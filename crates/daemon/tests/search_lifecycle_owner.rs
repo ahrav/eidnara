@@ -5689,6 +5689,12 @@ async fn absent_records_register_nothing() {
 
 /// A daemon over installed records, Current over two seeded memories with the claim-source runner paused, and a route bound with harness `cli` for the operator surface.
 async fn operator_daemon() -> (KernelDaemon, host_runtime::RouteHandle, std::path::PathBuf) {
+    operator_daemon_with(&[]).await
+}
+
+async fn operator_daemon_with(
+    limits: &[(&str, u64)],
+) -> (KernelDaemon, host_runtime::RouteHandle, std::path::PathBuf) {
     let data = tempfile::tempdir().unwrap();
     let home = data.path().to_owned();
     let kernel_root = home.join("eidnara").join("context");
@@ -5700,7 +5706,7 @@ async fn operator_daemon() -> (KernelDaemon, host_runtime::RouteHandle, std::pat
     let identity = identity(&kernel_incarnation_id(&kernel_root));
     write_records(
         &home,
-        &manifest_json(&identity, &ProjectionHook::ALL),
+        &manifest_json_with(&identity, &ProjectionHook::ALL, limits),
         &campaign_json(&identity),
     );
     let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
@@ -5876,51 +5882,7 @@ async fn the_operator_surface_rebuilds_disables_and_recovers_the_projection() {
 async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() {
     let (daemon, route, _home) = operator_daemon().await;
     let owner = daemon.handler().search_lifecycle().unwrap();
-    let store = daemon.store();
-    let mut committed = false;
-    let pending = owner
-        .disable(&slice_budget(), &mut move |event| {
-            if event == DisableEvent::BeforeDeregister && !committed {
-                committed = true;
-                store
-                    .commit(
-                        kernel::CommitIntent {
-                            producer: "test".to_string(),
-                            operation_key: "outrun-the-disable".to_string(),
-                            request_digest: "d".repeat(64),
-                            actor: "test".to_string(),
-                            cause: "seed".to_string(),
-                        },
-                        |envelope| {
-                            envelope.insert_decision(seed_decision(
-                                "operator-late",
-                                "project:operator",
-                            ))?;
-                            Ok(String::new())
-                        },
-                    )
-                    .unwrap();
-            }
-        })
-        .await;
-    assert!(
-        matches!(
-            pending,
-            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
-        ),
-        "{pending:?}"
-    );
-    let status = operator_status(&daemon, route).await;
-    assert_eq!(status["record"]["state"], "disabled");
-    assert_eq!(status["record"]["deregistered"], false, "{status}");
-    let consumer = status["record"]["consumer_id"].as_str().unwrap().to_owned();
-    assert!(
-        daemon
-            .store()
-            .outbox_consumer_checkpoint(&consumer)
-            .unwrap()
-            .is_some()
-    );
+    let consumer = leave_the_disable_pending(&daemon, route).await;
 
     // The first abandonment commits and its answer is lost before the disable's cleanup runs; the retry finds the consumer released and completes the cleanup.
     let first = owner
@@ -6085,4 +6047,210 @@ async fn a_rebuild_of_a_record_that_is_not_current_leaves_the_slice_loop_idle() 
         "a rebuild that recorded nothing started a slice"
     );
     daemon.shutdown().await;
+}
+
+async fn leave_the_disable_pending(
+    daemon: &KernelDaemon,
+    route: host_runtime::RouteHandle,
+) -> String {
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    let store = daemon.store();
+    let mut committed = false;
+    let pending = owner
+        .disable(&slice_budget(), &mut move |event| {
+            if event == DisableEvent::BeforeDeregister && !committed {
+                committed = true;
+                store
+                    .commit(
+                        kernel::CommitIntent {
+                            producer: "test".to_string(),
+                            operation_key: "outrun-the-disable".to_string(),
+                            request_digest: "d".repeat(64),
+                            actor: "test".to_string(),
+                            cause: "seed".to_string(),
+                        },
+                        |envelope| {
+                            envelope.insert_decision(seed_decision(
+                                "operator-late",
+                                "project:operator",
+                            ))?;
+                            Ok(String::new())
+                        },
+                    )
+                    .unwrap();
+            }
+        })
+        .await;
+    assert!(
+        matches!(
+            pending,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{pending:?}"
+    );
+    let status = operator_status(daemon, route).await;
+    assert_eq!(status["record"]["state"], "disabled");
+    assert_eq!(status["record"]["deregistered"], false, "{status}");
+    assert!(status["record"]["through"].is_i64(), "{status}");
+    let consumer = status["record"]["consumer_id"].as_str().unwrap().to_owned();
+    assert!(
+        daemon
+            .store()
+            .outbox_consumer_checkpoint(&consumer)
+            .unwrap()
+            .is_some()
+    );
+    consumer
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_operator_disable_completes_under_a_cleanup_bound_shorter_than_its_request() {
+    let (daemon, route, _home) = operator_daemon_with(&[("B_recovery_ms", 10_000)]).await;
+    let disabled = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.disable",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(disabled["kind"], "disabled", "{disabled}");
+    assert_eq!(disabled["record"]["deregistered"], true, "{disabled}");
+    daemon.shutdown().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_abandonment_after_the_cleanup_envelope_ends_releases_nothing() {
+    let (daemon, route, _home) = operator_daemon_with(&[("B_recovery_ms", 6_000)]).await;
+    let consumer = leave_the_disable_pending(&daemon, route).await;
+    tokio::time::sleep(Duration::from_millis(6_500)).await;
+    let late = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.abandon",
+        serde_json::json!({ "operator_id": "operator-1", "reason": "after the envelope" }),
+    )
+    .await;
+    assert_eq!(late["terminal"], "refused", "{late}");
+    assert!(
+        daemon
+            .store()
+            .outbox_consumer_checkpoint(&consumer)
+            .unwrap()
+            .is_some(),
+        "a refused abandonment releases nothing"
+    );
+    let recovered = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.recover",
+        serde_json::json!({ "authorization_ref": "operator:after-expiry" }),
+    )
+    .await;
+    assert_eq!(recovered["kind"], "recorded", "{recovered}");
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retried_operator_recovery_reopens_the_admission_an_unsynced_record_latched() {
+    use daemon::projection_lifecycle::IntentRefusal;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(matches!(outcome, SliceOutcome::Advanced(_)), "{outcome:?}");
+    }
+    assert!(matches!(control(home), ControlState::Current(_)));
+    owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
+    let admit = || {
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+            .map(|_| ())
+    };
+
+    owner.fail_next_recovery_directory_sync_for_test();
+    let unknown = owner.request_authorized_recovery("operator:unsynced", now(), &slice_budget());
+    assert!(
+        matches!(
+            unknown,
+            Err(BuildError::Intent(IntentRefusal::DurabilityUnknown(_)))
+        ),
+        "{unknown:?}"
+    );
+    assert_eq!(admit(), Err(Denial::RecoveryRequired));
+
+    let replayed = owner
+        .request_authorized_recovery("operator:unsynced", now(), &slice_budget())
+        .unwrap()
+        .expect("the recovery is recorded");
+    assert!(replayed.replayed);
+    assert_eq!(admit(), Ok(()), "the replay reopens admission");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_operator_recovery_of_an_unfinished_build_keeps_its_registered_consumer() {
+    use sha2::Digest as _;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let request = rebuild(home);
+    owner.request(&request, now(), &slice_budget()).unwrap();
+    // This commit reproduces the build's pre-construction consumer registration.
+    corpus
+        .kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "search-replacement".to_owned(),
+                operation_key: request.attempt_id.clone(),
+                request_digest: format!("{:x}", sha2::Sha256::digest(CONSUMER.as_bytes())),
+                actor: "daemon".to_owned(),
+                cause: "replacement capture".to_owned(),
+            },
+            |envelope| {
+                envelope.register_outbox_consumer(CONSUMER, now())?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    let unfinished = owner.disable(&slice_budget(), &mut |_| {}).await;
+    assert!(unfinished.is_err(), "{unfinished:?}");
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+    assert!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap()
+            .is_some()
+    );
+
+    let recorded = owner
+        .request_authorized_recovery("operator:unfinished", now(), &slice_budget())
+        .expect("the recovery of the unfinished build is recorded")
+        .expect("the record is Disabled");
+    assert_eq!(recorded.intent.consumer.consumer_id, CONSUMER);
+    assert!(!recorded.replayed);
+    for _ in 0..4 {
+        if matches!(control(home), ControlState::Current(_)) {
+            break;
+        }
+        let _ = owner.run_slice(&slice_budget());
+    }
+    match control(home) {
+        ControlState::Current(intent) => assert_eq!(intent.consumer.consumer_id, CONSUMER),
+        state => panic!("the recovery did not reach Current: {state:?}"),
+    }
 }

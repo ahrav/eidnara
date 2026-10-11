@@ -254,6 +254,8 @@ impl SearchSelection {
             lifecycle.update_disabled(&disabled, &next)?;
             disabled = next;
         }
+        let narrowed = budget.linked().bounded_by(cleanup_end(&disabled)?);
+        let budget = &narrowed;
         let end = self.cleanup_admission(gate, spec, budget, &disabled)?;
         if let Some(owner) = &mut self.maintenance {
             observer(DisableEvent::DrainStarted);
@@ -552,4 +554,27 @@ impl SearchSelection {
         gate.cleanup_limits(&InvalidationIdentity::from(&self.identity), &requested)?;
         Ok(end)
     }
+}
+
+/// The 10 ms margin reserves headroom for millisecond wall-clock rounding when deriving the monotonic cleanup deadline.
+const ENVELOPE_CLOCK_SLACK: Duration = Duration::from_millis(10);
+
+/// Returns the cleanup envelope's monotonic deadline with 10 ms reserved for millisecond wall-clock rounding.
+///
+/// # Errors
+///
+/// Returns [`BuildError::Expired`] when fewer than 10 ms remain before the envelope deadline, and [`BuildError::Invalid`] when `disabled.episodes` is `None`.
+pub(crate) fn cleanup_end(disabled: &DisabledIntent) -> Result<Instant, BuildError> {
+    let episodes = disabled
+        .episodes
+        .ok_or(BuildError::Invalid("missing cleanup envelope"))?;
+    let remaining = episodes
+        .deadline
+        .checked_sub(super::super::wall_ms()?)
+        .and_then(|left| u64::try_from(left).ok())
+        .ok_or(BuildError::Expired)?;
+    Duration::from_millis(remaining)
+        .checked_sub(ENVELOPE_CLOCK_SLACK)
+        .map(|left| Instant::now() + left)
+        .ok_or(BuildError::Expired)
 }

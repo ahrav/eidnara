@@ -40,7 +40,7 @@ use crate::search_catchup::EpisodeEvent;
 use crate::search_catchup::{
     Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeReport, SearchCatchUp,
 };
-use crate::search_replacement::selection::disable::{DisableEvent, MaintenanceHandle};
+use crate::search_replacement::selection::disable::{DisableEvent, MaintenanceHandle, cleanup_end};
 use crate::search_replacement::selection::recovery::{RecoveryFailure, RecoveryProgress};
 use crate::search_replacement::selection::retirement::DISPOSITION_ROW_BYTES;
 use crate::search_replacement::selection::{SearchReader, SearchSelection, damages_family};
@@ -706,6 +706,7 @@ impl SearchLifecycleOwner {
                 if intent.transition == Transition::Rebuilding
                     && intent.cause == Cause::OperatorRequest =>
             {
+                let _synced = ProjectionLifecycle::open(&self.home)?;
                 Ok(Some(Recorded {
                     intent,
                     replayed: true,
@@ -718,7 +719,7 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Records the authorized recovery of a Disabled record under `authorization_ref`: a new operation over the current selection, through the consumer after the disabled one, under the manifest's recovery bounds. The slice loop is woken to run it; `None` when the record is not Disabled. Restart and elapsed time grant no authorization, so this is the only entry that starts a recovery.
+    /// Records an authorized recovery under `authorization_ref`, using the current selection and the manifest's recovery bounds; `None` when the record is not Disabled. Recovery reads through the consumer registered by an unfinished construction, or otherwise through the consumer after the disabled consumer. Starting recovery requires explicit authorization through this entry point.
     ///
     /// # Errors
     ///
@@ -739,6 +740,14 @@ impl SearchLifecycleOwner {
                 if intent.transition == Transition::AuthorizedRecovery
                     && intent.authorization_ref.as_deref() == Some(authorization_ref) =>
             {
+                if self
+                    .admission
+                    .gate()
+                    .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+                    .is_err_and(|denial| denial == Denial::RecoveryRequired)
+                {
+                    self.request(&intent.replay_request(), now, budget)?;
+                }
                 return Ok(Some(Recorded {
                     intent,
                     replayed: true,
@@ -758,20 +767,38 @@ impl SearchLifecycleOwner {
         let identity = self
             .identity(inputs.manifest(), budget)
             .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
-        let disabled_consumer = disabled
-            .handoff
-            .as_deref()
-            .map_or(REGISTERED_CONSUMER, |handoff| {
-                handoff.consumer.consumer_id.as_str()
-            });
-        let consumer_id = next_consumer_id(disabled_consumer);
+        let (consumer_id, attempt_id) = match disabled.handoff.as_deref() {
+            // Recovery must read through the unfinished construction's registered consumer; `disabled.recorded_at` distinguishes the recovery attempt from the construction attempt.
+            Some(handoff)
+                if handoff.staged_seed_digest.as_deref() != Some(selected_generation.as_str())
+                    && self
+                        .kernel
+                        .outbox_consumer_checkpoint_within_budget(
+                            budget,
+                            &handoff.consumer.consumer_id,
+                        )?
+                        .is_some() =>
+            {
+                let consumer_id = handoff.consumer.consumer_id.clone();
+                let attempt_id = format!("recovery-{consumer_id}-{}", disabled.recorded_at);
+                (consumer_id, attempt_id)
+            }
+            handoff => {
+                let consumer_id =
+                    next_consumer_id(handoff.map_or(REGISTERED_CONSUMER, |handoff| {
+                        handoff.consumer.consumer_id.as_str()
+                    }));
+                let attempt_id = format!("recovery-{consumer_id}");
+                (consumer_id, attempt_id)
+            }
+        };
         let mut request = bounded_request(
             &inputs,
             identity,
             Transition::AuthorizedRecovery,
             RebuildTarget {
                 selected_generation,
-                attempt_id: format!("recovery-{consumer_id}"),
+                attempt_id,
                 consumer_id,
                 cause: Cause::DisabledRecovery,
             },
@@ -779,9 +806,7 @@ impl SearchLifecycleOwner {
         )?;
         request.authorization_ref = Some(authorization_ref.to_owned());
         // An authorized recovery records its intent through the selection rather than as a returned record.
-        if let Some(recorded) = self.request(&request, now, budget)? {
-            return Ok(Some(recorded));
-        }
+        self.request(&request, now, budget)?;
         match ProjectionLifecycle::read_at(&self.home) {
             ControlState::Intent(intent) if intent.attempt_id == request.attempt_id => {
                 Ok(Some(Recorded {
@@ -799,7 +824,7 @@ impl SearchLifecycleOwner {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::Invalid`] for an empty or oversized `operator_id` or `reason`, and the kernel's refusal of the abandonment.
+    /// Returns [`BuildError::Invalid`] for an empty or oversized `operator_id` or `reason`, [`BuildError::Expired`] when the disable's cleanup envelope ends within `DEADLINE_MARGIN_MS`, and the kernel's refusal of the abandonment.
     pub fn abandon_disabled_consumer(
         &self,
         operator_id: &str,
@@ -833,8 +858,14 @@ impl SearchLifecycleOwner {
         {
             return Ok(Some(consumer));
         }
+        // The release deadline reserves DEADLINE_MARGIN_MS of the cleanup envelope for cleanup.
+        let margin = Duration::from_millis(DEADLINE_MARGIN_MS);
+        let release_by = cleanup_end(&disabled)?
+            .checked_sub(margin)
+            .filter(|release_by| *release_by > Instant::now())
+            .ok_or(BuildError::Expired)?;
         self.kernel.commit_within_budget(
-            budget,
+            &budget.linked().bounded_by(release_by),
             kernel::CommitIntent {
                 producer: "search-operator".to_owned(),
                 operation_key: format!("abandon-{consumer}"),

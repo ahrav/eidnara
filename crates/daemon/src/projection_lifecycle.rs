@@ -226,6 +226,22 @@ impl LifecycleIntent {
             && self.episodes.deadline == request.deadline
             && self.authorization_ref == request.authorization_ref
     }
+
+    /// [`Self::is_replay_of`] accepts the returned request for this record.
+    pub(crate) fn replay_request(&self) -> LifecycleRequest {
+        LifecycleRequest {
+            transition: self.transition,
+            selected_generation: self.selected_generation.clone(),
+            kernel_incarnation_id: self.kernel_incarnation_id.clone(),
+            consumer: self.consumer.clone(),
+            cause: self.cause,
+            attempt_id: self.attempt_id.clone(),
+            recovery_target: self.recovery_target,
+            allowance: self.episodes.allowance,
+            deadline: self.episodes.deadline,
+            authorization_ref: self.authorization_ref.clone(),
+        }
+    }
 }
 
 /// `record` rejects and `read` marks unavailable intents with a blank consumer, a generation id
