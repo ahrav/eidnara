@@ -6116,7 +6116,7 @@ impl HandlerCore {
         }
     }
 
-    /// Emergency-pass firing is bounded by the completion-wait budget.
+    /// The pass waits `EMERGENCY_WAIT_BUDGET` for the firing; the spawned firing keeps running past it.
     async fn run_history_summarizer_firing_inline(
         &self,
         task: HistorySummarizerFiringTask,
@@ -6132,7 +6132,7 @@ impl HandlerCore {
                 HistorySummarizerProducerError::TimedOut,
             ));
         };
-        match tokio::time::timeout(history_summarizer::completion_wait_budget(), handle).await {
+        match tokio::time::timeout(history_summarizer::EMERGENCY_WAIT_BUDGET, handle).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(join_err)) => Err(history_summarizer::HistorySummarizerDriveError::Producer(
                 HistorySummarizerProducerError::RunFailed {
@@ -6152,7 +6152,7 @@ impl HandlerCore {
         &self,
         completion: LiveHistorySummarizerCompletionWait,
     ) -> bool {
-        tokio::time::timeout(history_summarizer::completion_wait_budget(), completion)
+        tokio::time::timeout(history_summarizer::EMERGENCY_WAIT_BUDGET, completion)
             .await
             .is_ok()
     }
@@ -40001,6 +40001,39 @@ mod tests {
         assert!(
             waited >= 1_200.0,
             "the live wait survives the rerun: {waited}"
+        );
+    }
+
+    /// A run that outlasts the emergency wait leaves the pass to answer inside the plugin's
+    /// transform deadline, and its publication folds on a later pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_emergency_pass_answers_after_the_wait_budget_and_a_later_pass_folds() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+
+        let first = call_transform(&handler, messages.clone()).await;
+        assert_eq!(first["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+
+        let emergency = call_transform_with_usage(&handler, messages.clone(), 48_000, 50_000).await;
+        let waited = emergency["timings"]["emergency_wait"].as_f64().unwrap();
+        let budget = history_summarizer::EMERGENCY_WAIT_BUDGET.as_secs_f64() * 1_000.0;
+        assert!(
+            (budget..budget * 2.0 + 1.0).contains(&waited),
+            "the pass waits the budget and no longer: {waited}"
+        );
+        assert!(!m0_text(&emergency).contains("autonomous summary"));
+
+        producer.block_output.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_idle(&store).await;
+        let folded = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
+        assert!(
+            m0_text(&folded).contains("autonomous summary"),
+            "the run that outlasted the wait publishes for a later pass: {folded}"
         );
     }
 

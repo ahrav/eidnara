@@ -1572,6 +1572,13 @@ pub fn completion_wait_budget() -> Duration {
     Duration::from_secs(660)
 }
 
+/// How long an Emergency95 pass waits on a history_summarizer run before it answers.
+///
+/// The harness plugins give a transform pass `TRANSFORM_SEND_TIMEOUT_MS` (5 s) end to end, so the
+/// wait leaves room for admission, the pass's own work, the rerun, and the reply. A run that
+/// outlasts the wait keeps running; its publication lands on a later pass.
+pub const EMERGENCY_WAIT_BUDGET: Duration = Duration::from_secs(3);
+
 /// Consumers must pass `MAX_WRAPUP_REQUEST_BUDGET` unchanged because it includes the margin.
 /// Consumers must not add margin to `MAX_WRAPUP_REQUEST_BUDGET` because it includes the margin.
 /// The producer has no round-count cap.
@@ -2836,6 +2843,26 @@ mod handoff_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_emergency_wait_fits_inside_the_plugins_transform_deadline() {
+        let source =
+            include_str!("../../../packages/opencode-plugin/src/hooks/context/module-transport.ts");
+        let deadline_ms: u64 = source
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("export const TRANSFORM_SEND_TIMEOUT_MS = ")
+            })
+            .and_then(|value| value.trim_end_matches(';').replace('_', "").parse().ok())
+            .expect("module-transport.ts declares TRANSFORM_SEND_TIMEOUT_MS");
+        let margin_ms = 1_500;
+        assert!(
+            EMERGENCY_WAIT_BUDGET.as_millis() as u64 + margin_ms <= deadline_ms,
+            "a {}ms emergency wait leaves under {margin_ms}ms of a {deadline_ms}ms transform deadline",
+            EMERGENCY_WAIT_BUDGET.as_millis()
+        );
+    }
 
     #[test]
     fn chunk_failures_count_per_chunk_and_ignore_provider_errors() {
