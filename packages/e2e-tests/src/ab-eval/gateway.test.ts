@@ -150,6 +150,56 @@ describe("gateway upstream retries", () => {
 });
 
 describe("forwarding a stream", () => {
+    it("records a stream with metadata but no messageStop as an incomplete call", async () => {
+        const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
+        const records: CallRecord[] = [];
+        const gateway = new BedrockGateway({
+            arm: "test",
+            role: "main",
+            workdir: dumpDir,
+            dumpDir,
+            stripTemperature: false,
+            onCall: (record) => records.push(record),
+        });
+        (gateway as unknown as { client: { send: unknown } }).client.send = async () => ({
+            stream: (async function* () {
+                yield { messageStart: { role: "assistant" } };
+                yield { metadata: { usage: { inputTokens: 1, outputTokens: 1 } } };
+            })(),
+        });
+        const sink = {
+            status: () => {},
+            write: () => {},
+            end: () => {},
+            signal: new AbortController().signal,
+        };
+        const base = {
+            ts: Date.now(),
+            arm: "test",
+            role: "main" as const,
+            caller: "main" as const,
+            turn: null,
+            estimatedInputTokens: 0,
+            requestBytes: 0,
+        };
+        try {
+            await (
+                gateway as unknown as { forward: (...args: unknown[]) => Promise<void> }
+            ).forward(
+                "model",
+                true,
+                { messages: [] },
+                sink,
+                base,
+                performance.now(),
+                Date.now() + 10_000,
+            );
+            expect(records[0]?.status).toBe(502);
+        } finally {
+            rmSync(dumpDir, { recursive: true, force: true });
+        }
+    });
+
     it("records a stream that ends before its metadata as an incomplete call", async () => {
         const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
         const records: CallRecord[] = [];
@@ -420,12 +470,69 @@ describe("forwarding a stream", () => {
     });
 });
 
+describe("gateway upstream retries until the deadline", () => {
+    it("keeps retrying a throttled call while the turn's deadline holds", async () => {
+        let calls = 0;
+        const value = await sendWithRetry(
+            async () => {
+                calls++;
+                if (calls < 20) throw throttled();
+                return "ok";
+            },
+            {
+                deadlineAt: Date.now() + 10_000,
+                signal: new AbortController().signal,
+                onRetry: () => {},
+                backoffMs: () => 1,
+            },
+        );
+        expect(value).toBe("ok");
+        expect(calls).toBe(20);
+    });
+});
+
 describe("delivery detection", () => {
     it("uses the grader's token boundaries", () => {
         expect(deliveredToken("the value is 27196.", "27196")).toBe(true);
         // The same digits inside another fact's prefixed value are a different token.
         expect(deliveredToken("incident INC-27196 was closed", "27196")).toBe(false);
         expect(deliveredToken("anything", undefined)).toBe(false);
+    });
+});
+
+describe("gateway rejections", () => {
+    it("records a request on an unknown route and a malformed body as failed calls", async () => {
+        const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
+        const records: CallRecord[] = [];
+        const gateway = new BedrockGateway({
+            arm: "test",
+            role: "main",
+            workdir: dumpDir,
+            dumpDir,
+            stripTemperature: false,
+            onCall: (record) => records.push(record),
+        });
+        const sink = () => ({
+            status: () => {},
+            write: () => {},
+            end: () => {},
+            signal: new AbortController().signal,
+        });
+        const handle = (path: string, body: string) =>
+            (gateway as unknown as { handle: (r: unknown, s: unknown) => Promise<void> }).handle(
+                { path, body: Buffer.from(body) },
+                sink(),
+            );
+        try {
+            await handle("/model/x/unknown-op", "{}");
+            await handle("/model/x/converse", "{not json");
+            expect(records.map((r) => [r.caller, r.status])).toEqual([
+                ["rejected", 404],
+                ["rejected", 400],
+            ]);
+        } finally {
+            rmSync(dumpDir, { recursive: true, force: true });
+        }
     });
 });
 

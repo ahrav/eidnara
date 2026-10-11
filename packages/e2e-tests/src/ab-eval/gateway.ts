@@ -30,7 +30,9 @@ export type Caller =
     | "memory_capture"
     | "memory_classifier"
     | "context_researcher"
-    | "other";
+    | "other"
+    /** The gateway refused the request before any provider call: unknown route or malformed body. */
+    | "rejected";
 
 export interface CallRecord {
     ts: number;
@@ -169,8 +171,6 @@ export interface RetryOptions {
     backoffMs?: (attempt: number) => number;
 }
 
-const MAX_RETRIES = 12;
-
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 const TRANSIENT_NETWORK_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT"]);
@@ -212,7 +212,9 @@ export async function sendWithRetry<T>(send: () => Promise<T>, opts: RetryOption
         try {
             return await send();
         } catch (caught) {
-            if (opts.signal.aborted || !retryable(caught) || attempt >= MAX_RETRIES) throw caught;
+            // The turn's deadline bounds the retries; the backoff is capped, so attempts continue
+            // for as long as the turn has time.
+            if (opts.signal.aborted || !retryable(caught)) throw caught;
             const delay = backoffMs(attempt);
             if (Date.now() + delay >= opts.deadlineAt) throw caught;
             opts.onRetry();
@@ -369,13 +371,35 @@ export class BedrockGateway {
     private async handle(received: Received, sink: Sink): Promise<void> {
         const started = performance.now();
         const route = ROUTE.exec(received.path.split("?", 1)[0] as string);
-        if (!route) {
-            sink.status(404, {
+        // A request the gateway refuses is still a model call the harness made, and the record
+        // keeps the run's call totals and stall diagnosis complete.
+        const reject = (status: number, errorType: string, message: string) => {
+            sink.status(status, {
                 "content-type": "application/json",
-                "x-amzn-errortype": "UnknownOperationException",
+                "x-amzn-errortype": errorType,
             });
-            sink.write(Buffer.from('{"message":"unknown operation"}'));
+            sink.write(Buffer.from(JSON.stringify({ message })));
             sink.end();
+            this.record({
+                ts: Date.now(),
+                arm: this.options.arm,
+                role: this.options.role,
+                caller: "rejected",
+                turn: this.scope?.key ?? null,
+                status,
+                ms: performance.now() - started,
+                firstByteMs: null,
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                estimatedInputTokens: estimateTokens(received.body.length),
+                requestBytes: received.body.length,
+                error: `${errorType}: ${message}`,
+            });
+        };
+        if (!route) {
+            reject(404, "UnknownOperationException", `unknown operation ${received.path}`);
             return;
         }
         const modelId = decodeURIComponent(route[1] as string);
@@ -384,12 +408,7 @@ export class BedrockGateway {
         try {
             body = JSON.parse(received.body.toString("utf8")) as ConverseBody;
         } catch {
-            sink.status(400, {
-                "content-type": "application/json",
-                "x-amzn-errortype": "ValidationException",
-            });
-            sink.write(Buffer.from('{"message":"malformed body"}'));
-            sink.end();
+            reject(400, "ValidationException", "malformed body");
             return;
         }
         const caller = classify(body);
@@ -569,7 +588,8 @@ export class BedrockGateway {
             cacheWriteInputTokens: 0,
         };
         let firstByteMs: number | null = null;
-        let ended = false;
+        let stopped = false;
+        let metadata = false;
         let status = 200;
         let error: string | undefined;
         let headersSent = false;
@@ -622,8 +642,9 @@ export class BedrockGateway {
                         if (firstByteMs === null) firstByteMs = performance.now() - started;
                         if (type === "metadata")
                             Object.assign(usage, (member as { usage?: object }).usage ?? {});
-                        // `metadata` follows `messageStop` and closes a complete stream.
-                        if (type === "metadata") ended = true;
+                        // A complete stream carries both `messageStop` and the `metadata` after it.
+                        if (type === "messageStop") stopped = true;
+                        if (type === "metadata") metadata = true;
                         // Bedrock reports a failure after the response began as a stream member,
                         // so the record carries it as the call's outcome while the harness
                         // still receives the event.
@@ -637,7 +658,7 @@ export class BedrockGateway {
                 // A Converse stream ends with messageStop and its usage metadata; one that stops
                 // short is incomplete, whether the harness went away or the provider's stream
                 // ended early.
-                if (!ended && status === 200) {
+                if (!(stopped && metadata) && status === 200) {
                     status = sink.signal.aborted ? 499 : 502;
                     error = sink.signal.aborted
                         ? "client disconnected before the stream ended"
