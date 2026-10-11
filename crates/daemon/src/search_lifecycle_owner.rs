@@ -675,6 +675,17 @@ impl SearchLifecycleOwner {
         let ControlState::Current(current) = ProjectionLifecycle::read_at(&self.home) else {
             return Ok(None);
         };
+        self.rebuild_current(&current, cause, now, budget)
+    }
+
+    /// Records the replacement of `current`, the Current record the caller read, for `cause`, as [`Self::request_rebuild`] describes.
+    fn rebuild_current(
+        &self,
+        current: &LifecycleIntent,
+        cause: Cause,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<Recorded>, BuildError> {
         let selected_generation = current
             .staged_seed_digest
             .clone()
@@ -697,6 +708,179 @@ impl SearchLifecycleOwner {
             now,
         )?;
         self.request(&request, now, budget)
+    }
+
+    /// The lifecycle record as the slice loop reads it, for the operator surface.
+    pub fn lifecycle_record(&self) -> ControlState {
+        ProjectionLifecycle::read_at(&self.home)
+    }
+
+    /// Records an operator's rebuild of the Current family through the next registered consumer, under the bounds a slice's rebuild takes; `None` when the record is not Current.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`BuildError`] [`Self::request`] returns.
+    pub fn request_operator_rebuild(
+        &self,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<Recorded>, BuildError> {
+        match ProjectionLifecycle::read_at(&self.home) {
+            // A retry after a lost answer finds the rebuild already recorded and reports it as a replay.
+            ControlState::Intent(intent)
+                if intent.transition == Transition::Rebuilding
+                    && intent.cause == Cause::OperatorRequest =>
+            {
+                Ok(Some(Recorded {
+                    intent,
+                    replayed: true,
+                }))
+            }
+            ControlState::Current(current) => {
+                self.rebuild_current(&current, Cause::OperatorRequest, now, budget)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Records the authorized recovery of a Disabled record under `authorization_ref`: a new operation over the current selection, through the consumer after the disabled one, under the manifest's recovery bounds. The slice loop is woken to run it; `None` when the record is not Disabled. Restart and elapsed time grant no authorization, so this is the only entry that starts a recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::InvalidAuthorization`] for a malformed reference, and otherwise the [`BuildError`] [`Self::request`] returns.
+    pub fn request_authorized_recovery(
+        &self,
+        authorization_ref: &str,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<Recorded>, BuildError> {
+        if !retrieval::dispatch::valid_authorization_ref(authorization_ref) {
+            return Err(IntentRefusal::InvalidAuthorization.into());
+        }
+        let disabled = match ProjectionLifecycle::read_at(&self.home) {
+            ControlState::Disabled(disabled) => disabled,
+            // A retry after a lost answer finds this authorization's recovery already recorded and reports it as a replay.
+            ControlState::Intent(intent)
+                if intent.transition == Transition::AuthorizedRecovery
+                    && intent.authorization_ref.as_deref() == Some(authorization_ref) =>
+            {
+                return Ok(Some(Recorded {
+                    intent,
+                    replayed: true,
+                }));
+            }
+            _ => return Ok(None),
+        };
+        let selected_generation =
+            match host_runtime::generation::GenerationStore::open(Some(&self.home))?
+                .read_search_current()?
+            {
+                host_runtime::generation::CurrentProfile::Current(digest) => digest,
+                _ => "unregistered".to_owned(),
+            };
+        let inputs = AdmissionInputs::read(&self.home)
+            .map_err(|_| IntentRefusal::Denied(Denial::NoManifest))?;
+        let identity = self
+            .identity(inputs.manifest(), budget)
+            .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
+        let disabled_consumer = disabled
+            .handoff
+            .as_deref()
+            .map_or(REGISTERED_CONSUMER, |handoff| {
+                handoff.consumer.consumer_id.as_str()
+            });
+        let consumer_id = next_consumer_id(disabled_consumer);
+        let mut request = bounded_request(
+            &inputs,
+            identity,
+            Transition::AuthorizedRecovery,
+            RebuildTarget {
+                selected_generation,
+                attempt_id: format!("recovery-{consumer_id}"),
+                consumer_id,
+                cause: Cause::DisabledRecovery,
+            },
+            now,
+        )?;
+        request.authorization_ref = Some(authorization_ref.to_owned());
+        // An authorized recovery records its intent through the selection rather than as a returned record.
+        if let Some(recorded) = self.request(&request, now, budget)? {
+            return Ok(Some(recorded));
+        }
+        match ProjectionLifecycle::read_at(&self.home) {
+            ControlState::Intent(intent) if intent.attempt_id == request.attempt_id => {
+                Ok(Some(Recorded {
+                    intent,
+                    replayed: false,
+                }))
+            }
+            _ => Err(BuildError::Invalid(
+                "the authorized recovery was not recorded",
+            )),
+        }
+    }
+
+    /// Abandons the Disabled record's consumer through the kernel's audited `ConsumerAbandonment`, which records `operator_id` and `reason`, and returns its id. The disable must have released the local family and recorded its prefix first, so only the kernel's release of a consumer behind its tip remains. A default disable never abandons, so this explicit operator action is the one that releases such a consumer. A retry of the same abandonment replays the kernel commit, and a consumer already absent under a record not yet marked deregistered is returned for that reconciliation. `None` when the record is not Disabled, has not released its local family, or is already deregistered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError::Invalid`] for an empty or oversized `operator_id` or `reason`, and the kernel's refusal of the abandonment.
+    pub fn abandon_disabled_consumer(
+        &self,
+        operator_id: &str,
+        reason: &str,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<String>, BuildError> {
+        if [operator_id, reason]
+            .iter()
+            .any(|field| field.trim().is_empty() || field.len() > ABANDONMENT_FIELD_BYTES)
+        {
+            return Err(BuildError::Invalid(
+                "operator_id and reason must be nonempty and at most 512 bytes",
+            ));
+        }
+        let ControlState::Disabled(disabled) = ProjectionLifecycle::read_at(&self.home) else {
+            return Ok(None);
+        };
+        let (Some(handoff), Some(_), false) = (
+            disabled.handoff.as_deref(),
+            disabled.through,
+            disabled.deregistered,
+        ) else {
+            return Ok(None);
+        };
+        let consumer = handoff.consumer.consumer_id.clone();
+        if self
+            .kernel
+            .outbox_consumer_checkpoint_within_budget(budget, &consumer)?
+            .is_none()
+        {
+            return Ok(Some(consumer));
+        }
+        self.kernel.commit_within_budget(
+            budget,
+            kernel::CommitIntent {
+                producer: "search-operator".to_owned(),
+                operation_key: format!("abandon-{consumer}"),
+                request_digest: abandonment_digest(&consumer, operator_id, reason),
+                actor: "operator".to_owned(),
+                cause: "operator consumer abandonment".to_owned(),
+            },
+            |envelope| {
+                envelope.abandon_outbox_consumer(
+                    &consumer,
+                    kernel::ConsumerAbandonment {
+                        operator_id: operator_id.to_owned(),
+                        reason: reason.to_owned(),
+                        abandoned_at: now,
+                        barrier_id: None,
+                    },
+                )?;
+                Ok(String::new())
+            },
+        )?;
+        Ok(Some(consumer))
     }
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
@@ -1379,7 +1563,7 @@ impl SearchLifecycleOwner {
     pub async fn disable(
         &self,
         budget: &EvalBudget,
-        observer: &mut dyn FnMut(DisableEvent),
+        observer: &mut (dyn FnMut(DisableEvent) + Send),
     ) -> Result<(), BuildError> {
         let mut restore = Restore {
             owner: self,
@@ -1615,13 +1799,24 @@ fn bounded_rebuild(
     target: RebuildTarget,
     now: i64,
 ) -> Result<LifecycleRequest, BuildError> {
+    bounded_request(inputs, identity, Transition::Rebuilding, target, now)
+}
+
+/// A `transition` request for `target` under the largest allowance up to `REGISTRATION_ALLOWANCE` the manifest bounds, with the transition's whole duration bound from `now` and no authorization.
+fn bounded_request(
+    inputs: &AdmissionInputs,
+    identity: ProjectionIdentity,
+    transition: Transition,
+    target: RebuildTarget,
+    now: i64,
+) -> Result<LifecycleRequest, BuildError> {
     let RebuildTarget {
         selected_generation,
         consumer_id,
         attempt_id,
         cause,
     } = target;
-    let bound = limit(inputs.manifest(), Transition::Rebuilding.duration_limit())
+    let bound = limit(inputs.manifest(), transition.duration_limit())
         .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
     let generation_id = format!("gen-{}", identity.generation_epoch);
     let allowance = (1..=REGISTRATION_ALLOWANCE)
@@ -1630,7 +1825,7 @@ fn bounded_rebuild(
             replacement_spec(
                 inputs.manifest(),
                 identity.clone(),
-                Transition::Rebuilding,
+                transition,
                 *allowance,
                 &generation_id,
             )
@@ -1638,7 +1833,7 @@ fn bounded_rebuild(
         })
         .unwrap_or(1);
     Ok(LifecycleRequest {
-        transition: Transition::Rebuilding,
+        transition,
         selected_generation,
         kernel_incarnation_id: identity.kernel_incarnation_id,
         consumer: ConsumerBinding {
@@ -1652,6 +1847,20 @@ fn bounded_rebuild(
         deadline: now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
         authorization_ref: None,
     })
+}
+
+/// Bytes an abandonment's `operator_id` or `reason` may carry before the kernel redacts and stores it.
+const ABANDONMENT_FIELD_BYTES: usize = 512;
+
+/// The request digest of an abandonment: its consumer, operator, and reason, each length-prefixed, so a retry with the same fields replays and different fields conflict.
+fn abandonment_digest(consumer: &str, operator_id: &str, reason: &str) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for part in [consumer, operator_id, reason] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// How the manifest bounds the operation already recorded, as judged at a request.

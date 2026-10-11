@@ -70,6 +70,7 @@ mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
 pub mod search_lifecycle_owner;
+mod search_lifecycle_wire;
 pub mod search_projection;
 pub mod search_replacement;
 pub mod search_seed;
@@ -14052,6 +14053,21 @@ impl HandlerCore {
                 edit_receipts::CONFIRM => self.handle_retrieval_confirm(channel, request),
                 memory_reviewer::wire::LIST => self.handle_review_list(channel, request).await,
                 memory_reviewer::wire::READ => self.handle_review_read(channel, request).await,
+                search_lifecycle_wire::STATUS => {
+                    self.handle_search_lifecycle_status(channel, request)
+                }
+                search_lifecycle_wire::REBUILD => {
+                    self.handle_search_lifecycle_rebuild(channel, request).await
+                }
+                search_lifecycle_wire::DISABLE => {
+                    self.handle_search_lifecycle_disable(channel, request).await
+                }
+                search_lifecycle_wire::RECOVER => {
+                    self.handle_search_lifecycle_recover(channel, request).await
+                }
+                search_lifecycle_wire::ABANDON => {
+                    self.handle_search_lifecycle_abandon(channel, request).await
+                }
                 // The handler echoes only explicit wire-debugging requests.
                 // Unknown request bodies must fail so misrouted callers cannot mistake an echo for success.
                 // An unconditional echo lets a misrouted caller mistake an echo for success.

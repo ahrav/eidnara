@@ -716,7 +716,7 @@ pub fn stage(
         .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
         .open(&report_path)
         .map_err(io)?;
-    if let Err(error) = file.write_all(&report).and_then(|()| file.sync_all()) {
+    if let Err(error) = file.write_all(&report) {
         drop(file);
         let _ = fs::remove_file(&report_path);
         return Err(io(error));

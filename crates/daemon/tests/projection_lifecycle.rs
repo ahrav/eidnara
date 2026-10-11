@@ -127,6 +127,29 @@ fn control_lock_refuses_without_waiting_and_allows_explicit_retry() {
 }
 
 #[test]
+fn reopening_keeps_an_owner_only_control_directory_unchanged_and_tightens_a_widened_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let root = tempfile::tempdir().unwrap();
+    drop(ProjectionLifecycle::open(root.path()).unwrap());
+    let control = root.path().join(CONTROL_DIR);
+    let changed = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.ctime(), metadata.ctime_nsec())
+    };
+    let before = changed(&control);
+    // The delay makes a mode change observable in the change time on filesystems with timestamp resolution finer than 50 ms.
+    std::thread::sleep(Duration::from_millis(50));
+    drop(ProjectionLifecycle::open(root.path()).unwrap());
+    assert_eq!(changed(&control), before);
+    fs::set_permissions(&control, fs::Permissions::from_mode(0o750)).unwrap();
+    drop(ProjectionLifecycle::open(root.path()).unwrap());
+    assert_eq!(
+        fs::metadata(&control).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+}
+
+#[test]
 fn private_cleanup_preserves_live_families_and_revoked_lease_handoffs() {
     let root = tempfile::tempdir().unwrap();
     let gate = open_gate();

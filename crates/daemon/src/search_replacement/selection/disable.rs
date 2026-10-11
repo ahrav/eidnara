@@ -156,7 +156,7 @@ impl SearchSelection {
     pub fn begin_disable(
         &self,
         gate: &HookGate,
-        observer: &mut dyn FnMut(DisableEvent),
+        observer: &mut (dyn FnMut(DisableEvent) + Send),
     ) -> Result<DisabledIntent, BuildError> {
         gate.disable();
         if let Some(family) = self.selected.load_full() {
@@ -188,7 +188,7 @@ impl SearchSelection {
         gate: &HookGate,
         spec: &super::super::ReplacementSpec,
         budget: &EvalBudget,
-        observer: &mut dyn FnMut(DisableEvent),
+        observer: &mut (dyn FnMut(DisableEvent) + Send),
     ) -> Result<DisabledIntent, BuildError> {
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
         #[cfg(feature = "test-support")]
@@ -422,7 +422,7 @@ impl SearchSelection {
         settled(&disabled, history)?;
         observer(DisableEvent::BeforeDeregister);
         settled(&disabled, history)?;
-        kernel.commit_within_budget(
+        let deregistered = kernel.commit_within_budget(
             budget,
             CommitIntent {
                 producer: "search-disable".to_owned(),
@@ -449,7 +449,13 @@ impl SearchSelection {
                 )?;
                 Ok(String::new())
             },
-        )?;
+        );
+        match deregistered {
+            Ok(_) => {}
+            // A consumer already absent when this attempt read it was released by an operator's audited abandonment; no deregistration of this disable committed, so nothing replays.
+            Err(kernel::KernelError::NotFound) if checkpoint.is_none() => {}
+            Err(error) => return Err(error.into()),
+        }
         observer(DisableEvent::Deregistered);
         if registered_again(&disabled)? {
             return Err(BuildError::Invalid(
