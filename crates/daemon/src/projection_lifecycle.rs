@@ -490,8 +490,10 @@ impl ProjectionLifecycle {
                 "the lifecycle directory is not the caller's own directory",
             ));
         }
-        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only before the shared check.
-        dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        // Setting mode 0o700 restores owner permissions that the umask can remove during creation. The mode check preserves the inode's change time when permissions are already 0o700.
+        if metadata.permissions().mode() & 0o7777 != 0o700 {
+            dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        }
         owner_only_directory(&dir_fd.metadata()?)
             .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
         let this = Self {

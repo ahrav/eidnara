@@ -130,8 +130,11 @@ fn create_validated_lock_file(
             path,
         });
     }
-    rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o600))
-        .map_err(|e| io_err("fchmod_coordination_lock", &path, e))?;
+    // The mode check preserves the inode's change time when the lock file's permissions are already 0o600.
+    if mode & 0o7777 != 0o600 {
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o600))
+            .map_err(|e| io_err("fchmod_coordination_lock", &path, e))?;
+    }
     Ok(fd)
 }
 
