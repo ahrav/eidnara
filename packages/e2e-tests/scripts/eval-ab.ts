@@ -37,17 +37,16 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-    const known = new Set<string>();
-    /** Positions `get` consumed as operands; every other `--` token must be a known flag. */
+    /** Positions `get` consumed, as a flag or its operand; every argument must be one of them. */
     const consumed = new Set<number>();
     const get = (name: string, fallback: string): string => {
-        known.add(`--${name}`);
-        const i = argv.indexOf(`--${name}`);
+        const flag = `--${name}`;
+        const i = argv.indexOf(flag);
         if (i < 0) return fallback;
+        if (argv.indexOf(flag, i + 1) >= 0) throw new Error(`${flag} given twice`);
         const value = argv[i + 1];
-        if (value === undefined || value.startsWith("--"))
-            throw new Error(`--${name} needs a value`);
-        consumed.add(i + 1);
+        if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value`);
+        consumed.add(i).add(i + 1);
         return value;
     };
     const num = (name: string, fallback: string): number => {
@@ -90,10 +89,8 @@ function parseArgs(argv: string[]): Options {
         enforceWindow: choice("enforce-window", ["on", "off"], "on") === "on",
         projectSize: choice("project-size", Object.keys(PROJECT_SIZES), "small"),
     };
-    const unknown = argv.filter(
-        (arg, i) => arg.startsWith("--") && !known.has(arg) && !consumed.has(i),
-    );
-    if (unknown.length > 0) throw new Error(`unknown flags: ${unknown.join(", ")}`);
+    const unexpected = argv.filter((_, i) => !consumed.has(i));
+    if (unexpected.length > 0) throw new Error(`unexpected arguments: ${unexpected.join(", ")}`);
     return options;
 }
 

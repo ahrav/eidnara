@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Arm, armSpec, inheritedHarnessEnv, PiArm, type PromptResult } from "./arms";
+import { descendants } from "./procs";
 
 describe("Pi arm process", () => {
     it("keeps ambient secrets out of the agent's inherited environment", () => {
@@ -82,6 +83,30 @@ describe("host liveness", () => {
             /host.*0:1/,
         );
         expect(() => new DeadHostArm(armSpec("pi-off"), ctx).assertAlive("0:1")).not.toThrow();
+    });
+
+    it("treats a zombie harness as gone", async () => {
+        // The background `sleep 0.1` exits while `sh` waits on the foreground `sleep 30`, so it
+        // stays a zombie child of `sh` until then.
+        const sh = spawn("/bin/sh", ["-c", "sleep 0.1 & exec sleep 30"], { stdio: "ignore" });
+        try {
+            await Bun.sleep(400);
+            const zombie = descendants(sh.pid as number).find((pid) => {
+                const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+                return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] === "Z";
+            });
+            expect(zombie).toBeDefined();
+            class ZombieHarnessArm extends FailingTeardownArm {
+                harnessPid(): number | undefined {
+                    return zombie;
+                }
+            }
+            expect(() => new ZombieHarnessArm(armSpec("pi-off"), ctx).assertAlive("0:1")).toThrow(
+                /harness.*0:1/,
+            );
+        } finally {
+            sh.kill("SIGKILL");
+        }
     });
 
     it("fails any arm whose harness is gone", () => {

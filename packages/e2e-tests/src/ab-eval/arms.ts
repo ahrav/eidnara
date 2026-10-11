@@ -24,7 +24,7 @@ import { HermeticHostStack } from "../rust-runner/hermetic-host";
 import { isSensitiveEnvKey } from "../secret-env-keys";
 import { StillRunningError, settleWithin } from "./deadline";
 import { BedrockGateway, type CallRecord, type TurnScope } from "./gateway";
-import { procStats, stopOwnedTree } from "./procs";
+import { running, stopOwnedTree } from "./procs";
 import { ensureSandboxScript, nodeRoot, opencodeBinary, sandboxKeep, sandboxPath } from "./sandbox";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
@@ -210,10 +210,11 @@ export abstract class Arm {
      * whose daemon exited would fail open for the rest of the run; either ends the arm.
      */
     assertAlive(key: string): void {
-        if (procStats(this.harnessPid()) === null) {
+        const alive = (pid: number | undefined) => pid !== undefined && running(pid);
+        if (!alive(this.harnessPid())) {
             throw new Error(`the harness is not running after turn ${key}`);
         }
-        if (this.spec.eidnara && procStats(this.hostPid()) === null) {
+        if (this.spec.eidnara && !alive(this.hostPid())) {
             throw new Error(`the host is not running after turn ${key}`);
         }
     }

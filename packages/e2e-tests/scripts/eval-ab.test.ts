@@ -84,10 +84,26 @@ describe("eval-ab", () => {
         ]);
         try {
             expect(result.status).not.toBe(0);
-            expect(result.stderr).toContain("--project-sze, --typo");
+            expect(result.stderr).toContain("unexpected arguments: --project-sze, --typo");
             expect(existsSync(join(root, "run"))).toBe(false);
         } finally {
             cleanup();
+        }
+    });
+
+    it("refuses a repeated option and a stray argument", () => {
+        for (const [args, message] of [
+            [["--project-size", "small", "--project-size", "large"], "--project-size given twice"],
+            [["--tier", "xs", "stray"], "unexpected arguments: stray"],
+        ] as const) {
+            const result = run(fresh(), ["--arms", "pi-off", "--sandbox", "off", ...args]);
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain(message);
+                expect(existsSync(join(root, "run"))).toBe(false);
+            } finally {
+                cleanup();
+            }
         }
     });
 

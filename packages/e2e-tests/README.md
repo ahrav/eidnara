@@ -276,7 +276,8 @@ and tokens per caller, and memory.
   direct_host_fixture --features direct-host-fixture --locked --release`, and
   the shared-memory addon from `bun run --cwd packages/shm-native
   build:native`. An unknown or repeated arm name, a flag value outside its
-  documented set, a flag the command does not know, a missing fixture, an
+  documented set, a flag the command does not know or sees twice, a stray
+  argument, a missing fixture, an
   addon that cannot load, or a `node` or `opencode` on PATH other than the
   pinned release fails the run before any arm starts, and an arm whose
   harness or daemon exits fails at the next turn.
