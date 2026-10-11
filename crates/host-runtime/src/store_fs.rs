@@ -308,6 +308,18 @@ pub(crate) fn write_new_file(
     bytes: &[u8],
     mode: u32,
 ) -> io::Result<OwnedFd> {
+    let fd = write_new_file_unsynced(dir, name, bytes, mode)?;
+    fsync(&fd)?;
+    Ok(fd)
+}
+
+/// The caller must sync the returned descriptor to make `bytes` durable.
+pub(crate) fn write_new_file_unsynced(
+    dir: &OwnedFd,
+    name: &str,
+    bytes: &[u8],
+    mode: u32,
+) -> io::Result<OwnedFd> {
     let fd = openat(
         dir,
         name,
@@ -316,8 +328,34 @@ pub(crate) fn write_new_file(
     )?;
     rustix::fs::fchmod(&fd, Mode::from_raw_mode(raw_mode(mode)))?;
     write_all_fd(&fd, bytes)?;
-    fsync(&fd)?;
     Ok(fd)
+}
+
+pub(crate) const CONCURRENT_SYNCS: usize = 8;
+
+/// Fsyncs every descriptor in `files` and returns the first failure. Up to [`CONCURRENT_SYNCS`] syncs run at once, so a journaling filesystem can make several files durable with one log commit and one device cache flush. A sync whose thread cannot be spawned runs on the calling thread. Every sync has returned when this returns, whatever its result.
+pub(crate) fn fsync_all(files: &[OwnedFd]) -> rustix::io::Result<()> {
+    let mut result = Ok(());
+    for group in files.chunks(CONCURRENT_SYNCS) {
+        let (first, rest) = group.split_first().expect("chunks are nonempty");
+        let synced = std::thread::scope(|scope| {
+            let mut synced = Ok(());
+            let mut others = Vec::with_capacity(rest.len());
+            for fd in rest {
+                match std::thread::Builder::new().spawn_scoped(scope, move || fsync(fd)) {
+                    Ok(handle) => others.push(handle),
+                    Err(_) => synced = synced.and(fsync(fd)),
+                }
+            }
+            synced = synced.and(fsync(first));
+            for other in others {
+                synced = synced.and(other.join().unwrap_or(Err(rustix::io::Errno::IO)));
+            }
+            synced
+        });
+        result = result.and(synced);
+    }
+    result
 }
 
 pub(crate) const HASH_BUFFER_BYTES: usize = 128 * 1024;
@@ -445,4 +483,32 @@ pub(crate) fn hash_copy_with(
         }
     }
     Ok((total, hex(&hasher.finalize())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fsync_all_syncs_every_group_and_reports_a_failure_in_any_of_them() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dir_fd = openat(
+            rustix::fs::CWD,
+            dir.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open dir");
+        let mut files: Vec<OwnedFd> = (0..CONCURRENT_SYNCS * 2 + 3)
+            .map(|index| {
+                write_new_file_unsynced(&dir_fd, &format!("file-{index}"), b"bytes", 0o600)
+                    .expect("write file")
+            })
+            .collect();
+        assert_eq!(fsync_all(&files), Ok(()));
+        assert_eq!(fsync_all(&[]), Ok(()));
+        let (reader, _writer) = rustix::pipe::pipe().expect("pipe");
+        files.insert(CONCURRENT_SYNCS + 1, reader);
+        assert_eq!(fsync_all(&files), Err(rustix::io::Errno::INVAL));
+    }
 }

@@ -306,9 +306,169 @@ enum Command {
         manifest: PathBuf,
         campaign: PathBuf,
     },
+    /// Sends one search lifecycle operation to the running daemon.
+    Search(SearchOperation),
 }
 
-const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest|build-profile> [--payload-dir <dir> --payload-manifest-digest <sha256>] | install-search-admission <runtime-manifest.json> <campaign-evidence.json> | --version (probe is an alias of status)";
+/// The operator's search lifecycle operations and the fields each carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SearchOperation {
+    Status,
+    Rebuild,
+    Disable,
+    Recover { authorization_ref: String },
+    Abandon { operator_id: String, reason: String },
+}
+
+impl SearchOperation {
+    fn method(&self) -> &'static str {
+        match self {
+            Self::Status => "search.lifecycle.status",
+            Self::Rebuild => "search.lifecycle.rebuild",
+            Self::Disable => "search.lifecycle.disable",
+            Self::Recover { .. } => "search.lifecycle.recover",
+            Self::Abandon { .. } => "search.lifecycle.abandon",
+        }
+    }
+
+    /// The request body: the routed envelope for `project_root` plus the operation's own fields.
+    fn body(&self, project_root: &Path) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "method": self.method(),
+            "v": 1,
+            "session_id": SEARCH_OPERATOR_SESSION,
+            "project_root": project_root,
+        });
+        match self {
+            Self::Recover { authorization_ref } => {
+                body["authorization_ref"] = serde_json::json!(authorization_ref);
+            }
+            Self::Abandon {
+                operator_id,
+                reason,
+            } => {
+                body["operator_id"] = serde_json::json!(operator_id);
+                body["reason"] = serde_json::json!(reason);
+            }
+            Self::Status | Self::Rebuild | Self::Disable => {}
+        }
+        body
+    }
+}
+
+/// The session a `search` route binds; the route's harness is `cli`, which the daemon keeps out of background participation.
+const SEARCH_OPERATOR_SESSION: &str = "search-operator";
+/// The time one `search` operation may take, connection included.
+const SEARCH_DEADLINE: Duration = Duration::from_secs(30);
+
+fn parse_search(args: &[&str]) -> Result<SearchOperation, String> {
+    let flag = |name: &str, rest: &[&str]| -> Result<String, String> {
+        let mut value = None;
+        let mut iter = rest.iter();
+        while let Some(arg) = iter.next() {
+            if *arg != name {
+                return Err(format!("unknown search argument {arg}"));
+            }
+            let Some(next) = iter.next().filter(|next| !next.is_empty()) else {
+                return Err(format!("{name} requires a value"));
+            };
+            if value.replace((*next).to_owned()).is_some() {
+                return Err(format!("duplicate {name}"));
+            }
+        }
+        value.ok_or_else(|| format!("search requires {name}"))
+    };
+    match args {
+        ["status"] => Ok(SearchOperation::Status),
+        ["rebuild"] => Ok(SearchOperation::Rebuild),
+        ["disable"] => Ok(SearchOperation::Disable),
+        ["recover", rest @ ..] => Ok(SearchOperation::Recover {
+            authorization_ref: flag("--authorization", rest)?,
+        }),
+        ["abandon", rest @ ..] => {
+            let (mut operator, mut reason) = (Vec::new(), Vec::new());
+            let mut iter = rest.iter();
+            while let Some(arg) = iter.next() {
+                let into = match *arg {
+                    "--operator" => &mut operator,
+                    "--reason" => &mut reason,
+                    other => return Err(format!("unknown search argument {other}")),
+                };
+                into.push(*arg);
+                into.push(iter.next().copied().unwrap_or(""));
+            }
+            Ok(SearchOperation::Abandon {
+                operator_id: flag("--operator", &operator)?,
+                reason: flag("--reason", &reason)?,
+            })
+        }
+        _ => Err("search takes status, rebuild, disable, recover --authorization <ref>, or abandon --operator <id> --reason <text>".to_owned()),
+    }
+}
+
+/// Sends `operation` over a context route bound with harness `cli` and prints the daemon's answer as one JSON line; exits 0 only for an answer that is not a terminal.
+fn search_lifecycle(operation: &SearchOperation) -> i32 {
+    let answer = (|| -> Result<serde_json::Value, String> {
+        let runtime = Runtime::new()?;
+        let publication = host_runtime::runtime_dir_path(None)
+            .map_err(|_| "no data directory".to_owned())?
+            .join(host_runtime::CONNECTION_FILE_NAME);
+        let project_root = std::env::current_dir().map_err(|error| error.to_string())?;
+        let body = serde_json::to_vec(&operation.body(&project_root))
+            .map_err(|error| error.to_string())?;
+        runtime.inner.block_on(async move {
+            tokio::time::timeout(SEARCH_DEADLINE, async move {
+                let client = Client::connect(&publication).await.map_err(|_| {
+                    "the daemon is not running or refused authentication".to_owned()
+                })?;
+                let answer = async {
+                    let route = client
+                        .open_route(
+                            host_runtime::RouteTarget {
+                                module_id: "context".to_owned(),
+                                kind: host_runtime::TargetKind::ToolProvider,
+                            },
+                            host_runtime::RouteIdentity {
+                                project_root,
+                                harness: "cli".to_owned(),
+                                session: SEARCH_OPERATOR_SESSION.to_owned(),
+                                consumer_module_id: None,
+                                consumer_launch_nonce: None,
+                                consumer_capabilities: Vec::new(),
+                                admission_facts: None,
+                                credential_fingerprints: Default::default(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let response = client
+                        .request(route, body, host_runtime::RequestOptions::default())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    serde_json::from_slice::<serde_json::Value>(&response.body)
+                        .map_err(|error| error.to_string())
+                }
+                .await;
+                let _ = client.close().await;
+                answer
+            })
+            .await
+            .map_err(|_| "the search operation timed out".to_owned())?
+        })
+    })();
+    match answer {
+        Ok(answer) => {
+            println!("{answer}");
+            i32::from(answer["kind"] == "terminal")
+        }
+        Err(reason) => {
+            eprintln!("eidnara-host: search {}: {reason}", operation.method());
+            1
+        }
+    }
+}
+
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest|build-profile> [--payload-dir <dir> --payload-manifest-digest <sha256>] | install-search-admission <runtime-manifest.json> <campaign-evidence.json> | search <status|rebuild|disable|recover --authorization <ref>|abandon --operator <id> --reason <text>> | --version (probe is an alias of status)";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -318,6 +478,12 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let Some(first) = first.to_str() else {
         return Err("command is not valid UTF-8".to_owned());
     };
+    if first == "search" {
+        let rest = iter
+            .map(|arg| arg.to_str().ok_or("argument is not valid UTF-8".to_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        return parse_search(&rest).map(Command::Search);
+    }
     if first == "install-search-admission" {
         let paths: Vec<PathBuf> = iter.map(PathBuf::from).collect();
         let [manifest, campaign] = <[PathBuf; 2]>::try_from(paths).map_err(|_| {
@@ -1977,6 +2143,7 @@ fn real_main() -> i32 {
         Command::InstallSearchAdmission { manifest, campaign } => {
             install_search_admission(&manifest, &campaign)
         }
+        Command::Search(operation) => search_lifecycle(&operation),
         Command::BuildProfile => {
             println!(
                 "{}",
@@ -2519,6 +2686,79 @@ mod tests {
         ] {
             assert!(parse_args(&args(arity)).is_err(), "{arity:?}");
         }
+    }
+
+    #[test]
+    fn search_takes_one_operation_and_exactly_its_fields() {
+        let args = |values: &[&str]| -> Vec<std::ffi::OsString> {
+            values.iter().map(std::ffi::OsString::from).collect()
+        };
+        for (line, operation) in [
+            (&["search", "status"][..], SearchOperation::Status),
+            (&["search", "rebuild"], SearchOperation::Rebuild),
+            (&["search", "disable"], SearchOperation::Disable),
+            (
+                &["search", "recover", "--authorization", "operator:ticket-1"],
+                SearchOperation::Recover {
+                    authorization_ref: "operator:ticket-1".to_owned(),
+                },
+            ),
+            (
+                &["search", "abandon", "--reason", "lost", "--operator", "op"],
+                SearchOperation::Abandon {
+                    operator_id: "op".to_owned(),
+                    reason: "lost".to_owned(),
+                },
+            ),
+        ] {
+            match parse_args(&args(line)) {
+                Ok(Command::Search(parsed)) => assert_eq!(parsed, operation, "{line:?}"),
+                _ => panic!("{line:?} did not parse as a search operation"),
+            }
+        }
+        for refused in [
+            &["search"][..],
+            &["search", "status", "extra"],
+            &["search", "recover"],
+            &["search", "recover", "--authorization"],
+            &[
+                "search",
+                "recover",
+                "--authorization",
+                "a",
+                "--authorization",
+                "b",
+            ],
+            &["search", "abandon", "--operator", "op"],
+            &[
+                "search",
+                "abandon",
+                "--operator",
+                "op",
+                "--reason",
+                "r",
+                "--other",
+                "x",
+            ],
+        ] {
+            assert!(parse_args(&args(refused)).is_err(), "{refused:?}");
+        }
+        let body = SearchOperation::Abandon {
+            operator_id: "op".to_owned(),
+            reason: "lost".to_owned(),
+        }
+        .body(Path::new("/workspace/project"));
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "method": "search.lifecycle.abandon",
+                "v": 1,
+                "session_id": SEARCH_OPERATOR_SESSION,
+                "project_root": "/workspace/project",
+                "operator_id": "op",
+                "reason": "lost",
+            })
+        );
     }
 
     #[test]

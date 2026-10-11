@@ -1181,6 +1181,7 @@ impl GenerationStore {
         meta: &StageMeta,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
+        let mut written = Vec::with_capacity(sources.len() + 1);
         let mut seen = BTreeSet::new();
         // The code fsyncs each directory that receives an entry because fsyncing a file does not persist its parent entry.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
@@ -1189,8 +1190,13 @@ impl GenerationStore {
             if !seen.insert(spec.rel_path.clone()) {
                 return Err(invalid("duplicate staged path"));
             }
-            let entry = copy_source_into(temp_fd, spec, source, &mut dirs)?;
+            let (entry, output) = copy_source_into(temp_fd, spec, source, &mut dirs)?;
             files.push(entry);
+            written.push(output);
+            if written.len() == crate::store_fs::CONCURRENT_SYNCS {
+                sync_staged(&written)?;
+                written.clear();
+            }
         }
         let manifest = GenerationManifest::from_files(meta, files);
         let bytes = manifest.canonical_bytes();
@@ -1198,7 +1204,17 @@ impl GenerationStore {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(invalid("staged manifest exceeds the manifest size cap"));
         }
-        write_new_file(temp_fd, GENERATION_MANIFEST_NAME, &bytes, 0o600)?;
+        written.push(
+            crate::store_fs::write_new_file_unsynced(
+                temp_fd,
+                GENERATION_MANIFEST_NAME,
+                &bytes,
+                0o600,
+            )
+            .map_err(|e| storage_or(e, "file write failed"))?,
+        );
+        // Every staged file and the manifest are durable before any directory that names them is synced; the temp stays unnamed by the store until promotion, so the file syncs need no order among themselves.
+        sync_staged(&written)?;
         // The code fsyncs directories deepest-first so each directory's entries are durable before its entry in its parent.
         for rel in dirs.iter().rev() {
             let dir = open_rel_nofollow(temp_fd, rel, true)
@@ -1712,12 +1728,19 @@ fn open_source_file(path: &Path) -> Result<(OwnedFd, rustix::fs::Stat), Generati
 
 /// The copy reopens the preflighted path and fails if the source's identity or timestamps
 /// differ from the preflight snapshot or change before the copy completes.
+fn sync_staged(files: &[OwnedFd]) -> Result<(), GenerationError> {
+    crate::store_fs::fsync_all(files).map_err(|e| match e {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        _ => invalid("staging output fsync failed"),
+    })
+}
+
 fn copy_source_into(
     temp_fd: &OwnedFd,
     spec: &SourceSpec,
     source: &PreflightSource,
     dirs: &mut BTreeSet<String>,
-) -> Result<ManifestFile, GenerationError> {
+) -> Result<(ManifestFile, OwnedFd), GenerationError> {
     let (source_fd, before) = open_source_file(&source.path)?;
     if !same_snapshot(&source.stat, &before) {
         return Err(invalid("staging source changed since preflight"));
@@ -1746,7 +1769,6 @@ fn copy_source_into(
                 storage_or(e, "staging output write failed")
             }
         })?;
-    fsync_preserving_storage(&dest_fd, "staging output fsync failed")?;
 
     let after = rustix::fs::fstat(source_fd).map_err(|_| invalid("source stat failed"))?;
     if !same_snapshot(before, &after) || total != before.st_size as u64 {
@@ -1763,12 +1785,15 @@ fn copy_source_into(
     {
         return Err(invalid("staging source hash differs from payload manifest"));
     }
-    Ok(ManifestFile {
-        path: spec.rel_path.clone(),
-        mode,
-        size: total,
-        sha256,
-    })
+    Ok((
+        ManifestFile {
+            path: spec.rel_path.clone(),
+            mode,
+            size: total,
+            sha256,
+        },
+        dest_fd,
+    ))
 }
 
 fn write_new_file(
@@ -2005,6 +2030,39 @@ mod tests {
 
         let again = stage_default(&store, src.path());
         assert_eq!(again, digest);
+    }
+
+    #[test]
+    fn a_stage_of_more_files_than_one_sync_group_validates_every_file() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let count = crate::store_fs::CONCURRENT_SYNCS * 2 + 3;
+        let sources: Vec<SourceSpec> = (0..count)
+            .map(|index| SourceSpec {
+                rel_path: format!("part/{index:02}.txt"),
+                source: write_source(
+                    src.path(),
+                    &format!("source-{index}"),
+                    format!("bytes {index}").as_bytes(),
+                ),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            })
+            .collect();
+        let digest = store
+            .stage_and_promote(&sources, &meta(), &BTreeSet::new())
+            .expect("stage");
+        let validated = store.validate(&digest).expect("validate");
+        assert_eq!(validated.manifest.files.len(), count);
+        for index in 0..count {
+            drop(
+                validated
+                    .open_verified_file(&format!("part/{index:02}.txt"))
+                    .expect("verified open"),
+            );
+        }
     }
 
     #[test]

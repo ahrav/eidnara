@@ -81,6 +81,8 @@ pub enum Cause {
     Registration,
     /// Catch-up hold extension for the Current family returned `SourceHoldError::BindingMismatch` or `SourceHoldError::Invalid(_)`.
     CatchUpHoldLost,
+    /// An operator asked the daemon to rebuild the Current family through `search.lifecycle.rebuild`.
+    OperatorRequest,
 }
 
 /// The kernel consumer the projection reads through and the vector generation it produces.
@@ -227,6 +229,22 @@ impl LifecycleIntent {
             && self.episodes.allowance == request.allowance
             && self.episodes.deadline == request.deadline
             && self.authorization_ref == request.authorization_ref
+    }
+
+    /// [`Self::is_replay_of`] accepts the returned request for this record.
+    pub(crate) fn replay_request(&self) -> LifecycleRequest {
+        LifecycleRequest {
+            transition: self.transition,
+            selected_generation: self.selected_generation.clone(),
+            kernel_incarnation_id: self.kernel_incarnation_id.clone(),
+            consumer: self.consumer.clone(),
+            cause: self.cause,
+            attempt_id: self.attempt_id.clone(),
+            recovery_target: self.recovery_target,
+            allowance: self.episodes.allowance,
+            deadline: self.episodes.deadline,
+            authorization_ref: self.authorization_ref.clone(),
+        }
     }
 }
 
@@ -495,8 +513,10 @@ impl ProjectionLifecycle {
                 "the lifecycle directory is not the caller's own directory",
             ));
         }
-        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only before the shared check.
-        dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        // Setting mode 0o700 restores owner permissions that the umask can remove during creation. The mode check preserves the inode's change time when permissions are already 0o700.
+        if metadata.permissions().mode() & 0o7777 != 0o700 {
+            dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        }
         owner_only_directory(&dir_fd.metadata()?)
             .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
         let this = Self {

@@ -2600,11 +2600,37 @@ mod sqlite_backend {
         )
     }
 
+    /// Identities [`ExpectedIdentity::for_baseline`] derived in this process, keyed by consumer text, oldest first.
+    static DERIVED_IDENTITIES: Mutex<Vec<(String, Arc<ExpectedIdentity>)>> = Mutex::new(Vec::new());
+    /// The cache retains at most this many consumer texts per process, evicting entries in insertion order.
+    const DERIVED_IDENTITY_ENTRIES: usize = 16;
+
     impl ExpectedIdentity {
+        /// The identity of `consumer`'s baseline. The derivation reads only `STORE_BASELINE`, `consumer`, and the linked SQLite's DDL normalization, so calls share a cached identity while its entry remains in [`DERIVED_IDENTITIES`]. Concurrent cache misses can derive separate, equal identities. A refused text is derived again on each call.
+        pub(crate) fn for_baseline(consumer: &str) -> Result<Arc<Self>, StoreError> {
+            let lock = || {
+                DERIVED_IDENTITIES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            };
+            if let Some((_, derived)) = lock().iter().find(|(text, _)| text == consumer) {
+                return Ok(Arc::clone(derived));
+            }
+            let derived = Arc::new(Self::derive(consumer)?);
+            let mut derived_identities = lock();
+            if !derived_identities.iter().any(|(text, _)| text == consumer) {
+                if derived_identities.len() >= DERIVED_IDENTITY_ENTRIES {
+                    derived_identities.remove(0);
+                }
+                derived_identities.push((consumer.to_owned(), Arc::clone(&derived)));
+            }
+            Ok(derived)
+        }
+
         /// The inventory comes from applying the text to an in-memory database, so
         /// the comparison uses SQLite's own normalization of the DDL rather than a
         /// second parser.
-        pub(crate) fn for_baseline(consumer: &str) -> Result<Self, StoreError> {
+        fn derive(consumer: &str) -> Result<Self, StoreError> {
             let text = format!("{STORE_BASELINE}\n{consumer}");
             let digest = baseline_digest(consumer);
             let scratch =
@@ -4031,6 +4057,24 @@ mod tests {
             "the fenced writer must not have re-pinned WAL, journal_mode is {mode}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_consumer_identity_is_derived_once_and_a_refusal_is_not_kept() {
+        let first = ExpectedIdentity::for_baseline(KV_BASELINE).expect("identity");
+        let again = ExpectedIdentity::for_baseline(KV_BASELINE).expect("identity again");
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        let other = ExpectedIdentity::for_baseline(
+            "CREATE TABLE derived_once (k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+        )
+        .expect("other identity");
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
+        for _ in 0..2 {
+            assert!(matches!(
+                ExpectedIdentity::for_baseline("CREATE TABLE derived_once_refused ("),
+                Err(StoreError::Baseline(_))
+            ));
+        }
     }
 
     /// An opener whose lease epoch is already at or below the fence row is refused on

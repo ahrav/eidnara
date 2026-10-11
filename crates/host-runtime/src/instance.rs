@@ -664,8 +664,11 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
             path: dir_path.to_path_buf(),
         });
     }
-    rustix::fs::fchmod(&current, Mode::from_raw_mode(0o700))
-        .map_err(|e| io_err("chmod_dir", dir_path, e))?;
+    // The mode check preserves the inode's change time when the mode is already 0o700.
+    if mode & 0o7777 != 0o700 {
+        rustix::fs::fchmod(&current, Mode::from_raw_mode(0o700))
+            .map_err(|e| io_err("chmod_dir", dir_path, e))?;
+    }
     Ok(current)
 }
 

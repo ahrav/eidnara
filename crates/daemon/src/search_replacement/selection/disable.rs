@@ -156,7 +156,7 @@ impl SearchSelection {
     pub fn begin_disable(
         &self,
         gate: &HookGate,
-        observer: &mut dyn FnMut(DisableEvent),
+        observer: &mut (dyn FnMut(DisableEvent) + Send),
     ) -> Result<DisabledIntent, BuildError> {
         gate.disable();
         if let Some(family) = self.selected.load_full() {
@@ -188,7 +188,7 @@ impl SearchSelection {
         gate: &HookGate,
         spec: &super::super::ReplacementSpec,
         budget: &EvalBudget,
-        observer: &mut dyn FnMut(DisableEvent),
+        observer: &mut (dyn FnMut(DisableEvent) + Send),
     ) -> Result<DisabledIntent, BuildError> {
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
         #[cfg(feature = "test-support")]
@@ -254,6 +254,8 @@ impl SearchSelection {
             lifecycle.update_disabled(&disabled, &next)?;
             disabled = next;
         }
+        let narrowed = budget.linked().bounded_by(cleanup_end(&disabled)?);
+        let budget = &narrowed;
         let end = self.cleanup_admission(gate, spec, budget, &disabled)?;
         if let Some(owner) = &mut self.maintenance {
             observer(DisableEvent::DrainStarted);
@@ -422,7 +424,7 @@ impl SearchSelection {
         settled(&disabled, history)?;
         observer(DisableEvent::BeforeDeregister);
         settled(&disabled, history)?;
-        kernel.commit_within_budget(
+        let deregistered = kernel.commit_within_budget(
             budget,
             CommitIntent {
                 producer: "search-disable".to_owned(),
@@ -449,7 +451,13 @@ impl SearchSelection {
                 )?;
                 Ok(String::new())
             },
-        )?;
+        );
+        match deregistered {
+            Ok(_) => {}
+            // A consumer already absent when this attempt read it was released by an operator's audited abandonment; no deregistration of this disable committed, so nothing replays.
+            Err(kernel::KernelError::NotFound) if checkpoint.is_none() => {}
+            Err(error) => return Err(error.into()),
+        }
         observer(DisableEvent::Deregistered);
         if registered_again(&disabled)? {
             return Err(BuildError::Invalid(
@@ -546,4 +554,27 @@ impl SearchSelection {
         gate.cleanup_limits(&InvalidationIdentity::from(&self.identity), &requested)?;
         Ok(end)
     }
+}
+
+/// The 10 ms margin reserves headroom for millisecond wall-clock rounding when deriving the monotonic cleanup deadline.
+const ENVELOPE_CLOCK_SLACK: Duration = Duration::from_millis(10);
+
+/// Returns the cleanup envelope's monotonic deadline with 10 ms reserved for millisecond wall-clock rounding.
+///
+/// # Errors
+///
+/// Returns [`BuildError::Expired`] when fewer than 10 ms remain before the envelope deadline, and [`BuildError::Invalid`] when `disabled.episodes` is `None`.
+pub(crate) fn cleanup_end(disabled: &DisabledIntent) -> Result<Instant, BuildError> {
+    let episodes = disabled
+        .episodes
+        .ok_or(BuildError::Invalid("missing cleanup envelope"))?;
+    let remaining = episodes
+        .deadline
+        .checked_sub(super::super::wall_ms()?)
+        .and_then(|left| u64::try_from(left).ok())
+        .ok_or(BuildError::Expired)?;
+    Duration::from_millis(remaining)
+        .checked_sub(ENVELOPE_CLOCK_SLACK)
+        .map(|left| Instant::now() + left)
+        .ok_or(BuildError::Expired)
 }
