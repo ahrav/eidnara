@@ -139,12 +139,12 @@ function clearPiEidnaraActive(): void {
 }
 
 /**
- * Eidnara answers every compaction reason (manual, threshold, overflow) alike: with the eviction
- * of its acknowledged rendered boundary when that boundary's end entry is on the branch, and with
- * a cancel otherwise, so no Pi LLM summary hides the boundary. Compaction-off mode lets Pi's
- * native compaction proceed, and so does `handBack`, set after a declined pass sent Pi's own
- * array when no eviction is available, for a session with no Eidnara compaction or for an
- * overflow: Pi's compaction is then that session's only recovery.
+ * Eidnara answers every compaction reason (manual, threshold, overflow) with the eviction of its
+ * acknowledged rendered boundary when that boundary's end entry is on the branch. Without an
+ * eviction it cancels, so no Pi LLM summary hides the boundary, unless `handBack` is set.
+ * Compaction-off mode lets Pi's native compaction proceed. `handBack` is set for an overflow,
+ * whose request the provider already refused, and after a declined pass sent Pi's own array for
+ * a session with no Eidnara compaction: Pi's compaction is then that session's only recovery.
  */
 export async function handlePiSessionBeforeCompact(args: {
     compactionOff: boolean;
@@ -953,15 +953,17 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             compactionOff:
                 compactionOff ||
                 (!ownEviction && !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config)),
-            // After a declined pass Pi's compaction is the session's recovery. Over an Eidnara
-            // compaction a threshold compaction cancels, so the fail-open array keeps m0; an
-            // overflow proceeds, so Pi shrinks the array to fit the provider's window.
+            // An overflow proceeds whether or not the last pass folded: the provider refused
+            // the served array, so Pi shrinks it to fit the window. After a declined pass a
+            // threshold compaction proceeds only for a session with no Eidnara compaction; over
+            // one it cancels, so the fail-open array keeps m0.
             handBack:
                 !ownEviction &&
                 sessionId !== undefined &&
-                piTransform?.folds(sessionId) === false &&
+                piTransform !== undefined &&
                 (event.reason === "overflow" ||
-                    !piTransform.ownsCompaction(sessionId, ctx.sessionManager)),
+                    (piTransform.folds(sessionId) === false &&
+                        !piTransform.ownsCompaction(sessionId, ctx.sessionManager))),
             eviction: () =>
                 sessionId && !offered.has(sessionId)
                     ? piTransform?.eviction(
