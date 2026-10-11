@@ -371,7 +371,7 @@ impl SearchSelection {
                     &family,
                     retirement::RetirementRun {
                         kernel,
-                        // The handoff's target is the seed's checkpoint or a later recertified commit, and a catch-up toward a recertified one may have stopped short of it; retirement certifies only what the selected family applied.
+                        // The handoff's target is the seed's checkpoint or a later recertified commit the selected family applied; the bound by the family's checkpoint keeps retirement within what the family applied.
                         through: intent
                             .recovery_target
                             .map_or(family.certificate.seed.checkpoint_commit_seq, |target| {

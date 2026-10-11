@@ -64,14 +64,19 @@ target and then deregisters it, and the kernel deregisters only a consumer at
 its tip. When the completion slice finds the old consumer still registered and
 the tip past the recorded target, it recertifies:
 
-1. `ProjectionLifecycle::recertify_target` moves the recorded target forward to
-   that tip under the episode the slice consumed. The attempt, allowance, and
-   deadline stay as recorded, and the target never passes the kernel tip.
-2. The selected family catches up to the new target under its own hold, and the
-   new consumer acknowledges each window.
+1. The selected family catches up to that tip under its own hold and the
+   episode the slice consumed, and the new consumer acknowledges each window.
+2. `ProjectionLifecycle::recertify_target` moves the recorded target forward to
+   the tip the family applied. The attempt, allowance, and deadline stay as
+   recorded, so every recorded target is a commit the selected family holds.
 3. Retirement certifies the old consumer's obligations through the new target
    and acknowledges it there. A receipt for the same retirement through an
    earlier commit is replaced by the later one.
+
+A restart ends the selected family's hold, so a family that trails the tip
+after a restart blocks the slice on hold extension with its recorded target
+unchanged. A family that applied the tip before the restart recertifies and
+completes.
 
 A commit that lands after that acknowledgement leaves the deregistration
 pending (`outbox consumer has not reached the commit-log tip`) while the old

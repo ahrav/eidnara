@@ -1208,7 +1208,7 @@ fn a_tip_that_moves_during_retirement_is_recertified_by_the_next_slice() {
     );
 }
 
-/// A slice cancelled after it recorded a recertified target leaves the selected family behind that target. The next completion slice resumes the catch-up under the recorded target without moving it again. A disable at that point retires the predecessor only through the commit the selected family applied, so the predecessor is never acknowledged past it and its deregistration waits for the tip.
+/// A slice cancelled before its catch-up leaves the record's target at the commit the selected family applied. The next completion slice catches the family up, recertifies the tip, and completes. A disable at that point retires the predecessor through the recorded target, the commit the family applied, so its deregistration waits for the tip.
 #[tokio::test]
 async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_applied() {
     for next in ["resume", "disable"] {
@@ -1223,20 +1223,20 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
         finish(&mut selection, &corpus, &gate, &config);
         let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
         let seed_target = fixed.recovery_target.unwrap().commit_seq;
-        let moved = corpus.publish("moving-tip", "behind the recertified target");
+        let moved = corpus.publish("moving-tip", "ahead of the selected family");
         let tip = corpus.tip();
         let slice = budget(Duration::from_secs(20));
         let interrupted =
             selection.recover_slice(&corpus.kernel, &gate, &config, &slice, &mut |event| {
-                if matches!(event, RecoveryEvent::Recertified { .. }) {
+                if event == (RecoveryEvent::BeforeCatchUp { target: tip }) {
                     slice.cancel();
                 }
             });
         assert!(interrupted.is_err(), "{next}: {interrupted:?}");
-        let recorded = control(root.path());
         assert_eq!(
-            recorded.recovery_target,
-            Some(RecoveryTarget { commit_seq: tip })
+            control(root.path()).recovery_target,
+            fixed.recovery_target,
+            "{next}: the target moves only after the family applied it"
         );
         if next == "resume" {
             let mut events = Vec::new();
@@ -1251,14 +1251,12 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
                 .unwrap();
             assert_eq!(progress, RecoveryProgress::Current);
             assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, RecoveryEvent::Recertified { .. })),
-                "the recorded target already names the tip: {events:?}"
+                events.contains(&RecoveryEvent::Recertified { target: tip }),
+                "{events:?}"
             );
             assert_eq!(
                 current(root.path()).recovery_target,
-                recorded.recovery_target
+                Some(RecoveryTarget { commit_seq: tip })
             );
             assert_eq!(
                 corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
@@ -1290,7 +1288,89 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
             assert_eq!(
                 corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
                 Some(seed_target),
-                "the predecessor is acknowledged through the applied commit, not the recertified one"
+                "the predecessor is acknowledged through the commit the family applied"
+            );
+        }
+    }
+}
+
+/// A restart completes recovery interrupted at recertification when the tip stays fixed. If the selected family trails the tip at restart, hold extension blocks recovery and the control record keeps the family's applied target.
+#[test]
+fn a_restart_never_strands_a_recertified_target_the_family_cannot_reach() {
+    for case in ["interrupted", "trailing"] {
+        let root = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(root.path());
+        corpus.seed();
+        corpus.publish("base", "bytes");
+        let mut config = spec(root.path());
+        let gate = home_gate(root.path(), &config);
+        record(root.path(), &gate, None, &config.identity);
+        let mut selection = selector(root.path());
+        finish(&mut selection, &corpus, &gate, &config);
+        let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
+        let moved = corpus.publish("moving-tip", "published before the restart");
+        let tip = corpus.tip();
+        if case == "interrupted" {
+            let slice = budget(Duration::from_secs(20));
+            let interrupted =
+                selection.recover_slice(&corpus.kernel, &gate, &config, &slice, &mut |event| {
+                    if matches!(event, RecoveryEvent::Recertified { .. }) {
+                        slice.cancel();
+                    }
+                });
+            assert!(interrupted.is_err(), "{case}: {interrupted:?}");
+        }
+        drop(selection);
+        drop(corpus);
+
+        let corpus = Corpus::open(root.path());
+        let gate = home_gate(root.path(), &config);
+        let mut selection = selector(root.path());
+        let mut events = Vec::new();
+        let result = selection.recover_slice(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |event| events.push(event),
+        );
+        if case == "interrupted" {
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{case}: {error:?}")),
+                RecoveryProgress::Current
+            );
+            assert_eq!(
+                current(root.path()).recovery_target,
+                Some(RecoveryTarget { commit_seq: tip })
+            );
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                None
+            );
+            let reader = selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .unwrap();
+            assert!(observe(&reader).rows.contains_key(&moved));
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(RecoveryFailure::Blocked(BuildError::Blocked(
+                        daemon::search_catchup::Blocked::HoldExtension(_)
+                    )))
+                ),
+                "{case}: {result:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, RecoveryEvent::Recertified { .. })),
+                "{case}: {events:?}"
+            );
+            assert_eq!(
+                control(root.path()).recovery_target,
+                fixed.recovery_target,
+                "the record keeps the target the selected family applied"
             );
         }
     }

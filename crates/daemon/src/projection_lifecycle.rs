@@ -837,7 +837,7 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Moves the fixed recovery target of `expected`, whose staged seed is selected, forward to `target` under the gate's admission and within the recorded deadline. The selected family then catches up to `target` before its predecessor retires there, so a retirement the moving tip left pending is certified again at a later commit. The episode the caller consumed for this attempt covers the move, so each retry still spends one episode of the allowance.
+    /// Moves the fixed recovery target of `expected`, whose staged seed is selected, forward to `target` under the gate's admission and within the recorded deadline. The caller passes a commit the selected family has applied, and the predecessor then retires there, so a retirement the moving tip left pending is certified again at a later commit. The episode the caller consumed for this attempt covers the move, so each retry still spends one episode of the allowance.
     ///
     /// # Errors
     ///
