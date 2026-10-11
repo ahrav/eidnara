@@ -291,6 +291,26 @@ describe("eval-ab", () => {
         },
     );
 
+    it.skipIf(!sandboxAvailable() || !nodeBin.ok)(
+        "refuses a sandboxed run root the launcher cannot name before claiming it",
+        () => {
+            fresh();
+            // The sandbox script takes its paths unquoted, so a space in the run root is refused.
+            const out = join(root, "with space", "run");
+            const result = run(root, ["--arms", "pi-off", "--sandbox", "on"], {
+                out,
+                path: `${nodeBin.ok ? nodeBin.root : ""}:/usr/bin:/bin`,
+            });
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain("sandbox path");
+                expect(existsSync(out)).toBe(false);
+            } finally {
+                cleanup();
+            }
+        },
+    );
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",

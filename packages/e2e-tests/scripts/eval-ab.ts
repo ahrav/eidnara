@@ -13,7 +13,12 @@ import { type Arm, armRoot, armSpec, makeArm, type PromptResult } from "../src/a
 import type { CallRecord } from "../src/ab-eval/gateway";
 import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
-import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
+import {
+    assertRunRootMaskable,
+    plainPath,
+    sandboxAvailable,
+    sharedKeep,
+} from "../src/ab-eval/sandbox";
 import {
     buildWorld,
     gradeOutcome,
@@ -306,8 +311,13 @@ async function main(): Promise<void> {
     }
     // The run root is checked against the kept paths before it exists, so a refused location
     // leaves nothing behind.
-    if (opts.sandbox) assertRunRootMaskable(realRunRoot(opts.out), sharedKeep(specs));
-    else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
+    if (opts.sandbox) {
+        const runRoot = realRunRoot(opts.out);
+        const keep = sharedKeep(specs);
+        assertRunRootMaskable(runRoot, keep);
+        // The launcher takes every path as one plain word; a path it cannot name fails here.
+        for (const path of [...keep, runRoot]) plainPath(path);
+    } else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
     writeFileSync(

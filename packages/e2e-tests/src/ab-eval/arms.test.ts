@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { managedSubtreePath } from "@eidnara/opencode/shared/host-lifecycle/paths";
+import { processStartTimeMs } from "../rust-runner/hermetic-host";
 import {
     Arm,
     armSpec,
@@ -308,15 +309,19 @@ describe("host PID record", () => {
                 }),
             );
             expect(arm.hostPid()).toBeUndefined();
-            writeFileSync(
-                join(dir, "rust-e2e-pids.json"),
+            const startedAt = processStartTimeMs(process.pid) as number;
+            const record = (createdAtMs: number) =>
                 JSON.stringify({
+                    createdAtMs,
                     pids: [
                         { pid: process.pid, role: "host-runtime", executable: process.execPath },
                     ],
-                }),
-            );
+                });
+            writeFileSync(join(dir, "rust-e2e-pids.json"), record(startedAt));
             expect(arm.hostPid()).toBe(process.pid);
+            // The same executable at the same PID, recorded an hour earlier, is another process.
+            writeFileSync(join(dir, "rust-e2e-pids.json"), record(startedAt - 3_600_000));
+            expect(arm.hostPid()).toBeUndefined();
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

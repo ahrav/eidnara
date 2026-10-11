@@ -92,6 +92,24 @@ describe("shell quoting", () => {
 });
 
 describe("sandbox availability", () => {
+    it("is unavailable when sudo refuses to preserve the environment", () => {
+        const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
+        // A sudoers rule that allows unshare without SETENV: `--preserve-env` is refused.
+        writeFileSync(
+            join(bin, "sudo"),
+            '#!/bin/sh\ncase "$*" in *--preserve-env*) echo "sudo: sorry, you are not allowed to preserve the environment" >&2; exit 1;; esac\nexit 0\n',
+            { mode: 0o755 },
+        );
+        const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+        const probe = `import { sandboxAvailable } from ${JSON.stringify(join(import.meta.dir, "sandbox.ts"))}; console.log(sandboxAvailable());`;
+        try {
+            const result = spawnSync(process.execPath, ["-e", probe], { env, encoding: "utf8" });
+            expect(result.stdout.trim()).toBe("false");
+        } finally {
+            rmSync(bin, { recursive: true, force: true });
+        }
+    });
+
     it("is unavailable when sudo works but namespace creation is refused", () => {
         const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
         writeFileSync(

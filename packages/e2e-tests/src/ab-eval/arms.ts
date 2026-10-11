@@ -21,7 +21,7 @@ import {
 } from "../bedrock-peer/harness-runtime";
 import { type SpawnedOpencode, spawnOpencode } from "../opencode-runner/spawn";
 import { type PiRpcEvent, PiRpcProcess, PiRpcProtocol } from "../pi-runner/rpc-client";
-import { HermeticHostStack } from "../rust-runner/hermetic-host";
+import { HermeticHostStack, processStartTimeMs } from "../rust-runner/hermetic-host";
 import { isSensitiveEnvKey } from "../secret-env-keys";
 import { StillRunningError, settleWithin } from "./deadline";
 import { BedrockGateway, type CallRecord, type TurnScope } from "./gateway";
@@ -199,7 +199,11 @@ export abstract class Arm {
         return connectionFilePath(this.hostDataDir);
     }
 
-    /** The daemon's PID from its record, once the process at that PID runs the recorded executable; a PID can be reused. */
+    /**
+     * The daemon's PID from its record, once the process at that PID runs the recorded
+     * executable and started when the record says; a PID can be reused, and every Eidnara arm
+     * runs the same fixture binary. The start-time rule matches the stale-record cleanup's.
+     */
     hostPid(): number | undefined {
         try {
             const record = JSON.parse(
@@ -207,11 +211,16 @@ export abstract class Arm {
                     join(managedSubtreePath(this.hostDataDir), "rust-e2e-pids.json"),
                     "utf8",
                 ),
-            ) as { pids: Array<{ pid: number; executable: string }> };
+            ) as { createdAtMs: number; pids: Array<{ pid: number; executable: string }> };
             const entry = record.pids[0];
             if (!entry) return undefined;
             const exe = readlinkSync(`/proc/${entry.pid}/exe`).replace(/ \(deleted\)$/, "");
-            return exe === entry.executable ? entry.pid : undefined;
+            if (exe !== entry.executable) return undefined;
+            const startedAt = processStartTimeMs(entry.pid);
+            const recordedSecond = Math.floor(record.createdAtMs / 1_000) * 1_000;
+            if (startedAt === null || Math.abs(startedAt - recordedSecond) > 5_000)
+                return undefined;
+            return entry.pid;
         } catch {
             return undefined;
         }

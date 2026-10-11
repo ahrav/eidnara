@@ -13,7 +13,7 @@ const UNSHARE_ARGS = ["--mount", "--pid", "--fork", "--mount-proc", "--propagati
 /** Paths reach the generated shell script unquoted, so each must be one plain word. */
 const PLAIN_PATH = /^\/[A-Za-z0-9._@+/-]*$/;
 
-function plainPath(path: string): string {
+export function plainPath(path: string): string {
     if (!PLAIN_PATH.test(path)) {
         throw new Error(`sandbox path ${JSON.stringify(path)} must match ${PLAIN_PATH}`);
     }
@@ -156,7 +156,9 @@ export function ensureSandboxScript(runRoot: string): string {
     return path;
 }
 
-/** Passwordless `sudo` can create the arm's mount and PID namespaces on this host. */
+/** Passwordless `sudo` runs the launcher's exact command shape here: environment preserved, namespaces created. */
 export function sandboxAvailable(): boolean {
-    return spawnSync("sudo", ["-n", "unshare", ...UNSHARE_ARGS, "true"]).status === 0;
+    return (
+        spawnSync("sudo", ["-n", "--preserve-env", "unshare", ...UNSHARE_ARGS, "true"]).status === 0
+    );
 }
