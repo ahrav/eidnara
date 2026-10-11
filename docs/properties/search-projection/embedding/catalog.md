@@ -376,11 +376,13 @@ fifth-waiter refusal behind a background holder are constructed
 (`scheduler.rs:271-315`, `mod.rs:1798-1850`,
 `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The shipped
 lane lets four queries wait (`crates/daemon/src/bin/eidnara_host/serve.rs`
-`lane_limits`). The ignored
+`lane_limits` returns `LocalEmbeddingsLimits::shipped_lane()`). The ignored
 `crates/host-runtime/tests/local_embeddings_reference_load.rs` drives the
 certified production bundle with continuous backfill and 1,000 open-loop
-queries at 2 per second; the #895 run on four pinned cores had zero busy
-queries and a longest queue wait under the longest backfill text's service.
+queries at 2 per second; the #895 runs on four pinned cores had zero busy
+queries and a longest queue-wait estimate within twice the longest backfill
+text's service. The run with the fastest-idle estimate below measured 94.9 ms
+against a 90.2 ms longest text service.
 The approved service bound for the D21 runner is not measured there.
 Guarantee: Backfill saturation preserves the declared query admission capacity
 and bounded service opportunity under the approved workload contract.
@@ -405,8 +407,10 @@ waiting query takes the slot ahead of a waiting batch text;
 FIFO order, the ninth grant to background, and the fifth-waiter refusal;
 `crates/host-runtime/tests/local_embeddings_reference_load.rs`
 `production_lane_meets_the_reference_query_and_backfill_budgets` (`#[ignore]`,
-real bundle) asserts zero busy queries under saturated backfill and a queue wait
-at most twice the longest single-text service.
+real bundle) asserts zero busy queries under saturated backfill and a
+queue-wait estimate at most twice the longest single-text service; the estimate
+is each query's latency past the fastest idle service of its token count, which
+upper-bounds the wait when the query runs no faster than that idle query.
 Impact: Offline backfill consumes the useful lifetime of interactive retrieval.
 Open questions:
 

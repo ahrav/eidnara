@@ -101,9 +101,12 @@ the slot already serves and at most `n / 8 + 1` background texts. With the four
 waiters the default scratch headroom allows (`docs/host-wire-protocol.md` §7.5.1),
 that is one fairness grant. Until #895 the shipped lane left `max_waiting_queries`
 at its default of zero, so in production a query that arrived while a backfill
-text held the slot was refused at once; `lane_limits` in
-`crates/daemon/src/bin/eidnara_host/serve.rs` now sets four, and
-`the_shipped_lane_admits_four_waiting_queries_within_its_serving_limits` checks
+text held the slot was refused at once. `lane_limits` in
+`crates/daemon/src/bin/eidnara_host/serve.rs` now returns
+`LocalEmbeddingsLimits::shipped_lane()`
+(`crates/host-runtime/src/local_embeddings/mod.rs`), which sets
+`SHIPPED_MAX_WAITING_QUERIES` (four) waiters, and
+`the_shipped_lane_validates_its_four_waiting_queries_and_refuses_six` checks
 those limits against the lane's own serving-limit validation. The mixed-order
 test now asserts query, query, query, batch
 (`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The saturated
