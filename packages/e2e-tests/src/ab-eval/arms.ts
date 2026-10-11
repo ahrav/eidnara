@@ -424,7 +424,6 @@ export class PiArm extends Arm {
             signal: cancel.signal,
         });
         end.catch(() => undefined);
-        const malformedBefore = rpc.getMalformedLines().length;
         const work = this.command("prompt", { message: text }, timeoutMs).then(() => end);
         try {
             const outcome = await settleWithin(work, timeoutMs, {
@@ -432,9 +431,9 @@ export class PiArm extends Arm {
                 drainMs: DRAIN_MS,
             });
             const ms = performance.now() - started;
-            // A line outside the RPC protocol on Pi's stdout means the plugin or the CLI broke
-            // the channel the arm reads its results through; the arm ends there.
-            const malformed = rpc.getMalformedLines().slice(malformedBefore);
+            // A line outside the RPC protocol on Pi's stdout, during startup or this turn, means
+            // the plugin or the CLI broke the channel the arm reads its results through.
+            const malformed = rpc.getMalformedLines();
             if (malformed.length > 0) {
                 throw new RpcOutputError(
                     `Pi wrote ${malformed.length} line(s) outside the RPC protocol: ${malformed[0]?.slice(0, 200)}`,

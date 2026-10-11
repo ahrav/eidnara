@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -966,6 +967,31 @@ function shuffle<T>(r: () => number, items: T[]): T[] {
     return items;
 }
 
+/**
+ * Turns the written repository into a Git repository with one commit, as the arms' agents expect.
+ * The commit runs with signing off and hooks disabled, so the evaluator's own Git configuration
+ * leaves the harness-owned repository alone.
+ */
+export function initRepo(dir: string): void {
+    const init = spawnSync(
+        "sh",
+        [
+            "-c",
+            [
+                "git init -q .",
+                "git add -A",
+                "git -c user.email=ab@eval -c user.name=ab -c commit.gpgsign=false -c core.hooksPath=/dev/null commit --no-gpg-sign -qm init",
+            ].join(" && "),
+        ],
+        { cwd: dir, encoding: "utf8" },
+    );
+    if (init.status !== 0) {
+        throw new Error(
+            `git setup of ${dir} failed (${init.status ?? init.error?.message}): ${init.stderr.trim()}`,
+        );
+    }
+}
+
 export function writeRepo(world: World, dir: string): void {
     for (const [path, content] of Object.entries(world.files)) {
         const full = join(dir, path);
@@ -984,8 +1010,14 @@ function carries(text: string, token: string): boolean {
     return new RegExp(`(^|[^A-Za-z0-9-])${escaped}($|[^A-Za-z0-9-])`, "i").test(text);
 }
 
+/** The shapes the world's answers take: five-digit numbers and `adjective-noun-NN` codenames. */
+const CANDIDATE_VALUE = /\b\d{5}\b|\b[a-z]+-[a-z]+-\d{2}\b/i;
+
 export function grade(fact: Fact, answer: string): Grade {
-    if (fact.kind === "abstain") return ABSTAIN.test(answer) ? "correct" : "wrong";
+    // An abstention beside a guessed value is a guess.
+    if (fact.kind === "abstain") {
+        return ABSTAIN.test(answer) && !CANDIDATE_VALUE.test(answer) ? "correct" : "wrong";
+    }
     if (carries(answer, fact.answer)) return "correct";
     if (fact.stale && carries(answer, fact.stale)) return "stale";
     if (ABSTAIN.test(answer)) return "abstained";

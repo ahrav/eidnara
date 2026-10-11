@@ -254,6 +254,29 @@ describe("Pi RPC output", () => {
             rmSync(root, { recursive: true, force: true });
         }
     });
+
+    it("fails the first turn when Pi wrote such lines while starting", async () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-pi-arm-"));
+        try {
+            const arm = new PiArm(armSpec("pi-off"), {
+                root,
+                resultsDir: root,
+                workdir: root,
+                sandboxDir: "",
+                enforceWindow: false,
+                onCall: () => {},
+                fixtureBin: "/nonexistent/fixture",
+            });
+            (arm as unknown as { rpc: unknown }).rpc = {
+                sendCommand: async () => ({ success: true, data: {} }),
+                waitForEvent: async () => ({ messages: [] }),
+                getMalformedLines: () => ["extension: startup noise"],
+            };
+            await expect(arm.prompt("hello", 1_000)).rejects.toThrow(/RPC/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 });
 
 describe("host PID record", () => {

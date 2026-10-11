@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,7 +7,14 @@ import type { CallRecord } from "../src/ab-eval/gateway";
 import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
-import { buildWorld, grade, PROJECT_SIZES, type World, writeRepo } from "../src/ab-eval/world";
+import {
+    buildWorld,
+    grade,
+    initRepo,
+    PROJECT_SIZES,
+    type World,
+    writeRepo,
+} from "../src/ab-eval/world";
 import {
     detectHarnessRuntimeSources,
     pinnedNodeOnPath,
@@ -108,19 +114,7 @@ function prepareWorkdir(world: World, dir: string): void {
     mkdirSync(dir, { recursive: true });
     writeRepo(world, dir);
     writeFileSync(join(dir, ".gitignore"), ".runs/\n");
-    const init = spawnSync(
-        "sh",
-        [
-            "-c",
-            "git init -q . && git add -A && git -c user.email=ab@eval -c user.name=ab commit -qm init",
-        ],
-        { cwd: dir, encoding: "utf8" },
-    );
-    if (init.status !== 0) {
-        throw new Error(
-            `git setup of ${dir} failed (${init.status ?? init.error?.message}): ${init.stderr.trim()}`,
-        );
-    }
+    initRepo(dir);
 }
 
 async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Promise<void> {
