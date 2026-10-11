@@ -19,7 +19,7 @@ import {
 } from "@aws-sdk/client-bedrock-runtime";
 import { callerOf } from "../bedrock-peer/answers";
 import { encodeEvent } from "../bedrock-peer/eventstream";
-import type { Turn } from "./world";
+import { carries, type Turn } from "./world";
 
 export type Caller =
     | "main"
@@ -68,6 +68,11 @@ type CallBase = Omit<
 interface Received {
     path: string;
     body: Buffer;
+}
+
+/** Whether the request text carries `token`, the probe's answer or stale value, as the grader would read it. */
+export function deliveredToken(haystack: string, token: string | undefined): boolean {
+    return token !== undefined && token.length > 0 && carries(haystack, token);
 }
 
 /** HTTP status a ConverseStream exception member would have carried as a rejected request. */
@@ -250,6 +255,8 @@ export interface GatewayOptions {
 export class BedrockGateway {
     scope: TurnScope | null = null;
     forwardedCalls = 0;
+    /** Forwarded calls by the turn they began under, since a call can finish during a later turn. */
+    private readonly forwardedByTurn = new Map<string, number>();
     scriptMismatches = 0;
     private http1: Server | undefined;
     private h2: Http2Server | undefined;
@@ -344,8 +351,18 @@ export class BedrockGateway {
         );
     }
 
+    /** Forwarded calls recorded under `turn`, wherever in the run they completed. */
+    forwardedCallsFor(turn: string): number {
+        return this.forwardedByTurn.get(turn) ?? 0;
+    }
+
     private record(record: CallRecord): void {
-        if (record.caller !== "main_scripted") this.forwardedCalls++;
+        if (record.caller !== "main_scripted") {
+            this.forwardedCalls++;
+            if (record.turn !== null) {
+                this.forwardedByTurn.set(record.turn, this.forwardedCallsFor(record.turn) + 1);
+            }
+        }
         this.options.onCall(record);
     }
 
@@ -446,12 +463,10 @@ export class BedrockGateway {
             const messages = body.messages ?? [];
             const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
             const lastUser = JSON.stringify(messages[lastUserIndex] ?? {});
-            const tokenIn = (haystack: string, token: string | undefined) =>
-                token !== undefined && token.length > 0 && haystack.includes(token);
             base.delivered = {
-                answer: tokenIn(text, probe.answer),
-                stale: tokenIn(text, probe.stale),
-                inLastUser: tokenIn(lastUser, probe.answer),
+                answer: deliveredToken(text, probe.answer),
+                stale: deliveredToken(text, probe.stale),
+                inLastUser: deliveredToken(lastUser, probe.answer),
             };
             let anchor = -1;
             for (let i = messages.length - 1; i >= 0; i--) {

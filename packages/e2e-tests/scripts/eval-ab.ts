@@ -156,7 +156,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
                 deadlineAt: Date.now() + timeout,
             });
             const mismatchesBefore = arm.main.scriptMismatches;
-            const forwardedBefore = arm.main.forwardedCalls;
+
             const hostPid = arm.hostPid();
             let resume = () => {};
             if (opts.stallAt.has(key) && arm.spec.eidnara) {
@@ -174,7 +174,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
             arm.assertAlive(key);
             const harness = treeStats(arm.harnessPid());
             const host = procStats(arm.hostPid());
-            const forwarded = arm.main.forwardedCalls - forwardedBefore;
+            const forwarded = arm.main.forwardedCallsFor(key);
             const fact = turn.probe
                 ? world.facts.find((f) => f.id === turn.probe?.factId)
                 : undefined;

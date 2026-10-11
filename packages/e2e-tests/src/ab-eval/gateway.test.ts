@@ -7,6 +7,7 @@ import {
     type CallRecord,
     type ConverseBody,
     classify,
+    deliveredToken,
     sendWithRetry,
 } from "./gateway";
 
@@ -413,6 +414,56 @@ describe("forwarding a stream", () => {
             expect(records[0]?.error).toContain("throttlingException");
             // The harness still receives the event the provider sent.
             expect(written.length).toBe(2);
+        } finally {
+            rmSync(dumpDir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("delivery detection", () => {
+    it("uses the grader's token boundaries", () => {
+        expect(deliveredToken("the value is 27196.", "27196")).toBe(true);
+        // The same digits inside another fact's prefixed value are a different token.
+        expect(deliveredToken("incident INC-27196 was closed", "27196")).toBe(false);
+        expect(deliveredToken("anything", undefined)).toBe(false);
+    });
+});
+
+describe("forwarded-call attribution", () => {
+    it("counts forwarded calls by the turn they were recorded under", () => {
+        const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
+        try {
+            const gateway = new BedrockGateway({
+                arm: "test",
+                role: "main",
+                workdir: dumpDir,
+                dumpDir,
+                stripTemperature: false,
+                onCall: () => {},
+            });
+            const record = (turn: string | null, caller: "main" | "main_scripted") =>
+                (gateway as unknown as { record: (r: Partial<CallRecord>) => void }).record({
+                    ts: 0,
+                    arm: "test",
+                    role: "main",
+                    caller,
+                    turn,
+                    status: 200,
+                    ms: 1,
+                    firstByteMs: null,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheReadTokens: 0,
+                    cacheWriteTokens: 0,
+                    estimatedInputTokens: 0,
+                    requestBytes: 0,
+                });
+            record("0:1", "main");
+            record("0:1", "main_scripted");
+            // A call that began under turn 0:1 and finished during 0:2 still belongs to 0:1.
+            record("0:1", "main");
+            expect(gateway.forwardedCallsFor("0:1")).toBe(2);
+            expect(gateway.forwardedCallsFor("0:2")).toBe(0);
         } finally {
             rmSync(dumpDir, { recursive: true, force: true });
         }

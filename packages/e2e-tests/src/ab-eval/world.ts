@@ -1016,7 +1016,8 @@ function standalone(token: string): RegExp {
     return new RegExp(`(^|(?<=[^A-Za-z0-9-]))${escaped}(?=$|[^A-Za-z0-9-])`, "gi");
 }
 
-function carries(text: string, token: string): boolean {
+/** Whether `text` holds `token` as a whole word, the rule probes are graded by. */
+export function carries(text: string, token: string): boolean {
     return standalone(token).test(text);
 }
 

@@ -466,6 +466,13 @@ export class PiArm extends Arm {
             return { ms, ...piOutcome(messages) };
         } catch (error) {
             if (error instanceof StillRunningError || error instanceof RpcOutputError) throw error;
+            // A rejected turn can also leave the channel corrupt; the same check applies.
+            const malformed = rpc.getMalformedLines();
+            if (malformed.length > 0) {
+                throw new RpcOutputError(
+                    `Pi wrote ${malformed.length} line(s) outside the RPC protocol: ${malformed[0]?.slice(0, 200)}`,
+                );
+            }
             return {
                 answer: "",
                 ms: performance.now() - started,
