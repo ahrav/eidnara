@@ -87,6 +87,16 @@ function main(): void {
         turnsByArm.set(arm, jsonl<TurnRow>(join(armsDir, arm, "turns.jsonl")));
         callsByArm.set(arm, jsonl<Call>(join(armsDir, arm, "calls.jsonl")));
     }
+    // An arm that stopped early recorded fewer turns than the world holds; its totals would
+    // read as a completed run with smaller denominators.
+    const world = JSON.parse(readFileSync(join(out, "world.json"), "utf8")) as {
+        sessions: { turns: unknown[] }[];
+    };
+    const expectedTurns = world.sessions.reduce((sum, s) => sum + s.turns.length, 0);
+    const incomplete = arms
+        .filter((arm) => (turnsByArm.get(arm)?.length ?? 0) !== expectedTurns)
+        .map((arm) => `${arm} recorded ${turnsByArm.get(arm)?.length ?? 0}/${expectedTurns} turns`);
+    if (incomplete.length > 0) throw new Error(`incomplete arms: ${incomplete.join("; ")}`);
 
     lines.push("## Accuracy by fact kind (correct/total; s=stale a=abstained w=wrong)", "");
     const kinds = [

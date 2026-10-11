@@ -286,12 +286,15 @@ and tokens per caller, and memory.
 - Each run writes to a fresh directory: `--out` must be missing or empty, and
   the default is a timestamped directory under `<tmp>/ab-eval/runs/` that
   `runs/latest` links to. The command exits nonzero when any arm fails, and
-  the other arms' results stay in the directory.
+  the other arms' results stay in the directory. The report refuses an arm
+  whose recorded turns differ from the world's count, and a record that does
+  not parse.
 - A turn that reaches its timeout is aborted, and the next turn starts once
   the harness has stopped it. The gateway retries throttled Bedrock calls
   until the turn's deadline.
 - `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
-  those prompts, to exercise a pass that misses its deadline.
+  those prompts, to exercise a pass that misses its deadline. A key the world
+  has no turn for fails the run before it starts.
 - The gateway answers a request whose estimated input exceeds the arms'
   200k window with `prompt is too long`, as a model with that window does;
   `--enforce-window off` forwards it to Bedrock.

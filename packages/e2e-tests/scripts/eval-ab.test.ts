@@ -117,6 +117,24 @@ describe("eval-ab", () => {
         }
     });
 
+    it("refuses a stall target the world does not contain", () => {
+        const result = run(fresh(), [
+            "--arms",
+            "pi-off",
+            "--sandbox",
+            "off",
+            "--stall-at",
+            "1:9999",
+        ]);
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("1:9999");
+            expect(existsSync(join(root, "run"))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",
@@ -137,11 +155,37 @@ describe("eval-ab", () => {
 });
 
 describe("eval-ab-report", () => {
+    it("fails on an arm that recorded fewer turns than the world holds", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
+        try {
+            const arm = join(root, "results/pi-off");
+            mkdirSync(arm, { recursive: true });
+            writeFileSync(
+                join(root, "world.json"),
+                JSON.stringify({ sessions: [{ turns: [{}, {}, {}] }, { turns: [{}] }] }),
+            );
+            writeFileSync(
+                join(arm, "turns.jsonl"),
+                `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n`,
+            );
+            const result = spawnSync(process.execPath, [REPORT, root], {
+                encoding: "utf8",
+                timeout: 60_000,
+            });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("pi-off");
+            expect(result.stderr).toContain("1/4");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("fails on a malformed record instead of dropping it", () => {
         const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
         try {
             const arm = join(root, "results/pi-off");
             mkdirSync(arm, { recursive: true });
+            writeFileSync(join(root, "world.json"), JSON.stringify({ sessions: [] }));
             writeFileSync(
                 join(arm, "turns.jsonl"),
                 `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n{"arm":"pi-off","kind":"pro\n`,

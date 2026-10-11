@@ -215,11 +215,18 @@ async function main(): Promise<void> {
             `${opts.fixtureBin} is not an executable file; build the release fixture with \`cargo ${cargoBuildExampleArgs(DIRECT_HOST_FIXTURE).join(" ")} --release\` or pass --fixture-bin`,
         );
     }
+    const world = buildWorld(opts.seed, opts.tier);
+    const turnKeys = new Set(
+        world.sessions.flatMap((s) => s.turns.map((t) => `${s.index}:${t.index}`)),
+    );
+    const missing = [...opts.stallAt].filter((key) => !turnKeys.has(key));
+    if (missing.length > 0) {
+        throw new Error(`--stall-at names turns the world does not have: ${missing.join(", ")}`);
+    }
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
     if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep());
     else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
-    const world = buildWorld(opts.seed, opts.tier);
     writeFileSync(
         join(opts.out, "world.json"),
         JSON.stringify({ ...world, files: Object.keys(world.files).length }, null, 1),
