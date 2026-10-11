@@ -126,7 +126,7 @@ function main(): void {
     lines.push("");
 
     lines.push("## Delivery diagnosis for eidnara-on misses", "");
-    for (const arm of arms.filter((a) => a.endsWith("-on"))) {
+    for (const arm of arms.filter((a) => /-on(raw)?$/.test(a))) {
         const calls = callsByArm.get(arm) ?? [];
         for (const r of (turnsByArm.get(arm) ?? []).filter(
             (x) => x.kind === "probe" && x.grade !== "correct" && x.factKind !== "abstain",

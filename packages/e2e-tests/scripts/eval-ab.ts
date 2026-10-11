@@ -9,6 +9,7 @@ import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
 import { buildWorld, grade, PROJECT_SIZES, type World, writeRepo } from "../src/ab-eval/world";
+import { pinnedNodeOnPath, pinnedOpencodeOnPath } from "../src/bedrock-peer/harness-runtime";
 import {
     cargoBuildExampleArgs,
     DIRECT_HOST_FIXTURE,
@@ -250,6 +251,17 @@ async function main(): Promise<void> {
         throw new Error(
             `the shared-memory channel cannot start here (${channel.reason}); build the addon with \`bun run --cwd packages/shm-native build:native\` so the Eidnara arms apply instead of failing open`,
         );
+    }
+    // Off arms launch the harness from PATH, so the baseline runs the pinned toolchain too.
+    const harnesses = new Set(specs.map((spec) => spec.harness));
+    for (const [harness, check] of [
+        ["pi", pinnedNodeOnPath],
+        ["opencode", pinnedOpencodeOnPath],
+    ] as const) {
+        if (!harnesses.has(harness)) continue;
+        const found = check();
+        if (!found.ok)
+            throw new Error(`${harness} arms need the pinned toolchain: ${found.reason}`);
     }
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);

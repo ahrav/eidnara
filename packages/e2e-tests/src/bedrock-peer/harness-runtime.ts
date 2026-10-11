@@ -68,26 +68,37 @@ function pinnedNode(manifest: ClosureManifest, path: string): ClosureNode {
 export function detectHarnessRuntimeSources():
     | { ok: true; sources: HarnessRuntimeSources }
     | { ok: false; reason: string } {
-    const opencode = readManifest(OPENCODE_MANIFEST);
-    const pi = readManifest(PI_MANIFEST);
-    const opencodePath = onPath("opencode");
-    const nodePath = onPath("node");
     if (!onPath("npm")) return { ok: false, reason: "npm is not on PATH" };
+    const opencode = pinnedOpencodeOnPath();
+    if (!opencode.ok) return opencode;
+    const node = pinnedNodeOnPath();
+    if (!node.ok) return node;
+    return { ok: true, sources: { opencodeRoot: opencode.root, nodeRoot: node.root } };
+}
+
+/** The `opencode` on PATH is the release the OpenCode closure pins; `root` holds its binary. */
+export function pinnedOpencodeOnPath(): { ok: true; root: string } | { ok: false; reason: string } {
+    const opencode = readManifest(OPENCODE_MANIFEST);
+    const opencodePath = onPath("opencode");
     if (!opencodePath) return { ok: false, reason: "opencode is not on PATH" };
-    if (!nodePath) return { ok: false, reason: "node is not on PATH" };
     const opencodeNode = pinnedNode(opencode, opencode.executable as string);
     const opencodeBinary = join(dirname(opencodePath), opencodeNode.source_path);
     if (!existsSync(opencodeBinary) || sha256File(opencodeBinary) !== opencodeNode.sha256) {
         return { ok: false, reason: `opencode on PATH is not the pinned ${opencode.version}` };
     }
+    return { ok: true, root: dirname(opencodeBinary) };
+}
+
+/** The `node` on PATH is the runtime the Pi closure pins; `root` holds its binary. */
+export function pinnedNodeOnPath(): { ok: true; root: string } | { ok: false; reason: string } {
+    const pi = readManifest(PI_MANIFEST);
+    const nodePath = onPath("node");
+    if (!nodePath) return { ok: false, reason: "node is not on PATH" };
     const nodeNode = pinnedNode(pi, pi.interpreter as string);
     if (sha256File(nodePath) !== nodeNode.sha256) {
         return { ok: false, reason: "node on PATH is not the Node runtime the Pi closure pins" };
     }
-    return {
-        ok: true,
-        sources: { opencodeRoot: dirname(opencodeBinary), nodeRoot: dirname(nodePath) },
-    };
+    return { ok: true, root: dirname(nodePath) };
 }
 
 /**

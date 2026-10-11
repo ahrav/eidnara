@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { probeCapabilities } from "@eidnara/shm-native";
+import { pinnedNodeOnPath } from "../src/bedrock-peer/harness-runtime";
 
 const SCRIPT = join(import.meta.dir, "eval-ab.ts");
 const REPORT = join(import.meta.dir, "eval-ab-report.ts");
@@ -26,11 +27,20 @@ describe("eval-ab", () => {
     };
     const cleanup = () => rmSync(root, { recursive: true, force: true });
 
-    it("exits nonzero when an arm fails", () => {
-        const result = run(fresh(), ["--arms", "oc-off", "--sandbox", "off"]);
+    // Arm-level behavior needs the pinned Node runtime on PATH, which the Pi arm launches.
+    const nodeBin = pinnedNodeOnPath();
+    it.skipIf(!nodeBin.ok)("exits nonzero when an arm fails, naming the cause", () => {
+        fresh();
+        // A PATH with `sh` and the pinned `node`, and no `git`, fails the work directory setup.
+        const bin = join(root, "bin");
+        mkdirSync(bin);
+        symlinkSync("/bin/sh", join(bin, "sh"));
+        const result = run(root, ["--arms", "pi-off", "--sandbox", "off"], {
+            path: `${bin}:${nodeBin.ok ? nodeBin.root : ""}`,
+        });
         try {
-            expect(result.stdout).toContain("oc-off: rejected");
             expect(result.status).not.toBe(0);
+            expect(result.stdout).toMatch(/pi-off: rejected .*git/);
         } finally {
             cleanup();
         }
@@ -95,21 +105,6 @@ describe("eval-ab", () => {
             } finally {
                 cleanup();
             }
-        }
-    });
-
-    it("fails an arm whose work directory could not become a repository", () => {
-        fresh();
-        // A PATH with `sh` and no `git` makes the repository setup fail.
-        const bin = join(root, "bin");
-        mkdirSync(bin);
-        symlinkSync("/bin/sh", join(bin, "sh"));
-        const result = run(root, ["--arms", "oc-off", "--sandbox", "off"], { path: bin });
-        try {
-            expect(result.status).not.toBe(0);
-            expect(result.stdout).toMatch(/oc-off: rejected .*git/);
-        } finally {
-            cleanup();
         }
     });
 
@@ -178,6 +173,18 @@ describe("eval-ab", () => {
         },
     );
 
+    it("refuses an arm whose harness toolchain is not the pinned one", () => {
+        // /usr/bin:/bin holds no node, so the Pi arm's pinned Node runtime is absent.
+        const result = run(fresh(), ["--arms", "pi-off", "--sandbox", "off"]);
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("node");
+            expect(existsSync(join(root, "run"))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",
@@ -198,6 +205,32 @@ describe("eval-ab", () => {
 });
 
 describe("eval-ab-report", () => {
+    it("diagnoses pi-onraw misses beside pi-on misses", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
+        try {
+            const arm = join(root, "results/pi-onraw");
+            mkdirSync(arm, { recursive: true });
+            writeFileSync(join(root, "options.json"), JSON.stringify({ arms: ["pi-onraw"] }));
+            writeFileSync(
+                join(root, "world.json"),
+                JSON.stringify({ sessions: [{ turns: [{}] }] }),
+            );
+            writeFileSync(
+                join(arm, "turns.jsonl"),
+                `${JSON.stringify({ arm: "pi-onraw", session: 0, turn: 0, kind: "probe", factId: "decision:1", factKind: "decision", scope: "in_session", grade: "wrong", ms: 5, error: null })}\n`,
+            );
+            writeFileSync(join(arm, "done.json"), "{}");
+            const result = spawnSync(process.execPath, [REPORT, root], {
+                encoding: "utf8",
+                timeout: 60_000,
+            });
+            expect(result.status).toBe(0);
+            expect(result.stdout).toContain("- pi-onraw decision:1");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("fails when a requested arm left no results", () => {
         const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
         try {
