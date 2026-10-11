@@ -70,6 +70,15 @@ interface Received {
     body: Buffer;
 }
 
+/** HTTP status a ConverseStream exception member would have carried as a rejected request. */
+const STREAM_EXCEPTION_STATUS: Record<string, number> = {
+    throttlingException: 429,
+    validationException: 400,
+    serviceUnavailableException: 503,
+    internalServerException: 500,
+    modelStreamErrorException: 500,
+};
+
 interface Sink {
     status(code: number, headers: Record<string, string>): void;
     write(chunk: Buffer): void;
@@ -591,6 +600,13 @@ export class BedrockGateway {
                         if (firstByteMs === null) firstByteMs = performance.now() - started;
                         if (type === "metadata")
                             Object.assign(usage, (member as { usage?: object }).usage ?? {});
+                        // Bedrock reports a failure after the response began as a stream member,
+                        // so the record carries it as the call's outcome while the harness
+                        // still receives the event.
+                        if (type.endsWith("Exception")) {
+                            status = STREAM_EXCEPTION_STATUS[type] ?? 500;
+                            error = `${type}: ${(member as { message?: string }).message ?? ""}`;
+                        }
                         sink.write(encodeEvent(type, member));
                     }
                 }

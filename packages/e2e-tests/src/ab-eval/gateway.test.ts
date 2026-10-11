@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { type ConverseBody, classify, sendWithRetry } from "./gateway";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import {
+    BedrockGateway,
+    type CallRecord,
+    type ConverseBody,
+    classify,
+    sendWithRetry,
+} from "./gateway";
 
 const SUMMARIZER_SYSTEM_PROMPT = readFileSync(
     resolve(
@@ -138,5 +145,67 @@ describe("gateway upstream retries", () => {
             ),
         ).rejects.toThrow();
         expect(Date.now() - started).toBeLessThan(1_000);
+    });
+});
+
+describe("forwarding a stream", () => {
+    it("records an exception event the stream carries as the call's failure", async () => {
+        const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
+        const records: CallRecord[] = [];
+        const gateway = new BedrockGateway({
+            arm: "test",
+            role: "main",
+            workdir: dumpDir,
+            dumpDir,
+            stripTemperature: false,
+            onCall: (record) => records.push(record),
+        });
+        const events = [
+            { messageStart: { role: "assistant" } },
+            { throttlingException: { message: "Too many requests" } },
+        ];
+        (gateway as unknown as { client: { send: unknown } }).client.send = async () => ({
+            stream: (async function* () {
+                for (const event of events) yield event;
+            })(),
+        });
+        const written: Buffer[] = [];
+        const sink = {
+            status: () => {},
+            write: (chunk: Buffer) => written.push(chunk),
+            end: () => {},
+            signal: new AbortController().signal,
+        };
+        const base = {
+            ts: Date.now(),
+            arm: "test",
+            role: "main" as const,
+            caller: "main" as const,
+            turn: null,
+            estimatedInputTokens: 0,
+            requestBytes: 0,
+        };
+        try {
+            await (
+                gateway as unknown as {
+                    forward: (...args: unknown[]) => Promise<void>;
+                }
+            ).forward(
+                "model",
+                true,
+                { messages: [] },
+                sink,
+                base,
+                performance.now(),
+                Date.now() + 10_000,
+            );
+            expect(records).toHaveLength(1);
+            expect(records[0]?.status).toBe(429);
+            expect(records[0]?.error).toContain("throttlingException");
+            // The harness still receives the event the provider sent.
+            expect(written.length).toBe(2);
+        } finally {
+            rmSync(dumpDir, { recursive: true, force: true });
+        }
     });
 });

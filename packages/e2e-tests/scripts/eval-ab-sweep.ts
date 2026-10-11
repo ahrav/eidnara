@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { loadRun } from "../src/ab-eval/results";
 
 interface TurnRow {
     session: number;
@@ -28,20 +29,6 @@ interface Call {
 const PRICE = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
 const WINDOW = 200_000;
 
-function jsonl<T>(path: string): T[] {
-    if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8")
-        .split("\n")
-        .filter((line) => line.trim().length > 0)
-        .flatMap((line) => {
-            try {
-                return [JSON.parse(line) as T];
-            } catch {
-                return [];
-            }
-        });
-}
-
 function pct(values: number[], p: number): number {
     if (values.length === 0) return 0;
     const sorted = [...values].sort((a, b) => a - b);
@@ -69,16 +56,15 @@ function main(): void {
     const roots = process.argv.slice(2).map((path) => resolve(path));
     if (roots.length === 0) throw new Error("usage: eval-ab-sweep <run dir>...");
     const lines = [
-        "| run | arm | cross | in | tool | control | abstain | all | failed turns | over-window | work p50/p99 ms | >5 s | probe p50 ms | est $ | harness/daemon RSS MB |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| run | arm | cross | in | tool | repo | control | abstain | all | failed turns | over-window | work p50/p99 ms | >5 s | probe p50 ms | est $ | harness/daemon RSS MB |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ];
     for (const root of roots) {
-        const results = join(root, "results");
-        if (!existsSync(results)) continue;
         const run = root.split("/").at(-1) ?? root;
-        for (const arm of readdirSync(results).sort()) {
-            const rows = jsonl<TurnRow>(join(results, arm, "turns.jsonl"));
-            const calls = jsonl<Call>(join(results, arm, "calls.jsonl"));
+        const { arms, turnsByArm, callsByArm } = loadRun<TurnRow, Call>(root);
+        for (const arm of arms) {
+            const rows = turnsByArm.get(arm) ?? [];
+            const calls = callsByArm.get(arm) ?? [];
             const probes = rows.filter((row) => row.kind === "probe");
             const work = rows.filter((row) => row.kind !== "probe").map((row) => row.ms);
             const cost =
@@ -100,7 +86,7 @@ function main(): void {
             const mb = (values: (number | null)[]) =>
                 Math.round(Math.max(0, ...values.map((value) => value ?? 0)) / 1e6);
             lines.push(
-                `| ${run} | ${arm} | ${score(rows, "cross")} | ${score(rows, "in")} | ${score(rows, "tool")} | ${score(rows, "control")} | ${score(rows, "abstain")} | ${probes.filter((row) => row.grade === "correct").length}/${probes.length} | ${rows.filter((row) => row.error).length} | ${overWindow} | ${pct(work, 50)}/${pct(work, 99)} | ${work.filter((ms) => ms > 5_000).length} | ${pct(
+                `| ${run} | ${arm} | ${score(rows, "cross")} | ${score(rows, "in")} | ${score(rows, "tool")} | ${score(rows, "repo")} | ${score(rows, "control")} | ${score(rows, "abstain")} | ${probes.filter((row) => row.grade === "correct").length}/${probes.length} | ${rows.filter((row) => row.error).length} | ${overWindow} | ${pct(work, 50)}/${pct(work, 99)} | ${work.filter((ms) => ms > 5_000).length} | ${pct(
                     probes.map((row) => row.ms),
                     50,
                 )} | ${cost.toFixed(0)} | ${mb(rows.map((row) => row.harnessRss))}/${mb(rows.map((row) => row.hostRss))} |`,

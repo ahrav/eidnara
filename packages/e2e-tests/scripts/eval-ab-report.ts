@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { loadRun, readJsonl } from "../src/ab-eval/results";
 
 interface TurnRow {
     arm: string;
@@ -43,21 +44,6 @@ interface Call {
 
 const PRICE = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
 
-/** A record that does not parse fails the report, since a truncated file is a partial run. */
-const jsonl = <T>(path: string): T[] => {
-    if (!existsSync(path)) return [];
-    const out: T[] = [];
-    for (const [i, line] of readFileSync(path, "utf8").split("\n").entries()) {
-        if (line.trim().length === 0) continue;
-        try {
-            out.push(JSON.parse(line) as T);
-        } catch (error) {
-            throw new Error(`${path}:${i + 1}: ${String(error)}`);
-        }
-    }
-    return out;
-};
-
 function pct(values: number[], p: number): number {
     if (values.length === 0) return 0;
     const sorted = [...values].sort((a, b) => a - b);
@@ -78,34 +64,8 @@ function binomTwoSided(k: number, n: number): number {
 
 function main(): void {
     const out = resolve(process.argv[2] ?? join(tmpdir(), "ab-eval/runs/latest"));
-    const armsDir = join(out, "results");
-    // The run's own record of what it was asked for, so an arm that never wrote results still counts.
-    const options = JSON.parse(readFileSync(join(out, "options.json"), "utf8")) as {
-        arms: string[];
-    };
-    const arms = [...options.arms].sort();
     const lines: string[] = [`# A/B report: ${out}`, ""];
-    const turnsByArm = new Map<string, TurnRow[]>();
-    const callsByArm = new Map<string, Call[]>();
-    for (const arm of arms) {
-        turnsByArm.set(arm, jsonl<TurnRow>(join(armsDir, arm, "turns.jsonl")));
-        callsByArm.set(arm, jsonl<Call>(join(armsDir, arm, "calls.jsonl")));
-    }
-    // An arm that stopped early recorded fewer turns than the world holds; its totals would
-    // read as a completed run with smaller denominators.
-    const world = JSON.parse(readFileSync(join(out, "world.json"), "utf8")) as {
-        sessions: { turns: unknown[] }[];
-    };
-    const expectedTurns = world.sessions.reduce((sum, s) => sum + s.turns.length, 0);
-    const incomplete = arms.flatMap((arm) => {
-        const recorded = turnsByArm.get(arm)?.length ?? 0;
-        if (recorded !== expectedTurns)
-            return [`${arm} recorded ${recorded}/${expectedTurns} turns`];
-        // `eval-ab` writes the marker after the arm's teardown succeeded.
-        if (!existsSync(join(armsDir, arm, "done.json"))) return [`${arm} did not finish`];
-        return [];
-    });
-    if (incomplete.length > 0) throw new Error(`incomplete arms: ${incomplete.join("; ")}`);
+    const { arms, turnsByArm, callsByArm } = loadRun<TurnRow, Call>(out);
 
     lines.push("## Accuracy by fact kind (correct/total; s=stale a=abstained w=wrong)", "");
     const kinds = [
@@ -272,8 +232,8 @@ function main(): void {
     );
     for (const arm of arms) {
         const rows = turnsByArm.get(arm) ?? [];
-        const sessions = jsonl<{ disk: { harness: number; eidnara: number } }>(
-            join(armsDir, arm, "sessions.jsonl"),
+        const sessions = readJsonl<{ disk: { harness: number; eidnara: number } }>(
+            join(out, "results", arm, "sessions.jsonl"),
         );
         const last = sessions[sessions.length - 1]?.disk;
         const mb = (b: number) => (b / 1e6).toFixed(0);
