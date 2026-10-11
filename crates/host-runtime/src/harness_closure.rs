@@ -11,6 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use rustix::fd::OwnedFd;
@@ -20,13 +22,15 @@ use sha2::{Digest, Sha256};
 use crate::file_mode::raw_mode;
 use crate::instance::{
     S_IFDIR, S_IFMT, S_IFREG, hex, mode_bits, owner_uid, read_all_fd, secure_runtime_dir,
+    stat_identity,
 };
 use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, create_owned_dir, exchange_dirs, hash_copy,
-    is_stale_mtime, is_temp_name, open_created_dir, open_dir_for_removal, open_or_create_parents,
-    open_rel_nofollow, path_names_descriptor, read_dir_names, read_dir_names_partitioned,
-    remove_tree, rename_no_replace, same_snapshot, write_new_file,
+    HARDENED_DIR_FLAGS, HASH_BUFFER_BYTES, MAX_PATH_COMPONENTS, create_owned_dir, exchange_dirs,
+    hash_copy, hash_copy_with, hash_pipelined, is_stale_mtime, is_temp_name, open_created_dir,
+    open_dir_for_removal, open_or_create_parents, open_rel_nofollow, path_names_descriptor,
+    read_dir_names, read_dir_names_partitioned, remove_tree, rename_no_replace, same_snapshot,
+    write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
@@ -164,6 +168,28 @@ impl ValidatedHarnessClosure {
         HarnessClosureStore::open(&self.root)?.validate(&self.digest)
     }
 
+    /// [`Self::revalidate`] that also resolves `nodes`, in order, from the same pass.
+    ///
+    /// Each resolved descriptor is the one whose bytes the re-verification hashed, so it carries the
+    /// proof [`Self::resolve_node_descriptor`] gives without a second read of the node. A name listed
+    /// twice, or one the manifest does not list, resolves through [`Self::resolve_node_descriptor`].
+    pub fn revalidate_resolving(
+        &self,
+        nodes: &[&str],
+    ) -> Result<(ValidatedHarnessClosure, Vec<ResolvedHarnessNode>), HarnessClosureError> {
+        let (fresh, mut retained) =
+            HarnessClosureStore::open(&self.root)?.validate_retaining(&self.digest, nodes)?;
+        let resolved = nodes
+            .iter()
+            .zip(retained.iter_mut())
+            .map(|(node, fd)| match fd.take() {
+                Some(fd) => fresh.hand_out(node, fd),
+                None => fresh.resolve_node_descriptor(node),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((fresh, resolved))
+    }
+
     pub fn resolve_node_descriptor(
         &self,
         node_path: &str,
@@ -177,6 +203,15 @@ impl ValidatedHarnessClosure {
         let fd = open_relative_file(&self.files_fd, node_path)
             .map_err(|_| invalid("resolved node is missing or insecure"))?;
         verify_node_file(&fd, node)?;
+        self.hand_out(node_path, fd)
+    }
+
+    /// Hands out `fd`, a verified descriptor for `node_path`, once the closure pathname still names its inode.
+    fn hand_out(
+        &self,
+        node_path: &str,
+        fd: OwnedFd,
+    ) -> Result<ResolvedHarnessNode, HarnessClosureError> {
         let closure_path = self.path.join(FILES_NAME).join(node_path);
         let verified = rustix::fs::fstat(&fd).map_err(|_| invalid("closure node stat failed"))?;
         // Re-resolving through the store root one component at a time avoids `ENAMETOOLONG`
@@ -717,6 +752,18 @@ impl HarnessClosureStore {
     }
 
     pub fn validate(&self, digest: &str) -> Result<ValidatedHarnessClosure, HarnessClosureError> {
+        self.validate_retaining(digest, &[])
+            .map(|(closure, _)| closure)
+    }
+
+    /// [`Self::validate`] that keeps the verified descriptor of each listed file in `retain`.
+    /// The returned descriptors align with `retain`; a name the walk did not admit, or the second
+    /// listing of a name, has no descriptor.
+    fn validate_retaining(
+        &self,
+        digest: &str,
+        retain: &[&str],
+    ) -> Result<(ValidatedHarnessClosure, Vec<Option<OwnedFd>>), HarnessClosureError> {
         validate_hash(digest)?;
         let dir_fd = open_owned_dir(&self.root_fd, digest)?;
         let manifest_fd = open_direct_file(&dir_fd, MANIFEST_NAME)?;
@@ -728,34 +775,61 @@ impl HarnessClosureStore {
         }
         let manifest: ClosureManifest =
             serde_json::from_slice(&bytes).map_err(|_| invalid("manifest decoding failed"))?;
-        validate_manifest(&manifest)?;
-        let canonical = canonical_manifest(&manifest)?;
-        if canonical != bytes {
-            return Err(invalid("retained manifest is not canonical"));
-        }
-
-        let files_fd = open_owned_dir(&dir_fd, FILES_NAME)?;
-        let expected: BTreeMap<&str, &ClosureNode> = manifest
-            .nodes
-            .iter()
-            .map(|node| (node.path.as_str(), node))
-            .collect();
-        let mut found = BTreeSet::new();
-        validate_tree(&files_fd, "", &expected, &mut found)?;
-        if found.len() != expected.len() {
+        let check_manifest = || {
+            validate_manifest(&manifest)?;
+            if canonical_manifest(&manifest)? != bytes {
+                return Err(invalid("retained manifest is not canonical"));
+            }
+            Ok(())
+        };
+        // The file walk reads only names it lists and uses the manifest as a lookup table, so it runs
+        // beside the manifest's own checks; a manifest failure still takes precedence over every file
+        // failure, as it would in sequence.
+        let walk_files = || {
+            let files_fd = open_owned_dir(&dir_fd, FILES_NAME)?;
+            let expected: BTreeMap<&str, &ClosureNode> = manifest
+                .nodes
+                .iter()
+                .map(|node| (node.path.as_str(), node))
+                .collect();
+            let mut slots: BTreeMap<&str, usize> = BTreeMap::new();
+            for (slot, name) in retain.iter().enumerate() {
+                slots.entry(name).or_insert(slot);
+            }
+            let (found, retained) = validate_files(&files_fd, &expected, &slots, retain.len())?;
+            Ok((files_fd, found == expected.len(), retained))
+        };
+        let (files_fd, complete, retained) = std::thread::scope(|scope| {
+            let Ok(checking) = std::thread::Builder::new()
+                .name("closure-manifest".to_owned())
+                .spawn_scoped(scope, check_manifest)
+            else {
+                check_manifest()?;
+                return walk_files();
+            };
+            let walked = walk_files();
+            checking
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+            walked
+        })?;
+        if !complete {
             return Err(invalid("closure is missing a manifest-listed node"));
         }
         let entries = list_names(&dir_fd)?;
         if entries != BTreeSet::from([FILES_NAME.to_owned(), MANIFEST_NAME.to_owned()]) {
             return Err(invalid("closure directory contains an unlisted entry"));
         }
-        Ok(ValidatedHarnessClosure {
-            digest: digest.to_owned(),
-            manifest,
-            root: self.root.clone(),
-            path: self.root.join(digest),
-            files_fd,
-        })
+        Ok((
+            ValidatedHarnessClosure {
+                digest: digest.to_owned(),
+                manifest,
+                root: self.root.clone(),
+                path: self.root.join(digest),
+                files_fd,
+            },
+            retained,
+        ))
     }
 
     fn create_temp(&self) -> Result<(String, OwnedFd), HarnessClosureError> {
@@ -916,21 +990,288 @@ fn create_parent_dirs(
     })
 }
 
-fn validate_tree(
-    dir: &OwnedFd,
-    prefix: &str,
+/// Threads that walk and hash one closure tree, at most this many per validation.
+const MAX_WALK_THREADS: usize = 8;
+
+/// Up to this many queued directories retain open descriptors; additional directories close their descriptors and
+/// reopen by path from the files directory when a thread takes them.
+const MAX_QUEUED_DIRS: usize = 64;
+
+/// The walk-order key of `name` inside the directory keyed `parent`.
+///
+/// A key joins path components with NUL, which sorts below every byte a name can hold, so byte order on keys
+/// is the order a sequential depth-first walk over sorted names visits entries in, and a directory sorts before
+/// everything inside it.
+fn walk_key(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent}\0{name}")
+    }
+}
+
+/// The failure earliest in walk order, so a concurrent walk reports the failure a sequential walk reaches first.
+#[derive(Default)]
+struct FirstFailure(Mutex<Option<(String, HarnessClosureError)>>);
+
+impl FirstFailure {
+    fn record(&self, key: String, error: HarnessClosureError) {
+        let mut first = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if first.as_ref().is_none_or(|(at, _)| key < *at) {
+            *first = Some((key, error));
+        }
+    }
+
+    /// Whether a failure earlier than `key` already decides the validation.
+    fn precedes(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(at, _)| at.as_str() < key)
+    }
+
+    fn into_inner(self) -> Option<HarnessClosureError> {
+        self.0
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|(_, error)| error)
+    }
+}
+
+/// A queued directory whose descriptor was closed keeps only its place, so reopening it by path must reach `identity`.
+struct DirPlace {
+    key: String,
+    relative: String,
+    /// Path components in `relative`; the files directory itself has none.
+    depth: usize,
+    identity: (u64, u64),
+}
+
+/// A directory the walk admitted by membership, owner, and mode; its entries await inspection.
+struct DirJob {
+    place: DirPlace,
+    fd: OwnedFd,
+}
+
+#[derive(Default)]
+struct WalkQueue {
+    open: Vec<DirJob>,
+    closed: Vec<DirPlace>,
+    /// Number of directories being inspected by threads.
+    active: usize,
+}
+
+/// Verifies every entry under `files_fd` against `expected` and returns how many listed files it verified, plus the
+/// verified descriptor of each file `slots` names, at that slot.
+///
+/// Up to [`MAX_WALK_THREADS`] threads take directories from a shared queue, check each entry's shape, owner, mode,
+/// link count, size, and membership, and hash each admitted file. Every check carries its entry's [`walk_key`], and
+/// validation reports the failure with the smallest key, which is the failure a sequential sorted walk returns.
+fn validate_files(
+    files_fd: &OwnedFd,
     expected: &BTreeMap<&str, &ClosureNode>,
-    found: &mut BTreeSet<String>,
-) -> Result<(), HarnessClosureError> {
-    for name in list_names(dir)? {
-        let relative = if prefix.is_empty() {
-            name.clone()
+    slots: &BTreeMap<&str, usize>,
+    slot_count: usize,
+) -> Result<(usize, Vec<Option<OwnedFd>>), HarnessClosureError> {
+    let root = rustix::io::fcntl_dupfd_cloexec(files_fd, 0)
+        .map_err(|_| invalid("closure files directory open failed"))?;
+    let root_stat =
+        rustix::fs::fstat(&root).map_err(|_| invalid("closure directory stat failed"))?;
+    let walk = TreeWalk {
+        files_fd,
+        expected,
+        slots,
+        uid: owner_uid(),
+        found: AtomicUsize::new(0),
+        failure: FirstFailure::default(),
+        retained: Mutex::new((0..slot_count).map(|_| None).collect()),
+        queue: Mutex::new(WalkQueue {
+            open: vec![DirJob {
+                place: DirPlace {
+                    key: String::new(),
+                    relative: String::new(),
+                    depth: 0,
+                    identity: stat_identity(&root_stat),
+                },
+                fd: root,
+            }],
+            closed: Vec::new(),
+            active: 0,
+        }),
+        ready: Condvar::new(),
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WALK_THREADS);
+    std::thread::scope(|scope| {
+        for _ in 1..threads {
+            // A thread that cannot start leaves its share to the threads that did.
+            let _ = std::thread::Builder::new()
+                .name("closure-walk".to_owned())
+                .spawn_scoped(scope, || walk.run());
+        }
+        walk.run();
+    });
+    let TreeWalk {
+        found,
+        failure,
+        retained,
+        ..
+    } = walk;
+    match failure.into_inner() {
+        Some(error) => Err(error),
+        None => Ok((
+            found.into_inner(),
+            retained
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner),
+        )),
+    }
+}
+
+/// The state every walk thread of one [`validate_files`] call shares.
+struct TreeWalk<'a> {
+    files_fd: &'a OwnedFd,
+    expected: &'a BTreeMap<&'a str, &'a ClosureNode>,
+    slots: &'a BTreeMap<&'a str, usize>,
+    uid: u32,
+    found: AtomicUsize,
+    failure: FirstFailure,
+    retained: Mutex<Vec<Option<OwnedFd>>>,
+    queue: Mutex<WalkQueue>,
+    ready: Condvar,
+}
+
+impl TreeWalk<'_> {
+    /// Takes queued directories until none remain and no thread can queue more.
+    fn run(&self) {
+        let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let open = queue.open.pop();
+            let closed = if open.is_none() {
+                queue.closed.pop()
+            } else {
+                None
+            };
+            if open.is_none() && closed.is_none() {
+                if queue.active == 0 {
+                    return;
+                }
+                queue = self
+                    .ready
+                    .wait(queue)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            queue.active += 1;
+            drop(queue);
+            if let Some(dir) = open.or_else(|| closed.and_then(|place| self.reopen(place))) {
+                self.visit(dir, &mut buffer);
+            }
+            queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            queue.active -= 1;
+            if queue.active == 0 && queue.open.is_empty() && queue.closed.is_empty() {
+                self.ready.notify_all();
+            }
+        }
+    }
+
+    fn spill(&self, dir: DirJob) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let closed_fd = if queue.open.len() < MAX_QUEUED_DIRS {
+            queue.open.push(dir);
+            None
         } else {
-            format!("{prefix}/{name}")
+            queue.closed.push(dir.place);
+            Some(dir.fd)
         };
+        drop(queue);
+        self.ready.notify_one();
+        drop(closed_fd);
+    }
+
+    fn reopen(&self, place: DirPlace) -> Option<DirJob> {
+        if self.failure.precedes(&place.key) {
+            return None;
+        }
+        let reopened = open_rel_nofollow(self.files_fd, &place.relative, true)
+            .map_err(|_| invalid("closure tree entry open failed"))
+            .and_then(|fd| {
+                let stat = rustix::fs::fstat(&fd)
+                    .map_err(|_| invalid("closure tree entry stat failed"))?;
+                if stat_identity(&stat) != place.identity {
+                    return Err(invalid("closure directory changed during validation"));
+                }
+                owned_directory_stat(&stat, self.uid)?;
+                Ok(fd)
+            });
+        match reopened {
+            Ok(fd) => Some(DirJob { place, fd }),
+            Err(error) => {
+                self.failure.record(place.key, error);
+                None
+            }
+        }
+    }
+
+    /// Each directory closes before the thread lists its first subdirectory, so a thread holds at most the directory
+    /// it lists, the first subdirectory it will descend into, and the entry it inspects, whatever the tree's depth.
+    fn visit(&self, mut dir: DirJob, buffer: &mut [u8]) {
+        while let Some(subdir) = self.visit_entries(dir, buffer) {
+            dir = subdir;
+        }
+    }
+
+    /// Inspects every entry of `dir`, queues each subdirectory but the first, and returns that first subdirectory.
+    fn visit_entries(&self, dir: DirJob, buffer: &mut [u8]) -> Option<DirJob> {
+        let names = match list_names(&dir.fd) {
+            Ok(names) => names,
+            Err(error) => {
+                // A listing failure follows the directory's own entry and precedes everything inside it.
+                self.failure.record(format!("{}\0", dir.place.key), error);
+                return None;
+            }
+        };
+        // This thread walks the directory's first subdirectory itself once the directory is done and queues the
+        // others, so the subtree that sorts first, and any large file in it, starts at once.
+        let mut first_subdir = None;
+        for name in names {
+            let key = walk_key(&dir.place.key, &name);
+            // Names arrive sorted, so once an earlier failure precedes this entry it precedes the rest of the directory.
+            if self.failure.precedes(&key) {
+                break;
+            }
+            let relative = if dir.place.relative.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", dir.place.relative)
+            };
+            match self.inspect(&dir, &name, key.clone(), relative, buffer) {
+                Ok(None) => {}
+                Ok(Some(subdir)) if first_subdir.is_none() => first_subdir = Some(subdir),
+                Ok(Some(subdir)) => self.spill(subdir),
+                Err(error) => {
+                    self.failure.record(key, error);
+                    break;
+                }
+            }
+        }
+        first_subdir
+    }
+
+    fn inspect(
+        &self,
+        dir: &DirJob,
+        name: &str,
+        key: String,
+        relative: String,
+        buffer: &mut [u8],
+    ) -> Result<Option<DirJob>, HarnessClosureError> {
         let fd = openat(
-            dir,
-            name.as_str(),
+            &dir.fd,
+            name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
@@ -938,39 +1279,88 @@ fn validate_tree(
         let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("closure tree entry stat failed"))?;
         match mode_bits(&stat) & S_IFMT {
             S_IFDIR => {
+                let depth = dir.place.depth + 1;
+                // A valid manifest path has at most `MAX_PATH_COMPONENTS` components, so no listed directory reaches
+                // that depth.
+                if depth >= MAX_PATH_COMPONENTS {
+                    return Err(invalid("closure contains an unlisted directory"));
+                }
                 let prefix = format!("{relative}/");
                 // Keys sharing `prefix` are contiguous in the sorted map, so the first key
                 // at or after `prefix` decides membership in O(log n) rather than a full scan.
-                let listed = expected
+                let listed = self
+                    .expected
                     .range(prefix.as_str()..)
                     .next()
                     .is_some_and(|(path, _)| path.starts_with(prefix.as_str()));
                 if !listed {
                     return Err(invalid("closure contains an unlisted directory"));
                 }
-                verify_owned_directory(&fd)?;
-                validate_tree(&fd, &relative, expected, found)?;
+                owned_directory_stat(&stat, self.uid)?;
+                Ok(Some(DirJob {
+                    place: DirPlace {
+                        key,
+                        relative,
+                        depth,
+                        identity: stat_identity(&stat),
+                    },
+                    fd,
+                }))
             }
             S_IFREG => {
-                let node = expected
+                let node = self
+                    .expected
                     .get(relative.as_str())
                     .ok_or_else(|| invalid("closure contains an unlisted file"))?;
-                verify_node_file(&fd, node)?;
-                found.insert(relative);
+                node_file_stat(&stat, node, self.uid)?;
+                verify_node_bytes(&fd, node, buffer)?;
+                self.found.fetch_add(1, AtomicOrdering::Relaxed);
+                if let Some(&slot) = self.slots.get(relative.as_str()) {
+                    self.retained.lock().unwrap_or_else(PoisonError::into_inner)[slot] = Some(fd);
+                }
+                Ok(None)
             }
-            _ => return Err(invalid("closure contains a non-regular entry")),
+            _ => Err(invalid("closure contains a non-regular entry")),
         }
+    }
+}
+
+fn verify_node_file(fd: &OwnedFd, node: &ClosureNode) -> Result<(), HarnessClosureError> {
+    let stat = rustix::fs::fstat(fd).map_err(|_| invalid("closure file stat failed"))?;
+    node_file_stat(&stat, node, owner_uid())?;
+    let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
+    verify_node_bytes(fd, node, &mut buffer)
+}
+
+/// The metadata half of node verification: an owner-only single-link regular file with the manifest's mode and size.
+fn node_file_stat(
+    stat: &rustix::fs::Stat,
+    node: &ClosureNode,
+    uid: u32,
+) -> Result<(), HarnessClosureError> {
+    secure_file_stat(stat, node.mode, uid)?;
+    if stat.st_size as u64 != node.size_bytes {
+        return Err(invalid("closure node size diverges from manifest"));
     }
     Ok(())
 }
 
-fn verify_node_file(fd: &OwnedFd, node: &ClosureNode) -> Result<(), HarnessClosureError> {
-    verify_secure_file(fd, node.mode)?;
-    let stat = rustix::fs::fstat(fd).map_err(|_| invalid("closure node stat failed"))?;
-    if stat.st_size as u64 != node.size_bytes {
-        return Err(invalid("closure node size diverges from manifest"));
-    }
-    let (total, sha256) = hash_copy(fd, None, node.size_bytes).map_err(|error| {
+/// A node at least this large hashes through [`hash_pipelined`]; a Pi closure's Node runtime is about 120 MiB, and its
+/// hash is the longest single task in a validation.
+const PIPELINED_HASH_MIN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The content half of node verification: the descriptor's bytes from its current offset match the manifest size and hash.
+fn verify_node_bytes(
+    fd: &OwnedFd,
+    node: &ClosureNode,
+    buffer: &mut [u8],
+) -> Result<(), HarnessClosureError> {
+    let hashed = if node.size_bytes >= PIPELINED_HASH_MIN_BYTES {
+        hash_pipelined(fd, node.size_bytes)
+    } else {
+        hash_copy_with(fd, None, node.size_bytes, Sha256::new(), 0, buffer)
+    };
+    let (total, sha256) = hashed.map_err(|error| {
         if error.kind() == std::io::ErrorKind::InvalidData {
             invalid("closure node grew past its manifest size")
         } else {
@@ -985,9 +1375,17 @@ fn verify_node_file(fd: &OwnedFd, node: &ClosureNode) -> Result<(), HarnessClosu
 
 fn verify_secure_file(fd: &OwnedFd, expected_mode: u32) -> Result<(), HarnessClosureError> {
     let stat = rustix::fs::fstat(fd).map_err(|_| invalid("closure file stat failed"))?;
-    let mode = mode_bits(&stat);
+    secure_file_stat(&stat, expected_mode, owner_uid())
+}
+
+fn secure_file_stat(
+    stat: &rustix::fs::Stat,
+    expected_mode: u32,
+    uid: u32,
+) -> Result<(), HarnessClosureError> {
+    let mode = mode_bits(stat);
     if mode & S_IFMT != S_IFREG
-        || stat.st_uid != owner_uid()
+        || stat.st_uid != uid
         || stat.st_nlink != 1
         || mode & 0o7777 != expected_mode
     {
@@ -1020,8 +1418,12 @@ fn open_owned_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosur
 
 fn verify_owned_directory(fd: &OwnedFd) -> Result<(), HarnessClosureError> {
     let stat = rustix::fs::fstat(fd).map_err(|_| invalid("closure directory stat failed"))?;
-    let mode = mode_bits(&stat);
-    if mode & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() || mode & 0o7777 != 0o700 {
+    owned_directory_stat(&stat, owner_uid())
+}
+
+fn owned_directory_stat(stat: &rustix::fs::Stat, uid: u32) -> Result<(), HarnessClosureError> {
+    let mode = mode_bits(stat);
+    if mode & S_IFMT != S_IFDIR || stat.st_uid != uid || mode & 0o7777 != 0o700 {
         return Err(invalid("closure directory is not owner-only"));
     }
     Ok(())

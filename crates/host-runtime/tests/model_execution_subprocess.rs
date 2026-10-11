@@ -154,6 +154,26 @@ fn main() {
             pi_alias_credential_failure_retries_canonical_provider,
         ),
         (
+            "pi_remembered_temperature_refusal_skips_the_refused_attempt",
+            pi_remembered_temperature_refusal_skips_the_refused_attempt,
+        ),
+        (
+            "pi_rejected_temperature_retries_without_temperature",
+            pi_rejected_temperature_retries_without_temperature,
+        ),
+        (
+            "pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider",
+            pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider,
+        ),
+        (
+            "pi_alias_refusal_then_credential_failure_keeps_temperature_for_canonical_provider",
+            pi_alias_refusal_then_credential_failure_keeps_temperature_for_canonical_provider,
+        ),
+        (
+            "pi_model_execution_hook_omits_temperature_for_registry_refusing_models",
+            pi_model_execution_hook_omits_temperature_for_registry_refusing_models,
+        ),
+        (
             "pi_project_pi_resources_ignored",
             pi_project_pi_resources_ignored,
         ),
@@ -627,6 +647,50 @@ mod fixture {
         std::process::exit(0);
     }
 
+    /// The provider refuses any request that carries a temperature and answers one without it.
+    fn temperature_rejected(out: PathBuf) -> ! {
+        let session = serde_json::json!({"type": "session", "id": "s", "version": "1", "timestamp": 1, "cwd": "/"});
+        let end = if std::env::var_os("EIDNARA_MODEL_EXECUTION_TEMPERATURE").is_some() {
+            fs::write(out.join("temperature-attempted"), b"1").expect("write temperature marker");
+            serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "The model returned the following errors: `temperature` is deprecated for this model.", "content": []}})
+        } else {
+            serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "native decoding answer"}]}})
+        };
+        emit_lines(&[session, serde_json::json!({"type": "agent_start"}), end]);
+        std::process::exit(0);
+    }
+
+    fn alias_refuses_temperature(out: PathBuf) -> ! {
+        let args = argv();
+        let model = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .and_then(|index| args.get(index + 1))
+            .expect("model argument");
+        let temperature = std::env::var("EIDNARA_MODEL_EXECUTION_TEMPERATURE").ok();
+        let session = serde_json::json!({"type": "session", "id": "s", "version": "1", "timestamp": 1, "cwd": "/"});
+        let end = if model.starts_with("openai-codex/") {
+            if out.join("alias-credentials-expired").exists() {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "No API key found for provider", "content": []}})
+            } else if temperature.is_some() {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "Unsupported parameter: 'temperature' is not supported with this model.", "content": []}})
+            } else if out.join("alias-expires-without-temperature").exists() {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "No API key found for provider", "content": []}})
+            } else {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "alias answer"}]}})
+            }
+        } else {
+            fs::write(
+                out.join("canonical-temperature"),
+                temperature.as_deref().unwrap_or("absent"),
+            )
+            .expect("write canonical temperature");
+            serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "canonical answer"}]}})
+        };
+        emit_lines(&[session, serde_json::json!({"type": "agent_start"}), end]);
+        std::process::exit(0);
+    }
+
     /// Pi must drain the lingering failed invocation after its error terminal.
     /// The failed alias invocation exhausts the run budget.
     fn alias_auth_retry_lingering(out: PathBuf) -> ! {
@@ -801,6 +865,12 @@ mod fixture {
             }
             Ok("alias_auth_retry_lingering") => {
                 alias_auth_retry_lingering(out.expect("alias fixture needs an out dir"));
+            }
+            Ok("temperature_rejected") => {
+                temperature_rejected(out.expect("temperature fixture needs an out dir"));
+            }
+            Ok("alias_refuses_temperature") => {
+                alias_refuses_temperature(out.expect("alias temperature fixture needs an out dir"));
             }
             Ok("error_then_retry_after_grace") => error_then_retry_after_grace(),
             Ok("hang_ignore_term") => hang_ignore_term(out),
@@ -1857,6 +1927,90 @@ console.log(JSON.stringify(apply({{ modelId: "thinking-model", inferenceConfig: 
     assert_eq!(native_bedrock["inferenceConfig"]["temperature"], 1);
 }
 
+/// Pi's registry marks models whose API refuses `temperature`; the hook sends none to them, so the request skips the refused attempt, and every other model context keeps the requested temperature.
+fn pi_model_execution_hook_omits_temperature_for_registry_refusing_models() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let hook_path = scratch.path().join(PI_MODEL_EXECUTION_EXTENSION_FILE);
+    fs::write(&hook_path, PI_MODEL_EXECUTION_EXTENSION_BYTES).expect("materialize hook");
+    let driver_path = scratch.path().join("driver.mjs");
+    let driver = format!(
+        r#"import hook from "file://{hook}";
+const handlers = [];
+const pi = {{ on(name, fn) {{ if (name === "before_provider_request") handlers.push(fn); }} }};
+hook(pi);
+const apply = (payload, ctx) => handlers[0]({{ payload }}, ctx);
+const refusing = {{ get model() {{ return {{ compat: {{ supportsTemperature: false }} }}; }} }};
+const accepting = {{ model: {{ compat: {{ supportsTemperature: true }} }} }};
+const unflagged = {{ model: {{ compat: {{ forceAdaptiveThinking: true }} }} }};
+const stale = {{ get model() {{ throw new Error("stale extension context"); }} }};
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, refusing)));
+console.log(JSON.stringify(apply({{ modelId: "b", messages: [], inferenceConfig: {{ maxTokens: 9, topP: 0.8 }} }}, refusing)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, accepting)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, unflagged)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, stale)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, undefined)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, temperature: 9, messages: [] }}, refusing)));
+console.log(JSON.stringify(apply({{ contents: [], generationConfig: {{ maxOutputTokens: 9, temperature: 1.9, topK: 3 }} }}, refusing)));
+console.log(JSON.stringify(apply({{ modelId: "b", messages: [], inferenceConfig: {{ maxTokens: 9, temperature: 1.9, topP: 0.8 }} }}, refusing)));
+"#,
+        hook = hook_path.to_string_lossy()
+    );
+    fs::write(&driver_path, driver).expect("driver");
+    let output = ["node", "bun"]
+        .iter()
+        .find_map(|runtime| {
+            std::process::Command::new(runtime)
+                .arg(&driver_path)
+                .env(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "32000")
+                .env(MODEL_EXECUTION_TEMPERATURE_ENV, "0.25")
+                .output()
+                .ok()
+        })
+        .expect("a JavaScript runtime (node or bun) is required for the hook fixture");
+    assert!(
+        output.status.success(),
+        "hook driver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("driver output");
+    let payloads: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("payload json"))
+        .collect();
+    assert_eq!(payloads.len(), 9, "{stdout}");
+
+    assert_eq!(payloads[0]["max_tokens"], 32_000);
+    assert!(payloads[0].get("temperature").is_none(), "{}", payloads[0]);
+    assert_eq!(payloads[1]["inferenceConfig"]["maxTokens"], 32_000);
+    assert_eq!(payloads[1]["inferenceConfig"]["topP"], 0.8);
+    assert!(
+        payloads[1]["inferenceConfig"].get("temperature").is_none(),
+        "{}",
+        payloads[1]
+    );
+    for payload in &payloads[2..6] {
+        assert_eq!(payload["max_tokens"], 32_000);
+        assert_eq!(payload["temperature"], 0.25, "{payload}");
+    }
+    // The hook clears a preexisting `temperature` in every spelling it owns for a registry-refusing model.
+    assert_eq!(payloads[6]["max_tokens"], 32_000);
+    assert!(payloads[6].get("temperature").is_none(), "{}", payloads[6]);
+    assert_eq!(payloads[7]["generationConfig"]["maxOutputTokens"], 32_000);
+    assert_eq!(payloads[7]["generationConfig"]["topK"], 3);
+    assert!(
+        payloads[7]["generationConfig"].get("temperature").is_none(),
+        "{}",
+        payloads[7]
+    );
+    assert_eq!(payloads[8]["inferenceConfig"]["maxTokens"], 32_000);
+    assert_eq!(payloads[8]["inferenceConfig"]["topP"], 0.8);
+    assert!(
+        payloads[8]["inferenceConfig"].get("temperature").is_none(),
+        "{}",
+        payloads[8]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
@@ -2547,6 +2701,133 @@ fn pi_alias_credential_failure_retries_canonical_provider() {
     assert!(args.iter().any(|arg| arg == "openai/m"), "{args:?}");
     assert!(!args.iter().any(|arg| arg == "openai-codex/m"), "{args:?}");
     assert!(setup.out.path().join("alias-attempted").exists());
+}
+
+/// A provider that refuses the temperature for the model gets the request once more without it.
+fn pi_rejected_temperature_retries_without_temperature() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "temperature_rejected")],
+        Vec::new(),
+        None,
+    );
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "anthropic/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "native decoding answer")
+    ));
+    assert!(setup.out.path().join("temperature-attempted").exists());
+}
+
+/// After a temperature refusal, later requests to that model ref run with native decoding; each distinct model ref first receives the requested temperature.
+fn pi_remembered_temperature_refusal_skips_the_refused_attempt() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "temperature_rejected")],
+        Vec::new(),
+        None,
+    );
+    let marker = setup.out.path().join("temperature-attempted");
+    for (model, refused_attempt) in [
+        ("anthropic/m", true),
+        ("anthropic/m", false),
+        ("anthropic/other", true),
+        ("anthropic/other", false),
+    ] {
+        let _ = fs::remove_file(&marker);
+        let (terminal, events) = execute(
+            &backend,
+            request(setup.project.path(), Harness::Pi, model, None),
+        );
+        assert!(
+            matches!(terminal, BackendTerminal::Completed { .. }),
+            "{model}: {terminal:?}"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "native decoding answer")
+        ));
+        assert_eq!(marker.exists(), refused_attempt, "{model}");
+    }
+}
+
+fn pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "alias_refuses_temperature")],
+        Vec::new(),
+        None,
+    );
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "openai/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "alias answer")
+    ));
+    fs::write(setup.out.path().join("alias-credentials-expired"), b"1")
+        .expect("expire alias credentials");
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "openai/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "canonical answer")
+    ));
+    assert_eq!(
+        fs::read_to_string(setup.out.path().join("canonical-temperature"))
+            .expect("canonical attempt ran"),
+        "0.25"
+    );
+}
+
+/// A temperature refusal applies to the model ref that refused it: when the alias refuses the temperature and its
+/// no-temperature retry then fails on credentials, the canonical provider still receives the admitted temperature.
+fn pi_alias_refusal_then_credential_failure_keeps_temperature_for_canonical_provider() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "alias_refuses_temperature")],
+        Vec::new(),
+        None,
+    );
+    fs::write(
+        setup.out.path().join("alias-expires-without-temperature"),
+        b"1",
+    )
+    .expect("expire alias credentials after the refusal");
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "openai/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "canonical answer")
+    ));
+    assert_eq!(
+        fs::read_to_string(setup.out.path().join("canonical-temperature"))
+            .expect("canonical attempt ran"),
+        "0.25"
+    );
 }
 
 /// `AuthRequired` received during Pi's shutdown gap must trigger the canonical retry.
