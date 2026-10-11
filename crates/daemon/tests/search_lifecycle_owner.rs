@@ -5927,6 +5927,69 @@ async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() 
     daemon.shutdown().await;
 }
 
+/// An abandonment and an authorized recovery over the same Disabled record serialize on the manager. A recorded authorized recovery survives abandonment cleanup; a refused recovery leaves the record deregistered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_abandonment_serializes_with_a_concurrent_authorized_recovery() {
+    let (daemon, route, _home) = operator_daemon().await;
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    let consumer = leave_the_disable_pending(&daemon, route).await;
+    type Recovered = Result<Option<String>, String>;
+    let recovery: Arc<std::sync::Mutex<Option<Recovered>>> = Arc::default();
+    owner.tap_slice_events_for_test({
+        let owner = Arc::downgrade(&owner);
+        let recovery = Arc::clone(&recovery);
+        move |event| {
+            if !matches!(event, SliceEvent::AbandonmentAuthorized) {
+                return;
+            }
+            let Some(owner) = owner.upgrade() else {
+                return;
+            };
+            let recovered = owner
+                .request_authorized_recovery(
+                    "operator:race",
+                    now(),
+                    &budget(Duration::from_millis(500)),
+                )
+                .map(|recorded| recorded.map(|recorded| recorded.intent.attempt_id))
+                .map_err(|error| error.to_string());
+            *recovery.lock().unwrap() = Some(recovered);
+        }
+    });
+    let abandoned = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.abandon",
+        serde_json::json!({ "operator_id": "operator-1", "reason": "the tip outran the disable" }),
+    )
+    .await;
+    let recovered = recovery
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the tap observed the abandonment");
+    let status = operator_status(&daemon, route).await;
+    match recovered {
+        Ok(Some(attempt_id)) => {
+            assert_ne!(
+                status["record"]["state"], "disabled",
+                "the cleanup persisted a Disabled record over the recovery: {status}"
+            );
+            assert_eq!(status["record"]["attempt_id"], attempt_id, "{status}");
+        }
+        Ok(None) => panic!("the record was Disabled when the recovery read it: {status}"),
+        Err(refusal) => {
+            assert_eq!(abandoned["kind"], "abandoned", "{abandoned}");
+            assert_eq!(abandoned["consumer_id"], consumer.as_str());
+            assert_eq!(
+                status["record"]["deregistered"], true,
+                "recovery refused ({refusal}) and the abandonment's cleanup incomplete: {status}"
+            );
+        }
+    }
+    daemon.shutdown().await;
+}
+
 /// An abandonment waits for the disable to release the local family: a disable a pinned reader holds back leaves the consumer registered with no recorded prefix, and the abandonment answers `nothing_to_abandon` and releases nothing. Once the reader is gone, the disable completes, and a retried recovery under the same reference reports the recovery already recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn an_abandonment_waits_for_the_local_release_and_retries_replay() {

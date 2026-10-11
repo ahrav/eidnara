@@ -211,6 +211,8 @@ pub enum SliceEvent {
     Idle,
     /// A request has taken its entry clock reading and is about to wait for the manager.
     RequestEntered,
+    /// An abandonment has read the Disabled record that authorizes it and is about to release its consumer through the kernel.
+    AbandonmentAuthorized,
 }
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
@@ -820,11 +822,11 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Abandons the Disabled record's consumer through the kernel's audited `ConsumerAbandonment`, which records `operator_id` and `reason`, and returns its id. The disable must have released the local family and recorded its prefix first, so only the kernel's release of a consumer behind its tip remains. A default disable never abandons, so this explicit operator action is the one that releases such a consumer. A retry of the same abandonment replays the kernel commit, and a consumer already absent under a record not yet marked deregistered is returned for that reconciliation. `None` when the record is not Disabled, has not released its local family, or is already deregistered.
+    /// Explicit operator abandonment releases the Disabled record's consumer through the kernel's audited `ConsumerAbandonment`, recording `operator_id` and `reason` and returning the consumer id. Eligibility requires the disable to have released the local family, recorded its prefix, and left deregistration pending; only the kernel release of a consumer behind its tip remains. A retry replays the same kernel commit. An eligible record with an already-absent consumer returns the consumer id for deregistration reconciliation. Ineligible records return `None`. The manager lock spans the record read through the kernel release, ordering a recovery intent recorded under the manager before or after the abandonment. After release, the consumer's absence refuses recovery until the disable's cleanup marks the record deregistered.
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::Invalid`] for an empty or oversized `operator_id` or `reason`, [`BuildError::Expired`] when the disable's cleanup envelope ends within `DEADLINE_MARGIN_MS`, and the kernel's refusal of the abandonment.
+    /// Returns [`BuildError::Invalid`] if `operator_id` or `reason` is empty after trimming or exceeds 512 bytes. Returns [`BuildError::Expired`] if acquiring the manager exhausts `budget` or the disable's cleanup envelope ends within `DEADLINE_MARGIN_MS`. Propagates the kernel's abandonment refusal.
     pub fn abandon_disabled_consumer(
         &self,
         operator_id: &str,
@@ -840,6 +842,7 @@ impl SearchLifecycleOwner {
                 "operator_id and reason must be nonempty and at most 512 bytes",
             ));
         }
+        let _managed = self.lock_within(budget)?;
         let ControlState::Disabled(disabled) = ProjectionLifecycle::read_at(&self.home) else {
             return Ok(None);
         };
@@ -850,6 +853,8 @@ impl SearchLifecycleOwner {
         ) else {
             return Ok(None);
         };
+        #[cfg(feature = "test-support")]
+        self.tap(SliceEvent::AbandonmentAuthorized);
         let consumer = handoff.consumer.consumer_id.clone();
         if self
             .kernel

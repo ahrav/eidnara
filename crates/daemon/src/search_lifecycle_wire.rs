@@ -57,6 +57,7 @@ fn refused(reason: impl std::fmt::Display) -> PreparedOutcome {
     response(json!({ "kind": "terminal", "terminal": "refused", "reason": &reason[..end] }))
 }
 
+/// The budget includes time spent waiting for a blocking worker.
 fn budget() -> EvalBudget {
     EvalBudget::new(
         Some(std::time::Instant::now() + OPERATION_BUDGET),
@@ -139,7 +140,8 @@ impl HandlerCore {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
-        match blocking(move || owner.request_operator_rebuild(crate::now_ms(), &budget())).await {
+        let budget = budget();
+        match blocking(move || owner.request_operator_rebuild(crate::now_ms(), &budget)).await {
             Ok(Ok(Some(recorded))) => response(json!({
                 "kind": "recorded",
                 "attempt_id": recorded.intent.attempt_id,
@@ -179,8 +181,9 @@ impl HandlerCore {
                 Ok(bound) => bound,
                 Err(outcome) => return outcome,
             };
+        let budget = budget();
         match blocking(move || {
-            owner.request_authorized_recovery(&authorization_ref, crate::now_ms(), &budget())
+            owner.request_authorized_recovery(&authorization_ref, crate::now_ms(), &budget)
         })
         .await
         {
