@@ -1439,6 +1439,8 @@ fn opencode_argv_env_stdin_contract() {
             OPENCODE_MODEL_EXECUTION_AGENT,
             "--format",
             "json",
+            "--title",
+            OPENCODE_MODEL_EXECUTION_AGENT,
         ]
     );
 

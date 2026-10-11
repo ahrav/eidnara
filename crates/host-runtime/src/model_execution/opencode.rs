@@ -302,6 +302,9 @@ async fn run_opencode(
         OsString::from(OPENCODE_MODEL_EXECUTION_AGENT),
         OsString::from("--format"),
         OsString::from("json"),
+        // A preset title keeps OpenCode from spending a model call on one.
+        OsString::from("--title"),
+        OsString::from(OPENCODE_MODEL_EXECUTION_AGENT),
     ];
 
     child_env.push((
