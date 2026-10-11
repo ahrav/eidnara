@@ -310,6 +310,19 @@ function failOpenPrefix(
  * Lengths for the submitted native array: members the capture verified against the retained
  * digest keep the lengths measured when they were first sent, and only the rest are measured.
  */
+/**
+ * UTF-8 bytes of the host messages before the submitted window, which a declined pass serves
+ * with the window; `undefined` when a slot cannot be read.
+ */
+function hostBytesBefore(source: TransformPassSource, boundaryIndex: number): number | undefined {
+    if (boundaryIndex <= 0) return 0;
+    const before = source.readWindow(0, boundaryIndex);
+    if (before === undefined) return undefined;
+    let bytes = 0;
+    for (const message of before) bytes += canonicalJsonLength(message);
+    return bytes;
+}
+
 function measureInputLengths(
     messages: readonly unknown[],
     previous: RetainedOutput | undefined,
@@ -1135,6 +1148,7 @@ export function createTransformSessionClient(
                             headroomPermille: INVOCATION_HEADROOM_PERMILLE,
                             profile: source.invocationProfile,
                         },
+                        () => hostBytesBefore(source, failOpen.boundaryIndex),
                     );
                     admission = admissionOf(invocation);
                     if (!invocation.ok) {
@@ -1631,11 +1645,16 @@ export function createTransformSessionClient(
                     throw new PassDeclined(sessionId, "host_container", publishRejection);
                 }
                 // Every candidate entry's canonical length is charged, not the inserted payload alone.
-                const invocation = validateInvocation(application.lengths, inputLengths, {
-                    maxTokens: reportedContextLimit,
-                    headroomPermille: INVOCATION_HEADROOM_PERMILLE,
-                    profile: source.invocationProfile,
-                });
+                const invocation = validateInvocation(
+                    application.lengths,
+                    inputLengths,
+                    {
+                        maxTokens: reportedContextLimit,
+                        headroomPermille: INVOCATION_HEADROOM_PERMILLE,
+                        profile: source.invocationProfile,
+                    },
+                    () => hostBytesBefore(source, boundaryIndex),
+                );
                 admission = admissionOf(invocation);
                 if (!invocation.ok) {
                     throw new PassDeclined(

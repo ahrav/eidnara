@@ -48,6 +48,21 @@ describe("invocation budget", () => {
         );
     });
 
+    it("counts the host messages a decline serves before the window against a growing candidate", () => {
+        const candidate = [40, 120, 7];
+        const incoming = [40, 120];
+        const budget = { ...BUDGET, maxTokens: 1 };
+        expect(validateInvocation(candidate, incoming, budget, () => 7)).toMatchObject({
+            ok: true,
+            reason: "shrinks",
+        });
+        expect(validateInvocation(candidate, incoming, budget, () => 6).ok).toBe(false);
+        expect(validateInvocation(candidate, incoming, budget, () => undefined).ok).toBe(false);
+        let read = 0;
+        validateInvocation(candidate, incoming, { ...budget, maxTokens: 1_000 }, () => ++read);
+        expect(read).toBe(0);
+    });
+
     it("gates nothing when the host has not reported a limit", () => {
         expect(
             validateInvocation([1 << 20], [], { ...BUDGET, maxTokens: undefined }),
