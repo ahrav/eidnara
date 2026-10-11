@@ -188,6 +188,17 @@ impl SearchSelection {
                 "retirement target exceeds the selected family's checkpoint",
             ));
         }
+        // The receipt transaction deletes the set a superseded receipt recorded, so that set is held to the bound the transaction's row charge covers.
+        let superseded = family.projection.read_within(deadline(budget)?, |conn| {
+            retrieval::retirement::recorded_dispositions_within(
+                conn,
+                &old_digest,
+                spec.retirement.max_obligations.get(),
+            )
+        })?;
+        if superseded > spec.retirement.max_obligations.get() {
+            return Err(BuildError::InventoryBound);
+        }
         let obligations = kernel
             .consumer_obligations_within_budget(
                 budget,

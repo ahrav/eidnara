@@ -94,6 +94,25 @@ pub fn verify_receipt(
     Ok(true)
 }
 
+/// The disposition rows recorded under `receipt_id`, counted up to `bound + 1`. A caller whose receipt transaction deletes a superseded set refuses one past its bound from this count, at a cost bounded by `bound` rows.
+///
+/// # Errors
+///
+/// Returns the SQLite error when the count fails.
+pub fn recorded_dispositions_within(
+    conn: &GuardedConn<'_>,
+    receipt_id: &str,
+    bound: usize,
+) -> Result<usize, ProjectionError> {
+    let limit = i64::try_from(bound.saturating_add(1)).map_err(|_| ProjectionError::CorruptRow)?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM retirement_dispositions WHERE receipt_id=?1 LIMIT ?2)",
+        params![receipt_id, limit],
+        |row| row.get(0),
+    )?;
+    usize::try_from(count).map_err(|_| ProjectionError::CorruptRow)
+}
+
 /// Calling this function attests that physical holders have drained and the whole old family is removed.
 /// The caller owns the transaction and releases it before taking the kernel writer.
 pub fn record_receipt(

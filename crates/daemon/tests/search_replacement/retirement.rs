@@ -1140,6 +1140,87 @@ fn the_receipt_transaction_charge_covers_the_set_a_supersession_deletes() {
     case.assert_no_receipt();
 }
 
+/// The receipt transaction deletes the set a superseded receipt recorded. A stored set past `max_obligations` would mutate more rows than the transaction's charge covers, so retirement refuses it before removing the old family or writing a receipt.
+#[test]
+fn a_superseded_receipt_past_the_obligation_bound_is_refused_before_retirement() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
+    drop(case.old.take());
+    let config = spec(root.path());
+    let bound = config.retirement.max_obligations.get();
+    let selected = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let selected_digest = selected.digest().to_owned();
+    let selected_path = selected.projection().path().to_owned();
+    drop(selected);
+    // A receipt the same retirement recorded through the commit before the target, with one disposition more than the bound.
+    let stored = Connection::open(&selected_path).unwrap();
+    stored
+        .execute(
+            "INSERT INTO retirement_receipts(receipt_id,generation_id,reason,retired_at,recorded_at,
+             old_consumer_id,old_family,selected_family,kernel_incarnation_id,through_commit_seq,obligation_count)
+             VALUES (?1,?2,'consumer_retired',1,1,?3,?1,?4,?5,?6,?7)",
+            rusqlite::params![
+                case.old_digest,
+                fixtures::GENERATION,
+                CONSUMER,
+                selected_digest,
+                config.identity.kernel_incarnation_id,
+                case.target - 1,
+                bound as i64 + 1,
+            ],
+        )
+        .unwrap();
+    for index in 0..=bound {
+        stored
+            .execute(
+                "INSERT INTO retirement_dispositions VALUES (?1,'source',?2,?3,0,NULL,'removed')",
+                rusqlite::params![
+                    case.old_digest,
+                    format!("stored-{index}"),
+                    "0".repeat(PAYLOAD_MANIFEST_DIGEST_LEN)
+                ],
+            )
+            .unwrap();
+    }
+    drop(stored);
+    let refused = case.retire(root.path(), &mut |_| {});
+    assert!(
+        matches!(refused, Err(BuildError::InventoryBound)),
+        "{refused:?}"
+    );
+    assert!(old_path.exists(), "the old family is kept");
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint),
+        "the old consumer is neither acknowledged nor deregistered"
+    );
+    let stored = Connection::open(&selected_path).unwrap();
+    let (through, dispositions): (i64, i64) = stored
+        .query_row(
+            "SELECT through_commit_seq,(SELECT COUNT(*) FROM retirement_dispositions WHERE receipt_id=?1)
+             FROM retirement_receipts WHERE receipt_id=?1",
+            [&case.old_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (through, dispositions),
+        (case.target - 1, bound as i64 + 1),
+        "the stored receipt is untouched"
+    );
+}
+
 #[test]
 fn receipt_ack_waits_for_local_release_and_gate_denial_keeps_obligations() {
     let root = tempfile::tempdir().unwrap();
