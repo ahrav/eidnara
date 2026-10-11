@@ -67,7 +67,10 @@ function main(): void {
     const lines: string[] = [`# A/B report: ${out}`, ""];
     const { arms, turnsByArm, callsByArm } = loadRun<TurnRow, Call>(out);
 
-    lines.push("## Accuracy by fact kind (correct/total; s=stale a=abstained w=wrong)", "");
+    lines.push(
+        "## Accuracy by fact kind (correct/total; s=stale a=abstained w=wrong f=failed)",
+        "",
+    );
     const kinds = [
         ...new Set(
             [...turnsByArm.values()]
@@ -86,7 +89,7 @@ function main(): void {
                 (r) => r.kind === "probe" && (k === "ALL" || `${r.factKind}/${r.scope}` === k),
             );
             const c = (g: string) => rows.filter((r) => r.grade === g).length;
-            return `${c("correct")}/${rows.length} (s${c("stale")} a${c("abstained")} w${c("wrong")})`;
+            return `${c("correct")}/${rows.length} (s${c("stale")} a${c("abstained")} w${c("wrong")} f${c("failed")})`;
         });
         lines.push(`| ${k} | ${cells.join(" | ")} |`);
     }

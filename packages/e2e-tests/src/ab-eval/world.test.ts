@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildWorld, grade, PROJECT_SIZES, TIERS } from "./world";
+import { buildWorld, grade, gradeOutcome, PROJECT_SIZES, TIERS } from "./world";
 
 describe("A/B world", () => {
     it("builds the same world from the same seed", () => {
@@ -73,6 +73,9 @@ describe("A/B world", () => {
         const abstain = { ...fact, kind: "abstain" as const, answer: "UNKNOWN", stale: undefined };
         expect(grade(abstain, "UNKNOWN, we never settled it")).toBe("correct");
         expect(grade(abstain, "41234")).toBe("wrong");
+        // A probe whose turn failed is graded failed, whatever text arrived before the failure.
+        expect(gradeOutcome(fact, { answer: "41234", error: "stream failed" })).toBe("failed");
+        expect(gradeOutcome(fact, { answer: "41234" })).toBe("correct");
         // A hedge beside a guessed value is a guess.
         expect(grade(abstain, "I don't know; maybe 41234")).toBe("wrong");
         expect(grade(abstain, "Not sure, perhaps amber-falcon-42")).toBe("wrong");

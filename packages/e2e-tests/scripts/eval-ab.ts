@@ -9,7 +9,7 @@ import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
 import {
     buildWorld,
-    grade,
+    gradeOutcome,
     initRepo,
     PROJECT_SIZES,
     type World,
@@ -187,7 +187,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
                           expected: fact.answer,
                           stale: fact.stale ?? null,
                           answer: result.answer.slice(0, 2000),
-                          grade: grade(fact, result.answer),
+                          grade: gradeOutcome(fact, result),
                       }
                     : {}),
                 ts: Date.now(),

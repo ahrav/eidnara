@@ -1000,7 +1000,12 @@ export function writeRepo(world: World, dir: string): void {
     }
 }
 
-export type Grade = "correct" | "stale" | "abstained" | "wrong";
+export type Grade = "correct" | "stale" | "abstained" | "wrong" | "failed";
+
+/** A probe whose turn ended in an error has no answer to grade, whatever text arrived first. */
+export function gradeOutcome(fact: Fact, result: { answer: string; error?: string }): Grade {
+    return result.error ? "failed" : grade(fact, result.answer);
+}
 
 const ABSTAIN =
     /\bUNKNOWN\b|\b(don'?t|do not) (know|have|see)\b|\bnever (settled|decided|discussed|set|mentioned)\b|\bnot (sure|aware)\b|\bno record\b|\bcan(no|')t find\b/i;
