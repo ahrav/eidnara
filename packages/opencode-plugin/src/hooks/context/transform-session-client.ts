@@ -74,6 +74,7 @@ const DISCOVERY_BUDGET_MS = TRANSFORM_SEND_TIMEOUT_MS - 4_000;
 if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no discovery budget");
 /** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
 const INVOCATION_HEADROOM_PERMILLE = 250;
+const HOST_BYTES_BEFORE_CHUNK = 32;
 /** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
 const WIRE_PROJECTION_FACTOR = 4;
 /** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
@@ -307,22 +308,30 @@ function failOpenPrefix(
 }
 
 /**
- * Lengths for the submitted native array: members the capture verified against the retained
- * digest keep the lengths measured when they were first sent, and only the rest are measured.
+ * UTF-8 bytes of the host messages before `boundaryIndex`, counted newest first until they reach
+ * `needed`. The count includes whole messages and can exceed `needed`.
  */
-/**
- * UTF-8 bytes of the host messages before the submitted window, which a declined pass serves
- * with the window; `undefined` when a slot cannot be read.
- */
-function hostBytesBefore(source: TransformPassSource, boundaryIndex: number): number | undefined {
-    if (boundaryIndex <= 0) return 0;
-    const before = source.readWindow(0, boundaryIndex);
-    if (before === undefined) return undefined;
+function hostBytesBefore(
+    source: TransformPassSource,
+    boundaryIndex: number,
+    needed: number,
+): number | undefined {
     let bytes = 0;
-    for (const message of before) bytes += canonicalJsonLength(message);
+    for (let end = boundaryIndex; end > 0 && bytes < needed; ) {
+        const start = Math.max(0, end - HOST_BYTES_BEFORE_CHUNK);
+        const slots = source.readWindow(start, end);
+        if (slots === undefined) return undefined;
+        for (let index = slots.length - 1; index >= 0 && bytes < needed; index -= 1)
+            bytes += canonicalJsonLength(slots[index]);
+        end = start;
+    }
     return bytes;
 }
 
+/**
+ * Lengths for the submitted native array: members the capture verified against the retained
+ * digest keep the lengths measured when they were first sent, and only the rest are measured.
+ */
 function measureInputLengths(
     messages: readonly unknown[],
     previous: RetainedOutput | undefined,
@@ -1148,7 +1157,7 @@ export function createTransformSessionClient(
                             headroomPermille: INVOCATION_HEADROOM_PERMILLE,
                             profile: source.invocationProfile,
                         },
-                        () => hostBytesBefore(source, failOpen.boundaryIndex),
+                        (needed) => hostBytesBefore(source, failOpen.boundaryIndex, needed),
                     );
                     admission = admissionOf(invocation);
                     if (!invocation.ok) {
@@ -1653,7 +1662,7 @@ export function createTransformSessionClient(
                         headroomPermille: INVOCATION_HEADROOM_PERMILLE,
                         profile: source.invocationProfile,
                     },
-                    () => hostBytesBefore(source, boundaryIndex),
+                    (needed) => hostBytesBefore(source, boundaryIndex, needed),
                 );
                 admission = admissionOf(invocation);
                 if (!invocation.ok) {

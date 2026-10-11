@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
+import { canonicalJsonLength } from "./edit-recipe";
 import { TransformCaptureAdmission } from "./transform-capture";
 import {
     createTransformSessionClient,
@@ -384,6 +385,50 @@ describe("transform session client over plain data", () => {
         expect(await run()).toEqual({ kind: "applied", boundary: older });
         expect(idReads).toBe(300);
         expect(host.windows.at(-1)).toEqual([600, 900]);
+    });
+});
+
+describe("transform session client invocation gate before the window", () => {
+    async function gatedPass(host: PlainHost, anchor: { mid: string; sequence: number }) {
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [anchor] })],
+            transform: [foldReply(anchor)],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admitted = new TransformCaptureAdmission().admit("ses");
+        if (!("lease" in admitted)) throw new Error("admission declined");
+        return client.run("ses", admitted.lease, { ...source(host), contextLimit: () => 1 });
+    }
+
+    it("reads only the host messages before the window that cover the candidate's growth", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const growth = canonicalJsonLength({ id: "eidnara:synthetic:m0", text: "summary" });
+        expect(growth).toBeLessThan(canonicalJsonLength(host.values.slice(80, 90)));
+        expect(await gatedPass(host, anchor)).toEqual({ kind: "applied", boundary: anchor });
+        expect(ids(host.published[0])).toEqual([
+            "eidnara:synthetic:m0",
+            ...host.values.slice(90).map((value) => value.id),
+        ]);
+        const [windowRead, ...beforeReads] = host.windows;
+        expect(windowRead).toEqual([90, 100]);
+        expect(beforeReads[0]?.[1]).toBe(90);
+        const slotsRead = beforeReads.reduce((sum, [start, end]) => sum + end - start, 0);
+        expect(slotsRead).toBeLessThan(90);
+    });
+
+    it("reads to the host's head and declines when the messages before the window cannot cover the growth", async () => {
+        const host = plainHost(5);
+        const anchor = { mid: "m2", sequence: 1 };
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+        expect(host.windows).toEqual([
+            [1, 5],
+            [0, 1],
+        ]);
     });
 });
 

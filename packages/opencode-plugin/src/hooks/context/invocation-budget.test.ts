@@ -63,6 +63,21 @@ describe("invocation budget", () => {
         expect(read).toBe(0);
     });
 
+    it("asks the before-window reader only for the bytes the candidate grows by", () => {
+        const needs: number[] = [];
+        const result = validateInvocation(
+            [40, 120, 7],
+            [40, 120],
+            { ...BUDGET, maxTokens: 1 },
+            (needed) => {
+                needs.push(needed);
+                return needed;
+            },
+        );
+        expect(result).toMatchObject({ ok: true, reason: "shrinks" });
+        expect(needs).toEqual([7]);
+    });
+
     it("gates nothing when the host has not reported a limit", () => {
         expect(
             validateInvocation([1 << 20], [], { ...BUDGET, maxTokens: undefined }),
