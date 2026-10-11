@@ -509,9 +509,6 @@ mod reference {
             .collect()
     }
 
-    /// Tool arcs in an assistant that consists only of native reasoning plus reducible tool blocks
-    /// are not reduction candidates. Reasoning cannot be rewritten, so changing every remaining
-    /// tool sibling would either strand a reasoning-only message or mutate a signed assistant turn.
     pub(crate) fn reasoning_ineligible_arc_ids(items: &[SelItem]) -> HashSet<String> {
         let mut messages: HashMap<&str, ReasoningMessageShape> = HashMap::new();
         for item in items {
@@ -533,6 +530,7 @@ mod reference {
                 SelKind::ToolCall { .. } | SelKind::ToolResult { .. } => {
                     message.has_durable_non_tool_sibling = true;
                 }
+                SelKind::Opaque => {}
                 _ => message.has_durable_non_tool_sibling = true,
             }
         }
@@ -2554,54 +2552,66 @@ fn reasoning_guard_matches_frozen_reference_on_unfiltered_decisions() {
         tag_protected: false,
         exempt_protected: false,
     };
-    let specs = vec![
-        spec(KIND_REASONING, None),
-        spec(KIND_TOOL_CALL, Some(0)),
-        spec(KIND_TOOL_RESULT, Some(0)),
+    // The arc remains ineligible with opaque items before and after it.
+    let shapes = [
+        vec![
+            spec(KIND_REASONING, None),
+            spec(KIND_TOOL_CALL, Some(0)),
+            spec(KIND_TOOL_RESULT, Some(0)),
+        ],
+        vec![
+            spec(KIND_OPAQUE, None),
+            spec(KIND_REASONING, None),
+            spec(KIND_TOOL_CALL, Some(0)),
+            spec(KIND_TOOL_RESULT, Some(0)),
+            spec(KIND_OPAQUE, None),
+        ],
     ];
     let bits: CtxBits = (0, 100_000.0, 100_000.0, 0, 0, true, 0, false, true, true);
-    let (items, _, _, _) = build_inputs!(
-        &specs,
-        bits,
-        SelItem,
-        SelKind,
-        SelMessageRole,
-        SelectionContext,
-        PassClass,
-        SelectionConfig,
-        std::borrow::Cow::Owned
-    );
-    let (ref_items, _, _, _) = build_inputs!(
-        &specs,
-        bits,
-        reference::SelItem,
-        reference::SelKind,
-        reference::SelMessageRole,
-        reference::SelectionContext,
-        reference::PassClass,
-        reference::SelectionConfig,
-        std::convert::identity
-    );
-    let candidates: Vec<_> = items
-        .iter()
-        .filter(|item| item.arc_id.is_some())
-        .map(|item| daemon::transform::ReductionDecision {
-            target_id: item.id.clone(),
-            kind: "drop".to_string(),
-            payload: "[dropped]".to_string(),
-        })
-        .collect();
+    for specs in &shapes {
+        let (items, _, _, _) = build_inputs!(
+            specs,
+            bits,
+            SelItem,
+            SelKind,
+            SelMessageRole,
+            SelectionContext,
+            PassClass,
+            SelectionConfig,
+            std::borrow::Cow::Owned
+        );
+        let (ref_items, _, _, _) = build_inputs!(
+            specs,
+            bits,
+            reference::SelItem,
+            reference::SelKind,
+            reference::SelMessageRole,
+            reference::SelectionContext,
+            reference::PassClass,
+            reference::SelectionConfig,
+            std::convert::identity
+        );
+        let candidates: Vec<_> = items
+            .iter()
+            .filter(|item| item.arc_id.is_some())
+            .map(|item| daemon::transform::ReductionDecision {
+                target_id: item.id.clone(),
+                kind: "drop".to_string(),
+                payload: "[dropped]".to_string(),
+            })
+            .collect();
 
-    assert_eq!(candidates.len(), 2);
-    let optimized = decision_rows(&filter_reasoning_ineligible_decisions(
-        &items,
-        candidates.clone(),
-    ));
-    let expected = decision_rows(&reference::filter_reasoning_ineligible_decisions(
-        &ref_items, candidates,
-    ));
-    assert_eq!(optimized, expected);
-    assert!(optimized.is_empty());
+        assert_eq!(candidates.len(), 2);
+        let optimized = decision_rows(&filter_reasoning_ineligible_decisions(
+            &items,
+            candidates.clone(),
+        ));
+        let expected = decision_rows(&reference::filter_reasoning_ineligible_decisions(
+            &ref_items, candidates,
+        ));
+        assert_eq!(optimized, expected, "diverged on {specs:?}");
+        assert!(optimized.is_empty(), "{specs:?}");
+    }
 }
 
 fn sampled_specs(
