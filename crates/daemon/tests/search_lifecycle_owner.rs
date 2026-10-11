@@ -6026,3 +6026,50 @@ async fn an_abandonment_waits_for_the_local_release_and_retries_replay() {
     assert_eq!(other["terminal"], "not_disabled", "{other}");
     daemon.shutdown().await;
 }
+
+/// An operator rebuild of a record that is not Current answers `not_current` and leaves the idle slice loop asleep until its own idle period ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_rebuild_of_a_record_that_is_not_current_leaves_the_slice_loop_idle() {
+    let (daemon, route, _home) = operator_daemon().await;
+    let disabled = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.disable",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(disabled["kind"], "disabled", "{disabled}");
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    owner.tap_slice_events_for_test(move |event| {
+        let idle = match event {
+            SliceEvent::Idle => true,
+            SliceEvent::Waiting { .. } => false,
+            _ => return,
+        };
+        let _ = events.send(idle);
+    });
+    // The loop enters its next idle wait within one idle period, and the window below ends well before that wait does.
+    let idle = tokio::time::timeout(daemon::search_lifecycle_owner::SLICE_IDLE * 3, async {
+        while observed.recv().await != Some(true) {}
+    })
+    .await;
+    assert!(idle.is_ok(), "the slice loop never entered its idle wait");
+    let answer = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.rebuild",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(answer["terminal"], "not_current", "{answer}");
+    let woke = tokio::time::timeout(Duration::from_secs(1), async {
+        while observed.recv().await != Some(false) {}
+    })
+    .await;
+    assert!(
+        woke.is_err(),
+        "a rebuild that recorded nothing started a slice"
+    );
+    daemon.shutdown().await;
+}

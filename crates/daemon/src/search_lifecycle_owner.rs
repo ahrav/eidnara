@@ -650,6 +650,17 @@ impl SearchLifecycleOwner {
         let ControlState::Current(current) = ProjectionLifecycle::read_at(&self.home) else {
             return Ok(None);
         };
+        self.rebuild_current(&current, cause, now, budget)
+    }
+
+    /// Records the replacement of `current`, the Current record the caller read, for `cause`, as [`Self::request_rebuild`] describes.
+    fn rebuild_current(
+        &self,
+        current: &LifecycleIntent,
+        cause: Cause,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<Recorded>, BuildError> {
         let selected_generation = current
             .staged_seed_digest
             .clone()
@@ -679,7 +690,7 @@ impl SearchLifecycleOwner {
         ProjectionLifecycle::read_at(&self.home)
     }
 
-    /// Records an operator's rebuild of the Current family through the next registered consumer, under the bounds a slice's rebuild takes, and wakes the slice loop to start it; `None` when the record is not Current.
+    /// Records an operator's rebuild of the Current family through the next registered consumer, under the bounds a slice's rebuild takes; `None` when the record is not Current.
     ///
     /// # Errors
     ///
@@ -689,19 +700,22 @@ impl SearchLifecycleOwner {
         now: i64,
         budget: &EvalBudget,
     ) -> Result<Option<Recorded>, BuildError> {
-        // A retry after a lost answer finds the rebuild already recorded and reports it as a replay.
-        if let ControlState::Intent(intent) = ProjectionLifecycle::read_at(&self.home)
-            && intent.transition == Transition::Rebuilding
-            && intent.cause == Cause::OperatorRequest
-        {
-            return Ok(Some(Recorded {
-                intent,
-                replayed: true,
-            }));
+        match ProjectionLifecycle::read_at(&self.home) {
+            // A retry after a lost answer finds the rebuild already recorded and reports it as a replay.
+            ControlState::Intent(intent)
+                if intent.transition == Transition::Rebuilding
+                    && intent.cause == Cause::OperatorRequest =>
+            {
+                Ok(Some(Recorded {
+                    intent,
+                    replayed: true,
+                }))
+            }
+            ControlState::Current(current) => {
+                self.rebuild_current(&current, Cause::OperatorRequest, now, budget)
+            }
+            _ => Ok(None),
         }
-        let recorded = self.request_rebuild(Cause::OperatorRequest, now, budget)?;
-        self.requested.notify_one();
-        Ok(recorded)
     }
 
     /// Records the authorized recovery of a Disabled record under `authorization_ref`: a new operation over the current selection, through the consumer after the disabled one, under the manifest's recovery bounds. The slice loop is woken to run it; `None` when the record is not Disabled. Restart and elapsed time grant no authorization, so this is the only entry that starts a recovery.
