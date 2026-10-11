@@ -102,17 +102,21 @@ export function opencodeKeepRoot(binary: string): string {
     return dir;
 }
 
+/** A Pi arm runs Pi under Node, and an Eidnara arm's harness closures hold the Node runtime. */
+function launchesNode(spec: ArmSpec): boolean {
+    return spec.eidnara || spec.harness === "pi";
+}
+
 /**
- * The paths the selected arms need visible: the repository, the Node runtime on the sandbox
- * PATH, the pinned Pi install for Pi arms, the OpenCode install for OpenCode arms, and both for
- * an Eidnara arm, whose harness closures hold both. Every kept path lies beside or below the
- * masked paths; one that contains a masked path would expose it.
+ * The paths the selected arms need visible: the repository, the Node runtime and the pinned Pi
+ * install for arms that launch Node, the OpenCode install for OpenCode arms, and both for an
+ * Eidnara arm, whose harness closures hold both. Every kept path lies beside or below the masked
+ * paths; one that contains a masked path would expose it.
  */
 export function sharedKeep(specs: readonly ArmSpec[]): string[] {
-    const eidnara = specs.some((spec) => spec.eidnara);
-    const keep = [REPO_ROOT, nodeRoot()];
-    if (eidnara || specs.some((spec) => spec.harness === "pi")) keep.push(ensurePiInstall());
-    if (eidnara || specs.some((spec) => spec.harness === "opencode")) {
+    const keep = [REPO_ROOT];
+    if (specs.some(launchesNode)) keep.push(nodeRoot(), ensurePiInstall());
+    if (specs.some((spec) => spec.eidnara || spec.harness === "opencode")) {
         keep.push(opencodeKeepRoot(opencodeBinary()));
     }
     const masked = ["/tmp", realpathSync(homedir())];
@@ -127,8 +131,10 @@ export function sandboxKeep(spec: ArmSpec, armRoot: string): string[] {
     return [...sharedKeep([spec]), armRoot].map(plainPath);
 }
 
-export function sandboxPath(): string {
-    return [join(nodeRoot(), "bin"), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
+/** The PATH inside an arm's sandbox; the Node runtime appears for arms that launch it. */
+export function sandboxPath(spec: ArmSpec): string {
+    const system = ["/usr/local/bin", "/usr/bin", "/bin"];
+    return (launchesNode(spec) ? [join(nodeRoot(), "bin"), ...system] : system).join(":");
 }
 
 export function ensureSandboxScript(runRoot: string): string {

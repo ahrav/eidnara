@@ -9,9 +9,11 @@ import {
     assertRunRootMaskable,
     ensureSandboxScript,
     maskedPaths,
+    nodeRoot,
     opencodeBinary,
     opencodeKeepRoot,
     sandboxAvailable,
+    sandboxPath,
     sharedKeep,
 } from "./sandbox";
 
@@ -45,6 +47,15 @@ describe("sandbox keep list", () => {
         expect(ocOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(false);
         // An Eidnara arm materializes both harness closures.
         expect(ocOn.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
+    });
+
+    it("puts the Node runtime on the sandbox PATH only for arms that launch it", () => {
+        const node = join(nodeRoot(), "bin");
+        expect(sandboxPath(armSpec("pi-off")).split(":")).toContain(node);
+        expect(sandboxPath(armSpec("oc-on")).split(":")).toContain(node);
+        expect(sandboxPath(armSpec("oc-off")).split(":")).not.toContain(node);
+        expect(sharedKeep([armSpec("oc-off")])).not.toContain(nodeRoot());
+        expect(sharedKeep([armSpec("pi-off")])).toContain(nodeRoot());
     });
 
     it("keeps the OpenCode install tree, never an ancestor such as the home directory", () => {

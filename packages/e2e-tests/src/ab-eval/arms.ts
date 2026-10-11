@@ -352,7 +352,7 @@ export class PiArm extends Arm {
             PI_OFFLINE: "1",
             PI_SKIP_VERSION_CHECK: "1",
         });
-        env.PATH = sandboxPath();
+        env.PATH = sandboxPath(this.spec);
         const node = join(nodeRoot(), "bin/node");
         const [command, argv] = this.ctx.sandboxDir
             ? [
@@ -504,7 +504,7 @@ export class OpencodeArm extends Arm {
             : `exec ${binary} "$@"`;
         writeFileSync(
             join(sbin, "opencode"),
-            `#!/bin/sh\nexport PATH=${sandboxPath()}\n${launch}\n`,
+            `#!/bin/sh\nexport PATH=${sandboxPath(this.spec)}\n${launch}\n`,
             {
                 mode: 0o755,
             },
