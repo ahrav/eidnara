@@ -249,10 +249,11 @@ and runs `validate-mode-manifest` and `test:rust` with
 
 ## Eidnara on/off evaluation
 
-`bun run eval:ab` runs one seeded project world through Pi and OpenCode with
-and without Eidnara and records every turn and model call. `bun run
-eval:ab:report <out>` prints accuracy by fact kind, a paired on/off test,
-turn latency, model calls and tokens per caller, and memory.
+`bun run eval:ab` builds the OpenCode plugin bundle and the Pi extension,
+then runs one seeded project world through Pi and OpenCode with and without
+Eidnara and records every turn and model call. `bun run eval:ab:report <out>`
+prints accuracy by fact kind, a paired on/off test, turn latency, model calls
+and tokens per caller, and memory.
 
 - The world (`src/ab-eval/world.ts`) is a synthetic service repository plus
   coding sessions. Fact turns plant decisions, corrections, constraints,
@@ -270,7 +271,11 @@ turn latency, model calls and tokens per caller, and memory.
   forwards those calls with the temperature the plugin set. On every arm the
   gateway removes the harness's `thinking` request field from each forwarded
   call. Eidnara arms run the release `direct_host_fixture` with the pinned
-  harness closures. An unknown arm name fails the run before any arm starts.
+  harness closures: `target/release/examples/direct_host_fixture`, or the
+  `--fixture-bin` path, built with `cargo build -p daemon --example
+  direct_host_fixture --features direct-host-fixture --locked --release`. An
+  unknown or repeated arm name, a flag value outside its documented set, or a
+  missing fixture fails the run before any arm starts.
 - When passwordless `sudo` can create mount and PID namespaces, each harness
   runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the home directory, and the run
   directory, and the arm's own directory is mounted back; the arm's `/proc`
@@ -298,4 +303,6 @@ bun run eval:ab:report /tmp/ab-eval/runs/m1
 ```
 
 Tiers: `xs` (2 x 24 turns), `c` (1 x 170), `s` (3 x 110), `m` (12 x 260),
-`l` (40 x 600). Run reports stay outside the repository.
+`l` (40 x 600). The count is the work turns per session; a later session opens
+with the cross-session probes that are due, and one final session holds only
+probes. Run reports stay outside the repository.

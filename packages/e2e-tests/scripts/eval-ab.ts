@@ -8,6 +8,11 @@ import { procStats, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
 import { buildWorld, grade, type World, writeRepo } from "../src/ab-eval/world";
+import {
+    cargoBuildExampleArgs,
+    DIRECT_HOST_FIXTURE,
+    isExecutableFile,
+} from "../src/rust-runner/daemon-examples";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
 
@@ -33,11 +38,22 @@ function parseArgs(argv: string[]): Options {
         const i = argv.indexOf(`--${name}`);
         return i >= 0 && argv[i + 1] !== undefined ? (argv[i + 1] as string) : fallback;
     };
+    const choice = <T extends string>(name: string, values: readonly T[], fallback: T): T => {
+        const value = get(name, fallback);
+        if (!values.includes(value as T)) {
+            throw new Error(`--${name} ${JSON.stringify(value)}; accepted: ${values.join(", ")}`);
+        }
+        return value as T;
+    };
     const out = get("out", "");
+    const arms = get("arms", "pi-on,pi-off,oc-on,oc-off").split(",");
+    const repeated = arms.find((name, i) => arms.indexOf(name) !== i);
+    if (repeated !== undefined) throw new Error(`--arms names ${repeated} twice`);
+    const sandbox = choice("sandbox", ["auto", "on", "off"], "auto");
     return {
         tier: get("tier", "xs"),
         seed: Number(get("seed", "7")),
-        arms: get("arms", "pi-on,pi-off,oc-on,oc-off").split(","),
+        arms,
         out: out ? resolve(out) : timestampedRunDir(join(tmpdir(), "ab-eval/runs")),
         linkLatest: !out,
         paceMs: Number(get("pace-ms", "1500")),
@@ -46,17 +62,14 @@ function parseArgs(argv: string[]): Options {
             "fixture-bin",
             join(REPO_ROOT, "target/release/examples/direct_host_fixture"),
         ),
-        sandbox:
-            get("sandbox", "auto") === "auto"
-                ? sandboxAvailable()
-                : get("sandbox", "auto") === "on",
+        sandbox: sandbox === "auto" ? sandboxAvailable() : sandbox === "on",
         stallAt: new Set(
             get("stall-at", "")
                 .split(",")
                 .filter((key) => key.length > 0),
         ),
         stallMs: Number(get("stall-ms", "6000")),
-        enforceWindow: get("enforce-window", "on") === "on",
+        enforceWindow: choice("enforce-window", ["on", "off"], "on") === "on",
     };
 }
 
@@ -185,6 +198,11 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
 async function main(): Promise<void> {
     const opts = parseArgs(process.argv.slice(2));
     const specs = opts.arms.map(armSpec);
+    if (specs.some((spec) => spec.eidnara) && !isExecutableFile(opts.fixtureBin)) {
+        throw new Error(
+            `${opts.fixtureBin} is not an executable file; build the release fixture with \`cargo ${cargoBuildExampleArgs(DIRECT_HOST_FIXTURE).join(" ")} --release\` or pass --fixture-bin`,
+        );
+    }
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
     if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep());

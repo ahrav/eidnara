@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { armSpec, inheritedHarnessEnv } from "./arms";
+import { Arm, armSpec, inheritedHarnessEnv, type PromptResult } from "./arms";
 
 describe("Pi arm process", () => {
     it("keeps ambient secrets out of the agent's inherited environment", () => {
@@ -32,5 +32,47 @@ describe("arm names", () => {
     it("rejects a name outside the supported set", () => {
         expect(() => armSpec("pi-of")).toThrow(/pi-of/);
         expect(() => armSpec("")).toThrow();
+    });
+});
+
+class FailingTeardownArm extends Arm {
+    async openSession(): Promise<void> {}
+    async prompt(): Promise<PromptResult> {
+        return { answer: "", ms: 0 };
+    }
+    async closeSession(): Promise<void> {
+        throw new Error("harness still running");
+    }
+    harnessPid(): number | undefined {
+        return undefined;
+    }
+    harnessDataDirs(): string[] {
+        return [];
+    }
+    sessionId(): string | null {
+        return null;
+    }
+}
+
+describe("arm teardown", () => {
+    it("reports a harness that would not stop and still stops the gateways", async () => {
+        const arm = new FailingTeardownArm(armSpec("pi-off"), {
+            root: "/nonexistent/arm",
+            resultsDir: "/nonexistent/results",
+            workdir: "/nonexistent/work",
+            sandboxDir: "",
+            enforceWindow: false,
+            onCall: () => {},
+            fixtureBin: "/nonexistent/fixture",
+        });
+        const stopped: string[] = [];
+        arm.main.stop = async () => {
+            stopped.push("main");
+        };
+        arm.closure.stop = async () => {
+            stopped.push("closure");
+        };
+        await expect(arm.stop()).rejects.toThrow("harness still running");
+        expect(stopped.sort()).toEqual(["closure", "main"]);
     });
 });

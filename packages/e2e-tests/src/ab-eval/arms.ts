@@ -230,11 +230,14 @@ export abstract class Arm {
         };
     }
 
+    /** Every teardown step runs; a harness or host that would not stop fails the arm afterwards. */
     async stop(): Promise<void> {
-        await this.closeSession().catch(() => undefined);
-        await this.host?.stop().catch(() => undefined);
+        const failures: unknown[] = [];
+        await this.closeSession().catch((error) => failures.push(error));
+        await this.host?.stop().catch((error) => failures.push(error));
         await this.main.stop();
         await this.closure.stop();
+        if (failures.length > 0) throw failures[0];
     }
 }
 
