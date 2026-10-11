@@ -5,8 +5,8 @@
 //! walk, preferring exact origin matches over fingerprint-only matches.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -117,9 +117,24 @@ pub(crate) struct MatchedBlockMetas<'a> {
     pub(crate) by_block: Vec<Option<&'a BlockMeta>>,
     retained_native_indices: BTreeSet<usize>,
     decoded_native_indices: BTreeSet<usize>,
+    block_fingerprints: Vec<OnceCell<String>>,
 }
 
 impl MatchedBlockMetas<'_> {
+    /// `blocks` must be the slice used to build this alignment.
+    pub(crate) fn block_is_unchanged(
+        &self,
+        blocks: &[WireBlock],
+        block_index: usize,
+        meta: &BlockMeta,
+    ) -> bool {
+        debug_assert_eq!(blocks.len(), self.block_fingerprints.len());
+        meta.content_fingerprint.as_deref().is_some_and(|expected| {
+            memoized_fingerprint(&self.block_fingerprints[block_index], &blocks[block_index])
+                == expected
+        })
+    }
+
     /// Removes native parts whose decoded blocks were removed.
     ///
     /// Parts with no decoded metadata remain because the sidecar cannot prove they
@@ -210,8 +225,13 @@ impl AlignmentScore {
 /// digest is the hex SHA-256 of the block's canonical bytes; a block that cannot
 /// serialize hashes the JSON text `null`.
 pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
-    let mut canonical = block.clone();
-    canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
+    let canonical = if block.provider_extras.contains_key(BLOCK_IDENTITY_NAMESPACE) {
+        let mut canonical = block.clone();
+        canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
+        Cow::Owned(canonical)
+    } else {
+        Cow::Borrowed(block)
+    };
     let bytes = crate::served_json::canonical_block_bytes(&canonical)
         .map(String::into_bytes)
         .unwrap_or_else(|_| serde_json::to_vec(&Value::Null).unwrap_or_default());
@@ -307,13 +327,26 @@ impl<'a> MetaContent<'a> {
 
     /// Whether `block`'s decoded fingerprint equals the meta's content fingerprint.
     pub(crate) fn matches(self, block: &WireBlock, meta: &BlockMeta) -> bool {
+        self.matches_memoized(block, &OnceCell::new(), meta)
+    }
+
+    fn matches_memoized(
+        self,
+        block: &WireBlock,
+        fingerprint: &OnceCell<String>,
+        meta: &BlockMeta,
+    ) -> bool {
         match &meta.content_fingerprint {
-            Some(fingerprint) => decoded_block_fingerprint(block) == *fingerprint,
+            Some(expected) => memoized_fingerprint(fingerprint, block) == expected,
             None => self
                 .decoded(meta)
                 .is_some_and(|decoded| same_decoded_content(block, decoded)),
         }
     }
+}
+
+fn memoized_fingerprint<'c>(cell: &'c OnceCell<String>, block: &WireBlock) -> &'c str {
+    cell.get_or_init(|| decoded_block_fingerprint(block))
 }
 
 /// Whether two blocks have equal decoded fingerprints, decided without serializing them.
@@ -328,39 +361,46 @@ pub(crate) fn same_decoded_content(block: &WireBlock, decoded: &WireBlock) -> bo
             || decoded_block_fingerprint(block) == decoded_block_fingerprint(decoded))
 }
 
+/// Whether `json` or any value nested in it is a float zero of either sign.
+pub(crate) fn json_holds_float_zero(json: &Value) -> bool {
+    match json {
+        Value::Number(number) => number.is_f64() && number.as_f64() == Some(0.0),
+        Value::Array(items) => items.iter().any(json_holds_float_zero),
+        Value::Object(fields) => fields.values().any(json_holds_float_zero),
+        Value::Null | Value::Bool(_) | Value::String(_) => false,
+    }
+}
+
 /// Whether any JSON value in `block`, its extras included, is a float zero of either sign.
 pub(crate) fn holds_float_zero(block: &WireBlock) -> bool {
-    fn value(json: &Value) -> bool {
-        match json {
-            Value::Number(number) => number.is_f64() && number.as_f64() == Some(0.0),
-            Value::Array(items) => items.iter().any(value),
-            Value::Object(fields) => fields.values().any(value),
-            Value::Null | Value::Bool(_) | Value::String(_) => false,
-        }
-    }
     fn extras(extras: &ProviderExtras) -> bool {
-        extras.values().flat_map(BTreeMap::values).any(value)
+        extras
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(json_holds_float_zero)
     }
     fn media(media: &MediaBlock) -> bool {
         let MediaBlock { source, .. } = media;
-        value(source)
+        json_holds_float_zero(source)
     }
     fn opaque(opaque: &OpaqueBlock) -> bool {
         let OpaqueBlock {
             source, raw, arc, ..
         } = opaque;
-        value(source) || value(raw) || arc.as_ref().is_some_and(value)
+        json_holds_float_zero(source)
+            || json_holds_float_zero(raw)
+            || arc.as_ref().is_some_and(json_holds_float_zero)
     }
     let kind = match block.kind() {
         BlockKind::Text { .. }
         | BlockKind::Reasoning { .. }
         | BlockKind::RedactedReasoning { .. } => false,
-        BlockKind::ToolCall { input, .. } => value(input),
+        BlockKind::ToolCall { input, .. } => json_holds_float_zero(input),
         BlockKind::ToolResult { output, .. } => {
             extras(&output.provider_extras)
                 || match &output.kind {
                     OutputKind::Json { value: json } | OutputKind::ErrorJson { value: json } => {
-                        value(json)
+                        json_holds_float_zero(json)
                     }
                     OutputKind::Text { .. }
                     | OutputKind::ErrorText { .. }
@@ -386,6 +426,7 @@ pub(crate) fn holds_float_zero(block: &WireBlock) -> bool {
 fn alignment_candidate(
     block: &WireBlock,
     block_index: usize,
+    block_fingerprint: &OnceCell<String>,
     meta: &BlockMeta,
     kind_matches: bool,
     content: MetaContent<'_>,
@@ -399,7 +440,7 @@ fn alignment_candidate(
         return origin_matches.then_some(true);
     }
 
-    if kind_matches && content.matches(block, meta) {
+    if kind_matches && content.matches_memoized(block, block_fingerprint, meta) {
         return Some(false);
     }
 
@@ -435,11 +476,12 @@ pub(crate) fn match_block_metas_by<'a>(
     mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
     content: MetaContent<'_>,
 ) -> MatchedBlockMetas<'a> {
+    let block_fingerprints = vec![OnceCell::new(); blocks.len()];
     let cells = blocks.len().saturating_mul(metas.len());
     let by_block = if cells > MAX_ALIGNMENT_CELLS {
-        greedy_block_metas(blocks, metas, &mut matches, content)
+        greedy_block_metas(blocks, &block_fingerprints, metas, &mut matches, content)
     } else {
-        optimal_block_metas(blocks, metas, &mut matches, content)
+        optimal_block_metas(blocks, &block_fingerprints, metas, &mut matches, content)
     };
 
     let retained_native_indices = by_block
@@ -452,11 +494,13 @@ pub(crate) fn match_block_metas_by<'a>(
         by_block,
         retained_native_indices,
         decoded_native_indices,
+        block_fingerprints,
     }
 }
 
 fn greedy_block_metas<'a>(
     blocks: &[WireBlock],
+    block_fingerprints: &[OnceCell<String>],
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     content: MetaContent<'_>,
@@ -500,15 +544,22 @@ fn greedy_block_metas<'a>(
                 meta_cursor,
                 &mut |meta_index| {
                     let meta = &metas[meta_index];
-                    alignment_candidate(block, block_index, meta, matches(block, meta), content)
-                        .is_some()
+                    alignment_candidate(
+                        block,
+                        block_index,
+                        &block_fingerprints[block_index],
+                        meta,
+                        matches(block, meta),
+                        content,
+                    )
+                    .is_some()
                 },
             )
         } else {
-            let fingerprint = decoded_block_fingerprint(block);
+            let fingerprint = memoized_fingerprint(&block_fingerprints[block_index], block);
             let mut kind_matches = |meta_index: usize| matches(block, &metas[meta_index]);
             first_at_or_after(
-                by_fingerprint.get(fingerprint.as_str()),
+                by_fingerprint.get(fingerprint),
                 meta_cursor,
                 &mut kind_matches,
             )
@@ -530,6 +581,7 @@ fn greedy_block_metas<'a>(
 
 fn optimal_block_metas<'a>(
     blocks: &[WireBlock],
+    block_fingerprints: &[OnceCell<String>],
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     content: MetaContent<'_>,
@@ -538,8 +590,14 @@ fn optimal_block_metas<'a>(
     for (block_index, block) in blocks.iter().enumerate() {
         for (meta_index, meta) in metas.iter().enumerate() {
             let kind_matches = matches(block, meta);
-            candidates[block_index][meta_index] =
-                alignment_candidate(block, block_index, meta, kind_matches, content);
+            candidates[block_index][meta_index] = alignment_candidate(
+                block,
+                block_index,
+                &block_fingerprints[block_index],
+                meta,
+                kind_matches,
+                content,
+            );
         }
     }
 
@@ -594,9 +652,11 @@ pub fn stable_hash_prefix(value: &Value, chars: usize) -> String {
 }
 
 fn hex_prefix(bytes: &[u8], count: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(count * 2);
     for byte in bytes.iter().take(count) {
-        let _ = write!(&mut out, "{byte:02x}");
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     out
 }
@@ -692,7 +752,7 @@ mod tests {
 
     fn stable_hash(value: &Value) -> String {
         let digest = Sha256::digest(serde_json::to_vec(value).unwrap());
-        hex_prefix(&digest, digest.len())
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     fn text_meta(block_index: usize) -> BlockMeta {
@@ -821,6 +881,56 @@ mod tests {
     }
 
     #[test]
+    fn hex_prefix_writes_two_lowercase_digits_per_byte() {
+        let bytes = (0..=u8::MAX).collect::<Vec<_>>();
+        let expected = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(hex_prefix(&bytes, bytes.len()), expected);
+        assert_eq!(hex_prefix(&bytes, 3), "000102");
+        assert_eq!(hex_prefix(&bytes, bytes.len() + 1), expected);
+        assert_eq!(
+            stable_hash_prefix(&Value::Null, 5),
+            stable_hash(&Value::Null)[..5]
+        );
+    }
+
+    #[test]
+    fn alignment_unchanged_check_agrees_with_the_unmemoized_check() {
+        let fingerprinted = |block_index: usize, text: &str| BlockMeta {
+            content_fingerprint: Some(decoded_block_fingerprint(&text_block(text))),
+            ..text_meta(block_index)
+        };
+        let metas = vec![fingerprinted(0, "a"), fingerprinted(1, "b"), text_meta(2)];
+        let mut stamped = text_block("a");
+        stamp_block_identity(
+            &mut stamped,
+            0,
+            0,
+            &decoded_block_fingerprint(&text_block("a")),
+        );
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        for blocks in [
+            vec![text_block("a"), text_block("b"), text_block("c")],
+            vec![stamped, text_block("§1§ b"), text_block("c")],
+            vec![text_block("b"), text_block("a")],
+        ] {
+            let mut matched = match_block_metas(&blocks, &metas, text);
+            matched.pair_in_place_edits(&blocks, &metas, text);
+            for (block_index, block) in blocks.iter().enumerate() {
+                for meta in &metas {
+                    assert_eq!(
+                        matched.block_is_unchanged(&blocks, block_index, meta),
+                        block_is_unchanged(block, meta),
+                        "block {block_index} {block:?} vs meta {meta:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn in_place_edit_pairing_restores_equal_runs_and_leaves_ambiguous_runs() {
         let originals = ["a", "b", "c"].map(text_block);
         let metas: Vec<BlockMeta> = originals
@@ -873,6 +983,7 @@ mod tests {
         let metas = vec![text_meta(1)];
         let by_block = greedy_block_metas(
             &blocks,
+            &vec![OnceCell::new(); blocks.len()],
             &metas,
             &mut |_, meta| meta.kind == "text",
             MetaContent::Fingerprint,
@@ -902,6 +1013,7 @@ mod tests {
 
         let by_block = greedy_block_metas(
             &blocks,
+            &vec![OnceCell::new(); blocks.len()],
             &metas,
             &mut |_, meta| meta.kind == "text",
             MetaContent::Fingerprint,
@@ -923,6 +1035,7 @@ mod tests {
         metas.rotate_left(2);
         let by_block = greedy_block_metas(
             &blocks,
+            &vec![OnceCell::new(); blocks.len()],
             &metas,
             &mut |_, meta| meta.kind == "text",
             MetaContent::Fingerprint,
