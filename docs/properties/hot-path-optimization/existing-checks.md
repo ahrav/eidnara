@@ -40,7 +40,8 @@ than redirected to different checks after test consolidation.
 | `the_domain_selection_equals_the_filtered_full_read` (`crates/kernel/tests/kernel_canonical_read.rs`) | The domain read equals the full read filtered to memory-domain decisions, on both surfaces. | unaudited |
 | `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order` (same file) | Row pressure: the target ranks past 8,192 unfiltered under 8 MiB and the domain read returns it. | unaudited |
 | `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` (same file) | Byte pressure: over 8 MiB of other-domain payload under 8,192 rows precedes the target; the domain read returns memory rows only. | unaudited |
-| `served_classes_for_one_domain_seek_the_domain_index_and_judge_approvals_once` (`crates/kernel/src/admission.rs`) | The domain shape seeks `idx_objects_domain_fk` and materializes one approval judgment step. | unaudited |
+| `served_classes_for_one_domain_seek_the_domain_index` (`crates/kernel/src/admission.rs`) | The domain shape seeks `idx_objects_domain_fk`. | unaudited |
+| `approval_validity_judges_each_distinct_approval_once` (same file) | The approval statement runs once over the distinct approvals the served rows name, and a read naming none runs no statement. | unaudited |
 | [Injectable categories][injectable-test] | Visible positive-category decisions survive conversion. | unaudited |
 | [Revision inputs][revision-test] | Rendered inputs determine the revision comparison. | unaudited |
 | [Dropped categories][dropped-test] | Renderer-excluded rows do not move the revision. | unaudited |
