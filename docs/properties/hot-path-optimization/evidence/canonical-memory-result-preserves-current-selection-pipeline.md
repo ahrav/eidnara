@@ -14,9 +14,10 @@ The preservation target is the selected result, not a particular SQL shape.
   Reruns at [8264, 8291, 8317, and 8372][reruns] reuse that captured result.
 - [canonical_memory.rs:141-174][entry] captures tip before lag sampling and
   passes that tip to the auto-inject read; failures become withheld outcomes.
-- [admission.rs:3132-3298][query] joins admission decisions, folds own/lineage
-  authority and sensitivity, and collects rows. SQL order is object ID order.
-- [read.rs:159-248][selection] applies domain/kind and scope selection, keeps
+- [admission.rs:3409-3623][query] builds the served query over admission
+  decisions, folds own/lineage authority and sensitivity in Rust, and collects
+  rows. [admission.rs:3117][order] sorts the collected rows by object ID.
+- [read.rs:163-258][selection] applies domain/kind and scope selection, keeps
   newest rows, checks typed-row completeness, and trims the payload prefix.
 - [canonical_memory.rs:184-212][conversion] applies Visible and positive-category
   filters only after those caps, then trims memory and creates the snapshot.
@@ -42,7 +43,12 @@ truncation, and outcome against commit
 and canonical conversion are the fixed semantic baseline. Include ties,
 negative categories, Labeled candidates, uncertain scope terms, admission and
 lineage restrictions, and both row and payload boundaries. Existing checks are
-[unaudited](../existing-checks.md#canonical-read); this record is not exercised.
+[unaudited](../existing-checks.md#canonical-read). This record is partially
+exercised: `the_domain_selection_equals_the_filtered_full_read` in
+`crates/kernel/tests/kernel_canonical_read.rs` compares the pushed-down read
+with the full read filtered in Rust, and the `admission::tests` fold tests pin
+the Rust history fold to the SQL it replaced. The comparison against the fixed
+baseline commit's rendered bytes does not run yet.
 
 ## Investigation log
 
@@ -64,6 +70,7 @@ lineage restrictions, and both row and payload boundaries. Existing checks are
 [pass]: ../../../../crates/daemon/src/lib.rs#L8190-L8270
 [reruns]: ../../../../crates/daemon/src/lib.rs#L8337-L8441
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
-[query]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
-[selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
+[query]: ../../../../crates/kernel/src/admission.rs#L3409-L3623
+[order]: ../../../../crates/kernel/src/admission.rs#L3117
+[selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
 [conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212

@@ -155,16 +155,11 @@ query and judges each distinct approval once.
 read with the full read filtered in Rust, on both surfaces, over approved
 dependents and other-domain rows; the `kernel_admission` approval, revocation,
 and lineage tests pass unchanged on the batched approval judgment. No
-comparison against the fixed baseline commit's rendered bytes runs yet. A
-review-time differential ran the previous per-row approval query beside the
-batched one on every served read the kernel and daemon suites make (10,000
-calls, 203,000 kernel rows, 0 differences); it is not committed. A second
-review-time differential rendered every served read (three selection shapes,
-both surfaces, four scope filters, seven snapshots, egress) over two frozen
-corpora (10,300 and 200 decisions, with approvals, a revocation, lineage
-decisions, inconsistent and unrecognized history, triggers, cited evidence,
-and scoped and unscoped rows) before and after the history fold moved into
-Rust: 56 MB of rendered rows, 0 differences; it is not committed.
+comparison against the fixed baseline commit's rendered bytes runs yet. Two
+review-time differentials (the previous per-row approval query beside the
+batched one, and every served read shape before and after the history fold
+moved into Rust) are not committed, so the repository cannot reproduce their
+results; they are recorded as unresolved below, not as evidence.
 `admission::tests::history_fold_ranks_rows_as_the_served_sql_does`,
 `the_latest_own_row_at_a_shared_commit_is_the_greater_identifier`,
 `the_served_fold_judges_own_history_consistency_as_the_authority_sql_does`, and
@@ -195,6 +190,12 @@ Open questions:
 - Resolved (#443, owner decision): a corrupt row outside the memory domain no
   longer withholds the memory read, because the pushed-down query never reads
   it; reads that serve that row still decode it and fail on it.
+- Unresolved, needs a committed reproducible check: the #443 review-time
+  differentials (per-row versus batched approval judgment over the kernel and
+  daemon suites' served reads; every selection shape, surface, scope filter,
+  and snapshot over two frozen corpora before and after the Rust history fold)
+  reported zero differences, but neither runs from the repository or leaves a
+  durable CI artifact. Their results do not count toward this record's status.
 
 ### canonical-memory-irrelevant-candidates-do-not-consume-caps
 
@@ -777,8 +778,8 @@ them without creating implementation tickets.
 [transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3779-L3811
 [prepare-field]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
-[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159
-[admission-reference]: ../../../crates/kernel/src/admission.rs#L3132-L3298
+[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L163
+[admission-reference]: ../../../crates/kernel/src/admission.rs#L3409-L3623
 [outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180
