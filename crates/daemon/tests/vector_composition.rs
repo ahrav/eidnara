@@ -2,20 +2,24 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::num::NonZeroUsize;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
 
 use daemon::vector_composition::{
     COMPOSITION_FILE, CompositionRefusal, CompositionSpec, Progress, Reconciled, SelectorState,
     Unavailable, compose, publish, reconcile, recover, verify_composition,
 };
 use daemon::vector_generation::{
-    CODES_FILE, ExpectedVectors, VerifiedVectors, build, stage, verify,
+    CODES_FILE, ExpectedVectors, Staging, VerifiedVectors, build, stage, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationStore, MEMBERS_FILE_NAME,
     ProfileEvent, SEARCH_PROFILE_NAME, SourceSpec, StageMeta, VECTOR_PROFILE_NAME,
     VECTOR_SELECTION_TARGET,
 };
+use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::export::LiveRows;
 use sha2::Digest;
@@ -270,7 +274,11 @@ fn precedes_selector_rename(cut: ProfileEvent) -> bool {
 
 /// Selector temps a cut left in the lifecycle root.
 fn profile_temps(fixture: &Fixture) -> Vec<String> {
-    fs::read_dir(fixture.lifecycle_dir())
+    profile_temps_in(&fixture.lifecycle_dir())
+}
+
+fn profile_temps_in(lifecycle: &Path) -> Vec<String> {
+    fs::read_dir(lifecycle)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with(".current-profile.json."))
@@ -423,6 +431,181 @@ fn selector_cut(cut: ProfileEvent, exhausted: bool, eio: &dyn Fn() -> Generation
     assert_eq!(
         fixture.verify_composition(&new.digest()).unwrap(),
         new.members()
+    );
+}
+
+const SELECTOR_KILL_CELL: &str = "EIDNARA_SELECTOR_KILL_CELL";
+const SELECTOR_KILL_WITNESS: &str = "EIDNARA_SELECTOR_KILL_WITNESS";
+/// The signal `std::process::abort` raises.
+const SIGABRT: i32 = 6;
+
+/// Each child publishes a first composition, then aborts inside the publication of a second at one selector event after writing and syncing a witness that names its store and both digests. The parent checks the abort, reopens the abandoned store twice on fresh handles, reconciles, finds the old or the new complete composition selected, and converges by retrying from the predecessor it reads. Process crash, not power loss.
+#[test]
+fn a_process_killed_at_every_selector_event_leaves_the_old_or_the_new_complete_selection() {
+    if let Some(index) = std::env::var_os(SELECTOR_KILL_CELL) {
+        let cut = SELECTOR_CELLS[index.to_str().unwrap().parse::<usize>().unwrap()];
+        let witness = PathBuf::from(std::env::var_os(SELECTOR_KILL_WITNESS).unwrap());
+        let fixture = Fixture::new();
+        let base = fixture.layer(1, 10);
+        let old = fixture.compose(1, &base, &[]).unwrap();
+        fixture.publish(&old).unwrap();
+        let new = fixture.compose(2, &base, &[fixture.layer(5, 12)]).unwrap();
+        let _ = publish(
+            &new,
+            Some(&old.digest()),
+            &fixture.staging(),
+            &fixture.work_dir(),
+            &mut |event| {
+                if event == cut {
+                    let mut file = fs::File::create(&witness).unwrap();
+                    writeln!(file, "{}", fixture.root.path().display()).unwrap();
+                    writeln!(file, "{}", old.digest()).unwrap();
+                    writeln!(file, "{}", new.digest()).unwrap();
+                    write!(file, "{cut:?}").unwrap();
+                    file.sync_all().unwrap();
+                    std::process::abort();
+                }
+                Ok(())
+            },
+        );
+        // Reaching here means the cell never fired; the parent reports the clean exit.
+        return;
+    }
+    let parent = Fixture::new();
+    let scratch = tempfile::tempdir_in(parent.root.path()).unwrap();
+    for (index, cut) in SELECTOR_CELLS.into_iter().enumerate() {
+        let witness = scratch.path().join(format!("witness-{index}"));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_process_killed_at_every_selector_event_leaves_the_old_or_the_new_complete_selection",
+                "--nocapture",
+            ])
+            .env(SELECTOR_KILL_CELL, index.to_string())
+            .env(SELECTOR_KILL_WITNESS, &witness)
+            .env("TMPDIR", scratch.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.signal(),
+            Some(SIGABRT),
+            "declared cell {cut:?} did not abort the child: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let witnessed = fs::read_to_string(&witness).unwrap();
+        let fields: Vec<&str> = witnessed.split('\n').collect();
+        let [root, old, new, event] = fields[..] else {
+            panic!("{cut:?}: malformed witness {witnessed:?}");
+        };
+        assert_eq!(event, format!("{cut:?}"), "the witness names the cell");
+        selector_kill_recovers(&parent, Path::new(root), cut, old, new);
+    }
+}
+
+fn selector_kill_recovers(parent: &Fixture, root: &Path, cut: ProfileEvent, old: &str, new: &str) {
+    let before_rename = precedes_selector_rename(cut);
+    let expected = if before_rename { old } else { new };
+    let tx = LifecycleTransactionLock::acquire_exclusive(Some(root)).unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..2 {
+        let reopened = GenerationStore::open(Some(root)).unwrap();
+        let reconciled = reconcile(&reopened, &tx, new).unwrap();
+        reads.push((reopened.read_vector_current().unwrap(), reconciled));
+    }
+    assert_eq!(reads[0], reads[1], "{cut:?}: two fresh handles agree");
+    assert_eq!(
+        reads[0],
+        (
+            CurrentProfile::Current(expected.to_owned()),
+            if before_rename {
+                Reconciled::Other(Some(old.to_owned()))
+            } else {
+                Reconciled::Published
+            }
+        ),
+        "{cut:?}"
+    );
+    let store = GenerationStore::open(Some(root)).unwrap();
+    // The selector temp a crash abandons after its write is left for the stale-temp sweep and never read as a selection.
+    let temps = profile_temps_in(store.root()).len();
+    let abandoned_temp = matches!(
+        cut,
+        ProfileEvent::AfterTempSync | ProfileEvent::BeforeRename
+    );
+    assert_eq!(temps, usize::from(abandoned_temp), "{cut:?}");
+    let verify = |digest: &str| {
+        verify_composition(
+            &store,
+            digest,
+            &parent.expected(),
+            NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
+        )
+        .map(|verified| verified.composition.members().len())
+    };
+    assert_eq!(
+        verify(expected),
+        Ok(if before_rename { 1 } else { 2 }),
+        "{cut:?}: the selection is complete"
+    );
+    let recovered = recover(
+        &store,
+        &tx,
+        &parent.expected(),
+        NonZeroUsize::new(4).unwrap(),
+        u64::MAX,
+        NonZeroUsize::new(8).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.composition.digest, expected, "{cut:?}");
+    assert_eq!(recovered.selector, SelectorState::Current, "{cut:?}");
+
+    // The retry hands over the predecessor the selector names now and converges on the new composition.
+    let record = store.read_manifest_file(new, COMPOSITION_FILE).unwrap();
+    let composition: daemon::vector_composition::Composition =
+        serde_json::from_slice(&record).unwrap();
+    let staging = Staging {
+        store: &store,
+        transaction: &tx,
+        gate: &parent.gate,
+        admission: &parent.admission,
+        identity: &parent.identity,
+        ledger: &parent.ledger,
+        protected: &parent.protected,
+    };
+    let records = store.digests().unwrap().len();
+    let retry = publish(
+        &composition,
+        Some(expected),
+        &staging,
+        &parent.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .map_err(|failure| failure.refusal);
+    match retry {
+        Ok(digest) => {
+            assert!(before_rename, "{cut:?}");
+            assert_eq!(digest, new);
+        }
+        Err(CompositionRefusal::Sequence {
+            sequence: 2,
+            selected: 2,
+        }) => assert!(!before_rename, "{cut:?}"),
+        Err(other) => panic!("{cut:?}: {other:?}"),
+    }
+    assert_eq!(
+        store.digests().unwrap().len(),
+        records,
+        "{cut:?}: no second record"
+    );
+    assert_eq!(
+        GenerationStore::open(Some(root))
+            .unwrap()
+            .read_vector_current()
+            .unwrap(),
+        CurrentProfile::Current(new.to_owned()),
+        "{cut:?}"
     );
 }
 
