@@ -89,11 +89,13 @@ past the recorded target, it recertifies before retiring:
    earlier commit is replaced by the later one.
 
 A restart ends the selected family's hold, so a family that trails the tip
-after a restart blocks the slice on hold extension with its recorded target
-unchanged. A family that applied the tip before the restart recertifies and
-completes. Each slice that stops before the family reaches the tip spends one
-episode, so a record whose slices keep stopping short is blocked once its
-allowance is spent.
+after a restart cannot catch up under it. The slice then retires the old
+consumer through the commits the family applied, the deregistering commit
+acknowledges it through the tip, and the Current family catches up or
+rebuilds from there. A family that applied the tip before the restart
+recertifies and completes. Each slice that stops before the family reaches
+the tip spends one episode, so a record whose slices keep stopping short is
+blocked once its allowance is spent.
 
 The completion slice validates the selected family's rows against the kernel
 inventory before it retires the old consumer. The reopen at the start of the

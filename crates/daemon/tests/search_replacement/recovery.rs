@@ -1391,7 +1391,7 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
     }
 }
 
-/// A restart completes recovery interrupted at recertification when the tip stays fixed. If the selected family trails the tip at restart, hold extension blocks recovery and the control record keeps the family's applied target.
+/// A restart completes recovery interrupted at recertification when the tip stays fixed. If the selected family trails the tip at restart, its hold belongs to the earlier lease, so the slice retires the predecessor through the commit the family applied instead of catching up: the record keeps that target, the predecessor is deregistered through the tip, and the Current family is left to catch up or rebuild.
 #[test]
 fn a_restart_never_strands_a_recertified_target_the_family_cannot_reach() {
     for case in ["interrupted", "trailing"] {
@@ -1449,14 +1449,13 @@ fn a_restart_never_strands_a_recertified_target_the_family_cannot_reach() {
                 .unwrap();
             assert!(observe(&reader).rows.contains_key(&moved));
         } else {
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{case}: {error:?}")),
+                RecoveryProgress::Current
+            );
             assert!(
-                matches!(
-                    result,
-                    Err(RecoveryFailure::Blocked(BuildError::Blocked(
-                        daemon::search_catchup::Blocked::HoldExtension(_)
-                    )))
-                ),
-                "{case}: {result:?}"
+                events.contains(&RecoveryEvent::BeforeCatchUp { target: tip }),
+                "{case}: {events:?}"
             );
             assert!(
                 !events
@@ -1464,11 +1463,29 @@ fn a_restart_never_strands_a_recertified_target_the_family_cannot_reach() {
                     .any(|event| matches!(event, RecoveryEvent::Recertified { .. })),
                 "{case}: {events:?}"
             );
+            let done = current(root.path());
             assert_eq!(
-                control(root.path()).recovery_target,
-                fixed.recovery_target,
+                done.recovery_target, fixed.recovery_target,
                 "the record keeps the target the selected family applied"
             );
+            assert_eq!(done.episodes.consumed, fixed.episodes.consumed + 1);
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                None,
+                "the predecessor is deregistered through the tip"
+            );
+            assert_eq!(
+                corpus
+                    .kernel
+                    .outbox_consumer_checkpoint("next-consumer")
+                    .unwrap(),
+                Some(fixed.recovery_target.unwrap().commit_seq),
+                "the replacement's consumer still owes the commit it has not applied"
+            );
+            let reader = selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .unwrap();
+            assert!(!observe(&reader).rows.contains_key(&moved), "{case}");
         }
     }
 }

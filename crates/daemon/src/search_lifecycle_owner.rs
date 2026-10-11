@@ -1491,7 +1491,7 @@ fn with_followup(error: &BuildError, step: &str, followup: Option<BuildError>) -
 }
 
 /// Whether a catch-up episode ended because the family's source hold cannot cover the next window under the running lease: the hold is bound to another lease, or it is missing, released, expired, or degraded. A hold error that a retry may clear ends the episode without a rebuild.
-fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
+pub(crate) fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
     matches!(
         end,
         EpisodeEnd::Blocked(Blocked::HoldExtension(

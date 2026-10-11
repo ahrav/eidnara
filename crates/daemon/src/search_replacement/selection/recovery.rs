@@ -54,6 +54,14 @@ pub enum RecoveryFailure<'a> {
     Blocked(#[from] BuildError),
 }
 
+/// How a selected family's catch-up toward a recertification target ended.
+enum CatchUp {
+    /// The family applied every commit through the target.
+    Reached,
+    /// The family's source hold belongs to an earlier lease or is gone, so the family stays at the commits it applied.
+    HoldLost,
+}
+
 impl SearchSelection {
     #[cfg(feature = "test-support")]
     pub fn with_recovery_write_barrier_for_test(
@@ -414,21 +422,33 @@ impl SearchSelection {
                 .map_err(BuildError::from)?
                 .through_commit;
             if tip > fixed.commit_seq {
+                let mut certified = tip;
                 if validated.report.checkpoint.checkpoint_commit_seq < tip {
                     observer(RecoveryEvent::BeforeCatchUp { target: tip });
-                    self.catch_up_selected(&family, kernel, gate, spec, budget, tip)?;
-                    check_operation(&intent)?;
-                    validated = self.validate_family(&family, kernel, budget)?;
+                    match self.catch_up_selected(&family, kernel, gate, spec, budget, tip)? {
+                        CatchUp::Reached => {
+                            check_operation(&intent)?;
+                            validated = self.validate_family(&family, kernel, budget)?;
+                        }
+                        // The family's hold belongs to an earlier lease, so the predecessor retires through the commits the family applied; the deregistering commit acknowledges it through the tip, and the Current family catches up or rebuilds from there.
+                        CatchUp::HoldLost => {
+                            certified = validated.report.checkpoint.checkpoint_commit_seq;
+                        }
+                    }
                 }
-                intent = lifecycle
-                    .recertify_target(
-                        gate,
-                        &intent,
-                        RecoveryTarget { commit_seq: tip },
-                        wall_ms()?,
-                    )
-                    .map_err(BuildError::from)?;
-                observer(RecoveryEvent::Recertified { target: tip });
+                if certified > fixed.commit_seq {
+                    intent = lifecycle
+                        .recertify_target(
+                            gate,
+                            &intent,
+                            RecoveryTarget {
+                                commit_seq: certified,
+                            },
+                            wall_ms()?,
+                        )
+                        .map_err(BuildError::from)?;
+                    observer(RecoveryEvent::Recertified { target: certified });
+                }
             }
         }
         let check = || check_operation(&intent);
@@ -531,7 +551,7 @@ impl SearchSelection {
         Ok(())
     }
 
-    /// Applies the commits after the selected family's checkpoint through `target` in one bounded episode under the family's own hold, acknowledging them for the consumer the family's certificate binds. The episode charges the catch-up hooks a Current family's catch-up charges.
+    /// Applies the commits after the selected family's checkpoint through `target` in one bounded episode under the family's own hold, acknowledging them for the consumer the family's certificate binds. The episode charges the catch-up hooks a Current family's catch-up charges. A hold the running lease cannot extend ends the episode as [`CatchUp::HoldLost`].
     fn catch_up_selected(
         &self,
         family: &SelectedFamily,
@@ -540,7 +560,7 @@ impl SearchSelection {
         spec: &ReplacementSpec,
         budget: &EvalBudget,
         target: i64,
-    ) -> Result<(), BuildError> {
+    ) -> Result<CatchUp, BuildError> {
         let bound = &family.certificate.intent.consumer;
         let checkpoint = family
             .projection
@@ -587,7 +607,8 @@ impl SearchSelection {
                 },
             )?;
         match report.end {
-            crate::search_catchup::EpisodeEnd::ReachedTarget => Ok(()),
+            crate::search_catchup::EpisodeEnd::ReachedTarget => Ok(CatchUp::Reached),
+            end if crate::search_lifecycle_owner::catch_up_hold_lost(&end) => Ok(CatchUp::HoldLost),
             crate::search_catchup::EpisodeEnd::Blocked(blocked) => {
                 Err(BuildError::Blocked(blocked))
             }
