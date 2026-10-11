@@ -6135,10 +6135,11 @@ impl HandlerCore {
         }
     }
 
-    /// Emergency-pass firing is bounded by the completion-wait budget.
+    /// The pass waits until `wait_deadline` for the firing; the spawned firing keeps running past it.
     async fn run_history_summarizer_firing_inline(
         &self,
         task: HistorySummarizerFiringTask,
+        wait_deadline: tokio::time::Instant,
     ) -> Result<
         history_summarizer::HistorySummarizerDriveOutcome,
         history_summarizer::HistorySummarizerDriveError,
@@ -6151,7 +6152,7 @@ impl HandlerCore {
                 HistorySummarizerProducerError::TimedOut,
             ));
         };
-        match tokio::time::timeout(history_summarizer::completion_wait_budget(), handle).await {
+        match tokio::time::timeout_at(wait_deadline, handle).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(join_err)) => Err(history_summarizer::HistorySummarizerDriveError::Producer(
                 HistorySummarizerProducerError::RunFailed {
@@ -6170,8 +6171,9 @@ impl HandlerCore {
     async fn await_live_history_summarizer_completion(
         &self,
         completion: LiveHistorySummarizerCompletionWait,
+        wait_deadline: tokio::time::Instant,
     ) -> bool {
-        tokio::time::timeout(history_summarizer::completion_wait_budget(), completion)
+        tokio::time::timeout_at(wait_deadline, completion)
             .await
             .is_ok()
     }
@@ -9105,6 +9107,7 @@ impl HandlerCore {
             mut pass,
             action,
         } = carry;
+        let wait_deadline = tokio::time::Instant::now() + history_summarizer::EMERGENCY_WAIT_BUDGET;
         let action = match action {
             PreparedHistorySummarizerAction::Busy {
                 diagnostics,
@@ -9117,7 +9120,7 @@ impl HandlerCore {
                     env.parsed.session_id
                 ));
                 let completed = self
-                    .await_live_history_summarizer_completion(completion)
+                    .await_live_history_summarizer_completion(completion, wait_deadline)
                     .await;
                 pass.trigger_timings.emergency_wait_ms +=
                     waited_at.elapsed().as_secs_f64() * 1_000.0;
@@ -9144,7 +9147,7 @@ impl HandlerCore {
                 let producer_started = Arc::clone(&prepared.task.producer_started);
                 let fired_at = Instant::now();
                 let result = self
-                    .run_history_summarizer_firing_inline(prepared.task)
+                    .run_history_summarizer_firing_inline(prepared.task, wait_deadline)
                     .await;
                 // A wait that elapsed first saw neither a start nor a failure to start; the spawned firing may still start the run.
                 diagnostics.started = match (&result, producer_started.load(Ordering::Relaxed)) {
@@ -36638,6 +36641,8 @@ mod tests {
 
     const TEST_WAIT_BUDGET: Duration = Duration::from_secs(10);
     const TEST_WAIT_POLL: Duration = Duration::from_millis(2);
+    const EMERGENCY_REPLY_MARGIN_MS: f64 =
+        history_summarizer::EMERGENCY_REPLY_MARGIN.as_millis() as f64;
 
     async fn wait_for_idle(store: &MemoryStore) {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
@@ -40070,6 +40075,106 @@ mod tests {
         assert!(
             waited >= 1_200.0,
             "the live wait survives the rerun: {waited}"
+        );
+    }
+
+    /// A run that outlasts the emergency wait leaves the pass to answer inside the plugin's
+    /// transform deadline, and its publication folds on a later pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_emergency_pass_answers_after_the_wait_budget_and_a_later_pass_folds() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+
+        let first = call_transform(&handler, messages.clone()).await;
+        assert_eq!(first["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+
+        let emergency = call_transform_with_usage(&handler, messages.clone(), 48_000, 50_000).await;
+        let waited = emergency["timings"]["emergency_wait"].as_f64().unwrap();
+        let budget = history_summarizer::EMERGENCY_WAIT_BUDGET.as_secs_f64() * 1_000.0;
+        assert!(
+            (budget..budget + EMERGENCY_REPLY_MARGIN_MS).contains(&waited),
+            "the pass waits the budget and no longer: {waited}"
+        );
+        assert!(!m0_text(&emergency).contains("autonomous summary"));
+
+        producer.block_output.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_idle(&store).await;
+        let folded = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
+        assert!(
+            m0_text(&folded).contains("autonomous summary"),
+            "the run that outlasted the wait publishes for a later pass: {folded}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_emergency_pass_shares_one_wait_budget_between_the_live_wait_and_an_inline_refire() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        const SESSION: &str = "ses-shared-wait-budget";
+        const CHANNEL: u16 = 8;
+        handler.bind_route(
+            test_route(CHANNEL),
+            binding_with_harness(project.to_str().unwrap(), "daemon-test", SESSION),
+        );
+        let transform_at = |usage: Option<(u64, u64)>| {
+            let mut request = match usage {
+                Some((used, limit)) => request_with_usage(big_messages(), used, limit),
+                None => request(big_messages()),
+            };
+            request["session_id"] = json!(SESSION);
+            call_transform_request_on_channel(&handler, CHANNEL, request)
+        };
+
+        let first = transform_at(None).await;
+        assert_eq!(first["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+
+        let live_run_lasts = history_summarizer::EMERGENCY_WAIT_BUDGET * 2 / 3;
+        let release = {
+            let producer = Arc::clone(&producer);
+            let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+            let armed_tx = Mutex::new(Some(armed_tx));
+            transform::install_transform_attempt_hook(
+                &format!("emergency_wait:{SESSION}"),
+                move || {
+                    if let Some(tx) = armed_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                },
+            );
+            tokio::spawn(async move {
+                armed_rx
+                    .await
+                    .expect("the emergency pass reaches its live wait");
+                tokio::time::sleep(live_run_lasts).await;
+                // The live run publishes; the refire the rerun prepares blocks in `start`.
+                producer.block_start.store(true, Ordering::SeqCst);
+                producer.block_output.store(false, Ordering::SeqCst);
+                producer.notify.notify_waiters();
+            })
+        };
+        let emergency = transform_at(Some((48_000, 50_000))).await;
+        release.await.unwrap();
+        producer.block_start.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            2,
+            "the rerun fires inline after the live run publishes: {emergency}"
+        );
+        let waited = emergency["timings"]["emergency_wait"].as_f64().unwrap();
+        let budget = history_summarizer::EMERGENCY_WAIT_BUDGET.as_secs_f64() * 1_000.0;
+        assert!(
+            waited < budget + EMERGENCY_REPLY_MARGIN_MS,
+            "the live wait and the inline refire share one {budget}ms budget: {waited}"
         );
     }
 
