@@ -24298,12 +24298,13 @@ mod tests {
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "ses"));
         let gate = Arc::clone(&handler.capture_commit_gate);
         let hold = Duration::from_millis(300);
+        let (acquired, acquired_at) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             let _held = gate.lock().unwrap();
+            acquired.send(Instant::now()).unwrap();
             std::thread::sleep(hold);
         });
-        std::thread::sleep(Duration::from_millis(30));
-        let started = Instant::now();
+        let started = acquired_at.recv().unwrap();
         let delete = json!({ "method": "session.delete", "v": 1, "session_id": "ses" });
         let (deleted, ticked_at) = tokio::join!(
             handler
@@ -24318,7 +24319,7 @@ mod tests {
         holder.join().unwrap();
         assert_eq!(tool_body(deleted)["ok"], json!(true));
         assert!(
-            deleted_at >= hold - Duration::from_millis(30),
+            deleted_at >= hold,
             "the delete must wait for the publication gate: {deleted_at:?}"
         );
         assert!(
