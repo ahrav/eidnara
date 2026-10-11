@@ -307,24 +307,21 @@ function failOpenPrefix(
     return applied.values.length - 1;
 }
 
-/**
- * Measures the UTF-8 size of host slots in `[start, end)`. Each slot read is charged to
- * `reserve` like a window slot. A refused reservation, an undefined `readWindow` result, or a
- * `TypeError` from `canonicalJsonLength` yields `undefined`.
- */
 function hostBytesBetween(
     source: TransformPassSource,
     start: number,
     end: number,
     needed: number,
-    reserve: (bytes: number) => boolean,
+    lease: Pick<CaptureLease, "reserve" | "remainingBytes">,
 ): number | undefined {
     let bytes = 0;
     for (let to = end; to > start && bytes < needed; ) {
         const from = Math.max(start, to - HOST_BYTES_BEFORE_CHUNK);
-        if (!reserve((to - from) * CANDIDATE_SLOT_BYTES)) return undefined;
+        if (!lease.reserve((to - from) * CANDIDATE_SLOT_BYTES)) return undefined;
         const slots = source.readWindow(from, to);
         if (slots === undefined) return undefined;
+        const inspection = inspectReferenceableMessages(slots, lease.remainingBytes, 0, false);
+        if (!inspection.ok || !lease.reserve(inspection.estimatedBytes)) return undefined;
         try {
             for (let index = slots.length - 1; index >= 0 && bytes < needed; index -= 1)
                 bytes += canonicalJsonLength(slots[index]);
@@ -1324,9 +1321,7 @@ export function createTransformSessionClient(
                 }
             }
             const servedBeforeWindow = (needed: number): number | undefined =>
-                hostBytesBetween(hostSource, servedBefore[0], servedBefore[1], needed, (bytes) =>
-                    lease.reserve(bytes),
-                );
+                hostBytesBetween(hostSource, servedBefore[0], servedBefore[1], needed, lease);
             // The window is copied, inspected, and taped in one synchronous section.
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);

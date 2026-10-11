@@ -499,6 +499,36 @@ describe("transform session client invocation gate before the window", () => {
         expect(host.published).toEqual([]);
     });
 
+    it("declines when a message before the window is a proxy, however large it reports itself", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const planted = host.values[89] as { id: string; text: string };
+        host.values[89] = new Proxy(planted, {
+            getOwnPropertyDescriptor(target, key) {
+                const slot = Reflect.getOwnPropertyDescriptor(target, key);
+                return key === "text" && slot ? { ...slot, value: "x".repeat(10_000) } : slot;
+            },
+        });
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+    });
+
+    it("declines when a message before the window holds a cycle", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const cyclic: Record<string, unknown> = { id: "m90", text: "message 90" };
+        cyclic.self = cyclic;
+        host.values[89] = cyclic as { id: string; text: string };
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+    });
+
     it("charges each chunk of messages read before the window to the capture lease", async () => {
         const host = plainHost(200);
         const anchor = { mid: "m191", sequence: 19 };
