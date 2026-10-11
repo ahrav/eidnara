@@ -5,9 +5,66 @@ Source: the RP2.3 specification
 ticket ([#391](https://github.com/ahrav/eidnara/issues/391)). The parent's
 property bundle is unavailable here, so these records are reconstructed from
 the ticket's acceptance criteria and verified against the code that implements
-them on the #391 branch. The part holds the catalog and its evidence; the
-existing-checks, fault-map, and portfolio-evaluation files follow owner
-approval of this part, which is pending.
+them on the #391 branch at `b3b9b7a80`.
+
+## Scope
+
+The lexical lane of the query route: probe analysis and compilation
+(`crates/retrieval/src/lexical/compile.rs`), the bounded scan and judged
+admission (`crates/retrieval/src/lexical/retrieve.rs`), the retrieval batch
+adapter over the kernel's eligibility policy
+(`crates/retrieval/src/eligibility.rs`), and the daemon's lexical admission in
+`crates/daemon/src/query_route.rs`. The daemon reaches the lane through `scan`
+(`crates/daemon/src/query_route.rs:1098`) and `admit` (`:1258`), each under
+`QueryRouteLimits::lexical_retrieval_bounds` (`:170`); `retrieve` has no
+production caller, and `crates/retrieval/tests/lexical_retrieval.rs:607`
+`admitting_a_released_scan_equals_retrieve_and_carries_the_judged_candidate`
+is the bridge every `retrieve`-driven check rests on. Fusion, packing, and
+host application are outside the part except where AC8 names them.
+
+## Reachability classes
+
+Each record carries its own class with the evidence in its `Reachability`
+field.
+
+- `default-production`: every record. A default install serves the route, and
+  the lexical lane runs whenever the request analyzes to one or more atoms
+  (`crates/daemon/src/query_route.rs:1094` returns `Undeclared` otherwise).
+  `one-kernel-eligibility-policy` is a static property of the source tree;
+  its label describes the paths the scan protects, which
+  `portfolio-evaluation.md` bias 1 records as a human call.
+  `host-application-matrices` carries the label for the hosts' default
+  application path with no host evidence yet; bias 2 records that.
+- `explicit-config-only`: none.
+- `test-only`: none. `Completion::Empty` is produced only by tests that call
+  `scan` or `retrieve` with zero probes; the route guards the case earlier.
+
+## Part artifacts
+
+The part holds this catalog, one evidence file per record under `evidence/`,
+[`existing-checks.md`](existing-checks.md), [`fault-map.md`](fault-map.md),
+and [`portfolio-evaluation.md`](portfolio-evaluation.md). The evaluation's
+refinements are applied here; its gaps and biases stay in that file.
+
+## Index
+
+| Slug | AC | Type | Check | Exercised |
+| --- | --- | --- | --- | --- |
+| [`literal-probes-never-operate`](#literal-probes-never-operate) | AC1 | safety | `always` | yes |
+| [`zero-terms-run-no-match`](#zero-terms-run-no-match) | AC1 | safety | `always` | yes |
+| [`rank-then-occurrence-order`](#rank-then-occurrence-order) | AC2, AC4 | safety | `always` | yes |
+| [`eligibility-before-accepted-slots`](#eligibility-before-accepted-slots) | AC3, AC4 | safety | `always` | yes |
+| [`one-kernel-eligibility-policy`](#one-kernel-eligibility-policy) | AC3 | safety | `always` | yes |
+| [`lexical-work-is-bounded-and-observed`](#lexical-work-is-bounded-and-observed) | AC5 | safety | `always` | partial |
+| [`original-budget-stops-sql`](#original-budget-stops-sql) | AC6 | safety | `always` | yes |
+| [`retrieval-reads-no-payload`](#retrieval-reads-no-payload) | AC7 | safety | `always` | yes |
+| [`no-alternative-lexical-index`](#no-alternative-lexical-index) | AC10 | safety | `always` | yes |
+| [`host-application-matrices`](#host-application-matrices) | AC8 | reachability | `sometimes` | not yet |
+
+Semantics distribution: nine `always`, one `sometimes`. AC9, the RP2.9 corpus
+run, has no record; `portfolio-evaluation.md` gap 2 queues it.
+
+## Records
 
 Each record names its runnable check and the enabling state that check
 constructs. A record exercised only by a fixture engine says so.
@@ -25,8 +82,9 @@ reaches the engine as query syntax.
 Check: `always` - each probe's match set equals the hand-written term set for
 its atom, because one operating operator widens or narrows a result silently.
 Fault/timing angle: none.
-Required faults and enabling state: request text holding `OR`, `NEAR`, `*`,
-`"`, parentheses, and column filters; a control that removes the quoting.
+Required faults and enabling state: request text holding `OR`, `NOT`, and
+`NEAR(...)` with engine match sets; `*`, `"`, `^`, and column filters at the
+analysis level only; a control that removes the quoting.
 Confidence: high - [evidence](evidence/literal-probes-never-operate.md). The
 compiler and both engine tests were read at the branch.
 Existing check: `crates/retrieval/tests/lexical_engine.rs:196`
@@ -41,7 +99,9 @@ Open questions: None.
 ### zero-terms-run-no-match
 
 Type: safety
-Reachability: default-production
+Reachability: default-production - the route's guard is the `Undeclared`
+return at `crates/daemon/src/query_route.rs:1094`; `Completion::Empty` itself
+is reached only by tests that call `scan` or `retrieve` with zero probes
 Status: active
 Exercised: yes - an analysis with zero atoms compiles to no probe and runs no
 MATCH, while a nonempty control completes
@@ -56,7 +116,10 @@ Confidence: high - [evidence](evidence/zero-terms-run-no-match.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:582`
 `zero_probes_run_no_match_while_a_control_probe_contributes`;
 `crates/retrieval/tests/lexical_engine.rs:268`
-`zero_atoms_issue_no_probe_while_a_nonempty_control_completes`.
+`zero_atoms_issue_no_probe_while_a_nonempty_control_completes`;
+`crates/daemon/tests/query_route_dense.rs:365`
+`a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`
+(a separator-only query is `InvalidQuery` at the route).
 Impact: an empty request returns arbitrary rows.
 Open questions: None.
 
@@ -168,7 +231,10 @@ Existing check: `crates/retrieval/tests/lexical_retrieval.rs:789`
 `:1069` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`; `:1576`
 `ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2312`
 `allocations_follow_the_scan_bound_and_the_rank_budget`; `:2381`
-`work_counters_report_exact_and_over_bound_work`.
+`work_counters_report_exact_and_over_bound_work`;
+`crates/daemon/tests/query_route.rs:320`
+`each_bound_saturates_before_its_protected_work`; `:532`
+`production_limits_are_the_d23_set`.
 Impact: a request does unbounded work under a small result cap.
 Open questions:
 - Which allocation counter and bound does RP2.9 approve? (needs human input)
@@ -212,8 +278,12 @@ renamed away and returns the same result
 Guarantee: lexical retrieval returns occurrence identifiers, raw ranks, and
 tie identity, never payload bytes; payloads load only after the caller's
 authorization.
-Check: `unreachable` - the payload read is a code location retrieval must never
-enter, because a denied request must load no bytes.
+Check: `always` - the retrieval over a projection whose `payloads` table is
+renamed equals the retrieval before the rename, because a denied request must
+load no bytes and no payload statement exists in the lexical module to mark
+`unreachable`; the readers are `fetch_payload`
+(`crates/retrieval/src/packing/mod.rs:269`) and `payload_lookup`
+(`crates/retrieval/src/lib.rs:606`), both outside the lane.
 Fault/timing angle: none.
 Required faults and enabling state: a projection whose `payloads` table is
 renamed, so any payload read fails.
@@ -266,3 +336,24 @@ Impact: lexical retrieval ships without host evidence.
 Open questions:
 - Host owners must supply the real OpenCode and Pi application capability and
   matrices. (needs human input)
+
+## Relationship map
+
+- `literal-probes-never-operate` and `zero-terms-run-no-match` bound what
+  reaches the engine; every later record assumes the probes are the request's
+  literal atoms and nothing else.
+- `rank-then-occurrence-order` fixes the comparator that
+  `eligibility-before-accepted-slots` judges in: a slot is taken in comparator
+  order, so a wrong order drops a different eligible occurrence.
+- `eligibility-before-accepted-slots` depends on `one-kernel-eligibility-policy`:
+  the batch adapter it judges through is one of the allowed callers, and a
+  second policy would make the slot verdicts diverge from the daemon's.
+- `lexical-work-is-bounded-and-observed` and `original-budget-stops-sql`
+  bound the same scan from two sides: the caller's bounds cap the work a
+  completed request does, and the budget ends a request before it completes
+  that work.
+- `retrieval-reads-no-payload` and `no-alternative-lexical-index` pin the
+  statements the scan may run: one FTS5 table, the occurrence join, and the
+  tombstone check, and no payload read.
+- `host-application-matrices` consumes the contributions every safety record
+  shapes; it is the one record this part cannot discharge without host owners.
