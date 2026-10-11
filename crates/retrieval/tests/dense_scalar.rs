@@ -716,3 +716,286 @@ fn the_fixed_corpus_produces_pinned_scale_and_code_bytes() {
         ]
     );
 }
+
+/// Every cell of the frozen scalar witness matrix; the aggregate fails when a cell is missing, duplicated, or undeclared.
+const SCALAR_WITNESS_CELLS: [&str; 20] = [
+    "calibration/zero_coordinate",
+    "calibration/scale_underflow",
+    "encoding/extrema",
+    "encoding/ties_positive",
+    "encoding/ties_negative",
+    "encoding/adjacent_values",
+    "encoding/clipping",
+    "scoring/extreme_code_products",
+    "scoring/generation_query_scales",
+    "scoring/accumulation_order",
+    "scoring/nonuniform_scales_vs_raw_dot",
+    "originals/unchanged",
+    "refusal/row_dimension",
+    "refusal/row_normalization",
+    "refusal/calibration_row",
+    "refusal/scale_bytes",
+    "refusal/scale_dimension",
+    "refusal/reserved_code",
+    "refusal/code_dimension",
+    "refusal/recipe",
+];
+
+fn fire(fired: &mut std::collections::BTreeSet<&'static str>, cell: &'static str) {
+    assert!(
+        SCALAR_WITNESS_CELLS.contains(&cell),
+        "{cell} is not a declared cell"
+    );
+    assert!(fired.insert(cell), "{cell} fired twice");
+}
+
+/// `Σ_j (s_j · s_j) · (cq_j · cd_j)` written out coordinate by coordinate, independent of the scorer.
+fn reference_weighted(scales: &[f32], query: &[i8], doc: &[i8]) -> f64 {
+    let mut sum = 0.0f64;
+    for j in 0..scales.len() {
+        let s = f64::from(scales[j]);
+        sum += (s * s) * f64::from(i32::from(query[j]) * i32::from(doc[j]));
+    }
+    sum
+}
+
+#[test]
+fn the_frozen_scalar_witness_matrix_fires_every_declared_cell() {
+    let mut fired = std::collections::BTreeSet::new();
+    let ones = scales_of([1.0; 8]);
+
+    let axis_only = [unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])];
+    let one = calibrate(&unit_layout(), axis_only.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(one.scales.as_slice()[0], 1.0 / 127.0);
+    assert!(one.scales.as_slice()[1..].iter().all(|s| *s == 1.0));
+    fire(&mut fired, "calibration/zero_coordinate");
+
+    let tiny = f32::from_bits(1);
+    let underflow = [vec![1.0, 0.0, 0.0, tiny, 0.0, 0.0, 0.0, 0.0]];
+    assert_eq!(
+        calibrate(&unit_layout(), underflow.iter().map(Vec::as_slice)),
+        Err(CalibrationRejection::ScaleUnderflow { coordinate: 3 })
+    );
+    fire(&mut fired, "calibration/scale_underflow");
+
+    let extrema = encode(
+        &loose_layout(),
+        &ones,
+        &[127.0, -127.0, 126.0, -126.0, 0.0, -0.0, 1.0, -1.0],
+    )
+    .unwrap();
+    assert_eq!(extrema.codes, vec![127, -127, 126, -126, 0, 0, 1, -1]);
+    assert_eq!(extrema.clipped, 0);
+    fire(&mut fired, "encoding/extrema");
+
+    let positive = encode(
+        &loose_layout(),
+        &ones,
+        &[0.5, 1.5, 2.5, 3.5, 4.5, 125.5, 126.5, 1.0],
+    )
+    .unwrap();
+    assert_eq!(positive.codes, vec![0, 2, 2, 4, 4, 126, 126, 1]);
+    fire(&mut fired, "encoding/ties_positive");
+
+    let negative = encode(
+        &loose_layout(),
+        &ones,
+        &[-0.5, -1.5, -2.5, -3.5, -4.5, -125.5, -126.5, 1.0],
+    )
+    .unwrap();
+    assert_eq!(negative.codes, vec![0, -2, -2, -4, -4, -126, -126, 1]);
+    fire(&mut fired, "encoding/ties_negative");
+
+    let adjacent = encode(
+        &loose_layout(),
+        &ones,
+        &[
+            2.5f32.next_up(),
+            2.5f32.next_down(),
+            (-2.5f32).next_up(),
+            (-2.5f32).next_down(),
+            1.5f32.next_up(),
+            1.5f32.next_down(),
+            (-1.5f32).next_up(),
+            (-1.5f32).next_down(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(adjacent.codes, vec![3, 2, -2, -3, 2, 1, -1, -2]);
+    fire(&mut fired, "encoding/adjacent_values");
+
+    let clipped = encode(
+        &loose_layout(),
+        &ones,
+        &[127.4, 127.5, -127.5, 128.0, -128.0, -1000.0, 0.0, 1.0],
+    )
+    .unwrap();
+    assert_eq!(clipped.codes, vec![127, 127, -127, 127, -127, -127, 0, 1]);
+    assert_eq!(clipped.clipped, 5);
+    assert!(!clipped.codes.contains(&i8::MIN));
+    fire(&mut fired, "encoding/clipping");
+
+    let scales = scales_of([1.0, 0.5, 0.25, 2.0, 1.0 / 127.0, 1.0, 3.0, 1.0e-3]);
+    let all_max = [CODE_MAX; 8];
+    let all_min = [CODE_MIN; 8];
+    for (query, doc) in [
+        (all_max, all_max),
+        (all_max, all_min),
+        (all_min, all_min),
+        (all_min, all_max),
+    ] {
+        let expected = reference_weighted(scales.as_slice(), &query, &doc);
+        assert_eq!(weighted_dot(&scales, &query, &doc), expected);
+        assert_eq!(expected.abs(), {
+            let mut sum = 0.0f64;
+            for s in scales.as_slice() {
+                sum += (f64::from(*s) * f64::from(*s)) * 16129.0;
+            }
+            sum
+        });
+    }
+    fire(&mut fired, "scoring/extreme_code_products");
+
+    let first = calibrate(&unit_layout(), corpus().iter().map(Vec::as_slice)).unwrap();
+    let mut wider = corpus();
+    wider.push(unit([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]));
+    let second = calibrate(&unit_layout(), wider.iter().map(Vec::as_slice)).unwrap();
+    let query = unit([0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5]);
+    let under_first = encode(&unit_layout(), &first.scales, &query).unwrap();
+    let under_second = encode(&unit_layout(), &second.scales, &query).unwrap();
+    assert_ne!(first.identity.scales_digest, second.identity.scales_digest);
+    assert_ne!(under_first.codes, under_second.codes);
+    let doc = &wider[0];
+    for calibration in [&first, &second] {
+        let q = encode(&unit_layout(), &calibration.scales, &query).unwrap();
+        let d = encode(&unit_layout(), &calibration.scales, doc).unwrap();
+        assert_eq!(
+            weighted_dot(&calibration.scales, &q.codes, &d.codes),
+            reference_weighted(calibration.scales.as_slice(), &q.codes, &d.codes)
+        );
+    }
+    fire(&mut fired, "scoring/generation_query_scales");
+
+    let order = scales_of([1.0e8, 1.0e-4, 1.0e8, 1.0e-4, 1.0, 1.0, 1.0, 1.0]);
+    let q = [1i8, 1, -1, 1, 0, 0, 0, 0];
+    let d = [1i8; 8];
+    let forward = weighted_dot(&order, &q, &d);
+    assert_eq!(forward, reference_weighted(order.as_slice(), &q, &d));
+    let mut reversed = 0.0f64;
+    for j in (0..8).rev() {
+        let s = f64::from(order.as_slice()[j]);
+        reversed += (s * s) * f64::from(i32::from(q[j]) * i32::from(d[j]));
+    }
+    assert_ne!(forward, reversed);
+    fire(&mut fired, "scoring/accumulation_order");
+
+    let skewed = scales_of([0.01, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    let q = [100i8, 10, 0, 0, 0, 0, 0, 0];
+    let a = [100i8, 0, 0, 0, 0, 0, 0, 0];
+    let b = [0i8, 20, 0, 0, 0, 0, 0, 0];
+    let raw = |x: &[i8]| -> i64 {
+        q.iter()
+            .zip(x)
+            .map(|(l, r)| i64::from(*l) * i64::from(*r))
+            .sum()
+    };
+    assert!(raw(&a) > raw(&b));
+    assert!(weighted_dot(&skewed, &q, &a) < weighted_dot(&skewed, &q, &b));
+    fire(&mut fired, "scoring/nonuniform_scales_vs_raw_dot");
+
+    let rows = corpus();
+    let before: Vec<Vec<u32>> = rows
+        .iter()
+        .map(|row| row.iter().map(|v| v.to_bits()).collect())
+        .collect();
+    let calibration = calibrate(&unit_layout(), rows.iter().map(Vec::as_slice)).unwrap();
+    for row in &rows {
+        encode(&unit_layout(), &calibration.scales, row).unwrap();
+    }
+    let after: Vec<Vec<u32>> = rows
+        .iter()
+        .map(|row| row.iter().map(|v| v.to_bits()).collect())
+        .collect();
+    assert_eq!(before, after);
+    fire(&mut fired, "originals/unchanged");
+
+    assert_eq!(
+        encode(&loose_layout(), &ones, &[1.0; 7]),
+        Err(RowRejection::Dimension {
+            expected: 8,
+            actual: 7
+        })
+    );
+    fire(&mut fired, "refusal/row_dimension");
+
+    assert_eq!(
+        encode(&unit_layout(), &ones, &[1.0; 8]),
+        Err(RowRejection::Normalization {
+            norm: 8.0f64.sqrt()
+        })
+    );
+    fire(&mut fired, "refusal/row_normalization");
+
+    let bad = [unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), vec![0.0; 8]];
+    assert_eq!(
+        calibrate(&unit_layout(), bad.iter().map(Vec::as_slice)),
+        Err(CalibrationRejection::Row {
+            index: 1,
+            rejection: RowRejection::ZeroNorm
+        })
+    );
+    fire(&mut fired, "refusal/calibration_row");
+
+    for value in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+        let mut values = [1.0f32; 8];
+        values[4] = value;
+        assert_eq!(
+            Scales::decode(&codec::encode(&values), DIMENSION),
+            Err(ScalarBytesRejection::NotPositiveFinite { coordinate: 4 })
+        );
+        assert_eq!(
+            Scales::from_values(values.to_vec(), DIMENSION),
+            Err(ScalarBytesRejection::NotPositiveFinite { coordinate: 4 })
+        );
+    }
+    fire(&mut fired, "refusal/scale_bytes");
+
+    assert_eq!(
+        Scales::decode(&codec::encode(&[1.0; 7]), DIMENSION),
+        Err(ScalarBytesRejection::Dimension {
+            expected: 8,
+            actual: 7
+        })
+    );
+    fire(&mut fired, "refusal/scale_dimension");
+
+    let mut reserved = encode_codes(&[1; 8]);
+    reserved[5] = 0x80;
+    assert_eq!(
+        decode_codes(&reserved, DIMENSION),
+        Err(ScalarBytesRejection::ReservedCode { coordinate: 5 })
+    );
+    fire(&mut fired, "refusal/reserved_code");
+
+    assert_eq!(
+        decode_codes(&[1; 9], DIMENSION),
+        Err(ScalarBytesRejection::Dimension {
+            expected: 8,
+            actual: 9
+        })
+    );
+    fire(&mut fired, "refusal/code_dimension");
+
+    assert_eq!(ScalarRecipe::from_id("scalar-int8-symmetric.v2"), None);
+    assert_eq!(
+        ScalarRecipe::from_id(&ScalarRecipe::SymmetricInt8V1.id().to_uppercase()),
+        None
+    );
+    fire(&mut fired, "refusal/recipe");
+
+    assert_eq!(
+        fired,
+        SCALAR_WITNESS_CELLS.into_iter().collect(),
+        "every declared witness cell fires exactly once"
+    );
+}

@@ -12,8 +12,8 @@ use daemon::projection_gates::{
 use daemon::vector_admission::Ledger;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
-    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VERIFY_CHUNK_BYTES, VectorRefusal,
-    VectorSidecar, build, resident_bytes, stage, verification_bytes, verify,
+    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VERIFY_CHUNK_BYTES, VectorIdentity,
+    VectorRefusal, VectorSidecar, build, resident_bytes, stage, verification_bytes, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationManifest, GenerationStore,
@@ -390,6 +390,53 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
             bytes: held,
             max: held - 1
         })
+    );
+}
+
+#[test]
+fn another_quantizer_recipe_over_the_same_rows_is_another_compatibility_and_sidecar_identity() {
+    let fixture = Fixture::new();
+    let built = fixture.build();
+    let current = &built.sidecar;
+    let other = VectorSidecar {
+        quantizer_recipe: "scalar-int8-symmetric.v2".to_owned(),
+        ..current.clone()
+    };
+    assert_eq!(other.files, current.files, "the payload bytes are the same");
+
+    let current_identity = VectorIdentity::from_sidecar(current);
+    let other_identity = VectorIdentity::from_sidecar(&other);
+    assert_eq!(
+        current_identity.first_mismatch(&other_identity),
+        Some("quantizer_recipe")
+    );
+    assert_ne!(
+        current_identity.compatibility_sha256(),
+        other_identity.compatibility_sha256()
+    );
+    assert_eq!(
+        current.stage_meta().release_contract_sha256,
+        current_identity.compatibility_sha256(),
+        "the contract slot carries the compatibility digest"
+    );
+    assert_eq!(
+        other.stage_meta().release_contract_sha256,
+        other_identity.compatibility_sha256()
+    );
+    assert_ne!(other.sha256(), current.sha256());
+    assert_ne!(
+        other.stage_meta().inputs_lock_sha256,
+        current.stage_meta().inputs_lock_sha256
+    );
+    assert_eq!(
+        other.stage_meta().source_payload_manifest_sha256,
+        current.stage_meta().source_payload_manifest_sha256,
+        "the row artifact's hash is unchanged"
+    );
+    assert_ne!(
+        other.stage_manifest().digest(),
+        built.digest(),
+        "the recipe names another generation directory"
     );
 }
 
