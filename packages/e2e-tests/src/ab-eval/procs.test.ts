@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
-import { descendants, stallFor, stopOwnedTree, treeStats } from "./procs";
+import { readFileSync } from "node:fs";
+import { descendants, running, stallFor, stopOwnedTree, treeStats } from "./procs";
 
 const spawned: ChildProcess[] = [];
 
@@ -60,7 +61,8 @@ describe("stopping an owned tree", () => {
             return found.length >= 1 ? found : undefined;
         });
         await stopOwnedTree(pid, 2_000);
-        expect(treeStats(grandchild)).toBeNull();
+        // The orphaned grandchild may still be a zombie until init reaps it.
+        expect(running(grandchild as number)).toBe(false);
     });
 });
 
@@ -69,9 +71,19 @@ describe("stalling a process", () => {
         const child = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
         spawned.push(child);
         const pid = child.pid as number;
-        stallFor(pid, 100);
+        await stallFor(pid, 100);
         child.kill("SIGKILL");
         await Bun.sleep(300);
-        expect(treeStats(pid)).toBeNull();
+        expect(running(pid)).toBe(false);
+    });
+
+    it("returns once the process has stopped", async () => {
+        const child = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+        spawned.push(child);
+        const pid = child.pid as number;
+        await stallFor(pid, 5_000);
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]).toBe("T");
+        process.kill(pid, "SIGCONT");
     });
 });

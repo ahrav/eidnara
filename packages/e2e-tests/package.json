@@ -24,7 +24,7 @@
         "mutation:goldens": "bun scripts/run-goldens-mutation.ts",
         "ensure:plugin-dist": "test -f ../opencode-plugin/dist/index.js || bun run --cwd ../opencode-plugin build",
         "ensure:pi-dist": "(test -f ../shm-native/index.js || bun run --cwd ../shm-native build:js) && bun run --cwd ../pi-plugin build",
-        "eval:ab": "bun run ensure:plugin-dist && bun run ensure:pi-dist && bun scripts/eval-ab.ts",
+        "eval:ab": "bun run --cwd ../opencode-plugin build && bun run ensure:pi-dist && bun scripts/eval-ab.ts",
         "eval:ab:report": "bun scripts/eval-ab-report.ts",
         "eval:ab:sweep": "bun scripts/eval-ab-sweep.ts"
     },

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -78,8 +78,12 @@ function binomTwoSided(k: number, n: number): number {
 
 function main(): void {
     const out = resolve(process.argv[2] ?? join(tmpdir(), "ab-eval/runs/latest"));
-    const armsDir = existsSync(join(out, "results")) ? join(out, "results") : join(out, "arms");
-    const arms = readdirSync(armsDir).sort();
+    const armsDir = join(out, "results");
+    // The run's own record of what it was asked for, so an arm that never wrote results still counts.
+    const options = JSON.parse(readFileSync(join(out, "options.json"), "utf8")) as {
+        arms: string[];
+    };
+    const arms = [...options.arms].sort();
     const lines: string[] = [`# A/B report: ${out}`, ""];
     const turnsByArm = new Map<string, TurnRow[]>();
     const callsByArm = new Map<string, Call[]>();

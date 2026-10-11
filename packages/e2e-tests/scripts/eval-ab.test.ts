@@ -63,6 +63,24 @@ describe("eval-ab", () => {
         }
     });
 
+    it("refuses a flag it does not know", () => {
+        const result = run(fresh(), [
+            "--arms",
+            "pi-off",
+            "--sandbox",
+            "off",
+            "--project-sze",
+            "large",
+        ]);
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("--project-sze");
+            expect(existsSync(join(root, "run"))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("refuses a numeric flag without a usable number", () => {
         for (const [flag, message] of [
             [["--seed", "typo"], "--seed must be a non-negative number"],
@@ -180,6 +198,35 @@ describe("eval-ab", () => {
 });
 
 describe("eval-ab-report", () => {
+    it("fails when a requested arm left no results", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
+        try {
+            const arm = join(root, "results/pi-off");
+            mkdirSync(arm, { recursive: true });
+            writeFileSync(
+                join(root, "options.json"),
+                JSON.stringify({ arms: ["pi-off", "oc-off"] }),
+            );
+            writeFileSync(
+                join(root, "world.json"),
+                JSON.stringify({ sessions: [{ turns: [{}] }] }),
+            );
+            writeFileSync(
+                join(arm, "turns.jsonl"),
+                `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n`,
+            );
+            writeFileSync(join(arm, "done.json"), "{}");
+            const result = spawnSync(process.execPath, [REPORT, root], {
+                encoding: "utf8",
+                timeout: 60_000,
+            });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("oc-off");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("fails on an arm that recorded every turn but did not finish", () => {
         const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
         try {
@@ -189,6 +236,7 @@ describe("eval-ab-report", () => {
                 join(root, "world.json"),
                 JSON.stringify({ sessions: [{ turns: [{}] }] }),
             );
+            writeFileSync(join(root, "options.json"), JSON.stringify({ arms: ["pi-off"] }));
             writeFileSync(
                 join(arm, "turns.jsonl"),
                 `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n`,
@@ -214,6 +262,7 @@ describe("eval-ab-report", () => {
                 join(root, "world.json"),
                 JSON.stringify({ sessions: [{ turns: [{}, {}, {}] }, { turns: [{}] }] }),
             );
+            writeFileSync(join(root, "options.json"), JSON.stringify({ arms: ["pi-off"] }));
             writeFileSync(
                 join(arm, "turns.jsonl"),
                 `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n`,
@@ -236,6 +285,7 @@ describe("eval-ab-report", () => {
             const arm = join(root, "results/pi-off");
             mkdirSync(arm, { recursive: true });
             writeFileSync(join(root, "world.json"), JSON.stringify({ sessions: [] }));
+            writeFileSync(join(root, "options.json"), JSON.stringify({ arms: ["pi-off"] }));
             writeFileSync(
                 join(arm, "turns.jsonl"),
                 `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n{"arm":"pi-off","kind":"pro\n`,

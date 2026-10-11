@@ -36,7 +36,9 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
+    const known = new Set<string>();
     const get = (name: string, fallback: string): string => {
+        known.add(`--${name}`);
         const i = argv.indexOf(`--${name}`);
         if (i < 0) return fallback;
         const value = argv[i + 1];
@@ -63,7 +65,7 @@ function parseArgs(argv: string[]): Options {
     const repeated = arms.find((name, i) => arms.indexOf(name) !== i);
     if (repeated !== undefined) throw new Error(`--arms names ${repeated} twice`);
     const sandbox = choice("sandbox", ["auto", "on", "off"], "auto");
-    return {
+    const options: Options = {
         tier: get("tier", "xs"),
         seed: num("seed", "7"),
         arms,
@@ -84,6 +86,11 @@ function parseArgs(argv: string[]): Options {
         enforceWindow: choice("enforce-window", ["on", "off"], "on") === "on",
         projectSize: choice("project-size", Object.keys(PROJECT_SIZES), "small"),
     };
+    const unknown = argv.filter(
+        (arg, i) => arg.startsWith("--") && !known.has(arg) && !argv[i - 1]?.startsWith("--"),
+    );
+    if (unknown.length > 0) throw new Error(`unknown flags: ${unknown.join(", ")}`);
+    return options;
 }
 
 function prepareWorkdir(world: World, dir: string): void {
@@ -136,7 +143,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
             const hostPid = arm.hostPid();
             if (opts.stallAt.has(key) && arm.spec.eidnara) {
                 if (hostPid === undefined) throw new Error(`no daemon PID to stall before ${key}`);
-                stallFor(hostPid, opts.stallMs);
+                await stallFor(hostPid, opts.stallMs);
                 log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
             }
             const result = await arm.prompt(turn.user, timeout);

@@ -23,6 +23,12 @@ describe("run directory", () => {
         expect(existsSync(out)).toBe(true);
     });
 
+    it("lets one claim win when two runs name the same directory", () => {
+        const out = join(scratch(), "shared");
+        claimRunDir(out);
+        expect(() => claimRunDir(out)).toThrow(/earlier run|claimed/);
+    });
+
     it("accepts an existing empty directory", () => {
         const out = join(scratch(), "empty");
         mkdirSync(out);

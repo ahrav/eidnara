@@ -249,8 +249,8 @@ and runs `validate-mode-manifest` and `test:rust` with
 
 ## Eidnara on/off evaluation
 
-`bun run eval:ab` builds the OpenCode plugin bundle and the Pi extension,
-then runs one seeded project world through Pi and OpenCode with and without
+`bun run eval:ab` builds the OpenCode plugin bundle and the Pi extension
+from the current sources, then runs one seeded project world through Pi and OpenCode with and without
 Eidnara and records every turn and model call. `bun run eval:ab:report <out>`
 prints accuracy by fact kind, a paired on/off test, turn latency, model calls
 and tokens per caller, and memory.
@@ -276,8 +276,8 @@ and tokens per caller, and memory.
   direct_host_fixture --features direct-host-fixture --locked --release`, and
   the shared-memory addon from `bun run --cwd packages/shm-native
   build:native`. An unknown or repeated arm name, a flag value outside its
-  documented set, a missing fixture, or an addon that cannot load fails the
-  run before any arm starts, and an Eidnara arm whose daemon exits fails at
+  documented set, a flag the command does not know, a missing fixture, or an
+  addon that cannot load fails the run before any arm starts, and an Eidnara arm whose daemon exits fails at
   the next turn.
 - When passwordless `sudo` can create mount and PID namespaces, each harness
   runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the home directory, and the run
@@ -286,18 +286,20 @@ and tokens per caller, and memory.
   `no_new_privs` set, so `sudo` inside the arm stays unprivileged. The run
   directory must sit outside the repository and the harness install
   directories. `--sandbox off` runs without isolation.
-- Each run writes to a fresh directory: `--out` must be missing or empty, and
-  the default is a timestamped directory under `<tmp>/ab-eval/runs/` that
-  `runs/latest` links to. The command exits nonzero when any arm fails, and
+- Each run writes to a fresh directory: `--out` must be missing or empty, one
+  run claims it exclusively, and the default is a timestamped directory under
+  `<tmp>/ab-eval/runs/` that `runs/latest` links to. The command exits nonzero when any arm fails, and
   the other arms' results stay in the directory. An arm writes
-  `results/<arm>/done.json` once its teardown succeeds; the report refuses an
-  arm without it, one whose recorded turns differ from the world's count, and
-  a record that does not parse.
+  `results/<arm>/done.json` once its teardown succeeds; the report reads the
+  requested arms from `options.json` and refuses an arm without the marker,
+  one whose recorded turns differ from the world's count, and a record that
+  does not parse.
 - A turn that reaches its timeout is aborted, and the next turn starts once
   the harness has stopped it. The gateway retries throttled Bedrock calls
   until the turn's deadline.
 - `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
-  those prompts, to exercise a pass that misses its deadline. A key the world
+  those prompts, once the daemon is observed stopped, to exercise a pass that
+  misses its deadline. A key the world
   has no turn for, or a selection without an Eidnara arm, fails the run before
   it starts.
 - The gateway answers a request whose estimated input exceeds the arms'
