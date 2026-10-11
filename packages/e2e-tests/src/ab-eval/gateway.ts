@@ -621,7 +621,9 @@ export class BedrockGateway {
             }
         }
         sink.end();
-        if (status >= 500 && this.dumped < 3) {
+        // A provider refusal of the request's shape (400) is the evidence a harness or Eidnara
+        // defect leaves, so the first few of each class are kept with their bodies.
+        if (status >= 400 && status !== 429 && this.dumped < 8) {
             this.dumped++;
             appendFileSync(
                 join(this.options.dumpDir, "failed-requests.jsonl"),
