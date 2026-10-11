@@ -1019,9 +1019,14 @@ function carries(text: string, token: string): boolean {
 const CANDIDATE_VALUE = /\b\d{5}\b|\b[a-z]+-[a-z]+-\d{2}\b/i;
 
 export function grade(fact: Fact, answer: string): Grade {
-    // An abstention beside a guessed value is a guess.
+    // An abstention beside a guessed value is a guess; the question's own subject words, which
+    // a larger project's component names can shape like codenames, are set aside first.
     if (fact.kind === "abstain") {
-        return ABSTAIN.test(answer) && !CANDIDATE_VALUE.test(answer) ? "correct" : "wrong";
+        const rest = fact.subject
+            .split(/\s+/)
+            .filter((word) => word.length > 0)
+            .reduce((text, word) => text.split(word).join(" "), answer);
+        return ABSTAIN.test(answer) && !CANDIDATE_VALUE.test(rest) ? "correct" : "wrong";
     }
     if (carries(answer, fact.answer)) return "correct";
     if (fact.stale && carries(answer, fact.stale)) return "stale";

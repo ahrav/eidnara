@@ -241,6 +241,28 @@ describe("eval-ab", () => {
         }
     });
 
+    it("refuses --sandbox on where the sandbox cannot start", () => {
+        fresh();
+        const bin = join(root, "bin");
+        mkdirSync(bin);
+        // A sudo that refuses namespace creation, as a restricted container's would.
+        writeFileSync(
+            join(bin, "sudo"),
+            '#!/bin/sh\ncase "$*" in *unshare*) echo "unshare: Operation not permitted" >&2; exit 1;; esac\nexit 0\n',
+            { mode: 0o755 },
+        );
+        const result = run(root, ["--arms", "pi-off", "--sandbox", "on"], {
+            path: `${bin}:/usr/bin:/bin`,
+        });
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("--sandbox on");
+            expect(existsSync(join(root, "run"))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",

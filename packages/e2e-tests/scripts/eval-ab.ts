@@ -237,6 +237,11 @@ async function main(): Promise<void> {
     const opts = parseArgs(process.argv.slice(2));
     const specs = opts.arms.map(armSpec);
     const eidnaraArms = specs.some((spec) => spec.eidnara);
+    if (opts.sandbox && !sandboxAvailable()) {
+        throw new Error(
+            "--sandbox on needs passwordless sudo that can create mount and PID namespaces",
+        );
+    }
     const componentCount = PROJECT_SIZES[opts.projectSize];
     if (componentCount === undefined) throw new Error(`unknown --project-size ${opts.projectSize}`);
     const world = buildWorld(opts.seed, opts.tier, componentCount);

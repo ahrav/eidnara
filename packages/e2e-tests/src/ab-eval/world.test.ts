@@ -76,6 +76,14 @@ describe("A/B world", () => {
         // A probe whose turn failed is graded failed, whatever text arrived before the failure.
         expect(gradeOutcome(fact, { answer: "41234", error: "stream failed" })).toBe("failed");
         expect(gradeOutcome(fact, { answer: "41234" })).toBe("correct");
+        // The question's own subject is not a guess, even when it looks like a codename.
+        const sized = { ...abstain, subject: "rate-limiter-15 max_payload" };
+        expect(grade(sized, "We never settled the rate-limiter-15 max payload size")).toBe(
+            "correct",
+        );
+        expect(grade(sized, "We never settled rate-limiter-15; maybe amber-falcon-42")).toBe(
+            "wrong",
+        );
         // A hedge beside a guessed value is a guess.
         expect(grade(abstain, "I don't know; maybe 41234")).toBe("wrong");
         expect(grade(abstain, "Not sure, perhaps amber-falcon-42")).toBe("wrong");

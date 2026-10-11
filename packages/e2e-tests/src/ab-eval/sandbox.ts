@@ -79,6 +79,11 @@ exit 0' sh "$@"
 `;
 }
 
+/** One POSIX shell word for `path`, whatever characters it holds. */
+export function shellQuote(path: string): string {
+    return `'${path.replace(/'/g, "'\\''")}'`;
+}
+
 export function nodeRoot(): string {
     return resolve(realpathSync(Bun.which("node") as string), "../..");
 }

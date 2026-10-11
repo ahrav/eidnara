@@ -26,7 +26,14 @@ import { isSensitiveEnvKey } from "../secret-env-keys";
 import { StillRunningError, settleWithin } from "./deadline";
 import { BedrockGateway, type CallRecord, type TurnScope } from "./gateway";
 import { running, stopOwnedTree } from "./procs";
-import { ensureSandboxScript, nodeRoot, opencodeBinary, sandboxKeep, sandboxPath } from "./sandbox";
+import {
+    ensureSandboxScript,
+    nodeRoot,
+    opencodeBinary,
+    sandboxKeep,
+    sandboxPath,
+    shellQuote,
+} from "./sandbox";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const PI_PLUGIN_ROOT = join(REPO_ROOT, "packages/pi-plugin");
@@ -424,7 +431,12 @@ export class PiArm extends Arm {
             signal: cancel.signal,
         });
         end.catch(() => undefined);
-        const work = this.command("prompt", { message: text }, timeoutMs).then(() => end);
+        // The command's own deadline sits past the turn's, so a Pi that stops answering the
+        // prompt command is aborted and drained by settleWithin rather than reported as a row
+        // error while its run may continue.
+        const work = this.command("prompt", { message: text }, timeoutMs + 2 * DRAIN_MS).then(
+            () => end,
+        );
         try {
             const outcome = await settleWithin(work, timeoutMs, {
                 abort: () => this.command("abort", {}, DRAIN_MS),
@@ -528,7 +540,7 @@ export class OpencodeArm extends Arm {
         const binary = opencodeBinary();
         const launch = this.ctx.sandboxDir
             ? `exec ${ensureSandboxScript(this.ctx.sandboxDir)} ${sandboxKeep(this.spec, this.ctx.root).join(" ")} -- ${binary} "$@"`
-            : `exec ${binary} "$@"`;
+            : `exec ${shellQuote(binary)} "$@"`;
         writeFileSync(
             join(sbin, "opencode"),
             `#!/bin/sh\nexport PATH=${sandboxPath(this.spec)}\n${launch}\n`,

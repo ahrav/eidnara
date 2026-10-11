@@ -15,6 +15,7 @@ import {
     sandboxAvailable,
     sandboxPath,
     sharedKeep,
+    shellQuote,
 } from "./sandbox";
 
 describe("sandbox masking plan", () => {
@@ -66,6 +67,13 @@ describe("sandbox keep list", () => {
             "/prefix/lib/node_modules",
         );
         expect(opencodeKeepRoot("/home/u/.opencode/bin/opencode")).toBe("/home/u/.opencode/bin");
+    });
+});
+
+describe("shell quoting", () => {
+    it("quotes a path for a POSIX shell line", () => {
+        expect(shellQuote("/opt/open code/bin/opencode")).toBe("'/opt/open code/bin/opencode'");
+        expect(shellQuote("/it's/here")).toBe("'/it'\\''s/here'");
     });
 });
 
