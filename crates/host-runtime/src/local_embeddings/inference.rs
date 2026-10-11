@@ -215,7 +215,8 @@ pub fn inference_threads() -> usize {
     })
 }
 
-/// One thread fewer than the host's parallelism, so the daemon keeps a core while a native call runs, at least one thread and at most four.
+/// One thread fewer than the host's parallelism, clamped to one through four; a host with two
+/// or more cores keeps one for the daemon while a native call runs.
 fn threads_for(parallelism: usize) -> usize {
     parallelism.saturating_sub(1).clamp(1, 4)
 }

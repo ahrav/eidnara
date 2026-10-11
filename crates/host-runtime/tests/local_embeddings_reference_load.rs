@@ -5,14 +5,19 @@
 //! passes, when run without them. Run it in release on the D21 host:
 //! `cargo test --release -p host-runtime --test local_embeddings_reference_load -- --ignored --nocapture`.
 //! `EIDNARA_LOCAL_EMBEDDINGS_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
+//! The page cache is warm for every timed phase: activation reads the whole model and certification runs it.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use host_runtime::SecondaryComponent;
 use host_runtime::local_embeddings::{
-    DenseUnavailable, EmbeddingInputLimits, LocalEmbeddingsComponent, LocalEmbeddingsConfig,
-    LocalEmbeddingsLimits, LocalEmbeddingsStatus, PollOutcome, SubmitOutcome,
+    DenseUnavailable, EmbeddingInputLimits, LaneInfo, LocalEmbeddingsComponent,
+    LocalEmbeddingsConfig, LocalEmbeddingsLimits, LocalEmbeddingsStatus, PollOutcome,
+    SubmitOutcome,
 };
 use sha2::{Digest, Sha256};
 
@@ -24,8 +29,15 @@ const BACKFILL_QUERIES: usize = 1000;
 /// Backfill texts timed at steady state after warm-up.
 const BACKFILL_TEXTS: usize = 200;
 const BACKFILL_TOKENS: u32 = 76;
+/// Backfill jobs kept in flight under load, so a background waiter is queued whenever a query arrives.
+const BACKFILL_IN_FLIGHT: usize = 2;
 const MAX_QUERY_TOKENS: u32 = 32;
 const MIN_QUERY_TOKENS: u32 = 4;
+const QUERY_DEADLINE: Duration = Duration::from_secs(5);
+const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+/// #825 acceptance budgets for the reference host.
+const MIN_BACKFILL_TEXTS_PER_SECOND: f64 = 8.0;
+const MAX_QUERY_P99_US: u64 = 60_000;
 
 const WORDS: &[&str] = &[
     "context",
@@ -116,13 +128,8 @@ fn required_path(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("{name} must be set"))
 }
 
-/// The lane limits the daemon serves with: one text per inference call.
-fn serving_limits() -> LocalEmbeddingsLimits {
-    LocalEmbeddingsLimits {
-        max_batch_items: 1,
-        max_waiting_queries: 4,
-        ..LocalEmbeddingsLimits::default()
-    }
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 /// A text of exactly `tokens` tokens under the lane's own counter, built from the fixed vocabulary.
@@ -141,34 +148,101 @@ fn text_of(
     };
     loop {
         let mut text = stream.word().to_string();
-        while count(&text) < tokens {
+        let mut counted = count(&text);
+        while counted < tokens {
             text.push(' ');
             text.push_str(stream.word());
+            counted = count(&text);
         }
-        if count(&text) == tokens {
+        if counted == tokens {
             return text;
         }
     }
 }
 
+/// One query's outcome; times are microseconds since the run's origin.
 struct Sample {
     phase: &'static str,
     scheduled_us: u64,
     sent_us: u64,
     done_us: u64,
     tokens: u32,
+    /// `ok`; `busy` for a full queue or a wait that reached the deadline, which the lane reports alike; or `refused`.
     outcome: &'static str,
 }
 
-fn percentile(sorted: &[u64], q: f64) -> u64 {
-    sorted[((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1)]
+impl Sample {
+    fn latency_us(&self) -> u64 {
+        self.done_us - self.scheduled_us
+    }
+
+    fn service_us(&self) -> u64 {
+        self.done_us - self.sent_us
+    }
+}
+
+/// Order statistics of one phase's completed queries, latency measured from each scheduled arrival.
+#[derive(Debug)]
+#[expect(dead_code, reason = "the run report reads every field through Debug")]
+struct PhaseSummary {
+    offered: usize,
+    completed: usize,
+    busy: usize,
+    p50_us: u64,
+    p99_us: u64,
+    /// The second-largest latency: with 600 or more samples, a distribution-free one-sided 95% upper bound on p99.
+    p99_upper_us: u64,
+    max_us: u64,
+    /// The p99 of each half of the phase in arrival order, to show the lane did not drift.
+    halves_p99_us: (u64, u64),
+    /// The largest gap between a scheduled arrival and its send, which bounds the generator's own lag.
+    max_send_lag_us: u64,
+}
+
+/// The `q` quantile by nearest rank; `None` for an empty slice.
+fn percentile(sorted: &[u64], q: f64) -> Option<u64> {
+    let rank = ((sorted.len() as f64 * q).ceil() as usize).checked_sub(1)?;
+    sorted.get(rank).copied()
+}
+
+fn summarize(samples: &[Sample], phase: &str) -> Option<PhaseSummary> {
+    let phase_samples: Vec<&Sample> = samples.iter().filter(|s| s.phase == phase).collect();
+    let completed: Vec<&Sample> = phase_samples
+        .iter()
+        .copied()
+        .filter(|s| s.outcome == "ok")
+        .collect();
+    let sorted = |of: &[&Sample]| {
+        let mut latency: Vec<u64> = of.iter().map(|s| s.latency_us()).collect();
+        latency.sort_unstable();
+        latency
+    };
+    let latency = sorted(&completed);
+    let half = completed.len() / 2;
+    Some(PhaseSummary {
+        offered: phase_samples.len(),
+        completed: completed.len(),
+        busy: phase_samples.iter().filter(|s| s.outcome == "busy").count(),
+        p50_us: percentile(&latency, 0.5)?,
+        p99_us: percentile(&latency, 0.99)?,
+        p99_upper_us: latency[latency.len().saturating_sub(2)],
+        max_us: *latency.last()?,
+        halves_p99_us: (
+            percentile(&sorted(&completed[..half]), 0.99)?,
+            percentile(&sorted(&completed[half..]), 0.99)?,
+        ),
+        max_send_lag_us: phase_samples
+            .iter()
+            .map(|s| s.sent_us - s.scheduled_us)
+            .max()?,
+    })
 }
 
 /// Embeds one 76-token text through the job table as backfill does, from submission to its vector.
 async fn backfill_one(
     component: &LocalEmbeddingsComponent,
     limits: EmbeddingInputLimits,
-    lane: &host_runtime::local_embeddings::LaneInfo,
+    lane: &LaneInfo,
     item: &str,
     text: &str,
 ) -> Duration {
@@ -195,18 +269,82 @@ async fn backfill_one(
     }
 }
 
+/// Offers `count` queries of 4 to 32 tokens on an open Poisson schedule: every arrival is drawn before the first is
+/// sent, and each query runs in its own task from its scheduled time, so no arrival waits for an earlier answer.
+async fn run_queries(
+    component: &LocalEmbeddingsComponent,
+    limits: EmbeddingInputLimits,
+    dims: usize,
+    origin: Instant,
+    count: usize,
+    phase: &'static str,
+    stream: &mut Stream,
+) -> Vec<Sample> {
+    let mut at = 0.0f64;
+    let schedule: Vec<(f64, String)> = (0..count)
+        .map(|_| {
+            at += -stream.uniform().ln() / QUERY_RATE_PER_SECOND;
+            let tokens = MIN_QUERY_TOKENS
+                + (stream.next() % u64::from(MAX_QUERY_TOKENS - MIN_QUERY_TOKENS + 1)) as u32;
+            (at, text_of(component, limits, tokens, stream))
+        })
+        .collect();
+    let start = Instant::now();
+    let tasks: Vec<_> = schedule
+        .into_iter()
+        .map(|(offset, text)| {
+            let component = component.clone();
+            let due = start + Duration::from_secs_f64(offset);
+            tokio::spawn(async move {
+                tokio::time::sleep_until(due.into()).await;
+                let sent = Instant::now();
+                let admitted = component.preflight_embedding(limits, &text).unwrap();
+                let tokens = admitted.tokens().get();
+                let outcome = match component
+                    .embed_query(&admitted, tokio::time::Instant::now() + QUERY_DEADLINE)
+                    .await
+                {
+                    Ok(vector) => {
+                        assert_eq!(vector.len(), dims);
+                        "ok"
+                    }
+                    Err(DenseUnavailable::LaneBusy { .. }) => "busy",
+                    Err(_) => "refused",
+                };
+                Sample {
+                    phase,
+                    scheduled_us: micros(due.duration_since(origin)),
+                    sent_us: micros(sent.duration_since(origin)),
+                    done_us: micros(origin.elapsed()),
+                    tokens,
+                    outcome,
+                }
+            })
+        })
+        .collect();
+    let mut samples = Vec::with_capacity(count);
+    for task in tasks {
+        samples.push(task.await.unwrap());
+    }
+    samples
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires EIDNARA_LOCAL_EMBEDDINGS_PRODUCTION_BUNDLE and EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY; run in release on the D21 host with --ignored"]
 async fn production_lane_meets_the_reference_query_and_backfill_budgets() {
     let bundle_dir = required_path("EIDNARA_LOCAL_EMBEDDINGS_PRODUCTION_BUNDLE");
     let ort = required_path("EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY");
     let ort_sha256 = sha256_hex(&std::fs::read(&ort).expect("ORT library is readable"));
+    let manifest_sha256 =
+        sha256_hex(&std::fs::read(bundle_dir.join("manifest.json")).expect("bundle manifest"));
+    let lane_limits = LocalEmbeddingsLimits::shipped_lane();
+    let max_waiting_queries = lane_limits.max_waiting_queries;
     let component = LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
         bundle_dir,
         bundle_manifest_sha256: None,
         ort_library: ort,
-        ort_library_sha256: ort_sha256,
-        limits: serving_limits(),
+        ort_library_sha256: ort_sha256.clone(),
+        limits: lane_limits,
     }));
     component.initialize().await.expect("initialize");
     SecondaryComponent::activate(&component)
@@ -217,22 +355,28 @@ async fn production_lane_meets_the_reference_query_and_backfill_budgets() {
         other => panic!("production bundle did not certify: {other:?}"),
     };
     let limits = EmbeddingInputLimits::of_lane(&lane);
-    let mut stream = Stream(0x9e37_79b9_7f4a_7c15);
+    let mut stream = Stream(SEED);
     let origin = Instant::now();
-    let micros = |at: Instant| u64::try_from(at.duration_since(origin).as_micros()).unwrap();
-    let mut samples: Vec<Sample> = Vec::new();
 
-    // Warm-up runs before any timed phase so model load and first-touch costs stay out of every measurement.
+    // The first query after activation is reported on its own: certification already ran the model, so no timed
+    // phase starts colder than this one.
+    let first_text = text_of(&component, limits, MAX_QUERY_TOKENS, &mut stream);
+    let admitted = component.preflight_embedding(limits, &first_text).unwrap();
+    let first_started = Instant::now();
+    component
+        .embed_query(&admitted, tokio::time::Instant::now() + QUERY_DEADLINE)
+        .await
+        .expect("first query");
+    let first_query_us = micros(first_started.elapsed());
+
+    // Warm-up runs before any timed phase so first-touch costs stay out of every measurement.
     for n in 0..8 {
         let text = text_of(&component, limits, BACKFILL_TOKENS, &mut stream);
         backfill_one(&component, limits, &lane, &format!("warm-{n}"), &text).await;
         let query = text_of(&component, limits, MAX_QUERY_TOKENS, &mut stream);
         let admitted = component.preflight_embedding(limits, &query).unwrap();
         component
-            .embed_query(
-                &admitted,
-                tokio::time::Instant::now() + Duration::from_secs(5),
-            )
+            .embed_query(&admitted, tokio::time::Instant::now() + QUERY_DEADLINE)
             .await
             .expect("warm-up query");
     }
@@ -246,158 +390,75 @@ async fn production_lane_meets_the_reference_query_and_backfill_budgets() {
     for (n, text) in texts.iter().enumerate() {
         let service =
             backfill_one(&component, limits, &lane, &format!("throughput-{n}"), text).await;
-        services.push(u64::try_from(service.as_micros()).unwrap());
+        services.push(micros(service));
     }
     let throughput = BACKFILL_TEXTS as f64 / throughput_started.elapsed().as_secs_f64();
     let max_text_service_us = *services.iter().max().unwrap();
 
-    // Open-loop queries: arrivals follow a Poisson schedule regardless of earlier queries, each timed from its scheduled arrival.
-    let run_queries = |count: usize, phase: &'static str, stream: &mut Stream| {
-        let mut at = 0.0f64;
-        let schedule: Vec<(f64, String)> = (0..count)
-            .map(|_| {
-                at += -stream.uniform().ln() / QUERY_RATE_PER_SECOND;
-                let tokens = MIN_QUERY_TOKENS
-                    + (stream.next() % u64::from(MAX_QUERY_TOKENS - MIN_QUERY_TOKENS + 1)) as u32;
-                (at, text_of(&component, limits, tokens, stream))
-            })
-            .collect();
-        let component = component.clone();
-        async move {
-            let start = Instant::now();
-            let tasks: Vec<_> = schedule
-                .into_iter()
-                .map(|(offset, text)| {
-                    let component = component.clone();
-                    let due = start + Duration::from_secs_f64(offset);
-                    tokio::spawn(async move {
-                        tokio::time::sleep_until(due.into()).await;
-                        let sent = Instant::now();
-                        let admitted = component.preflight_embedding(limits, &text).unwrap();
-                        let tokens = admitted.tokens().get();
-                        let outcome = match component
-                            .embed_query(
-                                &admitted,
-                                tokio::time::Instant::now() + Duration::from_secs(5),
-                            )
-                            .await
-                        {
-                            Ok(vector) => {
-                                assert_eq!(vector.len(), 768);
-                                "ok"
-                            }
-                            Err(DenseUnavailable::LaneBusy { .. }) => "busy",
-                            Err(_) => "refused",
-                        };
-                        (due, sent, Instant::now(), tokens, outcome)
-                    })
-                })
-                .collect();
-            let mut out = Vec::with_capacity(tasks.len());
-            for task in tasks {
-                let (due, sent, done, tokens, outcome) = task.await.unwrap();
-                out.push((phase, due, sent, done, tokens, outcome));
-            }
-            out
-        }
-    };
+    let mut samples = run_queries(
+        &component,
+        limits,
+        lane.dims,
+        origin,
+        IDLE_QUERIES,
+        "idle",
+        &mut stream,
+    )
+    .await;
 
-    let idle = run_queries(IDLE_QUERIES, "idle", &mut stream).await;
-
-    // The same open-loop queries while backfill keeps the native slot busy with one text after another.
-    let feeding = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let backfill_texts: Vec<String> = (0..64)
-        .map(|_| text_of(&component, limits, BACKFILL_TOKENS, &mut stream))
-        .collect();
-    let feeder = {
-        let component = component.clone();
-        let lane = lane.clone();
-        let feeding = std::sync::Arc::clone(&feeding);
-        tokio::spawn(async move {
-            let mut embedded = 0usize;
-            while feeding.load(std::sync::atomic::Ordering::Relaxed) {
-                let text = &backfill_texts[embedded % backfill_texts.len()];
-                backfill_one(
-                    &component,
-                    limits,
-                    &lane,
-                    &format!("saturate-{embedded}"),
-                    text,
-                )
-                .await;
-                embedded += 1;
-            }
-            embedded
-        })
-    };
-    let loaded = run_queries(BACKFILL_QUERIES, "backfill", &mut stream).await;
-    feeding.store(false, std::sync::atomic::Ordering::Relaxed);
-    let backfill_embedded = feeder.await.unwrap();
-
-    for (phase, due, sent, done, tokens, outcome) in idle.iter().chain(&loaded) {
-        samples.push(Sample {
-            phase,
-            scheduled_us: micros(*due),
-            sent_us: micros(*sent),
-            done_us: micros(*done),
-            tokens: *tokens,
-            outcome,
-        });
-    }
-    let summarize = |phase: &str| {
-        let phase_samples: Vec<&Sample> = samples.iter().filter(|s| s.phase == phase).collect();
-        let completed = phase_samples.iter().filter(|s| s.outcome == "ok").count();
-        let busy = phase_samples.iter().filter(|s| s.outcome == "busy").count();
-        let mut latency: Vec<u64> = phase_samples
-            .iter()
-            .filter(|s| s.outcome == "ok")
-            .map(|s| s.done_us - s.scheduled_us)
-            .collect();
-        latency.sort_unstable();
-        (
-            phase_samples.len(),
-            completed,
-            busy,
-            percentile(&latency, 0.5),
-            percentile(&latency, 0.99),
-            *latency.last().unwrap(),
-        )
-    };
-    let idle_summary = summarize("idle");
-    let loaded_summary = summarize("backfill");
-    // A query's queue wait under backfill is its latency past the idle median service of a query of its length.
-    let mut idle_service: std::collections::BTreeMap<u32, Vec<u64>> =
-        std::collections::BTreeMap::new();
-    for sample in samples
-        .iter()
-        .filter(|s| s.phase == "idle" && s.outcome == "ok")
-    {
-        idle_service
-            .entry(sample.tokens)
-            .or_default()
-            .push(sample.done_us - sample.sent_us);
-    }
-    let median_service = |tokens: u32| {
-        let mut service = idle_service[&tokens].clone();
-        service.sort_unstable();
-        service[service.len() / 2]
-    };
-    let max_queue_wait_us = samples
-        .iter()
-        .filter(|s| s.phase == "backfill" && s.outcome == "ok")
-        .map(|s| (s.done_us - s.scheduled_us).saturating_sub(median_service(s.tokens)))
-        .max()
-        .unwrap();
-    eprintln!(
-        "threads {}; backfill {throughput:.2} texts/s over {BACKFILL_TEXTS} texts of {BACKFILL_TOKENS} tokens, max single-text service {max_text_service_us} us; \
-         idle queries at {QUERY_RATE_PER_SECOND}/s (offered, completed, busy, p50, p99, max us) {idle_summary:?}; \
-         under backfill {loaded_summary:?} with {backfill_embedded} backfill texts embedded and max queue wait {max_queue_wait_us} us",
-        host_runtime::local_embeddings::inference::inference_threads(),
+    // A fresh open-loop sequence at the same rate while backfill keeps two texts in flight, so a background text
+    // always waits behind the one running and each query arrival competes with it.
+    let feeding = Arc::new(AtomicBool::new(true));
+    let embedded = Arc::new(AtomicUsize::new(0));
+    let backfill_texts: Arc<Vec<String>> = Arc::new(
+        (0..64)
+            .map(|_| text_of(&component, limits, BACKFILL_TOKENS, &mut stream))
+            .collect(),
     );
+    let feeders: Vec<_> = (0..BACKFILL_IN_FLIGHT)
+        .map(|feeder| {
+            let component = component.clone();
+            let lane = lane.clone();
+            let feeding = Arc::clone(&feeding);
+            let embedded = Arc::clone(&embedded);
+            let texts = Arc::clone(&backfill_texts);
+            tokio::spawn(async move {
+                let mut n = 0usize;
+                while feeding.load(Ordering::Relaxed) {
+                    let text = &texts[(n * BACKFILL_IN_FLIGHT + feeder) % texts.len()];
+                    let item = format!("saturate-{feeder}-{n}");
+                    backfill_one(&component, limits, &lane, &item, text).await;
+                    embedded.fetch_add(1, Ordering::Relaxed);
+                    n += 1;
+                }
+            })
+        })
+        .collect();
+    samples.extend(
+        run_queries(
+            &component,
+            limits,
+            lane.dims,
+            origin,
+            BACKFILL_QUERIES,
+            "backfill",
+            &mut stream,
+        )
+        .await,
+    );
+    feeding.store(false, Ordering::Relaxed);
+    for feeder in feeders {
+        feeder.await.unwrap();
+    }
+    let backfill_embedded = embedded.load(Ordering::Relaxed);
+
+    // Raw samples are written before any gate is judged, so a failing run still leaves its evidence.
+    let threads = host_runtime::local_embeddings::inference::inference_threads();
+    let parallelism = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
     if let Some(path) = std::env::var_os("EIDNARA_LOCAL_EMBEDDINGS_SAMPLES") {
         let mut rows = vec![format!(
-            "{{\"rate_per_second\":{QUERY_RATE_PER_SECOND},\"seed\":\"0x9e3779b97f4a7c15\",\"threads\":{},\"throughput\":{throughput},\"backfill_service_us\":{services:?}}}",
-            host_runtime::local_embeddings::inference::inference_threads()
+            "{{\"rate_per_second\":{QUERY_RATE_PER_SECOND},\"seed\":\"{SEED:#x}\",\"model\":\"{}\",\"manifest_sha256\":\"{manifest_sha256}\",\"ort_sha256\":\"{ort_sha256}\",\"available_parallelism\":{parallelism},\"threads\":{threads},\"max_waiting_queries\":{max_waiting_queries},\"cache\":\"warm\",\"first_query_us\":{first_query_us},\"throughput\":{throughput},\"backfill_embedded\":{backfill_embedded},\"backfill_service_us\":{services:?}}}",
+            lane.model
         )];
         rows.extend(samples.iter().map(|s| {
             format!(
@@ -408,23 +469,65 @@ async fn production_lane_meets_the_reference_query_and_backfill_budgets() {
         std::fs::write(path, rows.join("\n")).unwrap();
     }
 
-    assert!(
-        throughput >= 8.0,
-        "76-token backfill throughput {throughput:.2} texts/s is under 8"
+    let idle = summarize(&samples, "idle");
+    let loaded = summarize(&samples, "backfill");
+    // A query's latency under backfill past the idle median service of a query of its length bounds its queue wait from above.
+    let mut idle_service: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
+    for sample in samples
+        .iter()
+        .filter(|s| s.phase == "idle" && s.outcome == "ok")
+    {
+        idle_service
+            .entry(sample.tokens)
+            .or_default()
+            .push(sample.service_us());
+    }
+    let median_service: BTreeMap<u32, u64> = idle_service
+        .into_iter()
+        .map(|(tokens, mut service)| {
+            service.sort_unstable();
+            (tokens, service[service.len() / 2])
+        })
+        .collect();
+    let max_queue_wait_us = samples
+        .iter()
+        .filter(|s| s.phase == "backfill" && s.outcome == "ok")
+        .map(|s| {
+            let service = median_service.get(&s.tokens).copied().unwrap_or(0);
+            s.latency_us().saturating_sub(service)
+        })
+        .max();
+    eprintln!(
+        "parallelism {parallelism}, threads {threads}, waiters {max_waiting_queries}; first query after activation {first_query_us} us; \
+         backfill {throughput:.2} texts/s over {BACKFILL_TEXTS} texts of {BACKFILL_TOKENS} tokens, max single-text service {max_text_service_us} us; \
+         idle at {QUERY_RATE_PER_SECOND}/s {idle:?}; under backfill {loaded:?} with {backfill_embedded} texts embedded and max latency past idle median service {max_queue_wait_us:?} us; \
+         zero busy bounds the busy rate at 3/n by the rule of three"
     );
-    assert_eq!(idle_summary.1, IDLE_QUERIES, "every idle query completes");
+
+    let idle = idle.expect("idle queries completed");
+    let loaded = loaded.expect("queries under backfill completed");
     assert!(
-        idle_summary.4 <= 60_000,
-        "query embedding p99 {}us exceeds 60ms",
-        idle_summary.4
+        throughput >= MIN_BACKFILL_TEXTS_PER_SECOND,
+        "76-token backfill throughput {throughput:.2} texts/s is under {MIN_BACKFILL_TEXTS_PER_SECOND}"
     );
-    assert_eq!(loaded_summary.2, 0, "no query is busy under backfill");
+    assert_eq!(idle.completed, IDLE_QUERIES, "every idle query completes");
+    assert!(
+        idle.p99_us <= MAX_QUERY_P99_US,
+        "query embedding p99 {}us exceeds {MAX_QUERY_P99_US}us",
+        idle.p99_us
+    );
+    assert_eq!(loaded.busy, 0, "no query is busy under backfill");
+    assert_eq!(
+        loaded.completed, BACKFILL_QUERIES,
+        "every query under backfill completes"
+    );
+    assert!(
+        backfill_embedded >= BACKFILL_QUERIES / 8,
+        "backfill kept the slot busy: {backfill_embedded} texts"
+    );
+    let max_queue_wait_us = max_queue_wait_us.expect("queries under backfill completed");
     assert!(
         max_queue_wait_us <= 2 * max_text_service_us,
         "queue wait {max_queue_wait_us}us exceeds twice the longest text service {max_text_service_us}us"
-    );
-    assert_eq!(
-        loaded_summary.1, BACKFILL_QUERIES,
-        "every query under backfill completes"
     );
 }

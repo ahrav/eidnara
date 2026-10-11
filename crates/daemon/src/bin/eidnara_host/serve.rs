@@ -1268,22 +1268,13 @@ fn local_embeddings_from_manifest(
     }))
 }
 
-/// The daemon embeds one text per inference call: backfill admits single-item jobs and queries
-/// carry one text. One row keeps certification and every admitted batch at the single window the
-/// bundle certifies, instead of `[64, max_tokens]` tensors no supported host can hold.
-/// Up to [`MAX_WAITING_QUERIES`] queries wait for the native slot behind the text it is running.
+/// The daemon embeds one text per inference call, with the shipped lane's waiting-query bound.
+/// One row keeps certification and every admitted batch at the single window the bundle
+/// certifies, instead of `[64, max_tokens]` tensors no supported host can hold.
 #[cfg(not(target_os = "macos"))]
 fn lane_limits() -> LocalEmbeddingsLimits {
-    LocalEmbeddingsLimits {
-        max_batch_items: 1,
-        max_waiting_queries: MAX_WAITING_QUERIES,
-        ..LocalEmbeddingsLimits::default()
-    }
+    LocalEmbeddingsLimits::shipped_lane()
 }
-
-/// #825 D26: at most four queries wait for the inference slot; a fifth is busy at once.
-#[cfg(not(target_os = "macos"))]
-const MAX_WAITING_QUERIES: usize = 4;
 
 /// Revalidates startup state and runs the fixed host profile until shutdown.
 ///
@@ -1435,6 +1426,17 @@ pub fn run() -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
+    /// The committed manifest of the bundle every Linux payload ships.
+    #[cfg(not(target_os = "macos"))]
+    fn shipped_manifest() -> host_runtime::local_embeddings::bundle::BundleManifest {
+        let path = format!(
+            "{}/../../release/local-embeddings/gte-modernbert-base-f32/manifest.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_slice(&std::fs::read(path).expect("committed bundle manifest"))
+            .expect("bundle manifest parses")
+    }
+
     /// Startup certification runs `[max_batch_items, max_tokens]` token tensors through the f32
     /// graph, and serving admits the same shape. A 512-token single-row window certifies in
     /// seconds under 1.5 GB of RSS; one 8192-token row alone exceeds the 90 s hard
@@ -1442,15 +1444,8 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_shipped_lane_certifies_and_serves_one_window_within_the_startup_envelope() {
-        use host_runtime::local_embeddings::bundle::BundleManifest;
         const QUALIFIED_TOKENS_PER_CALL: u64 = 512;
-        let path = format!(
-            "{}/../../release/local-embeddings/gte-modernbert-base-f32/manifest.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let manifest: BundleManifest =
-            serde_json::from_slice(&std::fs::read(path).expect("committed bundle manifest"))
-                .expect("bundle manifest parses");
+        let manifest = shipped_manifest();
         let limits = lane_limits();
         let rows = u64::try_from(limits.max_batch_items).expect("row count fits u64");
         assert!(
@@ -1462,15 +1457,17 @@ mod tests {
         assert!(u64::from(manifest.recommended_batch.token_budget) <= rows * manifest.max_tokens);
     }
 
-    /// The shipped lane lets four queries wait behind the text the slot runs, and those waiters
-    /// with the single-row batch fit the lane's own serving-limit validation for the shipped
-    /// bundle, so the component the daemon builds starts rather than disabling at activation.
+    /// The shipped lane lets four queries wait behind the text the slot runs, and its limits pass the
+    /// lane's own serving-limit validation for the shipped bundle, so the component the daemon
+    /// builds starts rather than disabling at activation. The validation counts waiters against
+    /// the scratch the host reserves: six overdraw it, so the check is not vacuous.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn the_shipped_lane_admits_four_waiting_queries_within_its_serving_limits() {
-        use host_runtime::local_embeddings::bundle::BundleManifest;
+    fn the_shipped_lane_validates_its_four_waiting_queries_and_refuses_six() {
         use host_runtime::local_embeddings::inference::InferenceError;
-        use host_runtime::local_embeddings::{EmbedTokens, EmbeddingEngine, LaneInfo};
+        use host_runtime::local_embeddings::{
+            EmbedTokens, EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent,
+        };
         struct Unused;
         impl EmbeddingEngine for Unused {
             fn embed(&self, _: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
@@ -1480,35 +1477,37 @@ mod tests {
                 unreachable!("validation counts no tokens")
             }
         }
-        let path = format!(
-            "{}/../../release/local-embeddings/gte-modernbert-base-f32/manifest.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let manifest: BundleManifest =
-            serde_json::from_slice(&std::fs::read(path).expect("committed bundle manifest"))
-                .expect("bundle manifest parses");
+        let manifest = shipped_manifest();
+        let validate = |limits: LocalEmbeddingsLimits| {
+            let lane = LaneInfo {
+                model: manifest.model.clone(),
+                fingerprint: manifest.fingerprint.clone(),
+                table_epoch: manifest.table_epoch,
+                dims: usize::try_from(manifest.dims).expect("dims fit usize"),
+                execution_provider: "cpu",
+                max_tokens: u32::try_from(manifest.max_tokens).expect("max tokens fit u32"),
+                max_text_bytes: limits.max_text_bytes,
+                provenance: serde_json::Value::Null,
+                recommended_rows: manifest.recommended_batch.rows,
+                recommended_token_budget: manifest.recommended_batch.token_budget,
+            };
+            LocalEmbeddingsComponent::ready_with_engine(lane, std::sync::Arc::new(Unused), limits)
+        };
         let limits = lane_limits();
         assert_eq!(limits.max_waiting_queries, 4);
-        let lane = LaneInfo {
-            model: manifest.model.clone(),
-            fingerprint: manifest.fingerprint.clone(),
-            table_epoch: manifest.table_epoch,
-            dims: usize::try_from(manifest.dims).expect("dims fit usize"),
-            execution_provider: "cpu",
-            max_tokens: u32::try_from(manifest.max_tokens).expect("max tokens fit u32"),
-            max_text_bytes: limits.max_text_bytes,
-            provenance: serde_json::Value::Null,
-            recommended_rows: manifest.recommended_batch.rows,
-            recommended_token_budget: manifest.recommended_batch.token_budget,
+        assert!(
+            validate(limits.clone()).is_ok(),
+            "the shipped lane limits validate"
+        );
+        let six = LocalEmbeddingsLimits {
+            max_waiting_queries: 6,
+            ..limits
         };
-        let component =
-            host_runtime::local_embeddings::LocalEmbeddingsComponent::ready_with_engine(
-                lane,
-                std::sync::Arc::new(Unused),
-                limits,
-            )
-            .expect("the shipped lane limits validate");
-        assert_eq!(component.waiting_queries_for_test(), 0);
+        let refused = validate(six).err().expect("six waiters overdraw scratch");
+        assert!(
+            refused.to_string().contains("max_waiting_queries"),
+            "{refused}"
+        );
     }
 
     /// A Linux generation without ORT or without the bundle manifest is degraded, never
