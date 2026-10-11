@@ -205,8 +205,14 @@ export abstract class Arm {
         }
     }
 
-    /** An Eidnara arm whose daemon has exited would fail open for the rest of the run. */
-    assertHostRunning(key: string): void {
+    /**
+     * A harness that exited would turn every later turn into an error row, and an Eidnara arm
+     * whose daemon exited would fail open for the rest of the run; either ends the arm.
+     */
+    assertAlive(key: string): void {
+        if (procStats(this.harnessPid()) === null) {
+            throw new Error(`the harness is not running after turn ${key}`);
+        }
         if (this.spec.eidnara && procStats(this.hostPid()) === null) {
             throw new Error(`the host is not running after turn ${key}`);
         }
@@ -429,7 +435,8 @@ export class PiArm extends Arm {
         if (child.exitCode !== null || child.signalCode !== null) return;
         child.stdin?.end();
         if (child.pid !== undefined) await stopOwnedTree(child.pid, 10_000);
-        await rpc.shutdown(5_000).catch(() => undefined);
+        // A Pi process that survives its SIGKILL fails the arm; stop() reports it.
+        await rpc.shutdown(5_000);
     }
 
     harnessPid(): number | undefined {

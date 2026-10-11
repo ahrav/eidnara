@@ -277,12 +277,13 @@ and tokens per caller, and memory.
   the shared-memory addon from `bun run --cwd packages/shm-native
   build:native`. An unknown or repeated arm name, a flag value outside its
   documented set, a flag the command does not know, a missing fixture, or an
-  addon that cannot load fails the run before any arm starts, and an Eidnara arm whose daemon exits fails at
-  the next turn.
+  addon that cannot load fails the run before any arm starts, and an arm
+  whose harness or daemon exits fails at the next turn.
 - When passwordless `sudo` can create mount and PID namespaces, each harness
-  runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the home directory, and the run
-  directory, and the arm's own directory is mounted back; the arm's `/proc`
-  lists only its own processes. The harness runs as the invoking user with
+  runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the
+  home directory, and the run directory, and the arm's own directory is
+  mounted back; the arm's `/proc` lists only its own processes. The harness
+  runs as the invoking user with
   `no_new_privs` set, so `sudo` inside the arm stays unprivileged. The run
   directory must sit outside the repository and the harness install
   directories. `--sandbox off` runs without isolation.

@@ -150,7 +150,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
                 log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
             }
             const result = await arm.prompt(turn.user, timeout);
-            arm.assertHostRunning(key);
+            arm.assertAlive(key);
             const harness = treeStats(arm.harnessPid());
             const host = procStats(arm.hostPid());
             const forwarded = arm.main.forwardedCalls - forwardedBefore;

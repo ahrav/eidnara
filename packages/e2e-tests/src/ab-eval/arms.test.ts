@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { Arm, armSpec, inheritedHarnessEnv, type PromptResult } from "./arms";
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Arm, armSpec, inheritedHarnessEnv, PiArm, type PromptResult } from "./arms";
 
 describe("Pi arm process", () => {
     it("keeps ambient secrets out of the agent's inherited environment", () => {
@@ -65,18 +69,58 @@ describe("host liveness", () => {
         fixtureBin: "/nonexistent/fixture",
     };
     class DeadHostArm extends FailingTeardownArm {
+        harnessPid(): number | undefined {
+            return process.pid;
+        }
         hostPid(): number | undefined {
             return 2 ** 22 + 1;
         }
     }
 
     it("fails an Eidnara arm whose host is gone and leaves an off arm alone", () => {
-        expect(() => new DeadHostArm(armSpec("pi-on"), ctx).assertHostRunning("0:1")).toThrow(
+        expect(() => new DeadHostArm(armSpec("pi-on"), ctx).assertAlive("0:1")).toThrow(
             /host.*0:1/,
         );
-        expect(() =>
-            new DeadHostArm(armSpec("pi-off"), ctx).assertHostRunning("0:1"),
-        ).not.toThrow();
+        expect(() => new DeadHostArm(armSpec("pi-off"), ctx).assertAlive("0:1")).not.toThrow();
+    });
+
+    it("fails any arm whose harness is gone", () => {
+        class DeadHarnessArm extends FailingTeardownArm {
+            harnessPid(): number | undefined {
+                return 2 ** 22 + 1;
+            }
+        }
+        expect(() => new DeadHarnessArm(armSpec("pi-off"), ctx).assertAlive("0:1")).toThrow(
+            /harness.*0:1/,
+        );
+    });
+});
+
+describe("Pi arm teardown", () => {
+    it("reports a Pi process that survived its shutdown", async () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-pi-arm-"));
+        const harness = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+        try {
+            const arm = new PiArm(armSpec("pi-off"), {
+                root,
+                resultsDir: root,
+                workdir: root,
+                sandboxDir: "",
+                enforceWindow: false,
+                onCall: () => {},
+                fixtureBin: "/nonexistent/fixture",
+            });
+            (arm as unknown as { rpc: unknown }).rpc = {
+                child: harness,
+                shutdown: async () => {
+                    throw new Error("Pi RPC process did not exit");
+                },
+            };
+            await expect(arm.closeSession()).rejects.toThrow("did not exit");
+        } finally {
+            harness.kill("SIGKILL");
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
 
