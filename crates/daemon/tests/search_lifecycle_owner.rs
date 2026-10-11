@@ -5722,6 +5722,19 @@ async fn operator_daemon() -> (KernelDaemon, host_runtime::RouteHandle, std::pat
         status = operator_status(&daemon, route).await;
     }
     daemon.handler().pause_claim_sources_for_test();
+    let consumer = status["record"]["consumer_id"]
+        .as_str()
+        .expect("a Current record names its consumer")
+        .to_owned();
+    let store = daemon.store();
+    let started = Instant::now();
+    while store.outbox_consumer_checkpoint(&consumer).unwrap() != Some(store.tip().unwrap()) {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the Current family's consumer never reached the kernel tip, so a disable would answer that the consumer has not reached the commit-log tip"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     (daemon, route, home)
 }
 
