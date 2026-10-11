@@ -4,13 +4,20 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { probeCapabilities } from "@eidnara/shm-native";
+import { sandboxAvailable } from "../src/ab-eval/sandbox";
 import { pinnedNodeOnPath } from "../src/bedrock-peer/harness-runtime";
+
+const REPO_ROOT = join(import.meta.dir, "../../..");
 
 const SCRIPT = join(import.meta.dir, "eval-ab.ts");
 const REPORT = join(import.meta.dir, "eval-ab-report.ts");
 
-function run(root: string, args: string[], extra: { path?: string; cwd?: string } = {}) {
-    return spawnSync(process.execPath, [SCRIPT, ...args, "--out", join(root, "run")], {
+function run(
+    root: string,
+    args: string[],
+    extra: { path?: string; cwd?: string; out?: string } = {},
+) {
+    return spawnSync(process.execPath, [SCRIPT, ...args, "--out", extra.out ?? join(root, "run")], {
         encoding: "utf8",
         // Without `opencode` on PATH an OpenCode arm fails as its first session opens.
         env: { ...process.env, PATH: extra.path ?? "/usr/bin:/bin" },
@@ -262,6 +269,27 @@ describe("eval-ab", () => {
             cleanup();
         }
     });
+
+    it.skipIf(!sandboxAvailable() || !nodeBin.ok)(
+        "refuses a sandboxed run root inside a kept path before claiming it",
+        () => {
+            fresh();
+            // The repository is kept visible in every sandbox, so a run root inside it is refused.
+            const out = join(REPO_ROOT, "target", `ab-eval-test-${process.pid}`);
+            const result = run(root, ["--arms", "pi-off", "--sandbox", "on"], {
+                out,
+                path: `${nodeBin.ok ? nodeBin.root : ""}:/usr/bin:/bin`,
+            });
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain("inside");
+                expect(existsSync(out)).toBe(false);
+            } finally {
+                rmSync(out, { recursive: true, force: true });
+                cleanup();
+            }
+        },
+    );
 
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [

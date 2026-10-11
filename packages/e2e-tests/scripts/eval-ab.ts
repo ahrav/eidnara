@@ -1,6 +1,13 @@
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+    appendFileSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    realpathSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { probeCapabilities } from "@eidnara/shm-native";
 import { type Arm, armRoot, armSpec, makeArm, type PromptResult } from "../src/ab-eval/arms";
 import type { CallRecord } from "../src/ab-eval/gateway";
@@ -233,6 +240,17 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
     log("done");
 }
 
+/** `out` with its existing ancestor resolved through symlinks, as the sandbox will see it once it exists. */
+function realRunRoot(out: string): string {
+    const missing: string[] = [];
+    let dir = out;
+    while (!existsSync(dir)) {
+        missing.unshift(basename(dir));
+        dir = dirname(dir);
+    }
+    return join(realpathSync(dir), ...missing);
+}
+
 async function main(): Promise<void> {
     const opts = parseArgs(process.argv.slice(2));
     const specs = opts.arms.map(armSpec);
@@ -286,10 +304,12 @@ async function main(): Promise<void> {
         const sources = detectHarnessRuntimeSources();
         if (!sources.ok) throw new Error(`Eidnara arms need both toolchains: ${sources.reason}`);
     }
+    // The run root is checked against the kept paths before it exists, so a refused location
+    // leaves nothing behind.
+    if (opts.sandbox) assertRunRootMaskable(realRunRoot(opts.out), sharedKeep(specs));
+    else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
-    if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep(specs));
-    else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
     writeFileSync(
         join(opts.out, "world.json"),
         JSON.stringify({ ...world, files: Object.keys(world.files).length }, null, 1),
