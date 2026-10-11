@@ -93,9 +93,14 @@ function main(): void {
         sessions: { turns: unknown[] }[];
     };
     const expectedTurns = world.sessions.reduce((sum, s) => sum + s.turns.length, 0);
-    const incomplete = arms
-        .filter((arm) => (turnsByArm.get(arm)?.length ?? 0) !== expectedTurns)
-        .map((arm) => `${arm} recorded ${turnsByArm.get(arm)?.length ?? 0}/${expectedTurns} turns`);
+    const incomplete = arms.flatMap((arm) => {
+        const recorded = turnsByArm.get(arm)?.length ?? 0;
+        if (recorded !== expectedTurns)
+            return [`${arm} recorded ${recorded}/${expectedTurns} turns`];
+        // `eval-ab` writes the marker after the arm's teardown succeeded.
+        if (!existsSync(join(armsDir, arm, "done.json"))) return [`${arm} did not finish`];
+        return [];
+    });
     if (incomplete.length > 0) throw new Error(`incomplete arms: ${incomplete.join("; ")}`);
 
     lines.push("## Accuracy by fact kind (correct/total; s=stale a=abstained w=wrong)", "");

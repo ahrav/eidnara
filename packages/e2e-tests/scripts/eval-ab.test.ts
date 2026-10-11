@@ -1,16 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import {
-    existsSync,
-    mkdirSync,
-    mkdtempSync,
-    readFileSync,
-    rmSync,
-    symlinkSync,
-    writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { probeCapabilities } from "@eidnara/shm-native";
 
 const SCRIPT = join(import.meta.dir, "eval-ab.ts");
 const REPORT = join(import.meta.dir, "eval-ab-report.ts");
@@ -102,16 +95,14 @@ describe("eval-ab", () => {
         }
     });
 
-    it("records a relative fixture path as the absolute file it checked", () => {
+    it("resolves a relative fixture path against the invocation directory", () => {
         fresh();
-        writeFileSync(join(root, "fx"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
         const result = run(root, ["--arms", "pi-on", "--sandbox", "off", "--fixture-bin", "./fx"], {
             cwd: root,
         });
         try {
             expect(result.status).not.toBe(0);
-            const options = JSON.parse(readFileSync(join(root, "run/options.json"), "utf8"));
-            expect(options.fixtureBin).toBe(join(root, "fx"));
+            expect(result.stderr).toContain(`${join(root, "fx")} is not an executable file`);
         } finally {
             cleanup();
         }
@@ -120,7 +111,7 @@ describe("eval-ab", () => {
     it("refuses a stall target the world does not contain", () => {
         const result = run(fresh(), [
             "--arms",
-            "pi-off",
+            "pi-on",
             "--sandbox",
             "off",
             "--stall-at",
@@ -134,6 +125,40 @@ describe("eval-ab", () => {
             cleanup();
         }
     });
+
+    it("refuses a stall request when no selected arm runs a daemon", () => {
+        const result = run(fresh(), ["--arms", "pi-off", "--sandbox", "off", "--stall-at", "0:1"]);
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("--stall-at");
+            expect(existsSync(join(root, "run"))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.skipIf(probeCapabilities().available)(
+        "refuses an Eidnara arm when the shared-memory addon cannot load",
+        () => {
+            fresh();
+            writeFileSync(join(root, "fx"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+            const result = run(root, [
+                "--arms",
+                "pi-on",
+                "--sandbox",
+                "off",
+                "--fixture-bin",
+                join(root, "fx"),
+            ]);
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain("shm-native");
+                expect(existsSync(join(root, "run"))).toBe(false);
+            } finally {
+                cleanup();
+            }
+        },
+    );
 
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
@@ -155,6 +180,31 @@ describe("eval-ab", () => {
 });
 
 describe("eval-ab-report", () => {
+    it("fails on an arm that recorded every turn but did not finish", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
+        try {
+            const arm = join(root, "results/pi-off");
+            mkdirSync(arm, { recursive: true });
+            writeFileSync(
+                join(root, "world.json"),
+                JSON.stringify({ sessions: [{ turns: [{}] }] }),
+            );
+            writeFileSync(
+                join(arm, "turns.jsonl"),
+                `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n`,
+            );
+            const result = spawnSync(process.execPath, [REPORT, root], {
+                encoding: "utf8",
+                timeout: 60_000,
+            });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("pi-off");
+            expect(result.stderr).toContain("did not finish");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("fails on an arm that recorded fewer turns than the world holds", () => {
         const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
         try {

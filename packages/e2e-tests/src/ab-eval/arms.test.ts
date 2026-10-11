@@ -54,6 +54,32 @@ class FailingTeardownArm extends Arm {
     }
 }
 
+describe("host liveness", () => {
+    const ctx = {
+        root: "/nonexistent/arm",
+        resultsDir: "/nonexistent/results",
+        workdir: "/nonexistent/work",
+        sandboxDir: "",
+        enforceWindow: false,
+        onCall: () => {},
+        fixtureBin: "/nonexistent/fixture",
+    };
+    class DeadHostArm extends FailingTeardownArm {
+        hostPid(): number | undefined {
+            return 2 ** 22 + 1;
+        }
+    }
+
+    it("fails an Eidnara arm whose host is gone and leaves an off arm alone", () => {
+        expect(() => new DeadHostArm(armSpec("pi-on"), ctx).assertHostRunning("0:1")).toThrow(
+            /host.*0:1/,
+        );
+        expect(() =>
+            new DeadHostArm(armSpec("pi-off"), ctx).assertHostRunning("0:1"),
+        ).not.toThrow();
+    });
+});
+
 describe("arm teardown", () => {
     it("reports a harness that would not stop and still stops the gateways", async () => {
         const arm = new FailingTeardownArm(armSpec("pi-off"), {

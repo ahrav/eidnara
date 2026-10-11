@@ -24,7 +24,7 @@ import { HermeticHostStack } from "../rust-runner/hermetic-host";
 import { isSensitiveEnvKey } from "../secret-env-keys";
 import { StillRunningError, settleWithin } from "./deadline";
 import { BedrockGateway, type CallRecord, type TurnScope } from "./gateway";
-import { stopOwnedTree } from "./procs";
+import { procStats, stopOwnedTree } from "./procs";
 import { ensureSandboxScript, nodeRoot, opencodeBinary, sandboxKeep, sandboxPath } from "./sandbox";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
@@ -202,6 +202,13 @@ export abstract class Arm {
             return record.pids[0]?.pid;
         } catch {
             return undefined;
+        }
+    }
+
+    /** An Eidnara arm whose daemon has exited would fail open for the rest of the run. */
+    assertHostRunning(key: string): void {
+        if (this.spec.eidnara && procStats(this.hostPid()) === null) {
+            throw new Error(`the host is not running after turn ${key}`);
         }
     }
 
