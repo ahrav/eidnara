@@ -1216,6 +1216,63 @@ describe("window-scoped fail-open", () => {
         });
     }
 
+    it("publishes a candidate over the limit that is smaller than the window plus the host messages a decline serves before it", async () => {
+        const sessionId = `invocation-before-window-${Date.now()}`;
+        const anchor = { mid: "m-2", sequence: 5 };
+        const host = hostArray(sessionId, 6).map((member, index) => {
+            (member.info as Record<string, unknown>).model = GATED_MODEL;
+            // The folded head dwarfs the rendered summary, as covered history does.
+            if (index === 0) member.parts = [{ type: "text", text: "y".repeat(20_000) }];
+            return member;
+        });
+        const summary: MessageLike = {
+            info: { id: "fold", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "x".repeat(4_000) }],
+        };
+        const window = host.slice(2);
+        const candidate = [summary, ...window];
+        const bytes = (values: readonly unknown[]): number =>
+            values.map(canonicalJsonLength).reduce((sum, length) => sum + length, 0);
+        const charged = (values: readonly unknown[]): number =>
+            chargeInvocation(values.map(canonicalJsonLength), {
+                headroomPermille: 250,
+                profile: "opencode-heuristic",
+            }).chargedTokens;
+        // Enabling state: the candidate grows past its window yet stays under the whole host array.
+        expect(bytes(candidate)).toBeGreaterThan(bytes(window));
+        expect(bytes(candidate)).toBeLessThan(bytes(host));
+        const limit = charged(window);
+        const { client, bodies } = fakeDaemon({
+            pages: () => ({ anchors: [anchor] }),
+            transform: (body) => ({
+                base_revision: body.base_revision,
+                output_revision: "summary-out",
+                boundary: anchor,
+                operations: [{ op: "insert", values: candidate }],
+            }),
+        });
+        const limitSpy = spyOn(eventResolvers, "resolveTrustedContextLimit").mockImplementation(
+            (providerID, modelID) =>
+                providerID === GATED_MODEL.providerID && modelID === GATED_MODEL.modelID
+                    ? limit
+                    : undefined,
+        );
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const output = { messages: [...host] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(bodies[0]?.boundary).toEqual(anchor);
+            expect(output.messages).toEqual(candidate);
+            const passLine = logsOf(debug, sessionId).find((line) => line.startsWith("rust pass:"));
+            expect(passLine).toContain("applied=true");
+            expect(passLine).toContain("admission=shrinks ");
+        } finally {
+            debug.mockRestore();
+            limitSpy.mockRestore();
+        }
+    });
+
     it("serves raw against a mismatched basis anchor or a changed terminal message", async () => {
         const moved = `fail-open-moved-${Date.now()}`;
         const movedDaemon = failAfterFold(moved, { mid: "m-3", sequence: 6 });

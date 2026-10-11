@@ -57,16 +57,27 @@ export function chargeInvocation(
     };
 }
 
-/** A candidate with no more bytes than the incoming window is accepted over the limit, allowing an oversized window to compact. */
+/**
+ * A candidate with no more bytes than a decline would serve is accepted over the limit, allowing
+ * an oversized window to compact. A decline serves the incoming window and, when the window starts
+ * after the host array's head, the host messages before it. `servedBeforeWindow(needed)` returns
+ * at least `needed` UTF-8 bytes of those messages when they hold that many, and their total
+ * otherwise.
+ */
 export function validateInvocation(
     candidateLengths: readonly number[],
     incomingLengths: readonly number[],
     budget: InvocationBudget,
+    servedBeforeWindow?: (needed: number) => number | undefined,
 ): InvocationValidation {
     const candidate = chargeInvocation(candidateLengths, budget);
     if (budget.maxTokens === undefined) return { ok: true, candidate, reason: "limit_unknown" };
     if (candidate.chargedTokens <= budget.maxTokens) return { ok: true, candidate, reason: "fits" };
     const incoming = chargeInvocation(incomingLengths, budget);
     if (candidate.bytes <= incoming.bytes) return { ok: true, candidate, reason: "shrinks" };
+    const needed = candidate.bytes - incoming.bytes;
+    if ((servedBeforeWindow?.(needed) ?? 0) >= needed) {
+        return { ok: true, candidate, reason: "shrinks" };
+    }
     return { ok: false, candidate, incoming, limit: budget.maxTokens };
 }

@@ -74,6 +74,7 @@ const DISCOVERY_BUDGET_MS = TRANSFORM_SEND_TIMEOUT_MS - 4_000;
 if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no discovery budget");
 /** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
 const INVOCATION_HEADROOM_PERMILLE = 250;
+const HOST_BYTES_BEFORE_CHUNK = 32;
 /** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
 const WIRE_PROJECTION_FACTOR = 4;
 /** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
@@ -304,6 +305,33 @@ function failOpenPrefix(
     )
         return undefined;
     return applied.values.length - 1;
+}
+
+function hostBytesBetween(
+    source: TransformPassSource,
+    start: number,
+    end: number,
+    needed: number,
+    lease: Pick<CaptureLease, "reserve" | "remainingBytes">,
+): number | undefined {
+    let bytes = 0;
+    for (let to = end; to > start && bytes < needed; ) {
+        const from = Math.max(start, to - HOST_BYTES_BEFORE_CHUNK);
+        if (!lease.reserve((to - from) * CANDIDATE_SLOT_BYTES)) return undefined;
+        const slots = source.readWindow(from, to);
+        if (slots === undefined) return undefined;
+        const inspection = inspectReferenceableMessages(slots, lease.remainingBytes, 0, false);
+        if (!inspection.ok || !lease.reserve(inspection.estimatedBytes)) return undefined;
+        try {
+            for (let index = slots.length - 1; index >= 0 && bytes < needed; index -= 1)
+                bytes += canonicalJsonLength(slots[index]);
+        } catch (error) {
+            if (error instanceof TypeError) return undefined;
+            throw error;
+        }
+        to = from;
+    }
+    return bytes;
 }
 
 /**
@@ -622,7 +650,8 @@ export interface TransformPassPreparation {
  * `publish`, the one host write, which runs after every check the pass makes.
  *
  * Each attempt calls, in order: `preflight`, `readWindow`, `idOf` on the window, `contextLimit`,
- * `prepare`, `liveWindow` for every recheck, `validateOutput`, `publicationRejection`, and
+ * `prepare`, `liveWindow` for every recheck, `validateOutput`, `readWindow` on the slots before
+ * the window for the invocation gate, `publicationRejection`, and
  * `publish`. A `boundary_unknown` answer starts one more attempt from `preflight`. A failed pass
  * may call `liveWindow`, `publicationRejection`, and `publish` after `contextLimit` to fail open.
  */
@@ -1078,6 +1107,7 @@ export function createTransformSessionClient(
                   captured: CapturedHistory;
                   boundaryIndex: number;
                   recheck: (phase: string) => void;
+                  servedBeforeWindow: (needed: number) => number | undefined;
                   /** The trusted limit the main publication's invocation gate reads. */
                   contextLimit: number | undefined;
                   /** Leading applied values the fallback serves; the rest come from the capture. */
@@ -1097,21 +1127,13 @@ export function createTransformSessionClient(
             const applied = failOpen?.previous.applied;
             if (!failOpen || !applied || source.failOpen === false) return false;
             try {
-                failOpen.recheck("fail-open");
                 if (retainedOutputs.peek(sessionId) !== failOpen.previous) return false;
                 const { members } = failOpen.captured;
                 const { prefix } = failOpen;
                 const from = failOpen.previous.rawCount - (applied.values.length - prefix);
-                // The served prefix must match its capture; the kept terminal is the host's
-                // object, which it may have grown in place.
-                if (!capturedMessagesUnchanged(applied.values, applied.capture, prefix)) {
-                    retainedOutputs.dropApplied(sessionId, failOpen.previous);
-                    return false;
-                }
                 const served = [...applied.values.slice(0, prefix), ...members.slice(from)];
                 const gated = failOpen.contextLimit !== undefined;
                 if (
-                    source.publicationRejection(served.length) !== null ||
                     !lease.reserve(
                         served.length * CANDIDATE_SLOT_BYTES +
                             (gated ? members.length * LENGTH_SLOT_BYTES : 0),
@@ -1135,6 +1157,7 @@ export function createTransformSessionClient(
                             headroomPermille: INVOCATION_HEADROOM_PERMILLE,
                             profile: source.invocationProfile,
                         },
+                        failOpen.servedBeforeWindow,
                     );
                     admission = admissionOf(invocation);
                     if (!invocation.ok) {
@@ -1145,6 +1168,15 @@ export function createTransformSessionClient(
                         return false;
                     }
                 }
+                // Final synchronous guards, after the last read of host values: the served prefix
+                // must match its capture; the kept terminal is the host's object, which it may have
+                // grown in place.
+                failOpen.recheck("fail-open");
+                if (!capturedMessagesUnchanged(applied.values, applied.capture, prefix)) {
+                    retainedOutputs.dropApplied(sessionId, failOpen.previous);
+                    return false;
+                }
+                if (source.publicationRejection(served.length) !== null) return false;
                 const failure = source.publish(served, members, failOpen.boundaryIndex);
                 if (failure) {
                     sessionLog.warn(
@@ -1275,15 +1307,21 @@ export function createTransformSessionClient(
                 boundaryIndex = discovered.index;
             }
             // An anchor ends a cold import whether or not this pass applies.
+            // A decline serves the whole host array, so the slots before the window weigh with it:
+            // those before the boundary, or those a cold import skips between its lead and its head.
+            let servedBefore: readonly [start: number, end: number] = [0, boundaryIndex];
             if (boundary !== null) state.pinnedHead = undefined;
             else {
                 const head = coldHead(state, source);
                 if (head !== undefined) {
+                    servedBefore = [source.coldLead ?? 0, head];
                     source = coldSource(source, head);
                     host = source.host;
                     boundaryIndex = 0;
                 }
             }
+            const servedBeforeWindow = (needed: number): number | undefined =>
+                hostBytesBetween(hostSource, servedBefore[0], servedBefore[1], needed, lease);
             // The window is copied, inspected, and taped in one synchronous section.
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
@@ -1382,6 +1420,7 @@ export function createTransformSessionClient(
                     captured,
                     boundaryIndex,
                     recheck: recheckCapture,
+                    servedBeforeWindow,
                     contextLimit: reportedContextLimit,
                     prefix: servedPrefix,
                 };
@@ -1624,18 +1663,17 @@ export function createTransformSessionClient(
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     source.validateOutput?.(candidate, boundaryId);
                 }
-                // Final synchronous guards: ownership, source membership and content, and the host container contract.
-                recheckCapture("publish");
-                const publishRejection = source.publicationRejection(candidate.length);
-                if (publishRejection !== null) {
-                    throw new PassDeclined(sessionId, "host_container", publishRejection);
-                }
                 // Every candidate entry's canonical length is charged, not the inserted payload alone.
-                const invocation = validateInvocation(application.lengths, inputLengths, {
-                    maxTokens: reportedContextLimit,
-                    headroomPermille: INVOCATION_HEADROOM_PERMILLE,
-                    profile: source.invocationProfile,
-                });
+                const invocation = validateInvocation(
+                    application.lengths,
+                    inputLengths,
+                    {
+                        maxTokens: reportedContextLimit,
+                        headroomPermille: INVOCATION_HEADROOM_PERMILLE,
+                        profile: source.invocationProfile,
+                    },
+                    servedBeforeWindow,
+                );
                 admission = admissionOf(invocation);
                 if (!invocation.ok) {
                     throw new PassDeclined(
@@ -1644,6 +1682,13 @@ export function createTransformSessionClient(
                         `${invocation.candidate.chargedTokens} charged tokens over ${invocation.limit}, growing from ${invocation.incoming.bytes} to ${invocation.candidate.bytes} bytes, under ${invocation.candidate.profile.identity} ${invocation.candidate.profile.revision}`,
                         "warn",
                     );
+                }
+                // Final synchronous guards, after the last read of host values: ownership, source
+                // membership and content, and the host container contract.
+                recheckCapture("publish");
+                const publishRejection = source.publicationRejection(candidate.length);
+                if (publishRejection !== null) {
+                    throw new PassDeclined(sessionId, "host_container", publishRejection);
                 }
                 logStage(sessionId, "apply", applyStartedAt, timings);
                 const applyReplaceStartedAt = performance.now();

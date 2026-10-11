@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
-import { TransformCaptureAdmission } from "./transform-capture";
+import { canonicalJsonLength } from "./edit-recipe";
+import { type CaptureLease, TransformCaptureAdmission } from "./transform-capture";
 import {
     createTransformSessionClient,
     type RustModeModuleClient,
@@ -384,6 +385,183 @@ describe("transform session client over plain data", () => {
         expect(await run()).toEqual({ kind: "applied", boundary: older });
         expect(idReads).toBe(300);
         expect(host.windows.at(-1)).toEqual([600, 900]);
+    });
+});
+
+describe("transform session client invocation gate before the window", () => {
+    async function gatedPass(
+        host: PlainHost,
+        anchor: { mid: string; sequence: number } | null,
+        options: {
+            source?: Partial<TransformPassSource>;
+            lease?: (lease: CaptureLease) => CaptureLease;
+            reply?: Reply;
+        } = {},
+    ) {
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: anchor ? [anchor] : [] })],
+            transform: [options.reply ?? foldReply(anchor)],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admitted = new TransformCaptureAdmission().admit("ses");
+        if (!("lease" in admitted)) throw new Error("admission declined");
+        return client.run("ses", options.lease?.(admitted.lease) ?? admitted.lease, {
+            ...source(host),
+            contextLimit: () => 1,
+            ...options.source,
+        });
+    }
+
+    function wideFoldReply(summaryBytes: number): Reply {
+        return (body) => ({
+            status: "ok",
+            action: "HARD",
+            boundary: null,
+            base_revision: body.base_revision,
+            output_revision: "wide-out",
+            operations: [
+                {
+                    op: "insert",
+                    values: [{ id: "eidnara:synthetic:m0", text: "x".repeat(summaryBytes) }],
+                },
+                {
+                    op: "keep",
+                    source: "input",
+                    start: 0,
+                    count: (body.native_messages as unknown[]).length,
+                },
+            ],
+        });
+    }
+
+    it("reads only the host messages before the window that cover the candidate's growth", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const growth = canonicalJsonLength({ id: "eidnara:synthetic:m0", text: "summary" });
+        expect(growth).toBeLessThan(canonicalJsonLength(host.values.slice(80, 90)));
+        expect(await gatedPass(host, anchor)).toEqual({ kind: "applied", boundary: anchor });
+        expect(ids(host.published[0])).toEqual([
+            "eidnara:synthetic:m0",
+            ...host.values.slice(90).map((value) => value.id),
+        ]);
+        const [windowRead, ...beforeReads] = host.windows;
+        expect(windowRead).toEqual([90, 100]);
+        expect(beforeReads[0]?.[1]).toBe(90);
+        const slotsRead = beforeReads.reduce((sum, [start, end]) => sum + end - start, 0);
+        expect(slotsRead).toBeLessThan(90);
+    });
+
+    it("reads to the host's head and declines when the messages before the window cannot cover the growth", async () => {
+        const host = plainHost(5);
+        const anchor = { mid: "m2", sequence: 1 };
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+        expect(host.windows).toEqual([
+            [1, 5],
+            [0, 1],
+        ]);
+    });
+
+    it("counts the host messages a cold import skips between its lead and its head", async () => {
+        const host = plainHost(HALF_CAP_BLOCKS * 2);
+        const head = HALF_CAP_BLOCKS + 1;
+        const outcome = await gatedPass(host, null, {
+            source: { measure: () => () => ({ blocks: 1, bytes: 10 }), coldLead: 1 },
+        });
+        expect(outcome).toEqual({ kind: "applied", boundary: null });
+        expect(ids(host.published[0])).toEqual([
+            "eidnara:synthetic:m0",
+            "m1",
+            ...host.values.slice(head).map((value) => value.id),
+        ]);
+        const skippedReads = host.windows.filter(([start, end]) => start >= 1 && end <= head);
+        expect(skippedReads.length).toBeGreaterThan(0);
+        expect(skippedReads[0]?.[1]).toBe(head);
+    });
+
+    it("measures the messages before the window ahead of the final publication guards", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const planted = host.values[89] as { id: string; text: string };
+        host.values[89] = new Proxy(planted, {
+            ownKeys(target) {
+                host.values[99] = { id: "m100", text: "edited while measuring" };
+                return Reflect.ownKeys(target);
+            },
+        });
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+    });
+
+    it("declines when a message before the window is a proxy, however large it reports itself", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const planted = host.values[89] as { id: string; text: string };
+        host.values[89] = new Proxy(planted, {
+            getOwnPropertyDescriptor(target, key) {
+                const slot = Reflect.getOwnPropertyDescriptor(target, key);
+                return key === "text" && slot ? { ...slot, value: "x".repeat(10_000) } : slot;
+            },
+        });
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+    });
+
+    it("declines when a message before the window holds a cycle", async () => {
+        const host = plainHost(100);
+        const anchor = { mid: "m91", sequence: 9 };
+        const cyclic: Record<string, unknown> = { id: "m90", text: "message 90" };
+        cyclic.self = cyclic;
+        host.values[89] = cyclic as { id: string; text: string };
+        expect(await gatedPass(host, anchor)).toEqual({
+            kind: "declined",
+            servedLastApplied: false,
+        });
+        expect(host.published).toEqual([]);
+    });
+
+    it("charges each chunk of messages read before the window to the capture lease", async () => {
+        const host = plainHost(200);
+        const anchor = { mid: "m191", sequence: 19 };
+        const summaryBytes = canonicalJsonLength(host.values.slice(140, 190)) + 1;
+        let refuse = false;
+        const outcome = await gatedPass(host, anchor, {
+            reply: wideFoldReply(summaryBytes),
+            source: {
+                readWindow: (start, end) => {
+                    host.windows.push([start, end]);
+                    if (end <= 190) refuse = true;
+                    return host.values.slice(start, end);
+                },
+            },
+            lease: (lease) => ({
+                get signal() {
+                    return lease.signal;
+                },
+                get chargedBytes() {
+                    return lease.chargedBytes;
+                },
+                get remainingBytes() {
+                    return lease.remainingBytes;
+                },
+                reserve: (bytes) => !refuse && lease.reserve(bytes),
+                refund: () => lease.refund(),
+                requestCancel: (reason) => lease.requestCancel(reason),
+                release: () => lease.release(),
+            }),
+        });
+        expect(outcome).toEqual({ kind: "declined", servedLastApplied: false });
+        expect(host.published).toEqual([]);
+        expect(host.windows.filter(([, end]) => end <= 190)).toHaveLength(1);
     });
 });
 
