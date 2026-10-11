@@ -207,8 +207,13 @@ export async function sendWithRetry<T>(send: () => Promise<T>, opts: RetryOption
     }
 }
 
+/**
+ * Across 978 forwarded requests of the M-tier run, Converse bodies held 2.38 to 2.82 bytes per
+ * Bedrock input token (5th to 95th percentile), so 2.4 bytes per token keeps the estimate at or
+ * above the provider's count for nearly every request.
+ */
 export function estimateTokens(bytes: number): number {
-    return Math.round(bytes / 3);
+    return Math.round(bytes / 2.4);
 }
 
 export interface TurnScope {
@@ -373,9 +378,10 @@ export class BedrockGateway {
             estimatedInputTokens: estimateTokens(received.body.length),
             requestBytes: received.body.length,
         };
-        // The byte estimate reads about 15 percent under Bedrock's count, so the gate scales it up.
+        // Scripted turns report the same estimate as their usage, so a harness compacts on the
+        // count this gate refuses at.
         const window = this.options.windowTokens;
-        const projected = Math.round(base.estimatedInputTokens * 1.15);
+        const projected = base.estimatedInputTokens;
         if (window !== undefined && projected > window) {
             const message = `prompt is too long: ${projected} tokens > ${window} maximum`;
             sink.status(400, {
