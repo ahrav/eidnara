@@ -212,6 +212,7 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
         .unwrap();
     let failure = publish(
         &composition,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -250,94 +251,354 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
     assert!(fixture.generations().contains(&base.digest));
 }
 
+/// Every selector event in the order a publication reports it; the frozen matrix below cuts each one.
+const SELECTOR_CELLS: [ProfileEvent; 6] = [
+    ProfileEvent::BeforeTempWrite,
+    ProfileEvent::AfterTempSync,
+    ProfileEvent::BeforeRename,
+    ProfileEvent::AfterRename,
+    ProfileEvent::BeforeDirectorySync,
+    ProfileEvent::AfterDirectorySync,
+];
+
+fn precedes_selector_rename(cut: ProfileEvent) -> bool {
+    matches!(
+        cut,
+        ProfileEvent::BeforeTempWrite | ProfileEvent::AfterTempSync | ProfileEvent::BeforeRename
+    )
+}
+
+/// Selector temps a cut left in the lifecycle root.
+fn profile_temps(fixture: &Fixture) -> Vec<String> {
+    fs::read_dir(fixture.lifecycle_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".current-profile.json."))
+        .collect()
+}
+
+#[test]
+fn a_publication_reports_exactly_the_frozen_selector_events() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let mut seen = Vec::new();
+    publish(
+        &fixture.compose(1, &base, &[]).unwrap(),
+        None,
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |event| {
+            seen.push(event);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(seen, SELECTOR_CELLS);
+}
+
+/// Hook-simulated: each cell fails once with the error the store reports for `EIO` and once with the error it reports for `ENOSPC`; neither is kernel `fsync` evidence.
 #[test]
 fn every_selector_cut_leaves_the_old_or_the_new_complete_selection_and_reconciles_by_digest() {
-    for cut in [
-        ProfileEvent::BeforeRename,
-        ProfileEvent::AfterRename,
-        ProfileEvent::BeforeDirectorySync,
-        ProfileEvent::AfterDirectorySync,
-    ] {
-        let fixture = Fixture::new();
-        let base = fixture.layer(1, 10);
-        let old = fixture.compose(1, &base, &[]).unwrap();
-        fixture.publish(&old).unwrap();
-        let old_bytes = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
-
-        let delta = fixture.layer(5, 12);
-        let new = fixture.compose(2, &base, &[delta]).unwrap();
-        let mut seen = Vec::new();
-        let failure = publish(
-            &new,
-            &fixture.staging(),
-            &fixture.work_dir(),
-            &mut |event| {
-                seen.push(event);
-                if event == cut {
-                    Err(GenerationError::NativePayloadInvalid { detail: "cut" })
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .unwrap_err();
-        assert_eq!(*seen.last().unwrap(), cut);
-        let expected_progress = match cut {
-            ProfileEvent::BeforeRename => Progress::Staged,
-            ProfileEvent::AfterRename | ProfileEvent::BeforeDirectorySync => Progress::Acknowledged,
-            ProfileEvent::AfterDirectorySync => Progress::Durable,
-        };
-        assert_eq!(failure.progress, expected_progress, "{cut:?}");
-
-        let (expected_current, expected_reconciled) = if cut == ProfileEvent::BeforeRename {
-            (old.digest(), Reconciled::Other(Some(old.digest())))
-        } else {
-            (new.digest(), Reconciled::Published)
-        };
-        assert_eq!(
-            fixture.store.read_vector_current().unwrap(),
-            CurrentProfile::Current(expected_current.clone()),
-            "{cut:?}: the selection is the old complete one or the new complete one"
-        );
-        assert_eq!(
-            reconcile(&fixture.store, fixture.transaction(), &new.digest()).unwrap(),
-            expected_reconciled,
-            "{cut:?}"
-        );
-        if cut == ProfileEvent::BeforeRename {
-            assert_eq!(
-                fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap(),
-                old_bytes
-            );
+    let eio = || GenerationError::NativePayloadInvalid {
+        detail: "lifecycle root fsync failed",
+    };
+    for cut in SELECTOR_CELLS {
+        for exhausted in [false, true] {
+            selector_cut(cut, exhausted, &eio);
         }
-        // Both compositions are complete and verified; recovery names the selected one and reports it current.
-        let (recovered, selector) = fixture.recover().unwrap();
-        assert_eq!(recovered, expected_current, "{cut:?}");
-        assert_eq!(selector, SelectorState::Current, "{cut:?}");
+    }
+}
 
-        // A retry of the same publication converges on the new selection without a second composition record;
-        // once the new selection is acknowledged, the retry is refused by sequence and changes nothing.
-        let records_before = fixture.generations().len();
-        match fixture.publish(&new) {
-            Ok(retry) => assert_eq!(retry, new.digest(), "{cut:?}"),
-            Err(CompositionRefusal::Sequence {
-                sequence: 2,
-                selected: 2,
-            }) => {
-                assert_ne!(cut, ProfileEvent::BeforeRename, "{cut:?}");
+fn selector_cut(cut: ProfileEvent, exhausted: bool, eio: &dyn Fn() -> GenerationError) {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let old = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&old).unwrap();
+    let old_bytes = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
+
+    let delta = fixture.layer(5, 12);
+    let new = fixture.compose(2, &base, &[delta]).unwrap();
+    let mut seen = Vec::new();
+    let failure = publish(
+        &new,
+        Some(&old.digest()),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |event| {
+            seen.push(event);
+            match (event == cut, exhausted) {
+                (false, _) => Ok(()),
+                (true, true) => Err(GenerationError::InsufficientStorage),
+                (true, false) => Err(eio()),
             }
-            Err(other) => panic!("{cut:?}: {other:?}"),
-        }
-        assert_eq!(fixture.generations().len(), records_before, "{cut:?}");
+        },
+    )
+    .unwrap_err();
+    assert_eq!(*seen.last().unwrap(), cut, "declared cell {cut:?} fired");
+    let label = format!("{cut:?} exhausted={exhausted}");
+    if exhausted {
         assert_eq!(
-            fixture.store.read_vector_current().unwrap(),
-            CurrentProfile::Current(new.digest())
+            failure.refusal,
+            CompositionRefusal::InsufficientStorage,
+            "{label}"
         );
-        assert_eq!(
-            fixture.verify_composition(&new.digest()).unwrap(),
-            new.members()
+    } else {
+        assert!(
+            matches!(failure.refusal, CompositionRefusal::Store(_)),
+            "{label}"
         );
     }
+    let expected_progress = match cut {
+        ProfileEvent::BeforeTempWrite
+        | ProfileEvent::AfterTempSync
+        | ProfileEvent::BeforeRename => Progress::Staged,
+        ProfileEvent::AfterRename | ProfileEvent::BeforeDirectorySync => Progress::Acknowledged,
+        ProfileEvent::AfterDirectorySync => Progress::Durable,
+    };
+    assert_eq!(failure.progress, expected_progress, "{label}");
+    assert!(
+        profile_temps(&fixture).is_empty(),
+        "{label}: the selector temp is removed"
+    );
+
+    let before_rename = precedes_selector_rename(cut);
+    let (expected_current, expected_reconciled) = if before_rename {
+        (old.digest(), Reconciled::Other(Some(old.digest())))
+    } else {
+        (new.digest(), Reconciled::Published)
+    };
+    // Two fresh handles read back the same complete selection: the old one or the new one.
+    for _ in 0..2 {
+        let reopened = GenerationStore::open(Some(fixture.root.path())).unwrap();
+        assert_eq!(
+            reopened.read_vector_current().unwrap(),
+            CurrentProfile::Current(expected_current.clone()),
+            "{label}: the selection is the old complete one or the new complete one"
+        );
+        assert_eq!(
+            reconcile(&reopened, fixture.transaction(), &new.digest()).unwrap(),
+            expected_reconciled,
+            "{label}"
+        );
+    }
+    if before_rename {
+        assert_eq!(
+            fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap(),
+            old_bytes,
+            "{label}"
+        );
+    }
+    // Both compositions are complete and verified; recovery names the selected one and reports it current.
+    let (recovered, selector) = fixture.recover().unwrap();
+    assert_eq!(recovered, expected_current, "{label}");
+    assert_eq!(selector, SelectorState::Current, "{label}");
+
+    // A retry of the same publication from the same predecessor converges on the new selection without a second composition record;
+    // once the new selection is acknowledged, the retry is refused by sequence and changes nothing.
+    let records_before = fixture.generations().len();
+    let retry = publish(
+        &new,
+        Some(&old.digest()),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .map_err(|failure| failure.refusal);
+    match retry {
+        Ok(retry) => {
+            assert!(before_rename, "{label}");
+            assert_eq!(retry, new.digest(), "{label}");
+        }
+        Err(CompositionRefusal::Sequence {
+            sequence: 2,
+            selected: 2,
+        }) => assert!(!before_rename, "{label}"),
+        Err(other) => panic!("{label}: {other:?}"),
+    }
+    assert_eq!(fixture.generations().len(), records_before, "{label}");
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(new.digest())
+    );
+    assert_eq!(
+        fixture.verify_composition(&new.digest()).unwrap(),
+        new.members()
+    );
+}
+
+/// Two writers compose from the same selection; the first publishes, and the second, built on what is no longer selected, is refused before staging even with a higher sequence, so the first writer's delta is never dropped. The second writer recomposes from the new selection and both deltas are published once each.
+#[test]
+fn a_composition_built_from_a_stale_selection_is_refused_and_no_accepted_delta_is_lost() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let old = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&old).unwrap();
+    let read_by_both = fixture.predecessor();
+    assert_eq!(read_by_both, Some(old.digest()));
+
+    let delta_a = fixture.layer(5, 12);
+    let delta_a_digest = delta_a.digest.clone();
+    let delta_b = fixture.layer(6, 13);
+    let delta_b_digest = delta_b.digest.clone();
+    let a = fixture
+        .compose(2, &base, std::slice::from_ref(&delta_a))
+        .unwrap();
+    let b = fixture
+        .compose(3, &base, std::slice::from_ref(&delta_b))
+        .unwrap();
+
+    // Writer A's reply is lost after its rename: the outcome is unknown until reconciled.
+    let unknown = publish(
+        &a,
+        read_by_both.as_deref(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |event| {
+            if event == ProfileEvent::AfterRename {
+                Err(GenerationError::NativePayloadInvalid {
+                    detail: "reply lost",
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(unknown.progress, Progress::Acknowledged);
+    assert_eq!(
+        reconcile(&fixture.store, fixture.transaction(), &a.digest()).unwrap(),
+        Reconciled::Published
+    );
+    // A's retry after reconciliation changes nothing.
+    let records = fixture.generations().len();
+    let retry = publish(
+        &a,
+        read_by_both.as_deref(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(retry.progress, Progress::NotStaged);
+    assert_eq!(
+        retry.refusal,
+        CompositionRefusal::Sequence {
+            sequence: 2,
+            selected: 2
+        }
+    );
+
+    // Writer B composed from the same old selection with a higher sequence; it would drop A's delta.
+    let stale = publish(
+        &b,
+        read_by_both.as_deref(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(stale.progress, Progress::NotStaged);
+    assert_eq!(
+        stale.refusal,
+        CompositionRefusal::Predecessor {
+            expected: Some(old.digest()),
+            selected: Some(a.digest()),
+        }
+    );
+    assert_eq!(fixture.generations().len(), records, "nothing was staged");
+    assert_eq!(fixture.predecessor(), Some(a.digest()));
+
+    // B recomposes from the selection it now reads; both deltas are members exactly once.
+    let rebased = fixture.compose(3, &base, &[delta_a, delta_b]).unwrap();
+    publish(
+        &rebased,
+        Some(&a.digest()),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    let members = fixture.verify_composition(&rebased.digest()).unwrap();
+    assert_eq!(
+        members,
+        vec![base.digest.clone(), delta_a_digest, delta_b_digest]
+    );
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (rebased.digest(), SelectorState::Current)
+    );
+}
+
+/// A predecessor of `None` publishes only into an empty selector, and a selector that appeared since is refused.
+#[test]
+fn a_first_publication_requires_an_empty_selector() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    let second = fixture.compose(2, &base, &[fixture.layer(5, 12)]).unwrap();
+    publish(
+        &first,
+        None,
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    let refused = publish(
+        &second,
+        None,
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused.refusal,
+        CompositionRefusal::Predecessor {
+            expected: None,
+            selected: Some(first.digest()),
+        }
+    );
+    assert_eq!(fixture.predecessor(), Some(first.digest()));
+}
+
+/// The publisher drops every reply, including a successful one; a fresh store handle reconciles the outcome by digest, and the retry is refused without a second record.
+#[test]
+fn a_dropped_publication_reply_is_reconciled_on_a_fresh_store_handle() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let old = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&old).unwrap();
+    let new = fixture.compose(2, &base, &[fixture.layer(5, 12)]).unwrap();
+    drop(publish(
+        &new,
+        Some(&old.digest()),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    ));
+    let records = fixture.generations().len();
+    for _ in 0..2 {
+        let fresh = GenerationStore::open(Some(fixture.root.path())).unwrap();
+        assert_eq!(
+            reconcile(&fresh, fixture.transaction(), &new.digest()).unwrap(),
+            Reconciled::Published
+        );
+    }
+    let retry = publish(
+        &new,
+        Some(&old.digest()),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(retry.progress, Progress::NotStaged);
+    assert_eq!(fixture.generations().len(), records);
+    assert_eq!(
+        fixture.verify_composition(&new.digest()).unwrap(),
+        new.members()
+    );
 }
 
 #[test]
@@ -737,6 +998,7 @@ fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member
     fixture.corrupt(&composition.digest(), COMPOSITION_FILE);
     let failure = publish(
         &composition,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -790,6 +1052,7 @@ fn a_rename_lost_before_its_sync_is_read_back_as_the_old_selection_and_the_retry
     let new = fixture.compose(2, &base, &[fixture.layer(5, 12)]).unwrap();
     let failure = publish(
         &new,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |event| {
@@ -847,8 +1110,14 @@ fn a_competing_publication_with_the_same_sequence_and_other_members_is_refused_b
     let records = fixture.generations().len();
     let b = fixture.compose(2, &base, &[fixture.layer(6, 13)]).unwrap();
     assert_ne!(a.digest(), b.digest());
-    let failure =
-        publish(&b, &fixture.staging(), &fixture.work_dir(), &mut |_| Ok(())).unwrap_err();
+    let failure = publish(
+        &b,
+        fixture.predecessor().as_deref(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
     assert_eq!(failure.progress, Progress::NotStaged);
     assert_eq!(
         failure.refusal,
@@ -909,6 +1178,7 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
         .unwrap();
     let failure = publish(
         &orphaned,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -1030,6 +1300,7 @@ fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_trea
     );
     let failure = publish(
         &fixture.compose(9, &base, &[]).unwrap(),
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -1055,6 +1326,7 @@ fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_trea
     fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let failure = publish(
         &fixture.compose(9, &base, &[]).unwrap(),
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -1116,6 +1388,7 @@ fn an_unknown_members_schema_on_the_selected_composition_quarantines_publication
     );
     let failure = publish(
         &fixture.compose(9, &base, &[]).unwrap(),
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -1163,6 +1436,7 @@ fn an_unknown_record_schema_without_a_members_file_still_quarantines_publication
     );
     let failure = publish(
         &fixture.compose(9, &base, &[]).unwrap(),
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
@@ -1279,6 +1553,7 @@ fn a_quarantined_vector_selector_stops_staging_and_pruning_and_an_unselected_cor
     assert!(fixture.generations().contains(&stray.digest));
     let failure = publish(
         &fixture.compose(2, &base, &[]).unwrap(),
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),

@@ -360,7 +360,13 @@ pub fn publish(
         deltas: &carried,
         max_deltas,
     })?;
-    match vector_composition::publish(&composition, staging, work_dir, observer) {
+    match vector_composition::publish(
+        &composition,
+        Some(selected.as_str()),
+        staging,
+        work_dir,
+        observer,
+    ) {
         Ok(digest) => Ok(Published {
             digest,
             base: base_digest,

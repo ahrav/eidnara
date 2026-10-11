@@ -1,6 +1,6 @@
 //! Publishes and recovers one complete vector composition: one base layer plus bounded, ordered delta layers, named together by an immutable composition generation the vector selector points at.
 //!
-//! Publication stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
+//! Publication names the selection it was composed from and refuses unless the selector still names it, so a delta published by another writer in between is never dropped. It stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
 //! How far an attempt got is tracked as a ladder of separate facts; an unknown outcome is settled by reading the selector back and comparing digests, never by treating an error as a rollback.
 //! Recovery takes the selected composition when it verifies; otherwise it examines the other compositions newest first under a bound and takes the first whose every member verifies, reporting the selector as stale rather than silently repointing it.
 
@@ -127,6 +127,11 @@ pub enum CompositionRefusal {
     MemberIdentity { digest: String, field: &'static str },
     #[error("sequence {sequence} does not exceed the selected composition's {selected}")]
     Sequence { sequence: u64, selected: u64 },
+    #[error("the composition extends {expected:?}, but the selector names {selected:?}")]
+    Predecessor {
+        expected: Option<String>,
+        selected: Option<String>,
+    },
     #[error("the composition is not a vector composition: {0}")]
     NotComposition(&'static str),
     #[error("member {digest}: {refusal}")]
@@ -264,20 +269,23 @@ pub struct PublishFailure {
 }
 
 /// Stages `composition` through `staging` and points the vector selector at it. `observer` sees every selector event after this function has recorded it. A composition whose sequence does not exceed the selected composition's is refused, so two publishers under the same lock cannot reorder the namespace.
+/// `predecessor` is the digest the vector selector named when the caller read the selection it composed from, or `None` when nothing was selected. Publication refuses with [`CompositionRefusal::Predecessor`] before staging unless the selector still names it, so a composition built from a stale selection cannot replace a newer one and drop its deltas.
 ///
 /// # Errors
 ///
 /// A failure carries how far the attempt is known to have gone; a failure at or after `Acknowledged` is an unknown outcome the caller settles with [`reconcile`].
 pub fn publish(
     composition: &Composition,
+    predecessor: Option<&str>,
     staging: &Staging<'_>,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
 ) -> Result<String, Box<PublishFailure>> {
     let mut progress = Progress::NotStaged;
     let fail = |progress: Progress, refusal| Box::new(PublishFailure { progress, refusal });
-    if let Some(selected) =
-        selected_sequence(staging.store).map_err(|refusal| fail(progress, refusal))?
+    let (selected_digest, selected_sequence) =
+        selection(staging.store).map_err(|refusal| fail(progress, refusal))?;
+    if let Some(selected) = selected_sequence
         && composition.sequence <= selected
     {
         return Err(fail(
@@ -285,6 +293,15 @@ pub fn publish(
             CompositionRefusal::Sequence {
                 sequence: composition.sequence,
                 selected,
+            },
+        ));
+    }
+    if selected_digest.as_deref() != predecessor {
+        return Err(fail(
+            progress,
+            CompositionRefusal::Predecessor {
+                expected: predecessor.map(str::to_owned),
+                selected: selected_digest,
             },
         ));
     }
@@ -322,7 +339,10 @@ pub fn publish(
             match event {
                 ProfileEvent::AfterRename => progress = Progress::Acknowledged,
                 ProfileEvent::AfterDirectorySync => progress = Progress::Durable,
-                ProfileEvent::BeforeRename | ProfileEvent::BeforeDirectorySync => {}
+                ProfileEvent::BeforeTempWrite
+                | ProfileEvent::AfterTempSync
+                | ProfileEvent::BeforeRename
+                | ProfileEvent::BeforeDirectorySync => {}
             }
             observer(event)
         });
@@ -332,18 +352,21 @@ pub fn publish(
     }
 }
 
-/// Returns the selected composition's sequence, or `None` when no composition is selected or its record fails validation.
+/// Returns the digest the vector selector names and the selected composition's sequence; the sequence is `None` when no composition is selected or its record fails validation.
 ///
 /// # Errors
 ///
 /// Returns `Quarantined` when the selector is quarantined or the selected record has an unknown schema.
-fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, CompositionRefusal> {
+fn selection(store: &GenerationStore) -> Result<(Option<String>, Option<u64>), CompositionRefusal> {
     match store.read_vector_current()? {
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
-        CurrentProfile::Absent => Ok(None),
-        CurrentProfile::Current(digest) => Ok(record(store, &digest)?
-            .filter(|_| store.validate(&digest).is_ok())
-            .map(|record| record.sequence)),
+        CurrentProfile::Absent => Ok((None, None)),
+        CurrentProfile::Current(digest) => {
+            let sequence = record(store, &digest)?
+                .filter(|_| store.validate(&digest).is_ok())
+                .map(|record| record.sequence);
+            Ok((Some(digest), sequence))
+        }
     }
 }
 

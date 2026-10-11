@@ -51,8 +51,13 @@ pub const MEMBERS_FILE_NAME: &str = "members.json";
 /// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
 const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
 
+/// One step of a selector replacement, reported in execution order: the temp write and its sync, the rename over the selector, and the lifecycle root's sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileEvent {
+    /// Before the selector temp is created and written.
+    BeforeTempWrite,
+    /// After the selector temp's `fsync` returned.
+    AfterTempSync,
     BeforeRename,
     AfterRename,
     BeforeDirectorySync,
@@ -1450,11 +1455,18 @@ impl GenerationStore {
         getrandom::getrandom(&mut suffix)
             .map_err(|_| GenerationError::Instance(InstanceError::Random))?;
         let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
-        let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
+        let mut write_and_rename = || {
+            observer(ProfileEvent::BeforeTempWrite)?;
+            let temp =
+                crate::store_fs::write_new_file_unsynced(&self.root_fd, &temp_name, &bytes, 0o600)
+                    .map_err(|e| storage_or(e, "file write failed"))?;
+            fsync_preserving_storage(&temp, "profile temp fsync failed")?;
+            observer(ProfileEvent::AfterTempSync)?;
             observer(ProfileEvent::BeforeRename)?;
             renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name)
                 .map_err(|e| classify_errno(e, "profile rename failed"))
-        });
+        };
+        let result = write_and_rename();
         if result.is_err() {
             let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
         }
@@ -1851,17 +1863,6 @@ fn copy_source_into(
     ))
 }
 
-fn write_new_file(
-    dir: &OwnedFd,
-    name: &str,
-    bytes: &[u8],
-    mode: u32,
-) -> Result<(), GenerationError> {
-    crate::store_fs::write_new_file(dir, name, bytes, mode)
-        .map(drop)
-        .map_err(|e| storage_or(e, "file write failed"))
-}
-
 fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
     crate::store_fs::remove_tree(parent, name).map_err(|_| invalid("entry removal failed"))
 }
@@ -1991,6 +1992,17 @@ mod tests {
 
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
+    }
+
+    fn write_new_file(
+        dir: &OwnedFd,
+        name: &str,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<(), GenerationError> {
+        crate::store_fs::write_new_file(dir, name, bytes, mode)
+            .map(drop)
+            .map_err(|e| storage_or(e, "file write failed"))
     }
 
     #[test]

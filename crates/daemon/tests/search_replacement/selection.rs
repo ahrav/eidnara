@@ -459,6 +459,8 @@ pub(super) fn selection_child(root: &Path, cut: &str) {
                 SelectionEvent::MetadataWritten => "select-metadata",
                 SelectionEvent::Copied => "select-copy",
                 SelectionEvent::Profile(event) => match event {
+                    ProfileEvent::BeforeTempWrite => "select-before-temp-write",
+                    ProfileEvent::AfterTempSync => "select-after-temp-sync",
                     ProfileEvent::BeforeRename => "select-before-rename",
                     ProfileEvent::AfterRename => "select-after-rename",
                     ProfileEvent::BeforeDirectorySync => "select-before-sync",
