@@ -594,7 +594,13 @@ export class BedrockGateway {
                 for await (const event of response.stream as AsyncIterable<
                     Record<string, unknown>
                 >) {
-                    if (sink.signal.aborted) break;
+                    if (sink.signal.aborted) {
+                        // The harness gave up on this response, so the call ended short of
+                        // the provider's final event.
+                        status = 499;
+                        error = "client disconnected before the stream ended";
+                        break;
+                    }
                     for (const [type, member] of Object.entries(event)) {
                         if (member === undefined) continue;
                         if (firstByteMs === null) firstByteMs = performance.now() - started;
