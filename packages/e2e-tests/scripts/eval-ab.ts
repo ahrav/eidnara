@@ -316,7 +316,7 @@ async function main(): Promise<void> {
         const keep = sharedKeep(specs);
         assertRunRootMaskable(runRoot, keep);
         // The launcher takes every path as one plain word; a path it cannot name fails here.
-        for (const path of [...keep, runRoot]) plainPath(path);
+        for (const path of [...keep, resolve(opts.out), runRoot]) plainPath(path);
     } else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);

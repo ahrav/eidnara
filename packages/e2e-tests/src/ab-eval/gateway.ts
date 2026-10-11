@@ -607,7 +607,8 @@ export class BedrockGateway {
                         if (firstByteMs === null) firstByteMs = performance.now() - started;
                         if (type === "metadata")
                             Object.assign(usage, (member as { usage?: object }).usage ?? {});
-                        if (type === "messageStop") ended = true;
+                        // `metadata` follows `messageStop` and closes a complete stream.
+                        if (type === "metadata") ended = true;
                         // Bedrock reports a failure after the response began as a stream member,
                         // so the record carries it as the call's outcome while the harness
                         // still receives the event.
@@ -618,13 +619,14 @@ export class BedrockGateway {
                         sink.write(encodeEvent(type, member));
                     }
                 }
-                // A Converse stream ends with messageStop; one that stops short is incomplete,
-                // whether the harness went away or the provider's stream ended early.
+                // A Converse stream ends with messageStop and its usage metadata; one that stops
+                // short is incomplete, whether the harness went away or the provider's stream
+                // ended early.
                 if (!ended && status === 200) {
                     status = sink.signal.aborted ? 499 : 502;
                     error = sink.signal.aborted
                         ? "client disconnected before the stream ended"
-                        : "the stream ended without messageStop";
+                        : "the stream ended before messageStop and metadata";
                 }
             } else {
                 const response = await send(new ConverseCommand({ ...body, modelId } as never));

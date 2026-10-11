@@ -311,6 +311,28 @@ describe("eval-ab", () => {
         },
     );
 
+    it.skipIf(!sandboxAvailable() || !nodeBin.ok)(
+        "refuses a sandboxed run root whose given path the launcher cannot name",
+        () => {
+            fresh();
+            // The given path has a space; its resolved form is plain, and the arms use the given one.
+            mkdirSync(join(root, "plain"));
+            symlinkSync(join(root, "plain"), join(root, "with space"));
+            const out = join(root, "with space", "run");
+            const result = run(root, ["--arms", "pi-off", "--sandbox", "on"], {
+                out,
+                path: `${nodeBin.ok ? nodeBin.root : ""}:/usr/bin:/bin`,
+            });
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain("sandbox path");
+                expect(existsSync(join(root, "plain", "run"))).toBe(false);
+            } finally {
+                cleanup();
+            }
+        },
+    );
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",
