@@ -42,9 +42,13 @@ impl Sensitivity {
 
     /// An unrecognized stored class resolves to `Secret`, the strictest handling.
     pub fn from_stored(value: &str) -> Self {
+        Self::from_stored_bytes(value.as_bytes())
+    }
+
+    pub(crate) fn from_stored_bytes(value: &[u8]) -> Self {
         match value {
-            "normal" => Self::Normal,
-            "sensitive" => Self::Sensitive,
+            b"normal" => Self::Normal,
+            b"sensitive" => Self::Sensitive,
             _ => Self::Secret,
         }
     }
@@ -1710,7 +1714,9 @@ pub(super) fn prefix_upper_bound(prefix: &str) -> String {
 }
 
 pub(super) fn object_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRow> {
-    let sensitivity: String = row.get(9)?;
+    let sensitivity = row.get_ref(9)?.as_str().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(ObjectRow {
         object_id: row.get(0)?,
         object_kind: row.get(1)?,
@@ -1721,7 +1727,7 @@ pub(super) fn object_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<Objec
         created_commit_seq: row.get(6)?,
         invalidated_commit_seq: row.get(7)?,
         superseded_by: row.get(8)?,
-        sensitivity: Sensitivity::from_stored(&sensitivity),
+        sensitivity: Sensitivity::from_stored(sensitivity),
     })
 }
 

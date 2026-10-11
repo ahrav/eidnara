@@ -158,7 +158,17 @@ and lineage tests pass unchanged on the batched approval judgment. No
 comparison against the fixed baseline commit's rendered bytes runs yet. A
 review-time differential ran the previous per-row approval query beside the
 batched one on every served read the kernel and daemon suites make (10,000
-calls, 203,000 kernel rows, 0 differences); it is not committed.
+calls, 203,000 kernel rows, 0 differences); it is not committed. A second
+review-time differential rendered every served read (three selection shapes,
+both surfaces, four scope filters, seven snapshots, egress) over two frozen
+corpora (10,300 and 200 decisions, with approvals, a revocation, lineage
+decisions, inconsistent and unrecognized history, triggers, cited evidence,
+and scoped and unscoped rows) before and after the history fold moved into
+Rust: 56 MB of rendered rows, 0 differences; it is not committed.
+`admission::tests::history_fold_ranks_rows_as_the_served_sql_does`,
+`the_latest_own_row_at_a_shared_commit_is_the_greater_identifier`, and
+`a_surface_aware_read_omits_only_hidden_rows` pin the fold to the SQL it
+replaced.
 Guarantee: Selection optimization preserves the canonical memory result for
 the same valid store state, requested snapshot, project, and budget.
 Check: `always` - Compare the ordered selected rows, rendered memory bytes,
@@ -187,7 +197,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - the domain/kind predicate runs in SQL before the row and
-payload caps (`IdsPredicate::DomainDecisions` in
+payload caps (`ServedSelection::DomainDecisions` in
 `crates/kernel/src/admission.rs`), and the row- and byte-pressure tests in
 `crates/kernel/tests/kernel_canonical_read.rs` show other-domain rows leave
 the domain read's rows unchanged. No paired-store comparison runs.
