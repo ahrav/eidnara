@@ -556,7 +556,21 @@ describe("Pi eviction", () => {
         }
     });
 
-    it("keeps the call of a tool result the boundary lands on", async () => {
+    // Pi can append settings and extension entries while a tool runs, placing them on the
+    // branch between the assistant's tool call and its result.
+    it.each([
+        ["nothing", () => undefined],
+        [
+            "settings and custom entries",
+            () => {
+                const sessionManager = (harness as TestAgentSession).sessionManager;
+                sessionManager.appendThinkingLevelChange("high");
+                sessionManager.appendModelChange("faux", "other");
+                sessionManager.appendCustomEntry("probe-note", { n: 1 });
+                sessionManager.appendSessionInfo("probing");
+            },
+        ],
+    ])("keeps the call of a tool result the boundary lands on with %s between them", async (_, during) => {
         const { call } = foldingDaemon(false, 0, (rows) =>
             rows.findLastIndex((row) => row.message?.role === "toolResult"),
         );
@@ -566,7 +580,10 @@ describe("Pi eviction", () => {
                 label: "probe",
                 description: "probe",
                 parameters: Type.Object({ n: Type.Number() }),
-                execute: async () => ({ content: [{ type: "text", text: "probed" }], details: {} }),
+                execute: async () => {
+                    during();
+                    return { content: [{ type: "text", text: "probed" }], details: {} };
+                },
             });
         try {
             harness = await createTestAgentSession({

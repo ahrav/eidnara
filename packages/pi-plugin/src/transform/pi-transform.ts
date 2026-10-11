@@ -68,6 +68,20 @@ function isToolResultEntry(entry: SessionEntry | undefined): boolean {
     );
 }
 
+function separatesResultFromCall(entry: SessionEntry | undefined): boolean {
+    if (entry === undefined) return false;
+    switch (entry.type) {
+        case "message":
+            return isToolResultEntry(entry);
+        case "custom_message":
+        case "branch_summary":
+        case "compaction":
+            return false;
+        default:
+            return true;
+    }
+}
+
 function failedAssistant(entry: SessionEntry): boolean {
     const message = (entry as unknown as Json).message as Json | undefined;
     return (
@@ -320,9 +334,10 @@ export function createPiTransform(options: PiTransformOptions) {
         branch.sync(reader);
         let keptAt = branch.indexOf(row.entryId);
         if (keptAt === undefined) return undefined;
-        // A `toolResult` stays with the assistant message that carries its call, so Pi's own
-        // array never opens on a result whose call it evicted.
-        while (keptAt > 0 && isToolResultEntry(reader.getEntry(branch.idAt(keptAt) ?? ""))) {
+        // The walk skips intervening settings, labels, session info, extension entries, and
+        // sibling results to keep each `toolResult` with the assistant message carrying its
+        // call; Pi can append those entries while a tool runs.
+        while (keptAt > 0 && separatesResultFromCall(reader.getEntry(branch.idAt(keptAt) ?? ""))) {
             keptAt -= 1;
         }
         const kept = branch.idAt(keptAt);
