@@ -329,7 +329,7 @@ describe("Pi eviction", () => {
         }
     });
 
-    it("cancels an overflow with no acknowledged boundary", async () => {
+    it("hands an overflow with no acknowledged boundary back to Pi, though every pass applied", async () => {
         const call = unfoldedDaemon();
         try {
             harness = await createTestAgentSession({
@@ -344,13 +344,16 @@ describe("Pi eviction", () => {
                     stopReason: "error",
                     errorMessage: "prompt is too long: 213462 tokens > 200000 maximum",
                 }),
+                fauxAssistantMessage("pi summary"),
+                fauxAssistantMessage("pi summary"),
+                fauxAssistantMessage("after the recovery"),
             ]);
-            const requests = harness.requests.length;
             await harness.session.prompt("overflowing");
             await eventually(() => ends.some((end) => end.reason === "overflow"));
-            expect(ends.find((end) => end.reason === "overflow")?.aborted).toBe(true);
-            expect(compactions(harness)).toHaveLength(0);
-            expect(harness.requests.length - requests).toBe(1);
+            expect(ends.find((end) => end.reason === "overflow")?.aborted).toBe(false);
+            const latest = compactions(harness).at(-1);
+            expect(latest?.fromHook).not.toBe(true);
+            expect(latest?.summary).not.toBe(M0);
         } finally {
             call.mockRestore();
         }
