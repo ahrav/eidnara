@@ -512,6 +512,8 @@ export class OpencodeArm extends Arm {
         this.oc = await spawnOpencode({
             mockProviderURL: this.main.http1Url,
             existingEnv: this.env,
+            // An Eidnara arm brings its own host and an off arm has none.
+            provisionHost: false,
             modelContextLimit: CONTEXT_LIMIT,
             modelOutputLimit: 8192,
             modelId: MODEL,

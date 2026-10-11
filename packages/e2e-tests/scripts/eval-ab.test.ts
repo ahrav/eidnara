@@ -201,6 +201,27 @@ describe("eval-ab", () => {
         }
     });
 
+    it.skipIf(!probeCapabilities().available || !nodeBin.ok)(
+        "refuses an Eidnara arm unless both toolchains are on PATH",
+        () => {
+            fresh();
+            writeFileSync(join(root, "fx"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+            // The pinned Node alone satisfies a Pi arm; an Eidnara arm needs OpenCode and npm too.
+            const result = run(
+                root,
+                ["--arms", "pi-on", "--sandbox", "off", "--fixture-bin", join(root, "fx")],
+                { path: `${nodeBin.ok ? nodeBin.root : ""}:/usr/bin:/bin` },
+            );
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain("Eidnara arms need both toolchains");
+                expect(existsSync(join(root, "run"))).toBe(false);
+            } finally {
+                cleanup();
+            }
+        },
+    );
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",

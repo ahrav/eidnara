@@ -9,7 +9,11 @@ import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
 import { buildWorld, grade, PROJECT_SIZES, type World, writeRepo } from "../src/ab-eval/world";
-import { pinnedNodeOnPath, pinnedOpencodeOnPath } from "../src/bedrock-peer/harness-runtime";
+import {
+    detectHarnessRuntimeSources,
+    pinnedNodeOnPath,
+    pinnedOpencodeOnPath,
+} from "../src/bedrock-peer/harness-runtime";
 import {
     cargoBuildExampleArgs,
     DIRECT_HOST_FIXTURE,
@@ -259,6 +263,11 @@ async function main(): Promise<void> {
         const found = check();
         if (!found.ok)
             throw new Error(`${harness} arms need the pinned toolchain: ${found.reason}`);
+    }
+    // An Eidnara arm materializes both harness closures, so it needs npm and both toolchains.
+    if (eidnaraArms) {
+        const sources = detectHarnessRuntimeSources();
+        if (!sources.ok) throw new Error(`Eidnara arms need both toolchains: ${sources.reason}`);
     }
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
