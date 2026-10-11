@@ -38,18 +38,30 @@ const probe = JSON.stringify({
 });
 
 describe("eval-ab-sweep", () => {
-    it("scores repository-fact recall in its own column", () => {
+    it("scores repository-fact recall in its own column and keeps cents in the cost", () => {
         const root = runDir(`${probe}\n`);
+        writeFileSync(
+            join(root, "results/pi-off/calls.jsonl"),
+            `${JSON.stringify({
+                caller: "main",
+                status: 200,
+                inputTokens: 10_000,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                estimatedInputTokens: 0,
+            })}\n`,
+        );
         try {
             const result = sweep(root);
             expect(result.status).toBe(0);
             const [header, , row] = result.stdout.trim().split("\n");
             expect(header).toContain("| repo |");
-            const repo = (header as string)
-                .split("|")
-                .map((c) => c.trim())
-                .indexOf("repo");
-            expect((row as string).split("|").map((c) => c.trim())[repo]).toBe("1/1");
+            const names = (header as string).split("|").map((c) => c.trim());
+            const cells = (row as string).split("|").map((c) => c.trim());
+            const column = (name: string) => cells[names.indexOf(name)];
+            expect(column("repo")).toBe("1/1");
+            expect(column("est $")).toBe("0.05");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

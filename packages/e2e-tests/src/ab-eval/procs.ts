@@ -174,7 +174,10 @@ export async function stallFor(pid: number, ms: number): Promise<void> {
     process.kill(pid, "SIGSTOP");
     const deadline = Date.now() + 2_000;
     while (!/^[Tt]$/.test(statFields(pid)?.[0] ?? "")) {
-        if (Date.now() >= deadline) throw new Error(`process ${pid} did not stop within 2s`);
+        if (Date.now() >= deadline) {
+            signal(pid, "SIGCONT");
+            throw new Error(`process ${pid} did not stop within 2s`);
+        }
         await Bun.sleep(5);
     }
     setTimeout(() => signal(pid, "SIGCONT"), ms).unref();

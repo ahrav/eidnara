@@ -37,6 +37,8 @@ interface Options {
 
 function parseArgs(argv: string[]): Options {
     const known = new Set<string>();
+    /** Positions `get` consumed as operands; every other `--` token must be a known flag. */
+    const consumed = new Set<number>();
     const get = (name: string, fallback: string): string => {
         known.add(`--${name}`);
         const i = argv.indexOf(`--${name}`);
@@ -44,6 +46,7 @@ function parseArgs(argv: string[]): Options {
         const value = argv[i + 1];
         if (value === undefined || value.startsWith("--"))
             throw new Error(`--${name} needs a value`);
+        consumed.add(i + 1);
         return value;
     };
     const num = (name: string, fallback: string): number => {
@@ -87,7 +90,7 @@ function parseArgs(argv: string[]): Options {
         projectSize: choice("project-size", Object.keys(PROJECT_SIZES), "small"),
     };
     const unknown = argv.filter(
-        (arg, i) => arg.startsWith("--") && !known.has(arg) && !argv[i - 1]?.startsWith("--"),
+        (arg, i) => arg.startsWith("--") && !known.has(arg) && !consumed.has(i),
     );
     if (unknown.length > 0) throw new Error(`unknown flags: ${unknown.join(", ")}`);
     return options;

@@ -463,6 +463,10 @@ function componentNames(count: number): string[] {
 }
 
 export function buildWorld(seed: number, tierName: string, componentCount = 16): World {
+    // Constraint facts pair two distinct components, so the list needs at least two.
+    if (!Number.isInteger(componentCount) || componentCount < 2) {
+        throw new Error(`componentCount must be an integer of at least 2, got ${componentCount}`);
+    }
     const components = componentNames(componentCount);
     const tier = TIERS[tierName];
     if (!tier) throw new Error(`unknown tier ${tierName}`);

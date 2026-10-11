@@ -89,7 +89,7 @@ function main(): void {
                 `| ${run} | ${arm} | ${score(rows, "cross")} | ${score(rows, "in")} | ${score(rows, "tool")} | ${score(rows, "repo")} | ${score(rows, "control")} | ${score(rows, "abstain")} | ${probes.filter((row) => row.grade === "correct").length}/${probes.length} | ${rows.filter((row) => row.error).length} | ${overWindow} | ${pct(work, 50)}/${pct(work, 99)} | ${work.filter((ms) => ms > 5_000).length} | ${pct(
                     probes.map((row) => row.ms),
                     50,
-                )} | ${cost.toFixed(0)} | ${mb(rows.map((row) => row.harnessRss))}/${mb(rows.map((row) => row.hostRss))} |`,
+                )} | ${cost.toFixed(2)} | ${mb(rows.map((row) => row.harnessRss))}/${mb(rows.map((row) => row.hostRss))} |`,
             );
         }
     }

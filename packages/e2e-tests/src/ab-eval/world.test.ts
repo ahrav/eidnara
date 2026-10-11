@@ -73,6 +73,11 @@ describe("A/B world", () => {
 });
 
 describe("A/B project sizes", () => {
+    it("refuses a component count the facts cannot draw from", () => {
+        expect(() => buildWorld(7, "xs", 1)).toThrow(/componentCount/);
+        expect(() => buildWorld(7, "xs", 2.5)).toThrow(/componentCount/);
+    });
+
     it("builds one source tree per component with distinct names at every size", () => {
         for (const [size, components] of Object.entries(PROJECT_SIZES)) {
             const world = buildWorld(3, "xs", components);

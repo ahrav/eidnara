@@ -70,11 +70,11 @@ describe("eval-ab", () => {
             "--sandbox",
             "off",
             "--project-sze",
-            "large",
+            "--typo",
         ]);
         try {
             expect(result.status).not.toBe(0);
-            expect(result.stderr).toContain("--project-sze");
+            expect(result.stderr).toContain("--project-sze, --typo");
             expect(existsSync(join(root, "run"))).toBe(false);
         } finally {
             cleanup();
