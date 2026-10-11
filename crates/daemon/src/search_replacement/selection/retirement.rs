@@ -26,7 +26,7 @@ pub(super) struct RetirementRun<'a> {
     pub check: &'a dyn Fn() -> Result<(), BuildError>,
 }
 
-/// The `(local_transaction_rows, local_transaction_bytes)` a retirement transaction charges: one receipt plus every obligation disposition, and the censused bytes plus each row's fixed width and one record. Every path that runs `retire_bound` charges these.
+/// The `(local_transaction_rows, local_transaction_bytes)` a retirement transaction charges. Row capacity covers deleting a superseded receipt and its disposition set, recorded through an earlier target, and writing their replacements: two sets of one receipt plus every obligation disposition. Byte capacity covers the censused bytes, each written disposition's fixed width, and one record. Every path that runs `retire_bound` charges these.
 pub(super) fn retirement_transaction_charges(
     spec: &super::super::ReplacementSpec,
 ) -> Result<(u64, u64), BuildError> {
@@ -38,7 +38,9 @@ pub(super) fn retirement_transaction_charges(
         .and_then(|bytes| bytes.checked_add(MAX_RECORD_BYTES))
         .ok_or(BuildError::InventoryBound)?;
     Ok((
-        rows.checked_add(1).ok_or(BuildError::InventoryBound)?,
+        rows.checked_add(1)
+            .and_then(|set| set.checked_mul(2))
+            .ok_or(BuildError::InventoryBound)?,
         bytes,
     ))
 }

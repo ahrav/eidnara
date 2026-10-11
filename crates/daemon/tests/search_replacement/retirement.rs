@@ -260,7 +260,7 @@ async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
         config.retirement.max_obligation_bytes = NonZeroU64::new(8 << 20).unwrap();
         let per_row = (PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
         let expected = match name {
-            "local_transaction_rows" => 10_001,
+            "local_transaction_rows" => 2 * 10_001,
             _ => 10_000 * per_row + (8 << 20) + MAX_RECORD_BYTES,
         };
         let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
@@ -1090,6 +1090,50 @@ fn the_receipt_transaction_charge_covers_every_disposition_row() {
                 observed,
                 censused + config.retirement.max_obligations.get() as u64 * per_row
             );
+        }
+        other => panic!("{other:?}"),
+    }
+    case.assert_no_receipt();
+}
+
+/// A recertified retirement supersedes the receipt an earlier target recorded: the transaction deletes that receipt and its disposition set before writing the new ones, so the row charge covers two sets, each bounded by `max_obligations`.
+#[test]
+fn the_receipt_transaction_charge_covers_the_set_a_supersession_deletes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let mut config = spec(root.path());
+    config.retirement.max_obligations = NonZeroUsize::new(10_000).unwrap();
+    let one_set = 10_001;
+    let mut evaluator = support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &daemon::projection_gates::ProjectionHook::ALL,
+    );
+    evaluator
+        .manifest
+        .limits
+        .insert("local_transaction_rows".to_owned(), 2 * one_set - 1);
+    case.gate.install(evaluator);
+    let error = case
+        .selection
+        .retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &config,
+            &budget(Duration::from_secs(30)),
+            &mut |_| {},
+        )
+        .unwrap_err();
+    match error {
+        BuildError::Denied(daemon::projection_gates::Denial::LimitExceeded {
+            limit,
+            observed,
+            max,
+        }) => {
+            assert_eq!(limit, "local_transaction_rows");
+            assert_eq!(max, 2 * one_set - 1);
+            assert_eq!(observed, 2 * one_set);
         }
         other => panic!("{other:?}"),
     }

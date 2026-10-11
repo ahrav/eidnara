@@ -1934,11 +1934,11 @@ fn replacement_spec(
             attempt_wait: Duration::from_millis(attempt_wait_ms),
             max_bytes: seed_bytes,
         },
-        // A retirement charges one disposition row per obligation plus the censused bytes and one record.
+        // A retirement charges rows for deleting a superseded receipt and disposition set and writing their replacements, plus the censused bytes and one record.
         retirement: RetirementBounds {
             max_obligations: nonzero_usize(
                 "local_transaction_rows",
-                (half_rows.get() as u64).min(quarter_local / DISPOSITION_ROW_BYTES),
+                (half_rows.get() as u64 - 1).min(quarter_local / DISPOSITION_ROW_BYTES),
             )?,
             max_obligation_bytes: obligation_bytes,
         },
