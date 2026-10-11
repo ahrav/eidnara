@@ -267,12 +267,18 @@ impl SearchSelection {
             spec.identity
                 .require_compatible(&self.identity)
                 .map_err(BuildError::from)?;
-            self.reopen_locked(kernel, gate, budget, &transaction)?;
+            let validated = self
+                .reopen_locked(kernel, gate, budget, &transaction)?
+                .ok_or(BuildError::Invalid("missing selected owner"))?;
             let family = self
                 .selected
                 .load_full()
                 .ok_or(BuildError::Invalid("missing selected owner"))?;
+            // A completed target is a commit the family applied, so it lies at or before the checkpoint the reopen validated.
             if !family.names_operation(&intent)
+                || intent.recovery_target.is_none_or(|target| {
+                    target.commit_seq > validated.report.checkpoint.checkpoint_commit_seq
+                })
                 || lifecycle.read() != ControlState::Current(intent.clone())
             {
                 return Err(BuildError::Invalid("selected operation differs").into());

@@ -297,6 +297,56 @@ fn raced_operation_cannot_debit_the_replacement_record() {
     assert!(database(root.path()).is_file());
 }
 
+/// A completed record's target is a commit the selected family applied. A Current record whose target stands past the family's checkpoint contradicts the family, so the completed slice refuses it instead of reporting Current; the same record with its recorded target is Current.
+#[test]
+fn a_completed_target_past_the_family_checkpoint_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let done = current(root.path());
+    let target = done.recovery_target.unwrap().commit_seq;
+    let path = root.path().join("search-lifecycle/intent.json");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut moved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    moved["current"]["recovery_target"]["commit_seq"] = serde_json::json!(target + 1);
+    std::fs::write(&path, serde_json::to_vec(&moved).unwrap()).unwrap();
+    let refused = selection.recover_slice(
+        &corpus.kernel,
+        &gate,
+        &config,
+        &budget(Duration::from_secs(20)),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(RecoveryFailure::Blocked(BuildError::Invalid(
+                "selected operation differs"
+            )))
+        ),
+        "{refused:?}"
+    );
+    std::fs::write(&path, bytes).unwrap();
+    assert_eq!(
+        selection
+            .recover_slice(
+                &corpus.kernel,
+                &gate,
+                &config,
+                &budget(Duration::from_secs(20)),
+                &mut |_| {},
+            )
+            .unwrap(),
+        RecoveryProgress::Current
+    );
+}
+
 #[test]
 fn completion_decoder_rejects_ambiguous_schema_and_invalid_accounting() {
     let root = tempfile::tempdir().unwrap();
