@@ -25,7 +25,7 @@ Production code:
 - Every engine statement binds the probe as `?1` after `MATCH`: `COUNT_SQL`
   (`crates/retrieval/src/lexical/retrieve.rs:261`), `RANKED_SQL`, and
   `COMMON_SQL` on the following lines, run by `count_probe`
-  (`crates/retrieval/src/lexical/retrieve.rs:575`) and the scan functions.
+  (`crates/retrieval/src/lexical/retrieve.rs:585`) and the scan functions.
 - `analyze_segments` (`crates/retrieval/src/lexical/analysis.rs:78`) keeps
   only maximal runs of token characters, where `starts_atom`
   (`crates/retrieval/src/lexical/analysis.rs:113`) admits alphanumerics, `_`,
@@ -33,8 +33,8 @@ Production code:
   separators, so no atom carries them and `quote_atom`'s doubling is a second
   guard rather than the first.
 - The daemon compiles probes only through this path: `lexical_read`
-  (`crates/daemon/src/query_route.rs:1075`) calls `compile`
-  (`crates/daemon/src/query_route.rs:1097`) on the analysis of the request's
+  (`crates/daemon/src/query_route.rs:1076`) calls `compile`
+  (`crates/daemon/src/query_route.rs:1098`) on the analysis of the request's
   prose segments.
 
 Tests cited by the record, read at the branch:
@@ -52,7 +52,7 @@ Tests cited by the record, read at the branch:
   `[1, 8, 9]`, `a NOT b` subtracts to `[8]`, and `NEAR(a b)` constrains to
   `[1]`, so the operator rows are lost and the operators act.
 - `a_probe_matches_only_its_term_and_operators_in_text_stay_literal`
-  (`crates/retrieval/tests/lexical_retrieval.rs:583`) runs `retrieve` on a
+  (`crates/retrieval/tests/lexical_retrieval.rs:596`) runs `retrieve` on a
   projection built by `Fixture::all_admitted` (`:332`) over the `corpus`
   (`:228`), whose rows hold `fetch OR fallback parse` and `NEAR miss on a
   fetch path`. It asserts `parse` returns alpha, beta, gamma, and zeta with
@@ -101,8 +101,8 @@ a value on every statement; no interleaving changes the text the engine sees.
 
 - Sources examined: `crates/retrieval/tests/lexical_engine.rs:16` and `:180`
   (scratch engine); `crates/retrieval/tests/lexical_retrieval.rs:332`, `:164`,
-  and `:583` (projection fixture); `crates/daemon/src/query_route.rs:1075`
-  and `:1097` (daemon call site).
+  and `:596` (projection fixture); `crates/daemon/src/query_route.rs:1076`
+  and `:1098` (daemon call site).
 - Findings: the engine tests use a scratch in-memory table that shares only
   `fts5_table_args` with the projection. The retrieval test runs the real
   `retrieve` over a projection store opened through `open_store` and a kernel

@@ -280,20 +280,24 @@ const DETAILS_SQL: &str =
             NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=j.value)
      FROM json_each(?1) j LEFT JOIN occurrences o ON o.occurrence_id=j.value";
 
+/// Rowids one common stream reads per page, so a probe that contributes few rows to the merge reads few rows.
+const COMMON_PAGE_ROWS: usize = 512;
+
 /// The raw score a common probe's rows carry: they are read in rowid order, not ranked.
 const UNRANKED: f64 = 0.0;
 
 /// The kept matches in comparator order, not yet resolved to occurrence rows or judged by the kernel.
 ///
-/// Retains its `RetrievalBounds` so admission uses the bounds that produced its hits.
-#[derive(Debug, Clone)]
-pub struct Scan {
+/// Retains the projection connection it was read under and its `RetrievalBounds`, so admission reads occurrence rows from the same read transaction and uses the bounds that produced its hits.
+#[derive(Clone)]
+pub struct Scan<'c> {
+    conn: &'c GuardedConn<'c>,
     ordered: Found,
     retrieval: Retrieval,
     bounds: RetrievalBounds,
 }
 
-impl Scan {
+impl Scan<'_> {
     /// Distinct occurrences the kept matches name, before any occurrence row is read or kernel verdict given.
     pub fn hits(&self) -> usize {
         self.ordered.hits.len()
@@ -321,7 +325,7 @@ pub fn retrieve(
     budget: &EvalBudget,
 ) -> Result<Retrieval, RetrievalRefusal> {
     let scanned = scan(conn, probes, bounds, budget)?;
-    admit_inner(conn, kernel, authority, scanned, budget, |_| {})
+    admit_inner(scanned, kernel, authority, budget, |_| {})
 }
 
 /// `hook` runs after every admission batch and once before the final re-judgment, so a test can change the kernel or the budget in those windows.
@@ -336,7 +340,7 @@ pub fn retrieve_with_hook_for_test(
     hook: impl FnMut(Window),
 ) -> Result<Retrieval, RetrievalRefusal> {
     let scanned = scan(conn, probes, bounds, budget)?;
-    admit_inner(conn, kernel, authority, scanned, budget, hook)
+    admit_inner(scanned, kernel, authority, budget, hook)
 }
 
 /// Runs every probe against the projection and keeps each occurrence's best hit.
@@ -344,12 +348,12 @@ pub fn retrieve_with_hook_for_test(
 /// # Errors
 ///
 /// Refuses bounds the kernel's eligibility batch could never serve, more probes than `max_probes`, and a budget that ends before any probe completes; a budget that ends later yields a [`Scan`] whose admission is already [`Completion::Incomplete`] with no hits.
-pub fn scan(
-    conn: &GuardedConn<'_>,
+pub fn scan<'c>(
+    conn: &'c GuardedConn<'c>,
     probes: &[Probe],
     bounds: RetrievalBounds,
     budget: &EvalBudget,
-) -> Result<Scan, RetrievalRefusal> {
+) -> Result<Scan<'c>, RetrievalRefusal> {
     budget
         .check()
         .map_err(|_| RetrievalRefusal::BudgetExhausted)?;
@@ -385,7 +389,7 @@ pub fn scan(
     let mut distinct: Vec<(usize, &Probe, usize)> = Vec::new();
     for (ordinal, probe) in probes.iter().enumerate() {
         if budget.is_exhausted() {
-            return exhausted_scan(retrieval, bounds);
+            return exhausted_scan(conn, retrieval, bounds);
         }
         if !counted.contains(probe) {
             match count_probe(conn, probe, bounds.qualifying_matches, budget) {
@@ -395,7 +399,7 @@ pub fn scan(
                     counted.insert(probe);
                     distinct.push((ordinal, probe, count));
                 }
-                Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
+                Err(ScanStop::Budget) => return exhausted_scan(conn, retrieval, bounds),
                 Err(ScanStop::Projection(error)) => return Err(error.into()),
             }
         }
@@ -435,9 +439,11 @@ pub fn scan(
                 incomplete(&mut retrieval, IncompleteReason::ScanBound);
             }
         }
-        Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
+        Err(ScanStop::Budget) => return exhausted_scan(conn, retrieval, bounds),
         Err(ScanStop::Projection(error)) => return Err(error.into()),
     }
+    // Both scans keep each rowid once, and a consistent projection holds one lexical row per occurrence, so this dedup removes nothing there;
+    // it keeps an inconsistent projection that names one occurrence from two rows from yielding two hits for it.
     // Each hit's identifier, rank, and ordinal together are unique, and each deduplicated hit's identifier is unique, so both orders are total.
     let Found { hits, text } = &mut found;
     hits.sort_unstable_by(|left, right| best_first(left, right, text));
@@ -445,37 +451,36 @@ pub fn scan(
     hits.sort_unstable_by(|left, right| comparator(left, right, text));
     retrieval.consumed.scanned_rows = hits.len();
     Ok(Scan {
+        conn,
         ordered: found,
         retrieval,
         bounds,
     })
 }
 
-/// Reads each kept match's occurrence row as admission reaches it, judges the live ones in bounded kernel batches, accepts eligible ones until `max_accepted` fills, and re-judges the accepted set once before returning.
-/// `conn` must be the projection connection `scanned` was read under, still inside the same read transaction.
+/// Reads each kept match's occurrence row as admission reaches it, through the projection connection and read transaction `scanned` was read under, judges the live ones in bounded kernel batches, accepts eligible ones until `max_accepted` fills, and re-judges the accepted set once before returning.
 ///
 /// # Errors
 ///
 /// Returns kernel and projection errors except [`KernelError::Deadline`], which leaves the result [`Completion::Incomplete`] with no contributions.
 pub fn admit(
-    conn: &GuardedConn<'_>,
+    scanned: Scan<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
-    scanned: Scan,
     budget: &EvalBudget,
 ) -> Result<Retrieval, RetrievalRefusal> {
-    admit_inner(conn, kernel, authority, scanned, budget, |_| {})
+    admit_inner(scanned, kernel, authority, budget, |_| {})
 }
 
 fn admit_inner(
-    conn: &GuardedConn<'_>,
+    scanned: Scan<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
-    scanned: Scan,
     budget: &EvalBudget,
     mut hook: impl FnMut(Window),
 ) -> Result<Retrieval, RetrievalRefusal> {
     let Scan {
+        conn,
         ordered,
         mut retrieval,
         bounds,
@@ -528,8 +533,13 @@ impl From<ScanStop> for AdmitStop {
 }
 
 /// A budget-exhausted scan retains no hits; admission returns its recorded completion unchanged.
-fn exhausted_scan(retrieval: Retrieval, bounds: RetrievalBounds) -> Result<Scan, RetrievalRefusal> {
+fn exhausted_scan<'c>(
+    conn: &'c GuardedConn<'c>,
+    retrieval: Retrieval,
+    bounds: RetrievalBounds,
+) -> Result<Scan<'c>, RetrievalRefusal> {
     Ok(Scan {
+        conn,
         ordered: Found::default(),
         retrieval: exhausted(retrieval)?,
         bounds,
@@ -599,8 +609,14 @@ fn vm_steps(statement: &rusqlite::Statement<'_>) -> u64 {
     )
 }
 
-/// One match before its occurrence is read: the probe's raw rank, the lexical rowid, and the probe ordinal.
-type Matched = (f64, i64, usize);
+/// One match before its occurrence is read.
+#[derive(Debug, Clone, Copy)]
+struct Matched {
+    /// The probe's raw rank, or [`UNRANKED`] for a common probe's row.
+    rank: f64,
+    rowid: i64,
+    ordinal: usize,
+}
 
 /// Keeps the request's best `bound` matches across the ranked probes, each given as its ordinal, probe, and counted matches, and returns `true` when more distinct matches exist, with the VM steps the statements ran.
 /// Every match of every probe is scored once, the matches merge in rank order, and an occurrence several probes match keeps its lowest rank, then its lowest probe ordinal.
@@ -619,18 +635,20 @@ fn scan_ranked(
         steps += ranked_rows(conn, probe, ordinal, count, budget, &mut matches)?;
     }
     matches.sort_by(|left, right| {
-        left.0
-            .total_cmp(&right.0)
-            .then(left.1.cmp(&right.1))
-            .then(left.2.cmp(&right.2))
+        left.rank
+            .total_cmp(&right.rank)
+            .then(left.rowid.cmp(&right.rowid))
+            .then(left.ordinal.cmp(&right.ordinal))
     });
     // A lexical row names one occurrence, so the first of a rowid's matches in this order is its best.
     let mut seen = HashSet::with_capacity(matches.len());
-    matches.retain(|&(_, rowid, _)| seen.insert(rowid));
+    matches.retain(|matched| seen.insert(matched.rowid));
     drop(seen);
     let truncated = matches.len() > bound;
     let mut end = matches.len().min(bound);
-    while end < matches.len() && matches[end].0.total_cmp(&matches[end - 1].0) == Ordering::Equal {
+    while end < matches.len()
+        && matches[end].rank.total_cmp(&matches[end - 1].rank) == Ordering::Equal
+    {
         budget.check().map_err(|_| ScanStop::Budget)?;
         end += 1;
     }
@@ -661,7 +679,11 @@ fn ranked_rows(
     ])?;
     while let Some(row) = cursor.next()? {
         budget.check().map_err(|_| ScanStop::Budget)?;
-        matches.push((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?, ordinal));
+        matches.push(Matched {
+            rank: row.get(0)?,
+            rowid: row.get(1)?,
+            ordinal,
+        });
     }
     drop(cursor);
     Ok(vm_steps(&statement))
@@ -678,16 +700,21 @@ fn identify(
     let mut statement = conn.prepare_cached(IDS_SQL)?;
     statement.reset_status(StatementStatus::VmStep);
     let mut order: Vec<usize> = (0..matches.len()).collect();
-    order.sort_unstable_by_key(|&index| matches[index].1);
-    let json = json_array(order.iter().map(|&index| matches[index].1.to_string()));
+    order.sort_unstable_by_key(|&index| matches[index].rowid);
+    let json = json_array(order.iter().map(|&index| matches[index].rowid.to_string()));
     let mut read = 0;
     let mut cursor = statement.query([json])?;
     while let Some(row) = cursor.next()? {
         budget.check().map_err(|_| ScanStop::Budget)?;
         read += 1;
         let index = *order.get(key(row)?).ok_or(ProjectionError::CorruptRow)?;
-        let (rank, _, ordinal) = matches[index];
-        let hit = Hit::new(&mut found.text, text(row, 1)?, rank, ordinal);
+        let matched = matches[index];
+        let hit = Hit::new(
+            &mut found.text,
+            text(row, 1)?,
+            matched.rank,
+            matched.ordinal,
+        );
         found.hits.push(hit);
     }
     drop(cursor);
@@ -749,7 +776,7 @@ impl Descending<'_> {
 }
 
 /// Keeps the first `bound` distinct rowids of the common probes, each given as its ordinal and probe, in descending rowid order across all of them, and returns `true` when another exists, with the VM steps the statements ran.
-/// Each probe's rowids are read `bound + 1` at a time and merged; a rowid several probes match is kept once, under the lowest of their ordinals.
+/// Each probe's rowids are read a page of at most [`COMMON_PAGE_ROWS`] at a time and merged; a rowid several probes match is kept once, under the lowest of their ordinals.
 fn scan_common(
     conn: &GuardedConn<'_>,
     probes: &[(usize, &Probe)],
@@ -759,7 +786,7 @@ fn scan_common(
 ) -> Result<(bool, u64), ScanStop> {
     let mut pages = conn.prepare_cached(COMMON_SQL)?;
     pages.reset_status(StatementStatus::VmStep);
-    let page = i64::try_from(bound.saturating_add(1)).unwrap_or(i64::MAX);
+    let page = i64::try_from(bound.saturating_add(1).min(COMMON_PAGE_ROWS)).unwrap_or(i64::MAX);
     let mut streams: Vec<Descending<'_>> = probes
         .iter()
         .map(|&(ordinal, probe)| Descending {
@@ -790,7 +817,11 @@ fn scan_common(
                 stream.page.pop_front();
             }
         }
-        kept.push((UNRANKED, rowid, ordinal));
+        kept.push(Matched {
+            rank: UNRANKED,
+            rowid,
+            ordinal,
+        });
     }
     let truncated = kept.len() > bound;
     kept.truncate(bound);
@@ -833,8 +864,10 @@ fn resolve(
         budget.check().map_err(|_| ScanStop::Budget)?;
         read += 1;
         let index = *order.get(key(row)?).ok_or(ProjectionError::CorruptRow)?;
-        let live = row.get_ref(1)? != rusqlite::types::ValueRef::Null && row.get::<_, bool>(5)?;
-        if !live {
+        // Column 1 is NULL for a missing occurrence and column 5 is `false` for a tombstoned one.
+        let present = row.get_ref(1)? != rusqlite::types::ValueRef::Null;
+        let untombstoned: bool = row.get(5)?;
+        if !(present && untombstoned) {
             continue;
         }
         let class = row
@@ -895,7 +928,7 @@ fn judge_batch(
     Ok(Some((report, moved)))
 }
 
-/// Judges candidates in comparator order and accepts eligible ones until `max_accepted` fills. Each batch takes at most `batch_rows` kept matches and no more than the accepted slots still open, reads their occurrence rows, and judges the live ones, so no occurrence past the last one the bound can accept is read or judged.
+/// Judges candidates in comparator order and accepts eligible ones until `max_accepted` fills. The first batch takes the open accepted slots; each later batch takes the open slots scaled by the matches read per accepted occurrence so far, so a mostly eligible window reads few occurrences past the bound and a sparse one still advances a whole batch at a time. Every batch takes at most `batch_rows` kept matches, reads their occurrence rows, and judges the live ones.
 /// An ineligible leader consumes judgment work and no accepted slot, so eligible tails behind it are still reached.
 #[allow(clippy::too_many_arguments)]
 fn admit_batches(
@@ -920,10 +953,16 @@ fn admit_batches(
             break;
         }
         let open = bounds.max_accepted.get() - accepted.len();
+        // The matches read per accepted occurrence so far predict how many fill the open slots; a batch that has accepted none yet takes a whole batch.
+        let want = match (next, accepted.len()) {
+            (0, _) => open,
+            (_, 0) => bounds.batch_rows.get(),
+            (read, kept) => open.saturating_mul(read).div_ceil(kept),
+        };
         let end = ordered
             .hits
             .len()
-            .min(next + bounds.batch_rows.get().min(open));
+            .min(next + want.clamp(1, bounds.batch_rows.get()));
         let (resolved, steps) = resolve(conn, &ordered.hits[next..end], &ordered.text, budget)?;
         retrieval.consumed.sql_steps += steps;
         let mut batch: Vec<&Hit> = Vec::with_capacity(resolved.len());
@@ -957,6 +996,9 @@ fn admit_batches(
         }
         for ((hit, candidate), judged) in batch.iter().zip(candidates).zip(report.occurrences) {
             match judged.disposition {
+                Disposition::Eligible if accepted.len() == bounds.max_accepted.get() => {
+                    incomplete(retrieval, IncompleteReason::AcceptedBound);
+                }
                 Disposition::Eligible => accepted.push(Accepted {
                     candidate,
                     rank: hit.rank,

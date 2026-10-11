@@ -258,7 +258,7 @@ async fn exact_lane_positions_and_bounds_count_only_eligible_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_projection_connection_is_free_while_the_lanes_are_admitted() {
+async fn the_projection_connection_is_free_while_the_exact_lane_is_admitted() {
     let fixture = Fixture::build().await;
     let (_token, budget) = request_budget(10_000);
     let mut probed = Vec::new();

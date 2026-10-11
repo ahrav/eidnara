@@ -17,11 +17,11 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 - `crates/daemon/src/request_budget/host_tests.rs`
   `cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`
   witnesses join-before-settle on the bridge.
-- `crates/daemon/src/query_route.rs` `execute` runs only `exact_read` and
-  `lexical::scan` inside `read_under`; `admit_exact`, `lexical::admit`, and
+- `crates/daemon/src/query_route.rs` `execute` runs `exact_read`,
+  `lexical::scan`, and `lexical::admit` inside `read_under`; `admit_exact` and
   `judge_eligible` take their kernel readers after the closure returns.
   `crates/daemon/tests/query_route.rs`
-  `the_projection_connection_is_free_while_the_lanes_are_admitted` reads the
+  `the_projection_connection_is_free_while_the_exact_lane_is_admitted` reads the
   projection under a fresh budget from the admission, fusion, and revalidation
   hooks.
 - No envelope bound and no holder census exist for the route.
@@ -44,7 +44,7 @@ closure waits to pin.
 
 ## Investigation log
 
-### Q: Why does the lexical lane no longer judge under the projection connection?
+### Q: Why did the lexical lane stop judging under the projection connection, and why does it judge there again?
 
 - Sources examined: `retrieval::lexical::retrieve`, which took the connection
   and the kernel together; `storage::SqliteStore`, whose one connection is held
@@ -56,6 +56,14 @@ closure waits to pin.
   acquisitions. `lexical::scan` and `lexical::admit` split the two halves so
   the connection is released before the first kernel reader is taken;
   `retrieve` composes them for callers that hold nothing else.
+- Later finding (#896): at one million occurrences the split read the
+  occurrence row of every one of the 4,096 kept matches while admission judged
+  about 260, so the owner approved reading each candidate's occurrence row
+  just before the kernel judges it. `lexical::admit` now takes the `Scan`,
+  which carries the projection connection it was read under, and the route
+  runs it inside `read_under`, as the dense lane already judged there. The
+  connection is held across lexical eligibility batches again; the exact lane
+  still judges after release.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

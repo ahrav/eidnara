@@ -446,6 +446,19 @@ impl Fixture {
             .unwrap()
     }
 
+    /// The occurrence identifiers `scan` keeps, in comparator order, before any occurrence row is read.
+    fn kept(&self, probes: &[Probe], bounds: RetrievalBounds) -> Vec<String> {
+        self.store
+            .with_conn(|conn| {
+                Ok(scan(conn, probes, bounds, &EvalBudget::unbounded())
+                    .unwrap()
+                    .hit_ids()
+                    .map(str::to_string)
+                    .collect())
+            })
+            .unwrap()
+    }
+
     /// `retrieve` with the allocator recording only the retrieval call, after the connection is checked out.
     fn retrieve_recorded(
         &self,
@@ -649,10 +662,9 @@ fn scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_c
             assert_eq!(scanned.hits(), 6);
             // Admission reads each candidate's occurrence row under the connection the scan used.
             Ok(admit(
-                conn,
+                scanned,
                 &fixture.kernel,
                 fixture.authority(),
-                scanned,
                 &EvalBudget::unbounded(),
             ))
         })
@@ -780,9 +792,10 @@ fn an_ineligible_leader_is_excluded_without_taking_an_accepted_slot() {
     assert_eq!(ids_of(&all), reference[1..].to_vec());
 }
 
-/// Each batch judges at most the accepted slots still open, so the candidate past the filled bound is never judged and no verdict is spent on it.
+/// The first batch judges the open accepted slots and each later one scales the slots left by the matches read per acceptance so far, so a short tail is judged in one small batch rather than one candidate at a time.
 #[test]
-fn a_batch_judges_at_most_the_open_accepted_slots_and_an_exact_fill_stays_complete() {
+fn admission_batches_scale_the_open_slots_by_the_acceptance_so_far_and_an_exact_fill_stays_complete()
+ {
     let fixture = Fixture::new(&["alpha", "beta", "delta", "epsilon", "zeta"]);
     let request = probes("parse");
     let reference = fixture.reference(&request);
@@ -801,8 +814,8 @@ fn a_batch_judges_at_most_the_open_accepted_slots_and_an_exact_fill_stays_comple
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::AcceptedBound)
     );
-    // Two open slots take the hidden leader and one eligible row, the one slot left takes the next row, and revalidation re-judges both accepted rows.
-    assert_eq!(retrieval.consumed.judged, 2 + 1 + 2);
+    // Two open slots take the hidden leader and one eligible row; one acceptance in two reads scales the one slot left to two candidates, and revalidation re-judges both accepted rows.
+    assert_eq!(retrieval.consumed.judged, 2 + 2 + 2);
     assert_eq!(retrieval.consumed.batches, 3);
     assert_eq!(
         retrieval.consumed.excluded,
@@ -1681,18 +1694,7 @@ fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only
         scan_rows: NonZeroUsize::new(5).unwrap(),
         ..bounds()
     };
-    let scanned = fixture
-        .store
-        .with_conn(|conn| {
-            Ok(scan(
-                conn,
-                &probes("t10001"),
-                tight,
-                &EvalBudget::unbounded(),
-            ))
-        })
-        .unwrap()
-        .unwrap();
+    let scanned = fixture.kept(&probes("t10001"), tight);
     let mut highest: Vec<String> = fixture
         .raw()
         .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 't10001' ORDER BY rowid DESC LIMIT 5")
@@ -1702,8 +1704,8 @@ fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     highest.sort();
-    assert_eq!(scanned.hits(), 5);
-    let mut hit: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
+    assert_eq!(scanned.len(), 5);
+    let mut hit: Vec<String> = scanned.clone();
     hit.sort();
     assert_eq!(hit, highest, "the common scan keeps the highest rowids");
     // Admitting the kept rows' sources makes every one of them a contribution, so the assertion below sees them all.
@@ -1735,6 +1737,160 @@ fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only
         Completion::Incomplete(IncompleteReason::CommonTerms)
     );
     assert_eq!(mixed.consumed.scanned_rows, 1);
+}
+
+/// An interrupt from the connection's progress handler while admission reads a later batch's occurrence rows ends the request as budget exhaustion with no contributions, though the request's own budget never ends.
+#[test]
+fn an_interrupt_while_admission_reads_occurrence_rows_is_budget_exhaustion() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 600);
+    // Every other bulk row is eligible, so the first batch leaves slots open and a second batch reads more occurrence rows.
+    let admitted: Vec<&str> = bulk
+        .iter()
+        .step_by(2)
+        .map(|row| row.object.as_str())
+        .collect();
+    fixture.admit(&admitted);
+    let request = probes("parse");
+    let wide = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4096).unwrap(),
+        max_accepted: NonZeroUsize::new(128).unwrap(),
+        batch_rows: NonZeroUsize::new(128).unwrap(),
+        ..bounds()
+    };
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let stop = {
+        let interrupt = Arc::clone(&interrupt);
+        move || interrupt.load(Ordering::Relaxed)
+    };
+    let budget = EvalBudget::unbounded();
+    let interrupted = fixture
+        .store
+        .with_conn_interruptible(Instant::now() + Duration::from_secs(30), stop, |conn| {
+            Ok(retrieve_with_hook_for_test(
+                conn,
+                &fixture.kernel,
+                &request,
+                fixture.authority(),
+                wide,
+                &budget,
+                |window| {
+                    if window == Window::AfterBatch(1) {
+                        interrupt.store(true, Ordering::Relaxed);
+                    }
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        !budget.is_exhausted(),
+        "only the connection was interrupted"
+    );
+    assert_eq!(
+        interrupted.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(interrupted.contributions.is_empty());
+    assert_eq!(interrupted.consumed.batches, 1);
+
+    let control = fixture
+        .retrieve(&request, wide, &EvalBudget::unbounded())
+        .unwrap();
+    assert!(
+        control.consumed.batches > 2,
+        "the control reads a second batch"
+    );
+    assert_eq!(control.contributions.len(), 128);
+}
+
+/// Equal-rank matches from two probes that straddle the shared window's cut are kept by occurrence identifier, whichever probe matched them.
+#[test]
+fn equal_ranks_from_two_probes_across_the_window_cut_keep_the_lowest_identifiers() {
+    let fixture = Fixture::all_admitted();
+    // The two terms match equally many rows of equal length, so every match of either ranks the same.
+    let rows: Vec<Row> = (0..40)
+        .map(|n| {
+            let term = if n % 2 == 0 { "tiea" } else { "tieb" };
+            Row::claim(&format!("straddle-{n}"), &format!("{term} filler"))
+        })
+        .collect();
+    project_admitted(&fixture, &rows);
+    let request = probes("tiea tieb");
+    let keyed = fixture.keyed_reference(&request);
+    assert_eq!(keyed.len(), 40);
+    assert!(
+        keyed
+            .windows(2)
+            .all(|pair| pair[0].1.to_bits() == pair[1].1.to_bits()),
+        "every match of both probes ties"
+    );
+    let mut lowest: Vec<String> = rows.iter().map(Row::occurrence_id).collect();
+    lowest.sort();
+    lowest.truncate(13);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(13).unwrap(),
+        ..bounds()
+    };
+    assert_eq!(fixture.kept(&request, tight), lowest);
+    let reversed = probes("tieb tiea");
+    assert_eq!(fixture.kept(&reversed, tight), lowest);
+    let retrieval = fixture
+        .retrieve(&request, tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), lowest);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+}
+
+/// A repeated common probe is counted and merged once, so it adds no engine work to the common scan.
+#[test]
+fn a_repeated_common_probe_adds_no_work() {
+    let fixture = Fixture::all_admitted();
+    project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let once = fixture
+        .retrieve(&probes("t10001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    let twice = fixture
+        .retrieve(&probes("t10001 t10001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(twice.consumed.probes, 2);
+    assert_eq!(twice.consumed.counted_rows, once.consumed.counted_rows);
+    assert_eq!(twice.consumed.sql_steps, once.consumed.sql_steps);
+    assert_eq!(ids_of(&twice), ids_of(&once));
+    assert!(twice.contributions.iter().all(|c| c.ordinal == 0));
+}
+
+/// On the common path an ineligible leader keeps its window slot and is judged and excluded, so it never reaches the result.
+#[test]
+fn an_ineligible_leader_of_a_common_probe_is_excluded_and_keeps_its_slot() {
+    let fixture = Fixture::all_admitted();
+    let rows = project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let mut kept = fixture.kept(&probes("t10001"), tight);
+    assert_eq!(kept.len(), 5);
+    kept.sort();
+    // Admitting all but the comparator's first kept occurrence leaves that leader without an admission.
+    let objects: Vec<&str> = kept[1..].iter().map(|id| object_of(&rows, id)).collect();
+    fixture.admit(&objects);
+    let retrieval = fixture
+        .retrieve(&probes("t10001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), kept[1..].to_vec());
+    assert_eq!(retrieval.consumed.scanned_rows, 5);
+    assert_eq!(
+        retrieval.consumed.excluded,
+        vec![(EligibilityVerdict::Retracted, 1)]
+    );
 }
 
 /// Projects `rows` and admits their sources, so every one of their occurrences is an eligible contribution.
@@ -1935,6 +2091,11 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         Some(root) => Fixture::reopen(Root::Kept(root.into())),
         None => build_scale_fixture(occurrences),
     };
+    // A reused projection reports the occurrences it holds, not the requested count.
+    let occurrences: i64 = fixture
+        .raw()
+        .query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))
+        .unwrap();
     let mix = [
         "w123",
         "m42",
@@ -2067,6 +2228,15 @@ fn lexical_scan_p99_at_one_million_occurrences() {
     }
     // A refused, exhausted, or empty answer is not a latency sample the gate may pass on.
     assert_eq!(completed, queries, "every offered query must complete");
+    // The mix exercises the ranked regime it names: the largest qualifying probe, a budget skip, and no request past the budget.
+    for sample in &samples {
+        assert!(sample.ranked <= RANK_BUDGET, "{}", sample.request);
+        match sample.request {
+            "k3" => assert_eq!(sample.ranked, QUALIFYING_MATCHES),
+            "k3 k4" => assert!(sample.outcome.contains("RankBudget"), "{}", sample.outcome),
+            _ => {}
+        }
+    }
     for sample in &samples {
         assert!(
             sample.contributions > 0,
@@ -2123,13 +2293,9 @@ fn a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers() {
     let mut expected: Vec<String> = tied.iter().map(Row::occurrence_id).collect();
     expected.sort();
     expected.truncate(64);
-    let scanned = fixture
-        .store
-        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-        .unwrap()
-        .unwrap();
-    assert_eq!(scanned.hits(), 64);
-    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let scanned = fixture.kept(&request, bounds());
+    assert_eq!(scanned.len(), 64);
+    assert_eq!(scanned, expected);
     let reference = fixture.reference(&request);
     assert_eq!(
         &reference[..64],
@@ -2172,22 +2338,13 @@ fn dead_rows_in_a_large_tie_group_keep_their_window_slots() {
     };
     let request = probes("tiegroup");
     let scan_rows = bounds().scan_rows.get();
-    let scanned = |fixture: &Fixture| {
-        fixture
-            .store
-            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-            .unwrap()
-            .unwrap()
-    };
+    let scanned = |fixture: &Fixture| fixture.kept(&request, bounds());
 
     // Dead rows at the front of the group keep their slots: the window is the group's lowest identifiers whatever their liveness.
     let dead = 7;
     tombstone(&ids[..dead]);
     let kept = scanned(&fixture);
-    assert_eq!(
-        kept.hit_ids().collect::<Vec<_>>(),
-        ids[..scan_rows].to_vec()
-    );
+    assert_eq!(kept, ids[..scan_rows].to_vec());
     let retrieval = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
@@ -2383,19 +2540,8 @@ fn dead_rows_leading_a_common_probe_keep_their_window_slots() {
     for occurrence_id in &descending[..dead] {
         tombstone_raw(&fixture, occurrence_id);
     }
-    let scanned = fixture
-        .store
-        .with_conn(|conn| {
-            Ok(scan(
-                conn,
-                &probes("parse"),
-                common,
-                &EvalBudget::unbounded(),
-            ))
-        })
-        .unwrap()
-        .unwrap();
-    let mut kept: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
+    let scanned = fixture.kept(&probes("parse"), common);
+    let mut kept: Vec<String> = scanned.clone();
     kept.sort();
     let mut expected = descending[..scan_rows].to_vec();
     expected.sort();
@@ -2676,15 +2822,8 @@ fn dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots() {
     for &index in &dead {
         tombstone_raw(&fixture, &reference[index]);
     }
-    let kept = fixture
-        .store
-        .with_conn(|conn| Ok(scan(conn, &request, wide, &EvalBudget::unbounded())))
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        kept.hit_ids().collect::<Vec<_>>(),
-        reference[..scan_rows].to_vec()
-    );
+    let kept = fixture.kept(&request, wide);
+    assert_eq!(kept, reference[..scan_rows].to_vec());
     let retrieval = fixture
         .retrieve(&request, wide, &EvalBudget::unbounded())
         .unwrap();
@@ -2726,12 +2865,8 @@ fn a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group() {
         );
         head.sort_by_key(Row::occurrence_id);
         let expected: Vec<String> = head.iter().map(Row::occurrence_id).collect();
-        let scanned = fixture
-            .store
-            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-            .unwrap()
-            .unwrap();
-        assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+        let scanned = fixture.kept(&request, bounds());
+        assert_eq!(scanned, expected);
         let retrieval = fixture
             .retrieve(&request, bounds(), &EvalBudget::unbounded())
             .unwrap();
@@ -2787,12 +2922,8 @@ fn a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group() {
     tombstone_raw(&fixture, &head[0].occurrence_id());
     let expected: Vec<String> = head.iter().map(Row::occurrence_id).collect();
 
-    let scanned = fixture
-        .store
-        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-        .unwrap()
-        .unwrap();
-    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let scanned = fixture.kept(&request, bounds());
+    assert_eq!(scanned, expected);
     let retrieval = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();

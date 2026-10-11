@@ -605,6 +605,21 @@ impl KernelStore {
         result
     }
 
+    /// Each pooled reader's `PRAGMA mmap_size`, so a test can check the readers a restore installs.
+    #[cfg(feature = "test-support")]
+    pub fn reader_mmap_sizes_for_test(&self) -> Vec<i64> {
+        self.readers
+            .iter()
+            .map(|reader| {
+                reader
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .query_row("PRAGMA mmap_size", [], |row| row.get(0))
+                    .unwrap_or(-1)
+            })
+            .collect()
+    }
+
     #[cfg(feature = "test-support")]
     pub fn invalidate_writer_fence_for_test(&self) -> Result<(), KernelError> {
         let writer = self.lock_writer()?;
@@ -1075,6 +1090,7 @@ pub(super) fn stamp_writer_fence(conn: &mut Connection, epoch: u64) -> Result<()
     tx.commit().map_err(|_| KernelError::Io)
 }
 
+/// A pooled reader: query-only, with the kernel profile and [`READER_MMAP_BYTES`] of memory-mapped reads. The pool at open and the readers a restore installs both come from here.
 pub(super) fn open_reader(path: &Path) -> Result<Connection, KernelError> {
     let conn = Connection::open_with_flags(
         path,
@@ -1084,29 +1100,23 @@ pub(super) fn open_reader(path: &Path) -> Result<Connection, KernelError> {
     conn.pragma_update(None, "query_only", "ON")
         .map_err(super::map_sqlite)?;
     apply_preclassification_profile(&conn).map_err(super::map_sqlite)?;
+    conn.pragma_update(None, "mmap_size", READER_MMAP_BYTES)
+        .map_err(super::map_sqlite)?;
+    let query_only: i64 = conn
+        .query_row("PRAGMA query_only", [], |row| row.get(0))
+        .map_err(super::map_sqlite)?;
+    if query_only != 1 {
+        return Err(KernelError::Io);
+    }
     Ok(conn)
 }
 
 fn open_read_pool(path: &Path) -> Result<Vec<Mutex<Connection>>, KernelError> {
     (0..READ_POOL_SIZE)
         .map(|_| {
-            let conn = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|_| KernelError::Io)?;
-            conn.pragma_update(None, "query_only", "ON")
-                .map_err(|_| KernelError::Io)?;
-            apply_preclassification_profile(&conn).map_err(|_| KernelError::Io)?;
-            conn.pragma_update(None, "mmap_size", READER_MMAP_BYTES)
-                .map_err(|_| KernelError::Io)?;
-            let query_only: i64 = conn
-                .query_row("PRAGMA query_only", [], |row| row.get(0))
-                .map_err(|_| KernelError::Io)?;
-            if query_only != 1 {
-                return Err(KernelError::Io);
-            }
-            Ok(Mutex::new(conn))
+            open_reader(path)
+                .map(Mutex::new)
+                .map_err(|_| KernelError::Io)
         })
         .collect()
 }

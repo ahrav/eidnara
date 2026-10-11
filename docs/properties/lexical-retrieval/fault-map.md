@@ -16,20 +16,20 @@ reachability record needs a host campaign. Locations are verified against the
 | --- | --- | --- |
 | Query syntax in request text | request strings holding `OR`, `NEAR`, `*`, `"`, parentheses, and column filters; `probe_matches` (`crates/retrieval/tests/lexical_engine.rs:80`) for the engine, `probes` (`crates/retrieval/tests/lexical_retrieval.rs:164`) for `retrieve` | `lexical_engine.rs`, `lexical_retrieval.rs`, `lexical_analysis.rs` |
 | Unquoted control | the raw expression passed to `matches` (`lexical_engine.rs:71`) | `lexical_engine.rs:213` |
-| Zero atoms | separator-only and empty request text | `lexical_retrieval.rs:614`, `lexical_engine.rs:268` |
-| Equal raw ranks across probes, objects, or storage orders | `corpus()` rows (`lexical_retrieval.rs:228`) and `project_bulk` (`:999`) with identical text; permuted and duplicated probe lists | `lexical_retrieval.rs:675`, `:716`, `:2113`, `:2422` |
-| Dead rows inside and past the scan bound | `tombstone_raw` (`lexical_retrieval.rs:1015`); an orphaned lexical row | `lexical_retrieval.rs:903`, `:921`, `:1027`, `:1071`, `:2150`, `:2362`, `:2644`, `:2770` |
-| Ineligible leader | a scope decision that hides the comparator's first occurrence; `batch_rows` of one | `lexical_retrieval.rs:750`, `:785`, `:2422` |
-| Retirement, correction, or snapshot move after a grant | `retrieve_with_hook_for_test` (`crates/retrieval/src/lexical/retrieve.rs:329`) between admission batches; a kernel restore; a foreign project | `lexical_retrieval.rs:1187`, `:1210`, `:1240`, `:1280`; `crates/daemon/tests/claim_eligibility.rs:184` |
+| Zero atoms | separator-only and empty request text | `lexical_retrieval.rs:627`, `lexical_engine.rs:268` |
+| Equal raw ranks across probes, objects, or storage orders | `corpus()` rows (`lexical_retrieval.rs:228`) and `project_bulk` (`:1011`) with identical text; permuted and duplicated probe lists | `lexical_retrieval.rs:687`, `:728`, `:2270`, `:2558` |
+| Dead rows inside and past the scan bound | `tombstone_raw` (`lexical_retrieval.rs:1027`); an orphaned lexical row | `lexical_retrieval.rs:915`, `:933`, `:1039`, `:1083`, `:2303`, `:2509`, `:2780`, `:2898` |
+| Ineligible leader | a scope decision that hides the comparator's first occurrence; `batch_rows` of one | `lexical_retrieval.rs:762`, `:797`, `:2558` |
+| Retirement, correction, or snapshot move after a grant | `retrieve_with_hook_for_test` (`crates/retrieval/src/lexical/retrieve.rs:333`) between admission batches; a kernel restore; a foreign project | `lexical_retrieval.rs:1199`, `:1222`, `:1252`, `:1292`; `crates/daemon/tests/claim_eligibility.rs:184` |
 | A second eligibility caller | a planted `judge_eligibility` mention in any workspace member's `src` | `claim_eligibility.rs:456` (the scan; the plant is manual) |
-| Match counts at and past the thresholds | `project_thresholds` (`lexical_retrieval.rs:1586`), `small_thresholds` (`:2299`), a scan bound one below the match count, a result cap of one | `lexical_retrieval.rs:825`, `:1106`, `:1613`, `:2308`, `:2481`, `:2550` |
+| Match counts at and past the thresholds | `project_thresholds` (`lexical_retrieval.rs:1598`), `small_thresholds` (`:2446`), a scan bound one below the match count, a result cap of one | `lexical_retrieval.rs:837`, `:1118`, `:1625`, `:2455`, `:2617`, `:2686` |
 | Cancellation or deadline inside a phase | `before_phase` hooks in the route (`crates/daemon/src/query_route.rs:1383` for `Phase::Lexical`) | `crates/daemon/tests/query_route.rs:74` |
-| Engine interrupt mid-statement | `with_conn_interruptible` with a stop closure the progress handler polls every `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`) | `lexical_retrieval.rs:1444`, `:2212` |
-| Budget that ends between probes or holds a kernel reader | an `EvalBudget` deadline between probes | `lexical_retrieval.rs:1337`, `:1553` |
-| Payload table absent | `ALTER TABLE payloads RENAME` before `retrieve` | `lexical_retrieval.rs:1312` |
+| Engine interrupt mid-statement | `with_conn_interruptible` with a stop closure the progress handler polls every `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`) | `lexical_retrieval.rs:1456`, `:2359` |
+| Budget that ends between probes or holds a kernel reader | an `EvalBudget` deadline between probes | `lexical_retrieval.rs:1349`, `:1565` |
+| Payload table absent | `ALTER TABLE payloads RENAME` before `retrieve` | `lexical_retrieval.rs:1324` |
 | Schema drift | the frozen inventory in `schema_inventory.rs` against `crates/retrieval/baseline.sql:94` | `crates/retrieval/tests/schema_inventory.rs:312` |
 | Prefix or expansion path | the prefix-operator control | `lexical_engine.rs:248`, `:233`, `:340` |
-| One million occurrences under open-loop load | `lexical_scan_p99_at_one_million_occurrences` (`lexical_retrieval.rs:1919`); `#[ignore]`, release, D21 host | #896: warm p99 43.2 ms at 10/s and 28.6 ms at 2/s on four pinned EPYC 9R14 cores; cold misses the gate |
+| One million occurrences under open-loop load | `lexical_scan_p99_at_one_million_occurrences` (`lexical_retrieval.rs:2062`); `#[ignore]`, release, D21 host | #896: warm p99 43.2 ms at 10/s and 28.6 ms at 2/s on four pinned EPYC 9R14 cores; cold misses the gate |
 | Host application through fusion and packing | none in the repository | needs host owners (AC8) |
 
 ## Required faults per record
@@ -53,7 +53,7 @@ reachability record needs a host campaign. Locations are verified against the
   file under a workspace member's `src`, run the scan function against it, and
   require the failure. Today the scan is proven only by a manual plant.
 - A cancellation that lands inside the in-memory rank sort
-  (`retrieve.rs:621`), to time the window between the last row read and the
+  (`retrieve.rs:637`), to time the window between the last row read and the
   next `budget.check()` under `production_bounds`.
 - An absolute bound on `sql_steps` and on allocation events per probe, once
   RP2.9 approves one. Awaits the open question in

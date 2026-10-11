@@ -331,10 +331,11 @@ impl LaneStatus {
 pub enum Phase {
     Probes,
     Exact,
+    /// The lexical lane reads each candidate's occurrence row just before the kernel judges it, so its lane is finished under the connection.
     Lexical,
     /// The dense oracle judges each page it scores, so its lane is finished under the connection.
     Dense,
-    /// The exact and lexical hits are judged by the kernel, after the projection connection is released.
+    /// The exact hits are judged by the kernel, after the projection connection is released.
     Admission,
     Fusion,
     Revalidation,
@@ -1072,13 +1073,13 @@ fn exact_read(
     Ok(LaneRead::Pending(ExactHits { hits, status }))
 }
 
-fn lexical_read(
-    conn: &GuardedConn<'_>,
+fn lexical_read<'c>(
+    conn: &'c GuardedConn<'c>,
     intent: &Intent,
     query: &str,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-) -> Result<LaneRead<Scan>, QueryFailure> {
+) -> Result<LaneRead<Scan<'c>>, QueryFailure> {
     let segments = match intent {
         Intent::Direct(_) => Vec::new(),
         Intent::Hybrid(_) => intent.lexical_segments(query),
@@ -1240,11 +1241,10 @@ fn admit_exact(
 }
 
 fn admit_lexical(
-    conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
     budget: &SharedBudget,
-    read: LaneRead<Scan>,
+    read: LaneRead<Scan<'_>>,
     terms: &mut BTreeMap<OccurrenceId, OccurrenceCandidate>,
 ) -> Result<LaneOutput, QueryFailure> {
     let scanned = match read {
@@ -1256,7 +1256,7 @@ fn admit_lexical(
             });
         }
     };
-    let retrieval = match admit(conn, kernel, authority, scanned, budget.eval()) {
+    let retrieval = match admit(scanned, kernel, authority, budget.eval()) {
         Ok(retrieval) => retrieval,
         Err(refusal) => {
             return match retrieval_refusal(&refusal) {
@@ -1386,8 +1386,7 @@ pub fn admit_lanes<'a>(
             check(budget)?;
             let lexical = lexical_read(conn, &intent, query, limits, budget)?;
             let mut lexical_terms = BTreeMap::new();
-            let lexical =
-                admit_lexical(conn, kernel, authority, budget, lexical, &mut lexical_terms)?;
+            let lexical = admit_lexical(kernel, authority, budget, lexical, &mut lexical_terms)?;
             before_phase(Phase::Dense);
             check(budget)?;
             let dense = if has_prose(&intent, query, limits) {

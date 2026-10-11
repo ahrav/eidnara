@@ -34,8 +34,8 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   and the kernel `candidate`. `:131` `Retrieval` carries contributions,
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
   has a byte field.
-- `:317` `retrieve` is the lane entry; the daemon's `lexical_read`
-  (`crates/daemon/src/query_route.rs:1075`) calls `scan` (`:349`) and
+- `:321` `retrieve` is the lane entry; the daemon's `lexical_read`
+  (`crates/daemon/src/query_route.rs:1076`) calls `scan` (`:350`) and
   `admit_lexical` (`query_route.rs:1242`) calls `admit`.
 
 Schema, `crates/retrieval/baseline.sql`:
@@ -53,7 +53,7 @@ Payload loading after authorization, `crates/daemon/src/packing/mod.rs`:
   `crates/daemon/src/query_route.rs:1` states the route reads no payload bytes
   and packing materializes them under its own bounds.
 
-Test, `crates/retrieval/tests/lexical_retrieval.rs:1312`
+Test, `crates/retrieval/tests/lexical_retrieval.rs:1324`
 `retrieval_reads_no_payload_bytes`:
 
 - `Fixture::all_admitted` (`:332`) opens a kernel and a projection store,
@@ -61,7 +61,7 @@ Test, `crates/retrieval/tests/lexical_retrieval.rs:1312`
   `Payload::Whole` rows, so the `payloads` table is populated.
 - The test retrieves `parse fetch io` with `bounds()` (`:153`: `scan_rows`
   64, `max_accepted` 64, `batch_rows` 2) and an unbounded budget, then opens a
-  raw connection (`raw`, `:496`) and runs
+  raw connection (`raw`, `:509`) and runs
   `ALTER TABLE payloads RENAME TO payloads_hidden`. It asserts
   `SELECT count(*) FROM payloads` now errors, so any payload read would fail
   rather than return zeroed bytes.
@@ -108,7 +108,7 @@ before the fault and an equality assertion on the full result afterward.
 ### Q: Does the route read payload bytes anywhere before packing?
 
 - Sources examined: `crates/daemon/src/query_route.rs:1`, `:69` through
-  `:71`, `:1708` through `:1722`; `crates/retrieval/src/claims.rs:441`
+  `:71`, `:1707` through `:1721`; `crates/retrieval/src/claims.rs:441`
   `read_selected_claims`; `crates/kernel/src/claim_facts.rs:43` and `:427`.
 - Findings: the route's module doc states no payload read. Claim validation
   passes `max_causal_payload_bytes` of 1 MiB into `read_selected_claims`,

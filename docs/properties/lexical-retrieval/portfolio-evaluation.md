@@ -18,7 +18,7 @@ lexical_engine` (`lexical_engine`: 15 passed; `lexical_retrieval`: 36 passed,
 grepped `crates/*/src` for callers of `lexical::retrieve`,
 `retrieve_with_hook_for_test`, `scan`, and `admit` from the lexical module:
 `retrieve` has no production caller; the daemon reaches the lane through
-`scan` (`crates/daemon/src/query_route.rs:1098`) and `admit` (`:1258`), and
+`scan` (`crates/daemon/src/query_route.rs:1099`) and `admit` (`:1258`), and
 `retrieve_with_hook_for_test` is exported only under the `test-support`
 feature (`crates/retrieval/src/lexical/mod.rs:27`). Every `file:line`
 reference in `catalog.md` and `existing-checks.md` was checked with `sed -n`
@@ -46,19 +46,19 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    in_scope),`.
 2. **The catalog names no production entry point.** In `catalog.md`, after
    "A record exercised only by a fixture engine says so.", add: "The daemon
-   reaches the lane through `scan` (`crates/daemon/src/query_route.rs:1098`)
+   reaches the lane through `scan` (`crates/daemon/src/query_route.rs:1099`)
    and `admit` (`:1258`), each under `QueryRouteLimits::lexical_retrieval_bounds`
    (`:170`); `retrieve` has no production caller, and
-   `crates/retrieval/tests/lexical_retrieval.rs:639`
+   `crates/retrieval/tests/lexical_retrieval.rs:652`
    `scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate`
    is the bridge every `retrieve`-driven check rests on."
 3. **`zero-terms-run-no-match` asserts a completion production never
    produces.** `lexical_read` returns `LaneStatus::Undeclared` when the
-   analysis is empty (`crates/daemon/src/query_route.rs:1094`) before `scan`
+   analysis is empty (`crates/daemon/src/query_route.rs:1095`) before `scan`
    runs, so `Completion::Empty` is reached only by tests that call `scan` or
    `retrieve` with zero probes. Replace `Reachability: default-production`
    with `Reachability: default-production - the route's guard is the
-   `Undeclared` return at `crates/daemon/src/query_route.rs:1094`;
+   `Undeclared` return at `crates/daemon/src/query_route.rs:1095`;
    `Completion::Empty` itself is test-only`. Append to `Existing check:`
    "; `crates/daemon/tests/query_route_dense.rs:365`
    `a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`
@@ -121,8 +121,8 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    "final canonical revalidation catches post-admission changes", is
    implemented by `revalidate` (`crates/retrieval/src/lexical/retrieve.rs`,
    called from `admit_inner`) and witnessed by five uncredited tests
-   `existing-checks.md` already lists: `lexical_retrieval.rs:1187`, `:1210`,
-   `:1240`, `:1280`, `:2333`. No catalog record owns them;
+   `existing-checks.md` already lists: `lexical_retrieval.rs:1199`, `:1222`,
+   `:1252`, `:1292`, `:2480`. No catalog record owns them;
    `eligibility-before-accepted-slots` covers the pre-slot judgment and
    `one-kernel-eligibility-policy` the agreement, neither the re-judgment.
    Queue `accepted-set-is-revalidated-before-return` (`always`,
@@ -132,8 +132,8 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    marks it with the recorded precedence.
 2. **AC9 has no record and the scale gate is unanchored.** The RP2.9 corpus
    run is cited by no record; `lexical_scan_p99_at_one_million_occurrences`
-   (`lexical_retrieval.rs:1919`) is `#[ignore]` with one failed `ubuntu-latest`
-   run, and it measures `production_bounds()` (`:1857`), a hand copy of the
+   (`lexical_retrieval.rs:2062`) is `#[ignore]` with one failed `ubuntu-latest`
+   run, and it measures `production_bounds()` (`:2000`), a hand copy of the
    D23 values. No check ties that copy to
    `QueryRouteLimits::production().lexical_retrieval_bounds()`
    (`crates/daemon/src/query_route.rs:135`, `:170`); `retrieval` cannot depend
@@ -144,7 +144,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    cancellation of A cannot interrupt healthy B" is checked for the dense lane
    (`crates/daemon/tests/query_route_compressed.rs:289`) and the storage
    handler (`crates/storage/src/lib.rs:5825`, `:5880`); the lexical evidence
-   is the trailing unbounded run in `lexical_retrieval.rs:2212` after the
+   is the trailing unbounded run in `lexical_retrieval.rs:2359` after the
    handler is removed, which is one connection in sequence, not a late
    cancel against a running peer. Either list the dense and storage checks
    under `original-budget-stops-sql` with a sentence saying the lane shares
@@ -170,11 +170,11 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
 3. **One AC5 record holds deterministic counters and an unapproved
    allocation bound.** `lexical-work-is-bounded-and-observed` is `medium`
    because RP2.9 has approved no allocation bound, yet probes, rows, batches,
-   and `sql_steps` are asserted exactly (`lexical_retrieval.rs:2550`).
+   and `sql_steps` are asserted exactly (`lexical_retrieval.rs:2686`).
    Splitting the allocation clause into its own `partial` record would let the
    counter record be `high`; keeping one record preserves AC5's shape.
 4. **The ordering reference shares the engine.** `keyed_reference`
-   (`lexical_retrieval.rs:510`) reads `rank` from the same FTS5 table with the
+   (`lexical_retrieval.rs:523`) reads `rank` from the same FTS5 table with the
    same probes, then takes the minimum per occurrence and sorts. It is
    independent of `retrieve.rs`'s comparator and dedup code and cannot catch
    a shared misreading of the engine's rank sign. Whether the catalog should
@@ -204,7 +204,7 @@ absence of `always-or-unreached` is correct.
   constant, or statement. `crates/kernel/src/eligibility.rs:310` is a call
   site, not the definition (refinement 1).
 - Reachability: `scan` and `admit` are called from
-  `crates/daemon/src/query_route.rs:1098` and `:1258`; `retrieve` and
+  `crates/daemon/src/query_route.rs:1099` and `:1258`; `retrieve` and
   `retrieve_with_hook_for_test` have no caller under `crates/*/src`. The
   `default-production` labels on the eight code-path records hold through
   `scan` and `admit`; refinement 3 narrows one, bias 1 and bias 2 question two.
