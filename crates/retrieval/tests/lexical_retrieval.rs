@@ -450,11 +450,11 @@ impl Fixture {
     fn kept(&self, probes: &[Probe], bounds: RetrievalBounds) -> Vec<String> {
         self.store
             .with_conn(|conn| {
-                Ok(scan(conn, probes, bounds, &EvalBudget::unbounded())
+                let budget = EvalBudget::unbounded();
+                Ok(scan(conn, probes, bounds, &budget)
                     .unwrap()
-                    .hit_ids()
-                    .map(str::to_string)
-                    .collect())
+                    .hit_ids(&budget)
+                    .unwrap())
             })
             .unwrap()
     }
@@ -2941,6 +2941,91 @@ fn dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots() {
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::ScanBound)
     );
+}
+
+/// With `max_accepted = 1`, retrieval reads identifiers for the first rank group and the group cut by `scan_rows`. Reading the entire tied group requires more SQL steps than reading distinct-rank groups, with equal counted, ranked, scanned, and judged work.
+#[test]
+fn identifiers_are_read_for_the_rank_groups_admission_reaches() {
+    let scan_rows = bounds().scan_rows.get();
+    let matches = 150;
+    let run = |text: &dyn Fn(usize) -> String| {
+        let fixture = Fixture::all_admitted();
+        let rows: Vec<Row> = (0..matches)
+            .map(|n| Row::claim(&format!("lazy-{n}"), &text(n)))
+            .collect();
+        fixture.project(&rows);
+        let objects: Vec<&str> = rows.iter().map(|row| row.object.as_str()).collect();
+        fixture.admit(&objects);
+        let one = RetrievalBounds {
+            max_accepted: NonZeroUsize::new(1).unwrap(),
+            ..bounds()
+        };
+        fixture
+            .retrieve(&probes("lazy"), one, &EvalBudget::unbounded())
+            .unwrap()
+    };
+    // The increasing token counts give each `ladder` match a distinct rank.
+    let ladder = run(&|n| format!("lazy{}", " pad".repeat(n)));
+    let tied = run(&|_| "lazy pad".to_string());
+    for retrieval in [&ladder, &tied] {
+        assert_eq!(retrieval.consumed.counted_rows, matches);
+        assert_eq!(retrieval.consumed.ranked_matches, matches);
+        assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+        assert_eq!(retrieval.contributions.len(), 1);
+        assert_eq!(
+            (retrieval.consumed.judged, retrieval.consumed.batches),
+            (2, 2),
+            "retrieval judges one candidate at admission and re-judges that candidate once"
+        );
+        assert_eq!(retrieval.consumed.dead_rows, 0);
+        assert_eq!(
+            retrieval.completion,
+            Completion::Incomplete(IncompleteReason::ScanBound)
+        );
+    }
+    assert!(
+        ladder.consumed.sql_steps < tied.consumed.sql_steps,
+        "distinct ranks read two identifiers against {scan_rows}: {} steps against {}",
+        ladder.consumed.sql_steps,
+        tied.consumed.sql_steps
+    );
+}
+
+/// Retrieval counts a duplicate lexical row, which only an inconsistent projection stores, toward `scanned_rows` and deduplicates its `occurrence_id` before judgment, retaining the better rank for the single contribution.
+#[test]
+fn a_second_lexical_row_for_one_occurrence_yields_one_contribution() {
+    let fixture = Fixture::all_admitted();
+    let delta = fixture.id("delta");
+    let request = probes("io");
+    let before = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&before), [delta.as_str()]);
+    assert_eq!(before.consumed.scanned_rows, 1);
+    // Rowid 7 lets both lexical rows coexist; the inserted row's better rank makes it supply the contribution.
+    fixture
+        .raw()
+        .execute(
+            "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (7, 'io io io', 'io io io', ?1)",
+            [&delta],
+        )
+        .unwrap();
+    let after = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&after), [delta.as_str()]);
+    assert_eq!(after.consumed.scanned_rows, 2);
+    assert_eq!(after.consumed.dead_rows, 0);
+    assert_eq!(
+        (after.consumed.judged, after.consumed.batches),
+        (before.consumed.judged, before.consumed.batches),
+        "the duplicate row adds no kernel judgment"
+    );
+    assert!(
+        after.contributions[0].rank < before.contributions[0].rank,
+        "the better-ranked row supplies the contribution's rank"
+    );
+    assert_eq!(after.completion, Completion::Complete);
 }
 
 /// When a ranked probe's `scan_rows` bound ends at a rank change, one match from the next rank group suffices to prove truncation, so that group's size leaves the probe's SQL steps unchanged.
