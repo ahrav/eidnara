@@ -166,9 +166,14 @@ decisions, inconsistent and unrecognized history, triggers, cited evidence,
 and scoped and unscoped rows) before and after the history fold moved into
 Rust: 56 MB of rendered rows, 0 differences; it is not committed.
 `admission::tests::history_fold_ranks_rows_as_the_served_sql_does`,
-`the_latest_own_row_at_a_shared_commit_is_the_greater_identifier`, and
+`the_latest_own_row_at_a_shared_commit_is_the_greater_identifier`,
+`the_served_fold_judges_own_history_consistency_as_the_authority_sql_does`, and
 `a_surface_aware_read_omits_only_hidden_rows` pin the fold to the SQL it
-replaced.
+replaced, and `the_served_fold_is_under_the_serving_digest` keeps the fold
+under the policy digest.
+`the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact`
+covers an artifact ingested with `object_kind` `decision`, whose class lives
+on `evidence_meta`.
 Guarantee: Selection optimization preserves the canonical memory result for
 the same valid store state, requested snapshot, project, and budget.
 Check: `always` - Compare the ordered selected rows, rendered memory bytes,

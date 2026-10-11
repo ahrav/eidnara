@@ -40,6 +40,7 @@ than redirected to different checks after test consolidation.
 | `the_domain_selection_equals_the_filtered_full_read` (`crates/kernel/tests/kernel_canonical_read.rs`) | The domain read equals the full read filtered to memory-domain decisions, on both surfaces. | unaudited |
 | `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order` (same file) | Row pressure: the target ranks past 8,192 unfiltered under 8 MiB and the domain read returns it. | unaudited |
 | `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` (same file) | Byte pressure: over 8 MiB of other-domain payload under 8,192 rows precedes the target; the domain read returns memory rows only. | unaudited |
+| `the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact` (same file) | An artifact ingested as a memory-domain `decision` and tightened to secret by a replay is withheld from the domain read as from the full read, on every surface. | unaudited |
 | `served_classes_for_one_domain_seek_the_domain_index` (`crates/kernel/src/admission.rs`) | The domain shape seeks `idx_objects_domain_fk`. | unaudited |
 | `approval_validity_judges_each_distinct_approval_once` (same file) | The approval statement runs once over the distinct approvals the served rows name, and a read naming none runs no statement. | unaudited |
 | `history_fold_ranks_rows_as_the_served_sql_does` (same file) | The Rust fold over an object's own history ranks every taint, class, and maturity value as the served SQL ranks lineage history. | unaudited |
@@ -47,6 +48,9 @@ than redirected to different checks after test consolidation.
 | `the_latest_own_row_at_a_shared_commit_is_the_greater_identifier` (same file) | Two own rows at one commit resolve to the row `latest_own_decision_sql` orders first. | unaudited |
 | `a_named_read_returns_each_object_once_however_often_it_is_named` (same file) | A named read with repeated identifiers serves each object once. | unaudited |
 | `a_surface_aware_read_omits_only_hidden_rows` (same file) | A read that knows its surface omits exactly the rows the unfiltered read judges hidden on it, on every surface. | unaudited |
+| `the_served_fold_judges_own_history_consistency_as_the_authority_sql_does` (same file) | Over 256 three-row histories varying source class, taint class, and support above maturity, the served fold forces exactly the objects `own_history_inconsistent_sql` calls inconsistent. | unaudited |
+| `lineage_history_cost_does_not_scale_with_own_history` (same file) | The SQLite VM steps 200 lineage decisions add to a served read stay within twice their one-own-row cost when the object has 41 own rows. | unaudited |
+| `the_served_fold_is_under_the_serving_digest` (same file) | The served read's Rust fold, trigger SQL helpers, and approval batching sit inside `policy-digest:serving` sections. | unaudited |
 | [Injectable categories][injectable-test] | Visible positive-category decisions survive conversion. | unaudited |
 | [Revision inputs][revision-test] | Rendered inputs determine the revision comparison. | unaudited |
 | [Dropped categories][dropped-test] | Renderer-excluded rows do not move the revision. | unaudited |

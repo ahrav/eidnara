@@ -4,11 +4,13 @@
 use std::time::Instant;
 
 use kernel::{
-    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, CommitIntent, DecisionPayload,
-    DecisionSpec, DomainSpec, EventKind, KernelStore, RepositoryProvenance, Sensitivity,
-    SourceClass, StagingCandidateSpec, Surface, TaintClass, VisibleAsOf,
+    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent,
+    DecisionPayload, DecisionSpec, DomainSpec, EventKind, KernelStore, ProviderEgress,
+    RepositoryProvenance, Sensitivity, SourceClass, StagingCandidateSpec, Surface, TaintClass,
+    VisibleAsOf,
 };
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 const MEMORY: &str = "memory";
 
@@ -246,6 +248,90 @@ fn the_domain_selection_equals_the_filtered_full_read() {
             (selected.known_as_of, selected.tip),
             (all.known_as_of, all.tip)
         );
+    }
+}
+
+fn ingest_decision_kind_artifact(store: &KernelStore, sensitivity: Sensitivity) -> String {
+    let payload = b"an artifact registered as a decision".to_vec();
+    let mut intent = intent("decision-kind-artifact");
+    intent.request_digest = format!("{:x}", Sha256::digest(&payload));
+    store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent,
+            payload,
+            evidence_id: "decision-kind-evidence".to_string(),
+            object_id: "decision-kind-artifact".to_string(),
+            object_kind: "decision".to_string(),
+            domain_id: MEMORY.to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: "decision-kind-artifact".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: sensitivity,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: Some(RepositoryProvenance {
+                repository_id: "repo".to_string(),
+                revision: "abc123".to_string(),
+            }),
+        })
+        .unwrap()
+        .evidence_id
+}
+
+/// Domain decision reads enforce artifact sensitivity even when the artifact's `object_kind` is `decision`: a replay
+/// that tightens the artifact to secret withholds it from the full read and from the domain read alike.
+#[test]
+fn the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 3, 0, 0);
+    let evidence_id = ingest_decision_kind_artifact(&store, Sensitivity::Normal);
+    store
+        .commit(intent("admit-decision-kind-artifact"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some("decision-kind-artifact".to_string()),
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: Some(evidence_id.clone()),
+                    reason: "fixture".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let served = |surface: Surface| {
+        let tip = store.tip().unwrap();
+        let mut full = store
+            .visible_as_of_in_scope(surface, tip, None, None)
+            .unwrap();
+        full.rows
+            .retain(|row| row.object.object_kind == "decision" && row.object.domain_id == MEMORY);
+        let selected = store
+            .visible_domain_decisions_as_of_in_scope(surface, tip, MEMORY, None)
+            .unwrap();
+        (full.rows, selected.rows)
+    };
+    let names_artifact = |rows: &[kernel::VisibleRow]| {
+        rows.iter()
+            .any(|row| row.object.object_id == "decision-kind-artifact")
+    };
+    let (full, selected) = served(Surface::ExplicitSearch);
+    assert!(
+        names_artifact(&full) && names_artifact(&selected),
+        "the fixture must serve the artifact before the replay"
+    );
+
+    ingest_decision_kind_artifact(&store, Sensitivity::Secret);
+    for surface in Surface::ALL {
+        let (full, selected) = served(*surface);
+        assert!(!names_artifact(&full), "{surface:?}");
+        assert_eq!(selected, full, "{surface:?}");
     }
 }
 
