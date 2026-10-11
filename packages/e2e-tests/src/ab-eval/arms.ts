@@ -4,6 +4,7 @@ import {
     mkdirSync,
     readdirSync,
     readFileSync,
+    readlinkSync,
     realpathSync,
     writeFileSync,
 } from "node:fs";
@@ -191,6 +192,7 @@ export abstract class Arm {
         return connectionFilePath(this.hostDataDir);
     }
 
+    /** The daemon's PID from its record, once the process at that PID runs the recorded executable; a PID can be reused. */
     hostPid(): number | undefined {
         try {
             const record = JSON.parse(
@@ -198,8 +200,11 @@ export abstract class Arm {
                     join(managedSubtreePath(this.hostDataDir), "rust-e2e-pids.json"),
                     "utf8",
                 ),
-            ) as { pids: Array<{ pid: number }> };
-            return record.pids[0]?.pid;
+            ) as { pids: Array<{ pid: number; executable: string }> };
+            const entry = record.pids[0];
+            if (!entry) return undefined;
+            const exe = readlinkSync(`/proc/${entry.pid}/exe`).replace(/ \(deleted\)$/, "");
+            return exe === entry.executable ? entry.pid : undefined;
         } catch {
             return undefined;
         }

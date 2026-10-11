@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { realpathSync, writeFileSync } from "node:fs";
+import { realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { ensurePiInstall } from "../bedrock-peer/harness-runtime";
@@ -137,10 +137,16 @@ export function sandboxPath(spec: ArmSpec): string {
     return (launchesNode(spec) ? [join(nodeRoot(), "bin"), ...system] : system).join(":");
 }
 
+/**
+ * The launcher is replaced by rename, so an arm that is between exec and the shell's read of the
+ * script keeps the inode it opened while another arm's session writes a fresh one.
+ */
 export function ensureSandboxScript(runRoot: string): string {
     const root = realpathSync(runRoot);
     const path = join(root, "sandbox.sh");
-    writeFileSync(path, sandboxScript(maskedPaths(root)), { mode: 0o755 });
+    const staged = `${path}.${process.pid}.${Date.now()}`;
+    writeFileSync(staged, sandboxScript(maskedPaths(root)), { mode: 0o755 });
+    renameSync(staged, path);
     return path;
 }
 

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { managedSubtreePath } from "@eidnara/opencode/shared/host-lifecycle/paths";
 import {
     Arm,
     armSpec,
@@ -249,6 +250,50 @@ describe("Pi RPC output", () => {
                 getMalformedLines: () => malformed,
             };
             await expect(arm.prompt("hello", 1_000)).rejects.toThrow(/RPC/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("host PID record", () => {
+    it("drops a recorded PID that now names another executable", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-host-pid-"));
+        try {
+            const arm = new FailingTeardownArm(armSpec("pi-on"), {
+                root,
+                resultsDir: root,
+                workdir: root,
+                sandboxDir: "",
+                enforceWindow: false,
+                onCall: () => {},
+                fixtureBin: "/nonexistent/fixture",
+            });
+            const dir = managedSubtreePath(arm.hostDataDir);
+            mkdirSync(dir, { recursive: true });
+            // This test runner's PID, recorded as if it were the fixture binary.
+            writeFileSync(
+                join(dir, "rust-e2e-pids.json"),
+                JSON.stringify({
+                    pids: [
+                        {
+                            pid: process.pid,
+                            role: "host-runtime",
+                            executable: "/nonexistent/fixture",
+                        },
+                    ],
+                }),
+            );
+            expect(arm.hostPid()).toBeUndefined();
+            writeFileSync(
+                join(dir, "rust-e2e-pids.json"),
+                JSON.stringify({
+                    pids: [
+                        { pid: process.pid, role: "host-runtime", executable: process.execPath },
+                    ],
+                }),
+            );
+            expect(arm.hostPid()).toBe(process.pid);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
