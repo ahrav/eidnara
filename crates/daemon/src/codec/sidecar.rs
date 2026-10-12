@@ -97,6 +97,11 @@ pub struct HarnessMessageMeta {
     pub stable_key: Option<String>,
     #[serde(default)]
     pub blocks: Vec<BlockMeta>,
+    /// Indices of tool parts whose call id an earlier part already emitted and whose status
+    /// carries only the call. The encoder drops these parts, so each served call id names one
+    /// tool part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_native_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +139,12 @@ impl MatchedBlockMetas<'_> {
             memoized_fingerprint(&self.block_fingerprints[block_index], &blocks[block_index])
                 == expected
         })
+    }
+
+    /// Adds `native_indices` to the decoded set that [`Self::remove_unretained_native_parts`]
+    /// checks.
+    pub(crate) fn fold_native_parts(&mut self, native_indices: &[usize]) {
+        self.decoded_native_indices.extend(native_indices);
     }
 
     /// Removes native parts whose decoded blocks were removed.

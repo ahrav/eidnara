@@ -150,6 +150,7 @@ fn decode_rows<'a, E>(
         let mut blocks = DecodedBlocks {
             content: Vec::with_capacity(parts.len()),
             metas: Vec::with_capacity(parts.len()),
+            folded: Vec::new(),
             scratch: &mut scratch,
         };
 
@@ -226,6 +227,7 @@ fn decode_rows<'a, E>(
         let DecodedBlocks {
             content,
             metas: block_metas,
+            folded,
             ..
         } = blocks;
         let synthetic = is_synthetic_message(parts);
@@ -258,6 +260,7 @@ fn decode_rows<'a, E>(
                 raw: Arc::clone(raw_message),
                 stable_key: Some(stable_key),
                 blocks: block_metas,
+                folded_native_indices: folded,
             },
         );
     }
@@ -420,7 +423,8 @@ fn decode_tool_part<'a>(
         .and_then(|m| m.get("providerExecuted"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if emitted_calls.insert(id.clone()) {
+    let fresh_call = emitted_calls.insert(id.clone());
+    if fresh_call {
         let call_block = WireBlock::bare(BlockKind::ToolCall {
             id: id.to_string(),
             name: tool_name.clone(),
@@ -452,14 +456,17 @@ fn decode_tool_part<'a>(
             "tool_result",
             Some(id.into_owned()),
         );
+    } else if !fresh_call {
+        blocks.folded.push(part_index);
     }
 }
 
 /// The CK blocks one message decodes to and their metas, fingerprinted through the decode's
-/// shared serialization buffers.
+/// shared serialization buffers. `folded` lists the parts whose content an earlier block holds.
 struct DecodedBlocks<'s> {
     content: Vec<WireBlock>,
     metas: Vec<BlockMeta>,
+    folded: Vec<usize>,
     scratch: &'s mut CanonicalScratch,
 }
 
@@ -631,6 +638,7 @@ fn encode_with_meta(
         .unwrap_or_default();
     let mut matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
     matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
+    matched_metas.fold_native_parts(&meta.folded_native_indices);
 
     let mut block_index = 0;
     while block_index < msg.content().len() {
@@ -1653,6 +1661,52 @@ pub(crate) mod tests {
                 ("tool_result", Some("call_a"), Some(1)),
             ]
         );
+    }
+
+    #[test]
+    fn a_repeated_call_id_without_a_result_leaves_the_encoded_window() {
+        let tool = |part_id: &str, state: Value| json!({ "id": part_id, "type": "tool", "callID": "call_a", "tool": "read", "state": state });
+        let done = || {
+            tool(
+                "prt_1",
+                json!({ "status": "completed", "input": {}, "output": "one" }),
+            )
+        };
+        let running = || tool("prt_2", json!({ "status": "running", "input": {} }));
+        let text = json!({ "type": "text", "text": "again" });
+        let windows = [
+            (
+                vec![json!({
+                    "info": { "id": "msg_tools", "role": "assistant" },
+                    "parts": [done(), text.clone(), running()]
+                })],
+                vec![json!({
+                    "info": { "id": "msg_tools", "role": "assistant" },
+                    "parts": [done(), text.clone()]
+                })],
+            ),
+            (
+                vec![
+                    json!({ "info": { "id": "msg_done", "role": "assistant" }, "parts": [done()] }),
+                    json!({
+                        "info": { "id": "msg_repeat", "role": "assistant" },
+                        "parts": [text.clone(), running()]
+                    }),
+                ],
+                vec![
+                    json!({ "info": { "id": "msg_done", "role": "assistant" }, "parts": [done()] }),
+                    json!({
+                        "info": { "id": "msg_repeat", "role": "assistant" },
+                        "parts": [text.clone()]
+                    }),
+                ],
+            ),
+        ];
+        for (raw, expected) in windows {
+            let decoded = decode_opencode(&raw);
+            let messages: Vec<_> = decoded.messages.iter().map(|m| m.ck.clone()).collect();
+            assert_eq!(encode_opencode(&messages, &decoded.sidecar, None), expected);
+        }
     }
 
     #[test]
