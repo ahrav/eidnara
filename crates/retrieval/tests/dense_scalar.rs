@@ -7,6 +7,11 @@ use retrieval::dense::scalar::{
 use retrieval::dense::score::BLOCK_ROWS;
 use retrieval::dense::{inner_product, rank_order, rescore};
 
+#[path = "support/witness.rs"]
+mod witness;
+
+use witness::WitnessMatrix;
+
 const DIMENSION: u32 = 8;
 
 fn unit_layout() -> RowLayout {
@@ -715,4 +720,201 @@ fn the_fixed_corpus_produces_pinned_scale_and_code_bytes() {
             [14, 0, 0, 0, 0, 127, 0, 0],
         ]
     );
+}
+
+/// Every cell of the frozen scalar witness matrix; the aggregate fails when a cell is missing, duplicated, or undeclared.
+/// The daemon's refusal of a sidecar naming a foreign recipe is witnessed in `crates/daemon/tests/vector_generation.rs`.
+const SCALAR_WITNESS_CELLS: [&str; 20] = [
+    "calibration/zero_coordinate",
+    "calibration/refusal_and_scale_underflow",
+    "calibration/underflow_edge",
+    "encoding/extrema",
+    "encoding/ties_and_adjacent_values",
+    "encoding/clipping",
+    "encoding/pinned_corpus_bytes",
+    "scoring/weighted_products",
+    "scoring/extreme_code_products",
+    "scoring/generation_query_scales",
+    "scoring/accumulation_order",
+    "scoring/unfused_multiply_add",
+    "scoring/nonuniform_scales_vs_raw_dot",
+    "originals/artifact_round_trip",
+    "refusal/row_layout",
+    "refusal/scalar_bytes",
+    "refusal/scale_values",
+    "refusal/recipe_id_codec",
+    "refusal/reserved_code",
+    "refusal/code_dimension",
+];
+
+/// `Σ_j (s_j · s_j) · (cq_j · cd_j)` written out coordinate by coordinate, independent of the scorer.
+fn reference_weighted(scales: &[f32], query: &[i8], doc: &[i8]) -> f64 {
+    let mut sum = 0.0f64;
+    for j in 0..scales.len() {
+        let s = f64::from(scales[j]);
+        sum += (s * s) * f64::from(i32::from(query[j]) * i32::from(doc[j]));
+    }
+    sum
+}
+
+fn row_bits(rows: &[Vec<f32>]) -> Vec<Vec<u32>> {
+    rows.iter()
+        .map(|row| row.iter().map(|value| value.to_bits()).collect())
+        .collect()
+}
+
+#[test]
+fn the_frozen_scalar_witness_matrix_fires_every_declared_cell() {
+    let mut matrix = WitnessMatrix::new(&SCALAR_WITNESS_CELLS);
+    let ones = scales_of([1.0; 8]);
+
+    matrix.run(
+        "calibration/zero_coordinate",
+        calibration_stores_max_abs_over_127_per_coordinate_in_f32_and_scale_one_for_a_zero_coordinate,
+    );
+    matrix.run(
+        "calibration/refusal_and_scale_underflow",
+        calibration_refuses_no_rows_invalid_rows_and_a_nonzero_scale_that_underflows,
+    );
+    matrix.run("calibration/underflow_edge", || {
+        // 64 subnormal units over 127 round up to the smallest subnormal scale; 63 units round to zero.
+        let kept = [vec![1.0, f32::from_bits(64), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        let calibration = calibrate(&unit_layout(), kept.iter().map(Vec::as_slice)).unwrap();
+        assert_eq!(calibration.scales.as_slice()[1].to_bits(), 1);
+        let lost = [vec![1.0, f32::from_bits(63), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        assert_eq!(
+            calibrate(&unit_layout(), lost.iter().map(Vec::as_slice)),
+            Err(CalibrationRejection::ScaleUnderflow { coordinate: 1 })
+        );
+    });
+    matrix.run("encoding/extrema", || {
+        let extrema = encode(
+            &loose_layout(),
+            &ones,
+            &[127.0, -127.0, 126.0, -126.0, 0.0, -0.0, 1.0, -1.0],
+        )
+        .unwrap();
+        assert_eq!(extrema.codes, vec![127, -127, 126, -126, 0, 0, 1, -1]);
+        assert_eq!(extrema.clipped, 0);
+    });
+    matrix.run(
+        "encoding/ties_and_adjacent_values",
+        encoding_rounds_ties_to_even_on_both_signs_and_separates_adjacent_values,
+    );
+    matrix.run(
+        "encoding/clipping",
+        encoding_clips_to_plus_minus_127_counts_every_clip_and_never_yields_minus_128,
+    );
+    matrix.run(
+        "encoding/pinned_corpus_bytes",
+        the_fixed_corpus_produces_pinned_scale_and_code_bytes,
+    );
+    matrix.run(
+        "scoring/weighted_products",
+        weighted_scoring_forms_i32_products_in_range_and_weights_each_by_its_squared_scale,
+    );
+    matrix.run("scoring/extreme_code_products", || {
+        let scales = scales_of([1.0, 0.5, 0.25, 2.0, 1.0 / 127.0, 1.0, 3.0, 1.0e-3]);
+        let all_max = [CODE_MAX; 8];
+        let all_min = [CODE_MIN; 8];
+        let magnitude = reference_weighted(scales.as_slice(), &all_max, &all_max);
+        for (query, doc, sign) in [
+            (all_max, all_max, 1.0),
+            (all_max, all_min, -1.0),
+            (all_min, all_min, 1.0),
+            (all_min, all_max, -1.0),
+        ] {
+            let expected = reference_weighted(scales.as_slice(), &query, &doc);
+            assert_eq!(
+                weighted_dot(&scales, &query, &doc).to_bits(),
+                expected.to_bits()
+            );
+            assert_eq!(expected.to_bits(), (sign * magnitude).to_bits());
+        }
+    });
+    matrix.run(
+        "scoring/generation_query_scales",
+        a_query_encoded_under_another_generations_scales_carries_other_codes_and_scores,
+    );
+    matrix.run(
+        "scoring/accumulation_order",
+        weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order,
+    );
+    matrix.run(
+        "scoring/unfused_multiply_add",
+        weighted_scoring_never_fuses_the_multiply_into_the_add,
+    );
+    matrix.run(
+        "scoring/nonuniform_scales_vs_raw_dot",
+        nonuniform_scales_rank_differently_from_a_raw_integer_dot,
+    );
+    matrix.run("originals/artifact_round_trip", || {
+        // The retained original-row artifact carries every bit, and calibration over it equals calibration over the inputs.
+        let rows = corpus();
+        let bytes = codec::encode_rows(&unit_layout(), rows.iter().map(Vec::as_slice)).unwrap();
+        let retained = codec::decode_rows(&bytes, &unit_layout()).unwrap().rows;
+        assert_eq!(row_bits(&retained), row_bits(&rows));
+        let direct = calibrate(&unit_layout(), rows.iter().map(Vec::as_slice)).unwrap();
+        let from_artifact = calibrate(&unit_layout(), retained.iter().map(Vec::as_slice)).unwrap();
+        assert_eq!(from_artifact.scales.encode(), direct.scales.encode());
+        for (original, kept) in rows.iter().zip(&retained) {
+            assert_eq!(
+                encode(&unit_layout(), &from_artifact.scales, kept)
+                    .unwrap()
+                    .codes,
+                encode(&unit_layout(), &direct.scales, original)
+                    .unwrap()
+                    .codes
+            );
+        }
+    });
+    matrix.run(
+        "refusal/row_layout",
+        encoding_refuses_rows_outside_the_layout_and_scales_of_another_dimension,
+    );
+    matrix.run(
+        "refusal/scalar_bytes",
+        scales_and_codes_round_trip_deterministically_and_refuse_malformed_bytes,
+    );
+    matrix.run("refusal/scale_values", || {
+        for value in [0.0f32, -0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut values = [1.0f32; 8];
+            values[4] = value;
+            assert_eq!(
+                Scales::from_values(values.to_vec(), DIMENSION),
+                Err(ScalarBytesRejection::NotPositiveFinite { coordinate: 4 })
+            );
+        }
+        assert_eq!(
+            Scales::from_values(vec![1.0; 7], DIMENSION),
+            Err(ScalarBytesRejection::Dimension {
+                expected: 8,
+                actual: 7
+            })
+        );
+    });
+    matrix.run("refusal/recipe_id_codec", || {
+        let id = ScalarRecipe::SymmetricInt8V1.id();
+        assert_eq!(ScalarRecipe::from_id(&id.to_uppercase()), None);
+        assert_eq!(ScalarRecipe::from_id(&format!("{id} ")), None);
+    });
+    matrix.run("refusal/reserved_code", || {
+        let mut reserved = encode_codes(&[1; 8]);
+        reserved[5] = 0x80;
+        assert_eq!(
+            decode_codes(&reserved, DIMENSION),
+            Err(ScalarBytesRejection::ReservedCode { coordinate: 5 })
+        );
+    });
+    matrix.run("refusal/code_dimension", || {
+        assert_eq!(
+            decode_codes(&[1; 9], DIMENSION),
+            Err(ScalarBytesRejection::Dimension {
+                expected: 8,
+                actual: 9
+            })
+        );
+    });
+
+    matrix.finish();
 }
