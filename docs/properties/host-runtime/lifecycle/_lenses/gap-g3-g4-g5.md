@@ -262,18 +262,19 @@ inserting an optional field in a natural-reading position and tidying
 
 ### O10. macOS compiles the exchange and never runs it
 
-`store_fs.rs:112-115` gives Linux and macOS one shared arm:
+`store_fs.rs:111-115` gives Linux and macOS one shared arm:
 
 ```
+/// Atomically swaps the entries `a` and `b` under `dir`; both must exist.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
+pub(crate) fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> rustix::io::Result<()> {
     rustix::fs::renameat_with(dir, a, dir, b, rustix::fs::RenameFlags::EXCHANGE)
-        .map_err(|_| invalid("atomic digest-target exchange failed"))
 }
 ```
 
-with `:1200-1205` failing closed elsewhere. The doc comment at `:1191-1193`
-states the mapping: Linux `renameat2(RENAME_EXCHANGE)`, macOS
+with `:117-120` failing closed elsewhere and the caller at `generation.rs:1875-1878`
+classifying the errno. `rustix` issues `RenameFlags::EXCHANGE` as Linux
+`renameat2(RENAME_EXCHANGE)` and macOS
 `renameatx_np(RENAME_SWAP)`. Those are different kernel calls with independently
 documented behaviour, reached through one Rust expression.
 
@@ -294,8 +295,8 @@ at `:171-174` says so in its own terms: the macOS job proves "side-effect-free
 omission (R15), not active parity".
 
 So the macOS `RENAME_SWAP` call has never been observed to execute. Its call site
-is `generation.rs:905`, inside `promote_temp`, reached only when the digest target
-is occupied by a corrupt unprotected generation (`:886-905`).
+is `generation.rs:1352`, inside `promote_temp`, reached only when the digest target
+is occupied by a corrupt unprotected generation (`:1313-1350`).
 
 ### O11. The portable fallback is dead on Linux and load-bearing on macOS
 
@@ -323,21 +324,18 @@ match renameat(dir, from, dir, to) { ... }
 
 ### O12. The fallback cannot deliver the guarantee its caller documents
 
-`promote_temp`'s doc comment at `generation.rs:865-876` states the requirement
+`promote_temp`'s doc comment at `generation.rs:1285-1290` states the requirement
 explicitly:
 
-> The rename must not replace: POSIX `renameat` succeeds when the target is an
-> existing empty directory, so a plain rename would silently destroy a protected
-> occupant that had been corrupted into an empty directory before the protection
-> check below ever ran.
+> `renameat` can replace an empty target directory, bypassing the protected-target
+> check.
 
-The fallback's own comment at `:1211-1215` acknowledges the gap and justifies it
-by serialization:
+The fallback's own comment at `store_fs.rs:49-52` acknowledges the gap and leaves
+serialization to the caller:
 
-> Filesystems that reject `renameat2` flags, and platforms without them, fall
-> back to checking occupancy first; that check is sound here because every
-> mutating entry point holds `transaction.lock`, so no other participant in the
-> trust model creates the target concurrently.
+> The fallback checks occupancy first because plain `renameat` replaces an empty
+> target directory. The fallback is not atomic against a concurrent creator of
+> `to`, so callers must exclude concurrent writers.
 
 Two things are true at once. The flagged Linux path enforces "must not replace"
 unconditionally, because `RENAME_NOREPLACE` makes the occupant's emptiness
@@ -347,12 +345,13 @@ empty directory that appears at `to` in that window is silently replaced, which
 is exactly the outcome `generation.rs:1287` says must not happen.
 
 The justification is a prose claim about `transaction.lock`
-(`lifecycle.rs:44`, `:495-496`, `:534`), not a mechanism in
+(`lifecycle.rs:37`, `:444-445`, `:479`), not a mechanism in
 `rename_no_replace` itself. The lock excludes other lifecycle participants. It
 does not exclude anything outside the trust model that can write into the
 generations directory, and the store's own threat model elsewhere assumes hostile
-planting is possible: `validate_in_dir` at `:669-678` documents a directory
-replacement attack against the walk in detail, and
+planting is possible: the `ValidatedGeneration` comments at `generation.rs:323`
+and `:575` state that the retained descriptor pins the tree against pathname
+replacement, and
 `validation-and-enumeration-address-one-directory-object` in the catalog records
 two shipped defects from that class. So the store defends against planted
 replacements in the validation path while relying on the lock in the rename
@@ -630,17 +629,17 @@ orphan, with no observable state in which either name is absent. Also assert the
 non-Linux non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when the
 digest target is occupied by a corrupt unprotected generation
-(`generation.rs:886-905`), so a run that never meets that condition owes nothing
+(`generation.rs:1313-1350`), so a run that never meets that condition owes nothing
 and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
 `store_fs.rs:112-115` gives Linux and macOS a shared arm calling
-`rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, and its own doc comment
-at `:1191-1193` records that this is `renameat2(RENAME_EXCHANGE)` on Linux and
+`rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, which `rustix` issues as
+`renameat2(RENAME_EXCHANGE)` on Linux and
 `renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
 with independent semantics, error sets, and filesystem support, reached through
-one line of Rust. The call site at `:905` sits between an exchange and a
-revalidate-then-delete (`:907-910`), so a non-atomic or partially-applied
-exchange deletes the wrong directory. `promote_temp`'s contract at `:865-876`
+one line of Rust. The call site at `generation.rs:1352` sits between an exchange and a
+revalidate-then-delete (`:1355-1356`), so a non-atomic or partially-applied
+exchange deletes the wrong directory. `promote_temp`'s contract at `:1285-1290`
 depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing test
@@ -696,11 +695,12 @@ cfg, so `statat` at `:69-73` followed by `renameat` at `:74-78` is the
 only path. POSIX `rename` replaces an existing *empty* directory, which
 `promote_temp`'s comment at `generation.rs:1287` calls out by name as the thing that must
 not happen, so the flagged path and the fallback do not implement the same
-guarantee. The fallback's justification at `:1211-1215` is a prose claim that
-`transaction.lock` (`lifecycle.rs:44`, `:495-496`) excludes concurrent creation.
+guarantee. The fallback's justification at `store_fs.rs:49-52` is a prose claim that
+`transaction.lock` (`lifecycle.rs:37`, `:444-445`) excludes concurrent creation.
 That is a claim about actors inside the trust model only, and the same file
-defends against out-of-model directory replacement elsewhere: the walk comment at
-`:669-678` describes exactly that attack, and the catalog's
+defends against out-of-model directory replacement elsewhere: the
+`ValidatedGeneration` comments at `generation.rs:323` and `:575` name exactly that
+attack, and the catalog's
 `validation-and-enumeration-address-one-directory-object` records two shipped
 defects from the class.
 Required faults and enabling state: a directory appearing at the target between
