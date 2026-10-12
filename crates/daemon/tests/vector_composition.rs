@@ -1664,6 +1664,24 @@ fn an_unknown_members_schema_on_the_selected_composition_quarantines_publication
     assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
     assert_eq!(
         fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected.clone())
+    );
+
+    // The unknown members schema quarantines publication even when the selected generation fails validation.
+    fs::write(fixture.generation_dir(&selected).join("stray"), b"x").unwrap();
+    assert!(fixture.store.validate(&selected).is_err());
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        fixture.predecessor().as_deref(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
         CurrentProfile::Current(selected)
     );
 }

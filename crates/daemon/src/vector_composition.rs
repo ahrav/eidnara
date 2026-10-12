@@ -5,6 +5,7 @@
 //! Recovery takes the selected composition when it verifies; otherwise it examines the other compositions newest first under a bound and takes the first whose every member verifies, reporting the selector as stale rather than silently repointing it.
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
@@ -370,12 +371,62 @@ fn selection(store: &GenerationStore) -> Result<(Option<String>, Option<u64>), C
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
         CurrentProfile::Absent => Ok((None, None)),
         CurrentProfile::Current(digest) => {
-            let sequence = record(store, &digest)?
-                .filter(|_| store.validate(&digest).is_ok())
-                .map(|record| record.sequence);
+            let sequence = selected_record(store, &digest)?.map(|record| record.sequence);
             Ok((Some(digest), sequence))
         }
     }
+}
+
+/// `selected_record` reads composition and members metadata through the descriptors used to hash those files during validation.
+fn selected_record(
+    store: &GenerationStore,
+    digest: &str,
+) -> Result<Option<Composition>, CompositionRefusal> {
+    match store.validate_streaming(digest, &[]) {
+        Ok(pending) => record_of(&mut pending.finish(std::iter::empty())?),
+        Err(_) => record(store, digest).map(|_| None),
+    }
+}
+
+/// `record_of` reads composition metadata through the descriptors used to hash the files during validation.
+fn record_of(
+    generation: &mut ValidatedGeneration,
+) -> Result<Option<Composition>, CompositionRefusal> {
+    if generation.manifest.target != VECTOR_SELECTION_TARGET {
+        return Ok(None);
+    }
+    let Some(bytes) = take_metadata_file(generation, COMPOSITION_FILE) else {
+        return Ok(None);
+    };
+    if let Some(members) = take_metadata_file(generation, MEMBERS_FILE_NAME) {
+        check_members_schema(&members)?;
+    }
+    match decode_record(&generation.manifest, &bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(CompositionRefusal::Quarantined) => Err(CompositionRefusal::Quarantined),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `take_metadata_file` reads metadata through the same descriptor used to hash the file during validation.
+fn take_metadata_file(generation: &mut ValidatedGeneration, rel_path: &str) -> Option<Vec<u8>> {
+    let size = generation
+        .manifest
+        .files
+        .iter()
+        .find(|file| file.path == rel_path)?
+        .size;
+    if size > MAX_MANIFEST_BYTES as u64 {
+        return None;
+    }
+    let fd = generation.take_verified_file(rel_path).ok()?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    // One byte of slack distinguishes a file that grew after validation from one that matched.
+    std::fs::File::from(fd)
+        .take(size.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 == size).then_some(bytes)
 }
 
 /// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
