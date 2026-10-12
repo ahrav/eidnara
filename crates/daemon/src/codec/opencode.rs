@@ -148,8 +148,8 @@ fn decode_rows<'a, E>(
             .unwrap_or_default();
 
         let mut blocks = DecodedBlocks {
-            content: Vec::new(),
-            metas: Vec::new(),
+            content: Vec::with_capacity(parts.len()),
+            metas: Vec::with_capacity(parts.len()),
             scratch: &mut scratch,
         };
 
