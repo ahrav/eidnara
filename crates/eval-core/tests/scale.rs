@@ -23,7 +23,45 @@ fn row(tier: ScaleTier, session: &str, turn: u32, response_us: u64) -> PassRow {
         service_us: Some(response_us / 2),
         rss_bytes: 100_000_000,
         ipc_bytes: 4_096,
+        prefix_guard_us: None,
+        prepare_us: None,
+        wire_build_us: None,
+        serialize_us: None,
+        transport_and_encode_us: None,
+        apply_us: None,
+        other_us: None,
+        admit_us: None,
+        lane_gate_and_decode_us: None,
+        derive_ck_us: None,
+        transform_core_us: None,
+        native_attach_us: None,
+        daemon_residual_us: None,
+        daemon_total_us: None,
+        window_messages: None,
+        window_blocks: None,
     }
+}
+
+/// A completed steady pass whose ledger reconciles: plugin stages of 1..=7 us plus a daemon
+/// total of `daemon` us make `response_us`, and the daemon stages sum to that total.
+fn ledger_row(session: &str, turn: u32, daemon: u64) -> PassRow {
+    let mut pass = row(ScaleTier::Control10k, session, turn, 28 + daemon);
+    pass.prefix_guard_us = Some(1);
+    pass.prepare_us = Some(2);
+    pass.wire_build_us = Some(3);
+    pass.serialize_us = Some(4);
+    pass.transport_and_encode_us = Some(5);
+    pass.apply_us = Some(6);
+    pass.other_us = Some(7);
+    pass.admit_us = Some(1);
+    pass.lane_gate_and_decode_us = Some(2);
+    pass.transform_core_us = Some(daemon - 6);
+    pass.native_attach_us = Some(2);
+    pass.daemon_residual_us = Some(1);
+    pass.daemon_total_us = Some(daemon);
+    pass.window_messages = Some(301);
+    pass.window_blocks = Some(602);
+    pass
 }
 
 /// `passes` steady passes per session, every pass of a session at its one value.
@@ -62,6 +100,7 @@ fn inputs(rows: Vec<PassRow>) -> ScaleInputs {
             sent: 10,
             completed: 9,
         }),
+        cohort: Some(eval_core::CohortManifest { window: 300 }),
         seed: 825,
         rows,
     }
@@ -576,6 +615,12 @@ fn rows_the_typescript_writer_emits_parse_losslessly() {
         assert_eq!(serde_json::to_string(row).unwrap(), line);
     }
     assert!(rows.iter().any(|row| row.outcome == PassOutcome::Censored));
+    assert!(
+        rows.iter()
+            .any(|row| row.plugin_stages().iter().all(Option::is_some)),
+        "the fixture carries a full stage ledger"
+    );
+    assert!(ScaleReport::build(inputs(rows.clone())).is_ok());
     for reason in [
         RefusalReason::Declined,
         RefusalReason::DaemonError,
@@ -601,4 +646,130 @@ fn rows_the_typescript_writer_emits_parse_losslessly() {
     assert!(rows.iter().any(|row| row.service_us.is_none()));
     assert!(rows.iter().any(|row| row.harness == ScaleHarness::Pi));
     ScaleReport::build(inputs(rows)).unwrap();
+}
+
+#[test]
+fn a_ledger_row_reconciles_both_ledgers_and_refuses_a_partial_or_unbalanced_one() {
+    let rows: Vec<PassRow> = (0..4).map(|turn| ledger_row("ledger", turn, 100)).collect();
+    assert!(ScaleReport::build(inputs(rows.clone())).is_ok());
+    let edits: [fn(&mut PassRow); 5] = [
+        |pass| pass.other_us = None,
+        |pass| pass.other_us = pass.other_us.map(|other| other + 1),
+        |pass| pass.admit_us = None,
+        |pass| pass.daemon_residual_us = pass.daemon_residual_us.map(|residual| residual + 1),
+        |pass| pass.daemon_total_us = None,
+    ];
+    for edit in edits {
+        let mut broken = rows.clone();
+        edit(&mut broken[2]);
+        assert_eq!(
+            ScaleReport::build(inputs(broken)),
+            Err(ScaleReportError::LedgerMismatch { row: 2 })
+        );
+    }
+    // A refused pass carries no daemon ledger and keeps its outcome count.
+    let mut refused = rows;
+    refused[3] = row(ScaleTier::Control10k, "ledger", 3, 900);
+    refused[3].outcome = PassOutcome::Refused;
+    refused[3].refusal = Some(RefusalReason::Declined);
+    refused[3].service_us = None;
+    let report = ScaleReport::build(inputs(refused)).unwrap();
+    assert_eq!(report.sessions[0].refused, 1);
+    let steady = state(&report, ScaleTier::Control10k, BoundaryState::Steady);
+    assert_eq!(steady.passes, 3);
+}
+
+#[test]
+fn stage_percentiles_come_from_completed_rows_that_carry_the_stage() {
+    let mut rows: Vec<PassRow> = (0..10)
+        .map(|turn| ledger_row("stages", turn, 100 + 10 * u64::from(turn)))
+        .collect();
+    // A censored pass and a pass without a ledger stay out of every stage summary.
+    rows[8].outcome = PassOutcome::Censored;
+    rows[9] = row(ScaleTier::Control10k, "stages", 9, 5_000);
+    let report = ScaleReport::build(inputs(rows)).unwrap();
+    let steady = state(&report, ScaleTier::Control10k, BoundaryState::Steady);
+    let total = steady
+        .stages
+        .iter()
+        .find(|stage| stage.stage == "daemon_total_us")
+        .unwrap();
+    // Totals 100..=170 over eight completed passes: nearest-rank p50 is the 4th, p90 the 8th.
+    assert_eq!((total.passes, total.p50_us, total.p90_us), (8, 130, 170));
+    // The tier names the served-window cohort its completed passes belong to.
+    assert_eq!(
+        tier(&report, ScaleTier::Control10k).windows,
+        [eval_core::WindowCohort {
+            window_messages: 301,
+            window_blocks: 602,
+            passes: 8,
+        }]
+    );
+    assert!(
+        !steady
+            .stages
+            .iter()
+            .any(|stage| stage.stage == "derive_ck_us")
+    );
+    let names: Vec<&str> = steady
+        .stages
+        .iter()
+        .map(|stage| stage.stage.as_str())
+        .collect();
+    assert_eq!(names.first(), Some(&"prefix_guard_us"));
+    assert_eq!(names.last(), Some(&"daemon_total_us"));
+    // The report rebuilds from its rows, so a summary that disagrees with them is refused.
+    let mut value = report.serialize().unwrap();
+    value["tiers"][0]["states"][0]["stages"][0]["p50_us"] = json!(9);
+    assert!(parse_scale_report(&value).is_err());
+}
+
+#[test]
+fn duration_only_changes_leave_the_result_digest_unchanged() {
+    let rows: Vec<PassRow> = (0..4).map(|turn| ledger_row("digest", turn, 100)).collect();
+    let base = ScaleReport::build(inputs(rows.clone())).unwrap();
+    let slower: Vec<PassRow> = rows
+        .iter()
+        .map(|pass| ledger_row(&pass.session, pass.turn, 400))
+        .collect();
+    let remeasured = ScaleReport::build(inputs(slower)).unwrap();
+    let digest = |report: &ScaleReport| ScaleReport::result_digest(&report.serialize().unwrap());
+    assert_eq!(digest(&base).unwrap(), digest(&remeasured).unwrap());
+    let mut cohort = rows;
+    cohort[0].window_messages = Some(119);
+    let moved = ScaleReport::build(inputs(cohort)).unwrap();
+    assert_ne!(digest(&base).unwrap(), digest(&moved).unwrap());
+}
+
+#[test]
+fn a_row_from_before_the_ledger_parses_with_every_stage_unavailable() {
+    let pre_ledger = json!({
+        "harness": "pi", "tier": "10k", "session": "pi-old", "turn": 2,
+        "boundary_state": "steady", "outcome": "completed", "refusal": null,
+        "response_us": 21_000, "service_us": 9_000, "rss_bytes": 1_000, "ipc_bytes": 10
+    });
+    let parsed = parse_pass_row(&pre_ledger).unwrap();
+    assert!(parsed.plugin_stages().iter().all(Option::is_none));
+    assert!(parsed.daemon_stages().iter().all(Option::is_none));
+    // A row that carries part of the ledger names the field it omits.
+    let mut partial = serde_json::to_value(ledger_row("partial", 0, 100)).unwrap();
+    partial.as_object_mut().unwrap().remove("apply_us");
+    assert_eq!(
+        parse_pass_row(&partial),
+        Err(ScaleReportError::MissingField {
+            field: "apply_us".to_string()
+        })
+    );
+    for (field, value) in [
+        ("prepare_us", json!(-1)),
+        ("prepare_us", json!(1.5)),
+        ("prepare_us", json!(1u64 << 60)),
+    ] {
+        let mut bad = serde_json::to_value(ledger_row("bad", 0, 100)).unwrap();
+        bad[field] = value;
+        assert!(parse_pass_row(&bad).is_err(), "{field}");
+    }
+    let mut unknown = serde_json::to_value(ledger_row("unknown", 0, 100)).unwrap();
+    unknown["encode_us"] = json!(1);
+    assert!(parse_pass_row(&unknown).is_err());
 }

@@ -16,7 +16,7 @@ const PASS_LINE =
     "[eidnara] rust pass: decision=DEFER reason=steady served_from=transform in=12 out=12 " +
     "applied=true row_version=7 emergency_wait=1234.5 rediscovered=false admission=shrinks " +
     "invocation_bytes=9000 invocation_charged=3215 history_budget=750 elapsed=41.7 ms module=23.4 ms " +
-    "stages=prefix_guard:6.2 clone:0.4 wire_build:3.9 wire_messages:3 transport:9.8 " +
+    "stages=prefix_guard:6.2 prepare:0.4 wire_build:3.9 wire_messages:3 serialize:0.3 transport:9.8 " +
     "transport_pages:1 transport_bytes:20480 apply:1.2 other:0.8 work=scanned:3 charged:4096 retained:512";
 
 describe("RustTestHarness.create", () => {

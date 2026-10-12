@@ -27,8 +27,68 @@ pub const MIN_RATIO_SESSIONS: usize = 3;
 pub const RATIO_REPLICATES: u32 = 1_000;
 /// The tier ratio gate passes when the interval's upper bound is at most `6/5`.
 pub const RATIO_GATE: (i64, u64) = (6, 5);
-/// Row measurements the result digest excludes.
-const ROW_MEASUREMENTS: [&str; 4] = ["response_us", "service_us", "rss_bytes", "ipc_bytes"];
+/// The plugin stage fields of a row, in ledger order. With `daemon_total_us` they sum to
+/// `response_us` on a row that carries them.
+pub const PLUGIN_STAGES: [&str; 7] = [
+    "prefix_guard_us",
+    "prepare_us",
+    "wire_build_us",
+    "serialize_us",
+    "transport_and_encode_us",
+    "apply_us",
+    "other_us",
+];
+/// The daemon stage fields of a row, in ledger order. They sum to `daemon_total_us` on a row
+/// that carries them; `derive_ck_us` stays `null` until the daemon derives CK.
+pub const DAEMON_STAGES: [&str; 6] = [
+    "admit_us",
+    "lane_gate_and_decode_us",
+    "derive_ck_us",
+    "transform_core_us",
+    "native_attach_us",
+    "daemon_residual_us",
+];
+/// The optional fields a pre-ledger row omits: the stage fields, the daemon total, and the
+/// window the pass served.
+const LEDGER_FIELDS: [&str; 16] = [
+    "prefix_guard_us",
+    "prepare_us",
+    "wire_build_us",
+    "serialize_us",
+    "transport_and_encode_us",
+    "apply_us",
+    "other_us",
+    "admit_us",
+    "lane_gate_and_decode_us",
+    "derive_ck_us",
+    "transform_core_us",
+    "native_attach_us",
+    "daemon_residual_us",
+    "daemon_total_us",
+    "window_messages",
+    "window_blocks",
+];
+/// Row measurements the result digest excludes: every duration, RSS, and byte count.
+const ROW_MEASUREMENTS: [&str; 18] = [
+    "response_us",
+    "service_us",
+    "rss_bytes",
+    "ipc_bytes",
+    "prefix_guard_us",
+    "prepare_us",
+    "wire_build_us",
+    "serialize_us",
+    "transport_and_encode_us",
+    "apply_us",
+    "other_us",
+    "admit_us",
+    "lane_gate_and_decode_us",
+    "derive_ck_us",
+    "transform_core_us",
+    "native_attach_us",
+    "daemon_residual_us",
+    "daemon_total_us",
+];
 /// Sub-buckets per power of two in a [`Histogram`]; values below this count map to themselves.
 const HISTOGRAM_SUB_BUCKETS: u64 = 32;
 
@@ -102,8 +162,15 @@ pub enum RefusalReason {
     TransportError,
 }
 
-/// One pass: `response_us` runs from the plugin handing the request to IPC until the
-/// transformed array is back in the plugin; `service_us` is the daemon's own `total`.
+/// One pass: `response_us` is the full plugin hook, from the harness handing the plugin its
+/// array to the plugin returning the array it serves; `service_us` is the daemon's own
+/// `total`, an overlapping diagnostic.
+///
+/// The stage fields are an additive ledger in whole microseconds. A `null` stage is
+/// unavailable, never zero. On a row carrying them, the plugin stages plus `daemon_total_us`
+/// sum to `response_us`, and the daemon stages sum to `daemon_total_us`. `window_messages` and
+/// `window_blocks` count the CK messages and blocks the daemon served, the cohort a latency
+/// belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PassRow {
@@ -118,6 +185,74 @@ pub struct PassRow {
     pub service_us: Option<u64>,
     pub rss_bytes: u64,
     pub ipc_bytes: u64,
+    #[serde(default)]
+    pub prefix_guard_us: Option<u64>,
+    #[serde(default)]
+    pub prepare_us: Option<u64>,
+    #[serde(default)]
+    pub wire_build_us: Option<u64>,
+    #[serde(default)]
+    pub serialize_us: Option<u64>,
+    #[serde(default)]
+    pub transport_and_encode_us: Option<u64>,
+    #[serde(default)]
+    pub apply_us: Option<u64>,
+    #[serde(default)]
+    pub other_us: Option<u64>,
+    #[serde(default)]
+    pub admit_us: Option<u64>,
+    #[serde(default)]
+    pub lane_gate_and_decode_us: Option<u64>,
+    #[serde(default)]
+    pub derive_ck_us: Option<u64>,
+    #[serde(default)]
+    pub transform_core_us: Option<u64>,
+    #[serde(default)]
+    pub native_attach_us: Option<u64>,
+    #[serde(default)]
+    pub daemon_residual_us: Option<u64>,
+    #[serde(default)]
+    pub daemon_total_us: Option<u64>,
+    #[serde(default)]
+    pub window_messages: Option<u64>,
+    #[serde(default)]
+    pub window_blocks: Option<u64>,
+}
+
+impl PassRow {
+    /// The plugin stages in ledger order, `None` for an unavailable one.
+    pub fn plugin_stages(&self) -> [Option<u64>; 7] {
+        [
+            self.prefix_guard_us,
+            self.prepare_us,
+            self.wire_build_us,
+            self.serialize_us,
+            self.transport_and_encode_us,
+            self.apply_us,
+            self.other_us,
+        ]
+    }
+
+    /// The daemon stages in ledger order, `None` for an unavailable one.
+    pub fn daemon_stages(&self) -> [Option<u64>; 6] {
+        [
+            self.admit_us,
+            self.lane_gate_and_decode_us,
+            self.derive_ck_us,
+            self.transform_core_us,
+            self.native_attach_us,
+            self.daemon_residual_us,
+        ]
+    }
+
+    /// Every stage the report summarizes, named, with the daemon total last.
+    fn named_stages(&self) -> impl Iterator<Item = (&'static str, Option<u64>)> {
+        PLUGIN_STAGES
+            .into_iter()
+            .zip(self.plugin_stages())
+            .chain(DAEMON_STAGES.into_iter().zip(self.daemon_stages()))
+            .chain([("daemon_total_us", self.daemon_total_us)])
+    }
 }
 
 /// The machine a report was measured on; figures from different CPU models are never compared.
@@ -262,6 +397,20 @@ pub struct StateSummary {
     pub service_us: Histogram,
     pub response_percentiles: Vec<Percentile>,
     pub service_percentiles: Vec<Percentile>,
+    /// One descriptive summary per stage with any available value on a completed pass, in
+    /// ledger order. Stage medians describe their stage; they never add into a total median.
+    pub stages: Vec<StageSummary>,
+}
+
+/// One stage over the completed passes of a state that carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageSummary {
+    pub stage: String,
+    /// Completed passes of the state that carry the stage.
+    pub passes: u32,
+    pub p50_us: u64,
+    pub p90_us: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +519,25 @@ pub struct TierSummary {
     /// Refused passes over every pass of every state.
     pub refusals: RefusalRate,
     pub ratio: TierRatio,
+    /// The served-window sizes of the tier's completed passes that record one, smallest first.
+    pub windows: Vec<WindowCohort>,
+}
+
+/// The workload a driver qualified its rows with: the window of host messages each pass
+/// carries past its boundary. The rows' `window_messages` record what each pass actually sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CohortManifest {
+    pub window: u32,
+}
+
+/// One served-window size among a tier's completed passes, the cohort a latency belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowCohort {
+    pub window_messages: u64,
+    pub window_blocks: u64,
+    pub passes: u32,
 }
 
 /// What a driver hands the report: identities, the seed every bootstrap draw derives from, and
@@ -380,6 +548,7 @@ pub struct ScaleInputs {
     pub artifact: ArtifactIdentity,
     pub host: HostManifest,
     pub open_loop: Option<OpenLoopCounts>,
+    pub cohort: Option<CohortManifest>,
     pub seed: u64,
     pub rows: Vec<PassRow>,
 }
@@ -392,6 +561,7 @@ pub struct ScaleReport {
     pub artifact: ArtifactIdentity,
     pub host: HostManifest,
     pub open_loop: Option<OpenLoopCounts>,
+    pub cohort: Option<CohortManifest>,
     pub seed: u64,
     pub rows: Vec<PassRow>,
     pub sessions: Vec<SessionSummary>,
@@ -447,6 +617,10 @@ pub enum ScaleReportError {
     SummaryMismatch {
         section: &'static str,
     },
+    /// A row carries part of a ledger group, or its stages do not sum to their total.
+    LedgerMismatch {
+        row: usize,
+    },
     Statistics(StatisticsError),
     NotCanonical(ContractError),
     Shape(String),
@@ -494,7 +668,61 @@ fn state_summaries(rows: &[&PassRow]) -> Vec<StateSummary> {
                 service_us: Histogram::of(&service),
                 response_percentiles: censored_percentiles(&response),
                 service_percentiles: censored_percentiles(&service),
+                stages: stage_summaries(rows, state),
             }
+        })
+        .collect()
+}
+
+fn window_cohorts(rows: &[&PassRow]) -> Vec<WindowCohort> {
+    let mut counts = BTreeMap::<(u64, u64), u32>::new();
+    for row in rows
+        .iter()
+        .filter(|row| row.outcome == PassOutcome::Completed)
+    {
+        if let (Some(messages), Some(blocks)) = (row.window_messages, row.window_blocks) {
+            *counts.entry((messages, blocks)).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((window_messages, window_blocks), passes)| WindowCohort {
+            window_messages,
+            window_blocks,
+            passes,
+        })
+        .collect()
+}
+
+/// Per stage, the nearest-rank p50 and p90 of the completed passes in `state` that carry it;
+/// a stage no completed pass carries is left out.
+fn stage_summaries(rows: &[&PassRow], state: BoundaryState) -> Vec<StageSummary> {
+    let completed: Vec<&&PassRow> = rows
+        .iter()
+        .filter(|row| row.boundary_state == state && row.outcome == PassOutcome::Completed)
+        .collect();
+    let Some(first) = completed.first() else {
+        return Vec::new();
+    };
+    first
+        .named_stages()
+        .map(|(stage, _)| stage)
+        .filter_map(|stage| {
+            let values: Vec<(u64, bool)> = completed
+                .iter()
+                .filter_map(|row| {
+                    row.named_stages()
+                        .find(|(name, _)| *name == stage)
+                        .and_then(|(_, value)| value)
+                })
+                .map(|value| (value, false))
+                .collect();
+            (!values.is_empty()).then(|| StageSummary {
+                stage: stage.to_string(),
+                passes: values.len() as u32,
+                p50_us: censored_percentile(&values, 50).value,
+                p90_us: censored_percentile(&values, 90).value,
+            })
         })
         .collect()
 }
@@ -628,6 +856,46 @@ fn uncensored(observations: &[(u64, bool)]) -> u32 {
         .count() as u32
 }
 
+/// A ledger group is all present or all unavailable (`derive_ck_us` may stay unavailable in a
+/// present daemon group), a present daemon group sums to `daemon_total_us`, and a present
+/// plugin group plus `daemon_total_us` sums to `response_us`.
+fn ledger_reconciles(row: &PassRow) -> bool {
+    let plugin = row.plugin_stages();
+    let daemon = row.daemon_stages();
+    let plugin_present = plugin.iter().all(Option::is_some);
+    if !plugin_present && plugin.iter().any(Option::is_some) {
+        return false;
+    }
+    let daemon_present = daemon
+        .iter()
+        .enumerate()
+        .all(|(index, stage)| stage.is_some() || DAEMON_STAGES[index] == "derive_ck_us");
+    let daemon_any = daemon.iter().any(Option::is_some);
+    if daemon_present != row.daemon_total_us.is_some() || (!daemon_present && daemon_any) {
+        return false;
+    }
+    let sum = |stages: &[Option<u64>]| {
+        stages
+            .iter()
+            .flatten()
+            .try_fold(0u64, |total, stage| total.checked_add(*stage))
+    };
+    if let Some(total) = row.daemon_total_us
+        && sum(&daemon) != Some(total)
+    {
+        return false;
+    }
+    if plugin_present {
+        let Some(total) = row.daemon_total_us else {
+            return false;
+        };
+        if sum(&plugin).and_then(|plugin| plugin.checked_add(total)) != Some(row.response_us) {
+            return false;
+        }
+    }
+    true
+}
+
 fn check_inputs(inputs: &ScaleInputs) -> Result<(), ScaleReportError> {
     if !is_lower_hex(&inputs.artifact.commit, 40) {
         return Err(ScaleReportError::MalformedCommit);
@@ -659,6 +927,9 @@ fn check_inputs(inputs: &ScaleInputs) -> Result<(), ScaleReportError> {
         }
         if (row.outcome == PassOutcome::Refused) != row.refusal.is_some() {
             return Err(ScaleReportError::RefusalOutcomeMismatch { row: index });
+        }
+        if !ledger_reconciles(row) {
+            return Err(ScaleReportError::LedgerMismatch { row: index });
         }
         let entry =
             turns
@@ -779,6 +1050,7 @@ impl ScaleReport {
                 states: state_summaries(&all),
                 refusals,
                 ratio,
+                windows: window_cohorts(&all),
             });
         }
         Ok(Self {
@@ -787,6 +1059,7 @@ impl ScaleReport {
             artifact: inputs.artifact,
             host: inputs.host,
             open_loop: inputs.open_loop,
+            cohort: inputs.cohort,
             seed: inputs.seed,
             rows: inputs.rows,
             sessions,
@@ -800,6 +1073,7 @@ impl ScaleReport {
             artifact: self.artifact.clone(),
             host: self.host.clone(),
             open_loop: self.open_loop,
+            cohort: self.cohort,
             seed: self.seed,
             rows: self.rows.clone(),
         }
@@ -896,7 +1170,15 @@ impl ScaleReport {
             .as_object()
             .ok_or_else(|| ScaleReportError::Shape("report is not an object".to_string()))?;
         let mut kept = serde_json::Map::new();
-        for field in ["schema", "driver", "artifact", "host", "open_loop", "seed"] {
+        for field in [
+            "schema",
+            "driver",
+            "artifact",
+            "host",
+            "open_loop",
+            "cohort",
+            "seed",
+        ] {
             if let Some(value) = object.get(field) {
                 kept.insert(field.to_string(), value.clone());
             }
@@ -925,11 +1207,23 @@ impl ScaleReport {
 }
 
 /// Parses one row as the TypeScript writer emits it: every field present, nothing unknown, and
-/// every value surviving a lossless round trip.
+/// every value surviving a lossless round trip. A row written before the stage ledger carries
+/// none of the ledger fields and parses with every one unavailable; a row carrying some of them
+/// must carry all of them.
 pub fn parse_pass_row(value: &Value) -> Result<PassRow, ScaleReportError> {
     let row = PassRow::deserialize(value).map_err(shape_error)?;
     canonical_json_encode(value).map_err(ScaleReportError::NotCanonical)?;
-    round_trips(value, &serde_json::to_value(&row).map_err(shape_error)?)?;
+    let mut expected = value.clone();
+    if let Some(object) = expected.as_object_mut()
+        && LEDGER_FIELDS
+            .iter()
+            .all(|field| !object.contains_key(*field))
+    {
+        for field in LEDGER_FIELDS {
+            object.insert(field.to_string(), Value::Null);
+        }
+    }
+    round_trips(&expected, &serde_json::to_value(&row).map_err(shape_error)?)?;
     Ok(row)
 }
 

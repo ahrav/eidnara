@@ -25,4 +25,16 @@ describe("scale report pass row writer", () => {
         expect(() => serializePassRow({ ...base, tier: "1m" as never })).toThrow("tier");
         expect(() => serializePassRow({ ...base, session: " " })).toThrow("session");
     });
+
+    it("refuses a stage ledger the Rust report would refuse", () => {
+        const ledger = WRITER_FIXTURE_ROWS.find((row) => row.prepare_us !== null) as PassRow;
+        expect(() => serializePassRow({ ...ledger, prepare_us: 400.5 })).toThrow("prepare_us");
+        expect(() => serializePassRow({ ...ledger, prepare_us: -1 })).toThrow("prepare_us");
+        expect(() => serializePassRow({ ...ledger, apply_us: null })).toThrow("plugin stages");
+        expect(() => serializePassRow({ ...ledger, other_us: 1_501 })).toThrow("response_us");
+        expect(() => serializePassRow({ ...ledger, admit_us: 301 })).toThrow("daemon_total_us");
+        expect(() => serializePassRow({ ...ledger, daemon_total_us: null })).toThrow(
+            "daemon_total_us",
+        );
+    });
 });

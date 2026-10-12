@@ -351,8 +351,11 @@ function measureInputLengths(
 
 export interface RustPassTimings {
     prefixGuard: number;
-    clone: number;
+    /** The source's `prepare`: the harness's pass inputs, read before the wire build. */
+    prepare: number;
     wireBuild: number;
+    /** The transform body's page series serialized to wire text. */
+    serialize: number;
     wireMessages: number;
     transport: number;
     transportPages: number;
@@ -368,8 +371,9 @@ export interface RustPassTimings {
 function emptyRustPassTimings(): RustPassTimings {
     return {
         prefixGuard: 0,
-        clone: 0,
+        prepare: 0,
         wireBuild: 0,
+        serialize: 0,
         wireMessages: 0,
         transport: 0,
         transportPages: 0,
@@ -398,6 +402,38 @@ function admissionOf(validation: InvocationValidation): InvocationAdmission {
     };
 }
 
+/**
+ * One finished pass as the plugin measured it: the named plugin stages in milliseconds, the
+ * transport round trip they exclude, the window it sent, and the daemon stage ledger the final
+ * transform response carried (`undefined` when no response carried one). A measurement driver
+ * observes it to build pass rows; it changes nothing the pass does.
+ */
+export interface PassLedger {
+    sessionId: string;
+    applied: boolean;
+    elapsedMs: number;
+    prefixGuardMs: number;
+    prepareMs: number;
+    wireBuildMs: number;
+    serializeMs: number;
+    transportMs: number;
+    applyMs: number;
+    transportPages: number;
+    transportBytes: number;
+    windowMessages: number;
+    daemonLedger: Record<string, unknown> | undefined;
+}
+
+const passLedgerListeners = new Set<(ledger: PassLedger) => void>();
+
+/** Registers `listener` for every finished pass; the returned function unregisters it. */
+export function observePassLedgers(listener: (ledger: PassLedger) => void): () => void {
+    passLedgerListeners.add(listener);
+    return () => {
+        passLedgerListeners.delete(listener);
+    };
+}
+
 export function formatRustPassLog(args: {
     decision: string;
     reason: string;
@@ -417,11 +453,16 @@ export function formatRustPassLog(args: {
 }): string {
     const timings = args.timings ?? emptyRustPassTimings();
     const measured =
-        timings.prefixGuard + timings.clone + timings.wireBuild + timings.transport + timings.apply;
+        timings.prefixGuard +
+        timings.prepare +
+        timings.wireBuild +
+        timings.serialize +
+        timings.transport +
+        timings.apply;
     const unattributed = Math.max(0, args.elapsedMs - measured);
     const rowVersion = Number.isSafeInteger(args.rowVersion) ? args.rowVersion : 0;
     const admission = args.admission ?? NO_ADMISSION;
-    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} admission=${admission.branch} invocation_bytes=${admission.bytes} invocation_charged=${admission.chargedTokens} history_budget=${args.historyBudgetTokens ?? "none"} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
+    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} admission=${admission.branch} invocation_bytes=${admission.bytes} invocation_charged=${admission.chargedTokens} history_budget=${args.historyBudgetTokens ?? "none"} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} prepare:${timings.prepare.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} serialize:${timings.serialize.toFixed(1)} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
 }
 
 function responseValue(response: unknown): Record<string, unknown> {
@@ -980,11 +1021,28 @@ export function createTransformSessionClient(
         let moduleElapsedMs = 0;
         let emergencyWaitMs = 0;
         let rowVersion = 0;
+        let daemonLedger: Record<string, unknown> | undefined;
         let appliedAt: number | undefined;
         const finishPass = (applied: boolean): void => {
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
             timings.chargedBytes = lease.chargedBytes;
+            for (const listener of passLedgerListeners)
+                listener({
+                    sessionId,
+                    applied,
+                    elapsedMs,
+                    prefixGuardMs: timings.prefixGuard,
+                    prepareMs: timings.prepare,
+                    wireBuildMs: timings.wireBuild,
+                    serializeMs: timings.serialize,
+                    transportMs: timings.transport,
+                    applyMs: timings.apply,
+                    transportPages: timings.transportPages,
+                    transportBytes: timings.transportBytes,
+                    windowMessages: timings.wireMessages,
+                    daemonLedger,
+                });
             sessionLog.debug(
                 sessionId,
                 formatRustPassLog({
@@ -1022,6 +1080,7 @@ export function createTransformSessionClient(
                     ? response.materialize_reason
                     : "none";
             const timings = isRecord(response.timings) ? response.timings : undefined;
+            daemonLedger = isRecord(timings?.ledger) ? timings.ledger : undefined;
             const applyOnceTotal = timings?.total;
             emergencyWaitMs =
                 typeof timings?.emergency_wait === "number" &&
@@ -1410,7 +1469,9 @@ export function createTransformSessionClient(
             for (let index = 0; index < messageWireBytes.length; index += 1)
                 wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
             charge(wireBytes, "wire projection");
+            const prepareStartedAt = performance.now();
             const preparation = await source.prepare(messages, assertCurrentPass);
+            logStage(sessionId, "prepare", prepareStartedAt, timings);
             recheckCapture("wire-build");
             const projectRoot = options.projectRoot ?? directory;
             state.routeRoot = projectRoot;
@@ -1475,10 +1536,12 @@ export function createTransformSessionClient(
                 payload: Record<string, unknown>,
                 detail: string,
             ): Promise<TransformSeriesResult> => {
+                const serializeStartedAt = performance.now();
                 const series = buildPagedModuleTransformPayloads(
                     payload,
                     options.unpagedTransformMaxBytes,
                 );
+                logStage(sessionId, "serialize", serializeStartedAt, timings);
                 const paged = series.some(
                     (entry) => typeof entry.page.transform_page_id === "string",
                 );

@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use super::campaign::parse_flags;
 use daemon::synthetic_history::SyntheticHistory;
 use eval_core::{
-    ArtifactIdentity, DriverIdentity, HostManifest, OpenLoopCounts, ScaleInputs, ScaleReport,
-    TierRatio, parse_pass_row,
+    ArtifactIdentity, CohortManifest, DriverIdentity, HostManifest, OpenLoopCounts, ScaleInputs,
+    ScaleReport, TierRatio, parse_pass_row,
 };
 use memory_store::MemoryStore;
 use serde::Deserialize;
@@ -75,6 +75,8 @@ struct Manifest {
     artifact: ArtifactIdentity,
     host: HostManifest,
     open_loop: Option<OpenLoopCounts>,
+    #[serde(default)]
+    cohort: Option<CohortManifest>,
     seed: u64,
 }
 
@@ -104,6 +106,7 @@ pub fn run_report(args: impl Iterator<Item = String>) -> io::Result<()> {
         artifact: manifest.artifact,
         host: manifest.host,
         open_loop: manifest.open_loop,
+        cohort: manifest.cohort,
         seed: manifest.seed,
         rows,
     })
@@ -123,6 +126,7 @@ pub fn run_report(args: impl Iterator<Item = String>) -> io::Result<()> {
                         "passes": state.passes,
                         "response_us": state.response_percentiles,
                         "service_us": state.service_percentiles,
+                        "stages": state.stages,
                     })
                 })
                 .collect();
@@ -132,6 +136,7 @@ pub fn run_report(args: impl Iterator<Item = String>) -> io::Result<()> {
                 "sessions": tier.sessions.len(),
                 "states": states,
                 "refusals": tier.refusals,
+                "windows": tier.windows,
                 "ratio": match &tier.ratio {
                     TierRatio::Computed(claim) => json!({
                         "upper": claim.upper,

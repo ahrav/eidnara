@@ -135,6 +135,7 @@ async fn metered_transform(
         probe: probe.as_ref(),
         meter: &meter,
         runner,
+        clock: crate::transform_unit::PassClock::now(),
     };
     handler.dispatch_body(&entry, &body).await.1
 }

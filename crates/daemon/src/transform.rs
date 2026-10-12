@@ -1228,6 +1228,77 @@ pub struct TransformTimings {
     pub projection_blocks: usize,
     #[serde(default)]
     pub tail_messages_emitted: usize,
+    /// The daemon's additive stage ledger of a completed pass; absent on every other answer.
+    /// Its stages are disjoint and contiguous, so they sum to its `total_us` exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<DaemonStageLedger>,
+}
+
+/// One completed pass as disjoint daemon stages, in whole microseconds, plus the window it served.
+///
+/// `admit` runs from the handler taking the body to the end of the byte cap, admission charge,
+/// and lane probe; `lane_gate_and_decode` from there through the typed decode, the request
+/// checks, the session lane wait, and the unit permit; `transform_core` from there to the
+/// native-attach step; `native_attach` is that step; `residual` is the rest of the pass up to
+/// the instant the ledger is taken, which precedes the response encode. On the paged lane every
+/// stage measures the final page's request. `derive_ck` is reserved for daemon-derived CK and is
+/// `None` while the plugin sends CK.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonStageLedger {
+    pub admit_us: u64,
+    pub lane_gate_and_decode_us: u64,
+    pub derive_ck_us: Option<u64>,
+    pub transform_core_us: u64,
+    pub native_attach_us: u64,
+    pub residual_us: u64,
+    pub total_us: u64,
+    /// CK messages and content blocks in the window the pass served.
+    pub window_messages: u64,
+    pub window_blocks: u64,
+}
+
+/// The instants a [`DaemonStageLedger`] is measured between, in pass order.
+pub struct LedgerInstants {
+    pub received_at: Instant,
+    pub admitted_at: Instant,
+    pub core_started_at: Instant,
+    pub native_attach_started_at: Instant,
+    pub native_attach_ended_at: Instant,
+}
+
+impl DaemonStageLedger {
+    /// Measures the ledger now. Each stage is the whole-microsecond span between consecutive
+    /// instants, so the stages and `residual_us` sum to `total_us`.
+    pub fn measure(at: LedgerInstants, served: &TransformRequest) -> Self {
+        let ended_at = Instant::now();
+        let micros = |from: Instant, to: Instant| -> u64 {
+            u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX)
+        };
+        let admit_us = micros(at.received_at, at.admitted_at);
+        let lane_gate_and_decode_us = micros(at.admitted_at, at.core_started_at);
+        let transform_core_us = micros(at.core_started_at, at.native_attach_started_at);
+        let native_attach_us = micros(at.native_attach_started_at, at.native_attach_ended_at);
+        let total_us = micros(at.received_at, ended_at);
+        let staged = admit_us
+            .saturating_add(lane_gate_and_decode_us)
+            .saturating_add(transform_core_us)
+            .saturating_add(native_attach_us);
+        Self {
+            admit_us,
+            lane_gate_and_decode_us,
+            derive_ck_us: None,
+            transform_core_us,
+            native_attach_us,
+            residual_us: total_us.saturating_sub(staged),
+            total_us: total_us.max(staged),
+            window_messages: served.messages.len() as u64,
+            window_blocks: served
+                .messages
+                .iter()
+                .map(|message| message.ck.content().len() as u64)
+                .sum(),
+        }
+    }
 }
 
 /// Record this pass's token-cache counter deltas into `timings`.

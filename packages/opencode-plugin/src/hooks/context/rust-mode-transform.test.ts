@@ -33,6 +33,7 @@ import {
     inspectReferenceableMessages,
     TransformCaptureAdmission,
 } from "./transform-capture";
+import { observePassLedgers, type PassLedger } from "./transform-session-client";
 
 const unregisters: Array<() => void> = [];
 const availabilityDataHomes: string[] = [];
@@ -375,7 +376,7 @@ describe("Rust mode transform request", () => {
             );
             expect(passLines[0]).toMatch(/ history_budget=(\d+|none) elapsed=/);
             expect(passLines[0]).toMatch(
-                /reason=first_render .* stages=prefix_guard:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+ work=scanned:\d+ charged:\d+ retained:\d+$/,
+                /reason=first_render .* stages=prefix_guard:[\d.]+ prepare:[\d.]+ wire_build:[\d.]+ wire_messages:1 serialize:[\d.]+ transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+ work=scanned:\d+ charged:\d+ retained:\d+$/,
             );
             expect(passLines[1]).toContain("decision=SOFT+");
             expect(passLines[1]).toContain("served_from=cache");
@@ -383,6 +384,43 @@ describe("Rust mode transform request", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+
+    it("hands every listener one pass ledger per pass with the daemon ledger it carried", async () => {
+        const sessionId = `rust-ledger-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const daemonLedger = { admit_us: 10, total_us: 90, window_messages: 1 };
+        const { client } = recordingClient((request) =>
+            recipeResponse(request, makeMessages(sessionId), {
+                decision: "HARD",
+                timings: { handler_total: 1, total: 1, ledger: daemonLedger },
+            }),
+        );
+        const ledgers: PassLedger[] = [];
+        const unobserve = observePassLedgers((ledger) => {
+            if (ledger.sessionId === sessionId) ledgers.push(ledger);
+        });
+        try {
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+        } finally {
+            unobserve();
+        }
+        expect(ledgers).toHaveLength(1);
+        const [ledger] = ledgers as [PassLedger];
+        expect(ledger.applied).toBe(true);
+        expect(ledger.daemonLedger).toEqual(daemonLedger);
+        expect(ledger.windowMessages).toBe(1);
+        expect(ledger.transportPages).toBe(1);
+        const named =
+            ledger.prefixGuardMs +
+            ledger.prepareMs +
+            ledger.wireBuildMs +
+            ledger.serializeMs +
+            ledger.transportMs +
+            ledger.applyMs;
+        expect(named).toBeLessThanOrEqual(ledger.elapsedMs + 1e-6);
+        expect(ledger.serializeMs).toBeGreaterThan(0);
     });
 
     it("sends the whole captured array on every pass with no delta or fingerprint", async () => {

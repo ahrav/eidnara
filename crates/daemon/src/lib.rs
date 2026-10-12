@@ -3441,11 +3441,14 @@ struct TransformedPass {
     trigger_timings: HistorySummarizerTriggerTimings,
 }
 
-/// The handler-side timing brackets taken before the pass's store work begins.
+/// The handler-side timing brackets taken before the pass's store work begins. `clock` opens
+/// the daemon's stage ledger and `core_started_at` ends its `lane_gate_and_decode` stage.
 struct EntryTimings {
     handler_started_at: Instant,
     request_observed_to_handler: f64,
     pass_state_load_ms: f64,
+    clock: transform_unit::PassClock,
+    core_started_at: Instant,
 }
 
 /// The handler-side timing brackets taken before the transform, reported with the response.
@@ -3562,6 +3565,7 @@ impl Handler {
             probe: None,
             meter: &meter,
             runner: &runner,
+            clock: transform_unit::PassClock::now(),
         };
         self.dispatch_value_with_inbound_bytes(&entry, request, None)
             .await
@@ -3625,6 +3629,7 @@ impl Handler {
             probe: probe.as_ref(),
             meter: &meter,
             runner,
+            clock: transform_unit::PassClock::now(),
         };
         let (_, outcome) = self.dispatch_body(&entry, &body).await;
         outcome
@@ -8909,6 +8914,7 @@ impl HandlerCore {
             Err(outcome) => return outcome,
         };
         ticket.accept();
+        let core_started_at = Instant::now();
         // The reply does not wait on the checkpoint's store writes; the memo
         // learns a fragment only once the store accepted it, so a checkpoint
         // that never runs replays on the next sync. A drain answers `pending`
@@ -8945,6 +8951,8 @@ impl HandlerCore {
                 handler_started_at,
                 request_observed_to_handler,
                 pass_state_load_ms,
+                clock: entry.clock,
+                core_started_at,
             },
             held: PassHold {
                 _charges: entry.meter.take_charges(),
@@ -9703,7 +9711,11 @@ impl HandlerCore {
                 },
             )
         };
-        let native_attach_ms = native_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
+        let native_attach_ended_at = Instant::now();
+        let native_attach_ms = native_attach_ended_at
+            .duration_since(native_attach_started_at)
+            .as_secs_f64()
+            * 1_000.0;
         let trace_complete_started_at = Instant::now();
         let _ = store.trace_pass_completed(&parsed.session_id, now_ms());
         let trace_complete_ms = trace_complete_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -9753,6 +9765,16 @@ impl HandlerCore {
             response_timings.native_cache_refused_store = stored.refused;
             response_timings.native_cache_evicted = stored.evicted;
             response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
+            response_timings.ledger = Some(transform::DaemonStageLedger::measure(
+                transform::LedgerInstants {
+                    received_at: timings.entry.clock.received_at,
+                    admitted_at: timings.entry.clock.admitted_at,
+                    core_started_at: timings.entry.core_started_at,
+                    native_attach_started_at,
+                    native_attach_ended_at,
+                },
+                parsed,
+            ));
         }
         respond_transform(parsed, response, Some(recipe))
     }
@@ -12993,6 +13015,7 @@ impl CompositeComponent for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
+        let received_at = Instant::now();
         let body = ctx.body.as_slice();
         let cap_probe = match enforce_request_byte_cap(body) {
             Ok(probe) => probe,
@@ -13012,6 +13035,10 @@ impl CompositeComponent for Handler {
             probe: probe.as_ref(),
             meter: &meter,
             runner: &ctx,
+            clock: transform_unit::PassClock {
+                received_at,
+                admitted_at: Instant::now(),
+            },
         };
         let (_, outcome) = self.dispatch_body(&entry, body).await;
         settle_prepared(&ctx, outcome).await
@@ -20856,6 +20883,7 @@ mod tests {
                 probe: probe.as_ref(),
                 meter: &meter,
                 runner: &runner,
+                clock: transform_unit::PassClock::now(),
             };
             let (lane, through_body) = direct.dispatch_body(&entry, &body).await;
             let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
@@ -20921,6 +20949,7 @@ mod tests {
                     probe: probe.as_ref(),
                     meter: &direct_meter,
                     runner: &runner,
+                    clock: transform_unit::PassClock::now(),
                 };
                 let (_, through_body) = direct.dispatch_body(&entry, &body).await;
                 let tree_pool = TestPool::with_capacity(capacity);
@@ -21422,6 +21451,7 @@ mod tests {
                     probe: probe.as_ref(),
                     meter: &meter,
                     runner: &runner,
+                    clock: transform_unit::PassClock::now(),
                 };
                 let (_, outcome) = handler.dispatch_body(&entry, body).await;
                 comparable_outcome(outcome)
@@ -21748,6 +21778,7 @@ mod tests {
                 probe: probe.as_ref(),
                 meter: &meter,
                 runner: &runner,
+                clock: transform_unit::PassClock::now(),
             };
             let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
             assert_eq!(
@@ -21820,6 +21851,7 @@ mod tests {
                 probe: probe.as_ref(),
                 meter: &meter,
                 runner: &runner,
+                clock: transform_unit::PassClock::now(),
             };
             let (_, outcome) = handler.dispatch_body(&entry, &body).await;
             assert_eq!(comparable_outcome(outcome), comparable_outcome(expected));
@@ -21839,6 +21871,7 @@ mod tests {
             probe: probe.as_ref(),
             meter: &meter,
             runner: &runner,
+            clock: transform_unit::PassClock::now(),
         };
         let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
         assert_eq!(lane, BodyLane::Direct);
@@ -25278,6 +25311,7 @@ mod tests {
             probe: None,
             meter: &meter,
             runner: &runner,
+            clock: transform_unit::PassClock::now(),
         };
         let outcome = handler
             .handle_transform_typed(&entry, parsed, None, decode_started_at, &ticket)
@@ -25295,6 +25329,66 @@ mod tests {
             "request_observed_to_handler was {span} ms; the decode span of 10 s must not be \
              counted in it"
         );
+    }
+
+    /// A completed pass carries the daemon's stage ledger: the stages are the spans between the
+    /// entry clock and the pass's own instants, they sum to the ledger total, and the window
+    /// counts are the served CK messages and blocks. A pass that ends before the core carries none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_completed_pass_carries_a_reconciled_daemon_stage_ledger() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let parsed: TransformRequest =
+            serde_json::from_value(request(vec![ck("m1", 1, "hello"), ck("m2", 2, "there")]))
+                .unwrap();
+        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let pool = TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let received_at = Instant::now() - Duration::from_millis(40);
+        let admitted_at = received_at + Duration::from_millis(15);
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: None,
+            meter: &meter,
+            runner: &runner,
+            clock: transform_unit::PassClock {
+                received_at,
+                admitted_at,
+            },
+        };
+        let outcome = handler
+            .handle_transform_typed(&entry, parsed, None, admitted_at, &ticket)
+            .await;
+        ticket.finish(false);
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("unexpected handler outcome: {outcome:?}");
+        };
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        let ledger: transform::DaemonStageLedger =
+            serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
+        assert_eq!(ledger.admit_us, 15_000);
+        assert!(ledger.lane_gate_and_decode_us >= 25_000, "{ledger:?}");
+        assert_eq!(ledger.derive_ck_us, None);
+        assert_eq!(
+            ledger.admit_us
+                + ledger.lane_gate_and_decode_us
+                + ledger.transform_core_us
+                + ledger.native_attach_us
+                + ledger.residual_us,
+            ledger.total_us
+        );
+        assert!(ledger.total_us >= 40_000, "{ledger:?}");
+        assert_eq!((ledger.window_messages, ledger.window_blocks), (2, 2));
+        // The overlapping diagnostics keep their own brackets beside the ledger.
+        assert!(response["timings"]["handler_total"].is_number());
+
+        let mut unknown = request(vec![ck("m1", 1, "hello")]);
+        unknown["boundary"] = json!({ "mid": "m1", "sequence": 99 });
+        let answered = call_transform_request(&handler, unknown).await;
+        assert_eq!(answered["status"], "boundary_unknown", "{answered}");
+        assert!(answered["timings"].get("ledger").is_none(), "{answered}");
     }
 
     #[tokio::test(flavor = "current_thread")]
