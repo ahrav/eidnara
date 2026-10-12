@@ -56,7 +56,7 @@ pub use composite::{
 pub use config::{ConfigError, HostConfig, HostInit, HostLimits, HostTiming, LivenessPolicy};
 pub use connection_file::{
     ConnectionFileError, ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN,
-    MIN_KEY_LEN, SCHEMA_VERSION, read_for_client as read_connection_file,
+    MIN_KEY_LEN, read_for_client as read_connection_file,
 };
 #[cfg(feature = "test-support")]
 pub use control::host_status_response_json;

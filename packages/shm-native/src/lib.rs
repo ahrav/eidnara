@@ -18,7 +18,7 @@ use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
 use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring, RingError};
-use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
+use shm_transport::descriptor::{WIRE_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::PayloadLease;
 use shm_transport::pool::{BlockClass, Inventory};
 use shm_transport::profile::host_payload_pool_profile;
@@ -550,11 +550,6 @@ pub fn build_target() -> String {
 }
 
 #[napi]
-pub fn descriptor_schema_version() -> u32 {
-    u32::from(shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION)
-}
-
-#[napi]
 pub fn qualified_test_profile() -> &'static str {
     PROFILE
 }
@@ -1057,8 +1052,8 @@ const TERMINAL_FRAME_TYPES: [u8; 2] = [4, 5];
 /// The inventory a frame publishes from, by the same rule the host applies: a pure-header
 /// control takes the control reserve, a terminal that fits the terminal class takes the
 /// terminal reserve, and everything else, including a channel-0 `Request`, is ordinary.
-fn inventory_for(ring: &Ring, header: &[u8; WIRE_V3_HEADER_BYTES], body_len: usize) -> Inventory {
-    let ty = header[5];
+fn inventory_for(ring: &Ring, header: &[u8; WIRE_HEADER_BYTES], body_len: usize) -> Inventory {
+    let ty = header[4];
     if body_len == 0 && CONTROL_FRAME_TYPES.contains(&ty) {
         return Inventory::Control;
     }
@@ -1078,7 +1073,7 @@ pub fn produce(
     fill: Function<Vec<Unknown<'_>>, u32>,
     before_publish: Function<(), ()>,
 ) -> Result<()> {
-    let header: [u8; WIRE_V3_HEADER_BYTES] = header
+    let header: [u8; WIRE_HEADER_BYTES] = header
         .as_ref()
         .try_into()
         .map_err(|_| error("wire header has invalid length"))?;
@@ -1177,7 +1172,7 @@ pub fn reserve(
         // A direct serializer's header is supplied at commit, so its frame is ordinary data;
         // the attempt does not block, and only a reserved block ever reaches the serializer.
         let reservation = ring
-            .try_reserve(capacity as usize, [0; WIRE_V3_HEADER_BYTES])
+            .try_reserve(capacity as usize, [0; WIRE_HEADER_BYTES])
             .map_err(reservation_error)?;
         let mut views = Vec::with_capacity(reservation.segment_count());
         let mut refs = Vec::with_capacity(reservation.segment_count());
@@ -1244,7 +1239,7 @@ pub fn commit_reservation(
             .ok_or_else(|| error("native channel is closed"))?;
         // The header is validated before detaching the producer token, so an invalid
         // length leaves the token's reservation retryable.
-        let header: [u8; WIRE_V3_HEADER_BYTES] = header
+        let header: [u8; WIRE_HEADER_BYTES] = header
             .as_ref()
             .try_into()
             .map_err(|_| error("wire header has invalid length"))?;
@@ -1400,7 +1395,7 @@ mod tests {
         let mut reservation = producer
             .reserve_until(
                 5,
-                shm_transport::backend::ring::wire_v3_header(5).expect("header"),
+                shm_transport::backend::ring::body_header(5).expect("header"),
                 std::time::Instant::now() + Duration::from_secs(1),
             )
             .expect("reservation");
@@ -1454,7 +1449,7 @@ mod tests {
         let reservation = ring
             .reserve_until(
                 0,
-                [0; WIRE_V3_HEADER_BYTES],
+                [0; WIRE_HEADER_BYTES],
                 std::time::Instant::now() + Duration::from_secs(1),
             )
             .expect("reservation");
@@ -1573,7 +1568,7 @@ pub fn readiness_handled() -> bool {
 /// (`watch`) so the reactor can deliver the wake.
 #[napi]
 pub fn arm_capacity(channel_id: u32, header: Buffer, capacity: u32) -> Result<bool> {
-    let header: [u8; WIRE_V3_HEADER_BYTES] = header
+    let header: [u8; WIRE_HEADER_BYTES] = header
         .as_ref()
         .try_into()
         .map_err(|_| error("wire header has invalid length"))?;

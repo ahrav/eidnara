@@ -13,7 +13,6 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
     assertUint32Argument,
-    DESCRIPTOR_SCHEMA_VERSION,
     NativeChannel,
     nativeWireConstants,
     isRingFullError,
@@ -57,9 +56,6 @@ describe("native mechanism gate", () => {
             }
             return;
         }
-        expect(constants.descriptorSchemaVersion).toBe(
-            DESCRIPTOR_SCHEMA_VERSION,
-        );
         expect(constants.qualifiedTestProfile).toBe(QUALIFIED_TEST_PROFILE);
     });
 
@@ -139,7 +135,7 @@ function supportsMechanismTests(
     return addon !== null && process.platform === "linux";
 }
 
-/** Geometry of the `host-payload-pool-v1` profile (`PoolGeometry::host_payload_pool`). */
+/** Geometry of the `host-payload-pool` profile (`PoolGeometry::host_payload_pool`). */
 const GRANT_ORDINARY_DESCRIPTORS = 32;
 const GRANT_RESERVED_DESCRIPTORS = 16;
 /** Seven classes, ordinary first: `[block_bytes, count]`. */
@@ -165,23 +161,22 @@ const GRANT_CLASSES: [bigint, number][] = [
  * case counts, so a stale value fails there rather than in a rejection case.
  */
 const GRANT_TOTAL_BYTES = 95_825_920n;
-const GRANT_BYTES = 126;
+const GRANT_BYTES = 124;
 
 /**
- * Encodes one PoolGrant wire image (layout version 4) as lowercase hex:
- * layout_version u16, incarnation [16], lane u32, ordinary descriptors u32,
+ * Encodes one PoolGrant wire image as lowercase hex:
+ * incarnation [16], lane u32, ordinary descriptors u32,
  * reserved descriptors u32, seven (block_bytes u64, count u32) classes,
  * total_bytes u64, reserved u32 zero — all little-endian.
  */
 function testGrantHex(lane: number, incarnation: number): string {
     const bytes = new Uint8Array(GRANT_BYTES);
     const view = new DataView(bytes.buffer);
-    view.setUint16(0, 4, true);
-    bytes[2] = incarnation;
-    view.setUint32(18, lane, true);
-    view.setUint32(22, GRANT_ORDINARY_DESCRIPTORS, true);
-    view.setUint32(26, GRANT_RESERVED_DESCRIPTORS, true);
-    let cursor = 30;
+    bytes[0] = incarnation;
+    view.setUint32(16, lane, true);
+    view.setUint32(20, GRANT_ORDINARY_DESCRIPTORS, true);
+    view.setUint32(24, GRANT_RESERVED_DESCRIPTORS, true);
+    let cursor = 28;
     for (const [blockBytes, count] of GRANT_CLASSES) {
         view.setBigUint64(cursor, blockBytes, true);
         view.setUint32(cursor + 8, count, true);
@@ -264,13 +259,12 @@ describe("readiness dispatch", () => {
             ) {}
         });
         try {
-            const header = new Uint8Array(21);
+            const header = new Uint8Array(20);
             const view = new DataView(header.buffer);
             view.setUint32(0, 0, true);
-            view.setUint8(4, 4);
-            view.setUint8(5, 3);
-            view.setUint16(7, 1, true);
-            view.setUint32(9, 1, true);
+            view.setUint8(4, 3);
+            view.setUint16(6, 1, true);
+            view.setUint32(8, 1, true);
             second.second.produce(header, 0, () => {});
             const deadline = Date.now() + 1_000;
             while (!delivered && Date.now() < deadline) {
@@ -399,10 +393,10 @@ describe("raw N-API descriptor boundary", () => {
                 `  finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
                 `};\n` +
                 `addon.watch(pair.second, onReady);\n` +
-                `const header = new Uint8Array(21);\n` +
+                `const header = new Uint8Array(20);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
-                `view.setUint16(7, 1, true); view.setUint32(9, 1, true); view.setBigUint64(13, 7n, true);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 3);\n` +
+                `view.setUint16(6, 1, true); view.setUint32(8, 1, true); view.setBigUint64(12, 7n, true);\n` +
                 `addon.produce(pair.first, header, 1, (segments) => { segments[0][0] = 7; return 1; }, () => {});\n` +
                 `const deadline = Date.now() + 2000;\n` +
                 `while (dispatches === 0 && Date.now() < deadline) {\n` +
@@ -464,11 +458,11 @@ describe("raw N-API descriptor boundary", () => {
                 `handlers.set(live.second, () => { while (addon.poll(live.second, (t) => { liveDrained += 1; addon.release(live.second, t); })) {} });\n` +
                 `addon.watch(dead.second, dispatch);\n` +
                 `addon.watch(live.second, dispatch);\n` +
-                `const header = new Uint8Array(21);\n` +
+                `const header = new Uint8Array(20);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
-                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
-                `const publish = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 3);\n` +
+                `view.setUint16(6, 1, true); view.setUint32(8, 1, true);\n` +
+                `const publish = (channel, value) => { view.setBigUint64(12, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
                 `addon.close(dead.first);\n` +
                 `await until(() => !addon.isWatching(dead.second));\n` +
@@ -521,11 +515,11 @@ describe("raw N-API descriptor boundary", () => {
                 `  finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
                 `};\n` +
                 `addon.watch(pair.second, onReady);\n` +
-                `const header = new Uint8Array(21);\n` +
+                `const header = new Uint8Array(20);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
-                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
-                `const publish = (value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(pair.first, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 3);\n` +
+                `view.setUint16(6, 1, true); view.setUint32(8, 1, true);\n` +
+                `const publish = (value) => { view.setBigUint64(12, BigInt(value), true); addon.produce(pair.first, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
                 `publish(1); publish(2); publish(3);\n` +
                 `await until(() => received.length >= 3);\n` +
@@ -576,11 +570,11 @@ describe("raw N-API descriptor boundary", () => {
                 `const received = []; let callbacks = 0; let closed = false; let later = null;\n` +
                 `let complete; const completed = new Promise((resolve) => (complete = resolve));\n` +
                 `let trailingWake; let laterDelivered; let secondPollEmpty = null;\n` +
-                `const header = new Uint8Array(21);\n` +
+                `const header = new Uint8Array(20);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
-                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
-                `const publishTo = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 3);\n` +
+                `view.setUint16(6, 1, true); view.setUint32(8, 1, true);\n` +
+                `const publishTo = (channel, value) => { view.setBigUint64(12, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const onReady = () => {\n` +
                 `  // A peer's exit wakes its consumer, so one more callback may land after both ends closed; acknowledge it or the reactor stays parked. The later channel's wake lands here too and proves the acknowledgement released the reactor.\n` +
                 `  if (closed) {\n` +
@@ -638,15 +632,14 @@ describe("raw N-API descriptor boundary", () => {
         if (!supportsMechanismTests(addon)) return;
         // Blocks in the smallest ordinary class; holding all of them exhausts that class.
         const depth = GRANT_CLASSES[0]![1];
-        const header = new Uint8Array(21);
+        const header = new Uint8Array(20);
         const view = new DataView(header.buffer);
         view.setUint32(0, 1, true);
-        view.setUint8(4, 4);
-        view.setUint8(5, 3);
-        view.setUint16(7, 1, true);
-        view.setUint32(9, 1, true);
+        view.setUint8(4, 3);
+        view.setUint16(6, 1, true);
+        view.setUint32(8, 1, true);
         const publish = (pair: { first: number }, value: number): void => {
-            view.setBigUint64(13, BigInt(value), true);
+            view.setBigUint64(12, BigInt(value), true);
             addon.produce(
                 pair.first,
                 header,
@@ -719,14 +712,13 @@ describe("raw N-API descriptor boundary", () => {
         if (!supportsMechanismTests(addon)) return;
         const pair = addon.createTestPair();
         const header = (ty: number, channel: number, corr: number): Uint8Array => {
-            const bytes = new Uint8Array(21);
+            const bytes = new Uint8Array(20);
             const view = new DataView(bytes.buffer);
             view.setUint32(0, 0, true);
-            view.setUint8(4, 4);
-            view.setUint8(5, ty);
-            view.setUint16(7, channel, true);
-            view.setUint32(9, 1, true);
-            view.setBigUint64(13, BigInt(corr), true);
+            view.setUint8(4, ty);
+            view.setUint16(6, channel, true);
+            view.setUint32(8, 1, true);
+            view.setBigUint64(12, BigInt(corr), true);
             return bytes;
         };
         const publish = (ty: number, channel: number, corr: number): void =>
@@ -757,7 +749,7 @@ describe("raw N-API descriptor boundary", () => {
             const types: number[] = [];
             while (
                 addon.poll(pair.second, (token, wire) => {
-                    types.push(wire[5]!);
+                    types.push(wire[4]!);
                     addon.release(pair.second, token);
                 })
             ) {}
@@ -784,7 +776,7 @@ describe("raw N-API descriptor boundary", () => {
                 `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
                 `const DEPTH = ${GRANT_ORDINARY_DESCRIPTORS};\n` +
                 `const pair = addon.createTestPair();\n` +
-                `const header = (corr) => { const b = new Uint8Array(21); const v = new DataView(b.buffer); v.setUint32(0, 1, true); v.setUint8(4, 4); v.setUint16(7, 1, true); v.setUint32(9, 1, true); v.setBigUint64(13, BigInt(corr), true); return b; };\n` +
+                `const header = (corr) => { const b = new Uint8Array(20); const v = new DataView(b.buffer); v.setUint32(0, 1, true); v.setUint16(6, 1, true); v.setUint32(8, 1, true); v.setBigUint64(12, BigInt(corr), true); return b; };\n` +
                 `const publish = (corr) => addon.produce(pair.first, header(corr), 1, (s) => { s[0][0] = corr & 0xff; return 1; }, () => {});\n` +
                 `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n` +
                 `const report = { wakes: 0 };\n` +
@@ -885,15 +877,14 @@ describe("raw N-API descriptor boundary", () => {
             peerClosed(channel: number): boolean;
             forceClose(channel: number): void;
         };
-        const header = new Uint8Array(21);
+        const header = new Uint8Array(20);
         const view = new DataView(header.buffer);
         view.setUint32(0, 1, true);
-        view.setUint8(4, 4);
-        view.setUint8(5, 3);
-        view.setUint16(7, 1, true);
-        view.setUint32(9, 1, true);
+        view.setUint8(4, 3);
+        view.setUint16(6, 1, true);
+        view.setUint32(8, 1, true);
         const publish = (pair: { first: number }, value: number): void => {
-            view.setBigUint64(13, BigInt(value), true);
+            view.setBigUint64(12, BigInt(value), true);
             raw.produce(
                 pair.first,
                 header,
@@ -979,15 +970,14 @@ describe("raw N-API descriptor boundary", () => {
     test("a header that disagrees with the body is refused before beforePublish runs", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
-        const header = new Uint8Array(21);
+        const header = new Uint8Array(20);
         const view = new DataView(header.buffer);
         // Declared length 2, but the fill writes 1 byte.
         view.setUint32(0, 2, true);
-        view.setUint8(4, 4);
-        view.setUint8(5, 3);
-        view.setUint16(7, 1, true);
-        view.setUint32(9, 1, true);
-        view.setBigUint64(13, 1n, true);
+        view.setUint8(4, 3);
+        view.setUint16(6, 1, true);
+        view.setUint32(8, 1, true);
+        view.setBigUint64(12, 1n, true);
         const pair = addon.createTestPair();
         try {
             let published = 0;
@@ -1050,14 +1040,13 @@ describe("raw N-API descriptor boundary", () => {
                     () => {},
                 ),
             ).toThrow(/wire header has invalid length/);
-            const header = new Uint8Array(21);
+            const header = new Uint8Array(20);
             const view = new DataView(header.buffer);
             view.setUint32(0, 1, true);
-            view.setUint8(4, 4);
-            view.setUint8(5, 3);
-            view.setUint16(7, 1, true);
-            view.setUint32(9, 1, true);
-            view.setBigUint64(13, 5n, true);
+            view.setUint8(4, 3);
+            view.setUint16(6, 1, true);
+            view.setUint32(8, 1, true);
+            view.setBigUint64(12, 5n, true);
             raw.commitReservation(pair.first, token, header, 1, () => {});
             let delivered = -1;
             expect(
@@ -1153,10 +1142,10 @@ describe("raw N-API descriptor boundary", () => {
             "",
             42,
         ];
-        // A layout-3 image of the right length is not a current grant.
-        const stale = testGrantHex(0, 0xab);
-        expect(addon.grantDecodes(`0300${stale.slice(4)}`)).toBe(false);
-        hostileGrants.push(`0300${stale.slice(4)}`);
+        // An image of the former 126-byte layout, which led with a two-byte layout field, is not a grant.
+        const former = `0400${testGrantHex(0, 0xab)}`;
+        expect(addon.grantDecodes(former)).toBe(false);
+        hostileGrants.push(former);
         for (const grant of hostileGrants) {
             expectRejectedWithoutEffects(addon, {
                 ...valid,

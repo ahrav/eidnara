@@ -1243,7 +1243,7 @@ mod tests {
         );
         for queue in [&mut first_queue, &mut second_queue] {
             let frame = queue.try_recv().expect("Goodbye was queued concurrently");
-            assert_eq!(frame.bytes[5], crate::wire::FrameType::Goodbye as u8);
+            assert_eq!(frame.bytes[4], crate::wire::FrameType::Goodbye as u8);
         }
     }
 

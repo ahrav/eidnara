@@ -34,12 +34,10 @@ fn committed_auth_proof_vectors_pin_the_construction() {
     let (key, client_nonce, server_nonce, daemon_id) = vector_inputs();
 
     let expected_server_proof: [u8; 32] = [
-        8, 85, 246, 183, 53, 167, 124, 30, 98, 139, 55, 104, 107, 155, 175, 182, 20, 23, 143, 13,
-        243, 82, 19, 62, 37, 43, 103, 85, 123, 176, 4, 192,
+        221, 41, 211, 39, 105, 38, 36, 227, 218, 146, 108, 140, 44, 161, 195, 104, 113, 23, 2, 206, 170, 141, 151, 35, 1, 27, 126, 57, 158, 85, 209, 112,
     ];
     let expected_client_auth: [u8; 32] = [
-        96, 31, 69, 109, 112, 178, 81, 45, 173, 45, 35, 155, 120, 185, 24, 14, 40, 8, 205, 217, 4,
-        190, 7, 244, 224, 111, 20, 3, 121, 200, 83, 101,
+        161, 15, 9, 216, 159, 94, 127, 234, 216, 165, 252, 37, 93, 56, 218, 59, 100, 52, 116, 18, 7, 55, 91, 207, 160, 45, 227, 141, 45, 118, 114, 228,
     ];
 
     assert_eq!(
@@ -97,8 +95,7 @@ fn doc_committed_auth_vectors_match_the_pinned_arrays() {
     assert_eq!(
         bytes(&server["server_proof"]),
         [
-            8, 85, 246, 183, 53, 167, 124, 30, 98, 139, 55, 104, 107, 155, 175, 182, 20, 23, 143,
-            13, 243, 82, 19, 62, 37, 43, 103, 85, 123, 176, 4, 192
+            221, 41, 211, 39, 105, 38, 36, 227, 218, 146, 108, 140, 44, 161, 195, 104, 113, 23, 2, 206, 170, 141, 151, 35, 1, 27, 126, 57, 158, 85, 209, 112
         ],
         "doc server_proof drifted from the committed vector"
     );
@@ -120,8 +117,7 @@ fn doc_committed_auth_vectors_match_the_pinned_arrays() {
     assert_eq!(
         bytes(&client["client_auth"]),
         [
-            96, 31, 69, 109, 112, 178, 81, 45, 173, 45, 35, 155, 120, 185, 24, 14, 40, 8, 205, 217,
-            4, 190, 7, 244, 224, 111, 20, 3, 121, 200, 83, 101
+            161, 15, 9, 216, 159, 94, 127, 234, 216, 165, 252, 37, 93, 56, 218, 59, 100, 52, 116, 18, 7, 55, 91, 207, 160, 45, 227, 141, 45, 118, 114, 228
         ],
         "doc client_auth drifted from the committed vector"
     );
@@ -238,9 +234,9 @@ fn production_proof_matches_the_oracle_across_perturbed_tuples() {
     }
 }
 
-/// The committed `route.open` control header: length 167, version 2, request,
+/// The committed `route.open` control header: length 167, request,
 /// Interactive/Normal, channel 0, epoch 0, correlation 1.
-const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000400020000000000000100000000000000";
+const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a700000000020000000000000100000000000000";
 
 #[test]
 fn committed_header_vectors_decode_to_their_documented_fields() {
@@ -248,7 +244,6 @@ fn committed_header_vectors_decode_to_their_documented_fields() {
     assert_eq!(control.len(), HEADER_LEN);
     let decoded = raw_client::decode_header(&control);
     assert_eq!(decoded.len, 167);
-    assert_eq!(decoded.ver, 4);
     assert_eq!(decoded.ty, TY_REQUEST);
     assert_eq!(decoded.flags, FLAGS_INTERACTIVE);
     assert_eq!(decoded.channel, 0);
@@ -262,7 +257,7 @@ fn committed_header_vectors_decode_to_their_documented_fields() {
 
     // The routed request uses header values: length 44, Background/Normal, channel 7, and epoch 77.
     // correlation 2.
-    let routed = hex_to_bytes("2c00000004000407004d0000000200000000000000");
+    let routed = hex_to_bytes("2c000000000407004d0000000200000000000000");
     let decoded = raw_client::decode_header(&routed);
     assert_eq!(decoded.len, 44);
     assert_eq!(decoded.ty, TY_REQUEST);

@@ -50,13 +50,13 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::backend::retained::{
-    LAYOUT_VERSION, Mapping, MappingError, Retained, WakeEpoch, initialize_mapping, seal_object,
+    Mapping, MappingError, Retained, WakeEpoch, initialize_mapping, seal_object,
     system_page_size, validate_lifecycle, validate_object_len,
 };
 use crate::backend::sys;
 use crate::descriptor::{
-    CompletionRecord, DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, PayloadIdentity,
-    PoolDescriptor, WIRE_V3_HEADER_BYTES, WIRE_VERSION, check_wire_header,
+    CompletionRecord, DescriptorError, Incarnation, PayloadIdentity, PoolDescriptor,
+    WIRE_HEADER_BYTES, check_wire_header,
 };
 use crate::lease::{LeaseError, LeaseSpan, PayloadLease, copy_in, copy_out};
 use crate::pool::{
@@ -82,12 +82,12 @@ pub(crate) mod reclaim_counters {
     }
 }
 
-/// Encoded grant length: layout version, incarnation, lane, two descriptor depths, seven
+/// Encoded grant length: incarnation, lane, two descriptor depths, seven
 /// class specs, total bytes, and a zero reserved tail.
-pub const GRANT_BYTES: usize = 2 + 16 + 4 + 4 + 4 + CLASS_COUNT * (8 + 4) + 8 + 4;
-/// The grant stores 0 for the host-produced direction at wire offset 18.
+pub const GRANT_BYTES: usize = 16 + 4 + 4 + 4 + CLASS_COUNT * (8 + 4) + 8 + 4;
+/// The grant stores 0 for the host-produced direction at wire offset 16.
 pub const HOST_TO_PEER_LANE: u32 = 0;
-/// The grant stores 1 for the peer-produced direction at wire offset 18.
+/// The grant stores 1 for the peer-produced direction at wire offset 16.
 pub const PEER_TO_HOST_LANE: u32 = 1;
 
 /// Marks a wake epoch parked for one generation and clears the marker on drop, so every exit
@@ -299,7 +299,7 @@ impl Doorbell {
     }
 }
 
-/// Everything a peer needs to attach: layout version, incarnation, lane, and geometry. Sent
+/// Everything a peer needs to attach: incarnation, lane, and geometry. Sent
 /// over the authenticated setup channel alongside the file descriptors; `decode` refuses any
 /// grant whose geometry does not map to a valid pool.
 ///
@@ -307,7 +307,6 @@ impl Doorbell {
 /// hardware profile id before decoding any grant.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PoolGrant {
-    layout_version: u16,
     incarnation: Incarnation,
     lane: u32,
     geometry: PoolGeometry,
@@ -318,12 +317,11 @@ impl PoolGrant {
     /// Serializes to `GRANT_BYTES` little-endian bytes with a zero reserved tail.
     pub fn encode(self) -> [u8; GRANT_BYTES] {
         let mut bytes = [0u8; GRANT_BYTES];
-        bytes[0..2].copy_from_slice(&self.layout_version.to_le_bytes());
-        bytes[2..18].copy_from_slice(&self.incarnation.into_bytes());
-        bytes[18..22].copy_from_slice(&self.lane.to_le_bytes());
-        bytes[22..26].copy_from_slice(&self.geometry.ordinary_descriptors().to_le_bytes());
-        bytes[26..30].copy_from_slice(&self.geometry.reserved_descriptors().to_le_bytes());
-        let mut cursor = 30;
+        bytes[0..16].copy_from_slice(&self.incarnation.into_bytes());
+        bytes[16..20].copy_from_slice(&self.lane.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.geometry.ordinary_descriptors().to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.geometry.reserved_descriptors().to_le_bytes());
+        let mut cursor = 28;
         for class in self.geometry.classes() {
             bytes[cursor..cursor + 8].copy_from_slice(&class.block_bytes.to_le_bytes());
             bytes[cursor + 8..cursor + 12].copy_from_slice(&class.count.to_le_bytes());
@@ -336,7 +334,7 @@ impl PoolGrant {
     }
 
     /// Parses `encode` output. Rejects a nonzero reserved tail and any geometry that cannot
-    /// map a valid pool: wrong layout version, an invalid class table, or a total size that
+    /// map a valid pool: an invalid class table or a total size that
     /// disagrees with the computed layout.
     pub fn decode(bytes: [u8; GRANT_BYTES]) -> Result<Self, RingError> {
         let u32_at = |offset: usize| -> u32 {
@@ -353,17 +351,16 @@ impl PoolGrant {
                     .expect("grant u64 ranges have fixed width"),
             )
         };
-        let layout_version = u16::from_le_bytes([bytes[0], bytes[1]]);
         let incarnation = Incarnation::from_bytes(
-            bytes[2..18]
+            bytes[0..16]
                 .try_into()
                 .expect("grant incarnation has fixed width"),
         );
-        let lane = u32_at(18);
-        let ordinary_descriptors = u32_at(22);
-        let reserved_descriptors = u32_at(26);
+        let lane = u32_at(16);
+        let ordinary_descriptors = u32_at(20);
+        let reserved_descriptors = u32_at(24);
         let mut classes = [ClassSpec::new(0, 0); CLASS_COUNT];
-        let mut cursor = 30;
+        let mut cursor = 28;
         for class in &mut classes {
             *class = ClassSpec::new(u64_at(cursor), u32_at(cursor + 8));
             cursor += 12;
@@ -371,9 +368,6 @@ impl PoolGrant {
         let total_bytes = u64_at(cursor);
         cursor += 8;
         if bytes[cursor..cursor + 4] != [0; 4] {
-            return Err(RingError::InvalidGrant);
-        }
-        if layout_version != LAYOUT_VERSION {
             return Err(RingError::InvalidGrant);
         }
         let ordinary: [ClassSpec; ORDINARY_CLASSES] = classes[..ORDINARY_CLASSES]
@@ -388,7 +382,6 @@ impl PoolGrant {
         )
         .map_err(|_| RingError::InvalidGrant)?;
         let grant = Self {
-            layout_version,
             incarnation,
             lane,
             geometry,
@@ -596,16 +589,11 @@ impl Ring {
     /// producer ledger, the receiver records, and both doorbells exist before this returns;
     /// nothing is allocated per frame afterwards.
     pub fn create(profile: &TargetProfile, lane: u32) -> Result<Self, RingError> {
-        debug_assert_eq!(
-            profile.descriptor().schema_version(),
-            DESCRIPTOR_SCHEMA_VERSION
-        );
         let geometry = *profile.geometry();
         let layout =
             MappingLayout::new(&geometry, system_page_size()).map_err(RingError::Geometry)?;
         let incarnation = Incarnation::random().map_err(RingError::Descriptor)?;
         let grant = PoolGrant {
-            layout_version: LAYOUT_VERSION,
             incarnation,
             lane,
             geometry,
@@ -994,7 +982,7 @@ impl Ring {
     pub fn try_reserve(
         &self,
         bound: usize,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; WIRE_HEADER_BYTES],
     ) -> Result<ProducerReservation<'_>, ProducerError> {
         self.try_reserve_in(Inventory::Ordinary, bound, wire_header)
     }
@@ -1008,7 +996,7 @@ impl Ring {
         &self,
         inventory: Inventory,
         bound: usize,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; WIRE_HEADER_BYTES],
     ) -> Result<ProducerReservation<'_>, ProducerError> {
         #[cfg(test)]
         crate::lease::observers::ring_call();
@@ -1101,7 +1089,7 @@ impl Ring {
     pub fn reserve_until(
         &self,
         bound: usize,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; WIRE_HEADER_BYTES],
         deadline: Instant,
     ) -> Result<ProducerReservation<'_>, ProducerError> {
         self.reserve_until_in(Inventory::Ordinary, bound, wire_header, deadline)
@@ -1112,7 +1100,7 @@ impl Ring {
         &self,
         inventory: Inventory,
         bound: usize,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; WIRE_HEADER_BYTES],
         deadline: Instant,
     ) -> Result<ProducerReservation<'_>, ProducerError> {
         loop {
@@ -1312,7 +1300,7 @@ impl Ring {
         block: u32,
         generation: u64,
         body_len: usize,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; WIRE_HEADER_BYTES],
     ) -> Result<PayloadIdentity, ProducerError> {
         #[cfg(test)]
         crate::lease::observers::ring_call();
@@ -1479,7 +1467,7 @@ impl Ring {
         let body_len =
             usize::try_from(validated.body_len()).map_err(|_| RingError::InvalidLayout)?;
         let header_ptr = self.retained.header_ptr(block).map_err(RingError::from)?;
-        let mut wire_header = [0u8; WIRE_V3_HEADER_BYTES];
+        let mut wire_header = [0u8; WIRE_HEADER_BYTES];
         // SAFETY: `header_ptr` checked the header range against the block and the mapping, and
         // no Rust reference covers arena bytes; the atomic copy tolerates a peer write, which
         // the check below then rejects.
@@ -1742,7 +1730,7 @@ pub struct ProducerReservation<'ring> {
     /// The caller's body bound, not the block's class slack.
     capacity: usize,
     cursor: usize,
-    wire_header: [u8; WIRE_V3_HEADER_BYTES],
+    wire_header: [u8; WIRE_HEADER_BYTES],
     finished: bool,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -1822,7 +1810,7 @@ impl ProducerReservation<'_> {
     /// Replaces the header given to `try_reserve`. `commit` checks its declared length.
     pub fn set_wire_header(
         &mut self,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; WIRE_HEADER_BYTES],
     ) -> Result<(), ProducerError> {
         if self.finished {
             return Err(ProducerError::Aborted);
@@ -1934,16 +1922,14 @@ impl fmt::Debug for DuplexRing {
     }
 }
 
-/// Header with `body_len` in the first four bytes and the application version in the fifth,
-/// zeros elsewhere.
-pub fn wire_v3_header(body_len: usize) -> Result<[u8; WIRE_V3_HEADER_BYTES], ProducerError> {
+/// Header with `body_len` in the first four bytes, zeros elsewhere.
+pub fn body_header(body_len: usize) -> Result<[u8; WIRE_HEADER_BYTES], ProducerError> {
     let body_len = u32::try_from(body_len).map_err(|_| ProducerError::BoundExceedsClass)?;
     if body_len as usize > MAX_FRAME_BYTES {
         return Err(ProducerError::BoundExceedsClass);
     }
-    let mut header = [0u8; WIRE_V3_HEADER_BYTES];
+    let mut header = [0u8; WIRE_HEADER_BYTES];
     header[0..4].copy_from_slice(&body_len.to_le_bytes());
-    header[4] = WIRE_VERSION;
     Ok(header)
 }
 
@@ -2238,8 +2224,8 @@ mod tests {
     use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology};
 
     use super::{
-        LAYOUT_VERSION, PoolGrant, ProducerError, Ring, RingAttachment, RingError, sys,
-        wire_v3_header,
+        PoolGrant, ProducerError, Ring, RingAttachment, RingError, sys,
+        body_header,
     };
 
     pub(crate) fn tiny_geometry() -> PoolGeometry {
@@ -2279,7 +2265,7 @@ mod tests {
 
     pub(crate) fn publish(ring: &Ring, bytes: &[u8]) -> u32 {
         let mut reservation = ring
-            .try_reserve(bytes.len(), wire_v3_header(bytes.len()).unwrap())
+            .try_reserve(bytes.len(), body_header(bytes.len()).unwrap())
             .unwrap();
         reservation.write(bytes).unwrap();
         reservation.commit(bytes.len()).unwrap().block()
@@ -2344,7 +2330,7 @@ mod tests {
         publish(&producer, b"first");
         assert_eq!(
             producer
-                .try_reserve(5, wire_v3_header(5).unwrap())
+                .try_reserve(5, body_header(5).unwrap())
                 .err()
                 .map(|error| error.to_string()),
             Some(ProducerError::Exhausted.to_string()),
@@ -2369,18 +2355,18 @@ mod tests {
             held.push(receive(&consumer));
         }
         assert!(matches!(
-            producer.try_reserve(100, wire_v3_header(100).unwrap()),
+            producer.try_reserve(100, body_header(100).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         // A larger class still serves its own bound: no spill in either direction.
         let large = producer
-            .try_reserve(5000, wire_v3_header(5000).unwrap())
+            .try_reserve(5000, body_header(5000).unwrap())
             .unwrap();
         assert_eq!(large.class(), BlockClass::Ordinary(1));
         large.abort();
         held.pop().unwrap().release().unwrap();
         let reservation = producer
-            .try_reserve(100, wire_v3_header(100).unwrap())
+            .try_reserve(100, body_header(100).unwrap())
             .unwrap();
         assert_eq!(reservation.class(), BlockClass::Ordinary(0));
         reservation.abort();
@@ -2393,12 +2379,12 @@ mod tests {
         let (producer, consumer) = pair(geometry);
         let free_before = producer.inventory().classes[0].free;
         producer
-            .try_reserve(10, wire_v3_header(10).unwrap())
+            .try_reserve(10, body_header(10).unwrap())
             .unwrap()
             .abort();
         assert_eq!(producer.inventory().classes[0].free, free_before);
         let mut underfilled = producer
-            .try_reserve(100, wire_v3_header(100).unwrap())
+            .try_reserve(100, body_header(100).unwrap())
             .unwrap();
         underfilled.write(&[9; 10]).unwrap();
         assert!(matches!(
@@ -2408,7 +2394,7 @@ mod tests {
         assert_eq!(producer.inventory().classes[0].free, free_before);
         assert_eq!(producer.inventory().descriptors_outstanding, 0);
         let mut short = producer
-            .try_reserve(100, wire_v3_header(10).unwrap())
+            .try_reserve(100, body_header(10).unwrap())
             .unwrap();
         short.write(&[8; 10]).unwrap();
         let identity = short.commit(10).unwrap();
@@ -2445,7 +2431,7 @@ mod tests {
         for (len, expected_class) in cases {
             let body: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
             let mut reservation = producer
-                .try_reserve(len, wire_v3_header(len).unwrap())
+                .try_reserve(len, body_header(len).unwrap())
                 .unwrap();
             assert_eq!(reservation.class(), expected_class, "body of {len} bytes");
             assert_eq!(reservation.capacity(), len, "the caller sees its bound");
@@ -2457,7 +2443,7 @@ mod tests {
             lease.release().unwrap();
         }
         assert!(matches!(
-            producer.try_reserve(crate::pool::MAX_FRAME_BYTES + 1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(crate::pool::MAX_FRAME_BYTES + 1, body_header(1).unwrap()),
             Err(ProducerError::BoundExceedsClass)
         ));
         producer.probe().unwrap();
@@ -2483,24 +2469,24 @@ mod tests {
         let (producer, consumer) = pair(geometry);
         publish(&producer, b"data");
         assert!(matches!(
-            producer.try_reserve(4, wire_v3_header(4).unwrap()),
+            producer.try_reserve(4, body_header(4).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         let mut control = producer
-            .try_reserve_in(Inventory::Control, 0, wire_v3_header(0).unwrap())
+            .try_reserve_in(Inventory::Control, 0, body_header(0).unwrap())
             .unwrap();
         assert_eq!(control.class(), BlockClass::Control);
         control.write(&[]).unwrap();
         control.commit(0).unwrap();
         let mut terminal = producer
-            .try_reserve_in(Inventory::Terminal, 3, wire_v3_header(3).unwrap())
+            .try_reserve_in(Inventory::Terminal, 3, body_header(3).unwrap())
             .unwrap();
         assert_eq!(terminal.class(), BlockClass::Terminal);
         terminal.write(b"end").unwrap();
         terminal.commit(3).unwrap();
         // Every reserved slot is now taken too.
         assert!(matches!(
-            producer.try_reserve_in(Inventory::Control, 0, wire_v3_header(0).unwrap()),
+            producer.try_reserve_in(Inventory::Control, 0, body_header(0).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         assert_eq!(receive(&consumer).to_vec().unwrap(), b"data");
@@ -2509,7 +2495,7 @@ mod tests {
         assert_eq!(receive(&consumer).to_vec().unwrap(), b"end");
         // A control block never serves ordinary data even when ordinary classes are empty.
         assert!(matches!(
-            producer.try_reserve_in(Inventory::Control, 4096, wire_v3_header(4096).unwrap()),
+            producer.try_reserve_in(Inventory::Control, 4096, body_header(4096).unwrap()),
             Err(ProducerError::BoundExceedsClass)
         ));
     }
@@ -2568,7 +2554,7 @@ mod tests {
                     reserved_once = true;
                     // Re-enter the ring and take a small block: the freshly returned one.
                     producer
-                        .try_reserve(100, wire_v3_header(100).unwrap())
+                        .try_reserve(100, body_header(100).unwrap())
                         .unwrap()
                         .abort();
                 }
@@ -2717,7 +2703,7 @@ mod tests {
         // A late return of the first generation lands in the same cell and is ignored.
         forge_flagged_completion(&consumer, block, 1);
         assert!(matches!(
-            producer.try_reserve(4000, wire_v3_header(4000).unwrap()).map(|r| r.block()),
+            producer.try_reserve(4000, body_header(4000).unwrap()).map(|r| r.block()),
             Ok(other) if other != block
         ));
         assert_eq!(producer.inventory().classes[0].published, 1);
@@ -2725,7 +2711,7 @@ mod tests {
         // A completion ahead of anything issued is a protocol error.
         forge_flagged_completion(&consumer, block, 99);
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::Descriptor(
                 DescriptorError::FutureCompletion
             )))
@@ -2746,7 +2732,7 @@ mod tests {
             .generation
             .store(5, Ordering::Release);
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::Descriptor(
                 DescriptorError::FutureCompletion
             )))
@@ -2767,7 +2753,7 @@ mod tests {
             .generation
             .store(99, Ordering::Release);
         producer
-            .try_reserve(1, wire_v3_header(1).unwrap())
+            .try_reserve(1, body_header(1).unwrap())
             .unwrap()
             .abort();
         assert!(!producer.is_quarantined());
@@ -2788,12 +2774,12 @@ mod tests {
         // The next 4 KiB reservation pops block 1, so its generation is placed at the wrap.
         producer.set_block_generation_for_test(1, u64::MAX);
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Retired)
         ));
         assert!(producer.is_retired());
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Retired)
         ));
         assert_eq!(live.to_vec().unwrap(), b"live");
@@ -2805,7 +2791,7 @@ mod tests {
         producer.set_sequence_for_test(u64::MAX).unwrap();
         consumer.set_sequence_for_test(u64::MAX).unwrap();
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Retired)
         ));
         assert_eq!(consumer.try_receive().unwrap().map(|_| ()), None);
@@ -2863,7 +2849,7 @@ mod tests {
         let reservation = producer
             .reserve_until(
                 4,
-                wire_v3_header(4).unwrap(),
+                body_header(4).unwrap(),
                 Instant::now() + Duration::from_secs(5),
             )
             .unwrap();
@@ -2906,7 +2892,7 @@ mod tests {
         let reservation = producer
             .reserve_until(
                 6,
-                wire_v3_header(6).unwrap(),
+                body_header(6).unwrap(),
                 Instant::now() + Duration::from_secs(5),
             )
             .unwrap();
@@ -2928,7 +2914,7 @@ mod tests {
             held.push(receive(&consumer));
         }
         assert!(matches!(
-            producer.try_reserve(100, wire_v3_header(100).unwrap()),
+            producer.try_reserve(100, body_header(100).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         // The return lands before arming: generation bumps, `parked` is zero, no token.
@@ -2939,7 +2925,7 @@ mod tests {
             "capacity is already there; parking would sleep until an unrelated return"
         );
         producer
-            .try_reserve(100, wire_v3_header(100).unwrap())
+            .try_reserve(100, body_header(100).unwrap())
             .unwrap()
             .abort();
 
@@ -2948,7 +2934,7 @@ mod tests {
         publish(&producer, &[8u8; 100]);
         held.push(receive(&consumer));
         assert!(matches!(
-            producer.try_reserve(100, wire_v3_header(100).unwrap()),
+            producer.try_reserve(100, body_header(100).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         assert_eq!(
@@ -2962,7 +2948,7 @@ mod tests {
         assert!(sys::poll_readable(ready.as_fd(), 1000).unwrap());
         producer.complete_capacity_wait().unwrap();
         producer
-            .try_reserve(100, wire_v3_header(100).unwrap())
+            .try_reserve(100, body_header(100).unwrap())
             .unwrap()
             .abort();
         assert!(producer.inventory().conserves(&geometry));
@@ -3081,13 +3067,13 @@ mod tests {
             held.push(receive(&consumer));
         }
         assert!(matches!(
-            producer.try_reserve(64, wire_v3_header(64).unwrap()),
+            producer.try_reserve(64, body_header(64).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         held.remove(2).release().unwrap();
         let before = super::reclaim_counters::cell_loads();
         producer
-            .try_reserve(64, wire_v3_header(64).unwrap())
+            .try_reserve(64, body_header(64).unwrap())
             .unwrap()
             .abort();
         assert_eq!(
@@ -3113,7 +3099,7 @@ mod tests {
             .unwrap()
             .parked
             .store(1, Ordering::SeqCst);
-        let mut reservation = producer.try_reserve(3, wire_v3_header(3).unwrap()).unwrap();
+        let mut reservation = producer.try_reserve(3, body_header(3).unwrap()).unwrap();
         reservation.write(b"pub").unwrap();
         assert!(matches!(
             reservation.commit(3),
@@ -3190,7 +3176,7 @@ mod tests {
         let late = Ring::attach([mapping, data, capacity], grant).unwrap();
         assert!(!late.is_fresh());
         assert!(matches!(
-            late.try_reserve(1, wire_v3_header(1).unwrap()),
+            late.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::RoleMismatch))
         ));
         assert_eq!(
@@ -3229,12 +3215,6 @@ mod tests {
         assert_eq!(grant.lane(), 9);
         assert_eq!(*grant.geometry(), geometry);
         assert_eq!(grant.mapping_bytes() as usize, producer.object_size());
-        let mut wrong_version = bytes;
-        wrong_version[0..2].copy_from_slice(&(LAYOUT_VERSION + 1).to_le_bytes());
-        assert_eq!(
-            PoolGrant::decode(wrong_version),
-            Err(RingError::InvalidGrant)
-        );
         let mut tail = bytes;
         tail[super::GRANT_BYTES - 1] = 1;
         assert_eq!(PoolGrant::decode(tail), Err(RingError::InvalidGrant));
@@ -3242,7 +3222,7 @@ mod tests {
         total[super::GRANT_BYTES - 12] ^= 1;
         assert_eq!(PoolGrant::decode(total), Err(RingError::InvalidGrant));
         let mut empty_class = bytes;
-        empty_class[30 + 8..30 + 12].copy_from_slice(&0u32.to_le_bytes());
+        empty_class[28 + 8..28 + 12].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(PoolGrant::decode(empty_class), Err(RingError::InvalidGrant));
         for cut in 0..super::GRANT_BYTES {
             assert_eq!(
@@ -3283,7 +3263,7 @@ mod tests {
         consumer.enter_quarantine();
         assert!(producer.is_quarantined());
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Quarantined)
         ));
         assert_eq!(consumer.try_receive().err(), Some(RingError::Quarantined));
@@ -3326,7 +3306,7 @@ mod tests {
             leases.push(receive(&consumer));
         }
         assert!(matches!(
-            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            producer.try_reserve(1, body_header(1).unwrap()),
             Err(ProducerError::Exhausted)
         ));
         let workers: Vec<_> = leases

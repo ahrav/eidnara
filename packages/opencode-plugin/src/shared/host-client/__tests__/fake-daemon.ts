@@ -8,7 +8,6 @@ import {
     type EnvelopeHeader,
     encodeHeader,
     FrameType,
-    PROTOCOL_VERSION,
 } from "../protocol";
 import { ShmFrameChannel } from "../shm-frame-channel";
 import type { BindIdentity } from "../types";
@@ -132,7 +131,6 @@ export class FakeDaemon {
         this.link.deliver({
             header: {
                 len: body.byteLength,
-                ver: PROTOCOL_VERSION,
                 flags: 0,
                 channel: 0,
                 epoch: 0,
@@ -194,8 +192,6 @@ export class FakeDaemon {
 
 export async function writeConnectionFile(filePath: string): Promise<string> {
     const content = JSON.stringify({
-        schema: 2,
-        wire_version: 4,
         setup_socket: "/tmp/eidnara-host-client-test.sock",
         key: Array.from(KEY),
         daemon_id: Array.from(DAEMON_ID),

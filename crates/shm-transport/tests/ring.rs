@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use shm_transport::MAX_FRAME_BYTES;
 use shm_transport::backend::ring::{
-    PoolGrant, ProducerError, Ring, RingAttachment, RingError, wire_v3_header,
+    PoolGrant, ProducerError, Ring, RingAttachment, RingError, body_header,
 };
 use shm_transport::descriptor::HardwareProfileId;
 use shm_transport::lease::PayloadLease;
@@ -46,7 +46,7 @@ fn profile() -> TargetProfile {
 
 fn publish(ring: &Ring, body: &[u8]) -> u32 {
     let mut reservation = ring
-        .try_reserve(body.len(), wire_v3_header(body.len()).unwrap())
+        .try_reserve(body.len(), body_header(body.len()).unwrap())
         .unwrap();
     reservation.write(body).unwrap();
     reservation.commit(body.len()).unwrap().block()
@@ -92,7 +92,7 @@ fn production_profile_round_trips_a_maximum_frame_in_both_directions() {
     lease.release().unwrap();
     for ring in [&host.first, &peer_second] {
         assert!(matches!(
-            ring.try_reserve(MAX_FRAME_BYTES + 1, wire_v3_header(1).unwrap()),
+            ring.try_reserve(MAX_FRAME_BYTES + 1, body_header(1).unwrap()),
             Err(ProducerError::BoundExceedsClass)
         ));
     }
@@ -106,23 +106,20 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
     let base = ring.grant().encode();
     let total_offset = PoolGrant::encoded_len() - 12;
 
-    // Layout-identity and geometry mismatches fail in the pure decoder before an object
-    // descriptor can reach mapping or attachment.
-    let mut version = base;
-    version[0..2].copy_from_slice(&1u16.to_le_bytes());
+    // Geometry mismatches fail in the pure decoder before an object descriptor can reach
+    // mapping or attachment.
     let mut zero_descriptors = base;
-    zero_descriptors[22..26].copy_from_slice(&0u32.to_le_bytes());
+    zero_descriptors[20..24].copy_from_slice(&0u32.to_le_bytes());
     let mut empty_class = base;
-    empty_class[30 + 8..30 + 12].copy_from_slice(&0u32.to_le_bytes());
+    empty_class[28 + 8..28 + 12].copy_from_slice(&0u32.to_le_bytes());
     let mut unaligned_class = base;
-    unaligned_class[30..38].copy_from_slice(&4000u64.to_le_bytes());
+    unaligned_class[28..36].copy_from_slice(&4000u64.to_le_bytes());
     let mut total = base;
     total[total_offset..total_offset + 8]
         .copy_from_slice(&(ring.object_size() as u64 + 1).to_le_bytes());
     let mut reserved = base;
     reserved[PoolGrant::encoded_len() - 1] = 1;
     for bytes in [
-        version,
         zero_descriptors,
         empty_class,
         unaligned_class,
@@ -133,9 +130,9 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
     }
 
     let mut incarnation = base;
-    incarnation[2] ^= 1;
+    incarnation[0] ^= 1;
     let mut lane = base;
-    lane[18] ^= 1;
+    lane[16] ^= 1;
     for bytes in [incarnation, lane] {
         let grant = PoolGrant::decode(bytes).unwrap();
         let ring = Ring::create(&profile(), 21).unwrap();
@@ -372,7 +369,7 @@ fn two_process_exchange_holds_a_reuses_b_and_wakes_on_return() {
         let mut reservation = to_child
             .reserve_until(
                 b_bytes.len(),
-                wire_v3_header(b_bytes.len()).unwrap(),
+                body_header(b_bytes.len()).unwrap(),
                 deadline,
             )
             .unwrap();
@@ -390,7 +387,7 @@ fn two_process_exchange_holds_a_reuses_b_and_wakes_on_return() {
     let mut reservation = to_child
         .reserve_until(
             MAX_FRAME_BYTES,
-            wire_v3_header(MAX_FRAME_BYTES).unwrap(),
+            body_header(MAX_FRAME_BYTES).unwrap(),
             deadline,
         )
         .unwrap();
@@ -521,7 +518,7 @@ fn two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return()
 
     publish(&to_child, b"held");
     assert!(matches!(
-        to_child.try_reserve(4, wire_v3_header(4).unwrap()),
+        to_child.try_reserve(4, body_header(4).unwrap()),
         Err(ProducerError::Exhausted)
     ));
     assert_eq!(
@@ -547,7 +544,7 @@ fn two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return()
     );
     to_child.complete_capacity_wait().unwrap();
     to_child
-        .try_reserve(4, wire_v3_header(4).unwrap())
+        .try_reserve(4, body_header(4).unwrap())
         .unwrap()
         .abort();
     publish(&to_child, b"release");

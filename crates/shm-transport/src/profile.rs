@@ -123,7 +123,7 @@ impl ResourceCharges {
 
 /// Requested pool geometry. `TargetProfile::new` checks it and computes the charges.
 pub struct ProfileConfig {
-    /// Schema version and hardware profile id the grant will carry.
+    /// Hardware profile id the grant will carry.
     pub descriptor: TransportDescriptor,
     /// Per-direction geometry.
     pub geometry: PoolGeometry,
@@ -151,9 +151,6 @@ impl TargetProfile {
     /// same descriptors a grant transfers. Fails before any mapping or worker exists, so a
     /// rejected profile costs nothing.
     pub fn new(config: ProfileConfig) -> Result<Self, ProfileError> {
-        if config.descriptor.schema_version() != crate::descriptor::DESCRIPTOR_SCHEMA_VERSION {
-            return Err(ProfileError::UnsupportedSchema);
-        }
         if !config.geometry.holds_maximum_frame() {
             return Err(ProfileError::LargestClassBelowMaximumFrame);
         }
@@ -198,7 +195,7 @@ impl TargetProfile {
         })
     }
 
-    /// Schema version and hardware profile id the grant carries.
+    /// Hardware profile id the grant carries.
     pub const fn descriptor(&self) -> &TransportDescriptor {
         &self.descriptor
     }
@@ -668,9 +665,6 @@ crate::redacted_debug!(QuarantineRecord);
 /// Why `TargetProfile::new` rejected a `ProfileConfig`.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProfileError {
-    /// `descriptor.schema_version()` is not `DESCRIPTOR_SCHEMA_VERSION`.
-    #[error("target profile schema is unsupported")]
-    UnsupportedSchema,
     /// The largest ordinary class cannot hold one maximum frame.
     #[error("largest pool class is below one maximum frame")]
     LargestClassBelowMaximumFrame,
@@ -754,7 +748,7 @@ impl fmt::Debug for AdmissionError {
 
 /// Hardware profile id the host stamps into every production grant. A grant naming any other
 /// profile is rejected before mapping, so this is a wire literal, not a configuration value.
-pub const HOST_PAYLOAD_POOL_PROFILE: &str = "host-payload-pool-v1";
+pub const HOST_PAYLOAD_POOL_PROFILE: &str = "host-payload-pool";
 
 /// The geometry `HOST_PAYLOAD_POOL_PROFILE` names, so a peer or harness that echoes that id
 /// exercises the inventory the host creates.

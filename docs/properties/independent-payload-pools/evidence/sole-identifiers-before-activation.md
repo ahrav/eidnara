@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-Only descriptor schema 4, layout version 4, and profile `host-payload-pool-v1` are accepted; any other identifier, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8). The specification (#524) names this record under its
+Only descriptor schema 4, layout version 4, and profile `host-payload-pool` are accepted; any other identifier, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8). The specification (#524) names this record under its
 acceptance section and ties it to the requirements and decisions the
 `catalog.md` relationship map lists.
 

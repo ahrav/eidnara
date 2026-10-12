@@ -17,7 +17,7 @@ import {
     ProducerError,
     type ProducerFrameHeader,
 } from "../frame-channel";
-import { type EnvelopeHeader, FrameType, MAX_FRAME_BODY_LEN, PROTOCOL_VERSION } from "../protocol";
+import { type EnvelopeHeader, FrameType, MAX_FRAME_BODY_LEN } from "../protocol";
 
 export async function waitUntil(check: () => boolean, timeoutMs = 3_000): Promise<void> {
     const startedAt = Date.now();
@@ -140,7 +140,6 @@ function requestFrame(corr: bigint, body: Uint8Array): OutboundFrame {
     return {
         header: {
             len: body.length,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags: 0,
             channel: CHANNEL,
@@ -153,7 +152,6 @@ function requestFrame(corr: bigint, body: Uint8Array): OutboundFrame {
 
 function producerHeader(corr: bigint): ProducerFrameHeader {
     return {
-        ver: PROTOCOL_VERSION,
         ty: FrameType.Request,
         flags: 0,
         channel: CHANNEL,
@@ -542,7 +540,6 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             const h = await create();
             h.channel.sendControl({
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType.Pong,
                 flags: 0,
                 channel: 0,

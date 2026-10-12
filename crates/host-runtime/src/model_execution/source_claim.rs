@@ -9,8 +9,8 @@ use subtle::ConstantTimeEq;
 use super::aws_source::AwsProfileSource;
 use super::subprocess::{CredentialRowError, EnvSnapshot, canonical_provider};
 
-pub const SOURCE_CLAIM_DOMAIN: &str = "eidnara-model-execution-credential-v4";
-pub const SOURCE_CLAIM_CANONICALIZATION: &str = "harness-provider-source/2";
+pub const SOURCE_CLAIM_DOMAIN: &str = "eidnara-model-execution-credential";
+pub const SOURCE_CLAIM_CANONICALIZATION: &str = "harness-provider-source";
 
 pub(super) const PROFILE_PROVIDER: &str = "amazon-bedrock";
 

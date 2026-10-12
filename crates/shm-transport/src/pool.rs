@@ -8,7 +8,7 @@
 use std::fmt;
 use std::mem::size_of;
 
-use crate::descriptor::WIRE_V3_HEADER_BYTES;
+use crate::descriptor::WIRE_HEADER_BYTES;
 
 /// Largest wire body either peer will publish or admit.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
@@ -57,7 +57,7 @@ impl ClassSpec {
 
     /// Largest body one block of this class can carry.
     pub const fn body_capacity(self) -> u64 {
-        self.block_bytes.saturating_sub(WIRE_V3_HEADER_BYTES as u64)
+        self.block_bytes.saturating_sub(WIRE_HEADER_BYTES as u64)
     }
 }
 
@@ -141,7 +141,7 @@ pub struct BlockPlacement {
 impl BlockPlacement {
     /// Largest body the block can carry.
     pub const fn body_capacity(&self) -> u64 {
-        self.block_bytes.saturating_sub(WIRE_V3_HEADER_BYTES as u64)
+        self.block_bytes.saturating_sub(WIRE_HEADER_BYTES as u64)
     }
 }
 
@@ -203,7 +203,7 @@ impl PoolGeometry {
         }
         if class.block_bytes == 0
             || !class.block_bytes.is_multiple_of(BLOCK_ALIGN as u64)
-            || class.block_bytes <= WIRE_V3_HEADER_BYTES as u64
+            || class.block_bytes <= WIRE_HEADER_BYTES as u64
         {
             return Err(GeometryError::InvalidBlockBytes);
         }
@@ -562,7 +562,7 @@ mod tests {
         // 89.254 MiB ordinary plus 2.125 MiB reserved.
         assert_eq!(geometry.arena_bytes().unwrap(), 95_817_728);
         let largest = geometry.class(BlockClass::Ordinary(4));
-        assert_eq!(largest.body_capacity(), 64 * 1024 * 1024 + 4096 - 21);
+        assert_eq!(largest.body_capacity(), 64 * 1024 * 1024 + 4096 - 20);
         assert!(largest.body_capacity() >= MAX_FRAME_BYTES as u64);
     }
 
@@ -592,11 +592,11 @@ mod tests {
             Some(BlockClass::Ordinary(0))
         );
         assert_eq!(
-            geometry.class_for(Inventory::Ordinary, 4096 - 21),
+            geometry.class_for(Inventory::Ordinary, 4096 - 20),
             Some(BlockClass::Ordinary(0))
         );
         assert_eq!(
-            geometry.class_for(Inventory::Ordinary, 4096 - 20),
+            geometry.class_for(Inventory::Ordinary, 4096 - 19),
             Some(BlockClass::Ordinary(1))
         );
         assert_eq!(
@@ -608,15 +608,15 @@ mod tests {
             None
         );
         assert_eq!(
-            geometry.class_for(Inventory::Control, 4096 - 21),
+            geometry.class_for(Inventory::Control, 4096 - 20),
             Some(BlockClass::Control)
         );
-        assert_eq!(geometry.class_for(Inventory::Control, 4096 - 20), None);
+        assert_eq!(geometry.class_for(Inventory::Control, 4096 - 19), None);
         assert_eq!(
-            geometry.class_for(Inventory::Terminal, 32768 - 21),
+            geometry.class_for(Inventory::Terminal, 32768 - 20),
             Some(BlockClass::Terminal)
         );
-        assert_eq!(geometry.class_for(Inventory::Terminal, 32768 - 20), None);
+        assert_eq!(geometry.class_for(Inventory::Terminal, 32768 - 19), None);
     }
 
     #[test]

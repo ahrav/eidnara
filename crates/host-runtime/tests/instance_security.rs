@@ -78,8 +78,6 @@ async fn discovery_validates_the_publication_the_way_a_client_must() {
     let host = TestHost::start().await;
     let info = host_runtime::read_connection_file(host.publication_path())
         .expect("host-owned discovery accepts publication");
-    assert_eq!(info.schema, 2);
-    assert_eq!(info.wire_version, 4);
     assert!(!info.setup_socket.is_empty());
     assert_eq!(info.key.len(), 32);
     assert_eq!(info.daemon_id.len(), 16);
@@ -108,37 +106,35 @@ async fn discovery_validates_the_publication_the_way_a_client_must() {
 }
 
 #[tokio::test]
-async fn discovery_requires_numeric_wire_version_four() {
+async fn discovery_requires_every_publication_field() {
     let host = TestHost::start().await;
     let original: serde_json::Value =
         serde_json::from_slice(&std::fs::read(host.publication_path()).expect("read publication"))
             .expect("parse publication");
+    let mut fields: Vec<String> = original
+        .as_object()
+        .expect("object")
+        .keys()
+        .cloned()
+        .collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["daemon_id", "daemon_ver", "key", "pid", "setup_socket"],
+        "the publication carries exactly the single-shape fields"
+    );
 
-    for (name, value) in [
-        ("missing", None),
-        ("null", Some(serde_json::Value::Null)),
-        ("string", Some(serde_json::json!("2"))),
-        ("other", Some(serde_json::json!(1))),
-        ("predecessor", Some(serde_json::json!(3))),
-    ] {
-        let path = host.runtime_dir().join(format!("{name}.json"));
+    for name in &fields {
+        let path = host.runtime_dir().join(format!("without-{name}.json"));
         let mut candidate = original.clone();
-        let object = candidate.as_object_mut().expect("object");
-        match value {
-            Some(value) => {
-                object.insert("wire_version".to_owned(), value);
-            }
-            None => {
-                object.remove("wire_version");
-            }
-        }
+        candidate.as_object_mut().expect("object").remove(name);
         std::fs::write(&path, serde_json::to_vec(&candidate).expect("serialize"))
             .expect("write candidate");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("owner-only candidate");
         assert!(
             host_runtime::read_connection_file(&path).is_err(),
-            "{name} wire_version must fail discovery"
+            "a publication without {name} must fail discovery"
         );
     }
 
@@ -254,7 +250,7 @@ async fn lifecycle_record_is_owner_only_and_removed_at_shutdown() {
 
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&record).expect("read record")).expect("parse");
-    assert_eq!(json["schema"], 1);
+    assert!(json.get("schema").is_none());
     assert_eq!(json["phase"], "running");
 
     host.shutdown_gracefully().await;
@@ -384,8 +380,8 @@ async fn coordination_locks_are_owner_only_and_survive_teardown() {
     }
 }
 
-/// An unknown lifecycle schema at the record name blocks startup without
-/// An unknown lifecycle schema leaves quarantined bytes uninterpreted, unmigrated, and unchanged.
+/// A lifecycle record of unknown shape at the record name blocks startup without
+/// A record of unknown shape leaves quarantined bytes uninterpreted, unmigrated, and unchanged.
 #[tokio::test]
 async fn startup_refuses_to_overwrite_an_unknown_lifecycle_schema() {
     let data_root = tempfile::tempdir().expect("temp root");

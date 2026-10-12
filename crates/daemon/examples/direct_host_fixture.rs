@@ -1181,11 +1181,8 @@ mod unix {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if own_incarnation_is_running(root)
-                && let Ok(info) = host_runtime::read_connection_file(publication)
+                && host_runtime::read_connection_file(publication).is_ok()
             {
-                if info.wire_version != host_runtime::wire::PROTOCOL_VERSION {
-                    return Err("fixture published an unsupported wire version".into());
-                }
                 return Ok(());
             }
             if host.is_finished() {
@@ -1476,7 +1473,6 @@ mod unix {
         if ready.is_ok() {
             let record = serde_json::json!({
                 "status": "ready",
-                "wire_version": host_runtime::wire::PROTOCOL_VERSION,
                 "catalog": CATALOG,
                 "debug_assertions": cfg!(debug_assertions),
                 "model_workers": host_runtime::model_execution::config::MAX_BACKEND_PROCESSES,

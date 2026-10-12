@@ -55,9 +55,8 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
     assert_eq!(mode(&fixture.control_path()), 0o600);
     assert_eq!(mode(&fixture.connection_file()), 0o600);
 
-    let info = host_runtime::read_connection_file(fixture.connection_file())
+    host_runtime::read_connection_file(fixture.connection_file())
         .expect("strict connection publication");
-    assert_eq!(info.wire_version, 4);
     assert_eq!(
         fixture.readiness()["catalog"],
         json!(["context", "local_embeddings", "model_execution"])

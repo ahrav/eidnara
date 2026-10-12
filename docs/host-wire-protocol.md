@@ -1,10 +1,6 @@
 # `host-runtime` Wire Protocol and Handshake
 
 Status: normative direct-linked static three-target profile
-Wire version: 4
-Connection-file schema: 2
-Lifecycle-record schema: 1
-Context-application protocol: 4
 
 ## 1. Conformance and authority
 
@@ -12,7 +8,9 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** ar
 
 This document is the direct-only wire authority. `host-runtime` owns the Rust wire, authentication, discovery, control, routing, and managed-client contracts. Repository implementations and conformance tests provide executable evidence; historical published-package behavior is provenance only and cannot enable a compatibility path.
 
-Canonical literals are part of this contract. In particular, `host_ops`, `connection.json`, `EIDNARA_MODULE_ID`, `EIDNARA_LAUNCH_NONCE`, `eidnara-server-v3`, and `eidnara-client-v3` MUST NOT be renamed without a separately versioned wire or lifecycle migration. Version 4 keeps both proof domains; the wire version byte, the connection-file `wire_version`, the grant `wire_version`, and the credential claim domain carry the version change. Version 3 and version 4 peers refuse each other before routing: there is no mixed-version mode and no downgrade.
+The host wire has exactly one contract. It carries no version field, numbered revision, negotiation, or skew path, and the daemon, both plugins, the CLI, and the fixtures ship it from one build. Canonical literals are part of this contract; in particular `host_ops`, `connection.json`, `EIDNARA_MODULE_ID`, `EIDNARA_LAUNCH_NONCE`, `eidnara-server`, and `eidnara-client`. A change to any wire name, literal, or shape lands in one change with this document and every Rust and TypeScript peer.
+
+A client and a host process of different builds never share a connection: the connection identity rejects the pairing. The client reads the daemon ID, key, and daemon build string from the current publication, and the authentication proofs bind all three (Section 5.2), so a publication from another incarnation, a replaced daemon process, or a mismatched build fails authentication before any envelope is exchanged. Connection generations and route epochs then fence every later frame (Sections 8 and 12).
 
 ## 2. Profile, actors, and trust boundary
 
@@ -37,8 +35,8 @@ flowchart TB
   CF --> RC[Managed Rust clients]
   TS <-->|authenticate and receive descriptors| US[Owner-only Unix setup socket]
   RC <-->|authenticate and receive descriptors| US
-  TS <-->|v4 application frames| R[Shared-memory ring]
-  RC <-->|v4 application frames| R
+  TS <-->|application frames| R[Shared-memory ring]
+  RC <-->|application frames| R
   US --> H[host-runtime]
   R --> H
   H -->|initialize, bind, handle, route-gone, health| M[Linked Handler]
@@ -66,14 +64,12 @@ flowchart TB
 
 ## 4. Discovery and credential publication
 
-### 4.1 Canonical path and schema
+### 4.1 Canonical path and shape
 
-Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client configuration MAY supply an explicit equivalent path. The host MUST publish schema 2:
+Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client configuration MAY supply an explicit equivalent path. The host MUST publish exactly this shape:
 
 ```json
 {
-  "schema": 2,
-  "wire_version": 4,
   "setup_socket": "/home/user/.local/share/eidnara/run/setup.sock",
   "key": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
   "daemon_id": [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111],
@@ -84,13 +80,11 @@ Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client conf
 
 Example bytes are deterministic and non-secret. Real key and daemon-ID bytes MUST come from the OS CSPRNG.
 
-Writers MUST include numeric `wire_version: 4`. Clients MUST reject an absent, null, string, fractional, or non-4 value before dialing the setup socket. There is no omission default and no version downgrade.
-
 A client MUST:
 
 1. open the parent and connection file without following links, then take one descriptor-anchored regular-file snapshot capped at 65,536 bytes;
 2. reject a larger file before JSON parsing;
-3. require schema 2, numeric wire version 4, a nonempty absolute `setup_socket` path, exactly 32 key bytes, exactly 16 daemon-ID bytes, a numeric PID, and a nonempty daemon version;
+3. require a nonempty absolute `setup_socket` path, exactly 32 key bytes, exactly 16 daemon-ID bytes, a numeric PID, and a nonempty daemon version;
 4. verify owner-only regular-file metadata before and after the read and verify the directory entry still names the same file;
 5. dial `setup_socket` as a Unix stream socket;
 6. reject a relative `setup_socket`, since the host resolves it from its own data directory and a relative path names a different socket for a client with another working directory;
@@ -118,11 +112,10 @@ Shutdown removal MUST occur while the instance lock is held. Before unlinking, t
 
 ### 4.3 Lifecycle record and native state probe
 
-The host additionally maintains `${dataDir}/eidnara/run/host-lifecycle.json`, an owner-only (0600) strict schema-1 record written atomically through the same pinned runtime-directory descriptor as the publication:
+The host additionally maintains `${dataDir}/eidnara/run/host-lifecycle.json`, an owner-only (0600) strict record written atomically through the same pinned runtime-directory descriptor as the publication:
 
 ```json
 {
-  "schema": 1,
   "phase": "running",
   "launch_id": "<32 lowercase hex>",
   "daemon_id": "<32 lowercase hex>",
@@ -136,21 +129,21 @@ The host additionally maintains `${dataDir}/eidnara/run/host-lifecycle.json`, an
 
 `phase` is `starting` (after lock acquisition, before publication), `running` (after publication), or `stopping` (from graceful-shutdown step 1). `pid` is display metadata only: no reader may signal it, infer liveness from it, or authorize anything with it. Record cleanup is fenced by matching launch and daemon identity and runs under the instance lock before lock release, mirroring publication cleanup.
 
-`payload_manifest_digest` is required payload identity: exactly 64 lowercase hex characters, validated as host input before any lock is taken, and byte-identical across every `starting`, `running`, and `stopping` record one incarnation writes. An empty, oversized, or otherwise noncanonical digest never decodes as a valid record, so it can never support a `running` classification. A record whose JSON carries an unknown `schema` is quarantined: its bytes are preserved byte-for-byte, probes classify it `unsupported_state_schema`, and a host start against it fails closed rather than interpreting, migrating, or overwriting it.
+`payload_manifest_digest` is required payload identity: exactly 64 lowercase hex characters, validated as host input before any lock is taken, and byte-identical across every `starting`, `running`, and `stopping` record one incarnation writes. An empty, oversized, or otherwise noncanonical digest never decodes as a valid record, so it can never support a `running` classification. A record whose JSON object does not have exactly the record's keys (an added, missing, or renamed key) is outside the record's shape and is quarantined: its bytes are preserved byte-for-byte, probes classify it `unsupported_state_schema`, and a host start against it fails closed rather than interpreting, migrating, or overwriting it. A record with the record's keys but an invalid value is malformed.
 
 Lifecycle state is derived from lock ownership plus this evidence, never from PID existence. Two locks participate: the stable lifetime fence (`lifetime.lock`, below) and the runtime-directory instance lock.
 
 | Lifetime fence | Instance lock | Evidence | State |
 | --- | --- | --- | --- |
 | free | free | anything, including stale record or publication | `stopped`; nothing is unlinked |
-| free | free | record with an unknown schema | `stopped` with `unsupported_state_schema`; bytes preserved |
+| free | free | record of unknown shape | `stopped` with `unsupported_state_schema`; bytes preserved |
 | held | free (or the runtime directory is missing) | anything | `wedged` after a bounded reread: a live incarnation's namespace was replaced, or a start/teardown window persisted |
 | free | held | anything | `wedged` after a bounded reread: a holder without the stable fence is never coherent |
 | held | held | fresh `starting` record, with or without a predecessor's leftover publication | `starting` |
 | held | held | `running` record and publication with the same daemon ID | `running` |
 | held | held | `running` record with a missing or daemon-ID-mismatched publication | `wedged` |
 | held | held | fresh `stopping` record, with or without a predecessor's leftover publication | `stopping` |
-| held | held | record with an unknown schema | `wedged` with `unsupported_state_schema`; bytes preserved |
+| held | held | record of unknown shape | `wedged` with `unsupported_state_schema`; bytes preserved |
 | held | held | missing, corrupt, insecure, or expired *record* (including a noncanonical digest), or a corrupt or insecure *publication* (any phase) | `wedged` |
 
 A missing publication is `wedged` only under a `running` record (the row above); `starting` and `stopping` require no publication at all. A free replacement runtime-directory lock is never proof that the first daemon ended; only the stable lifetime fence proves that.
@@ -185,8 +178,8 @@ Host-owned authentication uses these fixed parameters:
 | Client nonce | 32 OS-CSPRNG bytes |
 | Server nonce | 32 OS-CSPRNG bytes |
 | Proof | 32-byte HMAC-SHA256 |
-| Server domain | ASCII `eidnara-server-v3` |
-| Client domain | ASCII `eidnara-client-v3` |
+| Server domain | ASCII `eidnara-server` |
+| Client domain | ASCII `eidnara-client` |
 
 Only lengths and domains are constants. Both nonces MUST be freshly generated from the OS CSPRNG for every handshake attempt and MUST NOT be reused within or across connections or host incarnations. Server-nonce freshness is the replay defense: a reused server nonce would let an observer replay a previously captured `client_auth` under a replayed client nonce.
 
@@ -202,7 +195,7 @@ sequenceDiagram
   C->>H: ClientAuth {client_auth}
   Note over H: constant-time verify
   H-->>C: two ring descriptors + activation data
-  Note over C,H: validate current identity, attach, commit; v4 ring traffic enabled
+  Note over C,H: validate current identity, attach, commit; ring traffic enabled
 ```
 
 Canonical JSON shapes:
@@ -212,11 +205,11 @@ Canonical JSON shapes:
 ```
 
 ```json
-{"daemon_id":[96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111],"server_nonce":[64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95],"daemon_ver":"eidnara-host/0.1.0","server_proof":[8,85,246,183,53,167,124,30,98,139,55,104,107,155,175,182,20,23,143,13,243,82,19,62,37,43,103,85,123,176,4,192]}
+{"daemon_id":[96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111],"server_nonce":[64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95],"daemon_ver":"eidnara-host/0.1.0","server_proof":[221,41,211,39,105,38,36,227,218,146,108,140,44,161,195,104,113,23,2,206,170,141,151,35,1,27,126,57,158,85,209,112]}
 ```
 
 ```json
-{"client_auth":[96,31,69,109,112,178,81,45,173,45,35,155,120,185,24,14,40,8,205,217,4,190,7,244,224,111,20,3,121,200,83,101]}
+{"client_auth":[161,15,9,216,159,94,127,234,216,165,252,37,93,56,218,59,100,52,116,18,7,55,91,207,160,45,227,141,45,118,114,228]}
 ```
 
 Those proofs use key bytes `00..1f`, client nonce `20..3f`, server nonce `40..5f`, daemon version `eidnara-host/0.1.0`, and daemon ID `60..6f`. For domain `D`, proof bytes are:
@@ -238,19 +231,18 @@ Any malformed JSON, wrong array length, oversized message, nonce-generation fail
 
 ### 6.1 Header
 
-After authentication, peers exchange a fixed 21-byte v4 header followed by `len` opaque body bytes. Integers are little-endian.
+After authentication, peers exchange a fixed 20-byte header followed by `len` opaque body bytes. Integers are little-endian.
 
 | Offset | Width | Field | Constraint |
 | ---: | ---: | --- | --- |
 | 0 | 4 | `len: u32` | `0..=67,108,864` |
-| 4 | 1 | `ver: u8` | exactly 4 |
-| 5 | 1 | `type: u8` | `0..=11` per table below |
-| 6 | 1 | `flags: u8` | valid bit fields below |
-| 7 | 2 | `channel: u16` | 0 is control; routed channels are nonzero |
-| 9 | 4 | `epoch: u32` | 0 on channel 0; routed epochs are nonzero |
-| 13 | 8 | `corr: u64` | request correlation; 0 only where this document permits |
+| 4 | 1 | `type: u8` | `0..=11` per table below |
+| 5 | 1 | `flags: u8` | valid bit fields below |
+| 6 | 2 | `channel: u16` | 0 is control; routed channels are nonzero |
+| 8 | 4 | `epoch: u32` | 0 on channel 0; routed epochs are nonzero |
+| 12 | 8 | `corr: u64` | request correlation; 0 only where this document permits |
 
-The first five bytes (`len` then `ver`) are the frozen prefix. A reader MUST read the prefix, reject unsupported version, read the remaining 16 header bytes, validate the complete header, and only then allocate/read the body.
+A reader MUST read all 20 header bytes, validate the complete header, and only then allocate/read the body.
 
 Flags:
 
@@ -304,13 +296,13 @@ Any structurally illegal channel, epoch, correlation, body, or direction closes 
 
 ### 6.3 Reading, limits, and corruption
 
-The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v4 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
+The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
 
 Aggregate resource policy takes effect between frames, before admitting more connections/work, or after a complete frame reaches a profile/application limit. For example, `Handler` may return terminal `invalid_params` for its 1 MiB facade or 32 MiB transform limits after transport framing accepts the body. Local limits never change header bytes.
 
 Waiting for the next frame on an idle connection is unbounded at the framing layer; idle lifetime is governed separately by liveness policy (Section 9.3). A published pool descriptor names one block that holds one complete header and body. The receiver MUST validate the publication sequence, block id, reuse generation, body length, and copied header against its own geometry and per-block records before exposing an owned payload lease, as `docs/payload-pool-protocol.md` Section 6 specifies. The lease keeps its block mapped until its single return, independently of the endpoint that received it.
 
-Clean `Goodbye` followed by joined teardown is orderly connection close. Unexpected setup-socket EOF, an invalid pool descriptor, truncated declared frame, unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body, or body declaration above 64 MiB retires the connection without resynchronization or reuse of uncertain storage.
+Clean `Goodbye` followed by joined teardown is orderly connection close. Unexpected setup-socket EOF, an invalid pool descriptor, truncated declared frame, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body, or body declaration above 64 MiB retires the connection without resynchronization or reuse of uncertain storage.
 
 Writers MUST verify header `len` equals body length, reserve one block from the smallest fitting class of the frame's inventory, fill the reservation, and publish exactly once. Each direction has one logical writer. Descriptor consumption is FIFO by publication sequence, and a class or descriptor exhaustion is backpressure, not a smaller frame limit. Queued admission order is not a cross-class publication promise: a writer MAY publish an eligible pure-header control or an unrelated terminal from the reserved control and terminal inventories while an ordinary frame waits for ordinary capacity, subject to the ordering rules of Sections 8-10 (increasing consumer Request correlations, per-stream data before its terminal, shutdown terminals before `Goodbye`). A channel-0 `Request` is not such a control. A failed or underfilled reservation aborts without publication. Once publication begins, a missing terminal leaves the request outcome unknown.
 
@@ -319,16 +311,16 @@ Writers MUST verify header `len` equals body length, reserve one block from the 
 The compact canonical `route.open` request defined in Section 7.2 is 167 UTF-8 bytes. Its `Request` header uses Interactive/Normal flags, control channel, epoch 0, correlation 1:
 
 ```text
-a7 00 00 00  04 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
-|--- len ---| ver ty fl | ch  |--- epoch --|--------- corr ----------|
+a7 00 00 00  00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
+|--- len ---| ty fl | ch  |--- epoch --|--------- corr ----------|
 ```
 
-Hex without spacing: `a70000000400020000000000000100000000000000`.
+Hex without spacing: `a700000000020000000000000100000000000000`.
 
 A routed 44-byte Background/Normal request on channel 7, epoch 77, correlation 2 has header:
 
 ```text
-2c00000004000407004d0000000200000000000000
+2c000000000407004d0000000200000000000000
 ```
 
 ## 7. Control and application messages
@@ -362,7 +354,7 @@ Required compact canonical request:
 {"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}
 ```
 
-Optional `consumer_identity` is `{module_id, launch_nonce}`. Optional `consumer_capabilities` is an array of strings. Optional `admission_facts` is any bounded JSON value. Managed callers may include `identity.credential_fingerprints`, a provider-to-HMAC map derived from the authenticated connection bearer and the owner's selected credential source. The derived key is `HMAC-SHA256(connection_key, "eidnara-model-execution-credential-v4")`; each value is `HMAC-SHA256(derived_key, preimage)` rendered as 64 lowercase hex. The `harness-provider-source/2` preimage encodes every field as `<decimal UTF-8 byte length>:<bytes>`: the canonicalization tag, the harness, the canonical provider, and the source kind. Source kind `env` then appends each row entry in row order as name, value byte length as decimal text, and value, omitting an empty or absent optional token. Source kind `aws_profile`, used for `amazon-bedrock` when the owner selected an AWS profile, appends `profile`, `region`, `config_file`, `credentials_file`, and `sso_cache_root`; it carries no token, graph digest, or host-minted identifier, so token rotation keeps the claim and a bearer change replaces it. The host recomputes the claim per bearer and compares in constant time. Values are protocol-internal and never credentials. Absence means no claim/capability/facts; it is not a denied claim. The bearer key remains authority.
+Optional `consumer_identity` is `{module_id, launch_nonce}`. Optional `consumer_capabilities` is an array of strings. Optional `admission_facts` is any bounded JSON value. Managed callers may include `identity.credential_fingerprints`, a provider-to-HMAC map derived from the authenticated connection bearer and the owner's selected credential source. The derived key is `HMAC-SHA256(connection_key, "eidnara-model-execution-credential")`; each value is `HMAC-SHA256(derived_key, preimage)` rendered as 64 lowercase hex. The `harness-provider-source` preimage encodes every field as `<decimal UTF-8 byte length>:<bytes>`: the canonicalization tag, the harness, the canonical provider, and the source kind. Source kind `env` then appends each row entry in row order as name, value byte length as decimal text, and value, omitting an empty or absent optional token. Source kind `aws_profile`, used for `amazon-bedrock` when the owner selected an AWS profile, appends `profile`, `region`, `config_file`, `credentials_file`, and `sso_cache_root`; it carries no token, graph digest, or host-minted identifier, so token rotation keeps the claim and a bearer change replaces it. The host recomputes the claim per bearer and compares in constant time. Values are protocol-internal and never credentials. Absence means no claim/capability/facts; it is not a denied claim. The bearer key remains authority.
 
 Successful response MUST retain the tag:
 
@@ -382,7 +374,7 @@ The direct profile routes exactly three static target pairs. Classification runs
 | any recognized kind above | any other module | terminal `unknown_module`; zero bind calls |
 | any other kind (`internal_service`, model-runner kinds, unknown strings) | any module | terminal `target_unavailable`; zero bind calls |
 
-A successful classification carries the validated typed target into the handler bind, so the composite dispatches on host-validated data and never re-parses the client body. The LocalEmbeddings target stays in this matrix even when its model bundle is missing or invalid: classification still succeeds, the bind is invoked, and the component rejects it with terminal `artifact_invalid` (Section 7.5.1). The ModelExecution component serves the five-operation LLM-run management protocol consumed by `HistorySummarizerProducer` (`session.send`, `session.subscribe`, `run.status`, `run.cancel`, `session.delete`); its application protocol is specified by the ModelExecution revision that implements it, not this section. That protocol's load-bearing properties for this profile are: run lifetime is detached from transport lifetime (waiter loss never stops a run; only `run.cancel`, `session.delete`, or host shutdown does, and each terminates and reaps the complete harness subprocess group before settling), run state is process-local and bounded (a restarted host reports old run IDs as strict `missing`), and subprocess execution is confined to the hardened OpenCode/Pi adapter trust boundary (no shell, private prompt delivery, provider-scoped child environment, bounded redacted output). Before `session.send` creates a run, ModelExecution derives the requested provider row fingerprint from its frozen startup snapshot and incarnation bearer and constant-time compares it with the route-frozen managed caller value; missing, oversize, unsupported, or changed rows return `harness_unavailable` with the closed credential subreason and spawn no child. A ModelExecution bind additionally requires harness `opencode` or `pi`; any other harness is rejected at bind with `invalid_identity` and no run state. Dynamic routing, provider discovery, and `internal_service` routing remain outside this document.
+A successful classification carries the validated typed target into the handler bind, so the composite dispatches on host-validated data and never re-parses the client body. The LocalEmbeddings target stays in this matrix even when its model bundle is missing or invalid: classification still succeeds, the bind is invoked, and the component rejects it with terminal `artifact_invalid` (Section 7.5.1). The ModelExecution component serves the five-operation LLM-run management protocol consumed by `HistorySummarizerProducer` (`session.send`, `session.subscribe`, `run.status`, `run.cancel`, `session.delete`); its application protocol is specified by the ModelExecution component that implements it, not this section. That protocol's load-bearing properties for this profile are: run lifetime is detached from transport lifetime (waiter loss never stops a run; only `run.cancel`, `session.delete`, or host shutdown does, and each terminates and reaps the complete harness subprocess group before settling), run state is process-local and bounded (a restarted host reports old run IDs as strict `missing`), and subprocess execution is confined to the hardened OpenCode/Pi adapter trust boundary (no shell, private prompt delivery, provider-scoped child environment, bounded redacted output). Before `session.send` creates a run, ModelExecution derives the requested provider row fingerprint from its frozen startup snapshot and incarnation bearer and constant-time compares it with the route-frozen managed caller value; missing, oversize, unsupported, or changed rows return `harness_unavailable` with the closed credential subreason and spawn no child. A ModelExecution bind additionally requires harness `opencode` or `pi`; any other harness is rejected at bind with `invalid_identity` and no run state. Dynamic routing, provider discovery, and `internal_service` routing remain outside this document.
 
 The direct component exposes no `thalamus` resolver route. A facade request without an explicit or route-bound session returns the existing typed `session_unresolved` result locally and opens no resolver transport route. Bound sessions retain their proven direct path, and a session with transform lineage under another root is refused on this one with `session_unresolved` and the message `this session's context lineage belongs to another project root; start a new session in this directory.` Transform lineage for a session is any of: a transform the host accepted on a root in this process, durable transform cache state for the session, or a live transform route bound for it; a session is proven on a root only by lineage on that root. A bound session with no transform lineage at all (a session that has not yet sent an accepted transform) is the conversation directly: nothing contradicts the route-bound identity, and the plugins bind the harness's own session id. The same rule applies to every harness the direct component admits; `harness` is a scoping claim, not authority (Section 2).
 
@@ -718,7 +710,7 @@ Commit runs inside retained host work (the connection writer task), so cancellin
 
 ### 7.7 Mandatory payload-pool setup
 
-Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four connected `AF_UNIX` stream socketpair ends, profile `host-payload-pool-v1`, wire version 4, descriptor schema 4, one 126-byte grant per direction, and a one-use activation token. The client validates both grants against the sole profile's geometry, attaches both directions while they are fresh, then commits activation. Memfds carry pool metadata, descriptor slots, completion cells, and the fixed block arena. The socketpair ends are doorbells and carry coalesced data-ready and capacity-ready tokens only; an eventfd, datagram, seqpacket, or unconnected socket is rejected before traffic. The pool is the only application frame channel. `docs/payload-pool-protocol.md` is the normative low-level authority for the layout, descriptor, completion, wake, and access rules; this section links to it and does not restate them.
+Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four connected `AF_UNIX` stream socketpair ends, profile `host-payload-pool`, one 124-byte grant per direction, and a one-use activation token. The client validates both grants against the sole profile's geometry, attaches both directions while they are fresh, then commits activation. Memfds carry pool metadata, descriptor slots, completion cells, and the fixed block arena. The socketpair ends are doorbells and carry coalesced data-ready and capacity-ready tokens only; an eventfd, datagram, seqpacket, or unconnected socket is rejected before traffic. The pool is the only application frame channel. `docs/payload-pool-protocol.md` is the normative low-level authority for the layout, descriptor, completion, wake, and access rules; this section links to it and does not restate them.
 
 Missing native support, malformed ancillary data, duplicate or extra descriptors, identity mismatch, token mismatch, admission failure, attachment failure, timeout, or setup-socket loss retires the connection before application traffic. Runtime pool corruption or unexpected setup-socket EOF also retires the connection. No setup or runtime failure changes transport or replays an uncertain request.
 

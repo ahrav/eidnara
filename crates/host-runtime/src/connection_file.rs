@@ -19,12 +19,8 @@ use serde::{Deserialize, Serialize};
 use shm_transport::setup_auth::DAEMON_VER_PREFIX;
 
 use crate::store_fs::same_snapshot;
-use crate::{
-    instance::{S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd},
-    wire::PROTOCOL_VERSION,
-};
+use crate::instance::{S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd};
 
-pub const SCHEMA_VERSION: u32 = 2;
 pub const MIN_KEY_LEN: usize = 32;
 pub const KEY_LEN: usize = 32;
 pub const DAEMON_ID_LEN: usize = 16;
@@ -32,8 +28,6 @@ pub const MAX_CONNECTION_FILE_LEN: usize = 65_536;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionInfo {
-    pub schema: u32,
-    pub wire_version: u8,
     pub setup_socket: String,
     pub key: Vec<u8>,
     pub daemon_id: [u8; DAEMON_ID_LEN],
@@ -44,8 +38,6 @@ pub struct ConnectionInfo {
 impl fmt::Debug for ConnectionInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionInfo")
-            .field("schema", &self.schema)
-            .field("wire_version", &self.wire_version)
             .field("setup_socket", &self.setup_socket)
             .field("key", &format_args!("<{} bytes redacted>", self.key.len()))
             .field("daemon_id", &self.daemon_id)
@@ -57,18 +49,6 @@ impl fmt::Debug for ConnectionInfo {
 
 impl ConnectionInfo {
     pub fn validate(&self) -> Result<(), ConnectionFileError> {
-        if self.schema != SCHEMA_VERSION {
-            return Err(ConnectionFileError::UnsupportedSchema {
-                schema: self.schema,
-                supported: SCHEMA_VERSION,
-            });
-        }
-        if self.wire_version != PROTOCOL_VERSION {
-            return Err(ConnectionFileError::WireVersionMismatch {
-                file: self.wire_version,
-                supported: PROTOCOL_VERSION,
-            });
-        }
         if self.setup_socket.is_empty() || !Path::new(&self.setup_socket).is_absolute() {
             return Err(ConnectionFileError::Invalid("invalid setup socket path"));
         }
@@ -126,14 +106,6 @@ pub enum ConnectionFileError {
         path: PathBuf,
         source: serde_json::Error,
     },
-    UnsupportedSchema {
-        schema: u32,
-        supported: u32,
-    },
-    WireVersionMismatch {
-        file: u8,
-        supported: u8,
-    },
     Invalid(&'static str),
     InvalidKeyLength {
         len: usize,
@@ -175,14 +147,6 @@ impl fmt::Display for ConnectionFileError {
                 f,
                 "connection file JSON read failed for {}: {source}",
                 path.display()
-            ),
-            Self::UnsupportedSchema { schema, supported } => write!(
-                f,
-                "unsupported connection file schema {schema}; expected {supported}"
-            ),
-            Self::WireVersionMismatch { file, supported } => write!(
-                f,
-                "connection file wire version {file} does not match supported wire version {supported}"
             ),
             Self::Invalid(reason) => write!(f, "invalid connection file: {reason}"),
             Self::InvalidKeyLength { len, expected } => write!(
@@ -367,8 +331,6 @@ mod tests {
 
     fn info() -> ConnectionInfo {
         ConnectionInfo {
-            schema: SCHEMA_VERSION,
-            wire_version: PROTOCOL_VERSION,
             setup_socket: "/tmp/eidnara-host.sock".to_owned(),
             key: vec![7; KEY_LEN],
             daemon_id: [8; DAEMON_ID_LEN],

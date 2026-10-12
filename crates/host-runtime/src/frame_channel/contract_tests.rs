@@ -507,7 +507,6 @@ impl PeerDriver for RingPeer {
             .send(
                 EnvelopeHeader {
                     len: body.len() as u32,
-                    ver: crate::wire::PROTOCOL_VERSION,
                     ty,
                     flags,
                     channel: id.channel,

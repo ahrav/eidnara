@@ -12,7 +12,6 @@ import {
     type EnvelopeHeader,
     FrameType,
     MAX_CONTROL_BODY_LEN,
-    PROTOCOL_VERSION,
 } from "./protocol";
 import { Priority } from "./types";
 
@@ -342,7 +341,6 @@ describe("BoundedFrameProducer segment traversal", () => {
 function violationHeader(fields: Partial<EnvelopeHeader> & { ty: number }): EnvelopeHeader {
     return {
         len: 0,
-        ver: PROTOCOL_VERSION,
         flags: 0,
         channel: 7,
         epoch: 1,

@@ -31,7 +31,6 @@ import {
     encodeHeader,
     FrameType,
     HEADER_LEN,
-    PROTOCOL_VERSION,
 } from "./protocol";
 
 class InboundFrameError extends Error {
@@ -792,9 +791,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
                         const header = decodeHeader(nativeLease.header);
                         const violation = headerViolation(header);
                         const structuralError =
-                            header.ver !== PROTOCOL_VERSION
-                                ? "unsupported protocol version"
-                                : header.len !== nativeLease.byteLength
+                            header.len !== nativeLease.byteLength
                                   ? "ring frame length mismatch"
                                   : header.len > this.options.maxBodyLen
                                     ? "ring frame exceeds configured body limit"

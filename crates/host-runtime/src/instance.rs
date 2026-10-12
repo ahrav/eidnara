@@ -14,7 +14,7 @@ use rustix::fs::{
 };
 
 use crate::connection_file::{
-    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN, SCHEMA_VERSION,
+    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN,
 };
 
 /// `CONNECTION_FILE_NAME` names the canonical publication file inside the runtime directory.
@@ -370,8 +370,6 @@ impl InstanceGuard {
             });
         }
         let info = ConnectionInfo {
-            schema: SCHEMA_VERSION,
-            wire_version: crate::wire::PROTOCOL_VERSION,
             setup_socket: setup_socket
                 .to_str()
                 .ok_or_else(|| InstanceError::Insecure {
@@ -1287,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_matches_schema_2_shape() {
+    fn publication_matches_the_connection_file_shape() {
         let root = temp_root();
         let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
         guard
@@ -1296,8 +1294,8 @@ mod tests {
 
         let bytes = std::fs::read(published(&guard)).expect("read publication");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
-        assert_eq!(json["schema"], 2);
-        assert_eq!(json["wire_version"], 4);
+        assert!(json.get("schema").is_none());
+        assert!(json.get("wire_version").is_none());
         assert_eq!(
             json["setup_socket"],
             guard

@@ -397,9 +397,6 @@ impl RingTransport {
             "error_class": error_class,
             "artifact": {
                 "profile": RING_PROFILE,
-                "wire_version": crate::wire::PROTOCOL_VERSION,
-                "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
-                "layout_version": shm_transport::backend::retained::LAYOUT_VERSION,
             },
             "bounds": limits,
             "accounting": accounting,
@@ -1715,7 +1712,7 @@ impl RingClientEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{Flags, PROTOCOL_VERSION, Priority};
+    use crate::wire::{Flags, Priority};
 
     /// The backing charge settles after `io` completes, once the peer-release wait ends.
     /// Blocks until the endpoint thread has settled its backing after `io` completed: the
@@ -1829,7 +1826,6 @@ mod tests {
         peer.send(
             EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Goodbye,
                 flags: crate::wire::pure_header_flags(),
                 channel: 0,
@@ -1986,18 +1982,9 @@ mod tests {
         let diagnostics = transport.diagnostics();
         assert_eq!(diagnostics["state"], "healthy");
         assert_eq!(diagnostics["error_class"], serde_json::Value::Null);
-        assert_eq!(diagnostics["artifact"]["profile"], RING_PROFILE);
         assert_eq!(
-            diagnostics["artifact"]["wire_version"],
-            crate::wire::PROTOCOL_VERSION
-        );
-        assert_eq!(
-            diagnostics["artifact"]["descriptor_schema"],
-            shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION
-        );
-        assert_eq!(
-            diagnostics["artifact"]["layout_version"],
-            shm_transport::backend::retained::LAYOUT_VERSION
+            diagnostics["artifact"],
+            serde_json::json!({"profile": RING_PROFILE})
         );
         assert_eq!(diagnostics["bounds"]["mapping_bytes"], limits.mapping_bytes);
         assert_eq!(diagnostics["bounds"]["ledger_bytes"], limits.ledger_bytes);
@@ -2078,7 +2065,6 @@ mod tests {
         let endpoint = RingClientEndpoint { to_host, from_host };
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Response,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 0,
@@ -2133,7 +2119,7 @@ mod tests {
                     .try_reserve_in(
                         Inventory::Terminal,
                         1,
-                        shm_transport::backend::ring::wire_v3_header(1).unwrap(),
+                        shm_transport::backend::ring::body_header(1).unwrap(),
                     )
                     .expect("fill terminal reservation");
                 reservation.write(&[1]).unwrap();
@@ -2159,7 +2145,7 @@ mod tests {
                     .try_reserve_in(
                         Inventory::Control,
                         0,
-                        shm_transport::backend::ring::wire_v3_header(0).unwrap(),
+                        shm_transport::backend::ring::body_header(0).unwrap(),
                     )
                     .expect("fill control reservation");
                 reservation.commit(0).unwrap();
@@ -2272,7 +2258,6 @@ mod tests {
         // because the inbound channel already holds an undrained event.
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -2340,7 +2325,6 @@ mod tests {
         // The peer commits a request whose one byte the ingress budget cannot grant.
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -2403,7 +2387,6 @@ mod tests {
         let body = b"copy";
         let header = EnvelopeHeader {
             len: body.len() as u32,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 0,
@@ -2451,7 +2434,6 @@ mod tests {
         let body = [7u8];
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 0,
@@ -2507,7 +2489,6 @@ mod tests {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 0,
@@ -2577,7 +2558,6 @@ mod tests {
             peer.send(
                 EnvelopeHeader {
                     len: 1,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::Request,
                     flags: Flags::new(false, Priority::Interactive, false),
                     channel: 7,
@@ -2638,7 +2618,6 @@ mod tests {
         let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         let request = |corr: u64| EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -2706,7 +2685,6 @@ mod tests {
         let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         let request = |corr: u64| EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -2774,7 +2752,6 @@ mod tests {
             peer.send(
                 EnvelopeHeader {
                     len: 1,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::Request,
                     flags: Flags::new(false, Priority::Interactive, false),
                     channel: 7,
@@ -2825,7 +2802,6 @@ mod tests {
         peer.send(
             EnvelopeHeader {
                 len: 1,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Request,
                 flags: Flags::new(false, Priority::Interactive, false),
                 channel: 7,
@@ -2872,7 +2848,6 @@ mod tests {
         peer.send(
             EnvelopeHeader {
                 len: 1,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Request,
                 flags: Flags::new(false, Priority::Interactive, false),
                 channel: 7,
@@ -3020,7 +2995,6 @@ mod tests {
         peer.send(
             EnvelopeHeader {
                 len: 1,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Request,
                 flags: Flags::new(false, Priority::Interactive, false),
                 channel: 7,
@@ -3072,7 +3046,7 @@ mod tests {
         assert_eq!(peer.arm_data_wait(), Ok(true), "the peer parks on data");
         let mut reservation = rings
             .first
-            .try_reserve(1, shm_transport::backend::ring::wire_v3_header(1).unwrap())
+            .try_reserve(1, shm_transport::backend::ring::body_header(1).unwrap())
             .unwrap();
         reservation.write(&[1]).unwrap();
         reservation.commit(1).unwrap();
@@ -3167,7 +3141,6 @@ mod tests {
         peer.send(
             EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Goodbye,
                 flags: crate::wire::pure_header_flags(),
                 channel: 0,
@@ -3234,7 +3207,6 @@ mod tests {
         peer.send(
             EnvelopeHeader {
                 len: 1,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Request,
                 flags: Flags::new(false, Priority::Interactive, false),
                 channel: 7,
@@ -3265,7 +3237,6 @@ mod tests {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Response,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -3305,7 +3276,6 @@ mod tests {
             .expect("peer attaches");
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -3335,7 +3305,6 @@ mod tests {
             .expect("peer attaches");
         let request = |corr| EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,
@@ -3357,7 +3326,6 @@ mod tests {
         );
         let pong = EnvelopeHeader {
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Pong,
             flags: crate::wire::pure_header_flags(),
             channel: 0,
@@ -3461,7 +3429,7 @@ mod tests {
         (0..count)
             .map(|_| {
                 let mut reservation = producer
-                    .try_reserve(1, shm_transport::backend::ring::wire_v3_header(1).unwrap())
+                    .try_reserve(1, shm_transport::backend::ring::body_header(1).unwrap())
                     .expect("fill reservation");
                 reservation.write(&[1]).unwrap();
                 reservation.commit(1).unwrap();
@@ -3501,7 +3469,6 @@ mod tests {
         drop(rings);
         let header = EnvelopeHeader {
             len: lease.len() as u32,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 0,
@@ -3588,7 +3555,6 @@ mod tests {
         let counted = Arc::clone(&runs);
         let header = EnvelopeHeader {
             len: 3,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Response,
             flags: Flags::new(false, Priority::Interactive, true),
             channel: 7,
@@ -3755,10 +3721,9 @@ mod tests {
 
     #[test]
     fn inventory_classification_reserves_controls_and_small_terminals_only() {
-        let capacity = 32 * 1024 - 21;
+        let capacity = 32 * 1024 - 20;
         let header = |ty, len| EnvelopeHeader {
             len,
-            ver: PROTOCOL_VERSION,
             ty,
             flags: Flags::new(false, Priority::Interactive, true),
             channel: 0,
@@ -3806,7 +3771,6 @@ mod tests {
         let body = vec![0xA5u8; 3_000];
         let header = EnvelopeHeader {
             len: body.len() as u32,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 7,

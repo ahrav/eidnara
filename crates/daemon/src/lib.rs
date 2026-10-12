@@ -42166,7 +42166,7 @@ mod release_contract_tests {
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "3c800a42b034241a516537b5805095683a11d2970b8bf503819228c7b7386710"
+            "11a57fa634ff3b921b4fb1d243927e7f206e07a7af5046a5201e188e5331b03f"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
@@ -42177,10 +42177,6 @@ mod release_contract_tests {
         assert_eq!(
             contract["versions"]["daemon"],
             json!(release_contract::DAEMON_VERSION)
-        );
-        assert_eq!(
-            contract["versions"]["wire_protocol"].as_u64(),
-            Some(release_contract::WIRE_PROTOCOL_VERSION as u64)
         );
         // `versions.modules` is keyed by catalog module id so a compatibility consumer can join
         // it with `catalog.list`; the composition is fixed at exactly these three.

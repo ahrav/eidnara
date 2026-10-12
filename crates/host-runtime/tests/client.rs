@@ -423,10 +423,10 @@ async fn managed_client_witnesses_current_layout_maximum_bodies_and_controlled_r
 
     let snapshot = client.host_status().await.expect("host.status decodes");
     let shm = &snapshot.shared_memory;
-    assert_eq!(shm["artifact"]["profile"], "host-payload-pool-v1");
-    assert_eq!(shm["artifact"]["layout_version"], 4);
-    assert_eq!(shm["artifact"]["descriptor_schema"], 4);
-    assert_eq!(shm["artifact"]["wire_version"], 4);
+    assert_eq!(
+        shm["artifact"],
+        serde_json::json!({"profile": "host-payload-pool"})
+    );
     assert_eq!(shm["activation"]["completed"], 1);
     assert_eq!(shm["reclamation"]["completed"], 0);
     assert_eq!(

@@ -58,8 +58,6 @@ pub const GRANT_MESSAGE_TYPE: &str = "grant";
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename = "grant")]
 pub struct GrantMessage {
-    pub wire_version: u8,
-    pub descriptor_schema: u16,
     pub activation_token: String,
     pub descriptor: serde_json::Value,
 }
@@ -68,8 +66,6 @@ pub struct GrantMessage {
 impl std::fmt::Debug for GrantMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrantMessage")
-            .field("wire_version", &self.wire_version)
-            .field("descriptor_schema", &self.descriptor_schema)
             .field("activation_token", &REDACTED)
             .field("descriptor", &self.descriptor)
             .finish()
@@ -80,8 +76,6 @@ impl std::fmt::Debug for GrantMessage {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum ClientMessage {
     Activate {
-        wire_version: u8,
-        descriptor_schema: u16,
         activation_token: String,
     },
     Commit,
@@ -92,14 +86,8 @@ enum ClientMessage {
 impl std::fmt::Debug for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Activate {
-                wire_version,
-                descriptor_schema,
-                ..
-            } => f
+            Self::Activate { .. } => f
                 .debug_struct("Activate")
-                .field("wire_version", wire_version)
-                .field("descriptor_schema", descriptor_schema)
                 .field("activation_token", &REDACTED)
                 .finish(),
             Self::Commit => f.write_str("Commit"),
@@ -130,7 +118,6 @@ pub enum SetupError {
     Timeout,
     MessageTooLarge,
     InvalidMessage,
-    InvalidIdentity,
     InvalidActivation,
     MissingDescriptors,
     DuplicateDescriptors,
@@ -150,7 +137,6 @@ impl std::fmt::Display for SetupError {
             Self::Timeout => "setup socket deadline expired",
             Self::MessageTooLarge => "setup socket message exceeds its bound",
             Self::InvalidMessage => "setup socket message is invalid",
-            Self::InvalidIdentity => "setup socket identity does not match",
             Self::InvalidActivation => "setup socket activation token does not match",
             Self::MissingDescriptors => "setup socket descriptor transfer is incomplete",
             Self::DuplicateDescriptors => "setup socket transferred unexpected descriptors",
@@ -278,16 +264,12 @@ pub async fn activate_server(
     stream: &mut UnixStream,
     descriptors: &[OwnedFd; RING_DESCRIPTOR_COUNT],
     descriptor: &serde_json::Value,
-    wire_version: u8,
-    descriptor_schema: u16,
     activation_token: &str,
     deadline: Instant,
 ) -> Result<(), SetupError> {
     send_grant(
         stream,
         &GrantMessage {
-            wire_version,
-            descriptor_schema,
             activation_token: activation_token.to_owned(),
             descriptor: descriptor.clone(),
         },
@@ -297,10 +279,8 @@ pub async fn activate_server(
     .await?;
     match read_message(stream, deadline).await? {
         ClientMessage::Activate {
-            wire_version: presented_wire,
-            descriptor_schema: presented_schema,
             activation_token: presented_token,
-        } if presented_wire == wire_version && presented_schema == descriptor_schema => {
+        } => {
             if subtle::ConstantTimeEq::ct_eq(
                 presented_token.as_bytes(),
                 activation_token.as_bytes(),
@@ -312,7 +292,6 @@ pub async fn activate_server(
                 return Err(SetupError::InvalidActivation);
             }
         }
-        ClientMessage::Activate { .. } => return Err(SetupError::InvalidIdentity),
         _ => return Err(SetupError::InvalidMessage),
     }
     match read_message(stream, deadline).await? {
@@ -331,29 +310,18 @@ pub async fn activate_client(
 ) -> Result<(serde_json::Value, [OwnedFd; RING_DESCRIPTOR_COUNT]), SetupError> {
     let (value, descriptors) = receive_grant(stream, deadline).await?;
     // Serde does not validate the `type` tag while deserializing `GrantMessage`,
-    // so any object carrying the four grant fields would otherwise decode as a
+    // so any object carrying the grant fields would otherwise decode as a
     // grant regardless of its declared `type`.
     if value.get("type").and_then(serde_json::Value::as_str) != Some(GRANT_MESSAGE_TYPE) {
         return Err(SetupError::InvalidMessage);
     }
     let GrantMessage {
-        wire_version,
-        descriptor_schema,
         activation_token,
         descriptor,
     } = serde_json::from_value(value).map_err(|_| SetupError::InvalidMessage)?;
-    if wire_version != crate::wire::PROTOCOL_VERSION
-        || descriptor_schema != shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION
-    {
-        return Err(SetupError::InvalidIdentity);
-    }
     write_message(
         stream,
-        &ClientMessage::Activate {
-            wire_version,
-            descriptor_schema,
-            activation_token,
-        },
+        &ClientMessage::Activate { activation_token },
         deadline,
     )
     .await?;
@@ -502,8 +470,6 @@ mod tests {
             send_grant(
                 &mut server,
                 &GrantMessage {
-                    wire_version: crate::wire::PROTOCOL_VERSION,
-                    descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                     activation_token: "token".to_owned(),
                     descriptor: serde_json::json!({"ring": "v1"}),
                 },
@@ -646,8 +612,6 @@ mod tests {
                 &mut server,
                 &descriptors,
                 &serde_json::json!({"ring": "v1"}),
-                crate::wire::PROTOCOL_VERSION,
-                shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
                 Instant::now() + Duration::from_secs(1),
             )
@@ -677,8 +641,6 @@ mod tests {
                 &mut server,
                 &descriptors,
                 &serde_json::json!({"ring": "v1"}),
-                crate::wire::PROTOCOL_VERSION,
-                shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
                 Instant::now() + Duration::from_secs(1),
             )
@@ -690,8 +652,6 @@ mod tests {
         write_message(
             &mut client,
             &ClientMessage::Activate {
-                wire_version: crate::wire::PROTOCOL_VERSION,
-                descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 activation_token: "token".to_owned(),
             },
             deadline,
@@ -743,8 +703,6 @@ mod tests {
                 &mut server,
                 &descriptors,
                 &serde_json::json!({"ring": "v1"}),
-                crate::wire::PROTOCOL_VERSION,
-                shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
                 Instant::now() + Duration::from_secs(1),
             )
@@ -753,8 +711,6 @@ mod tests {
         crate::auth::authenticate_client(
             &mut client,
             &crate::connection_file::ConnectionInfo {
-                schema: crate::connection_file::SCHEMA_VERSION,
-                wire_version: crate::wire::PROTOCOL_VERSION,
                 setup_socket: "/tmp/test.sock".to_owned(),
                 key,
                 daemon_id,
@@ -771,8 +727,6 @@ mod tests {
         write_message(
             &mut client,
             &ClientMessage::Activate {
-                wire_version: crate::wire::PROTOCOL_VERSION,
-                descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 activation_token: "token".to_owned(),
             },
             deadline,
@@ -794,90 +748,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_wire_or_descriptor_schema_is_invalid_identity() {
-        for (wire_version, descriptor_schema) in [
-            (
-                crate::wire::PROTOCOL_VERSION.saturating_sub(1),
-                shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
-            ),
-            (crate::wire::PROTOCOL_VERSION, 1),
-        ] {
-            let (mut server, mut client) = UnixStream::pair().expect("socket pair");
-            let descriptors = descriptors();
-            let task = tokio::spawn(async move {
-                activate_server(
-                    &mut server,
-                    &descriptors,
-                    &serde_json::json!({}),
-                    crate::wire::PROTOCOL_VERSION,
-                    shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
-                    "token",
-                    Instant::now() + Duration::from_secs(1),
-                )
-                .await
-            });
-            let deadline = Instant::now() + Duration::from_secs(1);
-            let _ = receive_grant(&mut client, deadline).await.expect("grant");
-            write_message(
-                &mut client,
-                &ClientMessage::Activate {
-                    wire_version,
-                    descriptor_schema,
-                    activation_token: "token".to_owned(),
-                },
-                deadline,
+    async fn activation_carrying_an_unknown_field_is_refused() {
+        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
+        let descriptors = descriptors();
+        let task = tokio::spawn(async move {
+            activate_server(
+                &mut server,
+                &descriptors,
+                &serde_json::json!({}),
+                "token",
+                Instant::now() + Duration::from_secs(1),
             )
             .await
-            .unwrap();
-            assert!(matches!(
-                task.await.expect("server task"),
-                Err(SetupError::InvalidIdentity)
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn client_rejects_stale_identity_without_activate_write_or_returned_descriptors() {
-        for (wire_version, descriptor_schema) in [
-            (
-                crate::wire::PROTOCOL_VERSION.saturating_sub(1),
-                shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
-            ),
-            (crate::wire::PROTOCOL_VERSION, 1),
-        ] {
-            let (mut server, mut client) = UnixStream::pair().expect("socket pair");
-            let descriptors = descriptors();
-            let deadline = Instant::now() + Duration::from_secs(1);
-            let sent = tokio::spawn(async move {
-                send_grant(
-                    &mut server,
-                    &GrantMessage {
-                        wire_version,
-                        descriptor_schema,
-                        activation_token: "token".to_owned(),
-                        descriptor: serde_json::json!({}),
-                    },
-                    &descriptors,
-                    deadline,
-                )
-                .await?;
-                let mut byte = [0u8; 1];
-                Ok::<_, SetupError>(
-                    tokio::time::timeout(Duration::from_millis(100), server.read(&mut byte)).await,
-                )
-            });
-
-            assert!(matches!(
-                activate_client(&mut client, Instant::now() + Duration::from_secs(1)).await,
-                Err(SetupError::InvalidIdentity)
-            ));
-            assert!(
-                sent.await
-                    .expect("sender task")
-                    .expect("send stale grant")
-                    .is_err()
-            );
-        }
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let _ = receive_grant(&mut client, deadline).await.expect("grant");
+        write_message(
+            &mut client,
+            &serde_json::json!({
+                "type": "activate",
+                "selector": 4,
+                "activation_token": "token",
+            }),
+            deadline,
+        )
+        .await
+        .unwrap();
+        assert!(task.await.expect("server task").is_err());
     }
 
     /// Serde emits but does not check the struct-level `type` tag, so the client
@@ -886,8 +783,6 @@ mod tests {
     async fn client_rejects_grant_shaped_payload_with_wrong_or_missing_type() {
         let mut wrong_type = serde_json::json!({
             "type": "request",
-            "wire_version": crate::wire::PROTOCOL_VERSION,
-            "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
             "activation_token": "token",
             "descriptor": {"ring": "v1"},
         });
@@ -956,14 +851,10 @@ mod tests {
     fn debug_output_never_renders_the_activation_token() {
         let token = "5a5a5a5a-secret-activation-token";
         let grant = GrantMessage {
-            wire_version: crate::wire::PROTOCOL_VERSION,
-            descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
             activation_token: token.to_owned(),
             descriptor: serde_json::json!({"ring": "v1"}),
         };
         let activate = ClientMessage::Activate {
-            wire_version: crate::wire::PROTOCOL_VERSION,
-            descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
             activation_token: token.to_owned(),
         };
         for rendered in [format!("{grant:?}"), format!("{activate:?}")] {

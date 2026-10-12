@@ -23,8 +23,8 @@ use crate::instance::{
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
 pub const LIFECYCLE_RECORD_NAME: &str = "host-lifecycle.json";
 
-/// Persisted records that decode to an unknown schema are quarantined.
-/// Unknown-schema records are preserved without repair.
+/// Persisted records that do not have the lifecycle record's shape are quarantined.
+/// Quarantined records are preserved without repair.
 ///
 /// `InstanceGuard::acquire` refuses records quarantined for `UNSUPPORTED_STATE_SCHEMA_REASON`.
 /// Probe consumers must recognize `UNSUPPORTED_STATE_SCHEMA_REASON` in `Stopped` when both fences are free and in `Wedged` when a fence is held.
@@ -222,11 +222,11 @@ fn lifetime_lock_free(data_dir_override: Option<&Path>) -> Result<bool, Instance
     }
 }
 
-/// Returns `true` when a regular lifecycle record has an unknown schema or cannot be read.
+/// Returns `true` when a regular lifecycle record lacks the record's shape or cannot be read.
 /// Supported code must not interpret, migrate, overwrite, or remove quarantined bytes.
 ///
-/// Startup refuses when record bytes could exist but cannot be proven to carry a known schema.
-/// Open failures other than `NOENT`, `LOOP`, and `NOTDIR`, plus `fstat` failures and read failures, refuse startup because the record schema cannot be proven known.
+/// Startup refuses when record bytes could exist but cannot be proven to carry the record's shape.
+/// Open failures other than `NOENT`, `LOOP`, and `NOTDIR`, plus `fstat` failures and read failures, refuse startup because the record's shape cannot be proven.
 /// A record larger than [`MAX_EVIDENCE_BYTES`] refuses startup rather than permit an overwrite.
 /// Startup's atomic rename replaces a non-regular lifecycle-record name without following it.
 pub(crate) fn quarantined_record_present(
@@ -282,7 +282,7 @@ impl LifecyclePhase {
     }
 }
 
-/// A schema-1 lifecycle record uses PID only as optional display metadata.
+/// A lifecycle record uses PID only as optional display metadata.
 /// The daemon must not make decisions from PID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleRecord {
@@ -297,7 +297,6 @@ pub struct LifecycleRecord {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireRecord {
-    schema: u32,
     phase: String,
     launch_id: String,
     daemon_id: String,
@@ -306,11 +305,23 @@ struct WireRecord {
     written_at_ms: u64,
 }
 
+/// The complete key set of a lifecycle record. A JSON object with any other key set does not
+/// have the record's shape and is quarantined rather than interpreted.
+const RECORD_KEYS: [&str; 6] = [
+    "daemon_id",
+    "launch_id",
+    "payload_manifest_digest",
+    "phase",
+    "pid",
+    "written_at_ms",
+];
+
 const HEX_LAUNCH_LEN: usize = 32;
 const HEX_DAEMON_LEN: usize = 32;
 
-/// Unknown schemas are classified separately from corruption because they are quarantined rather than repaired.
-/// `Legacy` records have schema 1 and an empty `payload_manifest_digest`; all other validated fields are valid.
+/// A JSON object whose key set differs from `RECORD_KEYS` is `UnknownSchema`: it is classified
+/// separately from corruption because it is quarantined rather than repaired.
+/// `Legacy` records have the record's shape and an empty `payload_manifest_digest`; all other validated fields are valid.
 /// `Legacy` records are not `Malformed` when only `payload_manifest_digest` is empty.
 #[derive(Debug, PartialEq, Eq)]
 enum RecordDecode {
@@ -324,10 +335,12 @@ fn decode_record(bytes: &[u8]) -> RecordDecode {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return RecordDecode::Malformed;
     };
-    match value.get("schema").and_then(serde_json::Value::as_u64) {
-        Some(1) => {}
-        Some(_) => return RecordDecode::UnknownSchema,
-        None => return RecordDecode::Malformed,
+    let Some(object) = value.as_object() else {
+        return RecordDecode::Malformed;
+    };
+    if object.len() != RECORD_KEYS.len() || !RECORD_KEYS.iter().all(|key| object.contains_key(*key))
+    {
+        return RecordDecode::UnknownSchema;
     }
     let Ok(wire) = serde_json::from_value::<WireRecord>(value) else {
         return RecordDecode::Malformed;
@@ -375,7 +388,6 @@ impl InstanceGuard {
     ///
     pub fn write_lifecycle_record(&self, phase: LifecyclePhase) -> Result<(), InstanceError> {
         let record = WireRecord {
-            schema: 1,
             phase: phase.as_str().to_owned(),
             launch_id: hex(self.launch_id()),
             daemon_id: hex(self.daemon_id()),
@@ -1228,7 +1240,6 @@ mod tests {
     #[test]
     fn strict_decode_rejects_wrong_shapes() {
         let valid = serde_json::json!({
-            "schema": 1,
             "phase": "running",
             "launch_id": "ab".repeat(16),
             "daemon_id": "cd".repeat(16),
@@ -1247,12 +1258,16 @@ mod tests {
             decode_record(&serde_json::to_vec(&v).unwrap())
         };
         assert_eq!(
-            mutate(&|v| v["schema"] = 2.into()),
-            RecordDecode::UnknownSchema
+            mutate(&|v| v["schema"] = 1.into()),
+            RecordDecode::UnknownSchema,
+            "an added key leaves the record's shape"
         );
         assert_eq!(
-            mutate(&|v| v["schema"] = 99.into()),
-            RecordDecode::UnknownSchema
+            mutate(&|v| {
+                v.as_object_mut().expect("object").remove("pid");
+            }),
+            RecordDecode::UnknownSchema,
+            "a missing key leaves the record's shape"
         );
         assert_eq!(
             mutate(&|v| v["phase"] = "paused".into()),
@@ -1267,9 +1282,9 @@ mod tests {
             RecordDecode::Malformed
         );
         assert_eq!(
-            mutate(&|v| v["extra"] = 1.into()),
+            mutate(&|v| v["pid"] = "42".into()),
             RecordDecode::Malformed,
-            "unknown fields are rejected"
+            "a field of the wrong type is malformed"
         );
         for digest in [
             "d".repeat(PAYLOAD_MANIFEST_DIGEST_LEN - 1),
@@ -2094,7 +2109,6 @@ mod tests {
         std::fs::set_permissions(&publication, std::fs::Permissions::from_mode(0o600))
             .expect("mode");
         let record = serde_json::json!({
-            "schema": 1,
             "phase": "running",
             "launch_id": "ab".repeat(16),
             "daemon_id": daemon_hex,
@@ -2299,9 +2313,9 @@ mod tests {
         );
     }
 
-    /// An unknown lifecycle schema is preserved byte-for-byte and classified `unsupported_state_schema` under held and free fences.
+    /// A lifecycle record of unknown shape is preserved byte-for-byte and classified `unsupported_state_schema` under held and free fences.
     #[test]
-    fn an_unknown_lifecycle_schema_is_quarantined_not_interpreted() {
+    fn an_unknown_lifecycle_shape_is_quarantined_not_interpreted() {
         let root = temp_root();
         let future_record = serde_json::to_vec(&serde_json::json!({
             "schema": 7,
@@ -2399,7 +2413,7 @@ mod tests {
         assert_eq!(record.payload_manifest_digest, TEST_DIGEST);
     }
 
-    /// The probe classifies a held runtime lock with a schema-1 empty-digest record and no lifetime fence as `Wedged`.
+    /// The probe classifies a held runtime lock with an empty-digest record and no lifetime fence as `Wedged`.
     #[test]
     fn a_pre_coordination_incumbent_classifies_by_its_record() {
         let root = temp_root();

@@ -7,7 +7,7 @@ import {
     type InboundFrame,
     ReceiveLease,
 } from "../frame-channel";
-import { type EnvelopeHeader, FrameType, PROTOCOL_VERSION } from "../protocol";
+import { type EnvelopeHeader, FrameType } from "../protocol";
 import {
     type ContractPeer,
     type ContractPeerFrame,
@@ -46,7 +46,6 @@ const NOT_EXERCISED_CHANNEL: FrameChannel = {
 function inboundHeader(fields: ContractPeerFrameFields, len: number): EnvelopeHeader {
     return {
         len,
-        ver: fields.ver ?? PROTOCOL_VERSION,
         ty: fields.ty as EnvelopeHeader["ty"],
         flags: fields.flags ?? 0,
         channel: fields.channel ?? 0,

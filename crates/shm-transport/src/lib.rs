@@ -39,6 +39,6 @@ pub mod profile;
 /// Setup-handshake proof transcript shared by both peers.
 pub mod setup_auth;
 
-pub use descriptor::{Incarnation, PayloadIdentity, WIRE_V3_HEADER_BYTES};
+pub use descriptor::{Incarnation, PayloadIdentity, WIRE_HEADER_BYTES};
 pub use lease::{LeaseSpan, PayloadLease};
 pub use pool::MAX_FRAME_BYTES;

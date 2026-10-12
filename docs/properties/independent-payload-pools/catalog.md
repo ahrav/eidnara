@@ -306,7 +306,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:3136`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
-Guarantee: Only descriptor schema 4, layout version 4, and profile `host-payload-pool-v1` are accepted; any other identifier, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8).
+Guarantee: Only descriptor schema 4, layout version 4, and profile `host-payload-pool` are accepted; any other identifier, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8).
 Check: `always` - every mismatch path returns an error before `Mapping::attach` or before `activate` commits, and no code path decodes another layout.
 Fault/timing angle: None; this is fail-closed identity checking.
 Required faults and enabling state: A grant with layout version 3; a setup message with schema 3; an eventfd in a doorbell position; a non-fresh pool at attach. Markers: marker:`setup.stale_identifier_presented`, marker:`setup.wrong_doorbell_type_presented`, marker:`setup.non_fresh_pool_presented`.

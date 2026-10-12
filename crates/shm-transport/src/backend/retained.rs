@@ -21,7 +21,7 @@ pub(crate) fn system_page_size() -> usize {
 }
 
 use crate::backend::sys;
-use crate::descriptor::{Incarnation, WIRE_V3_HEADER_BYTES};
+use crate::descriptor::{Incarnation, WIRE_HEADER_BYTES};
 use crate::pool::{
     CACHELINE, CLASS_COUNT, DESCRIPTOR_SLOT_BYTES, LIFECYCLE_PAGE_BYTES, MappingLayout,
     PoolGeometry, RETURN_WORD_BITS,
@@ -30,8 +30,6 @@ use crate::profile::BackingAdmission;
 
 /// Magic at the start of the lifecycle page; distinguishes a pool mapping from any other memfd.
 pub(crate) const MAPPING_MAGIC: u64 = 0x4d43_5348_4d50_3034;
-/// Mapping layout version; the sole version either peer accepts.
-pub const LAYOUT_VERSION: u16 = 4;
 
 /// Bytes of padding that keep a control page exactly one cacheline. Explicit padding lets
 /// `shared_page` hand out `&Page` over peer-writable memory: a shared reference permits
@@ -84,7 +82,6 @@ pub(crate) struct CompletionCell {
 #[repr(C, align(256))]
 pub(crate) struct LifecyclePage {
     pub(crate) magic: u64,
-    pub(crate) layout_version: u16,
     pub(crate) lane: u32,
     pub(crate) incarnation: [u8; 16],
     pub(crate) total_bytes: u64,
@@ -99,7 +96,6 @@ pub(crate) struct LifecyclePage {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LifecycleSnapshot {
     pub(crate) magic: u64,
-    pub(crate) layout_version: u16,
     pub(crate) lane: u32,
     pub(crate) incarnation: [u8; 16],
     pub(crate) total_bytes: u64,
@@ -126,9 +122,8 @@ const _: () = {
     assert!(size_of::<CompletionCell>() == 8);
     assert!(size_of::<LifecyclePage>() == LIFECYCLE_PAGE_BYTES);
     assert!(offset_of!(LifecyclePage, magic) == 0);
-    assert!(offset_of!(LifecyclePage, layout_version) == 8);
-    assert!(offset_of!(LifecyclePage, lane) == 12);
-    assert!(offset_of!(LifecyclePage, incarnation) == 16);
+    assert!(offset_of!(LifecyclePage, lane) == 8);
+    assert!(offset_of!(LifecyclePage, incarnation) == 12);
     assert!(offset_of!(LifecyclePage, total_bytes) == 32);
     assert!(offset_of!(LifecyclePage, ordinary_descriptors) == 40);
     assert!(offset_of!(LifecyclePage, reserved_descriptors) == 44);
@@ -493,7 +488,6 @@ impl Retained {
             use std::ptr::{addr_of, read_volatile};
             Ok(LifecycleSnapshot {
                 magic: read_volatile(addr_of!((*page).magic)),
-                layout_version: read_volatile(addr_of!((*page).layout_version)),
                 lane: read_volatile(addr_of!((*page).lane)),
                 incarnation: read_volatile(addr_of!((*page).incarnation)),
                 total_bytes: read_volatile(addr_of!((*page).total_bytes)),
@@ -531,7 +525,7 @@ impl Retained {
             .ok_or(MappingError::InvalidLayout)?;
         let start = usize::try_from(placement.offset)
             .ok()
-            .and_then(|offset| offset.checked_add(WIRE_V3_HEADER_BYTES))
+            .and_then(|offset| offset.checked_add(WIRE_HEADER_BYTES))
             .ok_or(MappingError::ArithmeticOverflow)?;
         if body_len as u64 > placement.body_capacity() {
             return Err(MappingError::InvalidLayout);
@@ -547,7 +541,7 @@ impl Retained {
             .ok_or(MappingError::InvalidLayout)?;
         let start =
             usize::try_from(placement.offset).map_err(|_| MappingError::ArithmeticOverflow)?;
-        self.arena_ptr(start, WIRE_V3_HEADER_BYTES)
+        self.arena_ptr(start, WIRE_HEADER_BYTES)
     }
 
     /// Receiver record for `block`: the generation live now, or zero.
@@ -749,7 +743,6 @@ pub(crate) fn initialize_mapping(
         layout.lifecycle,
         LifecyclePage {
             magic: MAPPING_MAGIC,
-            layout_version: LAYOUT_VERSION,
             lane,
             incarnation: incarnation.into_bytes(),
             total_bytes: layout.total as u64,
@@ -777,7 +770,6 @@ pub(crate) fn validate_lifecycle(
         class_counts[index] = class.count;
     }
     snapshot.magic == MAPPING_MAGIC
-        && snapshot.layout_version == LAYOUT_VERSION
         && snapshot.lane == lane
         && snapshot.incarnation == incarnation.into_bytes()
         && snapshot.total_bytes == total_bytes as u64
