@@ -388,10 +388,17 @@ pub fn decode_metered_typed_direct<'de, T: serde::Deserialize<'de>>(
     body: &'de [u8],
     meter: &ResidentMeter<'_>,
 ) -> Result<T, DecodeFailure> {
+    /// Clears the direct flag however the decode ends, so a later decode on the meter reads the
+    /// token by the tree's rule.
+    struct DirectFlag<'a>(&'a AtomicBool);
+    impl Drop for DirectFlag<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
     meter.direct.store(true, Ordering::Relaxed);
-    let decoded = decode_metered(body, meter);
-    meter.direct.store(false, Ordering::Relaxed);
-    decoded
+    let _clear = DirectFlag(&meter.direct);
+    decode_metered(body, meter)
 }
 
 /// Decodes `body` as `T`, charging `meter` as values are visited. Trailing bytes are an

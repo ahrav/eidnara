@@ -16515,7 +16515,7 @@ fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
 /// lane's typed decode to.
 #[cfg(test)]
 fn tree_decode_parses(body: &[u8]) -> bool {
-    serde_json::from_slice::<SkippedValue>(body).is_ok()
+    serde_json::from_slice::<TreeParseWitness>(body).is_ok()
 }
 
 /// The direct lane's one typed tokenization of an unpaged transform body, charged against
@@ -16641,56 +16641,56 @@ impl<'de> Deserialize<'de> for ProbeKey {
 /// boxed raw document when the token is the first key it sees, and a retained `Value`
 /// re-read from the sorted tree sees it first wherever the body placed it.
 #[cfg(test)]
-struct SkippedValue;
+struct TreeParseWitness;
 
 #[cfg(test)]
-impl<'de> Deserialize<'de> for SkippedValue {
+impl<'de> Deserialize<'de> for TreeParseWitness {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::{MapAccess, SeqAccess, Visitor};
 
         struct SkipVisitor;
 
         impl<'de> Visitor<'de> for SkipVisitor {
-            type Value = SkippedValue;
+            type Value = TreeParseWitness;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("any JSON value")
             }
 
             fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                while seq.next_element::<SkippedValue>()?.is_some() {}
-                Ok(SkippedValue)
+                while seq.next_element::<TreeParseWitness>()?.is_some() {}
+                Ok(TreeParseWitness)
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                while map.next_key::<SkippedKey>()?.is_some() {
-                    map.next_value::<SkippedValue>()?;
+                while map.next_key::<TreeParseWitnessKey>()?.is_some() {
+                    map.next_value::<TreeParseWitness>()?;
                 }
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
         }
 
@@ -16700,17 +16700,17 @@ impl<'de> Deserialize<'de> for SkippedValue {
 
 /// A key of a skipped object; [`RAW_VALUE_TOKEN`] in any position is an error.
 #[cfg(test)]
-struct SkippedKey;
+struct TreeParseWitnessKey;
 
 #[cfg(test)]
-impl<'de> Deserialize<'de> for SkippedKey {
+impl<'de> Deserialize<'de> for TreeParseWitnessKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Visitor;
 
         struct KeyVisitor;
 
         impl Visitor<'_> for KeyVisitor {
-            type Value = SkippedKey;
+            type Value = TreeParseWitnessKey;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("an object key other than the raw-value token")
@@ -16720,7 +16720,7 @@ impl<'de> Deserialize<'de> for SkippedKey {
                 if value == RAW_VALUE_TOKEN {
                     return Err(E::custom("raw-value token names an object key"));
                 }
-                Ok(SkippedKey)
+                Ok(TreeParseWitnessKey)
             }
         }
 
@@ -20808,9 +20808,10 @@ mod tests {
     /// derive refuses and the tree keeps last-wins (the direct lane falls back to the tree
     /// decode), and a shape under an ignored field that the derive skips without the tree's
     /// checks (nesting past the depth limit, a number out of range, a lone surrogate, invalid
-    /// UTF-8, an object opened by the raw-value token), which `tree_decode_parses` refuses
-    /// first. A body assembled from pages decodes to the same request as the same body in
-    /// one slice.
+    /// UTF-8, an object opened by the raw-value token). The direct lane's metered typed decode
+    /// refuses each of the latter, so the body restarts into the tree decode;
+    /// `tree_decode_parses` is the oracle for the tree's refusal. A body assembled from pages
+    /// decodes to the same request as the same body in one slice.
     #[test]
     fn direct_and_tree_transform_decodes_agree_on_the_corpus() {
         let corpus = transform_decode_corpus();
@@ -20903,7 +20904,16 @@ mod tests {
                 .unwrap();
             assert!(
                 !tree_decode_parses(body),
-                "{name}: the witness refuses the body before the direct decode can see it"
+                "{name}: the tree refuses the body"
+            );
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            assert!(
+                matches!(
+                    metered_decode::decode_metered_typed_direct::<TransformRequest>(body, &meter),
+                    Err(DecodeFailure::Invalid(_))
+                ),
+                "{name}: the direct lane's typed decode refuses the body, so it restarts"
             );
         }
 
@@ -21071,7 +21081,14 @@ mod tests {
             )
             .into_bytes()
         };
+        let escaped_token_key =
+            with_leading_key(&opencode_body, "$serde_json::private::Raw\\u0056alue", "1");
         vec![
+            (
+                "escaped raw token as a key",
+                escaped_token_key,
+                BodyLane::Tree,
+            ),
             (
                 "native opencode window",
                 text(&opencode_body).into_bytes(),
