@@ -3222,3 +3222,15 @@ index (`by_tail_mid`, `for_tail_message`) only the memo read. Every served
 message renders through the former miss path, and `SerializedOutputCache`
 keeps only the revision-bound previous CK output. Citations of these symbols
 here are historical at their stated baseline.
+
+## Dated note (2026-10-12, #993)
+
+Dated note, 2026-10-12, #993 (spec #988 milestone U3): the transform request
+carries no `serve_native`. The `pi` and `opencode-aisdk` profiles send
+`native_messages` as their only window, the daemon derives the pass's CK from
+it through the profile's codec before any projection and always serves native
+recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
+`messages`. Every clause here that names `serve_native`, a CK window sent
+beside the native window, or the Pi check that aligned rows with `messages` is
+invalidated; line anchors into files #993 changed are as of their earlier
+recorded head.

@@ -57,7 +57,7 @@ const PLUGIN_STAGES = [
     "apply_us",
     "other_us",
 ] as const;
-/** The daemon stage fields, in ledger order; `derive_ck_us` stays `null` until the daemon derives CK. */
+/** The daemon stage fields, in ledger order; `derive_ck_us` is `null` on a CK-only profile's pass. */
 const DAEMON_STAGES = [
     "admit_us",
     "lane_gate_and_decode_us",

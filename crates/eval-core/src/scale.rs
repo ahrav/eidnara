@@ -39,7 +39,7 @@ const PLUGIN_STAGES: [&str; 7] = [
     "other_us",
 ];
 /// The daemon stage fields of a row, in ledger order. They sum to `daemon_total_us` on a row
-/// that carries them; `derive_ck_us` stays `null` until the daemon derives CK.
+/// that carries them; `derive_ck_us` is `null` on a CK-only profile's pass, which derives no CK.
 const DAEMON_STAGES: [&str; 6] = [
     "admit_us",
     "lane_gate_and_decode_us",

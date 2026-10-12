@@ -886,14 +886,9 @@ const TRANSFORM_PAGE_FIELDS: [&str; 6] = [
     "transform_page_complete",
     "transform_page_digest",
 ];
-const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 6] = [
-    "input",
-    "messages",
-    "native_messages",
-    "ts_output",
-    "ts_messages",
-    "normalizations",
-];
+/// The window arrays a transform page series splits: a native profile's `native_messages` and a
+/// CK-only profile's `messages`.
+const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 2] = ["messages", "native_messages"];
 /// One ready-snapshot budget serves every session's wrapup. A snapshot charges only its CK
 /// input and scalar fields, never native payload, so 64 MiB holds several large sessions.
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
@@ -14176,11 +14171,11 @@ fn derive_native_window(
     if !profile.serves_native() {
         return Ok(None);
     }
+    let started_at = Instant::now();
     let native = request.native_messages.as_deref().unwrap_or_default();
     meter
         .charge(codec::derived_ck_charge(native))
         .map_err(resident_refusal)?;
-    let started_at = Instant::now();
     let messages = match profile {
         SerializerProfile::Pi => codec::pi::derive_pi_window(native)
             .map_err(|decline| invalid_params_error(decline.to_string()))?,
@@ -16877,6 +16872,26 @@ fn resident_refusal(refusal: Refusal) -> PreparedOutcome {
 #[cfg(feature = "test-support")]
 pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
     enforce_request_byte_cap(body).is_ok()
+}
+
+/// Derives a native profile's CK from `native` as a transform pass does, for the allocation
+/// test: `Ok` holds the derived message count, kept alive until the caller drops it, and `Err`
+/// the refusal.
+#[cfg(feature = "test-support")]
+pub fn derive_native_window_for_test(
+    profile: &str,
+    native: &[Arc<Value>],
+) -> Result<wire::IngressMessages, String> {
+    let messages = match SerializerProfile::parse(profile) {
+        Some(SerializerProfile::Pi) => {
+            codec::pi::derive_pi_window(native).map_err(|decline| decline.to_string())?
+        }
+        Some(SerializerProfile::OpencodeAiSdk) => {
+            codec::opencode::derive_opencode_window(native).map_err(|error| error.to_string())?
+        }
+        _ => return Err(format!("{profile} derives no CK")),
+    };
+    Ok(messages.into_iter().collect())
 }
 
 /// The steps `Handler::handle` runs on a sub-cap body before `dispatch_body`, against
@@ -25559,6 +25574,203 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    /// One native-window body through the body entry against a pool of `capacity` bytes: the
+    /// outcome, the bytes the meter needed, whether the session gained durable state, and whether
+    /// the pool holds all its bytes again once the pass has ended.
+    async fn native_body_against_a_pool(
+        body: &[u8],
+        capacity: usize,
+    ) -> (PreparedOutcome, usize, bool, bool) {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let pool = TestPool::with_capacity(capacity);
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let probe = lane_probe(body);
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner: &runner,
+            clock: transform_unit::PassClock::now(),
+        };
+        let (_, outcome) = handler.dispatch_body(&entry, body).await;
+        let needed = meter.needed();
+        drop(meter);
+        let released = pool.budget.try_charge(capacity).is_some();
+        (
+            outcome,
+            needed,
+            store.has_cache_state("ses").unwrap(),
+            released,
+        )
+    }
+
+    /// The derivation is funded before it allocates: a pool holding exactly the decode and the
+    /// derivation charge admits the pass, one byte short refuses it after the decode fit and
+    /// before any effect, and a pool holding the decode alone refuses the derivation the same way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_native_window_is_admitted_at_its_exact_charge_and_refused_one_byte_short() {
+        let window: Vec<IngressMessage> = (1..=40)
+            .map(|ordinal| ck(&format!("m{ordinal}"), ordinal, &"text ".repeat(200)))
+            .collect();
+        let body = serde_json::to_vec(&json!({
+            "kind": "transform",
+            "boundary": null,
+            "base_revision": "test-base",
+            "serializer_profile": "opencode-aisdk",
+            "session_id": "ses",
+            "render_config": "cfg0",
+            "native_messages": opencode_native_window(&window),
+        }))
+        .unwrap();
+        let (outcome, needed, durable, _) = native_body_against_a_pool(&body, 1 << 30).await;
+        assert!(
+            matches!(outcome, PreparedOutcome::Response(_)),
+            "{outcome:?}"
+        );
+        assert!(durable);
+        let native: Vec<Arc<Value>> =
+            serde_json::from_slice::<Value>(&body).unwrap()["native_messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(Arc::new)
+                .collect();
+        let derivation = codec::derived_ck_charge(&native);
+        let decode = needed - derivation;
+        assert!(
+            decode >= footprint_of(&body),
+            "the decode charge precedes the derivation's"
+        );
+
+        let (exact, _, durable, _) = native_body_against_a_pool(&body, needed).await;
+        assert!(matches!(exact, PreparedOutcome::Response(_)), "{exact:?}");
+        assert!(durable);
+        for capacity in [needed - 1, decode] {
+            let (short, _, durable, released) = native_body_against_a_pool(&body, capacity).await;
+            assert_eq!(
+                error_frame(short),
+                error_frame(request_too_large_error()),
+                "capacity {capacity}"
+            );
+            assert!(!durable, "a refused derivation leaves no session state");
+            assert!(released, "a refused derivation releases every charge");
+        }
+    }
+
+    /// The pages of `whole` split at `cuts` in its native window, as the plugins page it: every
+    /// page carries its native slice and content digest, and only the final page the scalars.
+    fn native_page_series(whole: &Value, cuts: &[usize]) -> Vec<Value> {
+        let native = whole["native_messages"].as_array().unwrap();
+        let bounds: Vec<usize> = std::iter::once(0)
+            .chain(cuts.iter().copied())
+            .chain(std::iter::once(native.len()))
+            .collect();
+        let total = bounds.len() - 1;
+        bounds
+            .windows(2)
+            .enumerate()
+            .map(|(index, range)| {
+                let complete = index + 1 == total;
+                let mut page = if complete {
+                    whole.clone()
+                } else {
+                    json!({ "method": "transform", "session_id": whole["session_id"] })
+                };
+                page["native_messages"] = json!(native[range[0]..range[1]]);
+                page["transform_page_id"] = json!("native-series");
+                page["transform_generation"] = json!(1);
+                page["transform_page_index"] = json!(index);
+                page["transform_page_total"] = json!(total);
+                page["transform_page_complete"] = json!(complete);
+                page["transform_page_digest"] = json!(transform_page_content_digest(&page));
+                page
+            })
+            .collect()
+    }
+
+    /// A native window paged in any partition assembles in order, derives the same CK, and
+    /// answers exactly as the unpaged window does; a page whose digest names other arrays
+    /// refuses as a digest mismatch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_native_window_paged_in_any_partition_serves_the_unpaged_response() {
+        let stated: Vec<IngressMessage> = (1..=12)
+            .map(|ordinal| ck(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
+            .collect();
+        let whole = json!({
+            "method": "transform",
+            "kind": "transform",
+            "boundary": null,
+            "base_revision": "test-base",
+            "serializer_profile": "opencode-aisdk",
+            "session_id": "ses",
+            "render_config": "cfg0",
+            "native_messages": opencode_native_window(&stated),
+        });
+        let run = |pages: Vec<Value>| async move {
+            let (handler, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            // Pages go out as the plugins send them, with no test client filling in fields.
+            let mut last = None;
+            for page in pages {
+                last = Some(handler.dispatch_value_for_test(test_route(7), page).await);
+            }
+            comparable_outcome(last.unwrap())
+        };
+        let unpaged = run(vec![whole.clone()]).await;
+        assert_eq!(unpaged.0, "response", "{unpaged:?}");
+        for cuts in [vec![1], vec![6], vec![11], vec![3, 7, 10]] {
+            let paged = run(native_page_series(&whole, &cuts)).await;
+            assert_eq!(paged, unpaged, "partition {cuts:?}");
+        }
+
+        let mut series = native_page_series(&whole, &[6]);
+        series[0]["transform_page_digest"] = json!(transform_page_content_digest(&json!({
+            "messages": series[0]["native_messages"],
+        })));
+        series.truncate(1);
+        let refused = run(series).await;
+        assert_eq!(
+            (refused.0.as_str(), refused.1.as_str()),
+            (
+                "authority_transform_page_digest_mismatch",
+                "transform page content digest did not match the supplied digest"
+            )
+        );
+    }
+
+    /// A native pass reports its derivation as `derive_ck`, a stage apart from
+    /// `lane_gate_and_decode`, and the daemon stages still sum to the carried total.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_native_pass_reports_its_derivation_inside_the_reconciled_ledger() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let request = native_cache_request(
+            "ses",
+            vec![ck("m1", 1, "hello"), ck("m2", 2, "there")],
+            Vec::new(),
+        );
+        let response =
+            call_transform_request(&handler, serde_json::to_value(request).unwrap()).await;
+        let ledger: transform::DaemonStageLedger =
+            serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
+        let derive_ck = ledger.derive_ck_us.expect("a native pass derives its CK");
+        assert_eq!(
+            ledger.admit_us
+                + ledger.lane_gate_and_decode_us
+                + derive_ck
+                + ledger.transform_core_us
+                + ledger.native_attach_us
+                + ledger.residual_us,
+            ledger.total_us,
+            "{ledger:?}"
+        );
+        assert_eq!((ledger.window_messages, ledger.window_blocks), (2, 2));
     }
 
     #[tokio::test(flavor = "current_thread")]
