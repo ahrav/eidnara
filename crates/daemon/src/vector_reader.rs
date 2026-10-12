@@ -29,7 +29,7 @@ use retrieval::dense::{
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
 
-use crate::projection_gates::Admission;
+use crate::projection_gates::{ActivationGrant, Admission};
 use crate::vector_admission::{self, Ledger, Pinned, Reservation, ResourceClass};
 use crate::vector_composition::{self, Candidate, SelectorState, Unavailable, VerifiedComposition};
 use crate::vector_generation::{
@@ -734,6 +734,8 @@ pub struct CompressedRequest<'a> {
     pub max_pinned_bytes: u64,
     /// Original-row bytes the rescore may read. Each pool entry is one positioned read of exactly one row, so a full pool reads `R` rows and nothing else.
     pub max_read_bytes: u64,
+    /// The gate's compressed activation; the ranking refuses when it is withdrawn before the first check or before the result returns.
+    pub activation: &'a ActivationGrant,
 }
 
 /// The rescored ranking and the quantized pool it came from, kept apart so candidate coverage and rescored quality are measured on their own stages.
@@ -745,6 +747,8 @@ pub struct CompressedRanking {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CompressedRefusal {
+    #[error("the compressed activation grant was withdrawn")]
+    ActivationRevoked,
     #[error("the view's {field} is not the request's")]
     Identity { field: &'static str },
     #[error("the view of composition {digest} is quarantined")]
@@ -816,6 +820,9 @@ pub fn rank_compressed(
     grant: &Admission,
     observe: &mut dyn FnMut(RescoreEvent<'_>),
 ) -> Result<CompressedRanking, CompressedRefusal> {
+    if request.activation.is_revoked() {
+        return Err(CompressedRefusal::ActivationRevoked);
+    }
     if view.is_quarantined() {
         return Err(CompressedRefusal::Quarantined {
             digest: view.digest.clone(),
@@ -918,6 +925,10 @@ pub fn rank_compressed(
     );
     let rescored = rescored.map_err(|refusal| rescore_refusal(view, refusal))?;
     budget.check().map_err(|_| CompressedRefusal::Budget)?;
+    // A grant withdrawn during the scan or the rescore discards the ranking.
+    if request.activation.is_revoked() {
+        return Err(CompressedRefusal::ActivationRevoked);
+    }
     Ok(CompressedRanking { pool, rescored })
 }
 

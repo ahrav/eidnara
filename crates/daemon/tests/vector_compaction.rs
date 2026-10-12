@@ -53,6 +53,7 @@ fn publish_compacted(
     publish(
         compacted,
         &fixture.staging(),
+        &fixture.activation(),
         &fixture.expected(),
         bounds(),
         &fixture.work_dir(),
@@ -263,6 +264,7 @@ fn a_tail_published_after_the_cut_is_carried_once_with_its_precedence_and_a_stal
     let published = publish(
         &compacted,
         &fixture.staging(),
+        &fixture.activation(),
         &fixture.expected(),
         bounds(),
         &fixture.work_dir(),
@@ -341,6 +343,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     let outcome = publish(
         &compacted,
         &fixture.staging(),
+        &fixture.activation(),
         &fixture.expected(),
         bounds(),
         &fixture.work_dir(),
@@ -401,6 +404,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     let outcome = publish(
         &compacted,
         &fixture.staging(),
+        &fixture.activation(),
         &fixture.expected(),
         bounds(),
         &record_dir,
@@ -433,6 +437,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     let published = publish(
         &compacted,
         &fixture.staging(),
+        &fixture.activation(),
         &fixture.expected(),
         bounds(),
         &record_dir,
@@ -935,4 +940,48 @@ fn discard_removes_only_the_builds_files_and_drop_removes_them_too() {
     drop(compacted);
     assert!(!dir.exists(), "the work directory goes with the output");
     assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
+}
+
+#[test]
+fn a_withdrawn_activation_grant_publishes_nothing_and_a_live_one_publishes_the_same_compaction() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let d1 = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    let selected = fixture
+        .publish(&fixture.compose(1, &base, &[d1]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let before = fixture.generations();
+    let withdrawn = fixture.activation();
+    // Reinstalling the evaluator withdraws every earlier grant and takes a fresh hook admission.
+    fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
+    let mut events = 0;
+    let refusal = publish(
+        &compacted,
+        &fixture.staging(),
+        &withdrawn,
+        &fixture.expected(),
+        bounds(),
+        &fixture.work_dir(),
+        &mut |_| {
+            events += 1;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refusal, CompactionRefusal::ActivationRevoked);
+    assert_eq!(events, 0, "the selector is never approached");
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(selected.clone())
+    );
+    assert_eq!(fixture.generations(), before, "nothing is staged");
+
+    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert_eq!(published.base, compacted.built().digest());
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(published.digest)
+    );
 }

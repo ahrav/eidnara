@@ -318,8 +318,10 @@ pub fn encode_rows<'a>(
     let mut count = 0u64;
     for (index, row) in rows.enumerate() {
         validate(row, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })?;
-        for value in row {
-            bytes.extend_from_slice(&value.to_le_bytes());
+        let start = bytes.len();
+        bytes.resize(start + row.len() * 4, 0);
+        for (word, value) in bytes[start..].as_chunks_mut::<4>().0.iter_mut().zip(row) {
+            *word = value.to_le_bytes();
         }
         count += 1;
     }

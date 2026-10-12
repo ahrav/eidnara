@@ -87,6 +87,9 @@ fn the_encoder_matches_exactly_the_codes_the_quotient_writes() {
             encode_validated_into(&layout, &scales, &row, &mut expected);
             let mut stored: Vec<u8> = expected.iter().map(|code| *code as u8).collect();
             let encoder = Encoder::new(&scales);
+            let mut written = vec![0u8; row.len()];
+            encoder.encode_into(&row, &mut written);
+            prop_assert_eq!(&written, &stored);
             prop_assert!(encoder.matches(&layout, &row, &stored));
             // Every byte is compared: changing any one of them, in a whole block or the tail, is seen.
             for index in 0..stored.len() {
@@ -95,6 +98,33 @@ fn the_encoder_matches_exactly_the_codes_the_quotient_writes() {
                 stored[index] ^= 1;
             }
             prop_assert!(!encoder.matches(&layout, &row, &stored[1..]));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn the_encoding_writes_the_rounded_quotient_and_counts_every_clamp() {
+    runner()
+        .run(&row_and_scales(), |(row, scales)| {
+            let layout = RowLayout {
+                unit_norm_tolerance: f64::MAX,
+                ..layout(row.len())
+            };
+            let (mut expected, mut clipped) = (Vec::new(), 0u32);
+            for (value, scale) in row.iter().zip(&scales) {
+                let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
+                let clamped = rounded.clamp(-127.0, 127.0);
+                clipped += u32::from(clamped != rounded);
+                expected.push(clamped as i8);
+            }
+            let scales = Scales::from_values(scales, layout.dimension).unwrap();
+            let mut codes = vec![i8::MIN; row.len() + 1];
+            prop_assert_eq!(
+                encode_validated_into(&layout, &scales, &row, &mut codes),
+                clipped
+            );
+            prop_assert_eq!(codes, expected);
             Ok(())
         })
         .unwrap();
@@ -129,6 +159,9 @@ fn ties_and_their_neighbours_code_as_the_quotient_does_in_wide_rows() {
                 encoder.matches(&layout, &row, &stored),
                 "scale {scale}, offset {offset}"
             );
+            let mut written = vec![0u8; dimension];
+            encoder.encode_into(&row, &mut written);
+            assert_eq!(written, stored, "scale {scale}, offset {offset}");
         }
     }
 }
@@ -220,6 +253,9 @@ fn the_product_path_sees_every_stored_byte() {
             encode_validated_into(&layout, &scales, &row, &mut expected);
             let mut stored: Vec<u8> = expected.iter().map(|code| *code as u8).collect();
             let encoder = Encoder::new(&scales);
+            let mut written = vec![0u8; row.len()];
+            encoder.encode_into(&row, &mut written);
+            prop_assert_eq!(&written, &stored);
             prop_assert!(encoder.matches(&layout, &row, &stored));
             for index in 0..stored.len() {
                 for bit in [0x01u8, 0x80] {

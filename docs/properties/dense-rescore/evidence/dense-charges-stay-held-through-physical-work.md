@@ -8,7 +8,7 @@ until blocking work exits and is joined.
 ## Evidence trail
 
 - The route clones `DenseVectors`, which holds the view's `Arc`, before
-  `run_unit` for an `Embedded::Vector` request (`query_route.rs:1977`), and
+  `run_unit` for an `Embedded::Vector` request (`query_route.rs:1992`), and
   moves it into the unit's closure; an undeclared or unavailable embedding
   takes no clone.
 - `rank_compressed` holds its `Scratch` and `RowBuffers` reservations for the
@@ -17,7 +17,7 @@ until blocking work exits and is joined.
   as the scan's retained payload buffers: per layer one decoded block, the
   query encoded under the layer's scales, and the layer's code window. The
   per-layer descriptor vectors `rank_compressed` builds
-  (`vector_reader.rs:858-868`) and the scan's control structures are bounded
+  (`vector_reader.rs:865-875`) and the scan's control structures are bounded
   by `max_layers` and `max_entries` and stay outside the charge.
 - `SharedBudget::bridge` awaits the unit after cancellation instead of
   dropping it.

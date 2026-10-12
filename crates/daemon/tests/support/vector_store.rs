@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use super::projection_gate::{identity, passing_evaluator};
 use daemon::projection_gates::{
-    Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
+    ActivationGrant, Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity,
+    ProjectionHook,
 };
 use daemon::vector_admission::Ledger;
 use daemon::vector_composition::{
@@ -183,6 +184,11 @@ impl Fixture {
             Some(LifecycleTransactionLock::acquire_exclusive(Some(self.root.path())).unwrap());
     }
 
+    /// The gate's compressed activation under the passing evaluator; [`Self::set_limit`] reinstalls the evaluator and withdraws it.
+    pub fn activation(&self) -> ActivationGrant {
+        self.gate.admit_compressed_activation().unwrap()
+    }
+
     pub fn expected(&self) -> ExpectedVectors<'_> {
         ExpectedVectors {
             generation: &self.generation,
@@ -266,6 +272,7 @@ impl Fixture {
             composition,
             self.predecessor().as_deref(),
             &self.staging(),
+            Some(&self.activation()),
             &self.work_dir(),
             &mut |_| Ok(()),
         )

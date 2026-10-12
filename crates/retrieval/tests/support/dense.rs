@@ -45,11 +45,16 @@ pub fn layout() -> RowLayout {
 }
 
 pub fn generation() -> VectorGeneration {
+    generation_of(DIMENSION)
+}
+
+/// The fixture's generation at `dimension`, so a wide fixture's queries name the generation its vectors were stored under.
+pub fn generation_of(dimension: u32) -> VectorGeneration {
     VectorGeneration {
         generation_id: GENERATION.to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),
-        vector_dimension: DIMENSION,
+        vector_dimension: dimension,
         generation_epoch: 1,
     }
 }
@@ -273,6 +278,7 @@ pub struct Fixture {
     pub incarnation: String,
     pub project: ProjectScope,
     pub rows: Vec<Row>,
+    pub dimension: u32,
 }
 
 impl Fixture {
@@ -282,6 +288,16 @@ impl Fixture {
 
     /// Every object in `objects` gets a decision and those in `admitted` an admission, so a test can shape a corpus larger than [`corpus`].
     pub fn with_objects(objects: &[&str], admitted: &[&str], rows: Vec<Row>) -> Self {
+        Self::with_dimension(objects, admitted, rows, DIMENSION)
+    }
+
+    /// [`Self::with_objects`] whose projection and stored vectors are `dimension` wide; decisions commit and rows project in chunks, so a corpus may exceed one batch's bounds.
+    pub fn with_dimension(
+        objects: &[&str],
+        admitted: &[&str],
+        rows: Vec<Row>,
+        dimension: u32,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let kernel = KernelStore::open(root.path().join("kernel")).unwrap();
         kernel
@@ -296,15 +312,23 @@ impl Fixture {
                     sensitivity: Sensitivity::Normal,
                 })?;
                 envelope.insert_scope(scope(SCOPE_A, PROJECT_A))?;
-                for object in objects {
-                    envelope.insert_decision(decision(object))?;
-                    if admitted.contains(object) {
-                        envelope.record_admission(admission(object))?;
-                    }
-                }
                 Ok(String::new())
             })
             .unwrap();
+        let admitted: BTreeSet<&str> = admitted.iter().copied().collect();
+        for (index, chunk) in objects.chunks(1024).enumerate() {
+            kernel
+                .commit(intent(&format!("decisions-{index}")), |envelope| {
+                    for object in chunk {
+                        envelope.insert_decision(decision(object))?;
+                        if admitted.contains(object) {
+                            envelope.record_admission(admission(object))?;
+                        }
+                    }
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
         let incarnation = kernel
             .database_incarnation_id_within_budget(&EvalBudget::unbounded())
             .unwrap();
@@ -324,13 +348,13 @@ impl Fixture {
                         analysis_identity: retrieval::lexical::AnalysisIdentity::current()
                             .as_str()
                             .to_string(),
-                        vector_dimension: DIMENSION,
+                        vector_dimension: dimension,
                         generation_epoch: 1,
                     },
                     1,
                 )
                 .unwrap();
-                register_generation(conn, &generation(), 1).unwrap();
+                register_generation(conn, &generation_of(dimension), 1).unwrap();
                 Ok(())
             })
             .unwrap();
@@ -341,6 +365,7 @@ impl Fixture {
             incarnation,
             project: ProjectScope::new(PROJECT_A).unwrap(),
             rows,
+            dimension,
         };
         fixture.project();
         fixture
@@ -353,14 +378,18 @@ impl Fixture {
     /// Projects every row with a queued embedding job, then completes the jobs whose rows carry a vector.
     pub fn project(&self) {
         let through = self.kernel.tip().unwrap();
-        let texts: Vec<String> = self
-            .rows
+        for rows in self.rows.chunks(batch_bounds().persist.max_records.get()) {
+            self.project_chunk(rows, through);
+        }
+    }
+
+    fn project_chunk(&self, rows: &[Row], through: i64) {
+        let texts: Vec<String> = rows
             .iter()
             .map(|row| format!("text {}", row.object))
             .collect();
-        let identities: Vec<Vec<(&str, &str)>> = self.rows.iter().map(Row::identity).collect();
-        let records: Vec<OccurrenceRecord<'_>> = self
-            .rows
+        let identities: Vec<Vec<(&str, &str)>> = rows.iter().map(Row::identity).collect();
+        let records: Vec<OccurrenceRecord<'_>> = rows
             .iter()
             .zip(&identities)
             .zip(&texts)
@@ -389,11 +418,11 @@ impl Fixture {
         self.store
             .with_conn_fenced(|conn| {
                 apply_batch(conn, &batch, batch_bounds(), through).unwrap();
-                for row in &self.rows {
+                for row in rows {
                     if let Some(vector) = &row.vector {
                         conn.execute(
                             "INSERT INTO occurrence_vectors(occurrence_id,generation_id,vector,vector_dimension,input_bytes,input_tokens,completed_at) VALUES (?1,?2,?3,?4,1,1,1)",
-                            rusqlite::params![row.occurrence_id(), GENERATION, codec::encode(vector), DIMENSION],
+                            rusqlite::params![row.occurrence_id(), GENERATION, codec::encode(vector), self.dimension],
                         )?;
                         conn.execute(
                             "UPDATE embedding_jobs SET state='embedded' WHERE occurrence_id=?1",
@@ -498,7 +527,7 @@ impl Fixture {
         bounds: OracleBounds,
         budget: &EvalBudget,
     ) -> Result<ExhaustiveRanking, OracleRefusal> {
-        let generation = generation();
+        let generation = generation_of(self.dimension);
         self.store
             .with_conn(|conn| {
                 Ok(exhaustive(
@@ -518,7 +547,7 @@ impl Fixture {
         budget: &EvalBudget,
         hook: impl FnMut(Window<'_>),
     ) -> Result<ExhaustiveRanking, OracleRefusal> {
-        let generation = generation();
+        let generation = generation_of(self.dimension);
         self.store
             .with_conn(|conn| {
                 Ok(exhaustive_with_hook_for_test(

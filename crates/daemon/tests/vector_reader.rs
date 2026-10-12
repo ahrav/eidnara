@@ -351,6 +351,7 @@ fn a_publisher_that_runs_while_a_reader_verifies_moves_the_selector_and_the_read
                         &new,
                         fixture.predecessor().as_deref(),
                         &staging,
+                        Some(&fixture.activation()),
                         &fixture.work_dir(),
                         &mut |_| Ok(()),
                     )

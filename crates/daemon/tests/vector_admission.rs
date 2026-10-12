@@ -326,6 +326,7 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
         &composition,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -342,6 +343,182 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
     assert_eq!(fixture.generations(), before);
     let within = fixture.compose(1, &base, &[fixture.layer(4, 16)]).unwrap();
     assert!(fixture.publish(&within).is_ok(), "the exact bound admits");
+    assert_eq!(fixture.ledger.census(), Census::default());
+}
+
+/// A grant from `other` stays live across changes to `gate`, so each refusal below comes from `gate`'s own state on the reservation right after the change.
+#[test]
+fn every_gate_change_reaches_the_next_reservation_under_a_grant_the_change_did_not_cancel() {
+    let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
+    let (other, _) = ledger_with(RESIDENT_LIMIT, 100);
+    let grant = admit(&other);
+    drop(ledger.reserve(&grant, ResourceClass::Text, 60).unwrap());
+    ledger.admit_deltas(&grant, 2).unwrap();
+
+    let identity = identity("test-incarnation", DIMENSION);
+    let mut lowered = passing_evaluator(&identity, 0, &ProjectionHook::ALL);
+    lowered
+        .manifest
+        .limits
+        .insert(RESIDENT_LIMIT.to_owned(), 50);
+    lowered.manifest.limits.insert(DELTA_LIMIT.to_owned(), 1);
+    gate.install(lowered);
+    assert!(!grant.invalidated.is_cancelled());
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 60).unwrap_err(),
+        exceeded(RESIDENT_LIMIT, 60, 50),
+        "the reinstalled limit judges the next reservation"
+    );
+    assert_eq!(
+        ledger.admit_deltas(&grant, 2).unwrap_err(),
+        Denial::LimitExceeded {
+            limit: DELTA_LIMIT.to_owned(),
+            observed: 2,
+            max: 1
+        }
+    );
+    drop(ledger.reserve(&grant, ResourceClass::Text, 50).unwrap());
+
+    gate.close();
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::NoManifest)
+    );
+    assert_eq!(
+        ledger.admit_deltas(&grant, 0).unwrap_err(),
+        Denial::NoManifest
+    );
+
+    let mut renamed = passing_evaluator(&identity, 0, &ProjectionHook::ALL);
+    renamed.current.embedding_model = "another-model".to_owned();
+    gate.install(renamed);
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::EvidenceIdentity),
+        "an evaluator for another identity refuses the ledger's"
+    );
+    assert_eq!(ledger.census(), Census::default());
+}
+
+#[test]
+fn a_zero_byte_static_charge_still_charges_once_and_refusals_keep_their_order() {
+    let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
+    let grant = admit(&gate);
+    let model = ledger
+        .reserve(&grant, ResourceClass::ModelMemory, 0)
+        .unwrap();
+    let text = ledger.reserve(&grant, ResourceClass::Text, 1).unwrap();
+    assert_eq!(
+        ledger.census().held.get(&ResourceClass::ModelMemory),
+        Some(&0),
+        "a zero-byte reservation still charges its class"
+    );
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::ModelMemory, 0)
+            .unwrap_err(),
+        Refusal::AlreadyCharged {
+            class: ResourceClass::ModelMemory
+        }
+    );
+
+    // The ledger refuses a double charge and an overflow before it consults the gate, so a cancelled grant sees those refusals first.
+    grant.invalidated.cancel();
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::ModelMemory, 1)
+            .unwrap_err(),
+        Refusal::AlreadyCharged {
+            class: ResourceClass::ModelMemory
+        }
+    );
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::Text, u64::MAX)
+            .unwrap_err(),
+        Refusal::Overflow {
+            pool: Pool::Resident
+        }
+    );
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::Invalidated)
+    );
+    drop((model, text));
+    assert_eq!(ledger.census(), Census::default());
+}
+
+const CLASSES: [ResourceClass; 9] = [
+    ResourceClass::ModelMemory,
+    ResourceClass::TokenizerCache,
+    ResourceClass::SqliteCache,
+    ResourceClass::Text,
+    ResourceClass::Scratch,
+    ResourceClass::RowBuffers,
+    ResourceClass::LayerTables,
+    ResourceClass::Staging,
+    ResourceClass::CompactionScratch,
+];
+
+/// The match is exhaustive, so a class added to the enum fails to compile here until it is named, next to `CLASSES`.
+fn named(class: ResourceClass) -> bool {
+    match class {
+        ResourceClass::ModelMemory
+        | ResourceClass::TokenizerCache
+        | ResourceClass::SqliteCache
+        | ResourceClass::Text
+        | ResourceClass::Scratch
+        | ResourceClass::RowBuffers
+        | ResourceClass::LayerTables
+        | ResourceClass::Staging
+        | ResourceClass::CompactionScratch => CLASSES.contains(&class),
+    }
+}
+
+#[test]
+fn every_class_reserves_into_its_own_census_slot_and_pool_and_releases_by_drop() {
+    let fixture = Fixture::new();
+    let mut reservations = Vec::new();
+    let mut expected = Census::default();
+    // Each class charges a distinct power of two, so a charge landing in another class's slot or pool changes the census.
+    for (index, class) in CLASSES.into_iter().enumerate() {
+        assert!(named(class), "{class:?} is listed in CLASSES");
+        let bytes = 1u64 << index;
+        let reservation = match class.pool() {
+            Pool::Resident => fixture.ledger.reserve(&fixture.admission, class, bytes),
+            Pool::Disk => {
+                fixture
+                    .ledger
+                    .reserve_disk(&fixture.admission, class, bytes, &fixture.store)
+            }
+        }
+        .unwrap_or_else(|refusal| panic!("{class:?} reserves: {refusal}"));
+        match class.pool() {
+            Pool::Resident => expected.resident += bytes,
+            Pool::Disk => expected.disk += bytes,
+        }
+        expected.held.insert(class, bytes);
+        assert_eq!(
+            fixture.ledger.census(),
+            expected,
+            "after charging {class:?}"
+        );
+        reservations.push(reservation);
+    }
+    for reservation in reservations {
+        let class = reservation.class();
+        match class.pool() {
+            Pool::Resident => expected.resident -= reservation.bytes(),
+            Pool::Disk => expected.disk -= reservation.bytes(),
+        }
+        expected.held.remove(&class);
+        drop(reservation);
+        assert_eq!(
+            fixture.ledger.census(),
+            expected,
+            "after releasing {class:?}"
+        );
+    }
     assert_eq!(fixture.ledger.census(), Census::default());
 }
 
