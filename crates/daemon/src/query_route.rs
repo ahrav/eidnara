@@ -52,7 +52,7 @@ use storage::{GuardedConn, StoreError};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, measure_json};
 use crate::kernel_routes::RouteScope;
-use crate::projection_gates::Admission;
+use crate::projection_gates::{ActivationGrant, Admission};
 use crate::request_budget::{
     BlockingFailure, BudgetRefusal, Exhaustion, RequestBudget, SharedBudget,
 };
@@ -98,6 +98,8 @@ pub enum LimitsRefusal {
     DenseCapacity(CapacityRefusal),
     #[error("compressed dense vectors need declared dense limits")]
     DenseUndeclared,
+    #[error("the compressed activation grant was withdrawn before installation")]
+    ActivationRevoked,
 }
 
 /// An absent dense limit set leaves the dense lane undeclared; RP2.9 approves the values before it is declared.
@@ -632,11 +634,12 @@ impl CompressedLimits {
     }
 }
 
-/// A verified composition the dense lane ranks through, the grant its ledger charges are taken under, and the producer's bounds.
+/// A verified composition the dense lane ranks through, the grant its ledger charges are taken under, the activation grant that admits compressed use, and the producer's bounds.
 #[derive(Clone)]
 pub struct DenseVectors {
     view: Arc<PinnedVectors>,
     grant: Admission,
+    activation: ActivationGrant,
     limits: CompressedLimits,
     #[cfg(any(test, feature = "test-support"))]
     observe: Option<DenseObserver>,
@@ -647,10 +650,17 @@ pub struct DenseVectors {
 pub type DenseObserver = Arc<dyn Fn(RescoreEvent<'_>) + Send + Sync>;
 
 impl DenseVectors {
-    pub fn new(view: Arc<PinnedVectors>, grant: Admission, limits: CompressedLimits) -> Self {
+    /// `activation` comes from [`crate::projection_gates::HookGate::admit_compressed_activation`]; installation refuses it once withdrawn, and every request refuses it too.
+    pub fn new(
+        view: Arc<PinnedVectors>,
+        grant: Admission,
+        activation: ActivationGrant,
+        limits: CompressedLimits,
+    ) -> Self {
         Self {
             view,
             grant,
+            activation,
             limits,
             #[cfg(any(test, feature = "test-support"))]
             observe: None,
@@ -690,6 +700,10 @@ impl DenseProducer for CompressedProducer {
         request: DenseRequest<'_>,
     ) -> Result<DenseRanking, DenseRefusal> {
         let vectors = &self.vectors;
+        // A withdrawn activation degrades the lane on the next request, whether or not the vectors are reinstalled.
+        if vectors.activation.is_revoked() {
+            return Err(DenseRefusal::Unavailable("activation_revoked"));
+        }
         // Installation checked the pool against the route's limits; this check covers a producer built outside the handler and a request whose limits were read before a concurrent reinstallation.
         let capacity = vectors
             .limits
@@ -1874,6 +1888,9 @@ impl HandlerCore {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(vectors) = &vectors {
+                if vectors.activation.is_revoked() {
+                    return Err(LimitsRefusal::ActivationRevoked);
+                }
                 check_pair(route.as_deref(), vectors)?;
             }
             std::mem::replace(&mut *installed, vectors)

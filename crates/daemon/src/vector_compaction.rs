@@ -10,6 +10,7 @@ use host_runtime::generation::{CurrentProfile, GenerationError, ProfileEvent};
 use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::{ResolveRefusal, RowAccess, RowFault, Winner, resolve};
 
+use crate::projection_gates::ActivationGrant;
 use crate::vector_admission::{self, Reservation, ResourceClass};
 use crate::vector_composition::{self, Composition, CompositionRefusal, CompositionSpec, Progress};
 use crate::vector_generation::{self, BuiltVectors, ExpectedVectors, Staging, VectorRefusal};
@@ -70,6 +71,9 @@ pub enum CompactionRefusal {
     PrefixMoved,
     #[error("no composition is selected")]
     NoSelection,
+    /// The compressed activation grant was withdrawn; nothing is selected.
+    #[error("the compressed activation grant was withdrawn")]
+    ActivationRevoked,
     #[error(transparent)]
     Composition(#[from] CompositionRefusal),
     #[error("the work directory could not be removed: {0}")]
@@ -289,17 +293,23 @@ pub struct Published {
 
 /// Only the deltas past the cut are verified here, each under `bounds.max_member_bytes` as the reader verifies a member: the view verified and pinned the cut's members at acquisition, and none of them is a member of the new composition. `staging` holds the exclusive transaction lock, so the selection cannot move between the readback and the publication.
 ///
+/// Publication is full-corpus publication of a compressed base, so it runs only under `activation`, checked before the readback and again before the selector moves.
+///
 /// # Errors
 ///
-/// A selection that no longer stands on the cut, with nothing staged; a staging or composition refusal; or an unknown outcome after the selector rename returned, which the caller settles with [`vector_composition::reconcile`] before any retry.
+/// A withdrawn activation grant; a selection that no longer stands on the cut, with nothing staged; a staging or composition refusal; or an unknown outcome after the selector rename returned, which the caller settles with [`vector_composition::reconcile`] before any retry.
 pub fn publish(
     compacted: &Compacted,
     staging: &Staging<'_>,
+    activation: &ActivationGrant,
     expected: &ExpectedVectors<'_>,
     bounds: ReaderBounds,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
 ) -> Result<Published, CompactionRefusal> {
+    if activation.is_revoked() {
+        return Err(CompactionRefusal::ActivationRevoked);
+    }
     let max_deltas = bounds.max_deltas;
     let selected = match staging.store.read_vector_current()? {
         CurrentProfile::Current(digest) => digest,
@@ -360,6 +370,10 @@ pub fn publish(
         deltas: &carried,
         max_deltas,
     })?;
+    // The staged base stays unselected, so a prune reclaims it.
+    if activation.is_revoked() {
+        return Err(CompactionRefusal::ActivationRevoked);
+    }
     match vector_composition::publish(
         &composition,
         Some(selected.as_str()),

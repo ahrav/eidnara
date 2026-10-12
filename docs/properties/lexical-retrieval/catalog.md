@@ -15,8 +15,8 @@ admission (`crates/retrieval/src/lexical/retrieve.rs`), the retrieval batch
 adapter over the kernel's eligibility policy
 (`crates/retrieval/src/eligibility.rs`), and the daemon's lexical admission in
 `crates/daemon/src/query_route.rs`. The daemon reaches the lane through `scan`
-(`crates/daemon/src/query_route.rs:1099`) and `admit` (`:1259`), each under
-`QueryRouteLimits::lexical_retrieval_bounds` (`:170`); `retrieve` has no
+(`crates/daemon/src/query_route.rs:1113`) and `admit` (`:1273`), each under
+`QueryRouteLimits::lexical_retrieval_bounds` (`:172`); `retrieve` has no
 production caller, and `crates/retrieval/tests/lexical_retrieval.rs:652`
 `scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate`
 is the bridge every `retrieve`-driven check rests on. Fusion, packing, and
@@ -29,7 +29,7 @@ field.
 
 - `default-production`: every record. A default install serves the route, and
   the lexical lane runs whenever the request analyzes to one or more atoms
-  (`crates/daemon/src/query_route.rs:1095` returns `Undeclared` otherwise).
+  (`crates/daemon/src/query_route.rs:1109` returns `Undeclared` otherwise).
   `one-kernel-eligibility-policy` is a static property of the source tree;
   its label describes the paths the scan protects, which
   `portfolio-evaluation.md` bias 1 records as a human call.
@@ -100,7 +100,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - the route's guard is the `Undeclared`
-return at `crates/daemon/src/query_route.rs:1095`; `Completion::Empty` itself
+return at `crates/daemon/src/query_route.rs:1109`; `Completion::Empty` itself
 is reached only by tests that call `scan` or `retrieve` with zero probes
 Status: active
 Exercised: yes - an analysis with zero atoms compiles to no probe and runs no

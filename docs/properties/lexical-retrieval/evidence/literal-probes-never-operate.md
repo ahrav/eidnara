@@ -33,8 +33,8 @@ Production code:
   separators, so no atom carries them and `quote_atom`'s doubling is a second
   guard rather than the first.
 - The daemon compiles probes only through this path: `lexical_read`
-  (`crates/daemon/src/query_route.rs:1076`) calls `compile`
-  (`crates/daemon/src/query_route.rs:1098`) on the analysis of the request's
+  (`crates/daemon/src/query_route.rs:1090`) calls `compile`
+  (`crates/daemon/src/query_route.rs:1112`) on the analysis of the request's
   prose segments.
 
 Tests cited by the record, read at the branch:
@@ -101,8 +101,8 @@ a value on every statement; no interleaving changes the text the engine sees.
 
 - Sources examined: `crates/retrieval/tests/lexical_engine.rs:16` and `:180`
   (scratch engine); `crates/retrieval/tests/lexical_retrieval.rs:332`, `:164`,
-  and `:596` (projection fixture); `crates/daemon/src/query_route.rs:1076`
-  and `:1098` (daemon call site).
+  and `:596` (projection fixture); `crates/daemon/src/query_route.rs:1090`
+  and `:1112` (daemon call site).
 - Findings: the engine tests use a scratch in-memory table that shares only
   `fts5_table_args` with the projection. The retrieval test runs the real
   `retrieve` over a projection store opened through `open_store` and a kernel

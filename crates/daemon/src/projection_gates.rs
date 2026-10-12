@@ -686,10 +686,17 @@ pub struct Admission {
     pub invalidated: CancellationToken,
 }
 
-/// A grant to use or publish compressed vector layers in production; `invalidated` fires when the gate's manifest or identity changes after the grant.
+/// A grant to use or publish compressed vector layers in production; `invalidated` fires when the gate's manifest or identity changes after the grant. Only [`HookGate::admit_compressed_activation`] issues one, so installing compressed vectors or publishing a compaction requires the gate's activation verdict.
 #[derive(Debug, Clone)]
 pub struct ActivationGrant {
-    pub invalidated: CancellationToken,
+    invalidated: CancellationToken,
+}
+
+impl ActivationGrant {
+    /// Whether the gate withdrew the grant after issuing it.
+    pub fn is_revoked(&self) -> bool {
+        self.invalidated.is_cancelled()
+    }
 }
 
 /// Outcome of a [`ProjectionAdmission::refresh`](crate::projection_admission::ProjectionAdmission::refresh) for existing grants.

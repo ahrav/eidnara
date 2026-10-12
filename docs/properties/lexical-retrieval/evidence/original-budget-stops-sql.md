@@ -14,17 +14,17 @@ branch. PR #967 lists AC6 as met by existing tests and names
 
 Route-level budget, `crates/daemon/src/query_route.rs`:
 
-- `:1328` `execute` calls `admit_lanes` (`:1353`) then `select` (`:1461`). Both
+- `:1342` `execute` calls `admit_lanes` (`:1367`) then `select` (`:1475`). Both
   take one `&SharedBudget`; no phase derives another.
-- `:471` `check` returns `exhaustion(budget)` (`:464`), which maps
+- `:473` `check` returns `exhaustion(budget)` (`:466`), which maps
   `Exhaustion::Cancelled` to `Terminal::Cancelled` and a deadline or an
   unclassified stop to `Terminal::Deadline`.
-- `:1371` `projection.read_under(budget, ...)` holds the connection for the
-  exact, lexical, and dense phases. Inside it `:1385` through `:1387` run
+- `:1385` `projection.read_under(budget, ...)` holds the connection for the
+  exact, lexical, and dense phases. Inside it `:1399` through `:1401` run
   `before_phase(Phase::Lexical)`, `check(budget)`, then `lexical_read`
-  (`:1076`), which passes `budget.eval()` into `retrieval::lexical::scan`
+  (`:1090`), which passes `budget.eval()` into `retrieval::lexical::scan`
   and maps `LaneRefusal::Budget` to `exhaustion(budget)`.
-- `:1243` `admit_lexical`, called at `:1389` inside the same closure, judges
+- `:1257` `admit_lexical`, called at `:1403` inside the same closure, judges
   the scanned lane with `budget.eval()` while the connection is held, inside
   the `Phase::Lexical` window.
 - `crates/daemon/src/search_projection.rs:406` `read_under` builds
@@ -126,7 +126,7 @@ most of the work in a count, a ranked read, or a common scan.
 ### Q: Does the route test prove an interrupt inside a lexical statement?
 
 - Sources examined: `crates/daemon/tests/query_route.rs:74` through `:110`;
-  `crates/daemon/src/query_route.rs:1383` through `:1385`.
+  `crates/daemon/src/query_route.rs:1397` through `:1399`.
 - Findings: the hook runs in `before_phase`, before `check(budget)` and before
   `lexical_read`. The cancel and the sleep therefore end the request at the
   phase entry check, not inside a MATCH statement. In-flight interruption is

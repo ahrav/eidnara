@@ -82,8 +82,8 @@ Type: safety
 Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:448`)
 is built by `select_inner` (`crates/retrieval/src/dense/candidates.rs:312`)
 under `select_candidates_observed`, which `rank_compressed` calls;
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:718`) reaches
-`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1866`)
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:732`) reaches
+`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1879`)
 installs a composition, and no production caller installs one at this HEAD.
 `TermTable::score_rows` (`scalar.rs:565`) is called from
 `crates/retrieval/tests/` only.
@@ -137,7 +137,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the query route's `ExhaustiveProducer`
-(`crates/daemon/src/query_route.rs:544`) ranks through the oracle walk, which
+(`crates/daemon/src/query_route.rs:546`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
 `rescore` (`score.rs:228`), which have no production caller at this base, so
@@ -198,7 +198,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `CandidateCapacity::new`
 (`crates/retrieval/src/dense/capacity.rs:38`) is called by
-`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:617`) at
+`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:619`) at
 `set_dense_vectors` and per compressed request; no production caller installs
 a composition at this HEAD.
 Status: active
@@ -364,7 +364,7 @@ Reachability: test-only - `select_candidates_observed`
 (`crates/daemon/src/vector_reader.rs:881`); `select_candidates`
 (`candidates.rs:263`) has no caller in the workspace. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
-`set_dense_vectors` (`crates/daemon/src/query_route.rs:1866`) installs a
+`set_dense_vectors` (`crates/daemon/src/query_route.rs:1880`) installs a
 composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
@@ -465,8 +465,8 @@ Open questions:
 Type: safety
 Reachability: test-only - `rank_compressed`
 (`crates/daemon/src/vector_reader.rs:810`) is called by
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:718`), which the
-route builds only after `set_dense_vectors` (`query_route.rs:1866`) installs a
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:732`), which the
+route builds only after `set_dense_vectors` (`query_route.rs:1879`) installs a
 composition; no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
@@ -621,8 +621,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:2012`) only when `set_dense_vectors`
-(`query_route.rs:1866`) has installed a composition, and no production caller
+(`crates/daemon/src/query_route.rs:2029`) only when `set_dense_vectors`
+(`query_route.rs:1879`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -683,7 +683,7 @@ and `a_request_that_ranks_no_dense_lane_holds_no_view` and
 for the payload buffers `Scratch` covers.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
-setters' locks before the unit is submitted (`query_route.rs:1977`), so the
+setters' locks before the unit is submitted (`query_route.rs:1994`), so the
 unit ranks under a pair the setters checked together and the view's pins and the ranking's `Scratch` and
 `RowBuffers` reservations stay charged until the blocking work returns; a
 cancelled request settles only after that work ends, and every charge is
@@ -757,8 +757,8 @@ later route-limit change that the installed vectors cannot serve, and
 `vectors_install_only_under_the_tolerance_their_layers_carry`.
 Guarantee: A composition installs only under declared dense limits whose
 `unit_norm_tolerance` equals the view's layout bit for bit (`check_pair`,
-`query_route.rs:741`), and only when the pool `CompressedLimits::capacity`
-(`query_route.rs:615`) derives from the lane's `k` and the alpha policy passes
+`query_route.rs:755`), and only when the pool `CompressedLimits::capacity`
+(`query_route.rs:617`) derives from the lane's `k` and the alpha policy passes
 the capacity checks and fits one kernel eligibility batch, with scan pages
 within the batch as well; a later route-limit change is checked against the
 installed vectors the same way.
@@ -795,8 +795,8 @@ original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
 `quarantined`; cancellation and deadlines end the request with their own
-terminals (`compressed_refusal`, `query_route.rs:758`; `lane_status`,
-`query_route.rs:580`).
+terminals (`compressed_refusal`, `query_route.rs:773`; `lane_status`,
+`query_route.rs:582`).
 Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
 degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as

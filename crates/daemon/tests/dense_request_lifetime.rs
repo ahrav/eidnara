@@ -497,6 +497,7 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
     let vectors = DenseVectors::new(
         Arc::clone(&view),
         store.admission.clone(),
+        store.activation(),
         compressed_limits(),
     );
     daemon
@@ -729,6 +730,7 @@ async fn a_request_that_ranks_no_dense_lane_holds_no_view() {
         .set_dense_vectors(Some(DenseVectors::new(
             Arc::clone(&view),
             store.admission.clone(),
+            store.activation(),
             compressed_limits(),
         )))
         .unwrap();
@@ -809,6 +811,7 @@ async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
         .set_dense_vectors(Some(DenseVectors::new(
             Arc::clone(&view),
             store.admission.clone(),
+            store.activation(),
             compressed_limits(),
         )))
         .unwrap();
@@ -818,7 +821,12 @@ async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
     narrow.candidates.cap = NonZeroUsize::new(2).unwrap();
     let mut single = route_limits();
     single.dense.as_mut().unwrap().k = NonZeroUsize::new(1).unwrap();
-    let replacement = DenseVectors::new(Arc::clone(&view), store.admission.clone(), narrow);
+    let replacement = DenseVectors::new(
+        Arc::clone(&view),
+        store.admission.clone(),
+        store.activation(),
+        narrow,
+    );
     let swap = {
         let daemon = Arc::clone(&daemon);
         Box::new(move || {
