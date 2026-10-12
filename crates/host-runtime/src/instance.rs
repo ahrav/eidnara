@@ -1292,8 +1292,17 @@ mod tests {
 
         let bytes = std::fs::read(published(&guard)).expect("read publication");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
-        assert!(json.get("schema").is_none());
-        assert!(json.get("wire_version").is_none());
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["daemon_id", "daemon_ver", "key", "pid", "setup_socket"]
+        );
         assert_eq!(
             json["setup_socket"],
             guard
