@@ -1272,7 +1272,7 @@ Status: active
 Exercised: not yet - statically checkable, and currently false.
 Guarantee: The size above which persisted state is unreadable and therefore
 quarantined is one value across the lifecycle record and the generation manifest.
-Check: `always` - the lifecycle-record cap and the generation-manifest cap (`MAX_MANIFEST_BYTES`, `generation.rs:138`, 1 MiB) are the same value. This is a predicted violation at HEAD, where the two thresholds differ (64 KiB against 1 MiB) while the source comment claims they match; accepting distinct caps requires revising or invalidating this guarantee, not passing the check.
+Check: `always` - the lifecycle-record cap and the generation-manifest cap (`MAX_MANIFEST_BYTES`, `generation.rs:143`, 1 MiB) are the same value. This is a predicted violation at HEAD, where the two thresholds differ (64 KiB against 1 MiB) while the source comment claims they match; accepting distinct caps requires revising or invalidating this guarantee, not passing the check.
 Fault/timing angle: forward compatibility. Verified: the evidence cap is 65,536
 bytes and the manifest cap is 1,048,576 bytes, sixteen times apart, while the
 manifest constant is documented as "matching the lifecycle evidence cap". A future
@@ -2285,11 +2285,11 @@ decoding `GOLDEN_BYTES` and re-encoding. `always` because the encoding is
 evaluated on every stage and every validate; there is no configuration in which
 it is unreached.
 Fault/timing angle: none. This is a static encoding contract. The mechanism is
-that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:251-253`),
-so the byte order is literally the declaration order at `:225-235` for the
-outer struct and `:209-212` for each file entry, and `digest` is the SHA-256 of
-exactly those bytes (`:255-257`). The optional field's
-`skip_serializing_if = "Option::is_none"` at `:233` is what makes the existing
+that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:256-258`),
+so the byte order is literally the declaration order at `:230-240` for the
+outer struct and `:214-217` for each file entry, and `digest` is the SHA-256 of
+exactly those bytes (`:260-262`). The optional field's
+`skip_serializing_if = "Option::is_none"` at `:238` is what makes the existing
 vector blind to its position: with the field absent, moving it changes nothing
 about the fixture's bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
@@ -2384,7 +2384,7 @@ that lands it.
 Status: active
 Exercised: partial - the Linux arm is covered by one test through `promote_temp`
 (`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`,
-`generation.rs:2916`, re-located at HEAD); the macOS arm and the non-Linux
+`generation.rs:2928`, re-located at HEAD); the macOS arm and the non-Linux
 non-macOS stub have never executed under observation; after PR #131 (merge `5d638e3e8`) `ci.yml` has no macOS job,
 so no CI executor for that arm exists.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
@@ -2400,7 +2400,7 @@ observable state in which either name is absent. Also assert the non-Linux
 non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when
 the digest target is occupied by a corrupt unprotected generation
-(`generation.rs:1309-1351`), so a run that never meets that condition owes
+(`generation.rs:1314-1356`), so a run that never meets that condition owes
 nothing and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
 `store_fs.rs:112-115` gives Linux and macOS a shared arm calling
@@ -2414,7 +2414,7 @@ depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing
 test `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-(`generation.rs:2916`) already builds that fixture, so the fault is available;
+(`generation.rs:2928`) already builds that fixture, so the fault is available;
 the missing element is executing it on macOS. On the stub platforms the check
 is a compile-and-call assertion.
 Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
@@ -2423,7 +2423,7 @@ with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
 since deleted that job with every other macOS job, so the claim that no macOS
 lifecycle or generation test executes now holds trivially: `ci.yml` at HEAD
 contains only `ubuntu-latest` jobs.
-Existing check: partial, Linux only. `generation.rs:2916` (re-located at HEAD)
+Existing check: partial, Linux only. `generation.rs:2928` (re-located at HEAD)
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
 branch. The macOS CI job this entry previously described was removed by
 PR #131 (merge `5d638e3e8`); no `generation` or `lifecycle` test body runs on
@@ -2467,7 +2467,7 @@ window: with a failpoint between the `statat` that reports `NOENT`
 as an empty directory and as a file, while the call is parked, and assert the
 rename does not replace it; pre-planting the target alone tests occupancy before
 the window and cannot fail on the race the guarantee forbids. `always` because the caller's contract at
-`generation.rs:1283` is unconditional, so an occupied target that gets
+`generation.rs:1288` is unconditional, so an occupied target that gets
 replaced is a violation rather than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one
 platform and load-bearing on another. `store_fs.rs:53-79`: the Linux
@@ -2476,7 +2476,7 @@ falling through only on `INVAL`, `NOSYS`, or `OPNOTSUPP`, so on a current
 kernel with ext4, tmpfs, or overlayfs the fallback never runs. On macOS that
 block is absent by cfg, so `statat` at `:69-73` followed by `renameat` at
 `:74-78` is the only path. POSIX `rename` replaces an existing *empty*
-directory, which `promote_temp`'s comment at `generation.rs:1283` calls out by name as
+directory, which `promote_temp`'s comment at `generation.rs:1288` calls out by name as
 the thing that must not happen, so the flagged path and the fallback do not
 implement the same guarantee. The fallback's justification at `:1211-1215` is a
 prose claim that `transaction.lock` (`lifecycle.rs:44`, `:495-496`) excludes
