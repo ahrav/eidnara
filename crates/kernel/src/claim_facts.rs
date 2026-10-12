@@ -388,7 +388,7 @@ fn load_served(
         return Ok(HashMap::new());
     }
     let ids = serde_json::to_string(object_ids).map_err(|_| KernelError::InvalidInput)?;
-    Ok(served_classes(tx, requested, Some(&ids), None)?
+    Ok(served_classes(tx, requested, &ids, None)?
         .into_iter()
         .map(|row| {
             let facts = ServedFacts {

@@ -112,8 +112,8 @@ Their recorded provenance is retained, not regenerated from the candidate.
 Choosing a test-only adapter or separate reference executable is packaging
 work for `/testing:test-strategy`, not an unresolved acceptance rule. A copied
 candidate helper cannot serve as the independent oracle. Corrupt excluded-row
-error behavior remains an owner gate before M1 selection pushdown; no error
-suppression is approved. M1 and M5 below name the supplied optimization surfaces
+error behavior was an owner gate before selection pushdown; the owner approved
+suppression for rows outside the read's domain during #443. M1 and M5 below name the supplied optimization surfaces
 (selection and prepared-field allocation), not tickets or prompt units.
 
 ## Index
@@ -148,7 +148,27 @@ can lead to fatal refusal of cleanup, not proof that arbitrary work terminates.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No baseline-versus-candidate selection comparison runs.
+Exercised: partial - #443 pushes the domain/kind selection into the served
+query and judges each distinct approval once.
+`crates/kernel/tests/kernel_canonical_read.rs`
+`the_domain_selection_equals_the_filtered_full_read` compares the pushed-down
+read with the full read filtered in Rust, on both surfaces, over approved
+dependents and other-domain rows; the `kernel_admission` approval, revocation,
+and lineage tests pass unchanged on the batched approval judgment. No
+comparison against the fixed baseline commit's rendered bytes runs yet. Two
+review-time differentials (the previous per-row approval query beside the
+batched one, and every served read shape before and after the history fold
+moved into Rust) are not committed, so the repository cannot reproduce their
+results; they are recorded as unresolved below, not as evidence.
+`admission::tests::history_fold_ranks_rows_as_the_served_sql_does`,
+`the_latest_own_row_at_a_shared_commit_is_the_greater_identifier`,
+`the_served_fold_judges_own_history_consistency_as_the_authority_sql_does`, and
+`a_surface_aware_read_omits_only_hidden_rows` pin the fold to the SQL it
+replaced, and `the_served_fold_is_under_the_serving_digest` keeps the fold
+under the policy digest.
+`the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact`
+covers an artifact ingested with `object_kind` `decision`, whose class lives
+on `evidence_meta`.
 Guarantee: Selection optimization preserves the canonical memory result for
 the same valid store state, requested snapshot, project, and budget.
 Check: `always` - Compare the ordered selected rows, rendered memory bytes,
@@ -167,16 +187,26 @@ composition and budgets; their status is unaudited.
 Impact: Memory bytes, revision-driven materialization, or withholding can drift.
 Open questions:
 
-- Must skipping a corrupt excluded row preserve the baseline error? This is
-  an owner gate before M1 pushdown across decoding; suppression is not approved.
-  (needs human input)
+- Resolved (#443, owner decision): a corrupt row outside the memory domain no
+  longer withholds the memory read, because the pushed-down query never reads
+  it; reads that serve that row still decode it and fail on it.
+- Unresolved, needs a committed reproducible check: the #443 review-time
+  differentials (per-row versus batched approval judgment over the kernel and
+  daemon suites' served reads; every selection shape, surface, scope filter,
+  and snapshot over two frozen corpora before and after the Rust history fold)
+  reported zero differences, but neither runs from the repository or leaves a
+  durable CI artifact. Their results do not count toward this record's status.
 
 ### canonical-memory-irrelevant-candidates-do-not-consume-caps
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No paired-store irrelevance comparison runs.
+Exercised: partial - the domain/kind predicate runs in SQL before the row and
+payload caps (`ServedSelection::DomainDecisions` in
+`crates/kernel/src/admission.rs`), and the row- and byte-pressure tests in
+`crates/kernel/tests/kernel_canonical_read.rs` show other-domain rows leave
+the domain read's rows unchanged. No paired-store comparison runs.
 Guarantee: Rows rejected by the existing pre-cap selection cannot displace
 eligible memory decisions or independently set canonical truncation.
 Check: `always` - With relevant rows, scope/admission facts, and freshness held
@@ -204,7 +234,12 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - No independent pressure witness is recorded.
+Exercised: partial -
+`the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`
+seeds 8,300 newer other-domain decisions under 8 MiB of payload, asserts the
+memory target ranks past 8,192 in the unfiltered serving order, and reads it
+through the kernel's domain selection. The daemon's 8,192-row cap is not
+driven by this witness.
 Guarantee: A preservation campaign constructs row pressure independently of
 byte pressure to distinguish pre-cap filtering from premature row limiting.
 Check: `sometimes` - More than 8192 admitted visible candidates place an
@@ -228,7 +263,12 @@ Open questions: None.
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - No independent byte-pressure witness is recorded.
+Exercised: partial -
+`the_domain_selection_reads_no_row_of_another_domains_payload_pressure` seeds
+140 newer other-domain decisions holding more than 8 MiB of stored payload,
+under 8,192 rows, ahead of the memory target, and returns only memory rows
+from the kernel's domain selection. The daemon's payload-prefix cut is not
+driven by this witness.
 Guarantee: A preservation campaign constructs byte pressure independently of
 row pressure to distinguish pre-cap filtering from premature payload limiting.
 Check: `sometimes` - At most 8192 admitted visible candidates place excluded
@@ -738,8 +778,8 @@ them without creating implementation tickets.
 [transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3779-L3811
 [prepare-field]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
-[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159
-[admission-reference]: ../../../crates/kernel/src/admission.rs#L3132-L3298
+[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L163
+[admission-reference]: ../../../crates/kernel/src/admission.rs#L3409-L3623
 [outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180

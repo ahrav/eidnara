@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
 
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "283aa10bdc19af0174f0f33b599cc9b76fb4613d30687e33a5c553af6d68a4e4";
+    "a244dde51610bc6088b9a1ff016c1d2bc5065d607da51944f8b7d1d472a12dbf";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -47,6 +47,17 @@ macro_rules! string_enum {
                     $($value => Ok(Self::$variant),)+
                     _ => Err(KernelError::AdmissionPolicy),
                 }
+            }
+        }
+
+        impl TryFrom<&[u8]> for $name {
+            type Error = KernelError;
+
+            fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+                $(if value == $value.as_bytes() {
+                    return Ok(Self::$variant);
+                })+
+                Err(KernelError::AdmissionPolicy)
             }
         }
     };
@@ -525,6 +536,7 @@ fn strictest_sensitivity_branch_sql(subject: &str, commit_bound: &str) -> String
     let floor_class = taint_floor_class_sql("h");
     let stored_rank = sensitivity_rank_sql("h.sensitivity_class");
     let floor_rank = sensitivity_rank_sql(&floor_class);
+    let row_rank = history_row_rank_sql("h");
     format!(
         "(
     SELECT CASE WHEN {floor_rank}>{stored_rank} THEN {floor_class}
@@ -534,10 +546,60 @@ fn strictest_sensitivity_branch_sql(subject: &str, commit_bound: &str) -> String
       AND {lineage}
       AND h.commit_seq IS NOT NULL
       {commit_bound}
-    ORDER BY MAX({floor_rank},{stored_rank}) DESC
+    ORDER BY {row_rank} DESC
     LIMIT 1
 )"
     )
+}
+
+fn history_row_rank_sql(alias: &str) -> String {
+    let floor_rank = sensitivity_rank_sql(&taint_floor_class_sql(alias));
+    let stored_rank = sensitivity_rank_sql(&format!("{alias}.sensitivity_class"));
+    format!("MAX({floor_rank},{stored_rank})")
+}
+
+/// The enclosing query must bind `o` to `object_registry`. The scalar subquery returns NULL when no lineage decision
+/// satisfies its filters.
+fn strictest_lineage_decision_sql(commit_bound: &str) -> String {
+    let lineage = same_lineage_as_object("h");
+    let row_rank = history_row_rank_sql("h");
+    format!(
+        "(
+    SELECT h.admission_decision_id
+    FROM admission_decisions h
+    WHERE h.subject_object_id IS NULL
+      AND {lineage}
+      AND h.commit_seq IS NOT NULL
+      {commit_bound}
+    ORDER BY {row_rank} DESC
+    LIMIT 1
+)"
+    )
+}
+
+/// The enclosing query must bind `o` to `object_registry`.
+fn own_history_join_sql(alias: &str, commit_bound: &str) -> String {
+    let lineage = same_lineage_as_object(alias);
+    format!(
+        "{alias}.subject_object_id=o.object_id
+              AND {lineage}
+              AND {alias}.commit_seq>=o.created_commit_seq
+              {commit_bound}"
+    )
+}
+
+fn history_row_rank(taint_class: Option<&[u8]>, sensitivity_class: Option<&[u8]>) -> Sensitivity {
+    let floor = taint_class
+        .and_then(|taint| TaintClass::try_from(taint).ok())
+        .map_or(Sensitivity::Secret, sensitivity_floor);
+    let stored = sensitivity_class.map_or(Sensitivity::Secret, Sensitivity::from_stored_bytes);
+    floor.restrictive(stored)
+}
+
+fn maturity_rank(maturity: Option<&[u8]>) -> u8 {
+    maturity
+        .and_then(|maturity| Maturity::try_from(maturity).ok())
+        .map_or(99, Maturity::rank)
 }
 
 /// Ranks `column` as `Maturity::rank` does. Unrecognized values rank 99.
@@ -928,7 +990,7 @@ impl Envelope<'_> {
     ) -> Result<HashMap<String, ServedRow>, KernelError> {
         let ids: Vec<String> = ids.iter().filter_map(|id| identity(id).ok()).collect();
         let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
-        Ok(served_classes(self.tx, self.commit_seq, Some(&ids), scope)?
+        Ok(served_classes(self.tx, self.commit_seq, &ids, scope)?
             .into_iter()
             .map(|row| (row.object.object_id.clone(), row))
             .collect())
@@ -2745,13 +2807,10 @@ struct DecidedColumns {
     policy_revision: usize,
     sensitivity_class: usize,
     approval_object_id: usize,
-    /// Whether the named approval's authority chain was intact at the
-    /// snapshot; selected after the contiguous groups.
-    approval_valid: usize,
 }
 
 impl DecidedColumns {
-    const fn starting_at(first: usize, approval_valid: usize) -> Self {
+    const fn starting_at(first: usize) -> Self {
         Self {
             maturity: first,
             effective_maturity: first + 1,
@@ -2762,16 +2821,15 @@ impl DecidedColumns {
             policy_revision: first + 6,
             sensitivity_class: first + 7,
             approval_object_id: first + 8,
-            approval_valid,
         }
     }
 }
 
-const OWN_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(10, 33);
-const LINEAGE_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(19, 34);
+const OWN_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(10);
+const LINEAGE_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(19);
 const ACCEPTED_DECISION_COLUMN: usize = 28;
-const HISTORY_SENSITIVITY_COLUMN: usize = 29;
-const OWN_HISTORY_INCONSISTENT_COLUMN: usize = 30;
+const LINEAGE_HISTORY_RANK_COLUMN: usize = 29;
+const OWN_COMMIT_SEQ_COLUMN: usize = 30;
 const SCOPE_ID_COLUMN: usize = 31;
 /// An idempotent ingest replay can tighten an artifact's classification on
 /// `evidence_meta` without a commit-log row or a registry change, so the
@@ -2780,13 +2838,30 @@ const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
 /// The class of the evidence a decision or observation cites, read live for the
 /// same reason as [`EVIDENCE_SENSITIVITY_COLUMN`]: a replay can tighten it after
 /// the citing row was written, and the citing row is immutable.
-const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 35;
+const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 33;
 /// The classes of the observation that triggered the object's own admission and
 /// of the evidence backing that observation, then the same pair for the lineage
 /// admission. The admission folded them once when it was decided; serving folds
 /// what they read today.
-const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [36, 37, 38, 39];
-const LAST_SERVED_COLUMN: usize = TRIGGER_SENSITIVITY_COLUMNS[3];
+const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [34, 35, 36, 37];
+const OWN_ADMISSION_DECISION_ID_COLUMN: usize = 38;
+/// Groups the history rows of one object without reading its identifier text.
+const OBJECT_ROWID_COLUMN: usize = 39;
+const LAST_SERVED_COLUMN: usize = OBJECT_ROWID_COLUMN;
+
+/// A text column's bytes borrowed from the row, `None` for SQL NULL.
+fn bytes_column<'r>(
+    row: &'r rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<&'r [u8]>> {
+    row.get_ref(index)?.as_bytes_or_null().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
 
 /// A text column borrowed from the row, `None` for SQL NULL.
 fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<&'r str>> {
@@ -2799,23 +2874,97 @@ fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result
     })
 }
 
+fn sensitivity_from_rank(rank: i64) -> Sensitivity {
+    usize::try_from(rank)
+        .ok()
+        .and_then(|index| Sensitivity::ALL.get(index))
+        .copied()
+        .unwrap_or(Sensitivity::Secret)
+}
+
+/// A named approval carries support only while its authority chain is
+/// intact at the snapshot. A revoked root invalidates every grant below it
+/// the moment it is revoked, so a row the cascade has not yet rewritten is
+/// read as if it named no approval at all.
+struct DecidedVisibility {
+    unsupported: VisibilityRow,
+    supported: VisibilityRow,
+    approval_object_id: Option<String>,
+}
+
+impl DecidedVisibility {
+    const AUDIT_ONLY: Self = Self {
+        unsupported: VisibilityRow::AuditOnly,
+        supported: VisibilityRow::AuditOnly,
+        approval_object_id: None,
+    };
+
+    fn resolve(&self, approvals: &HashMap<String, bool>) -> VisibilityRow {
+        let approval_valid = self
+            .approval_object_id
+            .as_deref()
+            .is_some_and(|approval| approvals.get(approval).copied().unwrap_or(false));
+        if approval_valid {
+            self.supported
+        } else {
+            self.unsupported
+        }
+    }
+}
+
+/// The decision columns read once per row and shared by [`decided_row`] and the history fold.
+struct DecidedTexts<'r> {
+    policy_revision: Option<i64>,
+    taint_class: Option<&'r [u8]>,
+    source_class: Option<&'r [u8]>,
+    sensitivity_class: Option<&'r [u8]>,
+    maturity: Option<&'r [u8]>,
+    effective_maturity: Option<&'r [u8]>,
+}
+
+impl<'r> DecidedTexts<'r> {
+    fn read(row: &'r rusqlite::Row<'_>, columns: &DecidedColumns) -> rusqlite::Result<Self> {
+        let policy_revision: Option<i64> = row.get(columns.policy_revision)?;
+        if policy_revision.is_none() {
+            return Ok(Self {
+                policy_revision,
+                taint_class: None,
+                source_class: None,
+                sensitivity_class: None,
+                maturity: None,
+                effective_maturity: None,
+            });
+        }
+        Ok(Self {
+            policy_revision,
+            taint_class: bytes_column(row, columns.taint_class)?,
+            source_class: bytes_column(row, columns.source_class)?,
+            sensitivity_class: bytes_column(row, columns.sensitivity_class)?,
+            maturity: bytes_column(row, columns.maturity)?,
+            effective_maturity: bytes_column(row, columns.effective_maturity)?,
+        })
+    }
+}
+
 /// The strongest surface a single stored decision can justify, its sensitivity
 /// ceiling, and whether the row could be interpreted at all. `None` when the
 /// decision is absent.
 fn decided_row(
     row: &rusqlite::Row<'_>,
     columns: &DecidedColumns,
-) -> rusqlite::Result<Option<(VisibilityRow, Sensitivity, bool)>> {
-    let accepted_decision = row.get::<_, bool>(ACCEPTED_DECISION_COLUMN)?;
-    let Some(revision) = row.get::<_, Option<i64>>(columns.policy_revision)? else {
+    texts: &DecidedTexts<'_>,
+) -> rusqlite::Result<Option<(DecidedVisibility, Sensitivity, bool)>> {
+    let Some(revision) = texts.policy_revision else {
         return Ok(None);
     };
-    let taint =
-        text_column(row, columns.taint_class)?.and_then(|value| TaintClass::try_from(value).ok());
-    let source =
-        text_column(row, columns.source_class)?.and_then(|value| SourceClass::try_from(value).ok());
-    let sensitivity =
-        Sensitivity::from_stored(text_column(row, columns.sensitivity_class)?.unwrap_or_default());
+    let accepted_decision = row.get::<_, bool>(ACCEPTED_DECISION_COLUMN)?;
+    let taint = texts
+        .taint_class
+        .and_then(|value| TaintClass::try_from(value).ok());
+    let source = texts
+        .source_class
+        .and_then(|value| SourceClass::try_from(value).ok());
+    let sensitivity = Sensitivity::from_stored_bytes(texts.sensitivity_class.unwrap_or_default());
     // A newer revision may attach meanings this binary cannot see, and a pairing
     // the evaluator forbids can only be corruption or an out-of-band write.
     let interpretable = revision <= POLICY_REVISION
@@ -2824,23 +2973,22 @@ fn decided_row(
             _ => false,
         };
     if !interpretable {
-        return Ok(Some((VisibilityRow::AuditOnly, Sensitivity::Secret, false)));
+        return Ok(Some((
+            DecidedVisibility::AUDIT_ONLY,
+            Sensitivity::Secret,
+            false,
+        )));
     }
     let floor = taint.map_or(Sensitivity::Secret, sensitivity_floor);
-    let stored =
-        text_column(row, columns.visibility)?.and_then(|value| VisibilityRow::try_from(value).ok());
-    let historical =
-        text_column(row, columns.maturity)?.and_then(|value| Maturity::try_from(value).ok());
-    // A named approval carries support only while its authority chain is
-    // intact at the snapshot. A revoked root invalidates every grant below it
-    // the moment it is revoked, so a row the cascade has not yet rewritten is
-    // read as if it named no approval at all.
-    let approval_valid = text_column(row, columns.approval_object_id)?.is_some()
-        && row.get::<_, bool>(columns.approval_valid)?;
-    let expected = match (
-        text_column(row, columns.effective_maturity)?.map(Maturity::try_from),
-        text_column(row, columns.disposition)?.map(Disposition::try_from),
-    ) {
+    let stored = bytes_column(row, columns.visibility)?
+        .and_then(|value| VisibilityRow::try_from(value).ok());
+    let historical = texts
+        .maturity
+        .and_then(|value| Maturity::try_from(value).ok());
+    let approval_object_id = row.get::<_, Option<String>>(columns.approval_object_id)?;
+    let effective = texts.effective_maturity.map(Maturity::try_from);
+    let disposition = bytes_column(row, columns.disposition)?.map(Disposition::try_from);
+    let expected = |approval_valid: bool| match (effective, disposition) {
         // Support can only clamp what history earned, so effective above
         // historical is a state the evaluator cannot produce. Support above the
         // pairing's automatic ceiling is one the evaluator only reaches on a valid
@@ -2865,8 +3013,18 @@ fn decided_row(
         }
         _ => None,
     };
+    let unsupported = served_visibility_row(stored, expected(false));
+    let supported = if approval_object_id.is_some() {
+        served_visibility_row(stored, expected(true))
+    } else {
+        unsupported
+    };
     Ok(Some((
-        served_visibility_row(stored, expected),
+        DecidedVisibility {
+            unsupported,
+            supported,
+            approval_object_id,
+        },
         sensitivity.restrictive(floor),
         true,
     )))
@@ -2912,8 +3070,39 @@ impl KernelStore {
         let ids = ids
             .map(|ids| serde_json::to_string(ids).map_err(|_| KernelError::InvalidInput))
             .transpose()?;
+        let selection = ids
+            .as_deref()
+            .map_or(ServedSelection::All, ServedSelection::Named);
+        self.visible_selected_as_of(surface, requested, selection, scope)
+    }
+
+    /// [`Self::visible_as_of_in_scope`] restricted to the decision objects of `domain_id`. The domain and kind are
+    /// matched in SQL before any row is read, so rows of other domains are neither decoded nor counted against a
+    /// caller's bounds, and a corrupt row outside the domain never fails this read.
+    pub fn visible_domain_decisions_as_of_in_scope(
+        &self,
+        surface: Surface,
+        requested: i64,
+        domain_id: &str,
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<VisibleAsOf, KernelError> {
+        self.visible_selected_as_of(
+            surface,
+            requested,
+            ServedSelection::DomainDecisions(domain_id),
+            scope,
+        )
+    }
+
+    fn visible_selected_as_of(
+        &self,
+        surface: Surface,
+        requested: i64,
+        selection: ServedSelection<'_>,
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<VisibleAsOf, KernelError> {
         let (tip, rows) = self.read_snapshot(requested, |tx, _| {
-            let rows = served_rows(tx, surface, requested, ids.as_deref(), scope)?
+            let mut rows: Vec<VisibleRow> = served_rows(tx, surface, requested, selection, scope)?
                 .into_iter()
                 .filter_map(|(object, visibility, scope_id)| match visibility {
                     SurfaceVisibility::Hidden => None,
@@ -2925,6 +3114,7 @@ impl KernelStore {
                     }),
                 })
                 .collect();
+            rows.sort_unstable_by(|left, right| left.object.object_id.cmp(&right.object.object_id));
             Ok(rows)
         })?;
         Ok(VisibleAsOf {
@@ -3015,7 +3205,7 @@ pub(crate) fn egress_candidates_tx(
     // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere;
     // the narrower surfaces ride along from the same row so a per-surface
     // judgement needs no second serving read.
-    let served: HashMap<String, ServedClass> = served_classes(tx, tip, Some(&ids), None)?
+    let served: HashMap<String, ServedClass> = served_classes(tx, tip, &ids, None)?
         .into_iter()
         .map(|row| {
             (
@@ -3161,43 +3351,76 @@ pub struct ScopeTermFilter<'a> {
     pub value: &'a str,
 }
 
-/// Every object admitted at `requested` with its served sensitivity and the
-/// visibility `surface` gives it, restricted to `ids` (a JSON string array)
-/// when given and to scopes that can match `scope` when given. Hidden rows
-/// are included so a caller can see the class of an object no surface serves.
+// policy-digest:serving-start
+/// `served_rows` returns every object admitted at `requested` that `surface` can serve, with its served sensitivity
+/// and visibility, restricted to the objects `selection` names and to scopes that can match `scope` when given.
 fn served_rows(
     tx: &Transaction<'_>,
     surface: Surface,
     requested: i64,
-    ids: Option<&str>,
+    selection: ServedSelection<'_>,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<(ObjectRow, SurfaceVisibility, Option<String>)>, KernelError> {
-    Ok(served_classes(tx, requested, ids, scope)?
-        .into_iter()
-        .map(|row| {
-            let visibility = row.visibility(surface);
-            (row.object, visibility, row.scope_id)
-        })
-        .collect())
+    Ok(
+        served_classes_selected(tx, requested, selection, scope, Some(surface))?
+            .into_iter()
+            .map(|row| {
+                let visibility = row.visibility(surface);
+                (row.object, visibility, row.scope_id)
+            })
+            .collect(),
+    )
 }
 
-/// Whether a served-class query names its objects or covers every object at the snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdsPredicate {
-    /// `:ids` is a JSON string array and only those objects are returned.
-    Named,
-    /// Every object at the snapshot is returned.
+/// The objects a served-class read returns, with the value its statement binds. Each variant is its own
+/// prepared statement, so its predicate is one the planner can serve from an index.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ServedSelection<'a> {
+    /// Every object at the snapshot.
     All,
+    /// The objects a JSON string array of identifiers names, bound as `:ids`.
+    Named(&'a str),
+    /// The decision objects of one domain, bound as `:domain_id`.
+    DomainDecisions(&'a str),
 }
 
-/// The served-class query text for one `ids` shape. It embeds only constants, so each shape is identical on every call.
-// policy-digest:serving-start
-fn served_classes_sql(ids: IdsPredicate) -> String {
-    let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
+/// The class of the observation `trigger_column` names, as a scalar the enclosing query evaluates only when the
+/// column is set.
+fn trigger_sensitivity_sql(trigger_column: &str) -> String {
+    format!(
+        "CASE WHEN {trigger_column} IS NULL THEN NULL
+                         ELSE (SELECT t.sensitivity_class FROM observations t
+                                WHERE t.object_id={trigger_column}) END"
+    )
+}
+
+/// The class of the evidence behind the observation `trigger_column` names, NULL when the observation cites none.
+fn trigger_evidence_sensitivity_sql(trigger_column: &str) -> String {
+    format!(
+        "CASE WHEN {trigger_column} IS NULL THEN NULL
+                         ELSE (SELECT e.sensitivity_class FROM observations t
+                                JOIN evidence_meta e ON e.evidence_id=t.evidence_id
+                                WHERE t.object_id={trigger_column}) END"
+    )
+}
+
+/// The served-class query text for one selection shape; the bound value is not part of the text. It embeds only
+/// constants, so each shape is identical on every call.
+fn served_classes_sql(selection: ServedSelection<'_>) -> String {
+    let own_history = own_history_join_sql("d", "AND d.commit_seq<=:governing_as_of");
     let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
-    let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
-    let own_history_inconsistent =
-        own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
+    // Evaluated once per statement: a store without lineage decisions at the snapshot skips the per-object lookup.
+    let any_lineage_decision = "EXISTS(
+                    SELECT 1 FROM admission_decisions l
+                    WHERE l.subject_object_id IS NULL
+                      AND l.commit_seq IS NOT NULL
+                      AND l.commit_seq<=:governing_as_of)";
+    let strictest_lineage = strictest_lineage_decision_sql("AND h.commit_seq<=:governing_as_of");
+    let lineage_rank = history_row_rank_sql("lh");
+    let d_trigger = trigger_sensitivity_sql("d.trigger_object_id");
+    let d_trigger_evidence = trigger_evidence_sensitivity_sql("d.trigger_object_id");
+    let s_trigger = trigger_sensitivity_sql("s.trigger_object_id");
+    let s_trigger_evidence = trigger_evidence_sensitivity_sql("s.trigger_object_id");
     // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`.
     // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too.
     let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
@@ -3206,15 +3429,30 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
     // set term in the scope algebra, so the prefilter keeps every scope
     // constrained on the dimension for the caller to judge.
     let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
-    let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
-    let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
-    let ids_predicate = match ids {
-        IdsPredicate::Named => "AND o.object_id IN (SELECT value FROM json_each(:ids))",
-        IdsPredicate::All => "",
+    let ids_predicate = match selection {
+        ServedSelection::Named(_) => "o.object_id IN (SELECT value FROM json_each(:ids)) AND",
+        ServedSelection::All => "",
+        ServedSelection::DomainDecisions(_) => {
+            "o.domain_id=:domain_id AND o.object_kind='decision' AND"
+        }
+    };
+    let (object_joins, scope_expr, cited_expr) = match selection {
+        ServedSelection::DomainDecisions(_) => (
+            "LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id",
+            "dec.scope_id",
+            "dec.evidence_id",
+        ),
+        ServedSelection::Named(_) | ServedSelection::All => (
+            "LEFT JOIN observations obs ON obs.object_id=o.object_id
+             LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id",
+            "COALESCE(dec.scope_id,obs.scope_id)",
+            "COALESCE(dec.evidence_id,obs.evidence_id)",
+        ),
     };
     format!(
         "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
-                    o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
+                    o.source_revision,o.created_commit_seq,NULL AS invalidated_commit_seq,
+                    NULL AS superseded_by,o.sensitivity_class,
                     d.maturity AS d_maturity,
                     d.effective_maturity AS d_effective_maturity,
                     d.disposition AS d_disposition,d.visibility AS d_visibility,
@@ -3229,52 +3467,43 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
                     s.policy_revision AS s_policy_revision,
                     s.sensitivity_class AS s_sensitivity_class,
                     s.approval_object_id AS s_approval_object_id,
-                    EXISTS(
-                        SELECT 1 FROM decisions ad
-                        WHERE ad.object_id=o.object_id
-                          AND o.object_kind='decision'
-                          AND ad.decision_kind='adr_accepted'
-                          AND ad.created_commit_seq<=:governing_as_of
-                          AND (ad.invalidated_commit_seq IS NULL
-                               OR :governing_as_of<ad.invalidated_commit_seq)
-                    ) AS accepted_decision,
-                    {history} AS history_sensitivity_class,
-                    {own_history_inconsistent} AS own_history_inconsistent,
-                    COALESCE(dec.scope_id,obs.scope_id) AS scope_id,
+                    CASE WHEN o.object_kind='decision'
+                          AND dec.decision_kind='adr_accepted'
+                          AND dec.created_commit_seq<=:governing_as_of
+                          AND (dec.invalidated_commit_seq IS NULL
+                               OR :governing_as_of<dec.invalidated_commit_seq)
+                         THEN 1 ELSE 0 END AS accepted_decision,
+                    CASE WHEN lh.admission_decision_id IS NULL THEN NULL
+                         ELSE {lineage_rank} END AS lineage_history_rank,
+                    d.commit_seq AS d_commit_seq,
+                    {scope_expr} AS scope_id,
                     ev.sensitivity_class AS evidence_sensitivity_class,
-                    {own_approval_valid} AS d_approval_valid,
-                    {lineage_approval_valid} AS s_approval_valid,
-                    cited.sensitivity_class AS cited_evidence_sensitivity_class,
-                    d_trigger.sensitivity_class AS d_trigger_sensitivity_class,
-                    d_trigger_ev.sensitivity_class AS d_trigger_evidence_sensitivity_class,
-                    s_trigger.sensitivity_class AS s_trigger_sensitivity_class,
-                    s_trigger_ev.sensitivity_class AS s_trigger_evidence_sensitivity_class
+                    CASE WHEN {cited_expr} IS NULL THEN NULL
+                         ELSE (SELECT cited.sensitivity_class FROM evidence_meta cited
+                                WHERE cited.evidence_id={cited_expr})
+                         END AS cited_evidence_sensitivity_class,
+                    {d_trigger} AS d_trigger_sensitivity_class,
+                    {d_trigger_evidence} AS d_trigger_evidence_sensitivity_class,
+                    {s_trigger} AS s_trigger_sensitivity_class,
+                    {s_trigger_evidence} AS s_trigger_evidence_sensitivity_class,
+                    d.admission_decision_id AS d_admission_decision_id,
+                    o.rowid AS o_rowid
              FROM object_registry o
-             JOIN admission_decisions d
-               ON d.admission_decision_id={own}
-             LEFT JOIN admission_decisions s
-               ON s.admission_decision_id={lineage}
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
-             LEFT JOIN observations obs ON obs.object_id=o.object_id
-             LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id
-             LEFT JOIN evidence_meta cited
-               ON cited.evidence_id=COALESCE(dec.evidence_id,obs.evidence_id)
-             LEFT JOIN observations d_trigger ON d_trigger.object_id=d.trigger_object_id
-             LEFT JOIN evidence_meta d_trigger_ev
-               ON d_trigger_ev.evidence_id=d_trigger.evidence_id
-             LEFT JOIN observations s_trigger ON s_trigger.object_id=s.trigger_object_id
-             LEFT JOIN evidence_meta s_trigger_ev
-               ON s_trigger_ev.evidence_id=s_trigger.evidence_id
-             WHERE o.created_commit_seq<=:governing_as_of
+             {object_joins}
+             LEFT JOIN admission_decisions s
+               ON s.admission_decision_id=CASE WHEN {any_lineage_decision} THEN {lineage} END
+             LEFT JOIN admission_decisions lh
+               ON lh.admission_decision_id=CASE WHEN s.admission_decision_id IS NULL THEN NULL
+                                               ELSE {strictest_lineage} END
+             CROSS JOIN admission_decisions d
+               ON {own_history}
+             WHERE {ids_predicate}
+               o.created_commit_seq<=:governing_as_of
                AND (o.invalidated_commit_seq IS NULL
                     OR :governing_as_of<o.invalidated_commit_seq)
-               {ids_predicate}
                AND (:scope_dimension IS NULL
-                    OR NOT EXISTS(
-                        SELECT 1 FROM scope_term t
-                        WHERE t.scope_id=COALESCE(dec.scope_id,obs.scope_id)
-                          AND t.dimension=:scope_dimension)
-                    OR COALESCE(dec.scope_id,obs.scope_id) IN (
+                    OR {scope_expr} IN (
                         SELECT t.scope_id FROM scope_term t
                         WHERE t.dimension=:scope_dimension
                           AND (t.operator NOT IN ('exact','set')
@@ -3283,109 +3512,406 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
                                OR {exact_redacted}
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)
                                          WHERE value=:scope_value
-                                            OR {set_redacted}))))
-             ORDER BY o.object_id"
+                                            OR {set_redacted})))
+                    OR {scope_expr} IS NULL
+                    OR {scope_expr} NOT IN (
+                        SELECT t.scope_id FROM scope_term t
+                        WHERE t.dimension=:scope_dimension))"
     )
 }
-// policy-digest:serving-end
+
+/// The returned SQL checks approval authority at `:governing_as_of` for the identifiers bound to `:ids` as a JSON
+/// string array.
+fn approval_validity_sql() -> String {
+    let valid = approval_chain_valid_at_snapshot_sql("ap.approval_object_id");
+    format!(
+        "SELECT ap.approval_object_id,{valid}
+         FROM (SELECT value AS approval_object_id FROM json_each(:ids)) ap"
+    )
+}
 
 /// Returns served rows before a surface is applied.
 pub(crate) fn served_classes(
     tx: &Transaction<'_>,
     requested: i64,
-    ids: Option<&str>,
+    ids: &str,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<ServedRow>, KernelError> {
+    served_classes_selected(tx, requested, ServedSelection::Named(ids), scope, None)
+}
+
+/// [`served_classes`] for any [`ServedSelection`]; only the selected objects' rows are read and decoded. With
+/// `visible_on`, rows no outcome of the approval check can make visible on that surface are omitted.
+pub(crate) fn served_classes_selected(
+    tx: &Transaction<'_>,
+    requested: i64,
+    selection: ServedSelection<'_>,
+    scope: Option<ScopeTermFilter<'_>>,
+    visible_on: Option<Surface>,
+) -> Result<Vec<ServedRow>, KernelError> {
     // Each shape's text is identical on every call, so building it once lets `prepare_cached` hash a stable string instead of a per-call `format!`.
-    static NAMED_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::Named));
-    static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::All));
-    let sql = match ids {
-        Some(_) => NAMED_SQL.as_str(),
-        None => ALL_SQL.as_str(),
+    static NAMED_SQL: LazyLock<String> =
+        LazyLock::new(|| served_classes_sql(ServedSelection::Named("")));
+    static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(ServedSelection::All));
+    static DOMAIN_SQL: LazyLock<String> =
+        LazyLock::new(|| served_classes_sql(ServedSelection::DomainDecisions("")));
+    let sql = match selection {
+        ServedSelection::Named(_) => NAMED_SQL.as_str(),
+        ServedSelection::All => ALL_SQL.as_str(),
+        ServedSelection::DomainDecisions(_) => DOMAIN_SQL.as_str(),
     };
     let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
     assert_served_columns(&statement);
     let scope_dimension = scope.map(|scope| scope.dimension.as_str());
     let scope_value = scope.map(|scope| scope.value);
-    // Binding a name the statement lacks is an error, and only the named shape has `:ids`.
-    let params: &[(&str, &dyn rusqlite::ToSql)] = match &ids {
-        Some(ids) => &[
+    // Binding a name the statement lacks is an error, so each shape binds only its own selector.
+    let params: &[(&str, &dyn rusqlite::ToSql)] = match &selection {
+        ServedSelection::Named(ids) => &[
             (":governing_as_of", &requested),
             (":ids", ids),
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
         ],
-        None => &[
+        ServedSelection::DomainDecisions(domain_id) => &[
+            (":governing_as_of", &requested),
+            (":domain_id", domain_id),
+            (":scope_dimension", &scope_dimension),
+            (":scope_value", &scope_value),
+        ],
+        ServedSelection::All => &[
             (":governing_as_of", &requested),
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
         ],
     };
-    let rows = statement
-        .query_map(params, |row| {
-            let mut object = object_row_from(row)?;
-            let (mut own, own_sensitivity, interpretable) = decided_row(
-                row,
-                &OWN_DECISION_COLUMNS,
-            )?
-            .unwrap_or((VisibilityRow::AuditOnly, Sensitivity::Secret, false));
-            let mut shared = object.sensitivity;
-            // An uninterpretable or inconsistent own row forces `AuditOnly` and a `Secret` shared class: the history rows that make it so stay under any row that replaces it.
-            if !interpretable || row.get::<_, bool>(OWN_HISTORY_INCONSISTENT_COLUMN)? {
-                own = VisibilityRow::AuditOnly;
-                shared = Sensitivity::Secret;
+    // `o` is the outer loop of the statement's `CROSS JOIN`, and every other join is one row per
+    // object, so the history rows of one object arrive consecutively.
+    let mut drafts: Vec<Draft> = Vec::new();
+    let mut rows = statement.query(params).map_err(map_sqlite)?;
+    while let Some(row) = rows.next().map_err(map_sqlite)? {
+        let history = HistoryRow::read(row).map_err(map_sqlite)?;
+        match drafts.last_mut() {
+            Some(draft) if draft.object_rowid == history.object_rowid => {
+                draft.fold(row, &history, visible_on).map_err(map_sqlite)?;
             }
-            // Neither scope may relax the other: a restriction on one
-            // outlives a later permissive decision on the other, so the
-            // served surface is the stricter of the two.
-            let mut lineage = None;
-            if let Some((lineage_row, lineage_sensitivity, _)) =
-                decided_row(row, &LINEAGE_DECISION_COLUMNS)?
-            {
-                lineage = Some(lineage_row);
-                shared = shared.restrictive(lineage_sensitivity);
-            }
-            shared = shared.restrictive(Sensitivity::from_stored(
-                text_column(row, HISTORY_SENSITIVITY_COLUMN)?.unwrap_or_default(),
-            ));
-            if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
-                shared = shared.restrictive(Sensitivity::from_stored(evidence_class));
-            }
-            // A decision or observation serves no lower than the evidence it
-            // cites reads today, however it was classified when written.
-            if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
-                shared = shared.restrictive(Sensitivity::from_stored(cited_class));
-            }
-            // Nor lower than the observation that admitted it and the evidence
-            // behind that observation read today.
-            let (own_trigger, lineage_trigger) = TRIGGER_SENSITIVITY_COLUMNS.split_at(2);
-            // The lineage trigger restricts every own row; the own trigger restricts only its own row.
-            for &column in lineage_trigger {
-                if let Some(trigger_class) = text_column(row, column)? {
-                    shared = shared.restrictive(Sensitivity::from_stored(trigger_class));
-                }
-            }
-            let mut own_fold = own_sensitivity;
-            for &column in own_trigger {
-                if let Some(trigger_class) = text_column(row, column)? {
-                    own_fold = own_fold.restrictive(Sensitivity::from_stored(trigger_class));
-                }
-            }
-            object.sensitivity = shared.restrictive(own_fold);
-            let scope_id = row.get::<_, Option<String>>(SCOPE_ID_COLUMN)?;
-            Ok(ServedRow {
-                object,
-                scope_id,
-                own,
-                lineage,
-                shared_sensitivity: shared,
-            })
-        })
-        .map_err(map_sqlite)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(map_sqlite)?;
-    Ok(rows)
+            _ => drafts.push(Draft::start(row, &history, visible_on).map_err(map_sqlite)?),
+        }
+    }
+    let approvals = approval_validity(
+        tx,
+        requested,
+        drafts.iter().flat_map(|draft| {
+            draft
+                .latest
+                .own
+                .approval_object_id
+                .as_deref()
+                .into_iter()
+                .chain(
+                    draft
+                        .latest
+                        .lineage
+                        .iter()
+                        .filter_map(|lineage| lineage.approval_object_id.as_deref()),
+                )
+        }),
+    )?;
+    Ok(drafts
+        .into_iter()
+        .filter_map(|draft| draft.finish(&approvals))
+        .collect())
 }
+
+/// Whether a stored class differs from `first` as SQL `<>` judges them: a NULL on either side is no difference.
+fn class_differs<T: Copy>(
+    first: &Option<Result<T, Vec<u8>>>,
+    text: Option<&[u8]>,
+    as_str: fn(T) -> &'static str,
+) -> bool {
+    match (first, text) {
+        (Some(Ok(known)), Some(text)) => as_str(*known).as_bytes() != text,
+        (Some(Err(raw)), Some(text)) => raw != text,
+        _ => false,
+    }
+}
+
+/// A stored class as the fold compares it later: the enum when the text is known, else the raw text.
+fn stored_class<T: for<'a> TryFrom<&'a [u8]>>(text: Option<&[u8]>) -> Option<Result<T, Vec<u8>>> {
+    text.map(|text| T::try_from(text).map_err(|_| text.to_vec()))
+}
+
+/// The columns the served fold reads from every own-decision history row of an object.
+struct HistoryRow<'r> {
+    object_rowid: i64,
+    commit_seq: i64,
+    admission_decision_id: &'r [u8],
+    texts: DecidedTexts<'r>,
+    rank: Sensitivity,
+    /// The row's effective maturity exceeds its recorded maturity.
+    maturity_inconsistent: bool,
+}
+
+impl<'r> HistoryRow<'r> {
+    fn read(row: &'r rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let texts = DecidedTexts::read(row, &OWN_DECISION_COLUMNS)?;
+        Ok(Self {
+            object_rowid: row.get(OBJECT_ROWID_COLUMN)?,
+            commit_seq: row.get(OWN_COMMIT_SEQ_COLUMN)?,
+            admission_decision_id: bytes_column(row, OWN_ADMISSION_DECISION_ID_COLUMN)?
+                .unwrap_or_default(),
+            rank: history_row_rank(texts.taint_class, texts.sensitivity_class),
+            maturity_inconsistent: maturity_rank(texts.effective_maturity)
+                > maturity_rank(texts.maturity),
+            texts,
+        })
+    }
+}
+
+/// Everything a served row takes from the object's latest own decision and the rows joined to it. `object` and
+/// `scope_id` are `None` when the caller's surface cannot serve the row whatever the approval check says.
+struct LatestRow {
+    object: Option<ObjectRow>,
+    scope_id: Option<String>,
+    own: DecidedVisibility,
+    /// The latest row could be interpreted under the current policy revision.
+    interpretable: bool,
+    lineage: Option<DecidedVisibility>,
+    /// The shared class before the own history is folded in.
+    shared: Sensitivity,
+    /// The own row's class with its trigger folded in.
+    own_fold: Sensitivity,
+}
+
+impl LatestRow {
+    fn read(
+        row: &rusqlite::Row<'_>,
+        own: &DecidedTexts<'_>,
+        visible_on: Option<Surface>,
+    ) -> rusqlite::Result<Self> {
+        let (own, own_sensitivity, interpretable) = decided_row(row, &OWN_DECISION_COLUMNS, own)?
+            .unwrap_or((DecidedVisibility::AUDIT_ONLY, Sensitivity::Secret, false));
+        let mut shared = Sensitivity::from_stored_bytes(bytes_column(row, 9)?.unwrap_or_default());
+        // Neither scope may relax the other: a restriction on one
+        // outlives a later permissive decision on the other, so the
+        // served surface is the stricter of the two.
+        let mut lineage = None;
+        if let Some((lineage_row, lineage_sensitivity, _)) = decided_row(
+            row,
+            &LINEAGE_DECISION_COLUMNS,
+            &DecidedTexts::read(row, &LINEAGE_DECISION_COLUMNS)?,
+        )? {
+            lineage = Some(lineage_row);
+            shared = shared.restrictive(lineage_sensitivity);
+        }
+        if let Some(lineage_rank) = row.get::<_, Option<i64>>(LINEAGE_HISTORY_RANK_COLUMN)? {
+            shared = shared.restrictive(sensitivity_from_rank(lineage_rank));
+        }
+        if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
+            shared = shared.restrictive(Sensitivity::from_stored(evidence_class));
+        }
+        // A decision or observation serves no lower than the evidence it
+        // cites reads today, however it was classified when written.
+        if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
+            shared = shared.restrictive(Sensitivity::from_stored(cited_class));
+        }
+        // Nor lower than the observation that admitted it and the evidence
+        // behind that observation read today.
+        let (own_trigger, lineage_trigger) = TRIGGER_SENSITIVITY_COLUMNS.split_at(2);
+        // The lineage trigger restricts every own row; the own trigger restricts only its own row.
+        for &column in lineage_trigger {
+            if let Some(trigger_class) = text_column(row, column)? {
+                shared = shared.restrictive(Sensitivity::from_stored(trigger_class));
+            }
+        }
+        let mut own_fold = own_sensitivity;
+        for &column in own_trigger {
+            if let Some(trigger_class) = text_column(row, column)? {
+                own_fold = own_fold.restrictive(Sensitivity::from_stored(trigger_class));
+            }
+        }
+        // Every later fold only restricts the row, so a row hidden under these values stays hidden.
+        let decode = visible_on.is_none_or(|surface| {
+            let floor = shared.restrictive(own_fold);
+            let lineages = lineage.as_ref().map_or([None, None], |lineage| {
+                [Some(lineage.unsupported), Some(lineage.supported)]
+            });
+            [own.unsupported, own.supported].into_iter().any(|own| {
+                lineages.into_iter().any(|lineage| {
+                    let row = match lineage {
+                        Some(lineage) => served_visibility_row(Some(own), Some(lineage)),
+                        None => own,
+                    };
+                    surface_visibility(row, surface, floor) != SurfaceVisibility::Hidden
+                })
+            })
+        });
+        let (object, scope_id) = if decode {
+            (Some(object_row_from(row)?), row.get(SCOPE_ID_COLUMN)?)
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            object,
+            scope_id,
+            own,
+            interpretable,
+            lineage,
+            shared,
+            own_fold,
+        })
+    }
+}
+
+/// `(commit_seq, admission_decision_id)` of an own row, the order `latest_own_decision_sql` ranks rows by. The
+/// identifier lives inline when it fits, so the common single-row object allocates nothing for its key.
+struct OwnRowKey {
+    commit_seq: i64,
+    len: u8,
+    inline: [u8; Self::INLINE],
+    spilled: Option<Box<[u8]>>,
+}
+
+impl OwnRowKey {
+    const INLINE: usize = 48;
+
+    fn new(commit_seq: i64, admission_decision_id: &[u8]) -> Self {
+        let mut inline = [0; Self::INLINE];
+        let spilled = if admission_decision_id.len() <= Self::INLINE {
+            inline[..admission_decision_id.len()].copy_from_slice(admission_decision_id);
+            None
+        } else {
+            Some(admission_decision_id.into())
+        };
+        Self {
+            commit_seq,
+            len: admission_decision_id.len().min(Self::INLINE) as u8,
+            inline,
+            spilled,
+        }
+    }
+
+    fn precedes(&self, commit_seq: i64, admission_decision_id: &[u8]) -> bool {
+        let id = match &self.spilled {
+            Some(spilled) => &spilled[..],
+            None => &self.inline[..usize::from(self.len)],
+        };
+        (commit_seq, admission_decision_id) > (self.commit_seq, id)
+    }
+}
+
+/// One object's served row under construction: its latest own decision plus the fold over its history.
+struct Draft {
+    object_rowid: i64,
+    latest: LatestRow,
+    latest_key: OwnRowKey,
+    first_source_class: Option<Result<SourceClass, Vec<u8>>>,
+    first_taint_class: Option<Result<TaintClass, Vec<u8>>>,
+    /// A history row differs from the others in source or taint class, or has an effective maturity above its
+    /// recorded maturity.
+    inconsistent: bool,
+    history_rank: Sensitivity,
+}
+
+impl Draft {
+    fn start(
+        row: &rusqlite::Row<'_>,
+        history: &HistoryRow<'_>,
+        visible_on: Option<Surface>,
+    ) -> rusqlite::Result<Self> {
+        Ok(Self {
+            object_rowid: history.object_rowid,
+            latest: LatestRow::read(row, &history.texts, visible_on)?,
+            latest_key: OwnRowKey::new(history.commit_seq, history.admission_decision_id),
+            first_source_class: stored_class(history.texts.source_class),
+            first_taint_class: stored_class(history.texts.taint_class),
+            inconsistent: history.maturity_inconsistent,
+            history_rank: history.rank,
+        })
+    }
+
+    fn fold(
+        &mut self,
+        row: &rusqlite::Row<'_>,
+        history: &HistoryRow<'_>,
+        visible_on: Option<Surface>,
+    ) -> rusqlite::Result<()> {
+        self.history_rank = self.history_rank.restrictive(history.rank);
+        self.inconsistent |= history.maturity_inconsistent
+            || class_differs(
+                &self.first_source_class,
+                history.texts.source_class,
+                SourceClass::as_str,
+            )
+            || class_differs(
+                &self.first_taint_class,
+                history.texts.taint_class,
+                TaintClass::as_str,
+            );
+        if self
+            .latest_key
+            .precedes(history.commit_seq, history.admission_decision_id)
+        {
+            self.latest = LatestRow::read(row, &history.texts, visible_on)?;
+            self.latest_key = OwnRowKey::new(history.commit_seq, history.admission_decision_id);
+        }
+        Ok(())
+    }
+    fn finish(self, approvals: &HashMap<String, bool>) -> Option<ServedRow> {
+        let Self {
+            latest,
+            inconsistent,
+            history_rank,
+            ..
+        } = self;
+        let LatestRow {
+            object,
+            scope_id,
+            mut own,
+            interpretable,
+            lineage,
+            mut shared,
+            own_fold,
+        } = latest;
+        let mut object = object?;
+        // An uninterpretable or inconsistent own row forces `AuditOnly` and a `Secret` shared class: the history rows that make it so stay under any row that replaces it.
+        if !interpretable || inconsistent {
+            own = DecidedVisibility::AUDIT_ONLY;
+            shared = Sensitivity::Secret;
+        }
+        shared = shared.restrictive(history_rank);
+        object.sensitivity = shared.restrictive(own_fold);
+        Some(ServedRow {
+            object,
+            scope_id,
+            own: own.resolve(approvals),
+            lineage: lineage.map(|lineage| lineage.resolve(approvals)),
+            shared_sensitivity: shared,
+        })
+    }
+}
+
+fn approval_validity<'a>(
+    tx: &Transaction<'_>,
+    requested: i64,
+    approvals: impl Iterator<Item = &'a str>,
+) -> Result<HashMap<String, bool>, KernelError> {
+    static SQL: LazyLock<String> = LazyLock::new(approval_validity_sql);
+    let distinct: BTreeSet<&str> = approvals.collect();
+    if distinct.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = serde_json::to_string(&distinct).map_err(|_| KernelError::InvalidInput)?;
+    tx.prepare_cached(&SQL)
+        .map_err(map_sqlite)?
+        .query_map(
+            rusqlite::named_params! { ":governing_as_of": requested, ":ids": ids },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .map_err(map_sqlite)?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()
+        .map_err(map_sqlite)
+}
+// policy-digest:serving-end
 
 /// Fail-stop guard for the positional reads in `decided_row`: every offset
 /// constant must name the alias it was written against. Runs in release
@@ -3437,12 +3963,10 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
             "s_approval_object_id",
         ),
         (ACCEPTED_DECISION_COLUMN, "accepted_decision"),
-        (HISTORY_SENSITIVITY_COLUMN, "history_sensitivity_class"),
-        (OWN_HISTORY_INCONSISTENT_COLUMN, "own_history_inconsistent"),
+        (LINEAGE_HISTORY_RANK_COLUMN, "lineage_history_rank"),
+        (OWN_COMMIT_SEQ_COLUMN, "d_commit_seq"),
         (SCOPE_ID_COLUMN, "scope_id"),
         (EVIDENCE_SENSITIVITY_COLUMN, "evidence_sensitivity_class"),
-        (OWN_DECISION_COLUMNS.approval_valid, "d_approval_valid"),
-        (LINEAGE_DECISION_COLUMNS.approval_valid, "s_approval_valid"),
         (
             CITED_EVIDENCE_SENSITIVITY_COLUMN,
             "cited_evidence_sensitivity_class",
@@ -3463,6 +3987,8 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
             TRIGGER_SENSITIVITY_COLUMNS[3],
             "s_trigger_evidence_sensitivity_class",
         ),
+        (OWN_ADMISSION_DECISION_ID_COLUMN, "d_admission_decision_id"),
+        (OBJECT_ROWID_COLUMN, "o_rowid"),
     ];
     assert_eq!(
         statement.column_count(),
@@ -5109,19 +5635,53 @@ mod tests {
         assert_eq!(promoted.visibility, VisibilityRow::ReviewOnly);
     }
 
+    fn digest_sections<'a>(source: &'a str, start: &str, end: &str) -> Vec<&'a str> {
+        let mut found = Vec::new();
+        let mut rest = source;
+        while let Some((_, tail)) = rest.split_once(start) {
+            let (body, remainder) = tail.split_once(end).expect("unterminated section");
+            found.push(body);
+            rest = remainder;
+        }
+        assert!(!found.is_empty(), "no sections found");
+        found
+    }
+
+    /// The Rust half of the served read decides the latest own row, history consistency, the history class, and
+    /// approval support, so its source sits under the serving digest beside the SQL it completes.
+    #[test]
+    fn the_served_fold_is_under_the_serving_digest() {
+        let source = include_str!("admission.rs").replace("\r\n", "\n");
+        // Runtime marker construction keeps this test's source text distinct from the markers the policy digest scans.
+        let marker = |edge: &str| format!("\n// policy-digest:{}-{edge}\n", "serving");
+        let serving = digest_sections(&source, &marker("start"), &marker("end")).concat();
+        for item in [
+            "fn served_rows(",
+            "enum ServedSelection<",
+            "fn trigger_sensitivity_sql(",
+            "fn trigger_evidence_sensitivity_sql(",
+            "fn served_classes_selected(",
+            "fn class_differs<",
+            "fn stored_class<",
+            "struct HistoryRow<",
+            "struct LatestRow",
+            "impl LatestRow",
+            "struct OwnRowKey",
+            "impl OwnRowKey",
+            "struct Draft",
+            "impl Draft",
+            "fn approval_validity<",
+        ] {
+            assert!(
+                serving.contains(item),
+                "`{item}` is outside every serving digest section"
+            );
+        }
+    }
+
     #[test]
     fn policy_revision_matches_policy_content() {
-        fn sections<'a>(source: &'a str, start: &str, end: &str) -> Vec<&'a str> {
-            let mut found = Vec::new();
-            let mut rest = source;
-            while let Some((_, tail)) = rest.split_once(start) {
-                let (body, remainder) = tail.split_once(end).expect("unterminated section");
-                found.push(body);
-                rest = remainder;
-            }
-            assert!(!found.is_empty(), "no sections found");
-            found
-        }
+        let sections = digest_sections;
         fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
             source
                 .split_once(start)
@@ -5209,6 +5769,518 @@ mod tests {
         assert_eq!(digest, REVISION_1_SOURCE_DIGEST);
     }
 
+    /// A domain read seeks the registry's domain index, so its cost follows the domain's objects rather than the
+    /// store's.
+    #[test]
+    fn served_classes_for_one_domain_seek_the_domain_index() {
+        let directory = tempfile::tempdir().unwrap();
+        KernelStore::open(directory.path()).unwrap();
+        let connection = rusqlite::Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                served_classes_sql(ServedSelection::DomainDecisions(""))
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::named_params! {
+                    ":governing_as_of": 1_i64,
+                    ":domain_id": "memory",
+                    ":scope_dimension": Option::<&str>::None,
+                    ":scope_value": Option::<&str>::None,
+                },
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let registry = plan
+            .iter()
+            .find(|step| step.contains(" o ") || step.ends_with(" o"))
+            .unwrap_or_else(|| panic!("no plan step for object_registry o in {plan:?}"));
+        assert!(
+            registry.starts_with("SEARCH o USING") && registry.contains("idx_objects_domain_fk"),
+            "expected a domain seek on object_registry, planner chose: {registry}"
+        );
+    }
+
+    #[test]
+    fn approval_validity_judges_each_distinct_approval_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        let (_, (none, judged)) = store
+            .read_snapshot(0, |tx, tip| {
+                let none = approval_validity(tx, tip, std::iter::empty())?;
+                let judged = approval_validity(
+                    tx,
+                    tip,
+                    ["approval-a", "approval-b", "approval-a"].into_iter(),
+                )?;
+                Ok((none, judged))
+            })
+            .unwrap();
+        assert!(none.is_empty());
+        assert_eq!(
+            judged,
+            HashMap::from([
+                ("approval-a".to_string(), false),
+                ("approval-b".to_string(), false),
+            ])
+        );
+        let unsupported = DecidedVisibility {
+            unsupported: VisibilityRow::AuditOnly,
+            supported: VisibilityRow::Automatic,
+            approval_object_id: Some("approval-a".to_string()),
+        };
+        assert_eq!(unsupported.resolve(&judged), VisibilityRow::AuditOnly);
+        assert_eq!(
+            unsupported.resolve(&HashMap::from([("approval-a".to_string(), true)])),
+            VisibilityRow::Automatic
+        );
+        assert_eq!(
+            unsupported.resolve(&HashMap::new()),
+            VisibilityRow::AuditOnly
+        );
+    }
+
+    /// The Rust fold over an object's own history ranks each row exactly as the SQL that ranks lineage history.
+    #[test]
+    fn history_fold_ranks_rows_as_the_served_sql_does() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE h(taint_class TEXT, sensitivity_class TEXT, maturity TEXT,
+                                effective_maturity TEXT)",
+            )
+            .unwrap();
+        let rank_sql = format!("SELECT {} FROM h", history_row_rank_sql("h"));
+        let maturity_sql = format!(
+            "SELECT {}, {} FROM h",
+            maturity_rank_sql("h.maturity"),
+            maturity_rank_sql("h.effective_maturity")
+        );
+        let taints: Vec<Option<&str>> = TaintClass::ALL
+            .iter()
+            .map(|taint| Some(taint.as_str()))
+            .chain([Some("from_the_future"), Some(""), None])
+            .collect();
+        let classes: Vec<Option<&str>> = Sensitivity::ALL
+            .iter()
+            .map(|class| Some(class.as_str()))
+            .chain([Some("weird"), Some(""), None])
+            .collect();
+        let maturities: Vec<Option<&str>> = Maturity::ALL
+            .iter()
+            .map(|maturity| Some(maturity.as_str()))
+            .chain([Some("ascended"), None])
+            .collect();
+        for taint in &taints {
+            for class in &classes {
+                for maturity in &maturities {
+                    connection.execute("DELETE FROM h", []).unwrap();
+                    connection
+                        .execute(
+                            "INSERT INTO h VALUES (?1,?2,?3,?4)",
+                            rusqlite::params![taint, class, maturity, maturity],
+                        )
+                        .unwrap();
+                    let sql_rank: i64 = connection
+                        .query_row(&rank_sql, [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(
+                        history_row_rank(taint.map(str::as_bytes), class.map(str::as_bytes)),
+                        sensitivity_from_rank(sql_rank),
+                        "taint {taint:?} class {class:?}"
+                    );
+                    let (sql_maturity, sql_effective): (i64, i64) = connection
+                        .query_row(&maturity_sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .unwrap();
+                    assert_eq!(sql_maturity, sql_effective);
+                    assert_eq!(
+                        i64::from(maturity_rank(maturity.map(str::as_bytes))),
+                        sql_maturity,
+                        "maturity {maturity:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn byte_parsing_matches_text_parsing_for_every_vocabulary() {
+        for value in TaintClass::ALL {
+            assert_eq!(TaintClass::try_from(value.as_str().as_bytes()), Ok(*value));
+        }
+        for value in SourceClass::ALL {
+            assert_eq!(SourceClass::try_from(value.as_str().as_bytes()), Ok(*value));
+        }
+        for value in Maturity::ALL {
+            assert_eq!(Maturity::try_from(value.as_str().as_bytes()), Ok(*value));
+        }
+        for value in Disposition::ALL {
+            assert_eq!(Disposition::try_from(value.as_str().as_bytes()), Ok(*value));
+        }
+        for value in VisibilityRow::ALL {
+            assert_eq!(
+                VisibilityRow::try_from(value.as_str().as_bytes()),
+                Ok(*value)
+            );
+        }
+        assert_eq!(
+            TaintClass::try_from(b"user_explici".as_slice()),
+            Err(KernelError::AdmissionPolicy)
+        );
+        assert_eq!(
+            Sensitivity::from_stored_bytes(b"sensitive"),
+            Sensitivity::Sensitive
+        );
+        assert_eq!(
+            Sensitivity::from_stored_bytes(b"sensitiv"),
+            Sensitivity::Secret
+        );
+    }
+
+    /// A store with one admitted decision whose history the tests below extend through raw rows.
+    fn store_with_one_decision(directory: &std::path::Path) -> (KernelStore, i64) {
+        let store = KernelStore::open(directory).unwrap();
+        let receipt = store
+            .commit(
+                crate::CommitIntent {
+                    producer: "served-fold-test".to_string(),
+                    operation_key: "seed".to_string(),
+                    request_digest: "a".repeat(64),
+                    actor: "test".to_string(),
+                    cause: "proof".to_string(),
+                },
+                |envelope| {
+                    envelope.insert_domain(crate::DomainSpec {
+                        domain_id: "memory".to_string(),
+                        object_id: "memory-object".to_string(),
+                        name: "memory".to_string(),
+                        source_kind: "fixture".to_string(),
+                        source_id: "memory".to_string(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                    })?;
+                    envelope.insert_decision(crate::DecisionSpec {
+                        decision_id: "decision-one".to_string(),
+                        object_id: "one".to_string(),
+                        domain_id: "memory".to_string(),
+                        proposition_id: None,
+                        scope_id: None,
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "adr_accepted".to_string(),
+                        payload: crate::DecisionPayload {
+                            summary: "one".to_string(),
+                            rationale: "one".to_string(),
+                        },
+                        source_kind: "fixture".to_string(),
+                        source_id: "src/one".to_string(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                    })?;
+                    envelope.record_admission(AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some("one".to_string()),
+                        source_class: Some(SourceClass::ExplicitUser),
+                        taint_class: Some(TaintClass::UserExplicit),
+                        event: AdmissionEvent {
+                            kind: EventKind::AcceptedAdr,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "fixture".to_string(),
+                        },
+                    })?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        (store, receipt.commit_seq)
+    }
+
+    /// Two own rows at one commit are ordered by identifier, as `latest_own_decision_sql` orders them, whichever
+    /// order the statement returns them in.
+    #[test]
+    fn the_latest_own_row_at_a_shared_commit_is_the_greater_identifier() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, commit_seq) = store_with_one_decision(directory.path());
+        drop(store);
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        // Identifiers sort after the kernel's own ("9:" > "2:"), and the stricter row carries the lesser one.
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                     outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                 ) VALUES
+                 ('9:z','one','fixture','src/one',1,'explicit_user','user_explicit','other','verified',
+                  'verified','active','automatic','admit','normal',1,'fixture',{commit_seq},1),
+                 ('9:a','one','fixture','src/one',1,'explicit_user','user_explicit','other','candidate',
+                  'candidate','stale','explicit_labeled','deny','normal',1,'fixture',{commit_seq},1);"
+            ))
+            .unwrap();
+        let sql_latest: String = connection
+            .query_row(
+                &format!(
+                    "SELECT {} FROM object_registry o WHERE o.object_id='one'",
+                    latest_own_decision_sql("a", &format!("AND a.commit_seq<={commit_seq}"))
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sql_latest, "9:z");
+        drop(connection);
+        let store = KernelStore::open(directory.path()).unwrap();
+        let visible = store
+            .visible_domain_decisions_as_of_in_scope(
+                Surface::AutoInject,
+                commit_seq,
+                "memory",
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            visible
+                .rows
+                .iter()
+                .map(|row| (row.object.object_id.as_str(), row.visibility))
+                .collect::<Vec<_>>(),
+            vec![("one", SurfaceVisibility::Visible)]
+        );
+    }
+
+    #[test]
+    fn a_named_read_returns_each_object_once_however_often_it_is_named() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, commit_seq) = store_with_one_decision(directory.path());
+        let ids = ["one".to_string(), "one".to_string(), "one".to_string()];
+        let visible = store
+            .visible_as_of_in_scope(Surface::ExplicitSearch, commit_seq, Some(&ids), None)
+            .unwrap();
+        assert_eq!(visible.rows.len(), 1);
+        assert_eq!(visible.rows[0].object.object_id, "one");
+    }
+
+    /// A surface-aware read omits exactly the rows the unfiltered read judges hidden on that surface.
+    #[test]
+    fn a_surface_aware_read_omits_only_hidden_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, commit_seq) = store_with_one_decision(directory.path());
+        drop(store);
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        // A labeled row, a sensitive automatic row, and a secret row beside the automatic one.
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('labeled','decision','memory','fixture','src/labeled',1,{commit_seq},'normal'),
+                        ('sensitive','decision','memory','fixture','src/sensitive',1,{commit_seq},'sensitive'),
+                        ('secret','decision','memory','fixture','src/secret',1,{commit_seq},'normal');
+                 INSERT INTO decisions(decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                     sensitivity_class)
+                 VALUES ('d-labeled','labeled','preference',X'7b7d',{commit_seq},'normal'),
+                        ('d-sensitive','sensitive','preference',X'7b7d',{commit_seq},'sensitive'),
+                        ('d-secret','secret','preference',X'7b7d',{commit_seq},'normal');
+                 INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                     outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                 ) VALUES
+                 ('a-labeled','labeled','fixture','src/labeled',1,'explicit_user','user_explicit','other',
+                  'candidate','candidate','active','explicit_labeled','deny','normal',1,'fixture',{commit_seq},1),
+                 ('a-sensitive','sensitive','fixture','src/sensitive',1,'explicit_user','user_explicit','other',
+                  'verified','verified','active','automatic','admit','sensitive',1,'fixture',{commit_seq},1),
+                 ('a-secret','secret','fixture','src/secret',1,'explicit_user','user_explicit','other',
+                  'verified','verified','active','automatic','admit','secret',1,'fixture',{commit_seq},1);"
+            ))
+            .unwrap();
+        drop(connection);
+        let store = KernelStore::open(directory.path()).unwrap();
+        for surface in Surface::ALL {
+            let (_, (unfiltered, filtered)) = store
+                .read_snapshot(commit_seq, |tx, _| {
+                    let selection = ServedSelection::DomainDecisions("memory");
+                    Ok((
+                        served_classes_selected(tx, commit_seq, selection, None, None)?,
+                        served_classes_selected(tx, commit_seq, selection, None, Some(*surface))?,
+                    ))
+                })
+                .unwrap();
+            assert_eq!(unfiltered.len(), 4, "{surface:?}");
+            let expected: Vec<&ServedRow> = unfiltered
+                .iter()
+                .filter(|row| row.visibility(*surface) != SurfaceVisibility::Hidden)
+                .collect();
+            assert_eq!(filtered.iter().collect::<Vec<_>>(), expected, "{surface:?}");
+            assert!(!expected.is_empty(), "{surface:?}");
+            assert!(expected.len() < 4, "{surface:?}");
+        }
+    }
+
+    #[test]
+    fn the_served_fold_judges_own_history_consistency_as_the_authority_sql_does() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, commit_seq) = store_with_one_decision(directory.path());
+        drop(store);
+        let older = [
+            ("explicit_user", "user_explicit"),
+            ("explicit_user", "current_code"),
+            ("trusted_local_code", "user_explicit"),
+            ("trusted_local_code", "current_code"),
+        ];
+        let latest = [
+            ("explicit_user", "user_explicit"),
+            ("trusted_local_code", "current_code"),
+        ];
+        // The second pair claims support above the maturity it records.
+        let maturities = [("verified", "verified"), ("candidate", "verified")];
+        let mut rows = Vec::new();
+        for latest_pair in latest {
+            for latest_maturity in maturities {
+                for first in older {
+                    for first_maturity in maturities {
+                        for second in older {
+                            rows.push([
+                                (first, first_maturity),
+                                (second, ("verified", "verified")),
+                                (latest_pair, latest_maturity),
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+        let mut sql = String::new();
+        for (case, history) in rows.iter().enumerate() {
+            sql.push_str(&format!(
+                "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('case-{case}','decision','memory','fixture','src/case-{case}',1,{commit_seq},'normal');"
+            ));
+            for (index, ((source, taint), (maturity, effective))) in history.iter().enumerate() {
+                sql.push_str(&format!(
+                    "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES ('case-{case}:{index}','case-{case}','fixture','src/case-{case}',1,'{source}',
+                               '{taint}','other','{maturity}','{effective}','active','automatic','admit','normal',
+                               1,'fixture',{commit_seq},1);"
+                ));
+            }
+        }
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch(&sql).unwrap();
+        let bound = format!("AND a.commit_seq<={commit_seq}");
+        let expected: HashMap<String, bool> = connection
+            .prepare(&format!(
+                "SELECT o.object_id,{}
+                 FROM object_registry o
+                 JOIN admission_decisions d ON d.admission_decision_id={}
+                 WHERE o.object_id GLOB 'case-*'",
+                own_history_inconsistent_sql("d", &format!("AND p.commit_seq<={commit_seq}")),
+                latest_own_decision_sql("a", &bound),
+            ))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        drop(connection);
+        assert_eq!(expected.len(), rows.len());
+        assert!(expected.values().any(|inconsistent| *inconsistent));
+        assert!(expected.values().any(|inconsistent| !*inconsistent));
+        let store = KernelStore::open(directory.path()).unwrap();
+        let ids: Vec<&String> = expected.keys().collect();
+        let ids = serde_json::to_string(&ids).unwrap();
+        let (_, served) = store
+            .read_snapshot(commit_seq, |tx, _| {
+                served_classes(tx, commit_seq, &ids, None)
+            })
+            .unwrap();
+        assert_eq!(served.len(), rows.len());
+        for row in served {
+            assert_eq!(
+                row.shared_sensitivity == Sensitivity::Secret,
+                expected[&row.object.object_id],
+                "{}",
+                row.object.object_id
+            );
+        }
+    }
+
+    fn served_read_steps(own: usize, lineage: usize) -> usize {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, commit_seq) = store_with_one_decision(directory.path());
+        drop(store);
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        for (prefix, subject, count) in [("own", "'one'", own), ("lineage", "NULL", lineage)] {
+            connection
+                .execute_batch(&format!(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 WHERE {count}>0 UNION ALL SELECT i+1 FROM n WHERE i<{count})
+                     INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     )
+                     SELECT '{prefix}-'||i,{subject},'fixture','src/one',1,'explicit_user','user_explicit',
+                            'other','verified','verified','active','automatic','admit','normal',1,'fixture',
+                            {commit_seq},1
+                     FROM n;"
+                ))
+                .unwrap();
+        }
+        drop(connection);
+        let store = KernelStore::open(directory.path()).unwrap();
+        let ids = serde_json::to_string(&["one"]).unwrap();
+        let (_, steps) = store
+            .read_snapshot(commit_seq, |tx, _| {
+                // The first read warms the query path before VM-step counting begins.
+                assert_eq!(served_classes(tx, commit_seq, &ids, None)?.len(), 1);
+                let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counter = std::sync::Arc::clone(&steps);
+                tx.progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .map_err(map_sqlite)?;
+                let read = served_classes(tx, commit_seq, &ids, None);
+                tx.progress_handler(0, None::<fn() -> bool>)
+                    .map_err(map_sqlite)?;
+                assert_eq!(read?.len(), 1);
+                Ok(steps.load(Ordering::Relaxed))
+            })
+            .unwrap();
+        steps
+    }
+
+    #[test]
+    fn lineage_history_cost_does_not_scale_with_own_history() {
+        let lineage_cost = |own: usize| served_read_steps(own, 200) - served_read_steps(own, 0);
+        let short = lineage_cost(0);
+        let long = lineage_cost(40);
+        assert!(
+            long <= 2 * short,
+            "200 lineage rows cost {short} VM steps beside one own row and {long} beside 41"
+        );
+    }
+
     /// Named object lookups must seek the append-only registry; a scan grows with every registered object.
     #[test]
     fn served_classes_for_named_ids_seek_the_registry() {
@@ -5222,7 +6294,7 @@ mod tests {
         let mut statement = connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                served_classes_sql(IdsPredicate::Named)
+                served_classes_sql(ServedSelection::Named(""))
             ))
             .unwrap();
         let plan = statement
