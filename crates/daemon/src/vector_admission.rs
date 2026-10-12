@@ -17,33 +17,56 @@ pub use crate::projection_gates::{
     VECTOR_RESIDENT_BYTES as RESIDENT_LIMIT,
 };
 
-/// What a reservation holds. Every class belongs to one pool and one limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResourceClass {
-    /// The embedding model's resident memory; charged once per process.
-    ModelMemory,
-    /// Tokenizer instances and their cache; charged once per process.
-    TokenizerCache,
-    /// The projection's SQLite page cache; charged once per process.
-    SqliteCache,
-    /// Text held for embedding.
-    Text,
-    /// Row scratch a ranking reads into.
-    Scratch,
-    /// Decoded f32 or int8 rows held beyond one page.
-    RowBuffers,
-    /// A view's identifiers, tombstones, scales, and sidecars.
-    LayerTables,
-    /// Files being copied into the store.
-    Staging,
-    /// A compactor's working files.
-    CompactionScratch,
+/// Implicit discriminants make `variant as usize` the variant's index in `ALL`, so arrays sized `ALL.len()` have a slot for every variant.
+macro_rules! indexed_enum {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident,)+
+        }
+    ) => {
+        $(#[$meta])*
+        pub enum $name {
+            $($(#[$variant_meta])* $variant,)+
+        }
+
+        impl $name {
+            const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
+        }
+    };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pool {
-    Resident,
-    Disk,
+indexed_enum! {
+    /// What a reservation holds. Every class belongs to one pool and one limit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum ResourceClass {
+        /// The embedding model's resident memory; charged once per process.
+        ModelMemory,
+        /// Tokenizer instances and their cache; charged once per process.
+        TokenizerCache,
+        /// The projection's SQLite page cache; charged once per process.
+        SqliteCache,
+        /// Text held for embedding.
+        Text,
+        /// Row scratch a ranking reads into.
+        Scratch,
+        /// Decoded f32 or int8 rows held beyond one page.
+        RowBuffers,
+        /// A view's identifiers, tombstones, scales, and sidecars.
+        LayerTables,
+        /// Files being copied into the store.
+        Staging,
+        /// A compactor's working files.
+        CompactionScratch,
+    }
+}
+
+indexed_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Pool {
+        Resident,
+        Disk,
+    }
 }
 
 impl ResourceClass {
@@ -117,35 +140,15 @@ impl Reconciliation {
     }
 }
 
-impl ResourceClass {
-    const ALL: [Self; 9] = [
-        Self::ModelMemory,
-        Self::TokenizerCache,
-        Self::SqliteCache,
-        Self::Text,
-        Self::Scratch,
-        Self::RowBuffers,
-        Self::LayerTables,
-        Self::Staging,
-        Self::CompactionScratch,
-    ];
-}
-
-// `Tally` indexes `held` by `class as usize`, so `ResourceClass::ALL` lists the classes in declaration order.
-const _: () = {
-    let mut index = 0;
-    while index < ResourceClass::ALL.len() {
-        assert!(ResourceClass::ALL[index] as usize == index);
-        index += 1;
-    }
-};
+// `charged` holds one bit per class.
+const _: () = assert!(ResourceClass::ALL.len() <= u16::BITS as usize);
 
 /// `held` indexes classes by declaration order. `charged` tracks each class from its first successful reservation until a release leaves its held bytes at zero, so a zero-byte reservation still charges a static class. `pools` caches each pool's sum of `held` for constant-time reservation checks.
 #[derive(Default)]
 struct Tally {
     held: [u64; ResourceClass::ALL.len()],
     charged: u16,
-    pools: [u64; 2],
+    pools: [u64; Pool::ALL.len()],
     pinned: u64,
     judgment: VectorJudgment,
 }

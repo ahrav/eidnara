@@ -92,7 +92,7 @@ refusal classes.
   doubles the scales file's charge and relies on the census equality above.
 - No check scans codes through `TermTable::score_rows` from a producer; the
   scan has no production caller at this base.
-- `Ledger::reconcile` (`crates/daemon/src/vector_admission.rs:329`) runs
+- `Ledger::reconcile` (`crates/daemon/src/vector_admission.rs:332`) runs
   only in tests. No production process owns a vector `Ledger` at this base,
   and the production prunes (`crates/daemon/src/bin/eidnara_host/serve.rs:389`,
   `crates/daemon/src/bin/eidnara-host.rs:1255`) run in launcher processes

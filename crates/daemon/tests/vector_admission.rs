@@ -448,6 +448,80 @@ fn a_zero_byte_static_charge_still_charges_once_and_refusals_keep_their_order() 
     assert_eq!(ledger.census(), Census::default());
 }
 
+const CLASSES: [ResourceClass; 9] = [
+    ResourceClass::ModelMemory,
+    ResourceClass::TokenizerCache,
+    ResourceClass::SqliteCache,
+    ResourceClass::Text,
+    ResourceClass::Scratch,
+    ResourceClass::RowBuffers,
+    ResourceClass::LayerTables,
+    ResourceClass::Staging,
+    ResourceClass::CompactionScratch,
+];
+
+/// The match is exhaustive, so a class added to the enum fails to compile here until it is named, next to `CLASSES`.
+fn named(class: ResourceClass) -> bool {
+    match class {
+        ResourceClass::ModelMemory
+        | ResourceClass::TokenizerCache
+        | ResourceClass::SqliteCache
+        | ResourceClass::Text
+        | ResourceClass::Scratch
+        | ResourceClass::RowBuffers
+        | ResourceClass::LayerTables
+        | ResourceClass::Staging
+        | ResourceClass::CompactionScratch => CLASSES.contains(&class),
+    }
+}
+
+#[test]
+fn every_class_reserves_into_its_own_census_slot_and_pool_and_releases_by_drop() {
+    let fixture = Fixture::new();
+    let mut reservations = Vec::new();
+    let mut expected = Census::default();
+    // Each class charges a distinct power of two, so a charge landing in another class's slot or pool changes the census.
+    for (index, class) in CLASSES.into_iter().enumerate() {
+        assert!(named(class), "{class:?} is listed in CLASSES");
+        let bytes = 1u64 << index;
+        let reservation = match class.pool() {
+            Pool::Resident => fixture.ledger.reserve(&fixture.admission, class, bytes),
+            Pool::Disk => {
+                fixture
+                    .ledger
+                    .reserve_disk(&fixture.admission, class, bytes, &fixture.store)
+            }
+        }
+        .unwrap_or_else(|refusal| panic!("{class:?} reserves: {refusal}"));
+        match class.pool() {
+            Pool::Resident => expected.resident += bytes,
+            Pool::Disk => expected.disk += bytes,
+        }
+        expected.held.insert(class, bytes);
+        assert_eq!(
+            fixture.ledger.census(),
+            expected,
+            "after charging {class:?}"
+        );
+        reservations.push(reservation);
+    }
+    for reservation in reservations {
+        let class = reservation.class();
+        match class.pool() {
+            Pool::Resident => expected.resident -= reservation.bytes(),
+            Pool::Disk => expected.disk -= reservation.bytes(),
+        }
+        expected.held.remove(&class);
+        drop(reservation);
+        assert_eq!(
+            fixture.ledger.census(),
+            expected,
+            "after releasing {class:?}"
+        );
+    }
+    assert_eq!(fixture.ledger.census(), Census::default());
+}
+
 #[test]
 fn a_prune_readback_above_the_ledgers_pinned_bytes_is_unaccounted() {
     let (_, ledger) = ledger_with(RESIDENT_LIMIT, u64::MAX);
