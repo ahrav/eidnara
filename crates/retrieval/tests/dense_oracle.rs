@@ -15,9 +15,10 @@ use retrieval::dense::codec::{
     RowLayout, RowRejection,
 };
 use retrieval::dense::export::{ExportRefusal, LiveRows, live_rows};
+use retrieval::dense::oracle::exhaustive_with_hook_for_test;
 use retrieval::dense::{
-    Completion, DenseCoverage, ExhaustiveRanking, IncompleteReason, OracleBounds, OracleRefusal,
-    Ranked, Window, exhaustive, inner_product, rank_order, rescore,
+    Completion, DenseCoverage, IncompleteReason, OracleBounds, OracleRefusal, Ranked, Window,
+    exhaustive, inner_product, rank_order, rescore,
 };
 use retrieval::eligibility::{
     AuthorityMoved, EligibilityReport, authority_moved, judge_occurrences,
@@ -814,6 +815,32 @@ fn an_earlier_row_that_fails_at_scoring_outranks_a_later_row_that_fails_at_decod
 fn an_invalid_query_or_layout_is_refused_before_the_projection_is_read() {
     let fixture = Fixture::all_admitted();
     let generation = generation();
+    let foreign = VectorGeneration {
+        generation_id: "gen-9".to_string(),
+        ..generation.clone()
+    };
+    let refuse = |query: &[f32], tolerance: f64, generation: &VectorGeneration| {
+        let mut windows = Vec::new();
+        let outcome = fixture
+            .store
+            .with_conn(|conn| {
+                let mut request = fixture.query(query, generation, bounds(3));
+                request.unit_norm_tolerance = tolerance;
+                Ok(exhaustive_with_hook_for_test(
+                    conn,
+                    &fixture.kernel,
+                    &request,
+                    &EvalBudget::unbounded(),
+                    |window| windows.push(format!("{window:?}")),
+                ))
+            })
+            .unwrap();
+        assert!(
+            windows.is_empty(),
+            "a refused query reads no row: {windows:?}"
+        );
+        outcome
+    };
     for (query, expected) in [
         (
             vec![1.0f32; 7],
@@ -831,39 +858,30 @@ fn an_invalid_query_or_layout_is_refused_before_the_projection_is_read() {
             },
         ),
     ] {
-        assert_eq!(
-            fixture.rank(&query, bounds(3), &EvalBudget::unbounded()),
-            Err(OracleRefusal::Query(expected))
-        );
+        for generation in [&generation, &foreign] {
+            assert_eq!(
+                refuse(&query, TOLERANCE, generation),
+                Err(OracleRefusal::Query(expected)),
+                "the query refusal precedes the {} generation check",
+                generation.generation_id
+            );
+        }
     }
     let query = axis(0);
     for tolerance in [f64::NAN, f64::INFINITY, -1e-3] {
-        let refused = fixture
-            .store
-            .with_conn(|conn| {
-                let mut request = fixture.query(&query, &generation, bounds(3));
-                request.unit_norm_tolerance = tolerance;
-                Ok(exhaustive(
-                    conn,
-                    &fixture.kernel,
-                    &request,
-                    &EvalBudget::unbounded(),
-                ))
-            })
-            .unwrap();
-        assert!(
-            matches!(
-                refused,
-                Err(OracleRefusal::Query(RowRejection::Tolerance { .. }))
-            ),
-            "{tolerance}: {refused:?}"
-        );
+        for generation in [&generation, &foreign] {
+            let refused = refuse(&query, tolerance, generation);
+            assert!(
+                matches!(
+                    refused,
+                    Err(OracleRefusal::Query(RowRejection::Tolerance { .. }))
+                ),
+                "{tolerance} under {}: {refused:?}",
+                generation.generation_id
+            );
+        }
     }
 
-    let foreign = VectorGeneration {
-        generation_id: "gen-9".to_string(),
-        ..generation.clone()
-    };
     let unknown = fixture
         .store
         .with_conn(|conn| {
@@ -1416,6 +1434,37 @@ fn a_deadline_that_expires_mid_walk_never_yields_a_complete_result() {
     }
     assert!(outcomes.contains("refused"), "{outcomes:?}");
     assert!(outcomes.contains("complete"), "{outcomes:?}");
+}
+
+#[test]
+fn a_deadline_that_passes_after_the_first_page_stops_the_walk_incomplete_with_no_ranked_rows() {
+    let fixture = Fixture::all_admitted();
+    // Retries widen the deadline margin so a loaded host still reaches the first page before the deadline expires.
+    for margin in [50, 200, 1_000].map(Duration::from_millis) {
+        let deadline = Instant::now() + margin;
+        let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+        let outcome = fixture.rank_with_hook(&axis(0), bounds(4), &budget, |window| {
+            if window == Window::AfterPage(1) {
+                while Instant::now() <= deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+        match outcome {
+            Err(OracleRefusal::BudgetExhausted) => continue,
+            Ok(ranking) => {
+                assert_eq!(
+                    ranking.completion,
+                    Completion::Incomplete(IncompleteReason::BudgetExhausted),
+                    "{ranking:?}"
+                );
+                assert!(ranking.ranked.is_empty(), "{ranking:?}");
+                return;
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    panic!("every attempt's deadline ended before the walk read its first page");
 }
 
 #[test]
@@ -2142,20 +2191,6 @@ fn stored_row_rejection(bytes: Vec<u8>, dimension: u32) -> RowRejection {
     }
 }
 
-/// Runs the walk with `hook` at every window, asserts it stops incomplete with `reason`, and returns the ranking.
-fn assert_hooked_stop(
-    fixture: &Fixture,
-    budget: &EvalBudget,
-    reason: IncompleteReason,
-    hook: impl FnMut(Window<'_>),
-) -> ExhaustiveRanking {
-    let ranking = fixture
-        .rank_with_hook(&axis(0), bounds(4), budget, hook)
-        .unwrap();
-    assert_eq!(ranking.completion, Completion::Incomplete(reason));
-    ranking
-}
-
 #[test]
 fn the_frozen_oracle_witness_matrix_fires_every_declared_cell() {
     const K: usize = 4;
@@ -2373,8 +2408,6 @@ fn the_frozen_oracle_witness_matrix_fires_every_declared_cell() {
         );
     });
 
-    // Stop cells: each builds its own fixture and never yields a wrong `Complete`. The hooked cells end the walk
-    // with their own incomplete reason; the deadline cell accepts a refusal or a correct complete result.
     for (cell, state, pending, without_pending) in [
         ("stop/coverage_shortfall_pending", "pending", 1, 0),
         ("stop/coverage_shortfall_without_pending", "failed", 0, 1),
@@ -2410,51 +2443,33 @@ fn the_frozen_oracle_witness_matrix_fires_every_declared_cell() {
         );
         assert_eq!(visited.len(), 5);
     });
-    matrix.run("stop/snapshot_changed", || {
-        let fixture = Fixture::all_admitted();
-        assert_hooked_stop(
-            &fixture,
-            &EvalBudget::unbounded(),
-            IncompleteReason::SnapshotChanged,
-            |window| {
-                if window == Window::AfterPage(1) {
-                    fixture.retire("theta");
-                }
-            },
-        );
-    });
-    matrix.run("stop/kernel_incarnation_changed", || {
-        let fixture = Fixture::all_admitted();
-        let manifest = fixture.backup();
-        assert_hooked_stop(
-            &fixture,
-            &EvalBudget::unbounded(),
-            IncompleteReason::KernelIncarnationChanged,
-            |window| {
-                if window == Window::AfterPage(1) {
-                    fixture.kernel.restore(&manifest).unwrap();
-                }
-            },
-        );
-    });
+    matrix.run(
+        "stop/snapshot_changed",
+        a_snapshot_that_moves_between_pages_stops_the_walk_without_a_complete_result,
+    );
+    matrix.run(
+        "stop/kernel_incarnation_changed",
+        a_kernel_restore_between_pages_stops_the_walk_with_the_incarnation_change,
+    );
     matrix.run("stop/cancel", || {
         let fixture = Fixture::all_admitted();
         let budget = EvalBudget::unbounded();
-        let cancelled = assert_hooked_stop(
-            &fixture,
-            &budget,
-            IncompleteReason::BudgetExhausted,
-            |window| {
+        let cancelled = fixture
+            .rank_with_hook(&axis(0), bounds(K), &budget, |window| {
                 if window == Window::AfterPage(1) {
                     budget.cancel();
                 }
-            },
+            })
+            .unwrap();
+        assert_eq!(
+            cancelled.completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted)
         );
         assert!(cancelled.ranked.is_empty(), "{cancelled:?}");
     });
     matrix.run(
         "stop/deadline",
-        a_deadline_that_expires_mid_walk_never_yields_a_complete_result,
+        a_deadline_that_passes_after_the_first_page_stops_the_walk_incomplete_with_no_ranked_rows,
     );
 
     matrix.finish();
