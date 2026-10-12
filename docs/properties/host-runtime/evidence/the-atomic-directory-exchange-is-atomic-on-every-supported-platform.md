@@ -161,8 +161,10 @@ portfolio evaluation asked a human to separate.
 ### Q: Is macOS a supported deployment target for the lifecycle store, or only a development platform?
 
 - Sources examined: `store_fs.rs:112-120` (both cfg arms),
-  `the source repository `ci.yml` workflow:126-184` in full (the matrix, both platform branches,
-  and the omission comment at `:171-174`), `src/generation.rs` and
+  `.github/workflows/ci.yml` at HEAD (fifteen `runs-on: ubuntu-latest` jobs, no
+  `macos` token), the source repository's former `ci.yml` workflow:126-184` in
+  full (the matrix, both platform branches, and the omission comment at
+  `:171-174`; source-catalog coordinates), `src/generation.rs` and
   `src/lifecycle.rs` cfg inventory (`generation.rs:2357` and `lifecycle.rs:1778`,
   `:1900`, `:1922`, `:1961` are the only `target_os` gates in either file; the
   production gates moved to `store_fs.rs:58`, `:112`, and `:117`).

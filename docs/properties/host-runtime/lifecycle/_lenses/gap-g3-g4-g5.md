@@ -280,8 +280,11 @@ classifying the errno. `rustix` issues `RenameFlags::EXCHANGE` as Linux
 `renameatx_np(RENAME_SWAP)`. Those are different kernel calls with independently
 documented behaviour, reached through one Rust expression.
 
-CI's macOS job (`the source repository`ci.yml`workflow:126-184`, matrix at `:132`) runs on
-macOS exactly four host-runtime steps:
+At HEAD `.github/workflows/ci.yml` runs every job on `ubuntu-latest` and contains
+no `macos` token; the catalog attributes the removal of the macOS job to PR #131
+(merge `5d638e3e8`) in the source repository. That former job (`the source
+repository`ci.yml`workflow:126-184`, matrix at `:132`; source-catalog coordinates)
+ran on macOS exactly four host-runtime steps:
 
 - `:156` `cargo build -p host-runtime` (build only, no test binaries)
 - `:178` `cargo nextest run -p host-runtime --test shm_soak`
@@ -290,11 +293,12 @@ macOS exactly four host-runtime steps:
 - `:182-183` `cargo test -p host-runtime --doc`
 
 No `--test lifecycle`, no `--test client`, no `--test activation`, and the only
-`--lib` invocation is filtered to one `shm_provider` test. The lib test binary is
-*compiled* on macOS by that filtered run, so a macOS type or cfg error would
-surface, but no `generation` or `lifecycle` test body executes. The step comment
-at `:171-174` says so in its own terms: the macOS job proves "side-effect-free
-omission (R15), not active parity".
+`--lib` invocation was filtered to one `shm_provider` test. The lib test binary
+was *compiled* on macOS by that filtered run, so a macOS type or cfg error would
+have surfaced, but no `generation` or `lifecycle` test body executed. The step
+comment at `:171-174` said so in its own terms: the macOS job proved
+"side-effect-free omission (R15), not active parity". With that job gone,
+nothing in this tree builds or tests host-runtime on macOS.
 
 So the macOS `RENAME_SWAP` call has never been observed to execute. Its call site
 is `generation.rs:1352`, inside `promote_temp`, reached only when the digest target
@@ -649,16 +653,19 @@ occupying the digest target, plus a restage of the same digest. The existing tes
 (`generation.rs:2922`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
-Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
-read at HEAD; the claim that no macOS lifecycle or generation test executes is
-derived from the four host-runtime steps in that job rather than asserted.
+Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms and the call site were read at the authoring pass's HEAD, along
+with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
+since deleted that job with every other macOS job, so the claim that no macOS
+lifecycle or generation test executes now holds trivially: `.github/workflows/ci.yml`
+at HEAD contains only `ubuntu-latest` jobs.
 Existing check: partial, Linux only. `generation.rs:2922`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
-branch. CI's macOS job (`the source repository`ci.yml`workflow:126-184`) runs only
+branch. The source repository's former macOS job
+(`the source repository`ci.yml`workflow:126-184`; source-catalog coordinates) ran only
 `cargo build -p host-runtime` (`:156`), `--test shm_soak` (`:178`), one filtered
-`--lib shm_provider` test (`:179-181`), and `--doc` (`:182-183`). No `generation`
-or `lifecycle` test body runs on macOS; the step comment at `:171-174` says the
-job proves omission, not parity. Status unaudited.
+`--lib shm_provider` test (`:179-181`), and `--doc` (`:182-183`), and this tree's
+workflow has no macOS job, so no `generation` or `lifecycle` test body runs on
+macOS. Status unaudited.
 Impact: the exchange is the store's only repair primitive for a corrupt occupant,
 and it is immediately followed by a deletion. If macOS `RENAME_SWAP` behaves
 differently on APFS than `RENAME_EXCHANGE` on ext4, the failure mode is deleting
