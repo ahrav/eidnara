@@ -44,3 +44,13 @@ Check semantics: `always` - the addon's `descriptorSchemaVersion()` and `qualifi
   witness constructs and what it leaves unconstructed.
 - Missing evidence: an artifact digest tied to the source revision; build metadata cannot tell a stale local build at the same layout from the tested one.
 - Conclusion: unresolved, needs the named handoff.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version. Line anchors into files
+#989 changed are as of their earlier recorded head.

@@ -561,7 +561,7 @@ Verified: `packages/plugin/src/shared/host-client/auth.test.ts` does not
 exist. `auth.ts` does not exist. `git show --stat ed487e11` shows both deleted in
 the commit that made the ring mandatory, at 365 and 314 lines. A repository-wide
 search for `auth.test.ts` returns nothing outside `node_modules`. A search for
-`eidnara-server-v3` in TypeScript returns two hits, neither a handshake
+`eidnara-server` in TypeScript returns two hits, neither a handshake
 implementation: `packages/plugin/scripts/host-client-boundary.test.ts:221`
 uses the string as a *forbidden-name fixture*, and
 `packages/plugin/dist/shared/host-client/auth.d.ts:24-25` is an untracked
@@ -988,3 +988,18 @@ Ranked by the gap between what the code decides and what any check proves.
   `"#[cfg(test)]\nmod tests {"` (`:353`) and silently scans its own test module
   if that string ever stops appearing verbatim. Verified present today in both
   scanned files; the fragility is the open item.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version; the connection file is
+exactly `setup_socket`, `key`, `daemon_id`, `pid`, and `daemon_ver`;
+stale-process skew is detected by connection identity and proof failure; the
+proof domains are `eidnara-server` and `eidnara-client`, the credential claim
+domain is `eidnara-model-execution-credential` with canonicalization
+`harness-provider-source`, and the pool profile is `host-payload-pool`. Line
+anchors into files #989 changed are as of their earlier recorded head.

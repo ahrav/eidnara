@@ -33,7 +33,7 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   asserts the alarm survives reopen and a repeat does not commit.
 - #881 (head `1c66f16c`): `Revert { None }` kept the pass-through;
   `each_resolution_outcome_runs_through_the_handler_with_its_effects`
-  (`crates/daemon/src/transform/revision_3.rs:323`) asserted `PASSTHROUGH`.
+  (`crates/daemon/src/transform/window_admission.rs:323`) asserted `PASSTHROUGH`.
   Outside the arm (a lineage anchor and continuation base present),
   `a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment`
   (`:824`) removes every segment; `:844` and `:859` repeat it under a CAS
@@ -116,3 +116,18 @@ the logged range, and a `FirstPass` response in the same request.
   unchanged; they ran in #833's daemon gate on `switched()` requests.
 - Missing evidence: None.
 - Conclusion: resolved with answer: no write.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, routed envelope, context, memory-capture,
+note-evaluation, discovery, and transform bodies carry no `v`; transform
+ignores a field named `v` and the former carriers, strict bodies refuse them
+as unknown fields, `transform_revision_unsupported` and
+`transform_tail_delta_retired` no longer exist, `transform/window_admission.rs` is
+`transform/window_admission.rs`, `transform/recorded_goldens.rs` is
+`transform/recorded_goldens.rs`, and the golden fixture is
+`transform-recorded-goldens.json`; `serve_native` remains until #993. Line
+anchors into files #989 changed are as of their earlier recorded head.

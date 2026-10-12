@@ -108,3 +108,13 @@ unprotected, and asserts `prune` preserves it byte-for-byte.
 - Conclusion: resolved. The manifest gate returns removable on four failure
   modes; at least two are reachable without any injected fault, and the single
   existing test exercises neither.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the lifecycle record carries no `schema` key,
+and a record whose key set differs from the record shape is quarantined
+byte-for-byte as `unsupported_state_schema`. Line anchors into files #989
+changed are as of their earlier recorded head.

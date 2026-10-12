@@ -371,7 +371,7 @@ not exist, and neither does `auth.ts`. Listing the directory returns 22 entries 
 neither name is among them. `git show --stat ed487e11` shows both deleted, at 365
 and 314 lines, by the commit that made the ring transport mandatory. A
 repository-wide search for `auth.test.ts` returns nothing outside `node_modules`.
-A search for `eidnara-server-v3` in TypeScript returns two hits and neither is a
+A search for `eidnara-server` in TypeScript returns two hits and neither is a
 handshake implementation: `packages/plugin/scripts/host-client-boundary.test.ts:221`
 uses the string as a forbidden-name fixture, and
 `packages/plugin/dist/shared/host-client/auth.d.ts:24-25` is an untracked build
@@ -620,3 +620,18 @@ Four limits, stated so a later pass does not read absence as absence of risk.
   `part-2-rescope/scope-map-and-risk-ranking.md:738-740`. It is the only unit in
   this sub-part whose tests run in CI, so **if Part 1 owns it, this sub-part has
   zero CI-executed source-resident checks.** (needs human input)
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version; the connection file is
+exactly `setup_socket`, `key`, `daemon_id`, `pid`, and `daemon_ver`;
+stale-process skew is detected by connection identity and proof failure; the
+proof domains are `eidnara-server` and `eidnara-client`, the credential claim
+domain is `eidnara-model-execution-credential` with canonicalization
+`harness-provider-source`, and the pool profile is `host-payload-pool`. Line
+anchors into files #989 changed are as of their earlier recorded head.

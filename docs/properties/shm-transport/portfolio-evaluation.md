@@ -1046,3 +1046,13 @@ Each test below has no citing record in the catalog.
 6. The record's Impact says "forever" for an idle channel; whether the reactor's
    readiness path or a setup-socket event bounds that in practice was not
    established.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version. Line anchors into files
+#989 changed are as of their earlier recorded head.

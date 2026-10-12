@@ -168,3 +168,13 @@ not a measurement. Coverage check to emit:
   - line 132, `ring.rs:1098` now `ring.rs:1401`: `enter_quarantine` is no longer called from one place in the transport: `try_reserve` (`:1321`), `Ring::release` (`:1533`), `publish_commit` (`:2377`), and `quarantine_with` (`:1944`) all reach it, so a release-time identity mismatch is now terminal too.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version. Line anchors into files
+#989 changed are as of their earlier recorded head.

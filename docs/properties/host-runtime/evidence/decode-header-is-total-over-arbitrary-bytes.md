@@ -172,3 +172,14 @@ lib target, which no CI job builds.
 - Conclusion: needs human input. The invariant should be written down either way;
   whether the enforcement belongs in a `const` assertion or in a versioned parse
   table depends on whether a narrower future header is permitted.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a former
+21-byte header is refused by header validation. Line anchors into files #989
+changed are as of their earlier recorded head.

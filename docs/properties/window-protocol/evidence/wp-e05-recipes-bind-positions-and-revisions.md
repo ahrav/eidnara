@@ -43,7 +43,7 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   + i; it ran in the #883 (head `d7712d75`) and #884 (head `f8734c12`) `bun
   run check:repo` gates. #881's
   `stale_slice_input_keeps_address_the_submitted_native_window`
-  (`crates/daemon/src/transform/revision_3.rs:988`) asserts every input keep
+  (`crates/daemon/src/transform/window_admission.rs:988`) asserts every input keep
   starts inside the submitted window after a stale cut.
 
 Gate results of the runs cited here, as recorded in the PR descriptions:
@@ -115,3 +115,18 @@ reconstruction and object identity.
 - Missing evidence: None.
 - Conclusion: resolved with answer: yes; the daemon side ran in #881's daemon
   gate and the plugin side in the #883 and #884 `bun run check:repo` gates.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, routed envelope, context, memory-capture,
+note-evaluation, discovery, and transform bodies carry no `v`; transform
+ignores a field named `v` and the former carriers, strict bodies refuse them
+as unknown fields, `transform_revision_unsupported` and
+`transform_tail_delta_retired` no longer exist, `transform/window_admission.rs` is
+`transform/window_admission.rs`, `transform/recorded_goldens.rs` is
+`transform/recorded_goldens.rs`, and the golden fixture is
+`transform-recorded-goldens.json`; `serve_native` remains until #993. Line
+anchors into files #989 changed are as of their earlier recorded head.

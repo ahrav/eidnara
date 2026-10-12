@@ -200,3 +200,16 @@ added to this path shows up as a changed number.
   figure and promotes the observation to a property. Synthesis should
   cross-reference rather than merge, and 2c's `existing-checks.md` line needs the
   figure amended by whoever owns that file.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a former
+21-byte header is refused by header validation; the grant is 124 bytes and
+carries no layout version, the lifecycle page carries no layout version, and
+the setup grant and activation carry no descriptor schema or wire version.
+Line anchors into files #989 changed are as of their earlier recorded head.

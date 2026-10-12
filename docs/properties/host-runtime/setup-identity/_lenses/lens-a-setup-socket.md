@@ -46,8 +46,8 @@ without reading a byte when none is free (`runtime.rs:1035-1040`).
 | # | Direction | Message | What the sender proves | What the receiver grants |
 | --- | --- | --- | --- | --- |
 | 1 | peer to host | `ClientHello { client_nonce, role }` (`auth.rs:26-29`) | nothing; `role` is parsed and discarded (`auth.rs:70-83`, doc `:215`) | nothing |
-| 2 | host to peer | `ServerProof { daemon_id, server_nonce, daemon_ver, server_proof }` (`auth.rs:31-37`) | host holds the key: `HMAC-SHA256(key, "eidnara-server-v3" ‖ client_nonce ‖ server_nonce ‖ daemon_id)` (`auth.rs:246-252`) | nothing; the host has not yet authenticated the peer |
-| 3 | peer to host | `ClientAuth { client_auth }` (`auth.rs:55-58`) | peer holds the key, under the same nonce pair and the `"eidnara-client-v3"` domain (`auth.rs:268-274`) | **everything.** Host returns `Authenticated` (`auth.rs:279`) |
+| 2 | host to peer | `ServerProof { daemon_id, server_nonce, daemon_ver, server_proof }` (`auth.rs:31-37`) | host holds the key: `HMAC-SHA256(key, "eidnara-server" ‖ client_nonce ‖ server_nonce ‖ daemon_id)` (`auth.rs:246-252`) | nothing; the host has not yet authenticated the peer |
+| 3 | peer to host | `ClientAuth { client_auth }` (`auth.rs:55-58`) | peer holds the key, under the same nonce pair and the `"eidnara-client"` domain (`auth.rs:268-274`) | **everything.** Host returns `Authenticated` (`auth.rs:279`) |
 | - | host internal | acquire connection permit, release handshake permit (`connection.rs:137-141`) | - | authenticated capacity |
 | - | host internal | `ring.prepare` on a blocking thread, bounded by `transport_setup_deadline` (`connection.rs:146-164`) | - | two memfds and a `WireDescriptor` |
 | - | host internal | mint a fresh 32-byte hex activation token (`connection.rs:165`, `:212-226`) | - | - |
@@ -863,3 +863,18 @@ Open questions: None.
    `transport_setup_deadline`, observed as a bounded attempt count rather than a
    generous timeout" deserves its own liveness record is left for synthesis.
    (surfaced for the portfolio evaluation)
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version; the connection file is
+exactly `setup_socket`, `key`, `daemon_id`, `pid`, and `daemon_ver`;
+stale-process skew is detected by connection identity and proof failure; the
+proof domains are `eidnara-server` and `eidnara-client`, the credential claim
+domain is `eidnara-model-execution-credential` with canonicalization
+`harness-provider-source`, and the pool profile is `host-payload-pool`. Line
+anchors into files #989 changed are as of their earlier recorded head.

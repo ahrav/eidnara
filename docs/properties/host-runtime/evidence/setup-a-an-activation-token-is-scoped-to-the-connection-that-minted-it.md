@@ -151,3 +151,15 @@ of asserting `matches!(..., Err(SetupError::InvalidIdentity))`
 - Missing evidence: none.
 - Conclusion: resolved. The test's step 3 is written to keep the version and
   schema correct so the failure is attributable.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version; the connection file is
+exactly `setup_socket`, `key`, `daemon_id`, `pid`, and `daemon_ver`;
+stale-process skew is detected by connection identity and proof failure. Line
+anchors into files #989 changed are as of their earlier recorded head.

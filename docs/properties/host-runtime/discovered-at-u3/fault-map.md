@@ -350,3 +350,14 @@ records unblocked per capability.
   `tests/local_embeddings_roundtrip.rs:57` uses `raw_client`'s frame budget; no code
   constant names a context-request deadline that a disabled LocalEmbeddings lane
   must respect. (needs human input)
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a former
+21-byte header is refused by header validation. Line anchors into files #989
+changed are as of their earlier recorded head.

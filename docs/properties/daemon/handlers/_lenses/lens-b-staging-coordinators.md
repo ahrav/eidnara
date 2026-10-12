@@ -712,3 +712,18 @@ Facts still missing, not design decisions.
    which would leave the page path with no in-process replay guard even without
    a restart (`lib.rs:9537-9540`). (unresolved, needs the response-assembly
    finding from 4d)
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, routed envelope, context, memory-capture,
+note-evaluation, discovery, and transform bodies carry no `v`; transform
+ignores a field named `v` and the former carriers, strict bodies refuse them
+as unknown fields, `transform_revision_unsupported` and
+`transform_tail_delta_retired` no longer exist, `transform/window_admission.rs` is
+`transform/window_admission.rs`, `transform/recorded_goldens.rs` is
+`transform/recorded_goldens.rs`, and the golden fixture is
+`transform-recorded-goldens.json`; `serve_native` remains until #993. Line
+anchors into files #989 changed are as of their earlier recorded head.

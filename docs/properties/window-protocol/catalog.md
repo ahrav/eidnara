@@ -1,5 +1,18 @@
 # Window protocol (M1)
 
+> Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+> unversioned contract, so every clause here that names a protocol version,
+> numbered revision, version-skew refusal, or retired-field refusal is
+> invalidated. At the #989 head, routed envelope, context, memory-capture,
+> note-evaluation, discovery, and transform bodies carry no `v`; transform
+> ignores a field named `v` and the former carriers, strict bodies refuse them
+> as unknown fields, `transform_revision_unsupported` and
+> `transform_tail_delta_retired` no longer exist, `transform/window_admission.rs` is
+> `transform/window_admission.rs`, `transform/recorded_goldens.rs` is
+> `transform/recorded_goldens.rs`, and the golden fixture is
+> `transform-recorded-goldens.json`; `serve_native` remains until #993. Line
+> anchors into files #989 changed are as of their earlier recorded head.
+
 This part catalogs the window protocol of the transform, revision 3, as
 specified by [#824](https://github.com/ahrav/eidnara/issues/824) and landed by
 milestone M1 (tickets #826 to #833). It carries the 37 records of catalog
@@ -83,7 +96,7 @@ the same field.
 | `TransformSnapshotCache` | Mixed | Generation fence remains; the snapshot holds CK input only (WP-E08). |
 | Tag protection and legacy tool ids | Mixed | Decisions remain; full-session reads are replaced (WP-E09). |
 | Durable meta size | Mixed | The 512 KiB guard remains; history-dependent growth must go (WP-E10, WP-P25). |
-| Revision 3 window and discovery protocol | New | Completeness, absence, ordering, and budget meanings (WP-P01, WP-P10, WP-P12, WP-P13, WP-P24, markers). |
+| Window and discovery protocol | New | Completeness, absence, ordering, and budget meanings (WP-P01, WP-P10, WP-P12, WP-P13, WP-P24, markers). |
 | Per-session daemon serialization | New | Generation fencing does not provide capture-order execution (WP-P04, WP-P18). |
 | Fold rendering horizon | New | Bounded read with byte-identical output (WP-P08). |
 | First-user tool policy | Mixed | The database resolver replaces window-based cache-miss resolution (WP-P14). |
@@ -163,7 +176,7 @@ Distribution: 27 `default-production`, 3 `explicit-config-only`, 7 `test-only`.
 | WP-P21 | [`wp-p21-discovery-passed-page-one-and-a-budget-fired`](#wp-p21-discovery-passed-page-one-and-a-budget-fired) | reachability | `sometimes` | plugin | active | yes | #883 |
 | WP-P22 | [`wp-p22-the-host-mutated-during-the-await`](#wp-p22-the-host-mutated-during-the-await) | reachability | `sometimes` | plugin | active | yes | #883 |
 | WP-P23 | [`wp-p23-the-scan-traversed-a-hostile-slot`](#wp-p23-the-scan-traversed-a-hostile-slot) | reachability | `sometimes` | plugin | active | yes | #883 |
-| WP-P24 | [`wp-p24-wire-admissibility-is-explicit`](#wp-p24-wire-admissibility-is-explicit) | safety | `always` | protocol | active | yes | #875, #881, #883 |
+| WP-P24 | [`wp-p24-wire-admissibility-is-explicit`](#wp-p24-wire-admissibility-is-explicit) | safety | `always` | protocol | active | yes | #989 |
 | WP-P25 | [`wp-p25-legacy-meta-is-pruned-on-first-commit`](#wp-p25-legacy-meta-is-pruned-on-first-commit) | safety | `always` | store | invalidated | yes | #833 |
 
 Owner lists the PR whose recorded run supplies the status, then, after a
@@ -260,7 +273,7 @@ Existing check: `crates/daemon/src/transform.rs:19455`
 (marker: `assert!(revert.reconcile_pending)` before the HARD);
 `crates/memory-store/src/lib.rs:26148`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`; #881
-`crates/daemon/src/transform/revision_3.rs:1147`
+`crates/daemon/src/transform/window_admission.rs:1147`
 `a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request` and
 `:1163` `a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass`.
 Impact: High. A wrong cut deletes surviving summaries or retains reverted
@@ -309,7 +322,7 @@ request; #833 adds that the arming commit leaves `block_identity_by_mid`
 unchanged); `:19950`
 `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`; `:20017`
 `pending_rewrite_persists_across_store_restart`. Reset contrast (#833):
-`crates/daemon/src/transform/revision_3.rs:447`
+`crates/daemon/src/transform/window_admission.rs:447`
 `a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_first_pass`
 (marker: resolution `Revert { keep_through_seq: None }` and
 `removed_sequence_range` "1..=2" asserted before the pass; then HARD,
@@ -693,10 +706,10 @@ Existing check: `crates/daemon/src/lib.rs:25333`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`;
 `crates/daemon/src/transform.rs:27963`
 `serialized_output_cache_take_under_a_new_epoch_returns_nothing` (#833);
-`crates/daemon/src/transform/revision_3.rs:701`
+`crates/daemon/src/transform/window_admission.rs:701`
 `a_same_pass_reset_reuses_no_previous_output` (#833; marker: the repeat
 before the reset has nonempty previous keeps); #881
-`crates/daemon/src/transform/revision_3.rs:1147` and `:1163` (interrupted
+`crates/daemon/src/transform/window_admission.rs:1147` and `:1163` (interrupted
 revert, one bump).
 Impact: High. Stale output can resurrect reverted context; extra bumps cause
 repeated invalidation.
@@ -747,7 +760,7 @@ appended messages on a capture_bytes decline"
 sending a smaller window. The trusted-producer assumption is contract C7.
 Existing check: `crates/daemon/src/window_coverage/tests.rs:217`
 `impossible_declarations_are_invalid_params` (#875);
-`crates/daemon/src/transform/revision_3.rs:193`
+`crates/daemon/src/transform/window_admission.rs:193`
 `boundary_presence_head_sequence_and_duplicates_are_invalid_params` and `:287`
 `paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request`
 (#881);
@@ -807,7 +820,7 @@ Existing check: `crates/daemon/src/window_coverage/tests.rs:99`
 `a_publish_between_the_core_read_and_the_declared_read_is_invisible`; `:317`
 `a_removal_between_the_core_read_and_the_intersection_is_invisible`; `:217`
 `impossible_declarations_are_invalid_params`; #881
-`crates/daemon/src/transform/revision_3.rs:323`
+`crates/daemon/src/transform/window_admission.rs:323`
 `each_resolution_outcome_runs_through_the_handler_with_its_effects`; `:876`
 `a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary`;
 `:917`
@@ -853,7 +866,7 @@ Existing check: `crates/daemon/src/window_coverage/tests.rs:436`
 `resolved_ordinals_equal_the_independent_model`; `:412`
 `synthetic_borrowing_matches_the_plugin_rule_case_for_case`; #881 asserts
 served `messages` and `operations` contain no `"ordinal"`
-(`crates/daemon/src/transform/revision_3.rs:323`).
+(`crates/daemon/src/transform/window_admission.rs:323`).
 Impact: High. Wrong ordinals misclassify coverage and tool policy.
 Open questions: None. D11 fixes the synthetic rule.
 
@@ -934,7 +947,7 @@ The #875 witness was read at `f2442b2f`. #881 deleted #827's
 is built against the submitted window.
 Existing check: `crates/daemon/src/window_coverage/tests.rs:513`
 `a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input`
-(#875, cut 4); `crates/daemon/src/transform/revision_3.rs:988`
+(#875, cut 4); `crates/daemon/src/transform/window_admission.rs:988`
 `stale_slice_input_keeps_address_the_submitted_native_window` (#881); plugin
 publication at `boundaryIndex + i`
 (`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:182`,
@@ -1593,7 +1606,7 @@ Confidence: high -
 `f2442b2f` (`window_coverage/tests.rs:513`); the table test also asserts
 `StaleSlice { cut: 4 }` and `{ cut: 7 }`.
 Existing check: `crates/daemon/src/window_coverage/tests.rs:513`;
-`crates/daemon/src/transform/revision_3.rs:988` (#881).
+`crates/daemon/src/transform/window_admission.rs:988` (#881).
 Impact: WP-P05 passes vacuously at cut = 0.
 Open questions: None.
 
@@ -1714,58 +1727,61 @@ Open questions:
 ### wp-p24-wire-admissibility-is-explicit
 
 Type: safety
-Reachability: default-production - every revision 3 request and every
-discovery call (`transform_revision_unsupported` at
-`crates/daemon/src/lib.rs:8226`; `window_refusal` at `:13457`, `f2442b2f`).
+Reachability: default-production - every transform request and every
+discovery call (`dispatch_transform` and `window_refusal` in
+`crates/daemon/src/lib.rs`; `parse_boundary_request` in
+`crates/daemon/src/window_coverage.rs`).
 Status: active
-Exercised: yes - #875's discovery shape (unsafe `before_sequence` including
-`i64::MIN` and `i64::MAX`, malformed bodies `invalid_params`, unknown methods
-still `unrecognized_request_shape`) ran in the #875 daemon gate. #881's
-`a_missing_or_non_3_revision_is_refused_with_expected_and_received_and_no_state_change`,
+Exercised: yes - #989's gate block records the daemon suite that runs
+`a_body_carrying_v_or_tail_delta_is_served_like_the_body_without_them`,
 `boundary_presence_head_sequence_and_duplicates_are_invalid_params`,
 `a_boundary_that_does_not_decode_is_bad_request`, and
-`paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request`
-ran in the #881 `cargo test -p daemon` gate (head `1c66f16c`), and #881's
-`test:rust` against the revision 2 plugin is red by design (9 pass, 14 fail).
-The plugin side ("serves raw and logs an upgrade hint when the daemon refuses
-the revision", the "a revision 2 daemon" decline, and the final-page test in
-`module-wire.test.ts`) ran in the #883 (head `d7712d75`) and #884 (head
-`f8734c12`) `bun run check:repo` gates; the paired `test:rust` is 23 pass, 17
-skip, 0 fail in #881 (with #883), #883, and #884.
-Guarantee: The daemon admits exactly the revision 3 request shape and refuses
-every other with a stable, distinguishable answer.
-Check: `always` - Missing or non-3 `v` answers
-`transform_revision_unsupported` with expected and received revisions; a
-missing `boundary` (distinct from `null`) answers `invalid_params`; a window
-head that is not the declared mid answers `invalid_params`; a `sequence`
-outside the safe-integer range is refused on both sides; paged `v` and
-`boundary` are final-page scalars validated on the assembled request; a
-revision 2 daemon answers discovery with `unrecognized_request_shape`, which
-the plugin treats as a decline. Falsifier: a decoder that defaults a missing
-`v` to 2.
-Fault/timing angle: Process version skew in either direction.
-Required faults and enabling state: A revision 2 plugin against a revision 3
-daemon and the reverse.
+`paged_boundary_is_a_final_page_scalar_checked_on_the_assembled_request`
+(`crates/daemon/src/transform/window_admission.rs`), plus
+`malformed_boundary_bodies_are_invalid_params`
+(`crates/daemon/src/window_coverage/dispatch_tests.rs`), and the plugin suite
+that runs "serves raw when the daemon refuses the pass", the discovery
+declines of `rust-mode-window.test.ts`, and the final-page test of
+`module-wire.test.ts`. #989 ships this record, so its recorded run is the
+gate block of its own PR description.
+Guarantee: The daemon admits exactly the one transform request shape and
+refuses every body outside it with a stable answer before any durable effect.
+Check: `always` - a body that decodes and satisfies the window rules is
+served; a field named `v` or a former carrier (`tail_delta`,
+`absolute_ordinal`, `declared_trim`, `full_array_fingerprint`) leaves the
+response and the durable state exactly as the same body without it; a missing
+`boundary` (distinct from `null`) answers `invalid_params`; a window head that
+is not the declared mid answers `invalid_params`; a `sequence` outside the
+safe-integer range is refused on both sides; paged `boundary` is a final-page
+scalar validated on the assembled request; a discovery body with any field
+outside its shape, including `v`, answers `invalid_params`, and the plugin
+treats every discovery error as a decline. Falsifier: any code path that reads
+a version or a former carrier, a second request shape, or a refusal code that
+names a version.
+Fault/timing angle: none. Stale-process pairing is refused by connection
+identity at authentication, before any routed body.
+Required faults and enabling state: a body carrying `v` or `tail_delta`; a
+missing boundary; an off-head window; unsafe sequences; a non-final page with
+a scalar; a discovery body with an extra field.
 Confidence: medium -
-[evidence](evidence/wp-p24-wire-admissibility-is-explicit.md). The #875, #881,
-and #883 witnesses were read at `f8734c12` and re-located at `f2442b2f`.
-#881's gate block records `test:rust` 9 pass, 14 fail on
-#881 alone, by design: the revision 2 plugin is refused with
-`transform_revision_unsupported` ("expected transform revision 3, received 2")
-and serves raw. That demonstrates the skew refusal end to end.
-Existing check: `crates/daemon/src/window_coverage/dispatch_tests.rs:81`
-`malformed_boundary_bodies_are_invalid_params` (#875);
-`crates/daemon/src/transform/revision_3.rs:158`
-`a_missing_or_non_3_revision_is_refused_with_expected_and_received_and_no_state_change`,
-`:193`, `:231` `a_boundary_that_does_not_decode_is_bad_request`, `:287`
-`paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request`
-(#881);
-`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:938`
-"serves raw and logs an upgrade hint when the daemon refuses the revision", the
-"a revision 2 daemon" case of `:562`, and `module-wire.test.ts:901` "carries v
-and boundary ${JSON.stringify(boundary)} on the final page only" (#883).
-Impact: High. Silent acceptance of a revision 2 body would apply an
-ordinal-bearing array to the window protocol.
+[evidence](evidence/wp-p24-wire-admissibility-is-explicit.md). The witnesses
+were read at the #989 head. Dated note, 2026-10-12, #989 (spec #988
+amendment A1): the version clauses of this record (`v` must be 3,
+`transform_revision_unsupported`, the revision 2 plugin and daemon skew cases)
+are invalidated; the admissibility claim stands without them.
+Existing check: `crates/daemon/src/transform/window_admission.rs`
+`a_body_carrying_v_or_tail_delta_is_served_like_the_body_without_them`,
+`boundary_presence_head_sequence_and_duplicates_are_invalid_params`,
+`a_boundary_that_does_not_decode_is_bad_request`,
+`paged_boundary_is_a_final_page_scalar_checked_on_the_assembled_request`;
+`crates/daemon/src/window_coverage/dispatch_tests.rs`
+`malformed_boundary_bodies_are_invalid_params`;
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts` "serves
+raw when the daemon refuses the pass" and the discovery declines;
+`module-wire.test.ts` "carries boundary ${JSON.stringify(boundary)} on the
+final page only".
+Impact: High. Silent acceptance of a body outside the shape, or a code path
+that reads a version, would let two shapes coexist on one wire.
 Open questions: None.
 
 ### wp-p25-legacy-meta-is-pruned-on-first-commit

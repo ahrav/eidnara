@@ -21,8 +21,8 @@ mac.update(daemon_id);
 ```
 
 `HMAC-SHA256` keyed on the connection key, over four concatenated inputs with a
-domain string first. The two domains are `"eidnara-server-v3"` and
-`"eidnara-client-v3"` (`auth.rs:19-20`), so a server proof can never be replayed as
+domain string first. The two domains are `"eidnara-server"` and
+`"eidnara-client"` (`auth.rs:19-20`), so a server proof can never be replayed as
 a client proof.
 
 Nonce provenance:
@@ -139,3 +139,14 @@ authenticating anybody.
 - Missing evidence: none.
 - Conclusion: resolved. The symmetric property holds and is covered by
   `setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof`.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the proof domains are `eidnara-server` and
+`eidnara-client`, the credential claim domain is
+`eidnara-model-execution-credential` with canonicalization
+`harness-provider-source`, and the pool profile is `host-payload-pool`. Line
+anchors into files #989 changed are as of their earlier recorded head.

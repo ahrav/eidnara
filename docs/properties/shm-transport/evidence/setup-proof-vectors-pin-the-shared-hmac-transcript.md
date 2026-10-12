@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-U3 renamed the domain separators (`eidnara-server-v3`, `eidnara-client-v3`) and the daemon version prefix (`eidnara-host/0.1.0`), and the committed proof vectors stopped matching. Because both peers link one `compute_proof`, a symmetric transcript change would interoperate while changing what a captured proof commits to; only a vector produced outside the implementation can catch that.
+U3 renamed the domain separators (`eidnara-server`, `eidnara-client`) and the daemon version prefix (`eidnara-host/0.1.0`), and the committed proof vectors stopped matching. Because both peers link one `compute_proof`, a symmetric transcript change would interoperate while changing what a captured proof commits to; only a vector produced outside the implementation can catch that.
 
 ## Evidence trail
 
@@ -47,3 +47,14 @@ None. The proof is a pure function of the committed inputs.
   - line 9, `crates/host-runtime/src/auth.rs:119` now `crates/host-runtime/src/auth.rs:132`: auth.rs re-exports only the domain and length constants at `:12-14`; compute_proof is a thin wrapper function that forwards to shm_transport::setup_auth::compute_proof.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the proof domains are `eidnara-server` and
+`eidnara-client`, the credential claim domain is
+`eidnara-model-execution-credential` with canonicalization
+`harness-provider-source`, and the pool profile is `host-payload-pool`. Line
+anchors into files #989 changed are as of their earlier recorded head.

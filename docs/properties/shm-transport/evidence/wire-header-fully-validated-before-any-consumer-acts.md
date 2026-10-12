@@ -180,3 +180,19 @@ At HEAD: The type is `RingClientEndpoint` at HEAD; `send` (`ring_transport.rs:15
   - line 141, `frame_channel.rs:48-49` (trimmed doc comment): `validate_inbound_header` (`frame_channel.rs:41-59`) carries no doc comment at HEAD.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a former
+21-byte header is refused by header validation; the grant is 124 bytes and
+carries no layout version, the lifecycle page carries no layout version, and
+the setup grant and activation carry no descriptor schema or wire version; the
+connection file is exactly `setup_socket`, `key`, `daemon_id`, `pid`, and
+`daemon_ver`; stale-process skew is detected by connection identity and proof
+failure. Line anchors into files #989 changed are as of their earlier recorded
+head.
