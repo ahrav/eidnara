@@ -21263,7 +21263,18 @@ mod tests {
     /// admits it on either lane.
     #[tokio::test(flavor = "current_thread")]
     async fn both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies() {
-        for (name, body) in transform_decode_corpus() {
+        // A supplementary body the tree cannot parse fails before it reaches its footprint, so
+        // only one the tree parses is refused one byte short of it.
+        let frozen = transform_decode_corpus()
+            .into_iter()
+            .map(|(name, body)| (name, body, true));
+        let supplementary = native_and_token_corpus()
+            .into_iter()
+            .map(|(name, body, _)| {
+                let parses = serde_json::from_slice::<Value>(&body).is_ok();
+                (name, body, parses)
+            });
+        for (name, body, reaches_footprint) in frozen.chain(supplementary) {
             let footprint = footprint_of(&body);
             if footprint == 0 {
                 continue;
@@ -21306,7 +21317,7 @@ mod tests {
                     tree_meter.needed(),
                     "{name}: the lanes count one footprint"
                 );
-                if capacity < footprint {
+                if capacity < footprint && reaches_footprint {
                     assert_eq!(
                         through_body,
                         comparable_outcome(request_too_large_error()),

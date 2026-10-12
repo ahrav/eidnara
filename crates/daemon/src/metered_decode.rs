@@ -380,10 +380,10 @@ pub enum DecodeFailure {
 }
 
 /// Decodes `body` as `T` as [`decode_metered`] does, for the direct lane: a string anywhere in
-/// the body that spells serde_json's raw-value token, key or value, makes the decode invalid. A `Value`
-/// tree reads that token by a rule of its own, which a typed decode does not apply, so a body
-/// that holds it decodes through the tree; every other body decodes as the tree decodes it, or
-/// fails as the tree fails.
+/// the body that spells serde_json's raw-value token makes the decode invalid. A `Value` tree
+/// reads that token as a key by a rule of its own, which a typed decode does not apply; the
+/// visitor sees keys and values alike, so a value spelling it is invalid too. The caller decodes
+/// such a body, like any other the typed decode refuses, through the tree.
 pub fn decode_metered_typed_direct<'de, T: serde::Deserialize<'de>>(
     body: &'de [u8],
     meter: &ResidentMeter<'_>,
