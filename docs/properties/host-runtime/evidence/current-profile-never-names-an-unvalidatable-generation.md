@@ -87,8 +87,16 @@ Storage exhaustion at each write and sync point, which needs `fsync`-time
 exhaustion on a delayed-allocation filesystem to reach the
 `fsync_preserving_storage` classification (`:202-207`, through `classify_errno` at
 `:104-109`), and a process kill between
-the promoting rename and the profile rename. No fault injection and no crash
-test exists. Four in-crate tests cover adjacent ground:
+the promoting rename and the profile rename. The staging half is covered through
+`stage_observed`: `crates/daemon/tests/vector_staging_cuts.rs:476-490` injects
+`EIO`, `ENOSPC`, and `EDQUOT` at every `StageEvent`, `:508-578` sends a child
+`SIGKILL` at every event and checks what the next process finds and reclaims, and
+`:662-675` checks the deployment selector's bytes across a cut. Those cells are
+hook-simulated errors and process kills, not kernel `fsync` exhaustion or power
+loss, and they stop at `stage`: the window between promotion and the
+`current-profile.json` rename in `stage_and_promote` (`:1107-1108`) has no cut,
+because `replace_profile` (`:1363-1365`) runs with the no-op `ProfileEvent`
+observer. Four in-crate tests cover adjacent ground:
 `stage_validate_and_read_current_roundtrip` (`:2102`), the same-digest repair
 including the protected-target refusal
 (`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`, `:2922`),

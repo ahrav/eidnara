@@ -1158,8 +1158,10 @@ The daemon CLI that reads the current profile and promotes on every start
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
 Status: active
-Exercised: partial - success and post-hoc tampering only; no fault injection and
-no crash test.
+Exercised: partial - success, post-hoc tampering, and hook-injected `EIO`,
+`ENOSPC`, and `EDQUOT` plus a `SIGKILL` child at every `StageEvent` of `stage`
+(`crates/daemon/tests/vector_staging_cuts.rs:476-578`); the window between
+promotion and the `current-profile.json` rename in `stage_and_promote` has no cut.
 Guarantee: After any outcome of staging and promotion, including a crash at any
 point, the current profile is absent, quarantined, or names a digest that
 validates.
@@ -1177,7 +1179,9 @@ Confidence: high - [evidence](evidence/current-profile-never-names-an-unvalidata
 exchange-then-revalidate window has a state where the digest name holds a
 candidate and the temp name holds the corrupt orphan.
 Existing check: four tests cover the success path, same-digest convergence,
-post-hoc tampering, and the quarantine abort. Status unaudited.
+post-hoc tampering, and the quarantine abort; `vector_staging_cuts.rs` cuts every
+`StageEvent` of `stage` with hook errors and process kills and checks that nothing
+is selected, the residue is reclaimed, and a restage succeeds. Status unaudited.
 Impact: the profile is the selector that decides which payload the daemon
 executes.
 Open questions:
