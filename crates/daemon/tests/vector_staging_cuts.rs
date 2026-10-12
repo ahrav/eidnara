@@ -42,8 +42,8 @@ enum Workload {
 const NESTED_DIR: &str = "nested";
 const NESTED_FILE: &str = "nested/payload.bin";
 
-/// The frozen cell count: the fresh vector trace (six files cut before and after their copy, the manifest before and after its write, the one sync group of the six files and the manifest before and after its syncs, two root, two rename, and two generations-directory events) is 22, the repair and retry traces omit `AfterRename` and are 21 each, and the nested workload adds two directory-sync events.
-const CELL_COUNT: usize = 66;
+/// The fresh vector trace has 22 events: 12 file-copy, two manifest-write, two grouped file-sync, two root, two rename, and two generations-directory events. The retry trace has 21 events, with `BeforeRename` as its rename event. The repair trace has 23 events, with `BeforeExchange` and `AfterExchange` after `BeforeRename`. The nested workload adds two directory-sync events.
+const CELL_COUNT: usize = 68;
 
 /// Every event a vector `workload` fires, in the order staging reports it; `the_cell_table_is_the_complete_event_trace` holds the store to exactly this sequence.
 fn vector_cells(workload: Workload) -> Vec<StageEvent> {
@@ -72,6 +72,9 @@ fn vector_cells(workload: Workload) -> Vec<StageEvent> {
     ]);
     if workload == Workload::Vector {
         cells.push(StageEvent::AfterRename);
+    }
+    if workload == Workload::Repair {
+        cells.extend([StageEvent::BeforeExchange, StageEvent::AfterExchange]);
     }
     cells.extend([
         StageEvent::BeforeGenerationsSync,
@@ -106,7 +109,12 @@ fn precedes_rename(event: &StageEvent) -> bool {
     !matches!(event, StageEvent::AfterRename) && !syncs_generations(event)
 }
 
-/// On the repair and retry paths the generations-directory sync follows the exchange or the temp's removal.
+/// On the repair path the exchange has completed at `AfterExchange` and at both generations-directory sync events; on the retry path the generations-directory sync follows the temp's removal.
+fn exchanged(event: &StageEvent) -> bool {
+    matches!(event, StageEvent::AfterExchange) || syncs_generations(event)
+}
+
+/// The generations-directory sync events, which follow the exchange or the temp's removal on the repair and retry paths.
 fn syncs_generations(event: &StageEvent) -> bool {
     matches!(
         event,
@@ -129,7 +137,7 @@ struct Expected {
 
 /// The residue a hook error (`killed == false`) or a process kill at `cut` leaves. A hook error removes this attempt's temp; a crash abandons it. A repair cut after the exchange leaves the repaired generation under the digest name and the corrupt occupant in the temp a crash abandons.
 fn residue(workload: Workload, cut: &StageEvent, killed: bool) -> Expected {
-    let exchanged = syncs_generations(cut);
+    let exchanged = exchanged(cut);
     match workload {
         Workload::Vector | Workload::Nested => {
             let published = !precedes_rename(cut);

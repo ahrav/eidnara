@@ -10,8 +10,8 @@ use std::path::Path;
 
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
-    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET,
-    ValidatedGeneration, WireMembers,
+    MEMBERS_FILE_NAME, ManifestFile, PendingGeneration, ProfileEvent, StageMeta, StreamedFile,
+    VECTOR_SELECTION_TARGET, ValidatedGeneration, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -384,10 +384,59 @@ fn selection(
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
         CurrentProfile::Absent => Ok((None, None)),
         CurrentProfile::Current(digest) => {
-            let selected = record(store, &digest)?.filter(|_| store.validate(&digest).is_ok());
+            let selected = selected_record(store, &digest)?;
             Ok((Some(digest), selected))
         }
     }
+}
+
+/// Metadata decoding uses bytes from streams accepted by `pending.finish(streams)`.
+fn selected_record(
+    store: &GenerationStore,
+    digest: &str,
+) -> Result<Option<Composition>, CompositionRefusal> {
+    let manifest = match store.manifest(digest) {
+        Ok(manifest) => manifest,
+        Err(GenerationError::UnsupportedStateSchema) => {
+            return Err(CompositionRefusal::Quarantined);
+        }
+        Err(_) => return Ok(None),
+    };
+    if !is_bounded_record(&manifest) {
+        return record(store, digest).map(|_| None);
+    }
+    let Ok(mut pending) = store.validate_streaming_all(digest) else {
+        return record(store, digest).map(|_| None);
+    };
+    let mut streams = Vec::with_capacity(2);
+    let composition = read_stream(&mut pending, COMPOSITION_FILE, &mut streams);
+    let members = read_stream(&mut pending, MEMBERS_FILE_NAME, &mut streams);
+    let Ok(generation) = pending.finish(streams) else {
+        return record(store, digest).map(|_| None);
+    };
+    let Some(bytes) = composition else {
+        return Ok(None);
+    };
+    if let Some(members) = members {
+        check_members_schema(&members)?;
+    }
+    match decode_record(&generation.manifest, &bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(CompositionRefusal::Quarantined) => Err(CompositionRefusal::Quarantined),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The stream remains in `streams` for [`PendingGeneration::finish`] even when `read_rest` fails.
+fn read_stream(
+    pending: &mut PendingGeneration,
+    rel_path: &str,
+    streams: &mut Vec<StreamedFile>,
+) -> Option<Vec<u8>> {
+    let mut stream = pending.stream(rel_path).ok()?;
+    let bytes = stream.read_rest().ok();
+    streams.push(stream);
+    bytes
 }
 
 /// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
@@ -519,15 +568,26 @@ pub fn verify_composition(
 
 /// Reads the manifest before any listed file is hashed or held in memory, so an oversized record is refused by its declared size.
 fn check_record_size(store: &GenerationStore, digest: &str) -> Result<(), CompositionRefusal> {
-    if store
-        .manifest(digest)?
-        .files
-        .iter()
-        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
-    {
+    if exceeds_metadata_cap(&store.manifest(digest)?) {
         return Err(CompositionRefusal::NotComposition("record size"));
     }
     Ok(())
+}
+
+fn exceeds_metadata_cap(manifest: &GenerationManifest) -> bool {
+    manifest
+        .files
+        .iter()
+        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
+}
+
+/// The files a composition record lists: [`COMPOSITION_FILE`] and [`MEMBERS_FILE_NAME`].
+const RECORD_FILES: usize = 2;
+
+fn is_bounded_record(manifest: &GenerationManifest) -> bool {
+    manifest.target == VECTOR_SELECTION_TARGET
+        && manifest.files.len() <= RECORD_FILES
+        && !exceeds_metadata_cap(manifest)
 }
 
 /// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.

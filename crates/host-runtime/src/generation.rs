@@ -93,6 +93,10 @@ pub enum StageEvent {
     BeforeRename,
     /// After the rename returned and published the digest name.
     AfterRename,
+    /// Before the repair path atomically exchanges a corrupt, unprotected occupant of the digest name with the temp.
+    BeforeExchange,
+    /// After the exchange returned: the digest name holds the temp's content and the temp name holds the former occupant.
+    AfterExchange,
     /// Before a `fsync` of the generations directory.
     BeforeGenerationsSync,
     AfterGenerationsSync,
@@ -906,7 +910,7 @@ impl GenerationStore {
 
     /// Failed validation never selects another generation.
     pub fn validate(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
-        self.validate_keeping(digest, false, &[])
+        self.validate_keeping(digest, false, &|_| false)
     }
 
     /// [`Self::validate`] that keeps open the descriptor it opened for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads a file without hashing it again. Each file in `streamed` has its shape checked and its hash left to the [`StreamedFile`] the caller reads it through, so each of its bytes is read once.
@@ -915,7 +919,16 @@ impl GenerationStore {
         digest: &str,
         streamed: &[&str],
     ) -> Result<PendingGeneration, GenerationError> {
-        let generation = self.validate_keeping(digest, true, streamed)?;
+        let generation = self.validate_keeping(digest, true, &|path| streamed.contains(&path))?;
+        Ok(PendingGeneration { generation })
+    }
+
+    /// [`Self::validate_streaming`] with every manifest file streamed: validation checks every manifest file's shape and defers hashing to its [`StreamedFile`] reader.
+    pub fn validate_streaming_all(
+        &self,
+        digest: &str,
+    ) -> Result<PendingGeneration, GenerationError> {
+        let generation = self.validate_keeping(digest, true, &|_| true)?;
         Ok(PendingGeneration { generation })
     }
 
@@ -923,7 +936,7 @@ impl GenerationStore {
         &self,
         digest: &str,
         retain: bool,
-        streamed: &[&str],
+        is_streamed: &dyn Fn(&str) -> bool,
     ) -> Result<ValidatedGeneration, GenerationError> {
         if !is_canonical_payload_digest(digest) {
             return Err(invalid("generation digest is noncanonical"));
@@ -931,7 +944,7 @@ impl GenerationStore {
         let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
             return Err(invalid("generation directory is missing or insecure"));
         };
-        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, streamed)?;
+        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, is_streamed)?;
         Ok(ValidatedGeneration {
             digest: digest.to_owned(),
             manifest,
@@ -1041,7 +1054,7 @@ impl GenerationStore {
         dir: &OwnedFd,
         digest: &str,
         retain: bool,
-        streamed: &[&str],
+        is_streamed: &dyn Fn(&str) -> bool,
     ) -> Result<(GenerationManifest, Vec<Retained>), GenerationError> {
         let manifest = Self::read_manifest_in_dir(dir, digest)?;
         let mut expected: BTreeSet<String> = BTreeSet::new();
@@ -1054,7 +1067,7 @@ impl GenerationStore {
             }
             let fd = open_rel_file(dir, &entry.path)
                 .ok_or_else(|| invalid("manifest-listed file is missing"))?;
-            let streamed = streamed.contains(&entry.path.as_str());
+            let streamed = is_streamed(&entry.path);
             if streamed {
                 check_file_shape(&fd, entry)?;
             } else {
@@ -1351,7 +1364,9 @@ impl GenerationStore {
             Reclamation::Pinned => invalid("corrupt generation is pinned"),
             Reclamation::Unopenable(err) => err,
         })?;
+        observe(observer, StageEvent::BeforeExchange)?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
+        observe(observer, StageEvent::AfterExchange)?;
         sync_generations(observer)?;
         self.validate(digest)?;
         let _ = remove_tree(&self.generations_fd, temp_name);
@@ -4084,5 +4099,54 @@ mod tests {
         ));
         store.validate(&other).unwrap();
         store.validate(&digest).unwrap();
+    }
+
+    #[test]
+    fn streaming_every_file_checks_shape_and_defers_each_hash_to_finish() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let sources = [
+            ("a.json", b"first".as_slice()),
+            ("b.json", b"second".as_slice()),
+        ]
+        .map(|(name, bytes)| SourceSpec {
+            rel_path: name.to_owned(),
+            source: write_source(src.path(), name, bytes),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        });
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+
+        let mut pending = store.validate_streaming_all(&digest).unwrap();
+        assert_eq!(pending.manifest().files.len(), 2);
+        let mut stream = pending.stream("a.json").unwrap();
+        assert_eq!(stream.read_rest().unwrap(), b"first");
+        let mut generation = pending.finish([stream]).unwrap();
+        assert_eq!(
+            read_all(generation.take_verified_file("b.json").unwrap()),
+            b"second"
+        );
+
+        // Bytes changed in place keep the file's shape, so validation succeeds and only finishing refuses them.
+        std::fs::write(dir.join("b.json"), b"SECOND").unwrap();
+        let pending = store.validate_streaming_all(&digest).unwrap();
+        assert_eq!(pending.manifest().files[1].path, "b.json");
+        assert!(matches!(
+            pending.finish([]),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file hash diverges from the manifest"
+            })
+        ));
+        std::fs::write(dir.join("b.json"), b"second").unwrap();
+
+        // Shape and inventory are still checked before any stream is handed out.
+        std::fs::write(dir.join("b.json"), b"second!").unwrap();
+        assert!(store.validate_streaming_all(&digest).is_err());
+        std::fs::write(dir.join("b.json"), b"second").unwrap();
+        std::fs::write(dir.join("stray"), b"x").unwrap();
+        assert!(store.validate_streaming_all(&digest).is_err());
     }
 }
