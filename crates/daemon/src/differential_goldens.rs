@@ -136,7 +136,6 @@ fn dg_goldens_encode_native_output_deterministically() {
             "serializer_profile": "opencode-aisdk",
             "session_id": format!("dg-native-{}", case.id),
             "render_config": "dg",
-            "serve_native": true,
             "messages": ingress,
         }))
         .expect("DG native transform request");

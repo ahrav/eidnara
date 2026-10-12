@@ -287,6 +287,13 @@ impl<'r> ResidentMeter<'r> {
         self.escaped_text(longest_escaped_string(body))
     }
 
+    /// Charges `bytes` a request is about to allocate past its decode, with the decode's
+    /// refusal classes: a total over the capacity refuses permanently, and a pool shortfall
+    /// refuses transiently. The charge joins the decode's and leaves with [`Self::take_charges`].
+    pub fn charge(&self, bytes: usize) -> Result<(), Refusal> {
+        self.need(bytes)
+    }
+
     fn need(&self, bytes: usize) -> Result<(), Refusal> {
         if let Some(refusal) = self.refusal() {
             return Err(refusal);

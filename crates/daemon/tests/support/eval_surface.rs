@@ -89,57 +89,12 @@ pub fn identities(world: &World, segments: &[StoredHistorySegment]) -> BTreeMap<
         .collect()
 }
 
-/// The message as the OpenCode plugin sends it to the daemon: a text part
-/// is a text block; a completed tool part is its call and its result, the
-/// result's output as text.
-pub fn ingress(message: &RenderedMessage, ordinal: u64) -> Value {
-    let mut content = Vec::new();
-    for part in message.message["parts"].as_array().unwrap() {
-        match part["type"].as_str() {
-            Some("text") => content.push(json!({"kind": {"type": "text", "text": part["text"]}})),
-            Some("tool") => {
-                let call_id = &part["callID"];
-                let tool = &part["tool"];
-                content.push(json!({"kind": {
-                    "type": "tool_call", "id": call_id, "name": tool,
-                    "input": part["state"]["input"],
-                }}));
-                content.push(json!({"kind": {
-                    "type": "tool_result", "id": call_id, "tool_name": tool,
-                    "output": {"kind": {"type": "text", "text": part["state"]["output"]}},
-                }}));
-            }
-            other => panic!("a rendered message carries text and tool parts, not {other:?}"),
-        }
-    }
-    json!({
-        "mid": mid(message),
-        "ordinal": ordinal,
-        "ck": {
-            "role": message.message["info"]["role"],
-            "content": content,
-            "meta": {"harness_id": mid(message)}
-        }
-    })
-}
-
-pub fn tail(session: &str, prompt: &str, ordinal: u64) -> (Value, Value) {
+pub fn tail(session: &str, prompt: &str, ordinal: u64) -> Value {
     let mid = format!("tail-{ordinal}");
-    (
-        json!({
-            "mid": mid,
-            "ordinal": ordinal,
-            "ck": {
-                "role": "user",
-                "content": [{"kind": {"type": "text", "text": prompt}}],
-                "meta": {"harness_id": mid}
-            }
-        }),
-        json!({
-            "info": {"id": mid, "sessionID": session, "role": "user", "time": {"created": EPOCH_MS + 10_000_000}},
-            "parts": [{"type": "text", "text": prompt}]
-        }),
-    )
+    json!({
+        "info": {"id": mid, "sessionID": session, "role": "user", "time": {"created": EPOCH_MS + 10_000_000}},
+        "parts": [{"type": "text", "text": prompt}]
+    })
 }
 
 pub struct Pass {
@@ -153,7 +108,6 @@ pub struct Pass {
 pub struct Knobs {
     pub threshold: f64,
     pub min_prompt_chars: usize,
-    pub native_tail: bool,
     /// Context pressure the harness reports with the request, as
     /// `(current_total_input_tokens, context_limit_tokens)`; without it the
     /// boundary protects the whole history and the summarizer never fires.
@@ -165,31 +119,21 @@ impl Default for Knobs {
         Self {
             threshold: 0.6,
             min_prompt_chars: 20,
-            native_tail: true,
             usage: None,
         }
     }
 }
 
 /// The transform request one harness turn sends: the world's first `upto`
-/// messages as ingress and native arrays, `tail` as a new user message after
-/// them when given, and the pass's knobs.
+/// messages as its native window, `tail` as a new user message after them
+/// when given, and the pass's knobs.
 pub fn transform_request(world: &World, upto: usize, tail: Option<&str>, knobs: &Knobs) -> Value {
-    let mut messages: Vec<Value> = world.messages[..upto]
-        .iter()
-        .enumerate()
-        .map(|(index, message)| ingress(message, index as u64 + 1))
-        .collect();
     let mut native: Vec<Value> = world.messages[..upto]
         .iter()
         .map(|m| m.message.clone())
         .collect();
     if let Some(prompt) = tail {
-        let (tail_ingress, tail_native) = self::tail(&world.session, prompt, upto as u64 + 1);
-        messages.push(tail_ingress);
-        if knobs.native_tail {
-            native.push(tail_native);
-        }
+        native.push(self::tail(&world.session, prompt, upto as u64 + 1));
     }
     let mut request = json!({
             "kind": "transform",
@@ -198,12 +142,10 @@ pub fn transform_request(world: &World, upto: usize, tail: Option<&str>, knobs: 
             "session_id": world.session,
             "serializer_profile": "opencode-aisdk",
             "render_config": "surface-config",
-            "serve_native": true,
             "native_messages": native,
             "auto_search_enabled": true,
             "auto_search_score_threshold": knobs.threshold,
             "auto_search_min_prompt_chars": knobs.min_prompt_chars,
-            "messages": messages,
     });
     if let Some((current_total_input_tokens, context_limit_tokens)) = knobs.usage {
         request["usage"] = json!({

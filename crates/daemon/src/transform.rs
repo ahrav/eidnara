@@ -722,8 +722,8 @@ pub struct TransformRequest {
     pub prompt_surface_tool_descriptions: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_surface_guidance_override: Option<String>,
-    #[serde(default)]
-    pub serve_native: bool,
+    /// The window of a native profile (`pi`, `opencode-aisdk`), from which the daemon derives
+    /// `messages`; a CK-only profile carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_messages: Option<Vec<Arc<Value>>>,
     /// Names this attempt's exact input snapshot; every `transform` request must carry one, and the
@@ -883,8 +883,6 @@ struct TransformRequestWire {
     prompt_surface_tool_descriptions: BTreeMap<String, String>,
     #[serde(default)]
     prompt_surface_guidance_override: Option<String>,
-    #[serde(default)]
-    serve_native: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default)]
@@ -983,7 +981,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
             prompt_surface_config_identity: wire.prompt_surface_config_identity,
             prompt_surface_tool_descriptions: wire.prompt_surface_tool_descriptions,
             prompt_surface_guidance_override: wire.prompt_surface_guidance_override,
-            serve_native: wire.serve_native,
             native_messages: wire.native_messages,
             base_revision: wire.base_revision,
             previous_output_revision: wire.previous_output_revision,
@@ -1241,8 +1238,9 @@ pub struct TransformTimings {
 /// checks, the session lane wait, and the unit permit; `transform_core` from there to the
 /// native-attach step; `native_attach` is that step; `residual` is the rest of the pass up to
 /// the instant the ledger is taken, which precedes the response encode. On the paged lane every
-/// stage measures the final page's request. `derive_ck` is reserved for daemon-derived CK and is
-/// `None` while the plugin sends CK.
+/// stage measures the final page's request. `derive_ck` is the derivation of a native profile's
+/// CK from its native window, a span inside `lane_gate_and_decode`'s bracket that the ledger
+/// reports apart from it; a CK-only profile derives nothing and reports `None`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStageLedger {
     pub admit_us: u64,
@@ -1261,6 +1259,9 @@ pub struct DaemonStageLedger {
 pub struct LedgerInstants {
     pub received_at: Instant,
     pub admitted_at: Instant,
+    /// The span of the native window's CK derivation, between `admitted_at` and
+    /// `core_started_at`.
+    pub derive_ck: Option<(Instant, Instant)>,
     pub core_started_at: Instant,
     pub native_attach_started_at: Instant,
     pub native_attach_ended_at: Instant,
@@ -1275,18 +1276,21 @@ impl DaemonStageLedger {
             u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX)
         };
         let admit_us = micros(at.received_at, at.admitted_at);
-        let lane_gate_and_decode_us = micros(at.admitted_at, at.core_started_at);
+        let derive_ck_us = at.derive_ck.map(|(from, to)| micros(from, to));
+        let lane_gate_and_decode_us = micros(at.admitted_at, at.core_started_at)
+            .saturating_sub(derive_ck_us.unwrap_or_default());
         let transform_core_us = micros(at.core_started_at, at.native_attach_started_at);
         let native_attach_us = micros(at.native_attach_started_at, at.native_attach_ended_at);
         let total_us = micros(at.received_at, ended_at);
         let staged = admit_us
             .saturating_add(lane_gate_and_decode_us)
+            .saturating_add(derive_ck_us.unwrap_or_default())
             .saturating_add(transform_core_us)
             .saturating_add(native_attach_us);
         Self {
             admit_us,
             lane_gate_and_decode_us,
-            derive_ck_us: None,
+            derive_ck_us,
             transform_core_us,
             native_attach_us,
             residual_us: total_us.saturating_sub(staged),
@@ -12120,9 +12124,7 @@ fn reasoning_clear_cutoff_with_tags(
         return None;
     }
     let profile_supported = match profile {
-        Some(SerializerProfile::OpencodeAiSdk) => {
-            request_accepts_empty_content(req) && req.serve_native
-        }
+        Some(SerializerProfile::OpencodeAiSdk) => request_accepts_empty_content(req),
         Some(SerializerProfile::ClaudeCodeAnthropic) => true,
         _ => false,
     };
@@ -13630,7 +13632,6 @@ pub(crate) mod tests {
             prompt_surface_config_identity: String::new(),
             prompt_surface_tool_descriptions: BTreeMap::new(),
             prompt_surface_guidance_override: None,
-            serve_native: false,
             native_messages: None,
             base_revision: None,
             previous_output_revision: None,
@@ -19521,7 +19522,6 @@ pub(crate) mod tests {
             100,
         );
         request.provider_id = Some("anthropic".to_string());
-        request.serve_native = true;
         request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
@@ -19635,7 +19635,6 @@ pub(crate) mod tests {
             100,
         );
         request.provider_id = Some("anthropic".to_string());
-        request.serve_native = true;
         request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         request.protected_tags = 0;
         let context = pctx("git:proj", "/nonexistent-docs", 0);
@@ -19756,7 +19755,6 @@ pub(crate) mod tests {
             100,
         );
         request.provider_id = Some("anthropic".to_string());
-        request.serve_native = true;
         request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         request.protected_tags = 0;
         let context = pctx("git:proj", "/nonexistent-docs", 0);
@@ -20017,7 +20015,6 @@ pub(crate) mod tests {
         };
         let mut request = active_cc_req("newest-reasoning", "cfg0", vec![latest.clone()]);
         request.provider_id = Some("anthropic".to_string());
-        request.serve_native = true;
         request.mid_turn = false;
         let projection = project_messages(&request.messages).unwrap();
         let tag_numbers = BTreeMap::from([("latest".to_string(), 1)]);
@@ -20076,7 +20073,6 @@ pub(crate) mod tests {
         fn request(messages: Vec<IngressMessage>) -> TransformRequest {
             let mut request = active_opencode_req("reasoning-batch", "cfg0", messages);
             request.provider_id = Some("anthropic".to_string());
-            request.serve_native = true;
             request.clear_reasoning_age = 3;
             with_usage(request, 70, 100)
         }
@@ -20400,7 +20396,6 @@ pub(crate) mod tests {
         );
         request.serializer_profile = SerializerProfile::OpencodeAiSdk.wire_id().to_string();
         request.provider_id = Some("anthropic".to_string());
-        request.serve_native = true;
         request.clear_reasoning_age = 5;
 
         let first = transform(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap();
@@ -22556,7 +22551,6 @@ pub(crate) mod tests {
             ingress_from_ck(healed_ck.clone()),
         );
         request.serializer_profile = "opencode-aisdk".to_string();
-        request.serve_native = true;
         let encode = || {
             let mut response = TransformResponse::passthrough(healed_ck.clone());
             crate::attach_native_messages_with_tags(
@@ -22845,7 +22839,6 @@ pub(crate) mod tests {
             ],
         );
         moved_request.serializer_profile = "opencode-aisdk".to_string();
-        moved_request.serve_native = true;
         let mut moved_native = moved.clone();
         crate::attach_native_messages_with_tags(
             &mut moved_native,
@@ -29408,7 +29401,6 @@ pub(crate) mod tests {
             )
             .unwrap();
             original.serializer_profile = "opencode-aisdk".into();
-            original.serve_native = true;
             if mode == "lineage" {
                 original.lineage_switched = true;
                 original.is_subagent = true;
@@ -29767,7 +29759,6 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let mut request = req("perf-full-module-pass", "cfg0", messages);
         request.serializer_profile = "opencode-aisdk".to_string();
-        request.serve_native = true;
         let projection_started_at = Instant::now();
         let projection = project_messages(&request.messages).unwrap();
         let full_projection_ms = elapsed_ms(projection_started_at);

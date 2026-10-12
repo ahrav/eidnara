@@ -14,6 +14,21 @@ pub use opencode::{
 };
 pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
 
+/// The derived-CK peak, per retained native byte, that a native window's derivation is charged
+/// before it allocates. `crates/daemon/tests/derived_ck_charge.rs` measures the peak over
+/// text-, tool-, and extras-heavy windows of both codecs and holds it under this factor.
+pub const DERIVED_CK_BYTES_PER_NATIVE_BYTE: usize = 2;
+
+/// The bytes a native window's CK derivation may allocate: its native retained size times
+/// [`DERIVED_CK_BYTES_PER_NATIVE_BYTE`].
+pub fn derived_ck_charge(native: &[std::sync::Arc<serde_json::Value>]) -> usize {
+    native
+        .iter()
+        .map(|message| crate::retained_size::value_retained_bytes(message))
+        .fold(0usize, usize::saturating_add)
+        .saturating_mul(DERIVED_CK_BYTES_PER_NATIVE_BYTE)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

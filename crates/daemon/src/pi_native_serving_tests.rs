@@ -75,7 +75,6 @@ fn alternating_transcript() -> Vec<IngressMessage> {
 fn native_request(profile: &str, messages: Vec<IngressMessage>, native: Vec<Value>) -> Value {
     let mut request = request_with_usage(messages, 48_000, 50_000);
     request["serializer_profile"] = json!(profile);
-    request["serve_native"] = json!(true);
     request["native_messages"] = json!(native);
     request
 }
@@ -278,7 +277,15 @@ async fn native_serving_admits_pi_and_still_refuses_another_profile_with_no_effe
             native_request(profile, messages.clone(), pi_rows(&messages)),
         )
         .await;
-        assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
+        assert_eq!(
+            error_frame(outcome),
+            (
+                "invalid_params".to_string(),
+                format!(
+                    "serializer_profile {profile} carries its window in messages, not native_messages"
+                )
+            )
+        );
         assert_no_session_state(&handler, &store);
     }
 
@@ -381,25 +388,15 @@ async fn a_pi_window_with_an_unknown_role_declines_with_no_state_change() {
     unknown[1]["message"]["role"] = json!("systemNotice");
     let mut reserved = pi_rows(&messages);
     reserved[0]["id"] = json!("eidnara:user:1a2b3c4d");
-    let mut renamed = pi_rows(&messages);
-    renamed[1]["id"] = json!("3c4d5e6f");
-    let mut unlinked = messages.clone();
-    unlinked[1].ck.meta.harness_id = None;
-    let mut relinked = messages.clone();
-    relinked[0].ck.meta.harness_id = Some("another-id".to_string());
+    let mut malformed = pi_rows(&messages);
+    malformed[1]["message"] = json!("assistant");
     for (window, rows, expected) in [
         (messages.clone(), unknown, "\"systemNotice\""),
         (messages.clone(), reserved, "must carry a host entry id"),
-        (messages.clone(), renamed, "does not carry the mid"),
         (
-            unlinked,
-            pi_rows(&messages),
-            "messages[1].ck.meta.harness_id",
-        ),
-        (
-            relinked,
-            pi_rows(&messages),
-            "messages[0].ck.meta.harness_id",
+            messages.clone(),
+            malformed,
+            "is not an {id, message: {role}} row",
         ),
     ] {
         let outcome = call_transform_outcome(&handler, native_request("pi", window, rows)).await;

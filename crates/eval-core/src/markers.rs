@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 66] = [
+pub const MARKERS: [Marker; 65] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -73,10 +73,6 @@ pub const MARKERS: [Marker; 66] = [
     Marker {
         name: "sls_injection_result_cap",
         test: "crates/daemon/tests/eval_surface_ledger.rs::a_fourth_match_is_lost_at_the_cap",
-    },
-    Marker {
-        name: "sls_injection_attachment",
-        test: "crates/daemon/tests/eval_surface_ledger.rs::a_native_array_without_the_tail_is_lost_at_attachment",
     },
     Marker {
         name: "rid_capabilities_read_during_cassette_run",

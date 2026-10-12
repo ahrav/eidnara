@@ -335,36 +335,6 @@ fn a_fourth_match_is_lost_at_the_cap(coverage: &mut Coverage) {
     );
 }
 
-fn a_native_array_without_the_tail_is_lost_at_attachment(coverage: &mut Coverage) {
-    let run = run(
-        6,
-        only_second,
-        PROMPT,
-        &Knobs {
-            native_tail: false,
-            ..Knobs::default()
-        },
-    );
-    let outcome = outcome(&run);
-    assert_eq!(outcome.trace.selected, [2]);
-    assert!(outcome.applied, "the served block carries the hint");
-    assert!(!outcome.attached, "no native message carries it");
-    let rule = &run.identities[&2];
-    assert_eq!(
-        run.ledger.presence(Surface1Stage::OverlayApply, rule),
-        Some(Presence::Reached)
-    );
-    assert_eq!(
-        run.ledger.presence(Surface1Stage::Attachment, rule),
-        Some(Presence::ReachedEvidenceAbsent),
-        "rendered but undelivered"
-    );
-    coverage.record("sls_injection_attachment").unwrap();
-    let verdict = verdict(&run.ledger, rule);
-    assert_eq!(verdict, StageVerdict::FirstLoss(Surface1Stage::Attachment));
-    assert_eq!(class(verdict), Some(FailureClass::Interference));
-}
-
 /// The outcome never reaches the wire: a response serializes to the same bytes
 /// whatever `user_hint` holds.
 #[test]
@@ -422,12 +392,10 @@ async fn pass_with_tails(
     let mut request = transform_request(world, upto, Some(prompts[0]), &Knobs::default());
     request["render_config"] = serde_json::json!(render_config);
     for (offset, prompt) in prompts.iter().enumerate().skip(1) {
-        let (ingress, native) = tail(&world.session, prompt, (upto + 1 + offset) as u64);
-        request["messages"].as_array_mut().unwrap().push(ingress);
         request["native_messages"]
             .as_array_mut()
             .unwrap()
-            .push(native);
+            .push(tail(&world.session, prompt, (upto + 1 + offset) as u64));
     }
     let response = request_json(client, route, request).await;
     assert_eq!(response["status"], "ok", "{response}");
@@ -663,33 +631,21 @@ fn a_repeated_pass_reports_the_frozen_decision_as_unjoinable() {
 /// names the wrong verdict: only the host's own attachment check counts.
 #[test]
 fn a_false_survivor_from_the_adapter_fails_the_self_test() {
-    let run = run(
-        6,
-        only_second,
-        PROMPT,
-        &Knobs {
-            native_tail: false,
-            ..Knobs::default()
-        },
-    );
+    let run = run(6, only_second, PROMPT, &Knobs::default());
     let rule = &run.identities[&2];
-    assert_eq!(
-        verdict(&run.ledger, rule),
-        StageVerdict::FirstLoss(Surface1Stage::Attachment)
-    );
+    assert_eq!(verdict(&run.ledger, rule), StageVerdict::Clean);
+    assert!(outcome(&run).attached, "the native output carries the hint");
+    // An adapter that reads attachment from the recipe's presence alone disagrees with the
+    // host's check of the native output whenever they differ; forge that disagreement.
     let mut forged = outcome(&run).clone();
-    forged.attached = run.pass.response["operations"].is_array();
-    assert!(
-        forged.attached,
-        "the recipe exists, but it does not carry the hint natively"
-    );
+    forged.attached = !run.pass.response["operations"].is_array();
     let forged = UserHintPass::Decided(forged);
     let mut adapter_view = SurfaceLedger::default();
     observe(&mut adapter_view, Some(&forged), &run.identities);
     assert_eq!(
         verdict(&adapter_view, rule),
-        StageVerdict::Clean,
-        "an adapter-supplied survivor would hide the attachment loss"
+        StageVerdict::FirstLoss(Surface1Stage::Attachment),
+        "an adapter-supplied survivor would invent an attachment loss"
     );
     let mut mis_mapped = run.identities.clone();
     mis_mapped.insert(2, run.identities[&3].clone());
@@ -705,7 +661,7 @@ fn a_false_survivor_from_the_adapter_fails_the_self_test() {
 
 type Scenario = fn(&mut Coverage);
 
-fn scenarios() -> [(&'static str, Scenario); 5] {
+fn scenarios() -> [(&'static str, Scenario); 4] {
     [
         (
             "an_old_segment_outside_the_window_is_lost_at_the_candidate_window",
@@ -722,10 +678,6 @@ fn scenarios() -> [(&'static str, Scenario); 5] {
         (
             "a_fourth_match_is_lost_at_the_cap",
             a_fourth_match_is_lost_at_the_cap,
-        ),
-        (
-            "a_native_array_without_the_tail_is_lost_at_attachment",
-            a_native_array_without_the_tail_is_lost_at_attachment,
         ),
     ]
 }
@@ -762,11 +714,6 @@ fn score_injection() {
 #[test]
 fn render_cap_injection() {
     run_scenario("a_fourth_match_is_lost_at_the_cap");
-}
-
-#[test]
-fn attach_injection() {
-    run_scenario("a_native_array_without_the_tail_is_lost_at_attachment");
 }
 
 #[test]

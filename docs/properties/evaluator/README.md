@@ -655,13 +655,14 @@ through `Surface1Stage: Stage` over `SURFACE1_STAGES`):
   (`sls-surface1-render-cap-injection-forces-first-loss`): four of twelve
   segments match with equal scores; the cap keeps three; `FirstLoss(Cap)` for
   the fourth and `Clean` for the first.
-- `a_native_array_without_the_tail_is_lost_at_attachment`
-  (`sls-surface1-attach-injection-forces-first-loss`): the served block carries
-  the hint and no native message does; `Attachment` is
-  `ReachedEvidenceAbsent`; `FirstLoss(Attachment)`.
-- `a_false_survivor_from_the_adapter_fails_the_self_test`: an adapter-supplied
-  `attached` would fold the same run `Clean`; a mis-mapped identity does not
-  reproduce the expected verdict.
+- `a_false_survivor_from_the_adapter_fails_the_self_test`: on a run the host
+  folds `Clean`, an adapter-supplied `attached` that disagrees with the host's
+  check of the native output folds `FirstLoss(Attachment)`; a mis-mapped
+  identity does not reproduce the expected verdict.
+- Attachment has no injection scenario since #993: the daemon derives the
+  served window from the native window, so a hint the overlay applies reaches
+  the native output through the codec, which the OpenCode codec parity corpus
+  covers.
 - `a_repeated_pass_reports_the_frozen_decision_as_unjoinable`: the second pass
   over the same tail is `Skipped { already_decided }`, folds the tail as
   unjoinable, and the verdict is `Indeterminate`, never a tail loss.

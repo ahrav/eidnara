@@ -1006,7 +1006,6 @@ fn native_body(mids: &[&str], boundary: Value) -> Value {
         "boundary": boundary,
         "serializer_profile": "opencode-aisdk",
         "provider_id": "anthropic",
-        "serve_native": true,
         "session_id": session(),
         "render_config": "cfg0",
         "messages": messages,
