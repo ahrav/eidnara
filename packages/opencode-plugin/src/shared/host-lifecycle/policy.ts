@@ -1115,7 +1115,7 @@ export class HostLifecyclePolicy {
      * against the child's own `command`, so blindly overwriting that field can
      * publish a `restart` result carrying `effects` under a `stop` or `start`
      * label. A disagreement means the child answered a different command than
-     * requested — a real version-skew signal — so it becomes `internal_error`
+     * requested, a real mismatch signal, so it becomes `internal_error`
      * rather than being silently relabeled.
      *
      * `expected` is the command the child must *report*, which is not always the

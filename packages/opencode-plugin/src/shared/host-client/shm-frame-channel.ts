@@ -25,13 +25,7 @@ import {
     ReceiveLease,
     type SetupFrameChannel,
 } from "./frame-channel";
-import {
-    decodeHeader,
-    type EnvelopeHeader,
-    encodeHeader,
-    FrameType,
-    HEADER_LEN,
-} from "./protocol";
+import { decodeHeader, type EnvelopeHeader, encodeHeader, FrameType, HEADER_LEN } from "./protocol";
 
 class InboundFrameError extends Error {
     constructor(
@@ -792,10 +786,10 @@ export class ShmFrameChannel implements SetupFrameChannel {
                         const violation = headerViolation(header);
                         const structuralError =
                             header.len !== nativeLease.byteLength
-                                  ? "ring frame length mismatch"
-                                  : header.len > this.options.maxBodyLen
-                                    ? "ring frame exceeds configured body limit"
-                                    : null;
+                                ? "ring frame length mismatch"
+                                : header.len > this.options.maxBodyLen
+                                  ? "ring frame exceeds configured body limit"
+                                  : null;
                         if (structuralError !== null || violation !== null) {
                             nativeLease.release();
                             throw new InboundFrameError(

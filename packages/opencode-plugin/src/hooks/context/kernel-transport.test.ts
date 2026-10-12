@@ -106,7 +106,7 @@ describe("createKernelTransport method guard", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 method: "kernel.read",
-                body: { method: "session.delete", v: 1, session_id: SESSION },
+                body: { method: "session.delete", session_id: SESSION },
             }),
         ).rejects.toThrow(/encoded method is not kernel\.read/);
         await expect(
@@ -126,7 +126,7 @@ describe("createKernelTransport method guard", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 method: "session.delete",
-                body: { method: "session.delete", v: 1, session_id: SESSION },
+                body: { method: "session.delete", session_id: SESSION },
             }),
         ).rejects.toThrow(/refuses non-kernel method session\.delete/);
     });
@@ -139,7 +139,7 @@ describe("createKernelTransport ranking route", () => {
             sessionId: SESSION,
             projectRoot: PROJECT,
             method: "retrieval.query",
-            body: { method: "retrieval.query", v: 1, session_id: SESSION, query: "x" },
+            body: { method: "retrieval.query", session_id: SESSION, query: "x" },
         });
         // The fixture's demand start refuses to run, which proves the call got past the guard to the dial.
         await expect(sent).rejects.toThrow(/demand start must not run/);
@@ -374,7 +374,7 @@ describe("createKernelTransport connection identity", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 method: "kernel.read",
-                body: { method: "kernel.read", v: 1 },
+                body: { method: "kernel.read" },
                 connectionIdentity: "0",
             }),
         ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
@@ -400,7 +400,7 @@ describe("createKernelTransport connection identity", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 method: "kernel.read",
-                body: { method: "kernel.read", v: 1 },
+                body: { method: "kernel.read" },
             }),
         ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
         expect(seen).toEqual([{ generationSensitive: true, expectedGeneration: 0 }]);
@@ -612,7 +612,7 @@ describe("shared-path connection identity", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 method: "kernel.read",
-                body: { method: "kernel.read", v: 1 },
+                body: { method: "kernel.read" },
                 connectionIdentity: identityBefore as string,
             }),
         ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);

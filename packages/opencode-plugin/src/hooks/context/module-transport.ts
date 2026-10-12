@@ -971,7 +971,7 @@ export class HostModuleTransport {
             sessionId,
             projectRoot,
             method: "session.delete",
-            body: { method: "session.delete", v: 1, session_id: sessionId },
+            body: { method: "session.delete", session_id: sessionId },
         });
     }
 

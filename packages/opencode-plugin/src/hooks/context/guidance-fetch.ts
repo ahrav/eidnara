@@ -49,7 +49,6 @@ export function createGuidanceFetcher(deps: GuidanceFetcherDeps): GuidanceFetche
                 signal: AbortSignal.timeout(GUIDANCE_FETCH_TIMEOUT_MS),
                 body: {
                     method: "guidance.get",
-                    v: 1,
                     session_id: args.sessionId,
                     tool_present: args.toolPresent,
                     serializer_profile: "opencode-aisdk",

@@ -131,7 +131,6 @@ impl QueryEmbedder for FixedEmbedder {
 fn request(project: &Path) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "method": "retrieval.query",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "query": "id:rule explicit contract",

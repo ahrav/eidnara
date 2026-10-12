@@ -32,7 +32,7 @@ async fn status_summary(handler: &Handler, channel: u16) -> String {
     let status = call_dispatch_request_on_channel(
         handler,
         channel,
-        json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        json!({ "method": "session.status", "session_id": "ses" }),
     )
     .await;
     status["summary"].as_str().unwrap().to_string()
@@ -117,7 +117,7 @@ async fn wrapup_is_refused_under_native_authority() {
         handler
             .dispatch_value(
                 test_route(7),
-                json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                json!({ "method": "session.wrapup", "session_id": "ses" }),
             )
             .await,
     );

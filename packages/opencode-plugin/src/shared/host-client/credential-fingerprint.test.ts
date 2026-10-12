@@ -11,9 +11,7 @@ describe("ModelExecution credential claims over environment rows", () => {
         expect(hostRelease.credential_fingerprint.domain).toBe(
             "eidnara-model-execution-credential",
         );
-        expect(hostRelease.credential_fingerprint.canonicalization).toBe(
-            "harness-provider-source",
-        );
+        expect(hostRelease.credential_fingerprint.canonicalization).toBe("harness-provider-source");
         expect(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES).toBe(
             hostRelease.harness_unavailable.value_cap_bytes,
         );

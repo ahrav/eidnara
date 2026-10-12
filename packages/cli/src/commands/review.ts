@@ -360,7 +360,7 @@ async function render(
         { project_root: projectRoot, harness: REVIEW_HARNESS, session },
         { consumerIdentity: null },
     );
-    const envelope = { v: 1, session_id: session, project_root: projectRoot };
+    const envelope = { session_id: session, project_root: projectRoot };
     if (parsed.command === "list") {
         const raw = await connection.request(
             handle,

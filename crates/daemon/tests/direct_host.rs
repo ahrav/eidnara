@@ -90,7 +90,6 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
         primary,
         json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "direct-host-base-1",
             "session_id": session,
@@ -156,7 +155,6 @@ async fn one_unpaged_three_mb_transform_body_commits() {
         .collect();
     let body = json!({
         "kind": "transform",
-        "v": 3,
         "boundary": null,
         "base_revision": "direct-unpaged-base",
         "session_id": session,
@@ -204,7 +202,6 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
 
     let request = json!({
         "kind": "transform",
-        "v": 3,
         "boundary": null,
         "base_revision": "restart-base-1",
         "session_id": "restart-transform",
@@ -579,7 +576,6 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
         primary,
         json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "direct-host-base-2",
             "session_id": session,

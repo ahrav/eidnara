@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import {
-        activeNativeChannels,
-        NativeChannel,
-        nativeArtifactIdentity,
-        probeCapabilities,
-        QUALIFIED_TEST_PROFILE,
-        supportsNativePlatform,
+	activeNativeChannels,
+	NativeChannel,
+	nativeArtifactIdentity,
+	probeCapabilities,
+	QUALIFIED_TEST_PROFILE,
+	supportsNativePlatform,
 } from "../index.ts";
 
 assert.equal(supportsNativePlatform("linux", "x64"), true);
@@ -18,62 +18,72 @@ const claimedTarget = process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1";
 // limitation is attributable to one build at one layout on one runtime.
 const artifact = nativeArtifactIdentity();
 const runtime = {
-        name: process.release.name,
-        version: process.version,
-        bun: (globalThis as { Bun?: { version: string } }).Bun?.version ?? null,
+	name: process.release.name,
+	version: process.version,
+	bun: (globalThis as { Bun?: { version: string } }).Bun?.version ?? null,
 };
 if (claimedTarget) {
-        assert.ok(artifact, "claimed native target loaded no addon");
-        assert.equal(artifact.buildProfile, "release");
-        assert.equal(artifact.buildTarget, "linux-x86_64");
-        assert.equal(artifact.qualifiedTestProfile, QUALIFIED_TEST_PROFILE);
+	assert.ok(artifact, "claimed native target loaded no addon");
+	assert.equal(artifact.buildProfile, "release");
+	assert.equal(artifact.buildTarget, "linux-x86_64");
+	assert.equal(artifact.qualifiedTestProfile, QUALIFIED_TEST_PROFILE);
 }
 // A claimed target must at least load its addon on every runtime. Transfer prevention is
 // reported, not gated, so availability on Node and Bun depends only on the gated mechanisms.
 if (claimedTarget) {
-        assert.notEqual(
-                capability.reason,
-                "addon_unavailable",
-                `claimed native target failed to load its addon: ${capability.reason}`,
-        );
-        assert.equal(capability.available, true, `claimed native target is unavailable: ${capability.reason}`);
+	assert.notEqual(
+		capability.reason,
+		"addon_unavailable",
+		`claimed native target failed to load its addon: ${capability.reason}`,
+	);
+	assert.equal(
+		capability.available,
+		true,
+		`claimed native target is unavailable: ${capability.reason}`,
+	);
 }
-if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined" && capability.available) {
-        // Node refuses to transfer external buffers itself; marking is never used there.
-        assert.equal(capability.transferPreventionMechanism, "intrinsic");
+if (
+	typeof (globalThis as { Bun?: unknown }).Bun === "undefined" &&
+	capability.available
+) {
+	// Node refuses to transfer external buffers itself; marking is never used there.
+	assert.equal(capability.transferPreventionMechanism, "intrinsic");
 }
-assert.equal(capability.transferPrevention, capability.transferPreventionMechanism !== "none");
 assert.equal(
-        activeNativeChannels(),
-        0,
-        "capability probe created a shared candidate",
+	capability.transferPrevention,
+	capability.transferPreventionMechanism !== "none",
+);
+assert.equal(
+	activeNativeChannels(),
+	0,
+	"capability probe created a shared candidate",
 );
 
 if (capability.available) {
-        const pair = NativeChannel.createTestPair();
-        assert.equal(activeNativeChannels(), 2);
-        pair.first.close();
-        pair.second.close();
-        assert.equal(activeNativeChannels(), 0);
-        console.log(
-                JSON.stringify({
-                        capabilityOutcome: "ACTIVATED",
-                        runtime,
-                        artifact,
-                }),
-        );
+	const pair = NativeChannel.createTestPair();
+	assert.equal(activeNativeChannels(), 2);
+	pair.first.close();
+	pair.second.close();
+	assert.equal(activeNativeChannels(), 0);
+	console.log(
+		JSON.stringify({
+			capabilityOutcome: "ACTIVATED",
+			runtime,
+			artifact,
+		}),
+	);
 } else {
-        assert.throws(
-                () => NativeChannel.createTestPair(),
-                /shared-memory native addon|shared-memory native startup failed/,
-        );
-        assert.equal(activeNativeChannels(), 0);
-        console.log(
-                JSON.stringify({
-                        capabilityOutcome: "TERMINAL_STARTUP_FAILURE",
-                        runtime,
-                        artifact,
-                        reason: capability.reason,
-                }),
-        );
+	assert.throws(
+		() => NativeChannel.createTestPair(),
+		/shared-memory native addon|shared-memory native startup failed/,
+	);
+	assert.equal(activeNativeChannels(), 0);
+	console.log(
+		JSON.stringify({
+			capabilityOutcome: "TERMINAL_STARTUP_FAILURE",
+			runtime,
+			artifact,
+			reason: capability.reason,
+		}),
+	);
 }

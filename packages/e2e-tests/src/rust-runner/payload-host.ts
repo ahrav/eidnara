@@ -119,7 +119,6 @@ export class PayloadHost implements HarnessHost {
             try {
                 const status = (await client.request(route, {
                     method: "session.status",
-                    v: 1,
                     session_id: sessionId,
                 })) as { search_admission?: SearchAdmission } | null;
                 return status?.search_admission;

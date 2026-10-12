@@ -2,286 +2,297 @@ import assert from "node:assert/strict";
 import { runInNewContext } from "node:vm";
 import { setFlagsFromString } from "node:v8";
 import {
-    activeExternalRefs,
-    activeNativeChannels,
-    estimateTokens,
-    NativeChannel,
-    NativeStartupError,
-    type NativeDescriptor,
-    type NativeReceiveLease,
-    probeCapabilities,
-    QUALIFIED_TEST_PROFILE,
-    setExternalViewCreationFailpoint,
+	activeExternalRefs,
+	activeNativeChannels,
+	estimateTokens,
+	NativeChannel,
+	NativeStartupError,
+	type NativeDescriptor,
+	type NativeReceiveLease,
+	probeCapabilities,
+	QUALIFIED_TEST_PROFILE,
+	setExternalViewCreationFailpoint,
 } from "../index.ts";
 
 const TOKEN_FIXTURES = [
-    ["", 0],
-    ["hello world", 2],
-    ["café résumé naïve Zürich piñata Malmö", 17],
-    ["x\u{feff}\n", 3],
-    ["valueOf", 2],
-    ["before <EOT> mid <META_START> after <SOS> end", 16],
-    ["a".repeat(300) + " " + "=".repeat(100) + " ".repeat(51) + "x", 25],
-    // Matches tokenizer's over_long_piece_is_chunked_and_bounded Rust reference fixture.
-    [`prefix ${"a".repeat(4096 * 3 + 17)} suffix`, 775],
+	["", 0],
+	["hello world", 2],
+	["café résumé naïve Zürich piñata Malmö", 17],
+	["x\u{feff}\n", 3],
+	["valueOf", 2],
+	["before <EOT> mid <META_START> after <SOS> end", 16],
+	["a".repeat(300) + " " + "=".repeat(100) + " ".repeat(51) + "x", 25],
+	// Matches tokenizer's over_long_piece_is_chunked_and_bounded Rust reference fixture.
+	[`prefix ${"a".repeat(4096 * 3 + 17)} suffix`, 775],
 ] as const;
 
 const hostile = "hostile-tokenizer-input-5f917ed8";
 for (const value of [null, 1, { [hostile]: true }]) {
-    assert.throws(
-        () => estimateTokens(value as never),
-        (error: unknown) =>
-            error instanceof Error && !error.message.includes(hostile),
-    );
+	assert.throws(
+		() => estimateTokens(value as never),
+		(error: unknown) =>
+			error instanceof Error && !error.message.includes(hostile),
+	);
 }
 
 // Counting must work before, and independently of, the transport capability probe.
 let tokenizerAvailable = false;
 let tokenizerReason: string | undefined;
 try {
-    for (const [text, expected] of TOKEN_FIXTURES) {
-        assert.equal(estimateTokens(text), expected, JSON.stringify(text));
-    }
-    tokenizerAvailable = true;
+	for (const [text, expected] of TOKEN_FIXTURES) {
+		assert.equal(estimateTokens(text), expected, JSON.stringify(text));
+	}
+	tokenizerAvailable = true;
 } catch (error) {
-    assert.ok(error instanceof NativeStartupError);
-    assert.notEqual(
-        process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET,
-        "1",
-        `claimed native tokenizer unavailable: ${error.reason}`,
-    );
-    assert.ok(!error.message.includes(hostile));
-    tokenizerReason = error.reason;
+	assert.ok(error instanceof NativeStartupError);
+	assert.notEqual(
+		process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET,
+		"1",
+		`claimed native tokenizer unavailable: ${error.reason}`,
+	);
+	assert.ok(!error.message.includes(hostile));
+	tokenizerReason = error.reason;
 }
 
 const result = probeCapabilities();
 assert.ok(result.napiVersion === null || result.napiVersion >= 1);
 // A claimed source-build target must load its addon; `addon_unavailable` is the only reason returned before the addon loads.
-if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" && !result.available) {
-    assert.notEqual(
-        result.reason,
-        "addon_unavailable",
-        `claimed native target failed to load its addon: ${result.reason}`,
-    );
+if (
+	process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" &&
+	!result.available
+) {
+	assert.notEqual(
+		result.reason,
+		"addon_unavailable",
+		`claimed native target failed to load its addon: ${result.reason}`,
+	);
 }
 if (result.available) {
-    assert.ok((result.napiVersion ?? 0) >= 8);
-    assert.equal(result.externalArrayBuffer, true);
-    assert.equal(result.exactBounds, true);
-    assert.equal(result.detachment, true);
-    assert.equal(result.transferPrevention, result.transferPreventionMechanism !== "none");
-    assert.equal(result.cleanupHooks, true);
-    runAttachBoundary();
-    runNativeLifecycle();
+	assert.ok((result.napiVersion ?? 0) >= 8);
+	assert.equal(result.externalArrayBuffer, true);
+	assert.equal(result.exactBounds, true);
+	assert.equal(result.detachment, true);
+	assert.equal(
+		result.transferPrevention,
+		result.transferPreventionMechanism !== "none",
+	);
+	assert.equal(result.cleanupHooks, true);
+	runAttachBoundary();
+	runNativeLifecycle();
 } else {
-    assert.ok(result.reason && result.reason.length > 0);
+	assert.ok(result.reason && result.reason.length > 0);
 }
 console.log(
-    JSON.stringify({ runtime: process.release.name, tokenizerAvailable, tokenizerReason, ...result }),
+	JSON.stringify({
+		runtime: process.release.name,
+		tokenizerAvailable,
+		tokenizerReason,
+		...result,
+	}),
 );
 
 function runAttachBoundary(): void {
-    const hostile: unknown[] = [
-        { profile: QUALIFIED_TEST_PROFILE, hostToPeerFd: Number.NaN },
-        { profile: QUALIFIED_TEST_PROFILE, hostToPeerFd: 2.5 },
-    ];
-    for (const descriptor of hostile) {
-        const refs = activeExternalRefs();
-        assert.throws(
-            () => NativeChannel.attach(descriptor as NativeDescriptor),
-            /invalid shared-memory descriptor/,
-        );
-        assert.equal(activeNativeChannels(), 0);
-        assert.equal(activeExternalRefs(), refs);
-    }
+	const hostile: unknown[] = [
+		{ profile: QUALIFIED_TEST_PROFILE, hostToPeerFd: Number.NaN },
+		{ profile: QUALIFIED_TEST_PROFILE, hostToPeerFd: 2.5 },
+	];
+	for (const descriptor of hostile) {
+		const refs = activeExternalRefs();
+		assert.throws(
+			() => NativeChannel.attach(descriptor as NativeDescriptor),
+			/invalid shared-memory descriptor/,
+		);
+		assert.equal(activeNativeChannels(), 0);
+		assert.equal(activeExternalRefs(), refs);
+	}
 }
 
 function header(length = 0): Uint8Array {
-    const bytes = new Uint8Array(20);
-    const view = new DataView(bytes.buffer);
-    view.setUint32(0, length, true);
-    view.setUint8(4, 3);
-    view.setUint16(6, 1, true);
-    view.setUint32(8, 1, true);
-    view.setBigUint64(12, 1n, true);
-    return bytes;
+	const bytes = new Uint8Array(20);
+	const view = new DataView(bytes.buffer);
+	view.setUint32(0, length, true);
+	view.setUint8(4, 3);
+	view.setUint16(6, 1, true);
+	view.setUint32(8, 1, true);
+	view.setBigUint64(12, 1n, true);
+	return bytes;
 }
 
 function fill(channel: NativeChannel, bytes: number, value = 1): void {
-    channel.produce(header(bytes), bytes, (cursor) => {
-        while (cursor.remaining > 0) {
-            const view = cursor.view();
-            view.fill(value);
-            cursor.advance(view.byteLength);
-        }
-    });
+	channel.produce(header(bytes), bytes, (cursor) => {
+		while (cursor.remaining > 0) {
+			const view = cursor.view();
+			view.fill(value);
+			cursor.advance(view.byteLength);
+		}
+	});
 }
 
 function receive(channel: NativeChannel): NativeReceiveLease {
-    let lease: NativeReceiveLease | undefined;
-    assert.equal(
-        channel.drainOne((value) => {
-            lease = value;
-        }),
-        true,
-    );
-    assert.ok(lease);
-    return lease;
+	let lease: NativeReceiveLease | undefined;
+	assert.equal(
+		channel.drainOne((value) => {
+			lease = value;
+		}),
+		true,
+	);
+	assert.ok(lease);
+	return lease;
 }
 
 function forceGc(): void {
-    const bun = (globalThis as { Bun?: { gc(force: boolean): void } }).Bun;
-    if (bun) {
-        bun.gc(true);
-        return;
-    }
-    setFlagsFromString("--expose_gc");
-    runInNewContext("gc()") as void;
+	const bun = (globalThis as { Bun?: { gc(force: boolean): void } }).Bun;
+	if (bun) {
+		bun.gc(true);
+		return;
+	}
+	setFlagsFromString("--expose_gc");
+	runInNewContext("gc()") as void;
 }
 
 function runNativeLifecycle(): void {
-    const direct = NativeChannel.createTestPair();
-    const producerAliases: Uint8Array[] = [];
-    let publishSawDetached = false;
-    direct.first.produce(
-        header(5),
-        5,
-        (cursor) => {
-            const alias = cursor.view();
-            producerAliases.push(alias);
-            alias.set([1, 2, 3, 4, 5]);
-            cursor.advance(5);
-        },
-        () => {
-            publishSawDetached = producerAliases.every(
-                (alias) => alias.byteLength === 0,
-            );
-        },
-    );
-    assert.equal(publishSawDetached, true);
-    const lease = receive(direct.second);
-    assert.equal(lease.segmentCount, 1);
-    const alias = lease.segment(0);
-    assert.equal(alias.byteOffset, 0);
-    assert.equal(alias.byteLength, alias.buffer.byteLength);
-    const subarray = alias.subarray(1);
-    const dataView = new DataView(alias.buffer, 1);
-    const buffer = Buffer.from(alias.buffer);
-    // Transfer prevention is reported, not gated; a runtime without it (Bun 1.3.x) would
-    // detach the alias here itself, so the attempt is made only where it must be refused.
-    if (result.transferPrevention) {
-        assert.throws(() =>
-            structuredClone(alias.buffer, { transfer: [alias.buffer] }),
-        );
-    }
-    lease.release();
-    assert.equal(alias.byteLength, 0);
-    assert.equal(subarray.byteLength, 0);
-    assert.equal(buffer.byteLength, 0);
-    assert.throws(() => dataView.byteLength);
-    assert.throws(() => lease.release(), /already released/);
-    assert.throws(() => lease.segment(0), /released/);
+	const direct = NativeChannel.createTestPair();
+	const producerAliases: Uint8Array[] = [];
+	let publishSawDetached = false;
+	direct.first.produce(
+		header(5),
+		5,
+		(cursor) => {
+			const alias = cursor.view();
+			producerAliases.push(alias);
+			alias.set([1, 2, 3, 4, 5]);
+			cursor.advance(5);
+		},
+		() => {
+			publishSawDetached = producerAliases.every(
+				(alias) => alias.byteLength === 0,
+			);
+		},
+	);
+	assert.equal(publishSawDetached, true);
+	const lease = receive(direct.second);
+	assert.equal(lease.segmentCount, 1);
+	const alias = lease.segment(0);
+	assert.equal(alias.byteOffset, 0);
+	assert.equal(alias.byteLength, alias.buffer.byteLength);
+	const subarray = alias.subarray(1);
+	const dataView = new DataView(alias.buffer, 1);
+	const buffer = Buffer.from(alias.buffer);
+	// Transfer prevention is reported, not gated; a runtime without it (Bun 1.3.x) would
+	// detach the alias here itself, so the attempt is made only where it must be refused.
+	if (result.transferPrevention) {
+		assert.throws(() =>
+			structuredClone(alias.buffer, { transfer: [alias.buffer] }),
+		);
+	}
+	lease.release();
+	assert.equal(alias.byteLength, 0);
+	assert.equal(subarray.byteLength, 0);
+	assert.equal(buffer.byteLength, 0);
+	assert.throws(() => dataView.byteLength);
+	assert.throws(() => lease.release(), /already released/);
+	assert.throws(() => lease.segment(0), /released/);
 
-    let thrownAlias: Uint8Array | undefined;
-    assert.throws(() =>
-        direct.first.produce(header(4), 4, (cursor) => {
-            thrownAlias = cursor.view();
-            cursor.write(new Uint8Array([1, 2, 3, 4]));
-            throw new Error("fill failed");
-        }),
-    );
-    assert.equal(thrownAlias?.byteLength, 0);
-    assert.equal(
-        direct.second.drainOne(() => {}),
-        false,
-    );
-    direct.first.close();
-    direct.second.close();
+	let thrownAlias: Uint8Array | undefined;
+	assert.throws(() =>
+		direct.first.produce(header(4), 4, (cursor) => {
+			thrownAlias = cursor.view();
+			cursor.write(new Uint8Array([1, 2, 3, 4]));
+			throw new Error("fill failed");
+		}),
+	);
+	assert.equal(thrownAlias?.byteLength, 0);
+	assert.equal(
+		direct.second.drainOne(() => {}),
+		false,
+	);
+	direct.first.close();
+	direct.second.close();
 
-    // Descriptor consumption is independent of payload return: holding every ordinary
-    // descriptor's payload does not block publication, because each receive frees its slot.
-    const descriptors = NativeChannel.createTestPair();
-    const held: NativeReceiveLease[] = [];
-    for (let index = 0; index < descriptors.descriptorDepth; index++) {
-        fill(descriptors.first, 1, index);
-        held.push(receive(descriptors.second));
-    }
-    fill(descriptors.first, 1, 2);
-    receive(descriptors.second).release();
-    // Holding every block of the smallest class does exhaust that class, and only that class.
-    while (held.length < descriptors.smallestClassCount) {
-        fill(descriptors.first, 1, 3);
-        held.push(receive(descriptors.second));
-    }
-    assert.throws(() => fill(descriptors.first, 1, 1));
-    fill(descriptors.first, descriptors.smallestBodyCapacity + 1, 4);
-    receive(descriptors.second).release();
-    // Returning one held block makes exactly that block reusable while the others stay intact.
-    const first = held.shift();
-    const firstSegment = held[0]?.segment(0);
-    assert.ok(firstSegment);
-    first?.release();
-    fill(descriptors.first, 1, 2);
-    receive(descriptors.second).release();
-    assert.equal(firstSegment[0], 1, "an unreleased neighbor keeps its bytes");
-    for (const active of held) active.release();
-    descriptors.first.close();
-    descriptors.second.close();
+	// Descriptor consumption is independent of payload return: holding every ordinary
+	// descriptor's payload does not block publication, because each receive frees its slot.
+	const descriptors = NativeChannel.createTestPair();
+	const held: NativeReceiveLease[] = [];
+	for (let index = 0; index < descriptors.descriptorDepth; index++) {
+		fill(descriptors.first, 1, index);
+		held.push(receive(descriptors.second));
+	}
+	fill(descriptors.first, 1, 2);
+	receive(descriptors.second).release();
+	// Holding every block of the smallest class does exhaust that class, and only that class.
+	while (held.length < descriptors.smallestClassCount) {
+		fill(descriptors.first, 1, 3);
+		held.push(receive(descriptors.second));
+	}
+	assert.throws(() => fill(descriptors.first, 1, 1));
+	fill(descriptors.first, descriptors.smallestBodyCapacity + 1, 4);
+	receive(descriptors.second).release();
+	// Returning one held block makes exactly that block reusable while the others stay intact.
+	const first = held.shift();
+	const firstSegment = held[0]?.segment(0);
+	assert.ok(firstSegment);
+	first?.release();
+	fill(descriptors.first, 1, 2);
+	receive(descriptors.second).release();
+	assert.equal(firstSegment[0], 1, "an unreleased neighbor keeps its bytes");
+	for (const active of held) active.release();
+	descriptors.first.close();
+	descriptors.second.close();
 
-    // The maximum body has one block; holding it leaves every other class free.
-    const MAX_BODY = 67_108_864;
-    const arena = NativeChannel.createTestPair();
-    fill(arena.first, MAX_BODY, 1);
-    const arenaLease = receive(arena.second);
-    assert.equal(arenaLease.byteLength, MAX_BODY);
-    fill(arena.first, 1, 2);
-    receive(arena.second).release();
-    assert.throws(() => fill(arena.first, MAX_BODY, 1), /ring is full/);
-    arenaLease.release();
-    // After arenaLease.release(), MAX_BODY + 1 fails the size bound rather than ring exhaustion.
-    assert.throws(() => fill(arena.first, MAX_BODY + 1, 1), /reservation failed/);
-    fill(arena.first, MAX_BODY, 2);
-    receive(arena.second).release();
-    arena.first.close();
-    arena.second.close();
+	// The maximum body has one block; holding it leaves every other class free.
+	const MAX_BODY = 67_108_864;
+	const arena = NativeChannel.createTestPair();
+	fill(arena.first, MAX_BODY, 1);
+	const arenaLease = receive(arena.second);
+	assert.equal(arenaLease.byteLength, MAX_BODY);
+	fill(arena.first, 1, 2);
+	receive(arena.second).release();
+	assert.throws(() => fill(arena.first, MAX_BODY, 1), /ring is full/);
+	arenaLease.release();
+	// After arenaLease.release(), MAX_BODY + 1 fails the size bound rather than ring exhaustion.
+	assert.throws(() => fill(arena.first, MAX_BODY + 1, 1), /reservation failed/);
+	fill(arena.first, MAX_BODY, 2);
+	receive(arena.second).release();
+	arena.first.close();
+	arena.second.close();
 
-    const partial = NativeChannel.createTestPair();
-    partial.first.produce(header(MAX_BODY - 2), MAX_BODY - 2, (cursor) => {
-        cursor.advance(MAX_BODY - 2);
-    });
-    receive(partial.second).release();
-    fill(partial.first, 4, 3);
-    const refsBeforeFailure = activeExternalRefs();
-    // One contiguous body means one view per receive; failing that creation must return the
-    // block and leave no reference behind.
-    setExternalViewCreationFailpoint(1);
-    try {
-        assert.throws(
-            () => partial.second.drainOne(() => {}),
-            /external view creation failpoint/,
-        );
-    } finally {
-        setExternalViewCreationFailpoint(0);
-    }
-    assert.equal(activeExternalRefs(), refsBeforeFailure);
-    fill(partial.first, 1, 4);
-    receive(partial.second).release();
-    partial.first.close();
-    partial.second.close();
+	const partial = NativeChannel.createTestPair();
+	partial.first.produce(header(MAX_BODY - 2), MAX_BODY - 2, (cursor) => {
+		cursor.advance(MAX_BODY - 2);
+	});
+	receive(partial.second).release();
+	fill(partial.first, 4, 3);
+	const refsBeforeFailure = activeExternalRefs();
+	// One contiguous body means one view per receive; failing that creation must return the
+	// block and leave no reference behind.
+	setExternalViewCreationFailpoint(1);
+	try {
+		assert.throws(
+			() => partial.second.drainOne(() => {}),
+			/external view creation failpoint/,
+		);
+	} finally {
+		setExternalViewCreationFailpoint(0);
+	}
+	assert.equal(activeExternalRefs(), refsBeforeFailure);
+	fill(partial.first, 1, 4);
+	receive(partial.second).release();
+	partial.first.close();
+	partial.second.close();
 
-    // Leaked leases pin their blocks: a whole class of them exhausts that class even after
-    // collection, because a finalizer never returns a block.
-    const leaked = NativeChannel.createTestPair();
-    for (let index = 0; index < leaked.smallestClassCount; index++) {
-        fill(leaked.first, 1, index);
-        assert.equal(
-            leaked.second.drainOne(() => {}),
-            true,
-        );
-    }
-    forceGc();
-    assert.throws(() => fill(leaked.first, 1, 1));
-    leaked.second.forceClose();
-    assert.throws(() => fill(leaked.first, 1, 1));
-    leaked.first.close();
+	// Leaked leases pin their blocks: a whole class of them exhausts that class even after
+	// collection, because a finalizer never returns a block.
+	const leaked = NativeChannel.createTestPair();
+	for (let index = 0; index < leaked.smallestClassCount; index++) {
+		fill(leaked.first, 1, index);
+		assert.equal(
+			leaked.second.drainOne(() => {}),
+			true,
+		);
+	}
+	forceGc();
+	assert.throws(() => fill(leaked.first, 1, 1));
+	leaked.second.forceClose();
+	assert.throws(() => fill(leaked.first, 1, 1));
+	leaked.first.close();
 }

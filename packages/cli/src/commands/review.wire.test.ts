@@ -100,7 +100,6 @@ describe("review over the host transport", () => {
             const routed = await daemon.nextRequest();
             expect(routed.header.channel).toBe(7);
             expect(routed.json).toEqual({
-                v: 1,
                 session_id: identity.session,
                 project_root: "/work/project",
                 method: "review.list",

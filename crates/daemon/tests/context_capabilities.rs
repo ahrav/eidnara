@@ -36,7 +36,6 @@ fn whole(occurrence_id: &str) -> Value {
 fn prepare(project: &Path, action: &str, survivors: Value) -> Value {
     json!({
         "method": "retrieval.prepare",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "context_revision": "rev-1",
@@ -350,7 +349,6 @@ async fn the_declaration_is_latched_at_bind_and_reread_by_a_new_bind() {
     let key = prepared["preparation_id"].as_str().unwrap();
     let mut apply = json!({
         "method": "retrieval.apply",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "preparation_id": key,
@@ -374,7 +372,6 @@ async fn the_declaration_is_latched_at_bind_and_reread_by_a_new_bind() {
     let forwarded_identity = forwarded["forwarded_identity"].as_str().unwrap();
     let confirm = json!({
         "method": "retrieval.confirm",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "preparation_id": key,
@@ -592,7 +589,6 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
 fn routed(project: &Path, method: &str, fields: Value) -> Value {
     let mut body = json!({
         "method": method,
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
     });

@@ -452,7 +452,7 @@ impl HandlerCore {
 /// Keys the transport adds around every `kernel.*` body. They are removed
 /// before the body is parsed so `deny_unknown_fields` judges only the route's
 /// own fields.
-const ENVELOPE_KEYS: [&str; 5] = ["method", "kind", "v", "session_id", "project_root"];
+const ENVELOPE_KEYS: [&str; 4] = ["method", "kind", "session_id", "project_root"];
 
 pub(crate) fn parse_request_body<T: DeserializeOwned>(
     mut request: Value,

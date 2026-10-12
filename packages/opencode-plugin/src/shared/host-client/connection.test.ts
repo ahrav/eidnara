@@ -23,12 +23,7 @@ import {
     ReceiveLease,
     type SetupFrameChannel,
 } from "./frame-channel";
-import {
-    type EnvelopeHeader,
-    FrameType,
-    HEADER_LEN,
-    MAX_CORRELATION,
-} from "./protocol";
+import { type EnvelopeHeader, FrameType, HEADER_LEN, MAX_CORRELATION } from "./protocol";
 
 const CHANNEL = 7;
 const EPOCH = 1;

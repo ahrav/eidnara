@@ -9,21 +9,21 @@ export const QUALIFIED_TEST_PROFILE = "host-payload-pool";
 
 /** The addon's own value for the constant above, or `null` when it cannot load. */
 export function nativeWireConstants(): {
-    qualifiedTestProfile: string;
+	qualifiedTestProfile: string;
 } | null {
-    const native = addon();
-    if (!native) return null;
-    return {
-        qualifiedTestProfile: native.qualifiedTestProfile(),
-    };
+	const native = addon();
+	if (!native) return null;
+	return {
+		qualifiedTestProfile: native.qualifiedTestProfile(),
+	};
 }
 
 /** What a run actually loaded: the addon's build identity and layout constants, or `null`. */
 export interface NativeArtifactIdentity {
-    buildProfile: string;
-    buildTarget: string;
-    napiVersion: number;
-    qualifiedTestProfile: string;
+	buildProfile: string;
+	buildTarget: string;
+	napiVersion: number;
+	qualifiedTestProfile: string;
 }
 
 /**
@@ -32,14 +32,14 @@ export interface NativeArtifactIdentity {
  * the addon cannot load.
  */
 export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
-    const native = addon();
-    if (!native) return null;
-    return {
-        buildProfile: native.buildProfile(),
-        buildTarget: native.buildTarget(),
-        napiVersion: native.napiVersion(),
-        qualifiedTestProfile: native.qualifiedTestProfile(),
-    };
+	const native = addon();
+	if (!native) return null;
+	return {
+		buildProfile: native.buildProfile(),
+		buildTarget: native.buildTarget(),
+		napiVersion: native.napiVersion(),
+		qualifiedTestProfile: native.qualifiedTestProfile(),
+	};
 }
 
 /**
@@ -48,9 +48,9 @@ export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
  * stale grant encoding. `null` when the addon cannot load.
  */
 export function grantDecodes(hex: string): boolean | null {
-    const native = addon();
-    if (!native) return null;
-    return native.grantDecodes(hex);
+	const native = addon();
+	if (!native) return null;
+	return native.grantDecodes(hex);
 }
 
 /**
@@ -64,153 +64,153 @@ export function grantDecodes(hex: string): boolean | null {
 export type TransferPreventionMechanism = "intrinsic" | "marked" | "none";
 
 export interface NativeCapabilities {
-    available: boolean;
-    napiVersion: number | null;
-    externalArrayBuffer: boolean;
-    exactBounds: boolean;
-    detachment: boolean;
-    /** Reported, not gated: `available` does not require it. */
-    transferPrevention: boolean;
-    transferPreventionMechanism: TransferPreventionMechanism;
-    cleanupHooks: boolean;
-    reason?: string;
+	available: boolean;
+	napiVersion: number | null;
+	externalArrayBuffer: boolean;
+	exactBounds: boolean;
+	detachment: boolean;
+	/** Reported, not gated: `available` does not require it. */
+	transferPrevention: boolean;
+	transferPreventionMechanism: TransferPreventionMechanism;
+	cleanupHooks: boolean;
+	reason?: string;
 }
 
 export type NativeStartupFailureReason =
-    | "missing_addon"
-    | "unsupported_platform"
-    | "missing_manifest"
-    | "wrong_platform_payload"
-    | "missing_checksum"
-    | "checksum_mismatch"
-    | "debug_build"
-    | "wrong_platform_binary"
-    | "addon_load_failed"
-    | "tokenizer_export_unavailable"
-    | "capability_unavailable";
+	| "missing_addon"
+	| "unsupported_platform"
+	| "missing_manifest"
+	| "wrong_platform_payload"
+	| "missing_checksum"
+	| "checksum_mismatch"
+	| "debug_build"
+	| "wrong_platform_binary"
+	| "addon_load_failed"
+	| "tokenizer_export_unavailable"
+	| "capability_unavailable";
 
 /** Bounded startup failure safe for cross-package classification. */
 export class NativeStartupError extends Error {
-    constructor(readonly reason: NativeStartupFailureReason) {
-        super(`shared-memory native startup failed: ${reason}`);
-        this.name = "NativeStartupError";
-    }
+	constructor(readonly reason: NativeStartupFailureReason) {
+		super(`shared-memory native startup failed: ${reason}`);
+		this.name = "NativeStartupError";
+	}
 }
 
 /** Counts Claude tokens synchronously with the Rust tokenizer. */
 export function estimateTokens(text: string): number {
-    if (typeof text !== "string") {
-        throw new TypeError("native tokenizer input must be a string");
-    }
-    const count = requireAddon().estimateTokens;
-    if (typeof count !== "function") {
-        throw new NativeStartupError("tokenizer_export_unavailable");
-    }
-    try {
-        return count(text);
-    } catch {
-        throw new Error("native tokenizer failed");
-    }
+	if (typeof text !== "string") {
+		throw new TypeError("native tokenizer input must be a string");
+	}
+	const count = requireAddon().estimateTokens;
+	if (typeof count !== "function") {
+		throw new NativeStartupError("tokenizer_export_unavailable");
+	}
+	try {
+		return count(text);
+	} catch {
+		throw new Error("native tokenizer failed");
+	}
 }
 
 export interface NativeDescriptor {
-    profile: string;
-    hostToPeerFd: number;
-    hostToPeerDataReadyFd: number;
-    hostToPeerCapacityReadyFd: number;
-    hostToPeerGrant: string;
-    peerToHostFd: number;
-    peerToHostDataReadyFd: number;
-    peerToHostCapacityReadyFd: number;
-    peerToHostGrant: string;
+	profile: string;
+	hostToPeerFd: number;
+	hostToPeerDataReadyFd: number;
+	hostToPeerCapacityReadyFd: number;
+	hostToPeerGrant: string;
+	peerToHostFd: number;
+	peerToHostDataReadyFd: number;
+	peerToHostCapacityReadyFd: number;
+	peerToHostGrant: string;
 }
 
 export interface NativeSetupOptions {
-    setupSocket: string;
-    key: Uint8Array;
-    daemonId: Uint8Array;
-    daemonVer: string;
-    timeoutMs: number;
+	setupSocket: string;
+	key: Uint8Array;
+	daemonId: Uint8Array;
+	daemonVer: string;
+	timeoutMs: number;
 }
 
 export interface NativeTestPair {
-    first: NativeChannel;
-    second: NativeChannel;
-    /** Ordinary descriptor slots per direction: frames a producer can publish before the consumer acknowledges any. */
-    descriptorDepth: number;
-    /** Largest body one block of the smallest ordinary class carries. */
-    smallestBodyCapacity: number;
-    /** Blocks in the smallest ordinary class. */
-    smallestClassCount: number;
+	first: NativeChannel;
+	second: NativeChannel;
+	/** Ordinary descriptor slots per direction: frames a producer can publish before the consumer acknowledges any. */
+	descriptorDepth: number;
+	/** Largest body one block of the smallest ordinary class carries. */
+	smallestBodyCapacity: number;
+	/** Blocks in the smallest ordinary class. */
+	smallestClassCount: number;
 }
 
 interface NativeAddon {
-    napiVersion(): number;
-    buildProfile(): string;
-    buildTarget(): string;
-    qualifiedTestProfile(): string;
-    estimateTokens?: (text: string) => number;
-    createExternalProbe(length: number): Uint8Array;
-    detachArrayBuffer(buffer: ArrayBuffer): boolean;
-    registerCleanupProbe(path: string): void;
-    probeCleanupHooks(): void;
-    nativeLeakDiagnostics(): number;
-    activeExternalRefCount(): number;
-    setExternalViewFailpoint(call: number): void;
-    setDetachFailpoint(call: number): void;
-    setDeleteFailpoint(call: number): void;
-    workerLimit(): number;
-    activeChannelCount(): number;
-    attach(descriptor: NativeDescriptor): number;
-    connectSetup(options: NativeSetupOptions): Promise<number>;
-    finishSetup(pending: number): Promise<number>;
-    peerClosed(channel: number): boolean;
-    createTestPair(): {
-        first: number;
-        second: number;
-        descriptorDepth: number;
-        smallestBodyCapacity: number;
-        smallestClassCount: number;
-    };
-    grantDecodes(hex: string): boolean;
-    produce(
-        channel: number,
-        header: Uint8Array,
-        capacity: number,
-        fill: (segments: Uint8Array[]) => number,
-        beforePublish: () => void,
-    ): void;
-    reserve(
-        channel: number,
-        capacity: number,
-        deliver: (token: number, segments: Uint8Array[]) => void,
-    ): void;
-    armCapacity(channel: number, header: Uint8Array, capacity: number): boolean;
-    commitReservation(
-        channel: number,
-        token: number,
-        header: Uint8Array,
-        written: number,
-        beforePublish: () => void,
-    ): void;
-    abortReservation(channel: number, token: number): void;
-    poll(
-        channel: number,
-        deliver: (
-            token: number,
-            header: Uint8Array,
-            segments: Uint8Array[],
-        ) => void,
-    ): boolean;
-    watch(channel: number, callback: () => void): void;
-    isWatching(channel: number): boolean;
-    producerRegistered(channel: number, token: number): boolean;
-    leaseRegistered(channel: number, token: number): boolean;
-    channelRegistered(channel: number): boolean;
-    readinessHandled(): boolean;
-    release(channel: number, token: number): void;
-    close(channel: number): void;
-    forceClose(channel: number): void;
+	napiVersion(): number;
+	buildProfile(): string;
+	buildTarget(): string;
+	qualifiedTestProfile(): string;
+	estimateTokens?: (text: string) => number;
+	createExternalProbe(length: number): Uint8Array;
+	detachArrayBuffer(buffer: ArrayBuffer): boolean;
+	registerCleanupProbe(path: string): void;
+	probeCleanupHooks(): void;
+	nativeLeakDiagnostics(): number;
+	activeExternalRefCount(): number;
+	setExternalViewFailpoint(call: number): void;
+	setDetachFailpoint(call: number): void;
+	setDeleteFailpoint(call: number): void;
+	workerLimit(): number;
+	activeChannelCount(): number;
+	attach(descriptor: NativeDescriptor): number;
+	connectSetup(options: NativeSetupOptions): Promise<number>;
+	finishSetup(pending: number): Promise<number>;
+	peerClosed(channel: number): boolean;
+	createTestPair(): {
+		first: number;
+		second: number;
+		descriptorDepth: number;
+		smallestBodyCapacity: number;
+		smallestClassCount: number;
+	};
+	grantDecodes(hex: string): boolean;
+	produce(
+		channel: number,
+		header: Uint8Array,
+		capacity: number,
+		fill: (segments: Uint8Array[]) => number,
+		beforePublish: () => void,
+	): void;
+	reserve(
+		channel: number,
+		capacity: number,
+		deliver: (token: number, segments: Uint8Array[]) => void,
+	): void;
+	armCapacity(channel: number, header: Uint8Array, capacity: number): boolean;
+	commitReservation(
+		channel: number,
+		token: number,
+		header: Uint8Array,
+		written: number,
+		beforePublish: () => void,
+	): void;
+	abortReservation(channel: number, token: number): void;
+	poll(
+		channel: number,
+		deliver: (
+			token: number,
+			header: Uint8Array,
+			segments: Uint8Array[],
+		) => void,
+	): boolean;
+	watch(channel: number, callback: () => void): void;
+	isWatching(channel: number): boolean;
+	producerRegistered(channel: number, token: number): boolean;
+	leaseRegistered(channel: number, token: number): boolean;
+	channelRegistered(channel: number): boolean;
+	readinessHandled(): boolean;
+	release(channel: number, token: number): void;
+	close(channel: number): void;
+	forceClose(channel: number): void;
 }
 
 let loaded: NativeAddon | null | undefined;
@@ -218,11 +218,11 @@ let loadError: Error | undefined;
 let constructorCapability: NativeCapabilities | undefined;
 
 const PLATFORM_PACKAGES = {
-    "linux-x64": {
-        package: "@eidnara/host-linux-x64-gnu",
-        target: "linux-x64-gnu",
-        nativeTarget: "linux-x86_64",
-    },
+	"linux-x64": {
+		package: "@eidnara/host-linux-x64-gnu",
+		target: "linux-x64-gnu",
+		nativeTarget: "linux-x86_64",
+	},
 } as const;
 
 const ADDON_PAYLOAD_PATH = "payload/native/shm_native.node";
@@ -231,7 +231,9 @@ const ADDON_PAYLOAD_PATH = "payload/native/shm_native.node";
 const HANDLE_CONSUMED_PREFIX = "native handle consumed: ";
 
 function consumesHandle(error: unknown): boolean {
-    return error instanceof Error && error.message.startsWith(HANDLE_CONSUMED_PREFIX);
+	return (
+		error instanceof Error && error.message.startsWith(HANDLE_CONSUMED_PREFIX)
+	);
 }
 
 /**
@@ -242,129 +244,142 @@ function consumesHandle(error: unknown): boolean {
 export const RING_FULL_MESSAGE = "shared-memory ring is full";
 
 export function isRingFullError(error: unknown): boolean {
-    return error instanceof Error && error.message === RING_FULL_MESSAGE;
+	return error instanceof Error && error.message === RING_FULL_MESSAGE;
 }
 
 /** True only when the query ran and reported absence; a throwing (busy) query is not evidence. */
 function confirmedAbsent(query: () => boolean): boolean {
-    try {
-        return !query();
-    } catch {
-        return false;
-    }
+	try {
+		return !query();
+	} catch {
+		return false;
+	}
 }
 
-type PlatformPackage = (typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
+type PlatformPackage =
+	(typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
 
 /**
  * `process.platform` and `process.arch` cannot distinguish glibc from musl. `PLATFORM_PACKAGES`
  * requires glibc; Node and Bun omit `glibcVersionRuntime` on musl.
  */
 function isMuslLinux(): boolean {
-    if (process.platform !== "linux") return false;
-    const report = (process as { report?: { getReport?: () => unknown } }).report;
-    const header = (report?.getReport?.() as { header?: { glibcVersionRuntime?: unknown } } | undefined)
-        ?.header;
-    return typeof header?.glibcVersionRuntime !== "string";
+	if (process.platform !== "linux") return false;
+	const report = (process as { report?: { getReport?: () => unknown } }).report;
+	const header = (
+		report?.getReport?.() as
+			| { header?: { glibcVersionRuntime?: unknown } }
+			| undefined
+	)?.header;
+	return typeof header?.glibcVersionRuntime !== "string";
 }
 
-export function supportsNativePlatform(platform: string, arch: string, musl = false): boolean {
-    return !musl && `${platform}-${arch}` in PLATFORM_PACKAGES;
+export function supportsNativePlatform(
+	platform: string,
+	arch: string,
+	musl = false,
+): boolean {
+	return !musl && `${platform}-${arch}` in PLATFORM_PACKAGES;
 }
 
 function platformPackage(): PlatformPackage {
-    if (!supportsNativePlatform(process.platform, process.arch, isMuslLinux())) {
-        throw new NativeStartupError("unsupported_platform");
-    }
-    return PLATFORM_PACKAGES[`${process.platform}-${process.arch}` as keyof typeof PLATFORM_PACKAGES];
+	if (!supportsNativePlatform(process.platform, process.arch, isMuslLinux())) {
+		throw new NativeStartupError("unsupported_platform");
+	}
+	return PLATFORM_PACKAGES[
+		`${process.platform}-${process.arch}` as keyof typeof PLATFORM_PACKAGES
+	];
 }
 
 function packageAddonPath(platform: PlatformPackage): string {
-    const require = createRequire(import.meta.url);
-    let packageJsonPath: string;
-    try {
-        packageJsonPath = require.resolve(`${platform.package}/package.json`);
-    } catch {
-        throw new NativeStartupError("missing_addon");
-    }
-    const packageDir = dirname(packageJsonPath);
-    const manifestPath = join(packageDir, "payload-manifest.json");
-    let manifest: {
-        package?: { name?: string; target?: string };
-        files?: { path?: string; sha256?: string }[];
-    };
-    try {
-        manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    } catch {
-        throw new NativeStartupError("missing_manifest");
-    }
-    if (
-        manifest.package?.name !== platform.package ||
-        manifest.package.target !== platform.target
-    ) {
-        throw new NativeStartupError("wrong_platform_payload");
-    }
-    const entry = manifest.files?.find(({ path }) => path === ADDON_PAYLOAD_PATH);
-    if (!entry || !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "")) {
-        throw new NativeStartupError("missing_checksum");
-    }
-    const addonPath = join(packageDir, ADDON_PAYLOAD_PATH);
-    if (!existsSync(addonPath)) {
-        throw new NativeStartupError("missing_addon");
-    }
-    const actual = createHash("sha256").update(readFileSync(addonPath)).digest("hex");
-    if (actual !== entry.sha256) {
-        throw new NativeStartupError("checksum_mismatch");
-    }
-    return addonPath;
+	const require = createRequire(import.meta.url);
+	let packageJsonPath: string;
+	try {
+		packageJsonPath = require.resolve(`${platform.package}/package.json`);
+	} catch {
+		throw new NativeStartupError("missing_addon");
+	}
+	const packageDir = dirname(packageJsonPath);
+	const manifestPath = join(packageDir, "payload-manifest.json");
+	let manifest: {
+		package?: { name?: string; target?: string };
+		files?: { path?: string; sha256?: string }[];
+	};
+	try {
+		manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+	} catch {
+		throw new NativeStartupError("missing_manifest");
+	}
+	if (
+		manifest.package?.name !== platform.package ||
+		manifest.package.target !== platform.target
+	) {
+		throw new NativeStartupError("wrong_platform_payload");
+	}
+	const entry = manifest.files?.find(({ path }) => path === ADDON_PAYLOAD_PATH);
+	if (!entry || !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "")) {
+		throw new NativeStartupError("missing_checksum");
+	}
+	const addonPath = join(packageDir, ADDON_PAYLOAD_PATH);
+	if (!existsSync(addonPath)) {
+		throw new NativeStartupError("missing_addon");
+	}
+	const actual = createHash("sha256")
+		.update(readFileSync(addonPath))
+		.digest("hex");
+	if (actual !== entry.sha256) {
+		throw new NativeStartupError("checksum_mismatch");
+	}
+	return addonPath;
 }
 
 function requireAddon(): NativeAddon {
-    if (loaded) return loaded;
-    if (loadError) throw loadError;
-    try {
-        const platform = platformPackage();
-        const localPath = new URL("./shm_native.node", import.meta.url);
-        const addonPath = existsSync(localPath)
-            ? fileURLToPath(localPath)
-            : packageAddonPath(platform);
-        // A present, checksummed payload can still fail to load (wrong architecture, missing
-        // loader symbol); the raw loader error carries paths and dynamic-linker text, so it is
-        // translated into the bounded reason taxonomy before it crosses the package boundary.
-        let native: NativeAddon;
-        try {
-            native = createRequire(import.meta.url)(addonPath) as NativeAddon;
-        } catch {
-            throw new NativeStartupError("addon_load_failed");
-        }
-        if (native.buildProfile() !== "release") {
-            throw new NativeStartupError("debug_build");
-        }
-        if (native.buildTarget() !== platform.nativeTarget) {
-            throw new NativeStartupError("wrong_platform_binary");
-        }
-        loaded = native;
-        return native;
-    } catch (error) {
-        loadError = error instanceof Error ? error : new Error(String(error));
-        loaded = null;
-        throw loadError;
-    }
+	if (loaded) return loaded;
+	if (loadError) throw loadError;
+	try {
+		const platform = platformPackage();
+		const localPath = new URL("./shm_native.node", import.meta.url);
+		const addonPath = existsSync(localPath)
+			? fileURLToPath(localPath)
+			: packageAddonPath(platform);
+		// A present, checksummed payload can still fail to load (wrong architecture, missing
+		// loader symbol); the raw loader error carries paths and dynamic-linker text, so it is
+		// translated into the bounded reason taxonomy before it crosses the package boundary.
+		let native: NativeAddon;
+		try {
+			native = createRequire(import.meta.url)(addonPath) as NativeAddon;
+		} catch {
+			throw new NativeStartupError("addon_load_failed");
+		}
+		if (native.buildProfile() !== "release") {
+			throw new NativeStartupError("debug_build");
+		}
+		if (native.buildTarget() !== platform.nativeTarget) {
+			throw new NativeStartupError("wrong_platform_binary");
+		}
+		loaded = native;
+		return native;
+	} catch (error) {
+		loadError = error instanceof Error ? error : new Error(String(error));
+		loaded = null;
+		throw loadError;
+	}
 }
 
 function capableAddon(): NativeAddon {
-    const native = requireAddon();
-    const capability = (constructorCapability ??= probeCapabilities());
-    if (!capability.available) throw new NativeStartupError("capability_unavailable");
-    return native;
+	const native = requireAddon();
+	const capability = (constructorCapability ??= probeCapabilities());
+	if (!capability.available)
+		throw new NativeStartupError("capability_unavailable");
+	return native;
 }
 
 function addon(): NativeAddon | null {
-    try {
-        return requireAddon();
-    } catch {
-        return null;
-    }
+	try {
+		return requireAddon();
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -376,59 +391,62 @@ function addon(): NativeAddon | null {
 let markLeasedBuffers = false;
 
 function isBun(): boolean {
-    return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+	return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 }
 
 function protect(segments: readonly Uint8Array[]): void {
-    for (const segment of segments) {
-        if (!(segment.buffer instanceof ArrayBuffer)) {
-            throw new Error("external segment lacks ArrayBuffer backing");
-        }
-        if (markLeasedBuffers) markAsUntransferable(segment.buffer);
-    }
+	for (const segment of segments) {
+		if (!(segment.buffer instanceof ArrayBuffer)) {
+			throw new Error("external segment lacks ArrayBuffer backing");
+		}
+		if (markLeasedBuffers) markAsUntransferable(segment.buffer);
+	}
 }
 
 const PROBE_BYTES = 31;
 
 /** True when a transfer attempt throws and leaves the buffer intact. */
 function transferRefused(buffer: ArrayBuffer): boolean {
-    try {
-        structuredClone(buffer, { transfer: [buffer] });
-        return false;
-    } catch {
-        return buffer.byteLength === PROBE_BYTES;
-    }
+	try {
+		structuredClone(buffer, { transfer: [buffer] });
+		return false;
+	} catch {
+		return buffer.byteLength === PROBE_BYTES;
+	}
 }
 
 /**
  * Probes transfer prevention on fresh external buffers so the detachment probe never runs
  * on a marked buffer. Every probe buffer that stays intact is detached before return.
  */
-function probeTransferPrevention(native: NativeAddon): TransferPreventionMechanism {
-    const intrinsic = native.createExternalProbe(PROBE_BYTES).buffer as ArrayBuffer;
-    if (transferRefused(intrinsic)) {
-        native.detachArrayBuffer(intrinsic);
-        return "intrinsic";
-    }
-    // The failed attempt above already detached `intrinsic`. Marking is attempted only on Bun;
-    // see `markLeasedBuffers`.
-    if (!isBun()) return "none";
-    const marked = native.createExternalProbe(PROBE_BYTES).buffer as ArrayBuffer;
-    try {
-        markAsUntransferable(marked);
-    } catch {
-        native.detachArrayBuffer(marked);
-        return "none";
-    }
-    if (!transferRefused(marked)) return "none";
-    // Marking is usable only when it leaves native detachment intact.
-    let detached = false;
-    try {
-        detached = native.detachArrayBuffer(marked) && marked.byteLength === 0;
-    } catch {
-        detached = false;
-    }
-    return detached ? "marked" : "none";
+function probeTransferPrevention(
+	native: NativeAddon,
+): TransferPreventionMechanism {
+	const intrinsic = native.createExternalProbe(PROBE_BYTES)
+		.buffer as ArrayBuffer;
+	if (transferRefused(intrinsic)) {
+		native.detachArrayBuffer(intrinsic);
+		return "intrinsic";
+	}
+	// The failed attempt above already detached `intrinsic`. Marking is attempted only on Bun;
+	// see `markLeasedBuffers`.
+	if (!isBun()) return "none";
+	const marked = native.createExternalProbe(PROBE_BYTES).buffer as ArrayBuffer;
+	try {
+		markAsUntransferable(marked);
+	} catch {
+		native.detachArrayBuffer(marked);
+		return "none";
+	}
+	if (!transferRefused(marked)) return "none";
+	// Marking is usable only when it leaves native detachment intact.
+	let detached = false;
+	try {
+		detached = native.detachArrayBuffer(marked) && marked.byteLength === 0;
+	} catch {
+		detached = false;
+	}
+	return detached ? "marked" : "none";
 }
 
 /**
@@ -436,10 +454,10 @@ function probeTransferPrevention(native: NativeAddon): TransferPreventionMechani
  * negative and oversized values.
  */
 export function assertUint32Argument(name: string, value: number): number {
-    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
-        throw new RangeError(`${name} must be an integer in [0, 4294967295]`);
-    }
-    return value;
+	if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+		throw new RangeError(`${name} must be an integer in [0, 4294967295]`);
+	}
+	return value;
 }
 
 /**
@@ -447,189 +465,185 @@ export function assertUint32Argument(name: string, value: number): number {
  * borrows its Rust slice.
  */
 export function privateBytes(bytes: Uint8Array): Uint8Array {
-    return new Uint8Array(bytes);
+	return new Uint8Array(bytes);
 }
 
 export function probeCapabilities(): NativeCapabilities {
-    const base = {
-        napiVersion: null,
-        externalArrayBuffer: false,
-        exactBounds: false,
-        detachment: false,
-        transferPrevention: false,
-        transferPreventionMechanism: "none" as TransferPreventionMechanism,
-        cleanupHooks: false,
-    };
-    markLeasedBuffers = false;
-    const native = addon();
-    if (!native)
-        return { available: false, ...base, reason: "addon_unavailable" };
-    try {
-        const napiVersion = native.napiVersion();
-        if (napiVersion < 8) {
-            return {
-                available: false,
-                ...base,
-                napiVersion,
-                reason: "napi_8_unavailable",
-            };
-        }
-        const view = native.createExternalProbe(PROBE_BYTES);
-        const externalArrayBuffer =
-            view instanceof Uint8Array && view.byteLength === PROBE_BYTES;
-        const exactBounds =
-            externalArrayBuffer &&
-            view.byteOffset === 0 &&
-            view.buffer.byteLength === PROBE_BYTES;
-        if (!exactBounds) {
-            return {
-                available: false,
-                ...base,
-                napiVersion,
-                externalArrayBuffer,
-                reason: "external_exact_bounds_unavailable",
-            };
-        }
-        const arrayBuffer = view.buffer as ArrayBuffer;
-        const subarray = view.subarray(1, 30);
-        const dataView = new DataView(arrayBuffer, 1, 29);
-        const bufferAlias = Buffer.from(arrayBuffer, 0, view.byteLength);
-        // Transfer prevention is measured on separate buffers and reported, not gated: no
-        // shipped runtime offers both marking and detachment (Node aborts on a marked detach,
-        // Bun 1.3.x has no `markAsUntransferable`), and the detach-before-publish rule plus
-        // private-copy decoding bound an escaped alias to torn bytes.
-        const transferPreventionMechanism = probeTransferPrevention(native);
-        const transferPrevention = transferPreventionMechanism !== "none";
-        const detachment = native.detachArrayBuffer(arrayBuffer);
-        const aliasesDetached =
-            detachment &&
-            Number(arrayBuffer.byteLength) === 0 &&
-            Number(view.byteLength) === 0 &&
-            subarray.byteLength === 0 &&
-            bufferAlias.byteLength === 0 &&
-            (() => {
-                try {
-                    return dataView.byteLength === 0;
-                } catch {
-                    return true;
-                }
-            })();
-        if (!aliasesDetached) {
-            return {
-                available: false,
-                ...base,
-                napiVersion,
-                externalArrayBuffer,
-                exactBounds,
-                transferPrevention,
-                transferPreventionMechanism,
-                reason: "detachment_unavailable",
-            };
-        }
-        let cleanupHooks = false;
-        try {
-            native.probeCleanupHooks();
-            cleanupHooks = true;
-        } catch {
-            cleanupHooks = false;
-        }
-        if (!cleanupHooks) {
-            return {
-                available: false,
-                ...base,
-                napiVersion,
-                externalArrayBuffer,
-                exactBounds,
-                detachment: true,
-                transferPrevention,
-                transferPreventionMechanism,
-                reason: "cleanup_hooks_unavailable",
-            };
-        }
-        markLeasedBuffers = transferPreventionMechanism === "marked";
-        return {
-            available: true,
-            napiVersion,
-            externalArrayBuffer,
-            exactBounds,
-            detachment: true,
-            transferPrevention,
-            transferPreventionMechanism,
-            cleanupHooks: true,
-        };
-    } catch {
-        return {
-            available: false,
-            ...base,
-            reason: "runtime_mechanism_unavailable",
-        };
-    }
+	const base = {
+		napiVersion: null,
+		externalArrayBuffer: false,
+		exactBounds: false,
+		detachment: false,
+		transferPrevention: false,
+		transferPreventionMechanism: "none" as TransferPreventionMechanism,
+		cleanupHooks: false,
+	};
+	markLeasedBuffers = false;
+	const native = addon();
+	if (!native)
+		return { available: false, ...base, reason: "addon_unavailable" };
+	try {
+		const napiVersion = native.napiVersion();
+		if (napiVersion < 8) {
+			return {
+				available: false,
+				...base,
+				napiVersion,
+				reason: "napi_8_unavailable",
+			};
+		}
+		const view = native.createExternalProbe(PROBE_BYTES);
+		const externalArrayBuffer =
+			view instanceof Uint8Array && view.byteLength === PROBE_BYTES;
+		const exactBounds =
+			externalArrayBuffer &&
+			view.byteOffset === 0 &&
+			view.buffer.byteLength === PROBE_BYTES;
+		if (!exactBounds) {
+			return {
+				available: false,
+				...base,
+				napiVersion,
+				externalArrayBuffer,
+				reason: "external_exact_bounds_unavailable",
+			};
+		}
+		const arrayBuffer = view.buffer as ArrayBuffer;
+		const subarray = view.subarray(1, 30);
+		const dataView = new DataView(arrayBuffer, 1, 29);
+		const bufferAlias = Buffer.from(arrayBuffer, 0, view.byteLength);
+		// Transfer prevention is measured on separate buffers and reported, not gated: no
+		// shipped runtime offers both marking and detachment (Node aborts on a marked detach,
+		// Bun 1.3.x has no `markAsUntransferable`), and the detach-before-publish rule plus
+		// private-copy decoding bound an escaped alias to torn bytes.
+		const transferPreventionMechanism = probeTransferPrevention(native);
+		const transferPrevention = transferPreventionMechanism !== "none";
+		const detachment = native.detachArrayBuffer(arrayBuffer);
+		const aliasesDetached =
+			detachment &&
+			Number(arrayBuffer.byteLength) === 0 &&
+			Number(view.byteLength) === 0 &&
+			subarray.byteLength === 0 &&
+			bufferAlias.byteLength === 0 &&
+			(() => {
+				try {
+					return dataView.byteLength === 0;
+				} catch {
+					return true;
+				}
+			})();
+		if (!aliasesDetached) {
+			return {
+				available: false,
+				...base,
+				napiVersion,
+				externalArrayBuffer,
+				exactBounds,
+				transferPrevention,
+				transferPreventionMechanism,
+				reason: "detachment_unavailable",
+			};
+		}
+		let cleanupHooks = false;
+		try {
+			native.probeCleanupHooks();
+			cleanupHooks = true;
+		} catch {
+			cleanupHooks = false;
+		}
+		if (!cleanupHooks) {
+			return {
+				available: false,
+				...base,
+				napiVersion,
+				externalArrayBuffer,
+				exactBounds,
+				detachment: true,
+				transferPrevention,
+				transferPreventionMechanism,
+				reason: "cleanup_hooks_unavailable",
+			};
+		}
+		markLeasedBuffers = transferPreventionMechanism === "marked";
+		return {
+			available: true,
+			napiVersion,
+			externalArrayBuffer,
+			exactBounds,
+			detachment: true,
+			transferPrevention,
+			transferPreventionMechanism,
+			cleanupHooks: true,
+		};
+	} catch {
+		return {
+			available: false,
+			...base,
+			reason: "runtime_mechanism_unavailable",
+		};
+	}
 }
 
 export class ProducerCursor {
-    private cursor = 0;
+	private cursor = 0;
 
-    constructor(
-        private readonly segments: readonly Uint8Array[],
-        readonly capacity: number,
-    ) {
-        const available = segments.reduce(
-            (sum, segment) => sum + segment.byteLength,
-            0,
-        );
-        if (available !== capacity)
-            throw new RangeError("producer spans disagree with reservation");
-    }
+	constructor(
+		private readonly segments: readonly Uint8Array[],
+		readonly capacity: number,
+	) {
+		const available = segments.reduce(
+			(sum, segment) => sum + segment.byteLength,
+			0,
+		);
+		if (available !== capacity)
+			throw new RangeError("producer spans disagree with reservation");
+	}
 
-    get written(): number {
-        return this.cursor;
-    }
+	get written(): number {
+		return this.cursor;
+	}
 
-    get remaining(): number {
-        return this.capacity - this.cursor;
-    }
+	get remaining(): number {
+		return this.capacity - this.cursor;
+	}
 
-    view(): Uint8Array {
-        let offset = this.cursor;
-        for (const segment of this.segments) {
-            if (offset < segment.byteLength) return segment.subarray(offset);
-            offset -= segment.byteLength;
-        }
-        return new Uint8Array(0);
-    }
+	view(): Uint8Array {
+		let offset = this.cursor;
+		for (const segment of this.segments) {
+			if (offset < segment.byteLength) return segment.subarray(offset);
+			offset -= segment.byteLength;
+		}
+		return new Uint8Array(0);
+	}
 
-    advance(bytes: number): void {
-        if (
-            !Number.isSafeInteger(bytes) ||
-            bytes < 0 ||
-            bytes > this.remaining
-        ) {
-            throw new RangeError("producer overflow");
-        }
-        this.cursor += bytes;
-    }
+	advance(bytes: number): void {
+		if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.remaining) {
+			throw new RangeError("producer overflow");
+		}
+		this.cursor += bytes;
+	}
 
-    write(bytes: Uint8Array): void {
-        if (bytes.byteLength > this.remaining)
-            throw new RangeError("producer overflow");
-        let source = 0;
-        let offset = this.cursor;
-        for (const segment of this.segments) {
-            if (source === bytes.byteLength) break;
-            if (offset >= segment.byteLength) {
-                offset -= segment.byteLength;
-                continue;
-            }
-            const take = Math.min(
-                segment.byteLength - offset,
-                bytes.byteLength - source,
-            );
-            segment.set(bytes.subarray(source, source + take), offset);
-            source += take;
-            offset = 0;
-        }
-        this.cursor += bytes.byteLength;
-    }
+	write(bytes: Uint8Array): void {
+		if (bytes.byteLength > this.remaining)
+			throw new RangeError("producer overflow");
+		let source = 0;
+		let offset = this.cursor;
+		for (const segment of this.segments) {
+			if (source === bytes.byteLength) break;
+			if (offset >= segment.byteLength) {
+				offset -= segment.byteLength;
+				continue;
+			}
+			const take = Math.min(
+				segment.byteLength - offset,
+				bytes.byteLength - source,
+			);
+			segment.set(bytes.subarray(source, source + take), offset);
+			source += take;
+			offset = 0;
+		}
+		this.cursor += bytes.byteLength;
+	}
 }
 
 /**
@@ -638,169 +652,174 @@ export class ProducerCursor {
  * without each being told individually.
  */
 class ChannelLiveness {
-    closed = false;
-    /**
-     * Handles the channel has issued and not yet retired. A partial native close can consume
-     * some tokens and fail on others; each handle re-checks its own token so consumed ones
-     * retire while the rest stay releasable.
-     */
-    readonly handles = new Set<{ retireIfConsumed(): void }>();
+	closed = false;
+	/**
+	 * Handles the channel has issued and not yet retired. A partial native close can consume
+	 * some tokens and fail on others; each handle re-checks its own token so consumed ones
+	 * retire while the rest stay releasable.
+	 */
+	readonly handles = new Set<{ retireIfConsumed(): void }>();
 }
 
 /** Module-private transition for a lease whose token the addon already consumed. */
 
 export class NativeProducerReservation {
-    private active = true;
+	private active = true;
 
-    constructor(
-        private readonly native: NativeAddon,
-        private readonly channel: number,
-        private readonly token: number,
-        readonly segments: readonly Uint8Array[],
-        private readonly liveness: ChannelLiveness = new ChannelLiveness(),
-    ) {
-        protect(segments);
-        liveness.handles.add(this);
-    }
+	constructor(
+		private readonly native: NativeAddon,
+		private readonly channel: number,
+		private readonly token: number,
+		readonly segments: readonly Uint8Array[],
+		private readonly liveness: ChannelLiveness = new ChannelLiveness(),
+	) {
+		protect(segments);
+		liveness.handles.add(this);
+	}
 
-    /** Retires the wrapper only on confirmed absence of its token; a busy registry is indeterminate. */
-    retireIfConsumed(): void {
-        if (!this.active) return;
-        if (confirmedAbsent(() => this.native.producerRegistered(this.channel, this.token))) {
-            this.retire();
-        }
-    }
+	/** Retires the wrapper only on confirmed absence of its token; a busy registry is indeterminate. */
+	retireIfConsumed(): void {
+		if (!this.active) return;
+		if (
+			confirmedAbsent(() =>
+				this.native.producerRegistered(this.channel, this.token),
+			)
+		) {
+			this.retire();
+		}
+	}
 
-    private retire(): void {
-        this.active = false;
-        this.liveness.handles.delete(this);
-    }
+	private retire(): void {
+		this.active = false;
+		this.liveness.handles.delete(this);
+	}
 
-    commit(
-        header: Uint8Array,
-        written: number,
-        beforePublish?: () => void,
-    ): void {
-        this.assertActive();
-        assertUint32Argument("written", written);
-        // The handle stays active until the addon accepts the call: a rejected commit (for
-        // example a re-entrant call while the channel is busy) must remain abortable. Once the
-        // addon reports the token consumed, a retry would fail as already released, so the
-        // handle is released here even though the commit failed.
-        try {
-            this.native.commitReservation(
-                this.channel,
-                this.token,
-                privateBytes(header),
-                written,
-                beforePublish ?? (() => {}),
-            );
-        } catch (error) {
-            if (consumesHandle(error)) this.retire();
-            throw error;
-        }
-        this.retire();
-    }
+	commit(
+		header: Uint8Array,
+		written: number,
+		beforePublish?: () => void,
+	): void {
+		this.assertActive();
+		assertUint32Argument("written", written);
+		// The handle stays active until the addon accepts the call: a rejected commit (for
+		// example a re-entrant call while the channel is busy) must remain abortable. Once the
+		// addon reports the token consumed, a retry would fail as already released, so the
+		// handle is released here even though the commit failed.
+		try {
+			this.native.commitReservation(
+				this.channel,
+				this.token,
+				privateBytes(header),
+				written,
+				beforePublish ?? (() => {}),
+			);
+		} catch (error) {
+			if (consumesHandle(error)) this.retire();
+			throw error;
+		}
+		this.retire();
+	}
 
-    abort(): void {
-        if (!this.isActive()) return;
-        try {
-            this.native.abortReservation(this.channel, this.token);
-        } catch (error) {
-            if (consumesHandle(error)) this.retire();
-            throw error;
-        }
-        this.retire();
-    }
+	abort(): void {
+		if (!this.isActive()) return;
+		try {
+			this.native.abortReservation(this.channel, this.token);
+		} catch (error) {
+			if (consumesHandle(error)) this.retire();
+			throw error;
+		}
+		this.retire();
+	}
 
-    private isActive(): boolean {
-        return this.active && !this.liveness.closed;
-    }
+	private isActive(): boolean {
+		return this.active && !this.liveness.closed;
+	}
 
-    private assertActive(): void {
-        if (!this.isActive()) throw new Error("producer reservation is released");
-    }
+	private assertActive(): void {
+		if (!this.isActive()) throw new Error("producer reservation is released");
+	}
 }
 
 export class NativeReceiveLease {
-    private released = false;
+	private released = false;
 
-    constructor(
-        private readonly native: NativeAddon,
-        private readonly channel: number,
-        private readonly token: number,
-        private readonly segments: readonly Uint8Array[],
-        readonly header: Uint8Array,
-        private readonly liveness: ChannelLiveness = new ChannelLiveness(),
-    ) {
-        protect(segments);
-        liveness.handles.add(this);
-    }
+	constructor(
+		private readonly native: NativeAddon,
+		private readonly channel: number,
+		private readonly token: number,
+		private readonly segments: readonly Uint8Array[],
+		readonly header: Uint8Array,
+		private readonly liveness: ChannelLiveness = new ChannelLiveness(),
+	) {
+		protect(segments);
+		liveness.handles.add(this);
+	}
 
-    /** Retires the wrapper only on confirmed absence of its token; a busy registry is indeterminate. */
-    retireIfConsumed(): void {
-        if (this.released) return;
-        if (confirmedAbsent(() => this.native.leaseRegistered(this.channel, this.token))) {
-            this.retire();
-        }
-    }
+	/** Retires the wrapper only on confirmed absence of its token; a busy registry is indeterminate. */
+	retireIfConsumed(): void {
+		if (this.released) return;
+		if (
+			confirmedAbsent(() =>
+				this.native.leaseRegistered(this.channel, this.token),
+			)
+		) {
+			this.retire();
+		}
+	}
 
-    private retire(): void {
-        this.released = true;
-        this.liveness.handles.delete(this);
-    }
+	private retire(): void {
+		this.released = true;
+		this.liveness.handles.delete(this);
+	}
 
-    get byteLength(): number {
-        this.assertActive();
-        return this.segments.reduce(
-            (sum, segment) => sum + segment.byteLength,
-            0,
-        );
-    }
+	get byteLength(): number {
+		this.assertActive();
+		return this.segments.reduce((sum, segment) => sum + segment.byteLength, 0);
+	}
 
-    get segmentCount(): number {
-        this.assertActive();
-        return this.segments.length;
-    }
+	get segmentCount(): number {
+		this.assertActive();
+		return this.segments.length;
+	}
 
-    segment(index: number): Uint8Array {
-        this.assertActive();
-        const segment = this.segments[index];
-        if (!segment) throw new RangeError("receive segment does not exist");
-        return segment;
-    }
+	segment(index: number): Uint8Array {
+		this.assertActive();
+		const segment = this.segments[index];
+		if (!segment) throw new RangeError("receive segment does not exist");
+		return segment;
+	}
 
-    release(): void {
-        if (this.isReleased()) throw new Error("receive lease is already released");
-        // A failure after the addon detached the token cannot be retried; the wrapper releases
-        // so `segment()` stops returning detached views.
-        try {
-            this.native.release(this.channel, this.token);
-        } catch (error) {
-            if (consumesHandle(error)) this.retire();
-            throw error;
-        }
-        this.retire();
-    }
+	release(): void {
+		if (this.isReleased()) throw new Error("receive lease is already released");
+		// A failure after the addon detached the token cannot be retried; the wrapper releases
+		// so `segment()` stops returning detached views.
+		try {
+			this.native.release(this.channel, this.token);
+		} catch (error) {
+			if (consumesHandle(error)) this.retire();
+			throw error;
+		}
+		this.retire();
+	}
 
-    [Symbol.dispose](): void {
-        if (this.isReleased()) return;
-        this.release();
-    }
+	[Symbol.dispose](): void {
+		if (this.isReleased()) return;
+		this.release();
+	}
 
-    private isReleased(): boolean {
-        return this.released || this.liveness.closed;
-    }
+	private isReleased(): boolean {
+		return this.released || this.liveness.closed;
+	}
 
-    private assertActive(): void {
-        if (this.isReleased()) throw new Error("receive lease is released");
-    }
+	private assertActive(): void {
+		if (this.isReleased()) throw new Error("receive lease is released");
+	}
 }
 
 interface ReadinessRegistration {
-    handler: () => void;
-    /** Told when the handler threw and was unregistered, so the owner can re-arm or close. */
-    onDropped?: (error: unknown) => void;
+	handler: () => void;
+	/** Told when the handler threw and was unregistered, so the owner can re-arm or close. */
+	onDropped?: (error: unknown) => void;
 }
 
 const readinessHandlers = new Map<number, ReadinessRegistration>();
@@ -811,278 +830,284 @@ let consecutiveMicrotaskRedispatches = 0;
 // Microtasks run ahead of timers and I/O; an unbounded chain under sustained traffic would
 // starve everything else on the event loop.
 function scheduleRedispatch(): void {
-    if (consecutiveMicrotaskRedispatches < REDISPATCH_MICROTASK_BUDGET) {
-        consecutiveMicrotaskRedispatches += 1;
-        queueMicrotask(dispatchReadiness);
-    } else {
-        consecutiveMicrotaskRedispatches = 0;
-        setImmediate(dispatchReadiness);
-    }
+	if (consecutiveMicrotaskRedispatches < REDISPATCH_MICROTASK_BUDGET) {
+		consecutiveMicrotaskRedispatches += 1;
+		queueMicrotask(dispatchReadiness);
+	} else {
+		consecutiveMicrotaskRedispatches = 0;
+		setImmediate(dispatchReadiness);
+	}
 }
 
 function dispatchReadiness(): void {
-    try {
-        for (const [id, registration] of [...readinessHandlers]) {
-            // Handlers for unwatched channels are removed so unrelated wakes do not invoke them.
-            if (loaded?.isWatching(id) === false) {
-                readinessHandlers.delete(id);
-                continue;
-            }
-            try {
-                registration.handler();
-            } catch (error) {
-                // One failed channel cannot starve readiness for other channels. A handler that
-                // threw before draining leaves its frame visible with no further wake, so it is
-                // unregistered and its owner is told; `startReadiness` re-arms it. Without the
-                // notification the owner would have no trigger and the channel would stall.
-                readinessHandlers.delete(id);
-                try {
-                    registration.onDropped?.(error);
-                } catch {
-                    // A failing drop callback must not disturb other channels' dispatch.
-                }
-            }
-        }
-    } finally {
-        if (loaded?.readinessHandled()) {
-            scheduleRedispatch();
-        } else {
-            consecutiveMicrotaskRedispatches = 0;
-        }
-    }
+	try {
+		for (const [id, registration] of [...readinessHandlers]) {
+			// Handlers for unwatched channels are removed so unrelated wakes do not invoke them.
+			if (loaded?.isWatching(id) === false) {
+				readinessHandlers.delete(id);
+				continue;
+			}
+			try {
+				registration.handler();
+			} catch (error) {
+				// One failed channel cannot starve readiness for other channels. A handler that
+				// threw before draining leaves its frame visible with no further wake, so it is
+				// unregistered and its owner is told; `startReadiness` re-arms it. Without the
+				// notification the owner would have no trigger and the channel would stall.
+				readinessHandlers.delete(id);
+				try {
+					registration.onDropped?.(error);
+				} catch {
+					// A failing drop callback must not disturb other channels' dispatch.
+				}
+			}
+		}
+	} finally {
+		if (loaded?.readinessHandled()) {
+			scheduleRedispatch();
+		} else {
+			consecutiveMicrotaskRedispatches = 0;
+		}
+	}
 }
 
 export class NativeChannel {
-    private readonly liveness = new ChannelLiveness();
+	private readonly liveness = new ChannelLiveness();
 
-    private constructor(
-        private readonly native: NativeAddon,
-        private readonly id: number,
-    ) {}
+	private constructor(
+		private readonly native: NativeAddon,
+		private readonly id: number,
+	) {}
 
-    static attach(descriptor: NativeDescriptor): NativeChannel {
-        const native = capableAddon();
-        return new NativeChannel(native, native.attach(descriptor));
-    }
+	static attach(descriptor: NativeDescriptor): NativeChannel {
+		const native = capableAddon();
+		return new NativeChannel(native, native.attach(descriptor));
+	}
 
-    static async connectSetup(options: NativeSetupOptions): Promise<NativeChannel> {
-        const native = capableAddon();
-        assertUint32Argument("timeoutMs", options.timeoutMs);
-        const pending = await native.connectSetup({
-            ...options,
-            key: privateBytes(options.key),
-            daemonId: privateBytes(options.daemonId),
-        });
-        return new NativeChannel(native, await native.finishSetup(pending));
-    }
+	static async connectSetup(
+		options: NativeSetupOptions,
+	): Promise<NativeChannel> {
+		const native = capableAddon();
+		assertUint32Argument("timeoutMs", options.timeoutMs);
+		const pending = await native.connectSetup({
+			...options,
+			key: privateBytes(options.key),
+			daemonId: privateBytes(options.daemonId),
+		});
+		return new NativeChannel(native, await native.finishSetup(pending));
+	}
 
-    static createTestPair(): NativeTestPair {
-        const native = capableAddon();
-        const pair = native.createTestPair();
-        return {
-            first: new NativeChannel(native, pair.first),
-            second: new NativeChannel(native, pair.second),
-            descriptorDepth: pair.descriptorDepth,
-            smallestBodyCapacity: pair.smallestBodyCapacity,
-            smallestClassCount: pair.smallestClassCount,
-        };
-    }
+	static createTestPair(): NativeTestPair {
+		const native = capableAddon();
+		const pair = native.createTestPair();
+		return {
+			first: new NativeChannel(native, pair.first),
+			second: new NativeChannel(native, pair.second),
+			descriptorDepth: pair.descriptorDepth,
+			smallestBodyCapacity: pair.smallestBodyCapacity,
+			smallestClassCount: pair.smallestClassCount,
+		};
+	}
 
-    /**
-     * Publishes one frame without waiting. The addon picks the inventory from the header the
-     * way the host does: a pure-header `Cancel`, `Ping`, `Pong`, or `Goodbye` takes the
-     * control reserve, a terminal that fits takes the terminal reserve, and everything else is
-     * ordinary. An exhausted inventory throws `RING_FULL_MESSAGE` with nothing charged.
-     */
-    produce(
-        header: Uint8Array,
-        capacity: number,
-        fill: (cursor: ProducerCursor) => void,
-        beforePublish?: () => void,
-    ): void {
-        this.assertOpen();
-        assertUint32Argument("capacity", capacity);
-        this.native.produce(
-            this.id,
-            privateBytes(header),
-            capacity,
-            (segments) => {
-                protect(segments);
-                const cursor = new ProducerCursor(segments, capacity);
-                fill(cursor);
-                if (cursor.written !== capacity)
-                    throw new RangeError("producer underfill");
-                return cursor.written;
-            },
-            beforePublish ?? (() => {}),
-        );
-    }
+	/**
+	 * Publishes one frame without waiting. The addon picks the inventory from the header the
+	 * way the host does: a pure-header `Cancel`, `Ping`, `Pong`, or `Goodbye` takes the
+	 * control reserve, a terminal that fits takes the terminal reserve, and everything else is
+	 * ordinary. An exhausted inventory throws `RING_FULL_MESSAGE` with nothing charged.
+	 */
+	produce(
+		header: Uint8Array,
+		capacity: number,
+		fill: (cursor: ProducerCursor) => void,
+		beforePublish?: () => void,
+	): void {
+		this.assertOpen();
+		assertUint32Argument("capacity", capacity);
+		this.native.produce(
+			this.id,
+			privateBytes(header),
+			capacity,
+			(segments) => {
+				protect(segments);
+				const cursor = new ProducerCursor(segments, capacity);
+				fill(cursor);
+				if (cursor.written !== capacity)
+					throw new RangeError("producer underfill");
+				return cursor.written;
+			},
+			beforePublish ?? (() => {}),
+		);
+	}
 
-    /** Reserves an ordinary block for a direct serializer without waiting; see `produce`. */
-    reserve(capacity: number): NativeProducerReservation {
-        this.assertOpen();
-        assertUint32Argument("capacity", capacity);
-        let token: number | undefined;
-        let segments: Uint8Array[] | undefined;
-        this.native.reserve(
-            this.id,
-            capacity,
-            (reservedToken, reservedSegments) => {
-                token = reservedToken;
-                segments = reservedSegments;
-            },
-        );
-        if (token === undefined || segments === undefined) {
-            throw new Error("native reservation callback did not run");
-        }
-        return new NativeProducerReservation(
-            this.native,
-            this.id,
-            token,
-            segments,
-            this.liveness,
-        );
-    }
+	/** Reserves an ordinary block for a direct serializer without waiting; see `produce`. */
+	reserve(capacity: number): NativeProducerReservation {
+		this.assertOpen();
+		assertUint32Argument("capacity", capacity);
+		let token: number | undefined;
+		let segments: Uint8Array[] | undefined;
+		this.native.reserve(
+			this.id,
+			capacity,
+			(reservedToken, reservedSegments) => {
+				token = reservedToken;
+				segments = reservedSegments;
+			},
+		);
+		if (token === undefined || segments === undefined) {
+			throw new Error("native reservation callback did not run");
+		}
+		return new NativeProducerReservation(
+			this.native,
+			this.id,
+			token,
+			segments,
+			this.liveness,
+		);
+	}
 
-    /**
-     * Parks the outbound side on the host's capacity doorbell after a `RING_FULL_MESSAGE`
-     * refusal of the frame `header` and `capacity` describe. `true` means the readiness
-     * handler registered with `startReadiness` runs when the host consumes a descriptor or
-     * returns a block; `false` means that frame's reservation may now succeed, so the caller
-     * retries at once. Requires `startReadiness`.
-     */
-    armCapacity(header: Uint8Array, capacity: number): boolean {
-        this.assertOpen();
-        assertUint32Argument("capacity", capacity);
-        return this.native.armCapacity(this.id, privateBytes(header), capacity);
-    }
+	/**
+	 * Parks the outbound side on the host's capacity doorbell after a `RING_FULL_MESSAGE`
+	 * refusal of the frame `header` and `capacity` describe. `true` means the readiness
+	 * handler registered with `startReadiness` runs when the host consumes a descriptor or
+	 * returns a block; `false` means that frame's reservation may now succeed, so the caller
+	 * retries at once. Requires `startReadiness`.
+	 */
+	armCapacity(header: Uint8Array, capacity: number): boolean {
+		this.assertOpen();
+		assertUint32Argument("capacity", capacity);
+		return this.native.armCapacity(this.id, privateBytes(header), capacity);
+	}
 
-    startReadiness(handler: () => void, onDropped?: (error: unknown) => void): void {
-        this.assertOpen();
-        readinessHandlers.set(this.id, { handler, onDropped });
-        try {
-            this.native.watch(this.id, dispatchReadiness);
-        } catch (error) {
-            readinessHandlers.delete(this.id);
-            throw error;
-        }
-    }
+	startReadiness(
+		handler: () => void,
+		onDropped?: (error: unknown) => void,
+	): void {
+		this.assertOpen();
+		readinessHandlers.set(this.id, { handler, onDropped });
+		try {
+			this.native.watch(this.id, dispatchReadiness);
+		} catch (error) {
+			readinessHandlers.delete(this.id);
+			throw error;
+		}
+	}
 
-    /**
-     * Delivers one frame and returns true, or returns false when the ring is empty, including
-     * after the peer hung up on a drained ring; `peerClosed()` tells the two apart. Any other
-     * receive failure throws.
-     */
-    drainOne(deliver: (lease: NativeReceiveLease) => void): boolean {
-        this.assertOpen();
-        let escaped: NativeReceiveLease | undefined;
-        try {
-            return this.native.poll(this.id, (token, header, segments) => {
-                const lease = new NativeReceiveLease(
-                    this.native,
-                    this.id,
-                    token,
-                    segments,
-                    header,
-                    this.liveness,
-                );
-                escaped = lease;
-                deliver(lease);
-                escaped = undefined;
-            });
-        } catch (error) {
-            // A throwing `deliver` normally makes the addon detach and release the token, but if
-            // that native cleanup itself fails the token is re-registered and stays releasable.
-            // The check runs after `poll` has unwound (the registry is busy inside it), and the
-            // wrapper retires only on confirmed absence of its token.
-            escaped?.retireIfConsumed();
-            throw error;
-        }
-    }
+	/**
+	 * Delivers one frame and returns true, or returns false when the ring is empty, including
+	 * after the peer hung up on a drained ring; `peerClosed()` tells the two apart. Any other
+	 * receive failure throws.
+	 */
+	drainOne(deliver: (lease: NativeReceiveLease) => void): boolean {
+		this.assertOpen();
+		let escaped: NativeReceiveLease | undefined;
+		try {
+			return this.native.poll(this.id, (token, header, segments) => {
+				const lease = new NativeReceiveLease(
+					this.native,
+					this.id,
+					token,
+					segments,
+					header,
+					this.liveness,
+				);
+				escaped = lease;
+				deliver(lease);
+				escaped = undefined;
+			});
+		} catch (error) {
+			// A throwing `deliver` normally makes the addon detach and release the token, but if
+			// that native cleanup itself fails the token is re-registered and stays releasable.
+			// The check runs after `poll` has unwound (the registry is busy inside it), and the
+			// wrapper retires only on confirmed absence of its token.
+			escaped?.retireIfConsumed();
+			throw error;
+		}
+	}
 
-    /**
-     * True once the host has dropped the setup socket that scopes this channel's
-     * lifetime, or once a receive saw the peer's doorbell end close. A ring that
-     * has simply gone quiet is indistinguishable from a dead peer without this signal.
-     */
-    peerClosed(): boolean {
-        if (this.liveness.closed) return true;
-        return this.native.peerClosed(this.id);
-    }
+	/**
+	 * True once the host has dropped the setup socket that scopes this channel's
+	 * lifetime, or once a receive saw the peer's doorbell end close. A ring that
+	 * has simply gone quiet is indistinguishable from a dead peer without this signal.
+	 */
+	peerClosed(): boolean {
+		if (this.liveness.closed) return true;
+		return this.native.peerClosed(this.id);
+	}
 
-    close(): void {
-        if (this.liveness.closed) return;
-        this.finishClose(() => this.native.close(this.id));
-    }
+	close(): void {
+		if (this.liveness.closed) return;
+		this.finishClose(() => this.native.close(this.id));
+	}
 
-    forceClose(): void {
-        if (this.liveness.closed) return;
-        this.finishClose(() => this.native.forceClose(this.id));
-    }
+	forceClose(): void {
+		if (this.liveness.closed) return;
+		this.finishClose(() => this.native.forceClose(this.id));
+	}
 
-    /**
-     * A close that fails after the addon already removed the native entry still transitions
-     * the wrapper: no later call can reach the channel, and a retry would fail as already
-     * closed.
-     */
-    private finishClose(nativeClose: () => void): void {
-        try {
-            nativeClose();
-        } catch (error) {
-            // The consumed prefix names the first consumed token, not necessarily the channel, so
-            // removal of the channel entry is checked directly. A confirmed-removed channel
-            // retires everything; a retained one (partial sweep) lets each handle re-check its
-            // own token so only the consumed ones retire and the rest remain releasable.
-            if (confirmedAbsent(() => this.native.channelRegistered(this.id))) {
-                readinessHandlers.delete(this.id);
-                this.liveness.closed = true;
-                this.liveness.handles.clear();
-            } else {
-                for (const handle of [...this.liveness.handles]) handle.retireIfConsumed();
-            }
-            throw error;
-        }
-        readinessHandlers.delete(this.id);
-        // A successful native close consumed every outstanding token; the shared liveness flag
-        // retires every lease and reservation issued by this channel at once.
-        this.liveness.closed = true;
-        this.liveness.handles.clear();
-    }
+	/**
+	 * A close that fails after the addon already removed the native entry still transitions
+	 * the wrapper: no later call can reach the channel, and a retry would fail as already
+	 * closed.
+	 */
+	private finishClose(nativeClose: () => void): void {
+		try {
+			nativeClose();
+		} catch (error) {
+			// The consumed prefix names the first consumed token, not necessarily the channel, so
+			// removal of the channel entry is checked directly. A confirmed-removed channel
+			// retires everything; a retained one (partial sweep) lets each handle re-check its
+			// own token so only the consumed ones retire and the rest remain releasable.
+			if (confirmedAbsent(() => this.native.channelRegistered(this.id))) {
+				readinessHandlers.delete(this.id);
+				this.liveness.closed = true;
+				this.liveness.handles.clear();
+			} else {
+				for (const handle of [...this.liveness.handles])
+					handle.retireIfConsumed();
+			}
+			throw error;
+		}
+		readinessHandlers.delete(this.id);
+		// A successful native close consumed every outstanding token; the shared liveness flag
+		// retires every lease and reservation issued by this channel at once.
+		this.liveness.closed = true;
+		this.liveness.handles.clear();
+	}
 
-    private assertOpen(): void {
-        if (this.liveness.closed) throw new Error("native channel is closed");
-    }
+	private assertOpen(): void {
+		if (this.liveness.closed) throw new Error("native channel is closed");
+	}
 }
 
 export function registerCleanupProbe(path: string): boolean {
-    const native = addon();
-    if (!native) return false;
-    native.registerCleanupProbe(path);
-    return true;
+	const native = addon();
+	if (!native) return false;
+	native.registerCleanupProbe(path);
+	return true;
 }
 
 export function nativeLeakDiagnostics(): number {
-    return addon()?.nativeLeakDiagnostics() ?? 0;
+	return addon()?.nativeLeakDiagnostics() ?? 0;
 }
 
 export function activeExternalRefs(): number {
-    return addon()?.activeExternalRefCount() ?? 0;
+	return addon()?.activeExternalRefCount() ?? 0;
 }
 
 export function setExternalViewCreationFailpoint(call: number): void {
-    addon()?.setExternalViewFailpoint(call);
+	addon()?.setExternalViewFailpoint(call);
 }
 
 /** Test hook: the `call`th alias detachment from now fails; `0` disarms. */
 export function setDetachFailpoint(call: number): void {
-    addon()?.setDetachFailpoint(call);
+	addon()?.setDetachFailpoint(call);
 }
 
 /** Test hook: the `call`th reference deletion from now fails; `0` disarms. */
 export function setDeleteFailpoint(call: number): void {
-    addon()?.setDeleteFailpoint(call);
+	addon()?.setDeleteFailpoint(call);
 }
 
 export function activeNativeChannels(): number {
-    return addon()?.activeChannelCount() ?? 0;
+	return addon()?.activeChannelCount() ?? 0;
 }

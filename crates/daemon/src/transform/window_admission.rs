@@ -1,10 +1,10 @@
-//! Transform revision 3 at the handler seam against a real store: wire admissibility (WP-P24),
+//! The transform window at the handler seam against a real store: wire admissibility (WP-P24),
 //! a duplicate id inside the window (WP-P01), one pass per resolution outcome with its
 //! resolution, ordinals, cut, output, and durable effects (WP-P02, WP-P03, WP-P05), the reset of
 //! a revert before the first anchor (spec D10), and the interrupted revert under an injected CAS
 //! conflict and a panic plus reopen.
 
-use super::revision_goldens::call;
+use super::recorded_goldens::call;
 use super::*;
 use crate::transform::install_transform_attempt_hook;
 use crate::window_coverage::Resolution;
@@ -12,7 +12,7 @@ use crate::window_coverage::Resolution;
 thread_local! {
     /// The session this test thread drives; the interrupted-revert tests take their own, since
     /// the transform attempt hook is keyed by session across the whole test binary.
-    static SESSION_ID: std::cell::Cell<&'static str> = const { std::cell::Cell::new("rev3") };
+    static SESSION_ID: std::cell::Cell<&'static str> = const { std::cell::Cell::new("admit") };
 }
 
 fn session() -> &'static str {
@@ -40,11 +40,10 @@ fn user(mid: &str) -> Value {
     })
 }
 
-/// A revision 3 body: no ordinal anywhere, `boundary` as given.
+/// A transform body: no ordinal anywhere, `boundary` as given.
 fn body(mids: &[&str], boundary: Value) -> Value {
     json!({
         "kind": "transform",
-        "v": 3,
         "boundary": boundary,
         "serializer_profile": "owned-llmrunner",
         "session_id": session(),
@@ -129,13 +128,13 @@ async fn raw(handler: &Handler, body: Value) -> PreparedOutcome {
 }
 
 fn with_base(mut body: Value) -> Value {
-    body["base_revision"] = json!("r3-base");
+    body["base_revision"] = json!("base-1");
     body
 }
 
 /// A session whose first pass folded segments 1 (m1..m2) and 2 (m3..m4) over m1..m6.
 async fn folded() -> (Handler, Arc<MemoryStore>, tempfile::TempDir) {
-    folded_as("rev3").await
+    folded_as("admit").await
 }
 
 /// [`folded`] under its own session, for a test that installs the session-keyed attempt hook.
@@ -151,39 +150,33 @@ async fn folded_as(id: &'static str) -> (Handler, Arc<MemoryStore>, tempfile::Te
     (handler, store, dir)
 }
 
+/// A field named `v` or the former `tail_delta` carrier follows the transform method's
+/// unknown-field policy: the pass is served exactly as the same body without them.
 #[tokio::test(flavor = "current_thread")]
-async fn a_missing_or_non_3_revision_is_refused_with_expected_and_received_and_no_state_change() {
-    let (handler, store, _dir) = folded().await;
-    let before = durable(&store);
+async fn a_body_carrying_v_or_tail_delta_is_served_like_the_body_without_them() {
     let window = body(&["m4", "m5", "m6"], anchor("m4", 2));
-    let mut revision_2 = window.clone();
-    revision_2["v"] = json!(2);
-    revision_2.as_object_mut().unwrap().remove("boundary");
-    for (index, message) in revision_2["messages"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .enumerate()
-    {
-        message["ordinal"] = json!(index + 4);
+    let (handler, store, _dir) = folded().await;
+    let plain = call(&handler, window.clone()).await;
+    let plain_state = durable(&store);
+    for extra in [
+        json!({ "v": 2 }),
+        json!({ "v": "3" }),
+        json!({ "tail_delta": { "after": "fp", "replace_from": 1 } }),
+        json!({ "v": 4, "tail_delta": null }),
+    ] {
+        let (handler, store, _dir) = folded().await;
+        let mut carried = window.clone();
+        for (key, value) in extra.as_object().unwrap() {
+            carried[key] = value.clone();
+        }
+        let served = call(&handler, carried).await;
+        for field in ["status", "action", "committed", "boundary", "messages"] {
+            assert_eq!(served[field], plain[field], "{extra} {field}");
+        }
+        let state = durable(&store);
+        assert_eq!(state.0, plain_state.0, "{extra} row_version");
+        assert_eq!(state.2, plain_state.2, "{extra} history segments");
     }
-    let mut missing = window.clone();
-    missing.as_object_mut().unwrap().remove("v");
-    let mut cases = vec![(revision_2, "2"), (missing, "null")];
-    for (v, received) in [(json!("3"), "\"3\""), (json!(3.0), "3.0"), (json!(4), "4")] {
-        let mut case = window.clone();
-        case["v"] = v;
-        cases.push((case, received));
-    }
-    for (case, received) in cases {
-        let (code, message) = error_frame(raw(&handler, with_base(case)).await);
-        assert_eq!(code, "transform_revision_unsupported");
-        assert_eq!(
-            message,
-            format!("expected transform revision 3, received {received}")
-        );
-    }
-    assert_eq!(durable(&store), before);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -223,7 +216,8 @@ async fn boundary_presence_head_sequence_and_duplicates_are_invalid_params() {
     assert_eq!(at_limit["status"], "boundary_unknown");
 }
 
-/// A `boundary` that fails typed decoding is `bad_request`, whatever its `v`, and changes nothing.
+/// A `boundary` that fails typed decoding is `bad_request`, whatever else the body carries, and
+/// changes nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn a_boundary_that_does_not_decode_is_bad_request() {
     let (handler, store, _dir) = folded().await;
@@ -240,10 +234,10 @@ async fn a_boundary_that_does_not_decode_is_bad_request() {
             error_frame(raw(&handler, with_base(body(&["m4"], boundary.clone()))).await);
         assert_eq!(code, "bad_request", "{boundary}");
     }
-    let mut revision_2 = body(&["m4"], json!({ "mid": "m4" }));
-    revision_2["v"] = json!(2);
-    let (code, _) = error_frame(raw(&handler, with_base(revision_2)).await);
-    assert_eq!(code, "bad_request", "decoding precedes the revision check");
+    let mut carried = body(&["m4"], json!({ "mid": "m4" }));
+    carried["v"] = json!(2);
+    let (code, _) = error_frame(raw(&handler, with_base(carried)).await);
+    assert_eq!(code, "bad_request", "an ignored field leaves decoding as it was");
     assert_eq!(durable(&store), before);
 }
 
@@ -261,7 +255,7 @@ fn pages(whole: &Value) -> Vec<Value> {
                 json!({ "method": "transform", "session_id": session() })
             };
             page["messages"] = json!([message]);
-            page["transform_page_id"] = json!("r3-pages");
+            page["transform_page_id"] = json!("pages-1");
             page["transform_generation"] = json!(1);
             page["transform_page_index"] = json!(index);
             page["transform_page_total"] = json!(total);
@@ -281,15 +275,11 @@ async fn send_pages(handler: &Handler, whole: Value) -> PreparedOutcome {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request() {
+async fn paged_boundary_is_a_final_page_scalar_checked_on_the_assembled_request() {
     let (handler, store, _dir) = folded().await;
     let before = durable(&store);
     let window = body(&["m4", "m5", "m6"], anchor("m4", 2));
 
-    let mut revision_2 = window.clone();
-    revision_2["v"] = json!(2);
-    let (code, _) = error_frame(send_pages(&handler, revision_2).await);
-    assert_eq!(code, "transform_revision_unsupported");
     let mut missing = window.clone();
     missing.as_object_mut().unwrap().remove("boundary");
     let (code, _) = error_frame(send_pages(&handler, missing).await);
@@ -299,9 +289,9 @@ async fn paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assem
     let (code, _) = error_frame(send_pages(&handler, off_head).await);
     assert_eq!(code, "invalid_params");
 
-    // `v` on a non-final page is refused by the paging rules before any assembly.
+    // A non-message field on a non-final page is refused by the paging rules before any assembly.
     let mut early = pages(&with_base(window.clone()));
-    early[0]["v"] = json!(3);
+    early[0]["boundary"] = Value::Null;
     early[0]["transform_page_digest"] = json!(transform_page_content_digest(&early[0]));
     let (code, _) = error_frame(raw(&handler, early.remove(0)).await);
     assert_eq!(code, "authority_transform_page_protocol_mismatch");
@@ -309,7 +299,7 @@ async fn paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assem
     assert_eq!((row_version, meta), (before.0, before.1));
 
     let PreparedOutcome::Response(bytes) = send_pages(&handler, window).await else {
-        panic!("the assembled revision 3 request is served");
+        panic!("the assembled request is served");
     };
     let served: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(served["status"], "ok", "{served}");
@@ -318,7 +308,7 @@ async fn paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assem
 
 #[tokio::test(flavor = "current_thread")]
 async fn each_resolution_outcome_runs_through_the_handler_with_its_effects() {
-    let (handler, store, _dir) = handler_for("rev3");
+    let (handler, store, _dir) = handler_for("admit");
     store
         .replace_history_segments(session(), &[segment(1, 1, 2), segment(2, 3, 4)])
         .unwrap();
@@ -497,16 +487,16 @@ async fn a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_firs
 /// resolves again, resets once, and serves the first pass.
 #[tokio::test(flavor = "current_thread")]
 async fn a_cas_conflict_on_the_no_survivor_reset_resolves_again_and_resets_once() {
-    let (handler, store, _dir) = folded_as("rev3-reset-now-cas").await;
+    let (handler, store, _dir) = folded_as("admit-reset-now-cas").await;
     let epoch = store.load(session()).unwrap().meta.revert_epoch;
     let hook_store = Arc::clone(&store);
     let conflicted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = Arc::clone(&conflicted);
     install_transform_attempt_hook(session(), move || {
-        let loaded = hook_store.load("rev3-reset-now-cas").unwrap();
+        let loaded = hook_store.load("admit-reset-now-cas").unwrap();
         hook_store
             .commit(
-                "rev3-reset-now-cas",
+                "admit-reset-now-cas",
                 loaded.row_version,
                 &loaded.core,
                 &loaded.meta,
@@ -645,10 +635,10 @@ fn bump(store: &MemoryStore, id: &str) {
 /// spent.
 #[tokio::test(flavor = "current_thread")]
 async fn a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict() {
-    let (handler, store, _dir) = folded_as("rev3-reset-cas-exhausted").await;
+    let (handler, store, _dir) = folded_as("admit-reset-cas-exhausted").await;
     let hook_store = Arc::clone(&store);
-    let fired = arm_steps("rev3-reset-cas-exhausted", move |_| {
-        bump(&hook_store, "rev3-reset-cas-exhausted");
+    let fired = arm_steps("admit-reset-cas-exhausted", move |_| {
+        bump(&hook_store, "admit-reset-cas-exhausted");
         true
     });
     let served = call(&handler, body(&["x1", "x2"], Value::Null)).await;
@@ -670,13 +660,13 @@ async fn a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict() {
 /// ends in a committed first pass.
 #[tokio::test(flavor = "current_thread")]
 async fn a_committed_reset_leaves_the_whole_retry_budget_to_the_pass() {
-    let (handler, store, _dir) = folded_as("rev3-reset-then-conflicts").await;
+    let (handler, store, _dir) = folded_as("admit-reset-then-conflicts").await;
     let hook_store = Arc::clone(&store);
     let retries = crate::transform::MAX_CAS_RETRIES;
     // Firing 1 is the reset; firings 2 through `retries + 1` are the pass's transform commits.
-    let fired = arm_steps("rev3-reset-then-conflicts", move |count| {
+    let fired = arm_steps("admit-reset-then-conflicts", move |count| {
         if count > 1 {
-            bump(&hook_store, "rev3-reset-then-conflicts");
+            bump(&hook_store, "admit-reset-then-conflicts");
         }
         count <= retries
     });
@@ -692,20 +682,20 @@ async fn a_committed_reset_leaves_the_whole_retry_budget_to_the_pass() {
 /// brings a second no-survivor resolution, which fails the pass instead of resetting again.
 #[tokio::test(flavor = "current_thread")]
 async fn a_second_no_survivor_resolution_in_one_pass_fails_with_a_cas_conflict() {
-    let (handler, store, _dir) = folded_as("rev3-reset-twice").await;
-    let before = store.load("rev3-reset-twice").unwrap();
-    let segments = store.load_history_segments("rev3-reset-twice").unwrap();
+    let (handler, store, _dir) = folded_as("admit-reset-twice").await;
+    let before = store.load("admit-reset-twice").unwrap();
+    let segments = store.load_history_segments("admit-reset-twice").unwrap();
     let hook_store = Arc::clone(&store);
     // Firing 1 is the reset; firing 2, at the transform commit, restores the folded session.
-    let fired = arm_steps("rev3-reset-twice", move |count| {
+    let fired = arm_steps("admit-reset-twice", move |count| {
         if count == 2 {
             hook_store
-                .replace_history_segments("rev3-reset-twice", &segments)
+                .replace_history_segments("admit-reset-twice", &segments)
                 .unwrap();
-            let loaded = hook_store.load("rev3-reset-twice").unwrap();
+            let loaded = hook_store.load("admit-reset-twice").unwrap();
             hook_store
                 .commit(
-                    "rev3-reset-twice",
+                    "admit-reset-twice",
                     loaded.row_version,
                     &before.core,
                     &before.meta,
@@ -750,7 +740,7 @@ async fn a_same_pass_reset_reuses_no_previous_output() {
     assert_eq!(served_mids(&reset), ["m5", "m6"]);
     assert_eq!(previous_keeps(&reset), Vec::<Value>::new(), "{reset}");
 
-    let (handler, store, _dir) = handler_for("rev3-native-reset");
+    let (handler, store, _dir) = handler_for("admit-native-reset");
     store
         .replace_history_segments(session(), &[segment(1, 1, 2), segment(2, 3, 4)])
         .unwrap();
@@ -860,7 +850,7 @@ async fn assert_reset_converges(handler: &Handler, store: &MemoryStore, epoch: u
 #[tokio::test(flavor = "current_thread")]
 async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment() {
     let (handler, store, _dir, epoch, window, hard) =
-        unanchored_revert("rev3-reset", |_, _| {}).await;
+        unanchored_revert("admit-reset", |_, _| {}).await;
     assert_eq!(hard["action"], "HARD", "{hard}");
     assert_eq!(hard["reconcile_pending"], false);
     assert_eq!(hard["boundary"], Value::Null);
@@ -880,7 +870,7 @@ async fn a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_ever
 #[tokio::test(flavor = "current_thread")]
 async fn a_cas_conflict_after_the_unanchored_revert_removal_converges() {
     let (handler, store, _dir, epoch, window, answer) =
-        unanchored_revert("rev3-reset-cas", |store, session| {
+        unanchored_revert("admit-reset-cas", |store, session| {
             let loaded = store.load(session).unwrap();
             store
                 .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
@@ -895,7 +885,7 @@ async fn a_cas_conflict_after_the_unanchored_revert_removal_converges() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_panic_plus_reopen_after_the_unanchored_revert_removal_converges() {
     let (handler, store, dir, epoch, window, answer) =
-        unanchored_revert("rev3-reset-kill", |_, _| {
+        unanchored_revert("admit-reset-kill", |_, _| {
             panic!("the pass dies after the removal commit")
         })
         .await;
@@ -911,7 +901,7 @@ async fn a_panic_plus_reopen_after_the_unanchored_revert_removal_converges() {
 /// not dropped. The ready snapshot holds the resolved window the pass folded (its input).
 #[tokio::test(flavor = "current_thread")]
 async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary() {
-    let (handler, store, _dir) = handler_for("rev3-cut");
+    let (handler, store, _dir) = handler_for("admit-cut");
     store
         .replace_history_segments(session(), &[segment(1, 1, 2)])
         .unwrap();
@@ -929,9 +919,9 @@ async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_bou
     let flag = Arc::clone(&published);
     install_transform_attempt_hook(session(), move || {
         hook_store
-            .append_history_segments("rev3-cut", &[segment(2, 3, 4)])
+            .append_history_segments("admit-cut", &[segment(2, 3, 4)])
             .unwrap();
-        hook_store.arm_soft_refresh("rev3-cut").unwrap();
+        hook_store.arm_soft_refresh("admit-cut").unwrap();
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
     });
     let served = call(&handler, window).await;
@@ -940,7 +930,7 @@ async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_bou
     assert_eq!(served_mids(&served), ["m5", "m6", "m7"]);
     assert_eq!(served["boundary"], anchor("m4", 2));
     // The fold rendered segment 2 (m3..m4), so m3 is covered rather than dropped.
-    let core = store.load("rev3-cut").unwrap().core;
+    let core = store.load("admit-cut").unwrap().core;
     assert!(core.boundary_id.starts_with("m4#"), "{}", core.boundary_id);
     assert_eq!(
         ready_snapshot_mids(&handler),
@@ -952,7 +942,7 @@ async fn a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_bou
 /// pass); the retry serves the new cut, and the ready snapshot holds that window, not the first.
 #[tokio::test(flavor = "current_thread")]
 async fn a_reset_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot() {
-    let (handler, store, _dir) = handler_for("rev3-reset-cut");
+    let (handler, store, _dir) = handler_for("admit-reset-cut");
     store
         .replace_history_segments(session(), &[segment(1, 1, 2)])
         .unwrap();
@@ -962,9 +952,9 @@ async fn a_reset_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapsh
     assert_eq!(first["boundary"], anchor("m2", 1));
     let hook_store = Arc::clone(&store);
     install_transform_attempt_hook(session(), move || {
-        let loaded = hook_store.load("rev3-reset-cut").unwrap();
+        let loaded = hook_store.load("admit-reset-cut").unwrap();
         hook_store
-            .reset_session_for_recomp("rev3-reset-cut", loaded.row_version)
+            .reset_session_for_recomp("admit-reset-cut", loaded.row_version)
             .unwrap();
     });
     let served = call(&handler, body(&host, Value::Null)).await;
@@ -1007,7 +997,6 @@ fn native_body(mids: &[&str], boundary: Value) -> Value {
         .collect();
     json!({
         "kind": "transform",
-        "v": 3,
         "boundary": boundary,
         "serializer_profile": "opencode-aisdk",
         "provider_id": "anthropic",
@@ -1023,7 +1012,7 @@ fn native_body(mids: &[&str], boundary: Value) -> Value {
 /// window, and the test client's application against that window reconstructs the output.
 #[tokio::test(flavor = "current_thread")]
 async fn stale_slice_input_keeps_address_the_submitted_native_window() {
-    let (handler, store, _dir) = handler_for("rev3");
+    let (handler, store, _dir) = handler_for("admit");
     store
         .replace_history_segments(session(), &[segment(1, 1, 2)])
         .unwrap();
@@ -1090,7 +1079,7 @@ async fn plugin_pass(handler: &Handler, host: &[&str]) -> Value {
     let mut before = None::<i64>;
     loop {
         let mut request =
-            json!({ "method": "transform.boundary", "v": 3, "session_id": session() });
+            json!({ "method": "transform.boundary", "session_id": session() });
         if let Some(before) = before {
             request["before_sequence"] = json!(before);
         }
@@ -1182,7 +1171,7 @@ async fn assert_steady(handler: &Handler, store: &MemoryStore, epoch: u64) {
 /// the retry folds against it and the request answers the HARD, never `boundary_unknown`.
 #[tokio::test(flavor = "current_thread")]
 async fn a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request() {
-    let (handler, store, _dir, epoch, answer) = interrupted_revert("rev3-cas", |store, session| {
+    let (handler, store, _dir, epoch, answer) = interrupted_revert("admit-cas", |store, session| {
         let loaded = store.load(session).unwrap();
         store
             .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
@@ -1198,7 +1187,7 @@ async fn a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request() {
 /// `boundary_unknown` and no `null` whole-array pass.
 #[tokio::test(flavor = "current_thread")]
 async fn a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass() {
-    let (handler, store, dir, epoch, answer) = interrupted_revert("rev3-kill", |_, _| {
+    let (handler, store, dir, epoch, answer) = interrupted_revert("admit-kill", |_, _| {
         panic!("the pass dies after the truncate commit")
     })
     .await;
@@ -1212,7 +1201,7 @@ async fn a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass() 
     let PreparedOutcome::Response(bytes) = handler
         .dispatch_value(
             test_route(7),
-            json!({ "method": "transform.boundary", "v": 3, "session_id": session() }),
+            json!({ "method": "transform.boundary", "session_id": session() }),
         )
         .await
     else {

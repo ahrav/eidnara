@@ -430,15 +430,6 @@ function responseValue(response: unknown): Record<string, unknown> {
     throw new Error("module transform returned a non-object response");
 }
 
-function errorHasCode(error: unknown, code: string): boolean {
-    const seen = new Set<unknown>();
-    for (let current = error; isRecord(current) && !seen.has(current); current = current.cause) {
-        seen.add(current);
-        if (current.code === code) return true;
-    }
-    return false;
-}
-
 export function isTransformPageAttemptMismatch(error: unknown): boolean {
     let current = error;
     const seen = new Set<unknown>();
@@ -529,7 +520,6 @@ export function buildTransformRequest(
         ...passFields,
         method: "transform",
         kind: "transform",
-        v: 3,
         boundary: core.boundary,
         serializer_profile: core.serializerProfile,
         serve_native: true,
@@ -556,7 +546,6 @@ export type PassDeclineReason =
     | "internal_child"
     | "daemon_session_busy"
     | "daemon_status_unrecognized"
-    | "daemon_revision_unsupported"
     | "boundary_unknown"
     | "discovery_declined";
 
@@ -609,7 +598,7 @@ async function deliverTransformNotes(
                     sessionId: plan.sessionId,
                     projectRoot: plan.projectRoot,
                     method,
-                    body: { method, v: 1, session_id: plan.sessionId, transform_pass_id: id },
+                    body: { method, session_id: plan.sessionId, transform_pass_id: id },
                 });
             } catch (error) {
                 errors.push(error);
@@ -1219,7 +1208,6 @@ export function createTransformSessionClient(
                         method: "transform.boundary",
                         body: {
                             method: "transform.boundary",
-                            v: 3,
                             session_id: sessionId,
                             ...(before === undefined ? {} : { before_sequence: before }),
                         },
@@ -1228,14 +1216,7 @@ export function createTransformSessionClient(
                     });
                 } catch (error) {
                     assertCurrentPass();
-                    throw new PassDeclined(
-                        sessionId,
-                        "discovery_declined",
-                        errorHasCode(error, "unrecognized_request_shape")
-                            ? "the daemon lacks transform.boundary; upgrade it with the plugin"
-                            : String(error),
-                        "warn",
-                    );
+                    throw new PassDeclined(sessionId, "discovery_declined", String(error), "warn");
                 }
                 assertCurrentPass();
                 const page = parseAnchorPage(reply, before);
@@ -1525,13 +1506,6 @@ export function createTransformSessionClient(
                     } catch (error) {
                         if (paged && isTransformPageAttemptMismatch(error))
                             return restart("attempt_mismatch");
-                        if (errorHasCode(error, "transform_revision_unsupported"))
-                            throw new PassDeclined(
-                                sessionId,
-                                "daemon_revision_unsupported",
-                                "the daemon speaks another transform revision; upgrade the plugin and daemon together",
-                                "warn",
-                            );
                         throw error;
                     }
                     if (paged && isModuleTransportGenerationChangedResult(moduleResponse))

@@ -48,7 +48,6 @@ export function registerCtxRecompCommand(pi: ExtensionAPI, deps: RegisterCtxReco
                 try {
                     const value = await callDaemonSession(deps, ctx, "session.recomp", {
                         method: "session.recomp",
-                        v: 1,
                         session_id: sessionId,
                         command_id: rustCommandId("recomp"),
                     });

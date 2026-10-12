@@ -3,12 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { type NativeChannel, type NativeReceiveLease, ProducerCursor } from "@eidnara/shm-native";
 import type { ConnectionGenerationOptions } from "../connection";
-import {
-    decodeHeader,
-    type EnvelopeHeader,
-    encodeHeader,
-    FrameType,
-} from "../protocol";
+import { decodeHeader, type EnvelopeHeader, encodeHeader, FrameType } from "../protocol";
 import { ShmFrameChannel } from "../shm-frame-channel";
 import type { BindIdentity } from "../types";
 

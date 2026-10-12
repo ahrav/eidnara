@@ -240,7 +240,7 @@ pub fn assign_ordinals(
     ordinals
 }
 
-/// Validates a `transform.boundary` body: `v: 3`, a non-blank `session_id`, an optional
+/// Validates a `transform.boundary` body: a non-blank `session_id`, an optional
 /// `before_sequence` that is a JavaScript safe integer, and nothing else beyond the envelope's
 /// `method`, `kind`, and `project_root`. Returns the session and the cursor.
 pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), String> {
@@ -250,13 +250,10 @@ pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), St
     if let Some(key) = fields.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "method" | "kind" | "v" | "session_id" | "project_root" | "before_sequence"
+            "method" | "kind" | "session_id" | "project_root" | "before_sequence"
         )
     }) {
         return Err(format!("transform.boundary does not accept {key:?}"));
-    }
-    if fields.get("v").and_then(Value::as_u64) != Some(3) {
-        return Err("transform.boundary requires v=3".to_string());
     }
     let Some(session_id) = fields
         .get("session_id")

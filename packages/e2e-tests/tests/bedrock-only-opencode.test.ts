@@ -164,7 +164,6 @@ describe.skipIf(!active)("bedrock-only callers: OpenCode", () => {
             async () => {
                 const status = await host.contextRequest(identity(), {
                     method: "memory.capture.status",
-                    v: 2,
                     session_id: sessionId,
                 });
                 return typeof status.completed === "number" && status.completed >= 1

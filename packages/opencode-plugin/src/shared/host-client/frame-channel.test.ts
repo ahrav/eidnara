@@ -7,12 +7,7 @@ import {
     type StorageReleaseOutcome,
     utf8FrameBody,
 } from "./frame-channel";
-import {
-    buildFlags,
-    type EnvelopeHeader,
-    FrameType,
-    MAX_CONTROL_BODY_LEN,
-} from "./protocol";
+import { buildFlags, type EnvelopeHeader, FrameType, MAX_CONTROL_BODY_LEN } from "./protocol";
 import { Priority } from "./types";
 
 /** Producer segments must be exact-bounds ArrayBuffers, so each segment gets its own backing store. */

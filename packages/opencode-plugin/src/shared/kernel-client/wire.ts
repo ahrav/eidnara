@@ -1,7 +1,7 @@
 /**
  * The only place daemon bytes become a `MemoryState`. Every parser here is
  * total: a shape violation yields `invalid(unrecognized_state)` instead of a
- * throw, so a daemon/plugin version skew degrades to a typed state.
+ * throw, so a malformed daemon reply degrades to a typed state.
  */
 
 import { isRecord } from "../record-type-guard";

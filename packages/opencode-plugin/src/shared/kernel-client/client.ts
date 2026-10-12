@@ -307,7 +307,7 @@ const INVALID_PARAMS_CODE = "invalid_params";
 
 /**
  * Codes a daemon answers when no `kernel.*` route matches the request, so the
- * caller sees the version-skew state rather than an internal error.
+ * caller sees the unknown-method state rather than an internal error.
  */
 const UNKNOWN_METHOD_CODES: ReadonlySet<string> = new Set([
     "unrecognized_request_shape",
@@ -363,7 +363,6 @@ export class KernelClient {
     private wireBody(method: string, fields: Record<string, unknown>): Record<string, unknown> {
         return {
             method,
-            v: 1,
             session_id: this.sessionId,
             project_root: this.projectRoot,
             ...fields,
@@ -505,7 +504,7 @@ export class KernelClient {
                 : { connectionIdentity: invoked.connectionIdentity };
         const parsed = parse(invoked.raw);
         if (parsed.state.kind !== "available" || parsed.payload === null) {
-            // A daemon-produced negative state proves a mutating request was not applied, but an undecodable response does not: the commit may have succeeded and only its receipt was lost to a malformed or version-skewed payload, so a definitive-looking error would invite a fresh-identity retry.
+            // A daemon-produced negative state proves a mutating request was not applied, but an undecodable response does not: the commit may have succeeded and only its receipt was lost to a malformed payload, so a definitive-looking error would invite a fresh-identity retry.
             const undecodable =
                 (parsed.state.kind === "invalid" && parsed.state.reason === "unrecognized_state") ||
                 (parsed.state.kind === "available" && parsed.payload === null);

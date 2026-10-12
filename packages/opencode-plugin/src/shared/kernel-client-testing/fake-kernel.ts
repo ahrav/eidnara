@@ -219,7 +219,6 @@ const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
 const ENVELOPE_KEYS: ReadonlySet<string> = new Set([
     "method",
     "kind",
-    "v",
     "session_id",
     "project_root",
 ]);

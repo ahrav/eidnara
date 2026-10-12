@@ -211,7 +211,6 @@ describe("review list", () => {
         expect(options).toEqual({ consumerIdentity: null });
         expect(recorded.requests).toEqual([
             {
-                v: 1,
                 session_id: identity.session,
                 project_root: "/p/real",
                 method: "review.list",

@@ -335,7 +335,6 @@ impl SearchOperation {
     fn body(&self, project_root: &Path) -> serde_json::Value {
         let mut body = serde_json::json!({
             "method": self.method(),
-            "v": 1,
             "session_id": SEARCH_OPERATOR_SESSION,
             "project_root": project_root,
         });
@@ -2752,7 +2751,6 @@ mod tests {
             body,
             serde_json::json!({
                 "method": "search.lifecycle.abandon",
-                "v": 1,
                 "session_id": SEARCH_OPERATOR_SESSION,
                 "project_root": "/workspace/project",
                 "operator_id": "op",

@@ -3997,7 +3997,6 @@ async fn a_second_begin_replaces_or_resumes_and_only_the_pending_cap_is_queue_fu
     // A total above the allowance is refused before it reserves anything.
     let huge = json!({
         "method": "kernel.artifact.ingest.begin",
-        "v": 1,
         "session_id": SESSION,
         "project_root": daemon.project.to_str().unwrap(),
         "upload_id": "huge",

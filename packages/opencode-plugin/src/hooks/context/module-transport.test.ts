@@ -833,7 +833,7 @@ describe("call policy is keyed off the body it forwards", () => {
             generation: 0,
         });
         const facadeBody = { name: "eidnara_note", arguments: { action: "read" } };
-        const normalBody = { method: "session.status", v: 1 };
+        const normalBody = { method: "session.status" };
 
         await expect(
             transport.call({

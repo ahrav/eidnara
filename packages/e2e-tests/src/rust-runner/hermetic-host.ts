@@ -1113,7 +1113,7 @@ export class HermeticHostStack {
     ): Promise<Record<string, unknown>> {
         return this.contextRequest(
             { project_root: resolve(projectRoot), harness: "opencode", session: sessionId },
-            { ...extra, method, v: 1, session_id: sessionId },
+            { ...extra, method, session_id: sessionId },
         );
     }
 

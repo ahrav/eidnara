@@ -806,7 +806,6 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         return {
             method: "transform",
             session_id: "ses-unpaged-limit",
-            v: 3,
             boundary: null,
             messages: Array.from({ length: count }, (_, index) => ({ mid: `m${index}`, text })),
         };
@@ -898,11 +897,10 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
     });
 
     for (const boundary of [{ mid: "m0", sequence: 4 }, null]) {
-        it(`carries v and boundary ${JSON.stringify(boundary)} on the final page only`, () => {
+        it(`carries boundary ${JSON.stringify(boundary)} on the final page only`, () => {
             const body = {
                 method: "transform",
                 session_id: "ses-final-scalars",
-                v: 3,
                 boundary,
                 messages: Array.from({ length: 80 }, (_, index) => ({
                     mid: `m${index}`,
@@ -914,10 +912,9 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             );
             expect(pages.length).toBeGreaterThan(1);
             for (const page of pages.slice(0, -1)) {
-                expect(Object.hasOwn(page, "v")).toBe(false);
                 expect(Object.hasOwn(page, "boundary")).toBe(false);
             }
-            expect(pages.at(-1)?.v).toBe(3);
+            expect(Object.hasOwn(pages.at(-1) ?? {}, "v")).toBe(false);
             expect(pages.at(-1)?.boundary).toEqual(boundary);
         });
     }

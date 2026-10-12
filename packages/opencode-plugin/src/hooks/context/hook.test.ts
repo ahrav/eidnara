@@ -1568,7 +1568,6 @@ describe("eidnara hook", () => {
                 method: "todo_state.set",
                 body: {
                     method: "todo_state.set",
-                    v: 1,
                     session_id: "ses-todo",
                     state_json: '[{"content":"Forward me","status":"pending","priority":"high"}]',
                     owner_message_id: "msg-owner",
@@ -1824,7 +1823,6 @@ describe("eidnara hook", () => {
                 method: "agent_drops.append",
                 body: {
                     method: "agent_drops.append",
-                    v: 1,
                     session_id: "ses-reduce",
                     drop: "tool output summary",
                     command_id: "cmd-1",
@@ -2261,7 +2259,7 @@ describe("eidnara hook", () => {
                 sessionId: "ses-flush",
                 projectRoot: "/tmp",
                 method: "session.flush",
-                body: { method: "session.flush", v: 1, session_id: "ses-flush" },
+                body: { method: "session.flush", session_id: "ses-flush" },
             },
         ]);
         expect(liveSessionState.historyRefreshSessions.has("ses-flush")).toBe(true);
