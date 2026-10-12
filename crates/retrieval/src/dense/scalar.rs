@@ -281,10 +281,19 @@ pub fn encode_validated_into(
     quotient_codes(row, &scales.scales, codes)
 }
 
+/// Adding and subtracting `1.5 * 2^52` rounds an f64 of magnitude at most `2^51` to an integer, ties to even, in the default rounding mode.
+const ROUNDING_BIAS_F64: f64 = 6_755_399_441_055_744.0;
+
+/// A quotient past this magnitude rounds past the code range, as this bound itself does, so bounding the quotient by it keeps every code and clip.
+const QUOTIENT_BOUND: f64 = 128.0;
+
 fn quotient_codes(row: &[f32], scales: &[f32], codes: &mut [i8]) -> u32 {
     let mut clipped = 0u32;
     for ((code, value), scale) in codes.iter_mut().zip(row).zip(scales) {
-        let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
+        // A finite value over a positive finite scale is a finite quotient. Bounded to `±128`, it lies inside the bias's exact range, and a quotient past `±128` rounds to a value past `±127` as `±128` does, so the code and the clip are those of the unbounded quotient.
+        let bounded =
+            (f64::from(*value) / f64::from(*scale)).clamp(-QUOTIENT_BOUND, QUOTIENT_BOUND);
+        let rounded = (bounded + ROUNDING_BIAS_F64) - ROUNDING_BIAS_F64;
         let clamped = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
         clipped += u32::from(clamped != rounded);
         // A finite value over a positive finite scale is a finite quotient, and the clamp bounds it to i8, so the cast is exact.
@@ -302,7 +311,7 @@ const NEAR_HALF: f32 = 0.5 - 1.0 / 16384.0;
 /// Adding and subtracting `1.5 * 2^23` rounds an f32 of magnitude at most `2^22` to an integer, ties to even, in the default rounding mode.
 const ROUNDING_BIAS: f32 = 12_582_912.0;
 
-/// Checks stored codes against [`encode_validated_into`] for many rows under one set of scales.
+/// Writes or checks the codes [`encode_validated_into`] writes, for many rows under one set of scales.
 ///
 /// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`, or below `2^-126` with `v / s` when the product leaves the normal range, where both round to zero.
 /// The exact quotient of two f32 values is a midpoint between two integers or at least `2^-26` from every such midpoint, so the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
@@ -369,6 +378,48 @@ impl<'a> Encoder<'a> {
         differ |= quotient_differ(row.len() - tail.len(), tail);
         differ == 0
     }
+
+    /// Writes into `out` the codes [`encode_validated_into`] writes for a `row` that [`codec::validate`] has accepted under the encoder's scales, one two's-complement byte per coordinate.
+    pub fn encode_into(&self, row: &[f32], out: &mut [u8]) {
+        assert_eq!(
+            self.scales.scales.len(),
+            row.len(),
+            "scales of one calibration match the layout"
+        );
+        assert_eq!(out.len(), row.len(), "one code per coordinate");
+        let quotient = |start: usize, out: &mut [u8]| {
+            let mut codes = [0i8; ENCODE_BLOCK];
+            let codes = &mut codes[..out.len()];
+            let end = start + out.len();
+            quotient_codes(&row[start..end], &self.scales.scales[start..end], codes);
+            for (byte, code) in out.iter_mut().zip(codes.iter()) {
+                *byte = *code as u8;
+            }
+        };
+        if self.reciprocals.is_empty() {
+            for (start, out) in (0..row.len())
+                .step_by(ENCODE_BLOCK)
+                .zip(out.chunks_mut(ENCODE_BLOCK))
+            {
+                quotient(start, out);
+            }
+            return;
+        }
+        let (values, _) = row.as_chunks::<ENCODE_BLOCK>();
+        let (reciprocals, _) = self.reciprocals.as_chunks::<ENCODE_BLOCK>();
+        let (blocks, tail) = out.as_chunks_mut::<ENCODE_BLOCK>();
+        for (index, ((values, reciprocals), block)) in values
+            .iter()
+            .zip(reciprocals)
+            .zip(blocks.iter_mut())
+            .enumerate()
+        {
+            if !product_codes(values, reciprocals, block) {
+                quotient(index * ENCODE_BLOCK, block);
+            }
+        }
+        quotient(row.len() - tail.len(), tail);
+    }
 }
 
 /// Nonzero when some code differs from its stored byte; the fold reads every byte, so it vectorizes.
@@ -388,14 +439,42 @@ fn product_differ(
     let mut near = false;
     let mut differ = 0u8;
     for ((value, reciprocal), byte) in values.iter().zip(reciprocals).zip(stored) {
-        // A finite value times a normal reciprocal is never NaN. Up to `2^22` in magnitude the bias rounds the product exactly and its distance to the rounded integer is exact; past that, the product and the quotient both code as 127 or -127 whichever path the block takes.
-        let product = value * reciprocal;
-        let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
-        near |= (product - rounded).abs() > NEAR_HALF;
-        let code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
-        differ |= code as u8 ^ byte;
+        let (code, close) = product_code(*value, *reciprocal);
+        near |= close;
+        differ |= code ^ byte;
     }
     (!near).then_some(differ)
+}
+
+/// Writes the codes of `values` from their products into `out` and returns `true` when no product raised [`product_code`]'s fallback flag; on `false` the caller recodes the block from its quotients.
+fn product_codes(
+    values: &[f32; ENCODE_BLOCK],
+    reciprocals: &[f32; ENCODE_BLOCK],
+    out: &mut [u8; ENCODE_BLOCK],
+) -> bool {
+    let mut near = false;
+    for ((value, reciprocal), byte) in values.iter().zip(reciprocals).zip(out) {
+        let (code, close) = product_code(*value, *reciprocal);
+        near |= close;
+        *byte = code;
+    }
+    !near
+}
+
+/// The two's-complement code byte of `value * reciprocal` and a fallback flag; for products of magnitude at most `2^22`, the flag marks a product within `2^-14` of a rounding midpoint.
+#[inline(always)]
+fn product_code(value: f32, reciprocal: f32) -> (u8, bool) {
+    // A finite value times a normal reciprocal is never NaN. Up to `2^22` in magnitude the bias rounds the product exactly and its distance to the rounded integer is exact; past that, the product and the quotient both code as 127 or -127 whichever path the block takes.
+    let product = value * reciprocal;
+    let biased = product + ROUNDING_BIAS;
+    let rounded = biased - ROUNDING_BIAS;
+    let near = (product - rounded).abs() > NEAR_HALF;
+    // Between `2^23` and `2^24` an f32 is the integer `2^23 + m` and its bits are `0x4b00_0000 + m`, so the low byte of the clamped biased value is the code's two's-complement byte.
+    let code = biased
+        .max(ROUNDING_BIAS + f32::from(CODE_MIN))
+        .min(ROUNDING_BIAS + f32::from(CODE_MAX))
+        .to_bits() as u8;
+    (code, near)
 }
 
 /// One byte per code, two's complement.
