@@ -95,6 +95,22 @@ impl LocalEmbeddingsLimits {
     }
 }
 
+/// Queries that wait for the inference slot behind the native call it runs in the shipped lane (#825 D26); a fifth is busy at once.
+pub const SHIPPED_MAX_WAITING_QUERIES: usize = 4;
+
+impl LocalEmbeddingsLimits {
+    /// The limits the daemon's lane serves with: one text per inference call, as backfill admits
+    /// single-item jobs and a query carries one text, and [`SHIPPED_MAX_WAITING_QUERIES`] waiting queries.
+    /// One row keeps certification and every admitted batch at the single window the bundle certifies.
+    pub fn shipped_lane() -> Self {
+        Self {
+            max_batch_items: 1,
+            max_waiting_queries: SHIPPED_MAX_WAITING_QUERIES,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for LocalEmbeddingsLimits {
     fn default() -> Self {
         let max_batch_items = 64;

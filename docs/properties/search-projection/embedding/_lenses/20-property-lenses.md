@@ -44,7 +44,7 @@ tokenizer copies are different resource owners. Product admission must respect
 approved pending limits; existing JobTable limits remain their own authority.
 `embedding-backfill-preserves-query-admission` adds the query-priority claim.
 `embedding-supervisor-shares-budget-and-joins` covers bounded slices and cleanup.
-Existing FIFO (`crates/host-runtime/src/local_embeddings/mod.rs:206-225`) is not priority.
+Existing FIFO (`crates/host-runtime/src/local_embeddings/mod.rs:222-241`) is not priority.
 
 ## Security boundaries
 
@@ -66,7 +66,7 @@ plane is inferred from the word "durable".
 Missing tokenizer identity means no submission. Shutdown stops new admission,
 retains ownership of started work, and leaves unfinished durable work retryable.
 Existing component shutdown joins the tracker and synchronous CPU holder
-(`crates/host-runtime/src/local_embeddings/mod.rs:1148-1161`). Reuse that ownership rather
+(`crates/host-runtime/src/local_embeddings/mod.rs:1164-1177`). Reuse that ownership rather
 than equating receiver cancellation with native completion.
 
 ## Idempotency and replay

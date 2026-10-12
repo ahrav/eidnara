@@ -11,9 +11,9 @@ corroboration. The wildcard is retained separately and runs last.
 The daemon host composes LocalEmbeddings at `serve.rs:1097-1127` under
 `crates/daemon/src/bin/eidnara_host/`. A selected generation supplies the bundle
 manifest and ORT digests at `serve.rs:1027-1065`. LocalEmbeddings activation loads verified
-bytes and builds Backend (`crates/host-runtime/src/local_embeddings/mod.rs:1189-1228`).
+bytes and builds Backend (`crates/host-runtime/src/local_embeddings/mod.rs:1205-1244`).
 Routed batches enter JobTable; routed queries have separate admission but share
-the same CPU semaphore (`mod.rs:634-902`). Product pending rows and the daemon
+the same CPU semaphore (`mod.rs:650-918`). Product pending rows and the daemon
 embedding driver are proposed, not another implemented transport component.
 
 ## State and persistence
@@ -27,8 +27,8 @@ vectors to be durable before product completion. It does not make JobTable durab
 ## Concurrency model
 
 One CPU semaphore serializes queries and batches, in semaphore registration
-order (`crates/host-runtime/src/local_embeddings/mod.rs:206-225`). A tracker owns async
-workers that join blocking inference (`mod.rs:678-722`, `:843-902`). Query
+order (`crates/host-runtime/src/local_embeddings/mod.rs:222-241`). A tracker owns async
+workers that join blocking inference (`mod.rs:694-738`, `:859-918`). Query
 admission permits remain held through physical inference. Admission order is
 not host arrival order and FIFO is not a backfill-priority policy.
 
@@ -37,7 +37,7 @@ not host arrival order and FIFO is not a backfill-priority policy.
 RP2.1 KTD3 requires one tokenizer authority and exact untruncated EmbedTokens.
 U3 requires stale-result rejection and durable vectors before completion.
 The existing private count runs on the truncating inference tokenizer
-(`crates/host-runtime/src/local_embeddings/inference.rs:577-589`). That is code evidence of
+(`crates/host-runtime/src/local_embeddings/inference.rs:578-590`). That is code evidence of
 a missing product preflight, not a claim that the existing wire path is broken.
 
 ## Claimed liveness guarantees
@@ -77,7 +77,7 @@ marks dense work missing under the plan's failure contract.
 
 VerifiedBundle holds the four tokenizer files as verified bytes
 (`crates/host-runtime/src/local_embeddings/bundle.rs:259-278`, `:293-304`). Backend passes
-them to FastEmbed with the manifest token window (`inference.rs:297-318`).
+them to FastEmbed with the manifest token window (`inference.rs:298-319`).
 The provider-accounting tokenizer instead embeds Claude BPE
 (`crates/tokenizer/src/lib.rs:1-8`, `:58`). Neither is interchangeable with the
 other. Dependency internals and runtime behavior are not executed here.

@@ -21,9 +21,9 @@ slice or shared LocalEmbeddings EvalBudget bridge exists at the pinned revision.
 - `crates/kernel/src/open.rs:1413-1421` installs SQLite progress privately;
   retrieval cannot simply call that installer from another crate.
 - `crates/host-runtime/src/handler.rs:450-455` exposes request cancellation.
-- `crates/host-runtime/src/local_embeddings/mod.rs:669-722` retains a query permit and
+- `crates/host-runtime/src/local_embeddings/mod.rs:685-738` retains a query permit and
   text charge in the tracked worker through its joined native call.
-- `mod.rs:1148-1161` joins tracked work and the synchronous CPU holder at stop.
+- `mod.rs:1164-1177` joins tracked work and the synchronous CPU holder at stop.
 
 ## Failure scenario
 
@@ -76,7 +76,7 @@ instead of interpreting an arbitrary harness timeout as a successful join.
 
 ### Q: What bounds physical shutdown of an uncooperative native call?
 
-- Sources examined: `mod.rs:678-722`, `:1148-1161`; P1 bounds; P7 line 81.
+- Sources examined: `mod.rs:694-738`, `:1164-1177`; P1 bounds; P7 line 81.
 - Findings: Started calls are joined, not preempted. Deadline expiry only
   stops later work and reporting; a finite native-drain bound is not established.
 - Missing evidence: Approved native service/drain contract, public budget
@@ -88,10 +88,10 @@ instead of interpreting an arbitrary harness timeout as a successful join.
 The fused route awaits the in-process embedding under its request budget and
 submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1712-1736`).
 `LocalEmbeddingsComponent::embed_query` ends its wait at the request deadline and
-leaves the queue (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`); a
+leaves the queue (`crates/host-runtime/src/local_embeddings/mod.rs:527-559`); a
 started native call keeps its grant, admission permit, and input charge in the
-tracked worker until it returns (`mod.rs:1117-1173`). Shutdown closes the
+tracked worker until it returns (`mod.rs:1133-1189`). Shutdown closes the
 scheduler, drains the tracker, then waits for the slot to go idle before it
-writes the terminal lane state (`mod.rs:1639-1653`). Tests:
-`mod.rs:1853-1889` and `scheduler.rs:318-375` and `scheduler.rs:427-458`. The maintenance supervisor slice
+writes the terminal lane state (`mod.rs:1655-1669`). Tests:
+`mod.rs:1869-1905` and `scheduler.rs:318-375` and `scheduler.rs:427-458`. The maintenance supervisor slice
 remains unexercised.

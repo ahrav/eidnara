@@ -25,7 +25,7 @@ observes reopened storage instead of a ready poll or an attempted SQL write.
 ## Logical stop and physical stop can disagree
 
 LocalEmbeddings joins started native calls after request expiry
-(`crates/host-runtime/src/local_embeddings/mod.rs:669-722`, `:1148-1161`). A shared
+(`crates/host-runtime/src/local_embeddings/mod.rs:685-738`, `:1164-1177`). A shared
 EvalBudget must not let expired work report a successful query or release its
 physical reservations early. A finite native-call drain bound is not established
 by that ownership. The supervisor record keeps this as an unresolved production
