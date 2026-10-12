@@ -637,7 +637,11 @@ pub(crate) fn fingerprint_digest(content_hash: &[u8; 32]) -> String {
 }
 
 pub(crate) fn fingerprint(bytes: &str) -> String {
-    let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
+    fingerprint_bytes(bytes.as_bytes())
+}
+
+pub(crate) fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let content_hash: [u8; 32] = Sha256::digest(bytes).into();
     fingerprint_digest(&content_hash)
 }
 

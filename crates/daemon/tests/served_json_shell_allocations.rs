@@ -204,17 +204,21 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         let fingerprint_vec = blocks * std::mem::size_of::<(String, usize)>();
         let fingerprint_arc = arc_layout(fingerprint_vec);
         let digests = blocks * HEX_DIGEST_BYTES;
+        // The canonicalizer reports each block's span of the canonical bytes, and the spans stay
+        // live until every receipt is hashed.
+        let block_ranges = blocks * std::mem::size_of::<std::ops::Range<usize>>();
         let retained = message_arc + fingerprint_arc + digests + arc_size;
         assert_eq!(
             ledger.live_bytes_at_close, retained as isize,
             "{label}: the constructor retains the message, fingerprints, and payload"
         );
         // The constructor converts the returned buffer to its exact-size `Arc`
-        // before serializing receipts, so the buffer's spare capacity and the
+        // before hashing receipts, so the buffer's spare capacity and the
         // `Arc` overlap only during that conversion.
-        let conversion_peak = returned_capacity + arc_size;
+        let canonicalizer_peak = canonicalizer_peak + block_ranges;
+        let conversion_peak = returned_capacity + arc_size + block_ranges;
         let live_after_conversion = arc_size + fingerprint_vec + digests;
-        let hashing_peak = live_after_conversion + largest_receipt_peak(&population);
+        let hashing_peak = live_after_conversion + block_ranges + largest_receipt_peak(&population);
         // Ownership transfer: the fingerprint `Vec` and its `Arc` overlap.
         let ownership_peak = live_after_conversion + message_arc + fingerprint_arc;
         let bound = canonicalizer_peak

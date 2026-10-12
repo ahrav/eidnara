@@ -225,12 +225,12 @@ impl ServedMessage {
     /// Reuse a projected block's retained hash only when its complete identity matches.
     ///
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
-    /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
+    /// Overlaid, reduced, and rewritten blocks hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
         // The canonicalizer may hand back its growth buffer with spare capacity;
         // converting to the exact-size `Arc` first keeps that slack from outliving
-        // the block-receipt serialization below.
-        let canonical = crate::served_json::canonical_message(&message)
+        // the block receipts below.
+        let (canonical, block_ranges) = crate::served_json::canonical_message_with_blocks(&message)
             .expect("CK wire message values must always serialize");
         let nesting_depth = canonical.nesting_depth;
         let canonical_bytes: Arc<[u8]> = Arc::from(canonical.bytes);
@@ -265,11 +265,19 @@ impl ServedMessage {
                 if let Some(fp) = reused {
                     return fp;
                 }
+                if let Some(range) = block_ranges
+                    .as_ref()
+                    .and_then(|ranges| ranges.get(served_index))
+                {
+                    let serialized = &canonical_bytes[range.clone()];
+                    return (wire::fingerprint_bytes(serialized), serialized.len());
+                }
                 let serialized = crate::served_json::canonical_block_bytes(block)
                     .expect("CK wire blocks must always have a JSON representation");
                 (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
+        drop(block_ranges);
         let message = Arc::new(message);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
         let retained_bytes =
