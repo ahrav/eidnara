@@ -140,7 +140,7 @@ The occupancy assertion, which passes today and should exist anyway:
    `:872-875` names.
 2. Repeat with a **nonempty** corrupt directory. The existing
    `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-   (`generation.rs:2940`) covers the nonempty case indirectly; the empty case has no
+   (`generation.rs:2949`) covers the nonempty case indirectly; the empty case has no
    coverage.
 
 Reaching the portable path deterministically needs one of:

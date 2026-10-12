@@ -109,7 +109,7 @@ path rather than only in `prune`. No test exists.
 ### Q: None recorded in the catalog. Verified here instead: what does each cap actually gate, and is the stated consequence the real one?
 
 - Sources examined: `lifecycle.rs:64-65`, `:257-284`, `:467-491`, `:803-830`;
-  `generation.rs:144-145`, `:890-894`, `:1014-1018`, `:1257-1260`, `:1529-1541`;
+  `generation.rs:144-145`, `:890-894`, `:1023-1027`, `:1266-1269`, `:1538-1550`;
   `crates/host-runtime/src/instance.rs:852-865` for `read_all_fd`'s over-cap error;
   `eidnara-host.rs:344-350` for the error-to-reason mapping; every workspace
   occurrence of both identifiers.

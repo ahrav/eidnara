@@ -1480,6 +1480,59 @@ fn verification_refuses_an_oversized_record_before_opening_the_generation() {
     );
 }
 
+/// Linux per-task `rchar`: bytes returned by read-family syscalls on the calling thread.
+fn thread_bytes_read() -> u64 {
+    fs::read_to_string("/proc/thread-self/io")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("rchar: "))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn publication_over_an_oversized_or_foreign_selection_reads_none_of_its_listed_files() {
+    const LARGE: usize = 8 * 1024 * 1024;
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let template = fixture.compose(1, &base, &[]).unwrap();
+    let oversized = fixture.stage_record(&vec![b'x'; LARGE], &template);
+    fixture
+        .store
+        .select_vector(&oversized, fixture.transaction(), &mut |_| Ok(()))
+        .unwrap();
+    let foreign = fixture.stage_foreign("search-projection-seed", "search.sqlite", &vec![0; LARGE]);
+
+    for (sequence, selected) in [(2, oversized), (3, foreign)] {
+        // The store refuses to select another owner's generation, so the foreign selection is written in place.
+        fixture.write_selector(
+            VECTOR_PROFILE_NAME,
+            &serde_json::to_vec(&serde_json::json!({ "schema": 1, "current": selected })).unwrap(),
+        );
+        let composition = fixture.compose(sequence, &base, &[]).unwrap();
+        let before = thread_bytes_read();
+        let published = publish(
+            &composition,
+            Some(&selected),
+            &fixture.staging(),
+            &fixture.work_dir(),
+            &mut |_| Ok(()),
+        )
+        .map_err(|failure| failure.refusal);
+        let read = thread_bytes_read() - before;
+        assert_eq!(published, Ok(composition.digest()), "{selected}");
+        assert!(
+            read < LARGE as u64,
+            "{selected}: publication read {read} bytes, at least the selected generation's listed file"
+        );
+        assert_eq!(
+            fixture.store.read_vector_current().unwrap(),
+            CurrentProfile::Current(composition.digest())
+        );
+    }
+}
+
 #[test]
 fn record_verification_refuses_an_oversized_record_before_opening_the_generation() {
     let fixture = Fixture::new();

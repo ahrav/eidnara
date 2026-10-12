@@ -5,14 +5,13 @@
 //! Recovery takes the selected composition when it verifies; otherwise it examines the other compositions newest first under a bound and takes the first whose every member verifies, reporting the selector as stale rather than silently repointing it.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
-    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET,
-    ValidatedGeneration, WireMembers,
+    MEMBERS_FILE_NAME, ManifestFile, PendingGeneration, ProfileEvent, StageMeta, StreamedFile,
+    VECTOR_SELECTION_TARGET, ValidatedGeneration, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -377,28 +376,28 @@ fn selection(store: &GenerationStore) -> Result<(Option<String>, Option<u64>), C
     }
 }
 
-/// `selected_record` reads composition and members metadata through the descriptors used to hash those files during validation.
+/// Metadata decoding uses bytes from streams accepted by `pending.finish(streams)`.
 fn selected_record(
     store: &GenerationStore,
     digest: &str,
 ) -> Result<Option<Composition>, CompositionRefusal> {
-    match store.validate_streaming(digest, &[]) {
-        Ok(pending) => record_of(&mut pending.finish(std::iter::empty())?),
-        Err(_) => record(store, digest).map(|_| None),
+    let Ok(mut pending) = store.validate_streaming_all(digest) else {
+        return record(store, digest).map(|_| None);
+    };
+    let manifest = pending.manifest();
+    if manifest.target != VECTOR_SELECTION_TARGET || exceeds_metadata_cap(manifest) {
+        return record(store, digest).map(|_| None);
     }
-}
-
-/// `record_of` reads composition metadata through the descriptors used to hash the files during validation.
-fn record_of(
-    generation: &mut ValidatedGeneration,
-) -> Result<Option<Composition>, CompositionRefusal> {
-    if generation.manifest.target != VECTOR_SELECTION_TARGET {
-        return Ok(None);
-    }
-    let Some(bytes) = take_metadata_file(generation, COMPOSITION_FILE) else {
+    let mut streams = Vec::with_capacity(2);
+    let composition = read_stream(&mut pending, COMPOSITION_FILE, &mut streams);
+    let members = read_stream(&mut pending, MEMBERS_FILE_NAME, &mut streams);
+    let Ok(generation) = pending.finish(streams) else {
+        return record(store, digest).map(|_| None);
+    };
+    let Some(bytes) = composition else {
         return Ok(None);
     };
-    if let Some(members) = take_metadata_file(generation, MEMBERS_FILE_NAME) {
+    if let Some(members) = members {
         check_members_schema(&members)?;
     }
     match decode_record(&generation.manifest, &bytes) {
@@ -408,25 +407,16 @@ fn record_of(
     }
 }
 
-/// `take_metadata_file` reads metadata through the same descriptor used to hash the file during validation.
-fn take_metadata_file(generation: &mut ValidatedGeneration, rel_path: &str) -> Option<Vec<u8>> {
-    let size = generation
-        .manifest
-        .files
-        .iter()
-        .find(|file| file.path == rel_path)?
-        .size;
-    if size > MAX_MANIFEST_BYTES as u64 {
-        return None;
-    }
-    let fd = generation.take_verified_file(rel_path).ok()?;
-    let mut bytes = Vec::with_capacity(size as usize);
-    // One byte of slack distinguishes a file that grew after validation from one that matched.
-    std::fs::File::from(fd)
-        .take(size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 == size).then_some(bytes)
+/// The stream remains in `streams` for [`PendingGeneration::finish`] even when `read_rest` fails.
+fn read_stream(
+    pending: &mut PendingGeneration,
+    rel_path: &str,
+    streams: &mut Vec<StreamedFile>,
+) -> Option<Vec<u8>> {
+    let mut stream = pending.stream(rel_path).ok()?;
+    let bytes = stream.read_rest().ok();
+    streams.push(stream);
+    bytes
 }
 
 /// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
@@ -558,15 +548,17 @@ pub fn verify_composition(
 
 /// Reads the manifest before any listed file is hashed or held in memory, so an oversized record is refused by its declared size.
 fn check_record_size(store: &GenerationStore, digest: &str) -> Result<(), CompositionRefusal> {
-    if store
-        .manifest(digest)?
-        .files
-        .iter()
-        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
-    {
+    if exceeds_metadata_cap(&store.manifest(digest)?) {
         return Err(CompositionRefusal::NotComposition("record size"));
     }
     Ok(())
+}
+
+fn exceeds_metadata_cap(manifest: &GenerationManifest) -> bool {
+    manifest
+        .files
+        .iter()
+        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
 }
 
 /// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.

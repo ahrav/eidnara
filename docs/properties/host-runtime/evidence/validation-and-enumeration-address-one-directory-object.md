@@ -19,7 +19,7 @@ the digest pathname while the manifest-listed files were verified through the
 retained descriptor, so a replacement holding only the expected names satisfied
 the walk while the returned `ValidatedGeneration` still pinned the original
 directory and its unlisted content. The fix is `walk_generation_tree(dir, ...)`
-at `crates/host-runtime/src/generation.rs:1071`, with the reasoning recorded at
+at `crates/host-runtime/src/generation.rs:1080`, with the reasoning recorded at
 `:666-673`. In `0827dbc8` `prune` enumerated with
 `std::fs::read_dir(self.root.join(GENERATIONS_DIR_NAME))` while every
 `remove_tree` below it acted on `generations_fd`, so a replacement directory at
