@@ -1294,6 +1294,18 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The corpus windows whose every message is an object carrying `info.id` and whose call
+    /// ids are unique.
+    const IDENTIFIED_WINDOWS: [&str; 7] = [
+        "thinking",
+        "cache_control",
+        "summary_finish_and_error",
+        "timestamps",
+        "opaque_media_and_excluded_parts",
+        "one_compaction",
+        "multiple_compactions",
+    ];
+
     /// The plugin encoder is the oracle: for every corpus window the daemon derives the CK the
     /// plugin encodes, equal as typed values and as canonical bytes.
     #[test]
@@ -1378,6 +1390,34 @@ pub(crate) mod tests {
         assert!(meta("msg_s6").summary && meta("msg_s6").finish.is_none());
         assert_eq!(meta("msg_s2").finish.as_deref(), Some("tool-calls"));
         assert!(meta("msg_s4").errored && !meta("msg_s5").errored);
+        // Only `summary: true` with `finish: "stop"` marks a compaction summary.
+        for mid in ["msg_s7", "msg_s8", "msg_s9", "msg_s10"] {
+            assert_eq!(meta(mid).finish.as_deref(), Some("stop"), "{mid}");
+        }
+    }
+
+    /// The sidecar decode of each corpus window of identified messages encodes back to the
+    /// window, so the shared decode loop keeps native attachment exact for those shapes. The
+    /// encoder names an id-less message and holds every served call id unique, so the windows
+    /// built on those inputs encode to the named, deduplicated form instead.
+    #[test]
+    fn every_identified_parity_window_round_trips_through_the_sidecar() {
+        let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            if !IDENTIFIED_WINDOWS.contains(&name) {
+                continue;
+            }
+            let window = native_window(case);
+            let decoded = decode_opencode_shared(&window);
+            let messages: Vec<_> = decoded.messages.iter().map(|m| m.ck.clone()).collect();
+            let encoded = encode_opencode_with_session(&messages, &decoded.sidecar, None, None);
+            let raw: Vec<Value> = window
+                .iter()
+                .map(|message| message.as_ref().clone())
+                .collect();
+            assert_eq!(encoded, raw, "{name}");
+        }
     }
 
     fn fresh_tool_transform_fixture() -> Vec<WireMessage> {

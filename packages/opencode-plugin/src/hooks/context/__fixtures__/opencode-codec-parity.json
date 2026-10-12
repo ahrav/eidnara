@@ -517,6 +517,110 @@
             "role": "assistant"
           },
           "mid": "msg_s6"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "reply msg_s7",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "finish": "stop",
+              "harness_id": "msg_s7",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s7"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "reply msg_s8",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "finish": "stop",
+              "harness_id": "msg_s8",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s8"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "reply msg_s9",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "finish": "stop",
+              "harness_id": "msg_s9",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s9"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "reply msg_s10",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "finish": "stop",
+              "harness_id": "msg_s10",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s10"
         }
       ],
       "messages": [
@@ -631,6 +735,73 @@
           "parts": [
             {
               "text": "summary without finish",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_s7",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": false
+          },
+          "parts": [
+            {
+              "text": "reply msg_s7",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_s8",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "reply msg_s8",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_s9",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": "true"
+          },
+          "parts": [
+            {
+              "text": "reply msg_s9",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_s10",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": 1
+          },
+          "parts": [
+            {
+              "text": "reply msg_s10",
               "type": "text"
             }
           ]
@@ -1106,7 +1277,7 @@
             "content": [
               {
                 "kind": {
-                  "text": "h\u00e9llo \ud83c\udf0d \u2028 \"quoted\"",
+                  "text": "héllo 🌍   \"quoted\"",
                   "type": "text"
                 }
               }
@@ -1139,7 +1310,7 @@
                     "c": -7,
                     "d": 1e+21,
                     "e": 0.1,
-                    "f": "\u00fc"
+                    "f": "ü"
                   },
                   "name": "calc",
                   "type": "tool_call"
@@ -1178,7 +1349,7 @@
                   "input": [
                     1,
                     2.25,
-                    "\u4e09"
+                    "三"
                   ],
                   "name": "calc",
                   "type": "tool_call"
@@ -1204,7 +1375,7 @@
           },
           "parts": [
             {
-              "text": "h\u00e9llo \ud83c\udf0d \u2028 \"quoted\"",
+              "text": "héllo 🌍   \"quoted\"",
               "type": "text"
             }
           ]
@@ -1223,7 +1394,7 @@
                   "c": -7,
                   "d": 1e+21,
                   "e": 0.1,
-                  "f": "\u00fc"
+                  "f": "ü"
                 },
                 "output": "ok",
                 "status": "completed"
@@ -1259,7 +1430,7 @@
                 "input": [
                   1,
                   2.25,
-                  "\u4e09"
+                  "三"
                 ],
                 "status": "pending"
               },
