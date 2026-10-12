@@ -11,8 +11,8 @@ silent consequence is a different one.
 ## Evidence trail
 
 The generation's name is the SHA-256 of its manifest bytes
-(`generation.rs:255-257`), and those bytes are declaration order
-(`:251-253`, structs at `:208-213` and `:224-236`).
+(`generation.rs:259-261`), and those bytes are declaration order
+(`:255-257`, structs at `:212-217` and `:228-240`).
 
 `validate_in_dir` binds name to bytes twice, `generation.rs:636-648`:
 
@@ -36,7 +36,7 @@ Trace a reordered struct against a retained generation:
 
 1. The bytes on disk are unchanged, so `hex(sha256(bytes)) == digest` and the first
    check passes.
-2. `decode_with_schema` (`generation.rs:266-279`) decodes by key name, not
+2. `decode_with_schema` (`generation.rs:270-283`) decodes by key name, not
    position, so the decode succeeds regardless of order.
 3. `manifest.canonical_bytes()` now re-encodes in the *new* order, so it differs
    from the on-disk bytes, and the second check fails with

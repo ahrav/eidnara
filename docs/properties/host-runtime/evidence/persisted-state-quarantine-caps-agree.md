@@ -20,7 +20,7 @@ Both constants, quoted at HEAD:
 const MAX_EVIDENCE_BYTES: usize = 65_536;
 ```
 
-`crates/host-runtime/src/generation.rs:137-138`
+`crates/host-runtime/src/generation.rs:141-142`
 
 ```rust
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
@@ -28,7 +28,7 @@ pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 ```
 
 The claim is the words "Manifest and lifecycle-evidence readers each cap input at
-1 MiB" at `generation.rs:137`. The values are 65,536 and 1,048,576. The ratio is
+1 MiB" at `generation.rs:141`. The values are 65,536 and 1,048,576. The ratio is
 exactly 16: 1,048,576 / 65,536 = 16. The comment is false as written: the
 lifecycle-evidence readers cap input at 64 KiB.
 
@@ -45,13 +45,13 @@ comment at `:717-719` explains is what stops a hostile shape from downgrading a
 `MAX_MANIFEST_BYTES` gates every generation-side read in `generation.rs`, and at
 HEAD each of the three execution-deciding paths quarantines an oversize file
 before reading it. `is_quarantined_schema` tests `st_size` against the cap at
-`:1507` and returns quarantined. `read_profile` tests the selector's `st_size` at
-`:883` and returns `CurrentProfile::Quarantined`, with the comment at `:881-882`
+`:1513` and returns quarantined. `read_profile` tests the selector's `st_size` at
+`:887` and returns `CurrentProfile::Quarantined`, with the comment at `:885-886`
 naming the manifest cap in `validate_in_dir` as what it matches. `read_manifest_in_dir`
-tests the manifest's `st_size` at `:1007` and returns
-`GenerationError::UnsupportedStateSchema`, with the comment at `:1006` naming
-`is_quarantined_schema` as what it matches. The capped reads that follow (`:886`,
-`:1010`, `:1511`) can still fail for other reasons and then report
+tests the manifest's `st_size` at `:1011` and returns
+`GenerationError::UnsupportedStateSchema`, with the comment at `:1010` naming
+`is_quarantined_schema` as what it matches. The capped reads that follow (`:890`,
+`:1014`, `:1517`) can still fail for other reasons and then report
 `invalid(...)`, which `crates/daemon/src/bin/eidnara-host.rs:347` maps to
 `native_payload_invalid`, but a file whose only fault is size never reaches them.
 The pre-write refusal at `:1251` stops this release writing such a manifest at
@@ -105,9 +105,9 @@ Nothing to inject. Either an equality assertion over the two constants, or -
 since the two caps gate different decisions - separate assertions that an
 over-cap record quarantines and an over-cap manifest quarantines on every read
 path rather than only in `prune`. Both generation-side halves are exercised:
-`undecodable_generations_survive_prune_after_a_successor` (`generation.rs:2214`)
+`undecodable_generations_survive_prune_after_a_successor` (`generation.rs:2220`)
 plants an oversized manifest and `unknown_schemas_are_quarantined_and_block_mutation`
-(`:2533`) writes an oversized profile (`:2589-2594`). No test asserts the two
+(`:2539`) writes an oversized profile (`:2595-2600`). No test asserts the two
 constants agree.
 
 ## Investigation log
@@ -115,7 +115,7 @@ constants agree.
 ### Q: None recorded in the catalog. Verified here instead: what does each cap actually gate, and is the stated consequence the real one?
 
 - Sources examined: `lifecycle.rs:51`, `:232-256`, `:416-441`, `:709-733`;
-  `generation.rs:137-138`, `:883-887`, `:1007-1011`, `:1250-1253`, `:1505-1517`;
+  `generation.rs:141-142`, `:887-891`, `:1011-1015`, `:1254-1257`, `:1511-1523`;
   `crates/host-runtime/src/instance.rs:852-865` for `read_all_fd`'s over-cap error;
   `eidnara-host.rs:344-350` for the error-to-reason mapping; every workspace
   occurrence of both identifiers.

@@ -7,8 +7,8 @@ an in-process `u64` lifecycle id. Nothing in this record involves async code.
 
 ## Discovery trigger
 
-Reading `stage_and_promote` (`crates/host-runtime/src/generation.rs:1097-1107`) top to
-bottom against its own doc comment (`:1091-1096`), which promises `current` is
+Reading `stage_and_promote` (`crates/host-runtime/src/generation.rs:1101-1111`) top to
+bottom against its own doc comment (`:1095-1100`), which promises `current` is
 unchanged on every failure. The promise is per-error-class, and the sequence has
 two renames and four distinct sync points, so "unchanged" has to be checked
 against a crash between them rather than against a returned `Err`.
@@ -16,23 +16,23 @@ against a crash between them rather than against a returned `Err`.
 ## Evidence trail
 
 The durability order is explicit and, read against the syscalls, correct.
-Staging (`:1218-1279`) syncs bottom-up: each copied file is written by
-`copy_source_into` (`:1796`) and its descriptor is kept, the manifest is written
-unsynced by `write_new_file_unsynced` (`:1256`), then every kept descriptor is
-fsynced in groups of `CONCURRENT_SYNCS` through `sync_group` (`:1243`, `:1266`),
+Staging (`:1222-1283`) syncs bottom-up: each copied file is written by
+`copy_source_into` (`:1802`) and its descriptor is kept, the manifest is written
+unsynced by `write_new_file_unsynced` (`:1260`), then every kept descriptor is
+fsynced in groups of `CONCURRENT_SYNCS` through `sync_group` (`:1247`, `:1270`),
 then every directory the run created entries in is reopened and fsynced
-deepest-first (`:1268-1274`), then the temp root itself (`:1276`). The
+deepest-first (`:1272-1278`), then the temp root itself (`:1280`). The
 deepest-first claim rests on `dirs.iter().rev()` over a `BTreeSet<String>` of
 relative paths: a prefix sorts before its extensions, so `a` precedes `a/b`
 lexicographically and the reversed walk emits `a/b` before `a`. Children are
 durable before the parent entry naming them.
 
-Promotion (`:1287-1352`) is the first rename. `rename_no_replace`
+Promotion (`:1291-1358`) is the first rename. `rename_no_replace`
 (`store_fs.rs:53-79`) must not replace, because POSIX `renameat` succeeds onto an
-existing empty directory (`generation.rs:1283`); on success `generations_fd` is
-fsynced (`:1304`) and the digest is validated (`:1306`) before returning. Only
-then does `replace_profile` (`:1357-1359`, through `replace_profile_at` at
-`:1438-1467`) write the profile temp (`:1453`, fsynced inside `write_new_file`,
+existing empty directory (`generation.rs:1287`); on success `generations_fd` is
+fsynced (`:1308`) and the digest is validated (`:1310`) before returning. Only
+then does `replace_profile` (`:1363-1365`, through `replace_profile_at` at
+`:1444-1473`) write the profile temp (`:1459`, fsynced inside `write_new_file`,
 `store_fs.rs:312`), rename it over `current-profile.json` (`:1455-1456`), and
 fsync the root (`:1464`). So the ordering is: temp contents durable, digest entry
 durable, profile durable - never inverted.
@@ -102,9 +102,9 @@ inertness of residue, not crash recovery.
 
 ### Q: Should the exchange-then-revalidate window be crash-tested? Whether any reader can observe the intermediate was not established.
 
-- Sources examined: `generation.rs:1287-1352` (`promote_temp`), `:1357-1359` and
-  `:1438-1467` (`replace_profile` and `replace_profile_at`), `:901` and
-  `:1032-1076` (`validate` and `validate_in_dir`), `store_fs.rs:112-120`
+- Sources examined: `generation.rs:1291-1358` (`promote_temp`), `:1363-1365` and
+  `:1444-1473` (`replace_profile` and `replace_profile_at`), `:905` and
+  `:1036-1080` (`validate` and `validate_in_dir`), `store_fs.rs:112-120`
   (`exchange_dirs`), `:53-79` (`rename_no_replace`); every `GenerationStore`
   construction site
   (`crates/daemon/src/bin/eidnara-host.rs:845`, `:966`, `:1001`;

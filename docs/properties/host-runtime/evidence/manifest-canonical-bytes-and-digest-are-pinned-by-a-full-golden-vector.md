@@ -26,11 +26,11 @@ pub fn digest(&self) -> String {
 `serde_json::to_vec` on a derived `Serialize` emits fields in declaration order,
 so the byte order is exactly:
 
-- `GenerationManifest`, `generation.rs:224-236`: `schema` (`:225`), `target`
-  (`:226`), `release_contract_sha256` (`:227`), `inputs_lock_sha256` (`:228`),
-  `source_payload_manifest_sha256` (`:234`, attribute at `:233`), `files` (`:235`).
-- `ManifestFile`, `generation.rs:208-213`: `path` (`:209`), `mode` (`:210`),
-  `size` (`:211`), `sha256` (`:212`).
+- `GenerationManifest`, `generation.rs:228-240`: `schema` (`:229`), `target`
+  (`:230`), `release_contract_sha256` (`:231`), `inputs_lock_sha256` (`:232`),
+  `source_payload_manifest_sha256` (`:238`, attribute at `:237`), `files` (`:239`).
+- `ManifestFile`, `generation.rs:212-217`: `path` (`:213`), `mode` (`:214`),
+  `size` (`:215`), `sha256` (`:216`).
 
 The struct's own doc comment at `:148-150` states the contract: "Serialization
 order is fixed by the struct, and `files` is sorted by path, so encoding is

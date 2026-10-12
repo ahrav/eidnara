@@ -42,7 +42,7 @@ match renameat(dir, from, dir, to) {
 }
 ```
 
-The function returns the raw errno; the caller in `generation.rs:1300-1301` maps it
+The function returns the raw errno; the caller in `generation.rs:1304-1305` maps it
 through `classify_errno`. The flagged path returns on `Ok`, `EXIST`, `NOTEMPTY`,
 and every errno other than `INVAL`, `NOSYS`, and `OPNOTSUPP`, so on a current
 Linux kernel with ext4, tmpfs, or overlayfs it never falls through. The
@@ -50,7 +50,7 @@ Linux kernel with ext4, tmpfs, or overlayfs it never falls through. The
 so there the portable path is the only path.
 
 **The two paths differ on empty directories, and the caller says which behaviour is
-required.** `promote_temp`'s doc comment, `generation.rs:1283`:
+required.** `promote_temp`'s doc comment, `generation.rs:1287`:
 
 > `renameat` can replace an empty target directory, bypassing the protected-target
 > check.
@@ -75,7 +75,7 @@ with a bounded wait. The claim is sound for what it says, which is "callers must
 exclude concurrent writers".
 
 **The same file assumes out-of-model writers elsewhere.** The `ValidatedGeneration`
-comments at `generation.rs:319` and `:571` state that the retained descriptor pins
+comments at `generation.rs:323` and `:575` state that the retained descriptor pins
 the validated tree against pathname replacement, which is why the walk goes through a
 retained descriptor rather than a pathname. The catalog's
 `validation-and-enumeration-address-one-directory-object` records two shipped
@@ -94,14 +94,14 @@ directory, for example by a partial removal after a crash. A restage of that dig
 runs on macOS. `rename_no_replace` calls `statat`, which is the moment the target
 must be observed as occupied. If the target is observed as occupied, the function
 returns `Ok(false)` and `promote_temp` proceeds to its validate-and-protect logic at
-`generation.rs:1309-1346`, which refuses the mutation. Correct.
+`generation.rs:1313-1350`, which refuses the mutation. Correct.
 
 If the directory is created in the window between `store_fs.rs:69` and `:74`,
 `statat` returns `NOENT`, the plain `renameat` at `:74` replaces the now-empty
 directory, and the function returns `Ok(true)`. `promote_temp` then takes the early
-return at `generation.rs:1302-1308`, fsyncs, validates the digest, and reports
-success. The protection check at `:1324-1326` never runs, which is precisely the
-sequencing the comment at `:1283` says must not happen: "bypassing the
+return at `generation.rs:1306-1312`, fsyncs, validates the digest, and reports
+success. The protection check at `:1328-1330` never runs, which is precisely the
+sequencing the comment at `:1287` says must not happen: "bypassing the
 protected-target check".
 
 The result is a deleted retained generation with no error and, per
@@ -134,11 +134,11 @@ The occupancy assertion, which passes today and should exist anyway:
 1. Plant an **empty** directory at the digest name, call `promote_temp` through
    `stage_and_promote`, and assert the mutation is refused when the digest is
    protected. This distinguishes the two paths' behaviour on the exact case
-   `generation.rs:1283` names. `an_empty_protected_digest_target_is_never_replaced`
-   (`generation.rs:3465-3487`) is this assertion, on the Linux flagged path only.
+   `generation.rs:1287` names. `an_empty_protected_digest_target_is_never_replaced`
+   (`generation.rs:3471-3493`) is this assertion, on the Linux flagged path only.
 2. Repeat with a **nonempty** corrupt directory. The existing
    `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-   (`generation.rs:2916`) covers the nonempty case indirectly; the empty case has no
+   (`generation.rs:2922`) covers the nonempty case indirectly; the empty case has no
    coverage on the portable path.
 
 Reaching the portable path deterministically needs one of:
@@ -163,11 +163,11 @@ question below resolves toward "yes, out-of-model writers exist".
 - Sources examined: `store_fs.rs:49-52` (the lock justification),
   `lifecycle.rs:37`, `:444-459`, `:473-495` (the lock's name, its documented
   scope, and its acquisition),
-  `generation.rs:319`, `:571` (the pathname-replacement comments),
-  `:1875-1885` (`validate_lifecycle_root_fd`, which checks owner uid and safe
-  ancestry), `:1887-1894` (`open_child_dir`).
+  `generation.rs:323`, `:575` (the pathname-replacement comments),
+  `:1881-1891` (`validate_lifecycle_root_fd`, which checks owner uid and safe
+  ancestry), `:1893-1900` (`open_child_dir`).
 - Findings: the store's own security model is explicitly concerned with hostile
-  planting. `validate_lifecycle_root_fd` at `:1878-1883` rejects a root not owned by
+  planting. `validate_lifecycle_root_fd` at `:1884-1889` rejects a root not owned by
   the expected uid or with unsafe ancestry, and the child-directory open rejects
   group and other mode bits, which the catalog's
   `an-undecidable-quarantine-witness-fails-closed` record examines. Those checks

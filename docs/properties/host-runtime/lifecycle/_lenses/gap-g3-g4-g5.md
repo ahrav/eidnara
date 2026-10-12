@@ -20,14 +20,14 @@ The prompt's references are accurate except for these, which are narrowed:
 - `LivenessPolicy` is `config.rs:234-245`, not `234-300`. The `liveness` field is
   `config.rs:282`, its default `None` is `config.rs:296`, and validation is
   `config.rs:370-382`.
-- The manifest structs are `generation.rs:208-213` (`ManifestFile`) and
-  `:224-236` (`GenerationManifest`), with `canonical_bytes` at `:251-253` and
-  `digest` at `:255-257`. The prompt's `147-177` is stale at HEAD.
+- The manifest structs are `generation.rs:212-217` (`ManifestFile`) and
+  `:228-240` (`GenerationManifest`), with `canonical_bytes` at `:255-257` and
+  `digest` at `:259-261`. The prompt's `147-177` is stale at HEAD.
 - `exchange_dirs` is `store_fs.rs:112-115` (macOS and Linux arm) and
   `:117-120` (the fail-closed stub); the prompt's `1191-1204` is stale at HEAD.
 - `rename_no_replace` is `store_fs.rs:47-79`: doc comment `:47-52`,
   body `:53-79`.
-- The golden test is `generation.rs:2038-2053`, confirmed.
+- The golden test is `generation.rs:2044-2059`, confirmed.
 
 ## G3 observations: normal configured liveness
 
@@ -344,7 +344,7 @@ unconditionally, because `RENAME_NOREPLACE` makes the occupant's emptiness
 irrelevant. The fallback path enforces it only for the interval between the
 `statat` and the `renameat`, and only against actors inside the trust model. An
 empty directory that appears at `to` in that window is silently replaced, which
-is exactly the outcome `generation.rs:1283` says must not happen.
+is exactly the outcome `generation.rs:1287` says must not happen.
 
 The justification is a prose claim about `transaction.lock`
 (`lifecycle.rs:44`, `:495-496`, `:534`), not a mechanism in
@@ -619,7 +619,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - the Linux arm has one test through `promote_temp`
-(`generation.rs:2916`), and the macOS arm has never executed under observation.
+(`generation.rs:2922`), and the macOS arm has never executed under observation.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
 atomically inside one directory, or an error is returned and neither name is left
 unoccupied; on a platform without the primitive it fails closed.
@@ -645,13 +645,13 @@ depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing test
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-(`generation.rs:2916`) already builds that fixture, so the fault is available; the
+(`generation.rs:2922`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
 Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
 read at HEAD; the claim that no macOS lifecycle or generation test executes is
 derived from the four host-runtime steps in that job rather than asserted.
-Existing check: partial, Linux only. `generation.rs:2916`
+Existing check: partial, Linux only. `generation.rs:2922`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
 branch. CI's macOS job (`the source repository`ci.yml`workflow:126-184`) runs only
 `cargo build -p host-runtime` (`:156`), `--test shm_soak` (`:178`), one filtered
@@ -684,7 +684,7 @@ it returns `Ok(false)` and leaves both names as they were. Run the assertion for
 an empty occupant and a nonempty occupant, on both the flagged Linux path and the
 portable path, forcing the portable path either by a filesystem that rejects
 `renameat2` flags or by extracting the fallback so it can be called directly.
-`always` because the caller's contract at `generation.rs:1283` is
+`always` because the caller's contract at `generation.rs:1287` is
 unconditional, so an occupied target that gets replaced is a violation rather
 than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one platform
@@ -694,7 +694,7 @@ only on `INVAL`, `NOSYS`, or `OPNOTSUPP`, so on a current kernel with ext4,
 tmpfs, or overlayfs the fallback never runs. On macOS that block is absent by
 cfg, so `statat` at `:69-73` followed by `renameat` at `:74-78` is the
 only path. POSIX `rename` replaces an existing *empty* directory, which
-`promote_temp`'s comment at `generation.rs:1283` calls out by name as the thing that must
+`promote_temp`'s comment at `generation.rs:1287` calls out by name as the thing that must
 not happen, so the flagged path and the fallback do not implement the same
 guarantee. The fallback's justification at `:1211-1215` is a prose claim that
 `transaction.lock` (`lifecycle.rs:44`, `:495-496`) excludes concurrent creation.
