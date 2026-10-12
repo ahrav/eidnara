@@ -406,12 +406,12 @@ pub fn build(
     };
     let vectors = rows.iter().map(|row| row.vector.as_slice());
     let rows_bytes = codec::encode_rows(&layout, vectors.clone()).map_err(VectorRefusal::Rows)?;
-    let calibration =
-        scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
-    let codes =
-        encode_all(&layout, &calibration.scales, vectors).map_err(|(index, rejection)| {
-            VectorRefusal::Rows(codec::ArtifactRejection::Row { index, rejection })
-        })?;
+    let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
+    vectors
+        .clone()
+        .for_each(|row| calibrator.push_validated(row));
+    let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
+    let codes = encode_all(&layout, &calibration.scales, vectors);
     let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
     let payloads = [
         rows_bytes,
@@ -1275,19 +1275,21 @@ pub(crate) fn check_identity(
     Ok(())
 }
 
-/// The codes of every row, concatenated in row order; the first row the recipe refuses is reported with its index.
+/// Callers supply rows [`codec::validate`] has accepted under `layout`.
 fn encode_all<'a>(
     layout: &RowLayout,
     scales: &Scales,
     rows: impl Iterator<Item = &'a [f32]>,
-) -> Result<Vec<u8>, (usize, codec::RowRejection)> {
-    let mut codes = Vec::with_capacity(rows.size_hint().0 * layout.dimension as usize);
-    for (index, row) in rows.enumerate() {
-        let encoded =
-            scalar::encode(layout, scales, row).map_err(|rejection| (index, rejection))?;
-        codes.extend(encoded.codes.iter().map(|code| *code as u8));
+) -> Vec<u8> {
+    let dimension = layout.dimension as usize;
+    let encoder = scalar::Encoder::new(scales);
+    let mut codes = Vec::with_capacity(rows.size_hint().0 * dimension);
+    for row in rows {
+        let start = codes.len();
+        codes.resize(start + dimension, 0);
+        encoder.encode_into(row, &mut codes[start..]);
     }
-    Ok(codes)
+    codes
 }
 
 /// `O_EXCL` so a build never overwrites a file another build left behind.
