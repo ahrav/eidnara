@@ -293,8 +293,10 @@ function buildTransformBody(
 }
 
 /**
- * The CK window of an OpenCode message array. Compaction summary rows leave the window, and every
- * kept message carries its unfiltered window position, which names its synthetic tool calls.
+ * The CK window of an OpenCode message array, the oracle the daemon's OpenCode codec derives to
+ * (`__fixtures__/opencode-codec-parity.json`); a pass sends the native window alone. Compaction
+ * summary rows leave the window, and every kept message carries its unfiltered window position,
+ * which names its synthetic tool calls.
  */
 export function encodeOpenCodeWindowToCk(
     messages: readonly unknown[],

@@ -13603,6 +13603,47 @@ pub(crate) mod tests {
         }
     }
 
+    /// Each stage is the span between its two instants, and the derivation's span is reported
+    /// as `derive_ck` and taken out of the `lane_gate_and_decode` bracket that holds it.
+    #[test]
+    fn the_stage_ledger_reports_the_derivation_apart_from_the_decode() {
+        let base = Instant::now();
+        let at = |ms: u64| base + std::time::Duration::from_millis(ms);
+        let served = req("ledger", "cfg0", Vec::new());
+        let instants = |derive_ck| LedgerInstants {
+            received_at: at(0),
+            admitted_at: at(1),
+            derive_ck,
+            core_started_at: at(10),
+            native_attach_started_at: at(12),
+            native_attach_ended_at: at(13),
+        };
+        let derived = DaemonStageLedger::measure(instants(Some((at(2), at(5)))), &served);
+        assert_eq!(
+            (
+                derived.admit_us,
+                derived.lane_gate_and_decode_us,
+                derived.derive_ck_us,
+                derived.transform_core_us,
+                derived.native_attach_us,
+            ),
+            (1_000, 6_000, Some(3_000), 2_000, 1_000)
+        );
+        let ck = DaemonStageLedger::measure(instants(None), &served);
+        assert_eq!((ck.lane_gate_and_decode_us, ck.derive_ck_us), (9_000, None));
+        for ledger in [derived, ck] {
+            assert_eq!(
+                ledger.admit_us
+                    + ledger.lane_gate_and_decode_us
+                    + ledger.derive_ck_us.unwrap_or_default()
+                    + ledger.transform_core_us
+                    + ledger.native_attach_us
+                    + ledger.residual_us,
+                ledger.total_us
+            );
+        }
+    }
+
     pub(crate) fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,

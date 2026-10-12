@@ -91,12 +91,15 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
         // messages: the window's synthetic history bytes, its non-history turns aside.
         const windowHistoryBytes = (pass: RustPassLine) =>
             Math.max(0, pass.inputCount - NON_HISTORY_MESSAGES) * HISTORY_TEXT_BYTES;
+        // A fold keeps a suffix of the history, never a tail delta of a few messages.
+        expect(smallSends.every((pass) => pass.inputCount > HISTORY_MESSAGES / 2)).toBe(true);
         expect(smallSends.every((pass) => pass.applied)).toBe(true);
         expect(smallSends.every((pass) => pass.transportBytes > windowHistoryBytes(pass))).toBe(
             true,
         );
         expect(smallSends.every((pass) => pass.transportPages === 1)).toBe(true);
 
+        expect(largeTail.inputCount).toBeGreaterThan(HISTORY_MESSAGES / 2);
         expect(largeTail.applied).toBe(true);
         expect(largeTail.transportBytes).toBeGreaterThan(
             windowHistoryBytes(largeTail) + TAIL_BYTES_FLOOR,

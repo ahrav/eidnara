@@ -116,6 +116,14 @@ fn opencode_windows() -> Vec<(&'static str, Vec<Value>)> {
         ("idless", (0..2_000).map(|i| json!({ "role": "assistant", "parts": [
             { "type": "tool", "tool": "read", "state": { "status": "pending", "input": { "path": format!("/p/{i}") } } }
         ] })).collect()),
+        // An id-less message is named by a hash of its encoding, whose escapes run six bytes
+        // to each control character.
+        (
+            "idless_escaped",
+            (0..4)
+                .map(|_| json!({ "role": "user", "parts": [{ "type": "text", "text": "\u{1}".repeat(1 << 20) }] }))
+                .collect(),
+        ),
         ("scalar_parts", vec![json!({ "info": { "id": "m" }, "parts": vec![json!(0); 50_000] })]),
         ("bare_tools", vec![json!({ "info": { "id": "m" }, "parts": vec![json!({ "type": "tool" }); 50_000] })]),
         ("bare_tools_completed", vec![json!({ "parts": vec![json!({ "type": "tool", "state": { "status": "error" } }); 50_000] })]),
@@ -145,6 +153,15 @@ fn pi_windows() -> Vec<(&'static str, Vec<Value>)> {
         ("scalar_blocks", vec![pi(1, json!({ "role": "user", "content": vec![json!(0); 50_000], "timestamp": 1 }))]),
         ("bare_calls", vec![pi(1, json!({ "role": "assistant", "content": vec![json!({ "type": "toolCall" }); 50_000], "timestamp": 1 }))]),
         ("long_ids", (0..8).map(|i| pi(0, json!({ "role": "user", "content": "x", "timestamp": 1 })).as_object().cloned().map(|mut row| { row.insert("id".into(), json!(format!("{i}{}", "a".repeat(1 << 20)))); Value::Object(row) }).unwrap()).collect()),
+        ("bash_output", vec![pi(1, json!({ "role": "bashExecution", "command": "ls", "output": long, "exitCode": 2, "timestamp": 1 }))]),
+        ("bash_command_and_path", vec![pi(1, json!({
+            "role": "bashExecution", "command": long, "output": long, "truncated": true,
+            "fullOutputPath": long, "cancelled": true, "timestamp": 1
+        }))]),
+        ("long_summaries", vec![
+            json!({ "id": "eidnara:branchSummary:00000001", "message": { "role": "branchSummary", "summary": long, "timestamp": 1 } }),
+            json!({ "id": "eidnara:compactionSummary:00000002", "message": { "role": "compactionSummary", "summary": long, "tokensBefore": 1, "timestamp": 1 } }),
+        ]),
         ("bash", (0..20_000).map(|i| pi(i, json!({ "role": "bashExecution", "command": "", "timestamp": 1 }))).collect()),
         ("summaries", (0..20_000).map(|i| json!({ "id": format!("eidnara:branchSummary:{i:08x}"), "message": { "role": "branchSummary", "summary": "", "timestamp": 1 } })).collect()),
     ]

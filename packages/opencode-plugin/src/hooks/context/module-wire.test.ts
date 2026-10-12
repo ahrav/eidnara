@@ -787,6 +787,8 @@ describe("transform page digest canonical JSON", () => {
     });
 });
 
+// The pager splits a window array without reading its items, so the bodies below page
+// arbitrary values under `native_messages`.
 describe("buildPagedModuleTransformPayloads byte reuse", () => {
     it("returns the first stringify length on the unpaged path", () => {
         const body = {

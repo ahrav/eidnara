@@ -14176,18 +14176,29 @@ fn derive_native_window(
     meter
         .charge(codec::derived_ck_charge(native))
         .map_err(resident_refusal)?;
-    let messages = match profile {
+    request.messages = derive_ck(profile, native)?.into_iter().collect();
+    Ok(Some((started_at, Instant::now())))
+}
+
+/// The CK a native profile's codec derives from `native`, or the refusal its codec answers: a Pi
+/// row decline as `invalid_params`, and an OpenCode creation time the request decode would refuse
+/// as `bad_request`.
+fn derive_ck(
+    profile: SerializerProfile,
+    native: &[Arc<Value>],
+) -> Result<Vec<wire::IngressMessage>, PreparedOutcome> {
+    match profile {
         SerializerProfile::Pi => codec::pi::derive_pi_window(native)
-            .map_err(|decline| invalid_params_error(decline.to_string()))?,
-        _ => codec::opencode::derive_opencode_window(native).map_err(|error| {
-            PreparedOutcome::Error {
+            .map_err(|decline| invalid_params_error(decline.to_string())),
+        SerializerProfile::OpencodeAiSdk => codec::opencode::derive_opencode_window(native)
+            .map_err(|error| PreparedOutcome::Error {
                 code: "bad_request".to_string(),
                 message: error.to_string(),
-            }
-        })?,
-    };
-    request.messages = messages.into_iter().collect();
-    Ok(Some((started_at, Instant::now())))
+            }),
+        SerializerProfile::OwnedLlmRunner
+        | SerializerProfile::OwnedModelExecution
+        | SerializerProfile::ClaudeCodeAnthropic => Ok(Vec::new()),
+    }
 }
 
 fn attach_native_messages(
@@ -16882,16 +16893,14 @@ pub fn derive_native_window_for_test(
     profile: &str,
     native: &[Arc<Value>],
 ) -> Result<wire::IngressMessages, String> {
-    let messages = match SerializerProfile::parse(profile) {
-        Some(SerializerProfile::Pi) => {
-            codec::pi::derive_pi_window(native).map_err(|decline| decline.to_string())?
-        }
-        Some(SerializerProfile::OpencodeAiSdk) => {
-            codec::opencode::derive_opencode_window(native).map_err(|error| error.to_string())?
-        }
-        _ => return Err(format!("{profile} derives no CK")),
-    };
-    Ok(messages.into_iter().collect())
+    let profile = SerializerProfile::parse(profile)
+        .filter(|profile| profile.serves_native())
+        .ok_or_else(|| format!("{profile} derives no CK"))?;
+    match derive_ck(profile, native) {
+        Ok(messages) => Ok(messages.into_iter().collect()),
+        Err(PreparedOutcome::Error { code, message }) => Err(format!("{code}: {message}")),
+        Err(other) => Err(format!("{other:?}")),
+    }
 }
 
 /// The steps `Handler::handle` runs on a sub-cap body before `dispatch_body`, against
@@ -18223,7 +18232,9 @@ impl Handler {
         };
         let native = serves_native_body(&request);
         // A native profile sends its native window alone, as the plugins send it; a test that
-        // states its window in CK sends the native window that derives it.
+        // states its window in CK sends the native window that derives it. A test that states
+        // both sends its native window, so its stated CK goes unread; a test of the mixed shape
+        // dispatches without this client.
         if native && let Some(body) = request.as_object_mut() {
             let stated = body.remove("messages");
             if body.get("native_messages").is_none()

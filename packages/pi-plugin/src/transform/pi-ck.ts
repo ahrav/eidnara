@@ -294,8 +294,8 @@ export function isPiRole(role: unknown): role is PiRole {
 }
 
 /**
- * Encodes rows as the CK window the daemon reads beside them. A row outside the closed role
- * set throws, so the adapter declines the pass instead of sending a window the daemon refuses.
+ * Encodes rows as the CK window the daemon derives from them, the oracle of the Pi codec parity
+ * fixture; a pass sends the rows alone. A row outside the closed role set throws.
  */
 export function encodePiRowsToCk(rows: readonly PiRow[]): PiCkMessage[] {
     return rows.map((row, index) => {

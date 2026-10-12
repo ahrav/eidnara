@@ -292,18 +292,22 @@ fn decode_content(message: &Value, role: PiRole, ordinal: u64) -> (Vec<WireBlock
         PiRole::BranchSummary => push_message_text(
             &mut content,
             &mut block_metas,
-            format!(
-                "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
-                string_field(message, "summary").unwrap_or_default()
-            ),
+            [
+                BRANCH_SUMMARY_PREFIX,
+                message["summary"].as_str().unwrap_or_default(),
+                BRANCH_SUMMARY_SUFFIX,
+            ]
+            .concat(),
         ),
         PiRole::CompactionSummary => push_message_text(
             &mut content,
             &mut block_metas,
-            format!(
-                "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
-                string_field(message, "summary").unwrap_or_default()
-            ),
+            [
+                COMPACTION_SUMMARY_PREFIX,
+                message["summary"].as_str().unwrap_or_default(),
+                COMPACTION_SUMMARY_SUFFIX,
+            ]
+            .concat(),
         ),
     }
     (content, block_metas)
@@ -343,24 +347,34 @@ fn classify_row(index: usize, row: &Value) -> Result<(&str, &Value, PiRole), PiD
 
 /// Pi 0.80.2 `bashExecutionToText`.
 fn bash_execution_text(message: &Value) -> String {
-    let command = string_field(message, "command").unwrap_or_default();
-    let mut text = format!("Ran `{command}`\n");
-    match string_field(message, "output").filter(|output| !output.is_empty()) {
-        Some(output) => text.push_str(&format!("```\n{output}\n```")),
-        None => text.push_str("(no output)"),
-    }
+    let field = |key| message.get(key).and_then(Value::as_str);
+    let command = field("command").unwrap_or_default();
+    let output = field("output").filter(|output| !output.is_empty());
     let exit_code = message.get("exitCode").and_then(Value::as_i64);
-    if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
-        text.push_str("\n\n(command cancelled)");
-    } else if let Some(code) = exit_code.filter(|code| *code != 0) {
-        text.push_str(&format!("\n\nCommand exited with code {code}"));
+    let status = if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        Some("\n\n(command cancelled)".to_string())
+    } else {
+        exit_code
+            .filter(|code| *code != 0)
+            .map(|code| format!("\n\nCommand exited with code {code}"))
+    };
+    let path = (message.get("truncated").and_then(Value::as_bool) == Some(true))
+        .then(|| field("fullOutputPath"))
+        .flatten()
+        .filter(|path| !path.is_empty());
+    // The pieces borrow the row and the text is sized once, so a long output is copied once.
+    let mut pieces = vec!["Ran `", command, "`\n"];
+    match output {
+        Some(output) => pieces.extend(["```\n", output, "\n```"]),
+        None => pieces.push("(no output)"),
     }
-    if message.get("truncated").and_then(Value::as_bool) == Some(true)
-        && let Some(path) = string_field(message, "fullOutputPath").filter(|path| !path.is_empty())
-    {
-        text.push_str(&format!("\n\n[Output truncated. Full output: {path}]"));
+    if let Some(status) = &status {
+        pieces.push(status);
     }
-    text
+    if let Some(path) = path {
+        pieces.extend(["\n\n[Output truncated. Full output: ", path, "]"]);
+    }
+    pieces.concat()
 }
 
 /// Encodes canonical messages as Pi rows, reusing the window's rows matched by mid.
@@ -2278,6 +2292,18 @@ mod tests {
             return;
         }
         assert_eq!(Value::Array(derived), fixture["expected"]);
+        // The production derivation gives the same CK, its ordinal the only daemon field.
+        let window: Vec<Value> = derive_pi_window(&rows)
+            .unwrap()
+            .into_iter()
+            .map(|message| {
+                assert_eq!((message.ordinal, message.ck.meta.ordinal), (0, None));
+                let mut value = serde_json::to_value(message).unwrap();
+                value.as_object_mut().unwrap().remove("ordinal");
+                value
+            })
+            .collect();
+        assert_eq!(Value::Array(window), fixture["expected"]);
     }
 
     #[test]

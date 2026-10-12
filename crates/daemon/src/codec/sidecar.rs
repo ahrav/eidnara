@@ -643,12 +643,31 @@ fn optimal_block_metas<'a>(
 /// Serialization failure hashes an empty byte sequence. Requests above 64 characters
 /// return the full 64-character digest.
 pub fn stable_hash_prefix(value: &Value, chars: usize) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    let digest = Sha256::digest(bytes);
+    // The compact bytes stream into the digest, so hashing allocates nothing in proportion to
+    // the value, whose escapes can make its encoding several times its retained size.
+    let mut hasher = DigestWriter(Sha256::new());
+    let digest = match serde_json::to_writer(&mut hasher, value) {
+        Ok(()) => hasher.0.finalize(),
+        Err(_) => Sha256::digest([]),
+    };
     hex_prefix(&digest, chars.div_ceil(2))
         .chars()
         .take(chars)
         .collect()
+}
+
+/// Feeds every byte written to it into its digest.
+struct DigestWriter(Sha256);
+
+impl std::io::Write for DigestWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn hex_prefix(bytes: &[u8], count: usize) -> String {
