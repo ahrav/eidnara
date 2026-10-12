@@ -1063,6 +1063,13 @@ fn a_walk_cancelled_mid_flight_ends_on_its_own_set_while_a_publish_prune_and_new
     let (replaced, new_base) = publish_replacement(&fixture, &corpus, 2);
     let report = fixture.store.prune(&BTreeSet::new()).unwrap();
     assert_eq!((report.removed_generations, report.retained_pinned), (0, 1));
+    // The held walk's handle keeps the ledger's pin on the old record and its base, and the prune's readback stays within it.
+    let reconciliation = fixture.ledger.reconcile(&report);
+    assert_eq!(
+        reconciliation.ledger_pinned,
+        manifest_bytes(&fixture, &[old_digest.clone(), old_base.digest.clone()])
+    );
+    assert!(!reconciliation.unaccounted());
     for retained in [&old_digest, &old_base.digest] {
         assert!(fixture.generations().contains(retained));
         assert!(!try_exclusive(&fixture.generation_dir(retained)));
@@ -1070,7 +1077,8 @@ fn a_walk_cancelled_mid_flight_ends_on_its_own_set_while_a_publish_prune_and_new
     let new_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     assert_eq!(new_view.members(), vec![new_base.digest.clone()]);
 
-    // The new reader's ranking starts during the overlap and runs once the held walk frees the connection.
+    // The new reader's thread signals immediately before its ranking call, and the held walk is released only after that signal,
+    // so the call begins during the overlap; it completes once the held walk frees the connection.
     let new_work = Work {
         view: Arc::clone(&new_view),
         projection_store: Arc::clone(&projection.store),
@@ -1081,9 +1089,18 @@ fn a_walk_cancelled_mid_flight_ends_on_its_own_set_while_a_publish_prune_and_new
         grant: fixture.admission.clone(),
     };
     let (ranked, ranking_new) = mpsc::channel();
+    let (calling, called) = mpsc::channel::<()>();
     let new_reader = std::thread::spawn(move || {
+        calling.send(()).unwrap();
         ranked.send(new_work.run(&EvalBudget::unbounded())).unwrap();
     });
+    called
+        .recv_timeout(STEP)
+        .expect("the new reader reaches its ranking call");
+    assert!(
+        ranking_new.try_recv().is_err(),
+        "the new reader cannot rank while the held walk owns the connection"
+    );
     interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
     release.send(()).unwrap();
     let (walked, ranking, visited) = finishing
