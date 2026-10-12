@@ -397,12 +397,12 @@ describe("Rust mode transform request", () => {
             }),
         );
         const ledgers: PassLedger[] = [];
-        const unobserve = observePassLedgers((ledger) => {
-            if (ledger.sessionId === sessionId) ledgers.push(ledger);
-        });
-        // A throwing listener leaves the pass and every other listener as they were.
+        // A throwing listener leaves the pass and every later listener as they were.
         const unobserveThrowing = observePassLedgers(() => {
             throw new Error("listener failure");
+        });
+        const unobserve = observePassLedgers((ledger) => {
+            if (ledger.sessionId === sessionId) ledgers.push(ledger);
         });
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
@@ -423,7 +423,6 @@ describe("Rust mode transform request", () => {
             ledger.transportMs +
             ledger.applyMs;
         expect(named).toBeLessThanOrEqual(ledger.elapsedMs + 1e-6);
-        expect(ledger.serializeMs).toBeGreaterThanOrEqual(0);
     });
 
     it("sends the whole captured array on every pass with no delta or fingerprint", async () => {

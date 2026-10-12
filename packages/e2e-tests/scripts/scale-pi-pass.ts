@@ -268,13 +268,6 @@ async function measureSession(
     const seed = baseSeed + index * 7 + tiers.indexOf(tier);
     const file = join(root, "session.jsonl");
     const sessionId = writePiTier(file, { messages, window: windowSize, seed, cwd: project });
-    // A plugin from before the stage ledger observes nothing, so its rows carry none.
-    const unobserve: () => void =
-        runtime.client.observePassLedgers?.(
-            (ledger: ObservedPassLedger & { sessionId: string }) => {
-                if (ledger.sessionId === sessionId) pass.ledger = ledger;
-            },
-        ) ?? (() => undefined);
     seedCoverage(evalRunnerBin, dataDir, sessionId, (messages - windowSize) / 2);
     const summarizer = join(root, "summarizer.ts");
     writeFileSync(summarizer, SUMMARIZER, { mode: 0o700 });
@@ -369,6 +362,13 @@ async function measureSession(
     session.subscribe((event: { type: string; result?: unknown }) => {
         if (event.type === "compaction_end" && event.result) evictions += 1;
     });
+    // A plugin from before the stage ledger observes nothing, so its rows carry none.
+    const unobserve: () => void =
+        runtime.client.observePassLedgers?.(
+            (ledger: ObservedPassLedger & { sessionId: string }) => {
+                if (ledger.sessionId === sessionId) pass.ledger = ledger;
+            },
+        ) ?? (() => undefined);
     try {
         for (let turn = 0; turn < samples; turn += 1) {
             if (performance.now() >= deadline) break;

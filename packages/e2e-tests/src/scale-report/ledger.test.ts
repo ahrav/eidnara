@@ -17,7 +17,6 @@ const daemonLedger = {
 };
 
 const observed = {
-    elapsedMs: 24.5,
     prefixGuardMs: 2.1,
     prepareMs: 0.4,
     wireBuildMs: 3.3,

@@ -1139,11 +1139,15 @@ jobs:
           fi
           if [ -n "$SCALE_SAMPLES" ]; then
             if [ "$SCALE_DRIVER" = pi-pass ]; then
-              measured_flags=(--sessions 1 --samples "$SCALE_SAMPLES" --steady "$SCALE_STEADY")
+              measured_flags=(--sessions 1 --samples "$SCALE_SAMPLES" --steady "${SCALE_STEADY:-0}")
+              # The base arm never transforms, so it reaches no steady pass and runs every sample.
+              base_flags=(--sessions 1 --samples "$SCALE_SAMPLES")
             else
               measured_flags=(--samples "$SCALE_SAMPLES")
+              base_flags=("${measured_flags[@]}")
             fi
-            base_flags=("${measured_flags[@]}")
+          elif [ "${SCALE_STEADY:-0}" != 0 ]; then
+            echo "scale_steady requires scale_samples" >&2; exit 1
           fi
           out="$RUNNER_TEMP/scale"
           runner="$PWD/target/release/examples/eval_runner"

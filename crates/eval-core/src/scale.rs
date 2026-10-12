@@ -1298,6 +1298,17 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(keys, expected);
         assert!(row_measurements().all(|field| value.get(field).is_some()));
+
+        // The report names each summarized value by position, so every name must label its own
+        // field's value.
+        let mut distinct = value.clone();
+        for (i, field) in ledger_fields().enumerate() {
+            distinct[field] = serde_json::json!(i + 1);
+        }
+        let row: PassRow = serde_json::from_value(distinct.clone()).unwrap();
+        for (name, value) in stage_fields().zip(row.stage_values()) {
+            assert_eq!(value, distinct[name].as_u64(), "{name}");
+        }
     }
 
     /// Sessions whose passes all share one value pool to a p99 equal to the largest value among

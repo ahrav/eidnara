@@ -11,7 +11,6 @@ import { NO_LEDGER, type PassRow } from "./rows";
 
 /** The plugin's pass ledger, as `observePassLedgers` delivers it. */
 export interface ObservedPassLedger {
-    elapsedMs: number;
     prefixGuardMs: number;
     prepareMs: number;
     wireBuildMs: number;
