@@ -460,6 +460,7 @@ pub(super) fn selection_child(root: &Path, cut: &str) {
                 SelectionEvent::Copied => "select-copy",
                 SelectionEvent::Profile(event) => match event {
                     ProfileEvent::BeforeTempWrite => "select-before-temp-write",
+                    ProfileEvent::BeforeTempSync => "select-before-temp-sync",
                     ProfileEvent::AfterTempSync => "select-after-temp-sync",
                     ProfileEvent::BeforeRename => "select-before-rename",
                     ProfileEvent::AfterRename => "select-after-rename",
@@ -529,6 +530,9 @@ pub(super) fn selection_child(root: &Path, cut: &str) {
 #[test]
 fn selector_process_cuts_reopen_twice_without_releasing_old_consumers() {
     for cut in [
+        "select-before-temp-write",
+        "select-before-temp-sync",
+        "select-after-temp-sync",
         "select-before-rename",
         "select-after-rename",
         "select-before-sync",
@@ -546,7 +550,13 @@ fn selector_process_cuts_reopen_twice_without_releasing_old_consumers() {
             let reader = selection
                 .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
                 .unwrap();
-            let expected = if cut == "select-before-rename" {
+            let expected = if matches!(
+                cut,
+                "select-before-temp-write"
+                    | "select-before-temp-sync"
+                    | "select-after-temp-sync"
+                    | "select-before-rename"
+            ) {
                 "before"
             } else {
                 "after"

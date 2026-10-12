@@ -132,6 +132,8 @@ pub enum CompositionRefusal {
         expected: Option<String>,
         selected: Option<String>,
     },
+    #[error("publication requires the exclusive lifecycle transaction")]
+    SharedTransaction,
     #[error("the composition is not a vector composition: {0}")]
     NotComposition(&'static str),
     #[error("member {digest}: {refusal}")]
@@ -271,6 +273,8 @@ pub struct PublishFailure {
 /// Stages `composition` through `staging` and points the vector selector at it. `observer` sees every selector event after this function has recorded it. A composition whose sequence does not exceed the selected composition's is refused, so two publishers under the same lock cannot reorder the namespace.
 /// `predecessor` is the digest the vector selector named when the caller read the selection it composed from, or `None` when nothing was selected. Publication refuses with [`CompositionRefusal::Predecessor`] before staging unless the selector still names it, so a composition built from a stale selection cannot replace a newer one and drop its deltas.
 ///
+/// The predecessor check and the selector rename are atomic only under the exclusive lifecycle transaction of the store `staging` writes to: a shared `staging.transaction` is refused with [`CompositionRefusal::SharedTransaction`] before any read. The caller acquires that transaction on the same lifecycle root as `staging.store`; the lock does not record its root.
+///
 /// # Errors
 ///
 /// A failure carries how far the attempt is known to have gone; a failure at or after `Acknowledged` is an unknown outcome the caller settles with [`reconcile`].
@@ -283,6 +287,9 @@ pub fn publish(
 ) -> Result<String, Box<PublishFailure>> {
     let mut progress = Progress::NotStaged;
     let fail = |progress: Progress, refusal| Box::new(PublishFailure { progress, refusal });
+    if !staging.transaction.is_exclusive() {
+        return Err(fail(progress, CompositionRefusal::SharedTransaction));
+    }
     let (selected_digest, selected_sequence) =
         selection(staging.store).map_err(|refusal| fail(progress, refusal))?;
     if let Some(selected) = selected_sequence
@@ -340,6 +347,7 @@ pub fn publish(
                 ProfileEvent::AfterRename => progress = Progress::Acknowledged,
                 ProfileEvent::AfterDirectorySync => progress = Progress::Durable,
                 ProfileEvent::BeforeTempWrite
+                | ProfileEvent::BeforeTempSync
                 | ProfileEvent::AfterTempSync
                 | ProfileEvent::BeforeRename
                 | ProfileEvent::BeforeDirectorySync => {}

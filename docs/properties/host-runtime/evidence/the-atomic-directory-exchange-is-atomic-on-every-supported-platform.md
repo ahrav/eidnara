@@ -119,7 +119,7 @@ reachable here.
 
 ## What a test must construct
 
-The fixture already exists. `generation.rs:2928`
+The fixture already exists. `generation.rs:2940`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives
 `promote_temp` into the exchange branch: `:1705` covers the protected corrupt
 target being refused and `:1714-1721` covers the unprotected case exchanging

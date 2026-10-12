@@ -256,8 +256,9 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
 }
 
 /// Every selector event in the order a publication reports it; the frozen matrix below cuts each one.
-const SELECTOR_CELLS: [ProfileEvent; 6] = [
+const SELECTOR_CELLS: [ProfileEvent; 7] = [
     ProfileEvent::BeforeTempWrite,
+    ProfileEvent::BeforeTempSync,
     ProfileEvent::AfterTempSync,
     ProfileEvent::BeforeRename,
     ProfileEvent::AfterRename,
@@ -268,7 +269,10 @@ const SELECTOR_CELLS: [ProfileEvent; 6] = [
 fn precedes_selector_rename(cut: ProfileEvent) -> bool {
     matches!(
         cut,
-        ProfileEvent::BeforeTempWrite | ProfileEvent::AfterTempSync | ProfileEvent::BeforeRename
+        ProfileEvent::BeforeTempWrite
+            | ProfileEvent::BeforeTempSync
+            | ProfileEvent::AfterTempSync
+            | ProfileEvent::BeforeRename
     )
 }
 
@@ -304,11 +308,11 @@ fn a_publication_reports_exactly_the_frozen_selector_events() {
     assert_eq!(seen, SELECTOR_CELLS);
 }
 
-/// Hook-simulated: each cell fails once with the error the store reports for `EIO` and once with the error it reports for `ENOSPC`; neither is kernel `fsync` evidence.
+/// Hook-simulated: the selector observer returns a ready-made `GenerationError`, so each cell fails once with a payload fault and once with `InsufficientStorage`, the classes the store gives `EIO` and `ENOSPC` or `EDQUOT`; neither is kernel `fsync` evidence.
 #[test]
 fn every_selector_cut_leaves_the_old_or_the_new_complete_selection_and_reconciles_by_digest() {
     let eio = || GenerationError::NativePayloadInvalid {
-        detail: "lifecycle root fsync failed",
+        detail: "hook: injected selector fault",
     };
     for cut in SELECTOR_CELLS {
         for exhausted in [false, true] {
@@ -358,6 +362,7 @@ fn selector_cut(cut: ProfileEvent, exhausted: bool, eio: &dyn Fn() -> Generation
     }
     let expected_progress = match cut {
         ProfileEvent::BeforeTempWrite
+        | ProfileEvent::BeforeTempSync
         | ProfileEvent::AfterTempSync
         | ProfileEvent::BeforeRename => Progress::Staged,
         ProfileEvent::AfterRename | ProfileEvent::BeforeDirectorySync => Progress::Acknowledged,
@@ -436,10 +441,7 @@ fn selector_cut(cut: ProfileEvent, exhausted: bool, eio: &dyn Fn() -> Generation
 
 const SELECTOR_KILL_CELL: &str = "EIDNARA_SELECTOR_KILL_CELL";
 const SELECTOR_KILL_WITNESS: &str = "EIDNARA_SELECTOR_KILL_WITNESS";
-/// The signal `std::process::abort` raises.
-const SIGABRT: i32 = 6;
-
-/// Each child publishes a first composition, then aborts inside the publication of a second at one selector event after writing and syncing a witness that names its store and both digests. The parent checks the abort, reopens the abandoned store twice on fresh handles, reconciles, finds the old or the new complete composition selected, and converges by retrying from the predecessor it reads. Process crash, not power loss.
+/// Each child publishes a first composition, then kills itself with `SIGKILL`, which writes no core dump, inside the publication of a second at one selector event after writing and syncing a witness that names its store and both digests. The parent checks the kill, reopens the abandoned store twice on fresh handles, reconciles, finds the old or the new complete composition selected, and converges by retrying from the predecessor it reads. Process crash, not power loss.
 #[test]
 fn a_process_killed_at_every_selector_event_leaves_the_old_or_the_new_complete_selection() {
     if let Some(index) = std::env::var_os(SELECTOR_KILL_CELL) {
@@ -463,7 +465,12 @@ fn a_process_killed_at_every_selector_event_leaves_the_old_or_the_new_complete_s
                     writeln!(file, "{}", new.digest()).unwrap();
                     write!(file, "{cut:?}").unwrap();
                     file.sync_all().unwrap();
-                    std::process::abort();
+                    rustix::process::kill_process(
+                        rustix::process::getpid(),
+                        rustix::process::Signal::KILL,
+                    )
+                    .unwrap();
+                    unreachable!("SIGKILL ends the process");
                 }
                 Ok(())
             },
@@ -488,8 +495,8 @@ fn a_process_killed_at_every_selector_event_leaves_the_old_or_the_new_complete_s
             .unwrap();
         assert_eq!(
             output.status.signal(),
-            Some(SIGABRT),
-            "declared cell {cut:?} did not abort the child: {}\n{}",
+            Some(libc::SIGKILL),
+            "declared cell {cut:?} did not kill the child: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -531,7 +538,7 @@ fn selector_kill_recovers(parent: &Fixture, root: &Path, cut: ProfileEvent, old:
     let temps = profile_temps_in(store.root()).len();
     let abandoned_temp = matches!(
         cut,
-        ProfileEvent::AfterTempSync | ProfileEvent::BeforeRename
+        ProfileEvent::BeforeTempSync | ProfileEvent::AfterTempSync | ProfileEvent::BeforeRename
     );
     assert_eq!(temps, usize::from(abandoned_temp), "{cut:?}");
     let verify = |digest: &str| {
@@ -712,13 +719,32 @@ fn a_composition_built_from_a_stale_selection_is_refused_and_no_accepted_delta_i
     );
 }
 
-/// A predecessor of `None` publishes only into an empty selector, and a selector that appeared since is refused.
+/// A predecessor of `None` publishes only into an empty selector, a selector that appeared since is refused, and a named predecessor is refused while nothing is selected.
 #[test]
 fn a_first_publication_requires_an_empty_selector() {
     let fixture = Fixture::new();
     let base = fixture.layer(1, 10);
     let first = fixture.compose(1, &base, &[]).unwrap();
     let second = fixture.compose(2, &base, &[fixture.layer(5, 12)]).unwrap();
+    let records = fixture.generations().len();
+    let named = publish(
+        &first,
+        Some(&second.digest()),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(named.progress, Progress::NotStaged);
+    assert_eq!(
+        named.refusal,
+        CompositionRefusal::Predecessor {
+            expected: Some(second.digest()),
+            selected: None,
+        }
+    );
+    assert_eq!(fixture.generations().len(), records, "nothing was staged");
+    assert_eq!(fixture.predecessor(), None);
     publish(
         &first,
         None,
@@ -777,11 +803,68 @@ fn a_dropped_publication_reply_is_reconciled_on_a_fresh_store_handle() {
     )
     .unwrap_err();
     assert_eq!(retry.progress, Progress::NotStaged);
+    assert_eq!(
+        retry.refusal,
+        CompositionRefusal::Sequence {
+            sequence: 2,
+            selected: 2
+        }
+    );
     assert_eq!(fixture.generations().len(), records);
     assert_eq!(
         fixture.verify_composition(&new.digest()).unwrap(),
         new.members()
     );
+}
+
+/// A shared lifecycle lock cannot serialize the predecessor check with the selector rename, so publication and the store's selector change both refuse it before reading the selection.
+#[test]
+fn publication_under_a_shared_lifecycle_lock_is_refused_before_staging() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let composition = fixture.compose(1, &base, &[]).unwrap();
+    let records = fixture.generations().len();
+    fixture.release_transaction();
+    let shared = LifecycleTransactionLock::acquire_shared(Some(fixture.root.path()))
+        .unwrap()
+        .unwrap();
+    assert!(!shared.is_exclusive());
+    let staging = Staging {
+        store: &fixture.store,
+        transaction: &shared,
+        gate: &fixture.gate,
+        admission: &fixture.admission,
+        identity: &fixture.identity,
+        ledger: &fixture.ledger,
+        protected: &fixture.protected,
+    };
+    let refused = publish(
+        &composition,
+        None,
+        &staging,
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(refused.progress, Progress::NotStaged);
+    assert_eq!(refused.refusal, CompositionRefusal::SharedTransaction);
+    assert_eq!(fixture.generations().len(), records, "nothing was staged");
+    assert!(matches!(
+        fixture
+            .store
+            .select_vector(&base.digest, &shared, &mut |_| Ok(())),
+        Err(GenerationError::NativePayloadInvalid {
+            detail: "selector change requires the exclusive lifecycle transaction"
+        })
+    ));
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Absent
+    );
+
+    drop(shared);
+    fixture.reacquire_transaction();
+    assert_eq!(fixture.publish(&composition).unwrap(), composition.digest());
 }
 
 #[test]

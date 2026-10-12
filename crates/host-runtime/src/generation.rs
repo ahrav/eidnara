@@ -56,6 +56,8 @@ const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME
 pub enum ProfileEvent {
     /// Before the selector temp is created and written.
     BeforeTempWrite,
+    /// After the selector temp was written and before its `fsync`.
+    BeforeTempSync,
     /// After the selector temp's `fsync` returned.
     AfterTempSync,
     BeforeRename,
@@ -1363,27 +1365,30 @@ impl GenerationStore {
         self.replace_profile_at(CURRENT_PROFILE_NAME, digest, &mut |_| Ok(()))
     }
 
+    /// Points the search selector at a generation. A shared `transaction` is refused before any read, so only the exclusive transaction holder changes a selector.
     pub fn select_search(
         &self,
         digest: &str,
-        _transaction: &LifecycleTransactionLock,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
-        self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
+        self.select_owner(SEARCH_PROFILE_NAME, digest, None, transaction, observer)
     }
 
     /// Points the vector selector at a composition. A generation whose manifest target is not [`VECTOR_SELECTION_TARGET`] belongs to another owner and is refused, and a composition whose members are not all present and valid is refused, so the selector never exposes a partial set.
     /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the composition and its members precedes this call and is not repeated here.
+    /// A shared `transaction` is refused before any read, as for [`Self::select_search`].
     pub fn select_vector(
         &self,
         digest: &str,
-        _transaction: &LifecycleTransactionLock,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
         self.select_owner(
             VECTOR_PROFILE_NAME,
             digest,
             Some(VECTOR_SELECTION_TARGET),
+            transaction,
             observer,
         )
     }
@@ -1393,8 +1398,14 @@ impl GenerationStore {
         name: &str,
         digest: &str,
         target: Option<&str>,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
+        if !transaction.is_exclusive() {
+            return Err(invalid(
+                "selector change requires the exclusive lifecycle transaction",
+            ));
+        }
         self.verify_named_identity()?;
         if self.read_profile(name)? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
@@ -1460,6 +1471,7 @@ impl GenerationStore {
             let temp =
                 crate::store_fs::write_new_file_unsynced(&self.root_fd, &temp_name, &bytes, 0o600)
                     .map_err(|e| storage_or(e, "file write failed"))?;
+            observer(ProfileEvent::BeforeTempSync)?;
             fsync_preserving_storage(&temp, "profile temp fsync failed")?;
             observer(ProfileEvent::AfterTempSync)?;
             observer(ProfileEvent::BeforeRename)?;

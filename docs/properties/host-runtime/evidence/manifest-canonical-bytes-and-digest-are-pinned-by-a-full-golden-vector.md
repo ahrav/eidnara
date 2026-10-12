@@ -12,12 +12,12 @@ existing golden actually pins and to catalog the vector that would close it.
 The encoding is declaration order, with nothing between the struct and the bytes:
 
 ```
-// generation.rs:256-258
+// generation.rs:258-260
 pub fn canonical_bytes(&self) -> Vec<u8> {
     serde_json::to_vec(self).expect("manifest serialization cannot fail")
 }
 
-// generation.rs:260-262
+// generation.rs:262-264
 pub fn digest(&self) -> String {
     hex(&sha2::Sha256::digest(self.canonical_bytes()))
 }
@@ -26,11 +26,11 @@ pub fn digest(&self) -> String {
 `serde_json::to_vec` on a derived `Serialize` emits fields in declaration order,
 so the byte order is exactly:
 
-- `GenerationManifest`, `generation.rs:229-241`: `schema` (`:230`), `target`
-  (`:231`), `release_contract_sha256` (`:232`), `inputs_lock_sha256` (`:233`),
-  `source_payload_manifest_sha256` (`:239`, attribute at `:238`), `files` (`:240`).
-- `ManifestFile`, `generation.rs:213-218`: `path` (`:214`), `mode` (`:215`),
-  `size` (`:216`), `sha256` (`:217`).
+- `GenerationManifest`, `generation.rs:231-243`: `schema` (`:232`), `target`
+  (`:233`), `release_contract_sha256` (`:234`), `inputs_lock_sha256` (`:235`),
+  `source_payload_manifest_sha256` (`:241`, attribute at `:240`), `files` (`:242`).
+- `ManifestFile`, `generation.rs:215-220`: `path` (`:216`), `mode` (`:217`),
+  `size` (`:218`), `sha256` (`:219`).
 
 The struct's own doc comment at `:148-150` states the contract: "Serialization
 order is fixed by the struct, and `files` is sorted by path, so encoding is
