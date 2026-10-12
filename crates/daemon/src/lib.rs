@@ -157,8 +157,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::derived_state::DerivedState;
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment, RecipeSegment};
 use crate::edit_recipe::{Keyed, Revision, RevisionAllocator};
+#[cfg(test)]
+use crate::metered_decode::RAW_VALUE_TOKEN;
 use crate::metered_decode::{
-    DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
+    DecodeFailure, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
 };
 use host_runtime::{BlockingWorkFailed, CancelSignal};
 
@@ -13861,9 +13863,9 @@ impl HandlerCore {
     /// is charged against `meter`, and a refused charge ends the request in the lane that saw
     /// it, before any dispatch runs, so a refusal has no dispatch-side effect; both lanes count
     /// the same footprint for the same bytes, so they refuse the same bodies. An unpaged
-    /// transform body decodes typed straight from its bytes when [`tree_decode_parses`]
-    /// accepts it. Every other body, and a transform body the typed decode cannot decode,
-    /// decodes through the `Value` tree, so a decode error is always the one the tree decode
+    /// transform body decodes typed straight from its bytes, once. Every other body, and a
+    /// transform body the typed decode cannot decode, decodes through the `Value` tree on the
+    /// bytes the typed prefix holds, so a decode error is always the one the tree decode
     /// produces and the two lanes cannot disagree on it.
     async fn dispatch_body(
         &self,
@@ -13879,21 +13881,14 @@ impl HandlerCore {
             .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
         {
             let decode_started_at = Instant::now();
-            match direct_lane_gate(body, meter) {
-                Ok(true) => match decode_metered::<TransformRequest>(body, meter) {
-                    Ok(parsed) => {
-                        let outcome = self
-                            .handle_transform_direct(entry, parsed, decode_started_at)
-                            .await;
-                        return (BodyLane::Direct, outcome);
-                    }
-                    Err(DecodeFailure::Refused(refusal)) => {
-                        return (BodyLane::Direct, resident_refusal(refusal));
-                    }
-                    // The tree decode reuses the bytes the failed decode holds.
-                    Err(DecodeFailure::Invalid(_)) => meter.restart(),
-                },
-                Ok(false) => {}
+            match direct_typed_decode(body, meter) {
+                Ok(Some(parsed)) => {
+                    let outcome = self
+                        .handle_transform_direct(entry, parsed, decode_started_at)
+                        .await;
+                    return (BodyLane::Direct, outcome);
+                }
+                Ok(None) => {}
                 Err(refusal) => return (BodyLane::Direct, resident_refusal(refusal)),
             }
         }
@@ -16509,38 +16504,42 @@ fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
 
 /// The probe that selects the lane for an admitted body. Only a discriminator the body
 /// spells literally selects the direct lane, so a body whose bytes never spell `transform`
-/// cannot reach it; the walk is skipped for such a body and a facade body pays only its
-/// `Value` parse, as before the direct lane.
+/// cannot reach it, and a facade body pays only its `Value` parse.
 fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
     memchr::memmem::find(body, b"transform")
         .is_some()
         .then(|| probe_request(body))?
 }
 
-/// The direct lane requires `true` so a body the tree refuses never decodes typed; the
-/// dispatch runs it through [`direct_lane_gate`], the tests call it bare.
+/// Whether the tree's parse rules accept `body`, the oracle the lane tests hold the direct
+/// lane's typed decode to.
 #[cfg(test)]
 fn tree_decode_parses(body: &[u8]) -> bool {
     serde_json::from_slice::<SkippedValue>(body).is_ok()
 }
 
-/// The tree-parse walk charged against `meter`: `Ok(true)` admits the body to the typed
-/// decode, which starts over on the bytes the walk holds; `Ok(false)` sends it to the tree
-/// decode the same way; `Err` is the walk's refused charge, taken before the value that
-/// needed it was built, so a held pool stops the walk at its first value.
-fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refusal> {
-    let walked = match decode_metered::<SkippedValue>(body, meter) {
-        Ok(SkippedValue) => true,
-        Err(DecodeFailure::Invalid(_)) => false,
-        Err(DecodeFailure::Refused(refusal)) => return Err(refusal),
-    };
-    meter.restart();
-    Ok(walked)
+/// The direct lane's one typed tokenization of an unpaged transform body, charged against
+/// `meter`: `Ok(Some)` is the request, `Ok(None)` a body the typed decode cannot decode, which
+/// starts the tree decode over on the bytes the typed prefix holds, and `Err` the refused
+/// charge, taken before the value that needed it was built.
+fn direct_typed_decode(
+    body: &[u8],
+    meter: &ResidentMeter<'_>,
+) -> Result<Option<TransformRequest>, Refusal> {
+    match metered_decode::decode_metered_typed_direct::<TransformRequest>(body, meter) {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(DecodeFailure::Refused(refusal)) => Err(refusal),
+        Err(DecodeFailure::Invalid(_)) => {
+            meter.restart();
+            Ok(None)
+        }
+    }
 }
 
-/// The admission steps `dispatch_body` runs for an unpaged transform body before its typed
-/// decode, against `reserve`, for the allocation tests: `Ok(walked)` is the gate's verdict
-/// and `Err` the refusal the request would end with.
+/// The admission steps and the typed decode `dispatch_body` runs for an unpaged transform
+/// body, against `reserve`, for the allocation tests: `Ok(true)` for a body the direct lane
+/// serves, `Ok(false)` for one that restarts into the tree decode, and `Err` the refusal the
+/// request would end with.
 #[cfg(feature = "test-support")]
 pub fn direct_lane_admission_for_test(
     body: &[u8],
@@ -16548,7 +16547,9 @@ pub fn direct_lane_admission_for_test(
 ) -> Result<bool, PreparedOutcome> {
     let meter = ResidentMeter::new(reserve);
     admit_body(body, &meter)?;
-    direct_lane_gate(body, &meter).map_err(resident_refusal)
+    direct_typed_decode(body, &meter)
+        .map(|parsed| parsed.is_some())
+        .map_err(resident_refusal)
 }
 
 /// Which decode a body went through.
@@ -16639,8 +16640,10 @@ impl<'de> Deserialize<'de> for ProbeKey {
 /// An object holding [`RAW_VALUE_TOKEN`] as any key is refused: the tree lane reads it as a
 /// boxed raw document when the token is the first key it sees, and a retained `Value`
 /// re-read from the sorted tree sees it first wherever the body placed it.
+#[cfg(test)]
 struct SkippedValue;
 
+#[cfg(test)]
 impl<'de> Deserialize<'de> for SkippedValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -16696,8 +16699,10 @@ impl<'de> Deserialize<'de> for SkippedValue {
 }
 
 /// A key of a skipped object; [`RAW_VALUE_TOKEN`] in any position is an error.
+#[cfg(test)]
 struct SkippedKey;
 
+#[cfg(test)]
 impl<'de> Deserialize<'de> for SkippedKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Visitor;
@@ -20530,7 +20535,7 @@ mod tests {
         assert!(lane_probe(escaped.as_bytes()).is_some());
         assert!(
             lane_probe(br#"{"kind":"tr\u0061nsform"}"#).is_none(),
-            "no literal `transform`, no walk"
+            "no literal `transform`, no direct decode"
         );
     }
 
@@ -21019,6 +21024,221 @@ mod tests {
             ],
             "the bodies that decode typed from their bytes; the rest take the tree lane"
         );
+    }
+
+    /// The native-only bodies and the raw-value token shapes the frozen corpus leaves out, each
+    /// with the lane it takes: a native window decodes on the direct lane, and a body that holds
+    /// the token anywhere, or a duplicate key, restarts into the tree lane.
+    fn native_and_token_corpus() -> Vec<(&'static str, Vec<u8>, BodyLane)> {
+        let native = |profile: &str, window: Value| {
+            json!({
+                "kind": "transform",
+                "boundary": null,
+                "base_revision": "test-base",
+                "serializer_profile": profile,
+                "session_id": "ses",
+                "render_config": "cfg0",
+                "native_messages": window,
+            })
+        };
+        let opencode = json!(opencode_native_window(&[
+            ck("m1", 1, "hello"),
+            ck("m2", 2, "there")
+        ]));
+        let pi = json!([{ "id": "1a2b3c4d", "message": { "role": "user", "content": "hi", "timestamp": 1 } }]);
+        let token = RAW_VALUE_TOKEN;
+        let text = |value: &Value| serde_json::to_string(value).unwrap();
+        let with_leading_key = |body: &Value, key: &str, value: &str| {
+            format!("{{\"{key}\":{value},{}", &text(body)[1..]).into_bytes()
+        };
+        let with_trailing_key = |body: &Value, key: &str, value: &str| {
+            let body = text(body);
+            format!("{},\"{key}\":{value}}}", &body[..body.len() - 1]).into_bytes()
+        };
+        let opencode_body = native("opencode-aisdk", opencode.clone());
+        let mut token_first_in_message = opencode.clone();
+        token_first_in_message[0] = json!({ token: "x" });
+        let mut token_later_in_message = opencode.clone();
+        token_later_in_message[0][token] = json!(1);
+        let mut token_value = opencode_body.clone();
+        token_value["render_config"] = json!(token);
+        let duplicate = {
+            let body = text(&opencode_body);
+            body.replacen(
+                "\"render_config\":\"cfg0\"",
+                "\"render_config\":\"cfg1\",\"render_config\":\"cfg0\"",
+                1,
+            )
+            .into_bytes()
+        };
+        vec![
+            (
+                "native opencode window",
+                text(&opencode_body).into_bytes(),
+                BodyLane::Direct,
+            ),
+            (
+                "native pi window",
+                text(&native("pi", pi)).into_bytes(),
+                BodyLane::Direct,
+            ),
+            (
+                "raw token as the leading top-level key",
+                with_leading_key(&opencode_body, token, "1"),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token as a later top-level key",
+                with_trailing_key(&opencode_body, token, "1"),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token first in a native message",
+                text(&native("opencode-aisdk", token_first_in_message)).into_bytes(),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token later in a native message",
+                text(&native("opencode-aisdk", token_later_in_message)).into_bytes(),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token as a string value",
+                text(&token_value).into_bytes(),
+                BodyLane::Tree,
+            ),
+            (
+                "duplicate top-level key on a native window",
+                duplicate,
+                BodyLane::Tree,
+            ),
+        ]
+    }
+
+    /// Each supplementary body answers through the body entry exactly as through the tree
+    /// entry, on the lane the corpus names.
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_and_token_bodies_reach_the_tree_outcome_on_their_lanes() {
+        for (name, body, expected_lane) in native_and_token_corpus() {
+            let (direct, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let (tree, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            let runner = transform_unit::DetachedRunner::default();
+            let probe = lane_probe(&body);
+            let entry = PassEntry {
+                core: &direct.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+                clock: transform_unit::PassClock::now(),
+            };
+            let (lane, through_body) = direct.dispatch_body(&entry, &body).await;
+            let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let tree_meter = ResidentMeter::new(&pool);
+            let entry = PassEntry {
+                core: &tree.core,
+                meter: &tree_meter,
+                ..entry
+            };
+            let through_tree = tree
+                .dispatch_value_with_inbound_bytes(&entry, request, Some(body.len()))
+                .await;
+            let through_body = comparable_outcome(through_body);
+            assert_eq!(through_body, comparable_outcome(through_tree), "{name}");
+            assert_eq!(lane, expected_lane, "{name}");
+            if name.starts_with("native") {
+                assert_eq!(through_body.0, "response", "{name}: {through_body:?}");
+            }
+        }
+    }
+
+    /// A typed prefix that fails before the pool runs short restarts into the tree decode on
+    /// the bytes it holds, and the tree decode's shortfall refuses with the tree's code, binds
+    /// no route, writes nothing, and releases every charge.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_typed_prefix_restarts_into_a_tree_shortfall_with_no_effect() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut messages: Vec<Value> = (1..=200)
+            .map(|ordinal| json!(ck(&format!("m{ordinal}"), ordinal, &"text ".repeat(40))))
+            .collect();
+        messages[0] = json!({ "mid": "first", "mid": "m1", "ck": messages[0]["ck"] });
+        let mut body = request(Vec::new());
+        body["messages"] = json!([]);
+        let body = serde_json::to_string(&body).unwrap().replacen(
+            "\"messages\":[]",
+            &format!(
+                "\"messages\":[{{\"mid\":\"first\",\"mid\":\"m1\",\"ck\":{}}},{}]",
+                serde_json::to_string(&messages[0]["ck"]).unwrap(),
+                messages[1..]
+                    .iter()
+                    .map(|message| serde_json::to_string(message).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            1,
+        );
+        let body = body.into_bytes();
+        let footprint = footprint_of(&body);
+        let typed_prefix = {
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            meter.reserve_unescape_scratch(&body).unwrap();
+            assert!(matches!(
+                metered_decode::decode_metered_typed_direct::<TransformRequest>(&body, &meter),
+                Err(DecodeFailure::Invalid(_))
+            ));
+            meter.needed()
+        };
+        assert!(
+            typed_prefix < footprint / 2,
+            "the duplicate key fails the typed decode early"
+        );
+
+        let pool = TestPool::with_capacity(footprint + 4096);
+        let holder = pool.hold(pool.capacity() - (typed_prefix + footprint) / 2);
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let probe = lane_probe(&body);
+        assert!(
+            probe
+                .as_ref()
+                .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
+        );
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner: &runner,
+            clock: transform_unit::PassClock::now(),
+        };
+        let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
+        assert_eq!(lane, BodyLane::Tree);
+        assert_eq!(
+            comparable_outcome(outcome),
+            comparable_outcome(resident_capacity_error())
+        );
+        drop(meter);
+        drop(holder);
+        assert!(
+            pool.budget.try_charge(pool.capacity()).is_some(),
+            "every charge is released"
+        );
+        assert!(
+            !handler
+                .transform_route_channels
+                .lock()
+                .expect("route channels mutex")
+                .contains_key(&test_route(7)),
+            "a refusal bound the route"
+        );
+        assert!(!handler.module_knows_transform_session("ses", &project));
+        assert!(store.load("ses").unwrap().row_version.is_none());
     }
 
     /// Both lanes count the same footprint for the same bytes, so a pool that is one byte

@@ -156,6 +156,9 @@ pub struct ResidentMeter<'r> {
     shortfall: Mutex<Option<ShortfallMarker>>,
     longest_escaped: AtomicUsize,
     admitted: AtomicBool,
+    /// Set while [`decode_metered_typed_direct`] runs: a string spelling [`RAW_VALUE_TOKEN`]
+    /// makes the decode invalid.
+    direct: AtomicBool,
 }
 
 const NO_REFUSAL: u8 = 0;
@@ -175,6 +178,7 @@ impl<'r> ResidentMeter<'r> {
             shortfall: Mutex::new(None),
             longest_escaped: AtomicUsize::new(0),
             admitted: AtomicBool::new(false),
+            direct: AtomicBool::new(false),
         }
     }
 
@@ -373,6 +377,21 @@ pub enum DecodeFailure {
     Refused(Refusal),
     /// The body did not decode as `T`.
     Invalid(serde_json::Error),
+}
+
+/// Decodes `body` as `T` as [`decode_metered`] does, for the direct lane: a string anywhere in
+/// the body that spells serde_json's raw-value token, key or value, makes the decode invalid. A `Value`
+/// tree reads that token by a rule of its own, which a typed decode does not apply, so a body
+/// that holds it decodes through the tree; every other body decodes as the tree decodes it, or
+/// fails as the tree fails.
+pub fn decode_metered_typed_direct<'de, T: serde::Deserialize<'de>>(
+    body: &'de [u8],
+    meter: &ResidentMeter<'_>,
+) -> Result<T, DecodeFailure> {
+    meter.direct.store(true, Ordering::Relaxed);
+    let decoded = decode_metered(body, meter);
+    meter.direct.store(false, Ordering::Relaxed);
+    decoded
 }
 
 /// Decodes `body` as `T`, charging `meter` as values are visited. Trailing bytes are an
@@ -874,6 +893,7 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
 
     /// serde_json takes this path, not `visit_borrowed_str`, for a string it unescaped.
     fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        self.direct_token::<E>(value)?;
         self.count_text::<E>(value.len())?;
         self.meter
             .escaped_text(value.len())
@@ -882,11 +902,13 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
     }
 
     fn visit_borrowed_str<E: serde::de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        self.direct_token::<E>(value)?;
         self.count_text::<E>(value.len())?;
         self.visitor.visit_borrowed_str(value)
     }
 
     fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        self.direct_token::<E>(&value)?;
         self.count_text::<E>(value.len())?;
         self.visitor.visit_string(value)
     }
@@ -960,6 +982,16 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
 }
 
 impl<'de, 'm, V: Visitor<'de>> MeteredVisitor<'m, V> {
+    /// On the direct lane, the raw-value token ends the decode as invalid, before it is counted.
+    fn direct_token<E: serde::de::Error>(&self, value: &str) -> Result<(), E> {
+        if value == RAW_VALUE_TOKEN && self.meter.direct.load(Ordering::Relaxed) {
+            return Err(E::custom(
+                "the raw-value token decodes through the tree lane",
+            ));
+        }
+        Ok(())
+    }
+
     fn count_text<E: serde::de::Error>(&self, len: usize) -> Result<(), E> {
         self.meter.node().map_err(|_| refused::<E>())?;
         self.meter.text(len).map_err(|_| refused::<E>())

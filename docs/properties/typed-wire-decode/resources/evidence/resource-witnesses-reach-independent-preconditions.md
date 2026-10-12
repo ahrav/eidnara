@@ -114,7 +114,7 @@ escaped variants), pool shortfall with a held pool
 (`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`
 in `crates/daemon/src/lib.rs`, where a backed `TestPool` holds bytes for a
 distinct owner, the refusal records the shortfall, and the same body decodes
-after the holder drops; `a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string`
+after the holder drops; `a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string`
 and `a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped`
 prove refusal ordering against a drained or unbacked reserve, not an
 independent owner),

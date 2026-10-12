@@ -1,5 +1,18 @@
 # Hot-path latency audit supplement
 
+> Dated note, 2026-10-12, #994 (spec #988 milestone U4, Q9): the direct lane has
+> no tree-parse walk. An unpaged transform body the entry probe routes there is
+> tokenized once by a metered typed decode,
+> `metered_decode::decode_metered_typed_direct`, which charges every value before
+> it is built exactly as the walk did and treats a string spelling the
+> raw-value token, as a key or a value, as invalid. An invalid typed decode
+> restarts the meter on the bytes it holds and decodes the body through the
+> `Value` tree, and a refused charge ends the request on the direct lane with
+> the walk's codes. `tree_decode_parses` remains a test oracle. A1 and A2 keep
+> their checks; the clauses that name the walk that gates the direct lane now
+> read as that typed decode, and the re-evidence is in the dated sections of
+> both evidence files.
+
 > Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
 > unversioned contract, so every clause here that names a protocol version,
 > numbered revision, version-skew refusal, or retired-field refusal is

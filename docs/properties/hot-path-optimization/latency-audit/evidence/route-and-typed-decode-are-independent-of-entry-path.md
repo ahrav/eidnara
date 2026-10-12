@@ -401,3 +401,23 @@ of every body at its frozen three-copy footprint and one byte under it through
 both lanes; unbounded terminals are unchanged and both lanes agree at every
 capacity. Duplicate recognized envelope keys inside a message still reach the
 tree lane with the last value.
+
+## Typed ingress gate re-evidence, 2026-10-12 (#994)
+
+At the #994 head the direct lane runs one metered typed decode and no
+tree-parse walk. A body the typed decode cannot decode, which now includes any
+body holding a string that spells the raw-value token, restarts into the tree
+decode on the bytes it holds; the lane changes only through that restart. The
+46-body entry differential passes unchanged: every body gives the same
+response or the same code and message through both entries, and the
+direct-lane set is still the pinned eleven bodies. The decode differential
+keeps `tree_decode_parses` as the oracle for the direct-only shapes.
+
+The new `native_and_token_bodies_reach_the_tree_outcome_on_their_lanes` adds
+the shapes the frozen corpus leaves out: an `opencode-aisdk` and a `pi`
+native window take the direct lane and are served; the raw-value token as the
+leading or a later top-level key, first or later in a native message, or as a
+string value, and a duplicate top-level key on a native window, take the tree
+lane, each with the tree entry's outcome. With the token check removed, that
+test and the entry differential both fail, so the strict decode is what keeps
+those shapes off the direct lane.

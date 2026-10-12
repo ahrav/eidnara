@@ -400,3 +400,28 @@ depend on the string coefficient. The frozen A2 replay
 (`frozen_corpus_footprints_replay_with_only_string_charge_changes`) records the
 admission differences the lower charge produces; see
 `docs/properties/typed-wire-decode/resources/evidence/frozen-admission-outcomes-and-boundaries-stay-stable.md`.
+
+## Typed ingress gate re-evidence, 2026-10-12 (#994)
+
+At the #994 head the direct lane decodes an unpaged transform body once through
+`decode_metered_typed_direct` (`crates/daemon/src/metered_decode.rs`) in
+`direct_typed_decode` (`crates/daemon/src/lib.rs`), with no tree-parse walk
+before it. The admission order is unchanged: the byte cap, the footprint
+floor, and the up-front unescape charge in `admit_body` precede the decode, and
+every value the decode builds is charged first. A capacity excess answers
+`invalid_params` and a pool shortage `queue_full`; an invalid typed prefix
+restarts the meter on the bytes it holds, so the tree decode spends them first
+and the request holds one footprint.
+
+Executed on the #994 branch: the daemon suite with
+`a_refused_decode_has_no_dispatch_side_effect`,
+`a_doomed_body_is_refused_without_touching_the_pool`,
+`both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies`,
+`frozen_corpus_footprints_replay_with_only_string_charge_changes`, and the new
+`a_failed_typed_prefix_restarts_into_a_tree_shortfall_with_no_effect`, which
+fails a typed prefix early, refuses the tree decode's shortfall as
+`queue_full`, and checks that no route is bound, no store row or module session
+exists, and the pool holds every byte again; and
+`crates/daemon/tests/parse_charge_covers_typed_decode.rs`, whose failed-prefix
+test now sees the admission restart the duplicate-key body and its held-pool
+test refuse the typed decode at its first value.

@@ -240,9 +240,9 @@ impl ResidentReserve for Drained {
 }
 
 #[test]
-fn a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string() {
+fn a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string() {
     let _serial = measure();
-    // The walk that gates the direct lane is charged like the decodes, so a pool that has no
+    // The direct lane's typed decode is charged as values are visited, so a pool that has no
     // bytes free refuses it at its first value and serde_json never grows an unescape buffer
     // for the 4 MiB text block further into the body.
     let body = text_body(1 << 22, true);
@@ -400,13 +400,18 @@ fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
         );
         let meter = ResidentMeter::new(&UNMETERED);
         let base = reset_peak();
-        let walked = daemon::direct_lane_admission_for_test(&body, &UNMETERED)
-            .expect("the walk is admitted");
-        assert!(walked, "the tree walk accepts the duplicate key");
+        let direct = daemon::direct_lane_admission_for_test(&body, &UNMETERED)
+            .expect("the body is admitted");
+        assert!(
+            !direct,
+            "the typed decode fails on the duplicate key and restarts"
+        );
         meter
             .reserve_unescape_scratch(&body)
             .expect("the scratch charge is granted");
-        let failure = decode_metered::<TransformRequest>(&body, &meter).unwrap_err();
+        let failure =
+            daemon::metered_decode::decode_metered_typed_direct::<TransformRequest>(&body, &meter)
+                .unwrap_err();
         assert!(
             matches!(failure, daemon::metered_decode::DecodeFailure::Invalid(_)),
             "{failure:?}"
@@ -425,7 +430,7 @@ fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
         let largest_needed = footprint_of(&body).max(typed_needed).max(meter.needed());
         assert!(
             peak <= largest_needed,
-            "escaped {escaped}: the walk, the failed typed prefix, and the tree fallback peaked at \
+            "escaped {escaped}: the admission, the failed typed prefix, and the tree fallback peaked at \
              {peak} bytes but the largest count reached was {largest_needed}"
         );
     }
