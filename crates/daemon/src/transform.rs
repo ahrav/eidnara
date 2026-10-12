@@ -10710,8 +10710,8 @@ fn apply_surface_strips(
                     && image_block_is_large(&block.wire))
                     || (request_accepts_empty_content(req)
                         && core.frozen_units.iter().any(|unit| {
-                            unit.key == format!("{RED_KEY_PREFIX}{}", block.id())
-                                && unit.kind == "image"
+                            unit.kind == "image"
+                                && unit.key.strip_prefix(RED_KEY_PREFIX) == Some(block.id())
                         })))
                 || (request_accepts_empty_content(req) && is_structural_noise(&block.wire));
         if should_strip {
