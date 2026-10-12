@@ -21,13 +21,13 @@ The prompt's references are accurate except for these, which are narrowed:
   `config.rs:282`, its default `None` is `config.rs:296`, and validation is
   `config.rs:370-382`.
 - The manifest structs are `generation.rs:208-213` (`ManifestFile`) and
-  `:147-169` (`GenerationManifest`), with `canonical_bytes` at `:172-174` and
-  `digest` at `:176-178`. The prompt's `147-177` covers both correctly.
+  `:224-236` (`GenerationManifest`), with `canonical_bytes` at `:251-253` and
+  `digest` at `:255-257`. The prompt's `147-177` is stale at HEAD.
 - `exchange_dirs` is `store_fs.rs:112-115` (macOS and Linux arm) and
-  `:117-120` (the fail-closed stub), so the prompt's `1191-1204` is right.
+  `:117-120` (the fail-closed stub); the prompt's `1191-1204` is stale at HEAD.
 - `rename_no_replace` is `store_fs.rs:47-79`: doc comment `:47-52`,
   body `:53-79`.
-- The golden test is `generation.rs:1395-1412`, confirmed.
+- The golden test is `generation.rs:2038-2053`, confirmed.
 
 ## G3 observations: normal configured liveness
 

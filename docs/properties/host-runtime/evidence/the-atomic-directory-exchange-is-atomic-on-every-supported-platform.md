@@ -9,49 +9,52 @@ macOS.
 
 ## Evidence trail
 
-**Two kernel interfaces behind one expression.** `store_fs.rs:112-115`:
+**Two kernel interfaces behind one expression.** `store_fs.rs:111-115`:
 
 ```
-/// Atomic same-filesystem directory exchange. Rustix maps `EXCHANGE` to
-/// Linux `renameat2(RENAME_EXCHANGE)` and macOS
-/// `renameatx_np(RENAME_SWAP)`; unsupported platforms fail closed.
+/// Atomically swaps the entries `a` and `b` under `dir`; both must exist.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
+pub(crate) fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> rustix::io::Result<()> {
     rustix::fs::renameat_with(dir, a, dir, b, rustix::fs::RenameFlags::EXCHANGE)
-        .map_err(|_| invalid("atomic digest-target exchange failed"))
 }
 ```
 
-and the fail-closed stub, `:1200-1205`:
+and the fail-closed stub, `:117-120`:
 
 ```
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> Result<(), GenerationError> {
-    Err(invalid(
-        "atomic digest-target exchange is unsupported on this platform",
-    ))
+pub(crate) fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> rustix::io::Result<()> {
+    Err(rustix::io::Errno::OPNOTSUPP)
 }
 ```
 
-The doc comment states the divergence itself: `renameat2(RENAME_EXCHANGE)` and
-`renameatx_np(RENAME_SWAP)` are separate syscalls with independent semantics,
+Both arms return the raw errno. The caller in `generation.rs:1869-1872` maps it
+through `classify_errno` (`:100-105`): `ENOSPC` and `EDQUOT` become
+`InsufficientStorage`, every other errno becomes
+`invalid("atomic digest-target exchange failed")`, so the stub's `EOPNOTSUPP`
+surfaces as `NativePayloadInvalid`.
+
+The divergence is in what `rustix` issues for `RenameFlags::EXCHANGE`:
+`renameat2(RENAME_EXCHANGE)` on Linux and `renameatx_np(RENAME_SWAP)` on macOS
+are separate syscalls with independent semantics,
 error sets, and filesystem support, reached through one line of Rust and covered by
 one cfg predicate.
 
 **The call site is a repair, followed immediately by a deletion.**
-`generation.rs:877-911`, inside `promote_temp`:
+`generation.rs:1299-1351`, inside `promote_temp`:
 
-- `:882-885` try the no-replace rename; on success, fsync and return.
-- `:886-900` the target is occupied: a valid occupant wins and the temp is
+- `:1299-1308` try the no-replace rename; on success, fsync, validate, and return.
+- `:1309-1323` the target is occupied: a valid occupant wins and the temp is
   discarded; `UnsupportedStateSchema` abandons the mutation.
-- `:901-903` a protected corrupt target abandons the mutation.
-- `:905` `exchange_dirs(&self.generations_fd, temp_name, digest)?`
-- `:906` fsync the generations directory.
-- `:907-910` revalidate the promoted target, then `remove_tree` the displaced
+- `:1324-1346` a protected, owner-selected, composition-named, or pinned corrupt
+  target abandons the mutation.
+- `:1347` `exchange_dirs(&self.generations_fd, temp_name, digest)?`
+- `:1348` fsync the generations directory.
+- `:1349-1350` revalidate the promoted target, then `remove_tree` the displaced
   orphan now at the temp name.
 
 So a non-atomic or partially-applied exchange means `remove_tree` deletes the wrong
-directory. `promote_temp`'s contract at `:865-876` depends on the swap being
+directory. `promote_temp`'s contract at `:1281-1286` depends on the swap being
 all-or-nothing.
 
 **macOS executes no test in this scope.** CI's matrix job is
@@ -94,11 +97,13 @@ the protection check passes, and `exchange_dirs` runs.
 On macOS, if `renameatx_np(RENAME_SWAP)` behaves differently on APFS from
 `RENAME_EXCHANGE` on ext4, for example by not being atomic across a crash, by
 failing on a directory rather than a file, or by returning a different errno that
-the blanket `map_err` at `:1197` flattens into one message, then either the
+the `classify_errno` call at `generation.rs:1871` flattens into one message, then
+either the
 mutation is abandoned with a message that names the wrong cause, or the swap
-partially applies and `:910` deletes a retained generation.
+partially applies and `:1350` deletes a retained generation.
 
-The blanket `map_err` matters here on its own: every error from either syscall
+The classifier matters here on its own: apart from `ENOSPC` and `EDQUOT`, every
+error from either syscall
 becomes `invalid("atomic digest-target exchange failed")`, so a platform-specific
 `ENOTSUP` from a filesystem that does not support the swap is indistinguishable
 from an `EXDEV` or a permission failure. The record's check should assert the
@@ -106,23 +111,24 @@ error is returned, not what it says, but the diagnosis loss is worth noting.
 
 ## Timing windows and dependencies
 
-The exchange must be atomic with respect to a crash, because `:905-910` is
-exchange, fsync, revalidate, delete. A crash between `:905` and `:910` leaves the
+The exchange must be atomic with respect to a crash, because `:1347-1350` is
+exchange, fsync, revalidate, delete. A crash between `:1347` and `:1350` leaves the
 corrupt orphan at the temp name, which the catalog's
 `current-profile-never-names-an-unvalidatable-generation` covers as an orphan a
 later prune removes. A non-atomic exchange breaks that reasoning, because the
 intermediate state is then not one of the two states the recovery argument assumes.
 
 Dependency: same-filesystem. Both syscalls operate within one directory descriptor
-(`dir` is passed as both the old and new dirfd at `:1196`), so cross-device is not
+(`dir` is passed as both the old and new dirfd at `store_fs.rs:114`), so
+cross-device is not
 reachable here.
 
 ## What a test must construct
 
 The fixture already exists. `generation.rs:2916`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives
-`promote_temp` into the exchange branch: `:1705` covers the protected corrupt
-target being refused and `:1714-1721` covers the unprotected case exchanging
+`promote_temp` into the exchange branch: `:2931-2937` covers the protected corrupt
+target being refused and `:2939-2954` covers the unprotected case exchanging
 atomically and the orphan temp being removed.
 
 What is missing is executing it on macOS. Concretely:
@@ -150,8 +156,9 @@ portfolio evaluation asked a human to separate.
 - Sources examined: `store_fs.rs:112-120` (both cfg arms),
   `the source repository `ci.yml` workflow:126-184` in full (the matrix, both platform branches,
   and the omission comment at `:171-174`), `src/generation.rs` and
-  `src/lifecycle.rs` cfg inventory (`generation.rs:1217` and `lifecycle.rs:1839`,
-  `:2013`, `:2040`, `:2081` are the only `target_os` gates in either file).
+  `src/lifecycle.rs` cfg inventory (`generation.rs:2351` and `lifecycle.rs:1778`,
+  `:1900`, `:1922`, `:1961` are the only `target_os` gates in either file; the
+  production gates moved to `store_fs.rs:58`, `:112`, and `:117`).
 - Findings: the evidence points both ways and cannot be resolved from the code.
   For support: macOS gets a real syscall mapping rather than the stub, host-runtime is
   built on macOS in CI, and `lifecycle.rs`'s Linux-only gates are all inside test
@@ -164,5 +171,5 @@ portfolio evaluation asked a human to separate.
   examined in this pass, and none is cited in either source file.
 - Conclusion: needs human input. If macOS is supported, this is a real coverage gap
   and the fix is a CI selection change. If it is not, the honest shape is to move
-  macOS to the fail-closed stub at `:1200-1205`, which would turn a silent
+  macOS to the fail-closed stub at `store_fs.rs:117-120`, which would turn a silent
   divergence into an explicit refusal.

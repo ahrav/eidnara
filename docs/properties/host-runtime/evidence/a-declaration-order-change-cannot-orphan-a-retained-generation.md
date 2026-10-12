@@ -12,7 +12,7 @@ silent consequence is a different one.
 
 The generation's name is the SHA-256 of its manifest bytes
 (`generation.rs:255-257`), and those bytes are declaration order
-(`:172-174`, structs at `:138-145` and `:147-169`).
+(`:251-253`, structs at `:208-213` and `:224-236`).
 
 `validate_in_dir` binds name to bytes twice, `generation.rs:636-648`:
 
