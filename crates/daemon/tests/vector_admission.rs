@@ -326,6 +326,7 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
         &composition,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )

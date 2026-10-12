@@ -218,6 +218,7 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
         &composition,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -298,6 +299,7 @@ fn a_publication_reports_exactly_the_frozen_selector_events() {
         &fixture.compose(1, &base, &[]).unwrap(),
         None,
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |event| {
             seen.push(event);
@@ -335,6 +337,7 @@ fn selector_cut(cut: ProfileEvent, exhausted: bool, eio: &dyn Fn() -> Generation
         &new,
         Some(&old.digest()),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |event| {
             seen.push(event);
@@ -413,6 +416,7 @@ fn selector_cut(cut: ProfileEvent, exhausted: bool, eio: &dyn Fn() -> Generation
         &new,
         Some(&old.digest()),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -456,6 +460,7 @@ fn a_process_killed_at_every_selector_event_leaves_the_old_or_the_new_complete_s
             &new,
             Some(&old.digest()),
             &fixture.staging(),
+            Some(&fixture.activation()),
             &fixture.work_dir(),
             &mut |event| {
                 if event == cut {
@@ -586,6 +591,7 @@ fn selector_kill_recovers(parent: &Fixture, root: &Path, cut: ProfileEvent, old:
         &composition,
         Some(expected),
         &staging,
+        Some(&parent.activation()),
         &parent.work_dir(),
         &mut |_| Ok(()),
     )
@@ -642,6 +648,7 @@ fn a_composition_built_from_a_stale_selection_is_refused_and_no_accepted_delta_i
         &a,
         read_by_both.as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |event| {
             if event == ProfileEvent::AfterRename {
@@ -665,6 +672,7 @@ fn a_composition_built_from_a_stale_selection_is_refused_and_no_accepted_delta_i
         &a,
         read_by_both.as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -683,6 +691,7 @@ fn a_composition_built_from_a_stale_selection_is_refused_and_no_accepted_delta_i
         &b,
         read_by_both.as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -704,6 +713,7 @@ fn a_composition_built_from_a_stale_selection_is_refused_and_no_accepted_delta_i
         &rebased,
         Some(&a.digest()),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -731,6 +741,7 @@ fn a_first_publication_requires_an_empty_selector() {
         &first,
         Some(&second.digest()),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -749,6 +760,7 @@ fn a_first_publication_requires_an_empty_selector() {
         &first,
         None,
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -757,6 +769,7 @@ fn a_first_publication_requires_an_empty_selector() {
         &second,
         None,
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -783,6 +796,7 @@ fn a_dropped_publication_reply_is_reconciled_on_a_fresh_store_handle() {
         &new,
         Some(&old.digest()),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     ));
@@ -798,6 +812,7 @@ fn a_dropped_publication_reply_is_reconciled_on_a_fresh_store_handle() {
         &new,
         Some(&old.digest()),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -842,6 +857,7 @@ fn publication_under_a_shared_lifecycle_lock_is_refused_before_staging() {
         &composition,
         None,
         &staging,
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1266,6 +1282,7 @@ fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member
         &composition,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1320,6 +1337,7 @@ fn a_rename_lost_before_its_sync_is_read_back_as_the_old_selection_and_the_retry
         &new,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |event| {
             if event == ProfileEvent::BeforeDirectorySync {
@@ -1380,6 +1398,7 @@ fn a_competing_publication_with_the_same_sequence_and_other_members_is_refused_b
         &b,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1446,6 +1465,7 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
         &orphaned,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1568,6 +1588,7 @@ fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_trea
         &fixture.compose(9, &base, &[]).unwrap(),
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1594,6 +1615,7 @@ fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_trea
         &fixture.compose(9, &base, &[]).unwrap(),
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1656,6 +1678,7 @@ fn an_unknown_members_schema_on_the_selected_composition_quarantines_publication
         &fixture.compose(9, &base, &[]).unwrap(),
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1704,6 +1727,7 @@ fn an_unknown_record_schema_without_a_members_file_still_quarantines_publication
         &fixture.compose(9, &base, &[]).unwrap(),
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1821,6 +1845,7 @@ fn a_quarantined_vector_selector_stops_staging_and_pruning_and_an_unselected_cor
         &fixture.compose(2, &base, &[]).unwrap(),
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -1882,4 +1907,71 @@ fn a_search_seed_that_lists_members_retains_them_like_any_owner() {
         "the members rule is owner-agnostic"
     );
     assert!(fixture.generations().contains(&layer.digest));
+}
+
+#[test]
+fn a_new_base_publishes_only_under_a_live_activation_and_a_delta_on_the_selected_base_needs_none() {
+    let mut fixture = Fixture::new();
+    fn publish_with(
+        fixture: &Fixture,
+        composition: &daemon::vector_composition::Composition,
+        activation: Option<&daemon::projection_gates::ActivationGrant>,
+    ) -> Result<String, Box<daemon::vector_composition::PublishFailure>> {
+        publish(
+            composition,
+            fixture.predecessor().as_deref(),
+            &fixture.staging(),
+            activation,
+            &fixture.work_dir(),
+            &mut |_| Ok(()),
+        )
+    }
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    let withdrawn = fixture.activation();
+    fixture.set_limit(daemon::vector_admission::DELTA_LIMIT, 4);
+    assert!(withdrawn.is_revoked());
+
+    // With nothing selected, the first base is a full-corpus publication: no grant, or a withdrawn one, stages nothing.
+    let before = fixture.generations();
+    for activation in [None, Some(&withdrawn)] {
+        let failure = publish_with(&fixture, &first, activation).unwrap_err();
+        assert_eq!(failure.progress, Progress::NotStaged);
+        assert_eq!(failure.refusal, CompositionRefusal::BaseUnactivated);
+        assert_eq!(fixture.generations(), before);
+        assert_eq!(
+            fixture.store.read_vector_current().unwrap(),
+            CurrentProfile::Absent
+        );
+    }
+    publish_with(&fixture, &first, Some(&fixture.activation())).unwrap();
+
+    // A composition on the selected base carries only a new delta, and publishes without a grant.
+    let delta = fixture.layer(2, 12);
+    let fresher = fixture.compose(2, &base, &[delta]).unwrap();
+    let selected = publish_with(&fixture, &fresher, None).unwrap();
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected.clone())
+    );
+
+    // A composition on another base is a new full-corpus publication again.
+    let other = fixture.layer(3, 14);
+    let replacement = fixture.compose(3, &other, &[]).unwrap();
+    let before = fixture.generations();
+    for activation in [None, Some(&withdrawn)] {
+        let failure = publish_with(&fixture, &replacement, activation).unwrap_err();
+        assert_eq!(failure.progress, Progress::NotStaged);
+        assert_eq!(failure.refusal, CompositionRefusal::BaseUnactivated);
+        assert_eq!(fixture.generations(), before);
+        assert_eq!(
+            fixture.store.read_vector_current().unwrap(),
+            CurrentProfile::Current(selected.clone())
+        );
+    }
+    let replaced = publish_with(&fixture, &replacement, Some(&fixture.activation())).unwrap();
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(replaced)
+    );
 }

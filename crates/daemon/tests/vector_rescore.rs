@@ -82,6 +82,8 @@ fn run(
     Vec<(String, usize)>,
 ) {
     let expected = fixture.expected();
+    let activation = fixture.activation();
+
     let request = CompressedRequest {
         expected: &expected,
         query,
@@ -92,6 +94,7 @@ fn run(
         max_layers: NonZeroUsize::new(limits.max_layers).unwrap(),
         max_pinned_bytes: limits.max_pinned_bytes,
         max_read_bytes: limits.max_read_bytes,
+        activation: &activation,
     };
     let mut reads = Vec::new();
     let outcome = projection
@@ -791,6 +794,8 @@ fn a_view_of_another_identity_is_refused_first() {
     let mut expected = fixture.expected();
     expected.kernel_incarnation_id = "another-kernel";
     let query = axis(0);
+    let activation = fixture.activation();
+
     let request = CompressedRequest {
         expected: &expected,
         query: &query,
@@ -801,6 +806,7 @@ fn a_view_of_another_identity_is_refused_first() {
         max_layers: NonZeroUsize::new(8).unwrap(),
         max_pinned_bytes: u64::MAX,
         max_read_bytes: u64::MAX,
+        activation: &activation,
     };
     let outcome = projection
         .store
@@ -1177,6 +1183,8 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let budget = EvalBudget::unbounded();
     let expected = fixture.expected();
+    let activation = fixture.activation();
+
     let request = CompressedRequest {
         expected: &expected,
         query: &axis(0),
@@ -1187,6 +1195,7 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
         max_layers: NonZeroUsize::new(ROOMY.max_layers).unwrap(),
         max_pinned_bytes: ROOMY.max_pinned_bytes,
         max_read_bytes: ROOMY.max_read_bytes,
+        activation: &activation,
     };
     // A row rewritten to NaN fails its decode, so a read that happens after the cancellation shows as corruption and a quarantine.
     let mut poison = rewrite_rows(&fixture, &base.digest, |row| {
@@ -1278,6 +1287,8 @@ fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
     // One page holds the whole population, so its `AfterPage` is the final one.
     let mut bounds = scan_bounds();
     bounds.page_rows = NonZeroUsize::new(64).unwrap();
+    let activation = fixture.activation();
+
     let request = CompressedRequest {
         expected: &expected,
         query: &axis(0),
@@ -1288,6 +1299,7 @@ fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
         max_layers: NonZeroUsize::new(ROOMY.max_layers).unwrap(),
         max_pinned_bytes: ROOMY.max_pinned_bytes,
         max_read_bytes: ROOMY.max_read_bytes,
+        activation: &activation,
     };
     // A codes file cut to nothing makes any scoring read visible as a missing-codes refusal and a quarantine.
     let codes = fixture

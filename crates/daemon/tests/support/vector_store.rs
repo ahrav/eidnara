@@ -272,6 +272,7 @@ impl Fixture {
             composition,
             self.predecessor().as_deref(),
             &self.staging(),
+            Some(&self.activation()),
             &self.work_dir(),
             &mut |_| Ok(()),
         )

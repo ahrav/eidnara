@@ -39,7 +39,7 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   a lexical row names one occurrence, so equal-byte occurrences of distinct
   objects stay separate hits with bit-equal ranks under `rank.total_cmp`.
 
-Daemon path: the route calls `admit` (`crates/daemon/src/query_route.rs:1273`)
+Daemon path: the route calls `admit` (`crates/daemon/src/query_route.rs:1271`)
 with `validation_batch` 128 as `batch_rows` and `lexical_accepted` 128 as
 `max_accepted` (`:137`, `:172`).
 

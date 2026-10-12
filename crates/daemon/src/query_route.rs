@@ -650,7 +650,7 @@ pub struct DenseVectors {
 pub type DenseObserver = Arc<dyn Fn(RescoreEvent<'_>) + Send + Sync>;
 
 impl DenseVectors {
-    /// `activation` comes from [`crate::projection_gates::HookGate::admit_compressed_activation`]; installation refuses it once withdrawn, and every request refuses it too.
+    /// `activation` comes from [`crate::projection_gates::HookGate::admit_compressed_activation`]; installation refuses it once withdrawn, and a request whose ranking starts or finishes after the withdrawal degrades the lane as `activation_revoked`.
     pub fn new(
         view: Arc<PinnedVectors>,
         grant: Admission,
@@ -700,10 +700,6 @@ impl DenseProducer for CompressedProducer {
         request: DenseRequest<'_>,
     ) -> Result<DenseRanking, DenseRefusal> {
         let vectors = &self.vectors;
-        // A withdrawn activation degrades the lane on the next request, whether or not the vectors are reinstalled.
-        if vectors.activation.is_revoked() {
-            return Err(DenseRefusal::Unavailable("activation_revoked"));
-        }
         // Installation checked the pool against the route's limits; this check covers a producer built outside the handler and a request whose limits were read before a concurrent reinstallation.
         let capacity = vectors
             .limits
@@ -727,6 +723,7 @@ impl DenseProducer for CompressedProducer {
             max_layers: vectors.limits.max_layers,
             max_pinned_bytes: vectors.limits.max_pinned_bytes,
             max_read_bytes: vectors.limits.max_read_bytes,
+            activation: &vectors.activation,
         };
         let mut observe = |event: RescoreEvent<'_>| vectors.observe(event);
         let ranking = rank_compressed(
@@ -773,6 +770,7 @@ fn check_pair(
 fn compressed_refusal(refusal: CompressedRefusal) -> DenseRefusal {
     match refusal {
         CompressedRefusal::Budget => DenseRefusal::Budget,
+        CompressedRefusal::ActivationRevoked => DenseRefusal::Unavailable("activation_revoked"),
         CompressedRefusal::Query(_)
         | CompressedRefusal::Candidates(CandidateRefusal::Query { .. }) => DenseRefusal::QueryShape,
         CompressedRefusal::Candidates(CandidateRefusal::Layered(LayeredRefusal::Oracle(

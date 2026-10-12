@@ -682,8 +682,10 @@ async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant(
     let outcome = run(&fixture, 2, installed.clone(), &budget).unwrap();
     assert_eq!(outcome.statuses[2], LaneStatus::Complete);
 
-    // A reinstalled evaluator withdraws the activation the installed vectors carry: the next request's lane degrades with a typed reason instead of ranking, and the same vectors no longer install.
+    // A reinstalled evaluator withdraws the activation the installed vectors carry: the next request's lane degrades with a typed reason before any scan window, and the same vectors no longer install.
+    let withdrawn = composition.store.activation();
     composition.store.set_limit(RESIDENT_LIMIT, u64::MAX);
+    assert!(withdrawn.is_revoked());
     let outcome = run(&fixture, 2, installed.clone(), &budget).unwrap();
     assert_eq!(
         outcome.statuses[2],
@@ -696,7 +698,25 @@ async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant(
         handler.set_dense_vectors(Some(installed)),
         Err(LimitsRefusal::ActivationRevoked)
     );
-    // The hook admission was renewed with the evaluator; only a fresh activation from the gate installs again.
+
+    // The renewed hook admission paired with the withdrawn activation still refuses: the activation alone decides, before any physical work.
+    let events = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&events);
+    let stale = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        withdrawn,
+        compressed_limits(),
+    )
+    .with_observer_for_test(Arc::new(move |_| *counted.lock().unwrap() += 1));
+    let outcome = run(&fixture, 2, stale, &budget).unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Unavailable("activation_revoked")
+    );
+    assert_eq!(*events.lock().unwrap(), 0);
+
+    // Only a fresh activation from the gate installs again.
     let renewed = DenseVectors::new(
         Arc::clone(&composition.view),
         composition.store.admission.clone(),
@@ -705,5 +725,19 @@ async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant(
     );
     handler.set_dense_vectors(Some(renewed)).unwrap();
     handler.set_dense_vectors(None).unwrap();
+
+    // A gate closed after the pool is selected discards the ranking the request already scanned and rescored.
+    let gate = Arc::clone(&composition.store.gate);
+    let closing = composition.observed(move |event| {
+        if event == RescoreEvent::AfterSelection {
+            gate.close();
+        }
+    });
+    let outcome = run(&fixture, 2, closing, &budget).unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Unavailable("activation_revoked")
+    );
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
     fixture.daemon.shutdown().await;
 }

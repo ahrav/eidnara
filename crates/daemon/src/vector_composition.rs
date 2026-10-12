@@ -15,7 +15,7 @@ use host_runtime::generation::{
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
-use crate::projection_gates::Denial;
+use crate::projection_gates::{ActivationGrant, Denial};
 use crate::vector_generation::{
     ExpectedVectors, Staging, VectorIdentity, VectorRefusal, VerifiedVectors, sha256_hex, verify,
     write_new,
@@ -145,6 +145,9 @@ pub enum CompositionRefusal {
     Stage(VectorRefusal),
     #[error("delta admission: {0}")]
     Deltas(Denial),
+    /// The composition's base is not the selected composition's base, and no live compressed activation grant came with it; nothing is staged.
+    #[error("a new compressed base needs a live activation grant")]
+    BaseUnactivated,
     #[error("the lifecycle store refused: {0}")]
     Store(String),
     #[error(
@@ -275,6 +278,8 @@ pub struct PublishFailure {
 ///
 /// The predecessor check and the selector rename are atomic only under the exclusive lifecycle transaction of the store `staging` writes to: a shared `staging.transaction` is refused with [`CompositionRefusal::SharedTransaction`] before any read. The caller acquires that transaction on the same lifecycle root as `staging.store`; the lock does not record its root.
 ///
+/// A composition whose base differs from the selected composition's base, or that is published with no composition selected, publishes a full-corpus compressed base, so it needs a live `activation` grant from [`crate::projection_gates::HookGate::admit_compressed_activation`]. A composition on the selected base adds or replaces only deltas and publishes with or without one. The grant is checked once, before delta admission and staging; a withdrawal after that check leaves this attempt running to its outcome, and readers still need their own live grant to rank the result.
+///
 /// # Errors
 ///
 /// A failure carries how far the attempt is known to have gone; a failure at or after `Acknowledged` is an unknown outcome the caller settles with [`reconcile`].
@@ -282,6 +287,7 @@ pub fn publish(
     composition: &Composition,
     predecessor: Option<&str>,
     staging: &Staging<'_>,
+    activation: Option<&ActivationGrant>,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
 ) -> Result<String, Box<PublishFailure>> {
@@ -290,16 +296,16 @@ pub fn publish(
     if !staging.transaction.is_exclusive() {
         return Err(fail(progress, CompositionRefusal::SharedTransaction));
     }
-    let (selected_digest, selected_sequence) =
+    let (selected_digest, selected) =
         selection(staging.store).map_err(|refusal| fail(progress, refusal))?;
-    if let Some(selected) = selected_sequence
-        && composition.sequence <= selected
+    if let Some(selected) = &selected
+        && composition.sequence <= selected.sequence
     {
         return Err(fail(
             progress,
             CompositionRefusal::Sequence {
                 sequence: composition.sequence,
-                selected,
+                selected: selected.sequence,
             },
         ));
     }
@@ -311,6 +317,12 @@ pub fn publish(
                 selected: selected_digest,
             },
         ));
+    }
+    let new_base = selected
+        .as_ref()
+        .is_none_or(|selected| selected.base != composition.base);
+    if new_base && activation.is_none_or(ActivationGrant::is_revoked) {
+        return Err(fail(progress, CompositionRefusal::BaseUnactivated));
     }
     staging
         .ledger
@@ -360,20 +372,20 @@ pub fn publish(
     }
 }
 
-/// Returns the digest the vector selector names and the selected composition's sequence; the sequence is `None` when no composition is selected or its record fails validation.
+/// Returns the digest the vector selector names and the selected composition's record; the record is `None` when no composition is selected or its record fails validation.
 ///
 /// # Errors
 ///
 /// Returns `Quarantined` when the selector is quarantined or the selected record has an unknown schema.
-fn selection(store: &GenerationStore) -> Result<(Option<String>, Option<u64>), CompositionRefusal> {
+fn selection(
+    store: &GenerationStore,
+) -> Result<(Option<String>, Option<Composition>), CompositionRefusal> {
     match store.read_vector_current()? {
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
         CurrentProfile::Absent => Ok((None, None)),
         CurrentProfile::Current(digest) => {
-            let sequence = record(store, &digest)?
-                .filter(|_| store.validate(&digest).is_ok())
-                .map(|record| record.sequence);
-            Ok((Some(digest), sequence))
+            let selected = record(store, &digest)?.filter(|_| store.validate(&digest).is_ok());
+            Ok((Some(digest), selected))
         }
     }
 }

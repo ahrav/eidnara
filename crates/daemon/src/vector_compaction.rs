@@ -293,11 +293,11 @@ pub struct Published {
 
 /// Only the deltas past the cut are verified here, each under `bounds.max_member_bytes` as the reader verifies a member: the view verified and pinned the cut's members at acquisition, and none of them is a member of the new composition. `staging` holds the exclusive transaction lock, so the selection cannot move between the readback and the publication.
 ///
-/// Publication is full-corpus publication of a compressed base, so it runs only under `activation`, checked before the readback and again before the selector moves.
+/// Publication is full-corpus publication of a compressed base, so it needs a live `activation`. This function checks it before the readback, so a withdrawn grant stages nothing, and [`vector_composition::publish`] checks it again before delta admission and staging the composition.
 ///
 /// # Errors
 ///
-/// A withdrawn activation grant; a selection that no longer stands on the cut, with nothing staged; a staging or composition refusal; or an unknown outcome after the selector rename returned, which the caller settles with [`vector_composition::reconcile`] before any retry.
+/// A grant withdrawn before the readback, as `ActivationRevoked`, or before the composition is staged, as `Composition(BaseUnactivated)` with the compacted base staged and unselected; a selection that no longer stands on the cut, with nothing staged; a staging or composition refusal; or an unknown outcome after the selector rename returned, which the caller settles with [`vector_composition::reconcile`] before any retry.
 pub fn publish(
     compacted: &Compacted,
     staging: &Staging<'_>,
@@ -370,14 +370,11 @@ pub fn publish(
         deltas: &carried,
         max_deltas,
     })?;
-    // The staged base stays unselected, so a prune reclaims it.
-    if activation.is_revoked() {
-        return Err(CompactionRefusal::ActivationRevoked);
-    }
     match vector_composition::publish(
         &composition,
         Some(selected.as_str()),
         staging,
+        Some(activation),
         work_dir,
         observer,
     ) {

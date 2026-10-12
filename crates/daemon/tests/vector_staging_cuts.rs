@@ -614,6 +614,7 @@ fn vector_stage_select_prune_discard_and_exchange_repair_leave_the_deployment_se
         &composition,
         fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
