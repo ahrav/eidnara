@@ -346,6 +346,108 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
     assert_eq!(fixture.ledger.census(), Census::default());
 }
 
+/// A grant from `other` stays live across changes to `gate`, so each refusal below comes from `gate`'s own state on the reservation right after the change.
+#[test]
+fn every_gate_change_reaches_the_next_reservation_under_a_grant_the_change_did_not_cancel() {
+    let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
+    let (other, _) = ledger_with(RESIDENT_LIMIT, 100);
+    let grant = admit(&other);
+    drop(ledger.reserve(&grant, ResourceClass::Text, 60).unwrap());
+    ledger.admit_deltas(&grant, 2).unwrap();
+
+    let identity = identity("test-incarnation", DIMENSION);
+    let mut lowered = passing_evaluator(&identity, 0, &ProjectionHook::ALL);
+    lowered
+        .manifest
+        .limits
+        .insert(RESIDENT_LIMIT.to_owned(), 50);
+    lowered.manifest.limits.insert(DELTA_LIMIT.to_owned(), 1);
+    gate.install(lowered);
+    assert!(!grant.invalidated.is_cancelled());
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 60).unwrap_err(),
+        exceeded(RESIDENT_LIMIT, 60, 50),
+        "the reinstalled limit judges the next reservation"
+    );
+    assert_eq!(
+        ledger.admit_deltas(&grant, 2).unwrap_err(),
+        Denial::LimitExceeded {
+            limit: DELTA_LIMIT.to_owned(),
+            observed: 2,
+            max: 1
+        }
+    );
+    drop(ledger.reserve(&grant, ResourceClass::Text, 50).unwrap());
+
+    gate.close();
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::NoManifest)
+    );
+    assert_eq!(
+        ledger.admit_deltas(&grant, 0).unwrap_err(),
+        Denial::NoManifest
+    );
+
+    let mut renamed = passing_evaluator(&identity, 0, &ProjectionHook::ALL);
+    renamed.current.embedding_model = "another-model".to_owned();
+    gate.install(renamed);
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::EvidenceIdentity),
+        "an evaluator for another identity refuses the ledger's"
+    );
+    assert_eq!(ledger.census(), Census::default());
+}
+
+#[test]
+fn a_zero_byte_static_charge_still_charges_once_and_refusals_keep_their_order() {
+    let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
+    let grant = admit(&gate);
+    let model = ledger
+        .reserve(&grant, ResourceClass::ModelMemory, 0)
+        .unwrap();
+    let text = ledger.reserve(&grant, ResourceClass::Text, 1).unwrap();
+    assert_eq!(
+        ledger.census().held.get(&ResourceClass::ModelMemory),
+        Some(&0),
+        "a zero-byte reservation still charges its class"
+    );
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::ModelMemory, 0)
+            .unwrap_err(),
+        Refusal::AlreadyCharged {
+            class: ResourceClass::ModelMemory
+        }
+    );
+
+    // The ledger refuses a double charge and an overflow before it consults the gate, so a cancelled grant sees those refusals first.
+    grant.invalidated.cancel();
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::ModelMemory, 1)
+            .unwrap_err(),
+        Refusal::AlreadyCharged {
+            class: ResourceClass::ModelMemory
+        }
+    );
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::Text, u64::MAX)
+            .unwrap_err(),
+        Refusal::Overflow {
+            pool: Pool::Resident
+        }
+    );
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::Invalidated)
+    );
+    drop((model, text));
+    assert_eq!(ledger.census(), Census::default());
+}
+
 #[test]
 fn a_prune_readback_above_the_ledgers_pinned_bytes_is_unaccounted() {
     let (_, ledger) = ledger_with(RESIDENT_LIMIT, u64::MAX);

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use host_runtime::generation::{GENERATIONS_DIR_NAME, GenerationStore, PruneReport};
 
-use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
+use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity, VectorJudgment};
 
 /// The limits the ledger's two pools and delta admission are judged against, named where the manifest parser accepts them so the two cannot drift.
 pub use crate::projection_gates::{
@@ -117,19 +117,42 @@ impl Reconciliation {
     }
 }
 
+impl ResourceClass {
+    const ALL: [Self; 9] = [
+        Self::ModelMemory,
+        Self::TokenizerCache,
+        Self::SqliteCache,
+        Self::Text,
+        Self::Scratch,
+        Self::RowBuffers,
+        Self::LayerTables,
+        Self::Staging,
+        Self::CompactionScratch,
+    ];
+}
+
+// `Tally` indexes `held` by `class as usize`, so `ResourceClass::ALL` lists the classes in declaration order.
+const _: () = {
+    let mut index = 0;
+    while index < ResourceClass::ALL.len() {
+        assert!(ResourceClass::ALL[index] as usize == index);
+        index += 1;
+    }
+};
+
+/// `held` indexes classes by declaration order. `charged` tracks each class from its first successful reservation until a release leaves its held bytes at zero, so a zero-byte reservation still charges a static class. `pools` caches each pool's sum of `held` for constant-time reservation checks.
 #[derive(Default)]
 struct Tally {
-    held: BTreeMap<ResourceClass, u64>,
+    held: [u64; ResourceClass::ALL.len()],
+    charged: u16,
+    pools: [u64; 2],
     pinned: u64,
+    judgment: VectorJudgment,
 }
 
 impl Tally {
-    fn pool_total(&self, pool: Pool) -> Option<u64> {
-        self.held
-            .iter()
-            .filter(|(class, _)| class.pool() == pool)
-            .map(|(_, held)| *held)
-            .try_fold(0u64, |sum, held| sum.checked_add(held))
+    fn is_charged(&self, class: ResourceClass) -> bool {
+        self.charged & (1 << class as u16) != 0
     }
 }
 
@@ -167,9 +190,13 @@ impl Ledger {
     pub fn census(&self) -> Census {
         let tally = self.lock();
         Census {
-            held: tally.held.clone(),
-            resident: tally.pool_total(Pool::Resident).unwrap_or(u64::MAX),
-            disk: tally.pool_total(Pool::Disk).unwrap_or(u64::MAX),
+            held: ResourceClass::ALL
+                .into_iter()
+                .filter(|class| tally.is_charged(*class))
+                .map(|class| (class, tally.held[class as usize]))
+                .collect(),
+            resident: tally.pools[Pool::Resident as usize],
+            disk: tally.pools[Pool::Disk as usize],
             pinned: tally.pinned,
         }
     }
@@ -248,18 +275,24 @@ impl Ledger {
     ) -> Result<Reservation, Refusal> {
         let pool = class.pool();
         let mut tally = self.lock();
-        if class.is_static() && tally.held.contains_key(&class) {
+        if class.is_static() && tally.is_charged(class) {
             return Err(Refusal::AlreadyCharged { class });
         }
-        let total = tally
-            .pool_total(pool)
-            .and_then(|held| held.checked_add(bytes))
-            .and_then(|total| total.checked_add(base))
+        let held = tally.pools[pool as usize]
+            .checked_add(bytes)
             .ok_or(Refusal::Overflow { pool })?;
-        self.gate
-            .check_limits(grant, &self.identity, &[(pool.limit(), total)])?;
-        let entry = tally.held.entry(class).or_insert(0);
-        *entry = entry.checked_add(bytes).ok_or(Refusal::Overflow { pool })?;
+        let total = held.checked_add(base).ok_or(Refusal::Overflow { pool })?;
+        self.gate.check_vector_limit(
+            &mut tally.judgment,
+            grant,
+            &self.identity,
+            pool.limit(),
+            total,
+        )?;
+        // A class holds at most its pool's total, so the class sum fits wherever the pool sum does.
+        tally.held[class as usize] += bytes;
+        tally.charged |= 1 << class as u16;
+        tally.pools[pool as usize] = held;
         Ok(Reservation {
             ledger: Arc::clone(self),
             class,
@@ -283,8 +316,14 @@ impl Ledger {
     ///
     /// The gate's denial.
     pub fn admit_deltas(&self, grant: &Admission, deltas: usize) -> Result<(), Denial> {
-        self.gate
-            .check_limits(grant, &self.identity, &[(DELTA_LIMIT, deltas as u64)])
+        let mut tally = self.lock();
+        self.gate.check_vector_limit(
+            &mut tally.judgment,
+            grant,
+            &self.identity,
+            DELTA_LIMIT,
+            deltas as u64,
+        )
     }
 
     pub fn reconcile(&self, report: &PruneReport) -> Reconciliation {
@@ -296,10 +335,12 @@ impl Ledger {
 
     fn release(&self, class: ResourceClass, bytes: u64) {
         let mut tally = self.lock();
-        if let Some(entry) = tally.held.get_mut(&class) {
-            *entry = entry.saturating_sub(bytes);
-            if *entry == 0 {
-                tally.held.remove(&class);
+        if tally.is_charged(class) {
+            let released = bytes.min(tally.held[class as usize]);
+            tally.held[class as usize] -= released;
+            tally.pools[class.pool() as usize] -= released;
+            if tally.held[class as usize] == 0 {
+                tally.charged &= !(1 << class as u16);
             }
         }
     }
