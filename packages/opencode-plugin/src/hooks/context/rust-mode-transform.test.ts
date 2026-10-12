@@ -1451,12 +1451,20 @@ describe("Rust mode transform transport", () => {
         const sessionId = `rust-paged-full-send-${Date.now()}`;
         const rows = rawRows(3);
         installRawRows(sessionId, rows);
+        const daemonLedger = { admit_us: 10, total_us: 90, window_messages: 4 };
         const { client, bodies } = recordingClient((request) =>
-            recipeResponse(request, [], { decision: "PASSTHROUGH" }),
+            recipeResponse(request, [], {
+                decision: "PASSTHROUGH",
+                timings: { handler_total: 1, total: 1, ledger: daemonLedger },
+            }),
         );
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
             unpagedTransformMaxBytes: MODULE_PAGE_MAX_BYTES,
+        });
+        const ledgers: PassLedger[] = [];
+        const unobserve = observePassLedgers((ledger) => {
+            if (ledger.sessionId === sessionId) ledgers.push(ledger);
         });
         const buildMessages = () =>
             rowMessages(sessionId, rows, (row) =>
@@ -1472,7 +1480,14 @@ describe("Rust mode transform transport", () => {
             hasValidInfo: true,
         });
         const appended = buildMessages();
-        await transform.run(sessionId, { messages: [...appended] });
+        try {
+            await transform.run(sessionId, { messages: [...appended] });
+        } finally {
+            unobserve();
+        }
+        // One ledger per pass: the paged pass reports the ledger its final response carried.
+        expect(ledgers).toHaveLength(2);
+        expect(ledgers[1]?.daemonLedger).toEqual(daemonLedger);
 
         const pages = bodies.filter((body) => "transform_page_id" in body);
         expect(pages.length).toBeGreaterThan(1);
