@@ -36,5 +36,6 @@ describe("scale report pass row writer", () => {
         expect(() => serializePassRow({ ...ledger, daemon_total_us: null })).toThrow(
             "daemon_total_us",
         );
+        expect(() => serializePassRow({ ...ledger, window_blocks: null })).toThrow("served window");
     });
 });

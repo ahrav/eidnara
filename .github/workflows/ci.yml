@@ -38,6 +38,12 @@ on:
           driver's full sampling
         type: string
         default: ""
+      scale_steady:
+        description: >-
+          With scale_samples, completed steady Pi passes that end a session
+          early; zero runs every sample
+        type: string
+        default: "0"
       qualification:
         description: >-
           Run the retained-history and outage qualification campaign, with its
@@ -1066,6 +1072,7 @@ jobs:
       SCALE_BASE: ${{ inputs.scale_base }}
       SCALE_TIERS: ${{ inputs.scale_tiers }}
       SCALE_SAMPLES: ${{ inputs.scale_samples }}
+      SCALE_STEADY: ${{ inputs.scale_steady }}
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1132,7 +1139,7 @@ jobs:
           fi
           if [ -n "$SCALE_SAMPLES" ]; then
             if [ "$SCALE_DRIVER" = pi-pass ]; then
-              measured_flags=(--sessions 1 --samples "$SCALE_SAMPLES")
+              measured_flags=(--sessions 1 --samples "$SCALE_SAMPLES" --steady "$SCALE_STEADY")
             else
               measured_flags=(--samples "$SCALE_SAMPLES")
             fi

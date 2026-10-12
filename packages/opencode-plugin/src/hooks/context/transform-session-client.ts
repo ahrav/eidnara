@@ -404,13 +404,12 @@ function admissionOf(validation: InvocationValidation): InvocationAdmission {
 
 /**
  * One finished pass as the plugin measured it: the named plugin stages in milliseconds, the
- * transport round trip they exclude, the window it sent, and the daemon stage ledger the final
- * transform response carried (`undefined` when no response carried one). A measurement driver
- * observes it to build pass rows; it changes nothing the pass does.
+ * transport round trip they exclude, and the daemon stage ledger the final transform response
+ * carried (`undefined` when no response carried one). A measurement driver observes it to build
+ * pass rows; a listener's failure is contained, so observing never changes the pass.
  */
 export interface PassLedger {
     sessionId: string;
-    applied: boolean;
     elapsedMs: number;
     prefixGuardMs: number;
     prepareMs: number;
@@ -418,9 +417,6 @@ export interface PassLedger {
     serializeMs: number;
     transportMs: number;
     applyMs: number;
-    transportPages: number;
-    transportBytes: number;
-    windowMessages: number;
     daemonLedger: Record<string, unknown> | undefined;
 }
 
@@ -1027,22 +1023,24 @@ export function createTransformSessionClient(
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
             timings.chargedBytes = lease.chargedBytes;
-            for (const listener of passLedgerListeners)
-                listener({
-                    sessionId,
-                    applied,
-                    elapsedMs,
-                    prefixGuardMs: timings.prefixGuard,
-                    prepareMs: timings.prepare,
-                    wireBuildMs: timings.wireBuild,
-                    serializeMs: timings.serialize,
-                    transportMs: timings.transport,
-                    applyMs: timings.apply,
-                    transportPages: timings.transportPages,
-                    transportBytes: timings.transportBytes,
-                    windowMessages: timings.wireMessages,
-                    daemonLedger,
-                });
+            const ledger: PassLedger = {
+                sessionId,
+                elapsedMs,
+                prefixGuardMs: timings.prefixGuard,
+                prepareMs: timings.prepare,
+                wireBuildMs: timings.wireBuild,
+                serializeMs: timings.serialize,
+                transportMs: timings.transport,
+                applyMs: timings.apply,
+                daemonLedger,
+            };
+            for (const listener of passLedgerListeners) {
+                try {
+                    listener(ledger);
+                } catch (error) {
+                    sessionLog.debug(sessionId, "pass ledger listener failed:", error);
+                }
+            }
             sessionLog.debug(
                 sessionId,
                 formatRustPassLog({

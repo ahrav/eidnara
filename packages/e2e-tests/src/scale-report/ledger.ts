@@ -1,9 +1,10 @@
 /**
  * Builds a pass row's stage ledger from what one plugin pass and its final transform response
  * measured. The plugin stages plus the daemon total sum to the full-hook `response_us`; the
- * daemon stages sum to the daemon total. `transport_and_encode_us` is the residual of the hook
- * after every measured plugin stage and the daemon total: the transport, the daemon's
- * response encode, and any hook time outside the plugin's own pass span.
+ * daemon stages sum to the daemon total. `other_us` is every moment of the hook outside the
+ * named stages and the transport round trip, adapter work and note delivery included;
+ * `transport_and_encode_us` is the residual after every other plugin stage and the daemon
+ * total, the round trip less the daemon's own span.
  */
 
 import { NO_LEDGER, type PassRow } from "./rows";
@@ -80,7 +81,7 @@ export function rowLedger(responseUs: number, observed: ObservedPassLedger | und
         apply_us: us(observed.applyMs),
     };
     const namedSum = Object.values(named).reduce((a, b) => a + b, 0);
-    const otherUs = Math.max(0, us(observed.elapsedMs) - namedSum - us(observed.transportMs));
+    const otherUs = Math.max(0, responseUs - namedSum - us(observed.transportMs));
     const transportAndEncodeUs = responseUs - namedSum - otherUs - daemon.total_us;
     if (transportAndEncodeUs < 0) return daemonFields;
     return {

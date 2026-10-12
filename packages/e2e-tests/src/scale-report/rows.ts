@@ -48,7 +48,7 @@ export interface PassRow {
 }
 
 /** The plugin stage fields, in ledger order. */
-export const PLUGIN_STAGES = [
+const PLUGIN_STAGES = [
     "prefix_guard_us",
     "prepare_us",
     "wire_build_us",
@@ -58,7 +58,7 @@ export const PLUGIN_STAGES = [
     "other_us",
 ] as const;
 /** The daemon stage fields, in ledger order; `derive_ck_us` stays `null` until the daemon derives CK. */
-export const DAEMON_STAGES = [
+const DAEMON_STAGES = [
     "admit_us",
     "lane_gate_and_decode_us",
     "derive_ck_us",
@@ -119,13 +119,14 @@ function checkLedger(row: PassRow): void {
     const daemon = DAEMON_STAGES.filter((field) => field !== "derive_ck_us").map(
         (field) => row[field],
     );
+    const daemonGroup = [...daemon, row.window_messages, row.window_blocks];
     const present = (values: (number | null)[]) => values.every((value) => value !== null);
     const absent = (values: (number | null)[]) => values.every((value) => value === null);
     if (!present(plugin) && !absent(plugin))
         throw new Error("plugin stages are all present or all unavailable");
-    if (!present(daemon) && !absent([...daemon, row.derive_ck_us]))
-        throw new Error("daemon stages are all present or all unavailable");
-    if (present(daemon) !== (row.daemon_total_us !== null))
+    if (!present(daemonGroup) && !absent([...daemonGroup, row.derive_ck_us]))
+        throw new Error("daemon stages and the served window are all present or all unavailable");
+    if (present(daemonGroup) !== (row.daemon_total_us !== null))
         throw new Error("daemon_total_us accompanies exactly the daemon stages");
     const sum = (values: (number | null)[]) => values.reduce<number>((a, b) => a + (b ?? 0), 0);
     if (row.daemon_total_us !== null && sum([...daemon, row.derive_ck_us]) !== row.daemon_total_us)

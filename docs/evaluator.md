@@ -1213,7 +1213,7 @@ it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
 otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
 and pass^k case in the golden.
 
-## Scale report `eval-scale-report/v1`
+## Scale report `eval-scale-report/v2`
 
 `scale.rs` holds the report the scale budgets of #825 are measured with. A
 `PassRow` is one transform pass: `harness` (`opencode` or `pi`), `tier`
@@ -1238,18 +1238,23 @@ A row carries two additive ledgers in whole microseconds. The plugin ledger is
 `prefix_guard_us` (capture and every recheck of the host window), `prepare_us`
 (the harness's pass inputs), `wire_build_us` (the transform body), `serialize_us`
 (the page series serialized to text), `transport_and_encode_us`, `apply_us`
-(recipe application and publication), and `other_us` (the plugin's own pass
-span outside those stages). With `daemon_total_us` they sum to `response_us`
-exactly: `transport_and_encode_us` is the residual of the hook after every
-other plugin stage and the daemon total, so it holds the transport, the
-daemon's response encode, and hook time outside the plugin's own pass span. The
+(recipe application and publication), and `other_us` (every other moment of
+the hook outside the transport round trip, adapter work and note delivery
+included). With `daemon_total_us` they sum to `response_us` exactly:
+`transport_and_encode_us` is the residual of the hook after every other plugin
+stage and the daemon total, the transport round trip less the daemon's own
+span, so it holds the transport and the daemon's response encode. The
 daemon ledger is `admit_us` (from the handler taking the body through the byte
 cap, admission charge, and lane probe), `lane_gate_and_decode_us` (the typed
 decode, request checks, session lane wait, and unit permit), `derive_ck_us`
 (reserved for daemon-derived CK, `null` while the plugin sends CK),
 `transform_core_us`, `native_attach_us`, and `daemon_residual_us`; they sum to
 `daemon_total_us`, which the transform response carries as `timings.ledger`
-measured just before the response encode. On a paged pass every daemon stage
+measured just before the response encode; a pass the daemon serves
+untransformed, such as a child session's, carries no ledger.
+`lane_gate_and_decode_us` holds the session lane wait and the unit-permit wait
+beside the decode, near zero in a closed-loop single-session run and a
+confounded figure under concurrency. On a paged pass every daemon stage
 measures the final page's request, and the earlier pages' daemon time falls in
 `transport_and_encode_us`. `window_messages` and `window_blocks` count the CK
 messages and blocks the daemon served, the cohort a latency belongs to.
@@ -1412,16 +1417,19 @@ The transform-pass latency work of #988 measures one cohort: the 10k session
 with the qualified 300-message window (`--window 300`, the drivers' default),
 whose rows record the window each pass actually served; #988 qualifies the
 cohort at 301 served messages for OpenCode and 119 for a Pi steady pass. Its baseline runs on the reference host
-through a dispatch of the `scale-report` job with `scale_tiers=10k`,
-`scale_samples=80`, and `scale_budget_seconds=900`, once with
-`scale_driver=opencode-pass` and once with `scale_driver=pi-pass`, which then
-runs one Pi session. Locally the same rows come from release binaries:
+through a dispatch of the `scale-report` job with `scale_tiers=10k` and
+`scale_budget_seconds=900`: `scale_driver=opencode-pass` with
+`scale_samples=80`, and `scale_driver=pi-pass` with one session of up to
+`scale_samples=700` calls that ends at `scale_steady=80` completed steady
+passes, since a Pi session reaches steady state only after its window folds and
+its boundary moves three times. Locally the same rows come from release
+binaries:
 
 ```text
 cargo +1.98 build --release -p daemon --example direct_host_fixture --features direct-host-fixture --locked
 cargo +1.98 build --release -p daemon --example eval_runner --features eval-runner --locked
 EIDNARA_SCALE_BUDGET_SECONDS=900 bun packages/e2e-tests/scripts/scale-opencode-pass.ts --tiers 10k --samples 80 --plugin-root packages/opencode-plugin --fixture-bin target/release/examples/direct_host_fixture --eval-runner-bin target/release/examples/eval_runner --out-dir <dir>
-EIDNARA_SCALE_BUDGET_SECONDS=900 bun packages/e2e-tests/scripts/scale-pi-pass.ts --tiers 10k --sessions 1 --samples 80 --plugin-root packages/pi-plugin --fixture-bin target/release/examples/direct_host_fixture --eval-runner-bin target/release/examples/eval_runner --out-dir <dir>
+EIDNARA_SCALE_BUDGET_SECONDS=900 bun packages/e2e-tests/scripts/scale-pi-pass.ts --tiers 10k --sessions 1 --samples 700 --steady 80 --plugin-root packages/pi-plugin --fixture-bin target/release/examples/direct_host_fixture --eval-runner-bin target/release/examples/eval_runner --out-dir <dir>
 target/release/examples/eval_runner scale-report --rows <dir>/rows.jsonl --manifest <dir>/manifest.json --out <dir>/report.json
 ```
 
@@ -1430,10 +1438,18 @@ baseline run produces no verdict. A later verdict compares matched cohorts:
 one host, one build per arm, the same tier, window, session count, and boundary
 states, and the same denominators. It uses a fixed horizon of three complete
 paired ABBA blocks of the baseline (A) and candidate (B) artifacts on one host,
-plus at least three A/A blocks of the baseline artifact alone, with no peeking:
-the candidate wins only when every block's B/A ratio of the compared statistic
-is below 1 and the smallest improvement exceeds the largest A/A absolute
-log-ratio. Stage percentiles explain a verdict; they are never summed into one.
+plus at least three A/A blocks of the baseline artifact alone, with no peeking.
+The compared statistic is the nearest-rank p50 of `response_us` over the
+completed passes of the compared boundary state and window cohort: `replay` for
+OpenCode and `steady` for Pi. A block runs four arms in order, A1 B1 B2 A2, each
+under the same flags and sample count; its ratio is the geometric mean of
+B1/A1 and B2/A2. An A/A block runs the baseline artifact four times in the same
+order and shape, and its ratio is computed the same way with the second and
+third runs in the B positions. With every ratio taken as a natural log, the
+candidate wins only when every block's log ratio is below zero and the
+smallest improvement, the least absolute log ratio among the blocks, exceeds
+the largest absolute A/A log ratio. Stage percentiles explain a verdict; they
+are never summed into one.
 
 ## Paired worlds
 

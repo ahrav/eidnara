@@ -652,12 +652,25 @@ fn rows_the_typescript_writer_emits_parse_losslessly() {
 fn a_ledger_row_reconciles_both_ledgers_and_refuses_a_partial_or_unbalanced_one() {
     let rows: Vec<PassRow> = (0..4).map(|turn| ledger_row("ledger", turn, 100)).collect();
     assert!(ScaleReport::build(inputs(rows.clone())).is_ok());
-    let edits: [fn(&mut PassRow); 5] = [
+    let edits: [fn(&mut PassRow); 8] = [
         |pass| pass.other_us = None,
         |pass| pass.other_us = pass.other_us.map(|other| other + 1),
         |pass| pass.admit_us = None,
         |pass| pass.daemon_residual_us = pass.daemon_residual_us.map(|residual| residual + 1),
         |pass| pass.daemon_total_us = None,
+        |pass| pass.window_blocks = None,
+        // Plugin stages reconcile only against a daemon total.
+        |pass| {
+            pass.admit_us = None;
+            pass.lane_gate_and_decode_us = None;
+            pass.transform_core_us = None;
+            pass.native_attach_us = None;
+            pass.daemon_residual_us = None;
+            pass.daemon_total_us = None;
+            pass.window_messages = None;
+            pass.window_blocks = None;
+        },
+        |pass| pass.derive_ck_us = Some(1),
     ];
     for edit in edits {
         let mut broken = rows.clone();
@@ -667,6 +680,21 @@ fn a_ledger_row_reconciles_both_ledgers_and_refuses_a_partial_or_unbalanced_one(
             Err(ScaleReportError::LedgerMismatch { row: 2 })
         );
     }
+    // A pass whose plugin ledger could not reconcile keeps its daemon ledger alone.
+    let mut daemon_only = rows.clone();
+    let pass = &mut daemon_only[1];
+    for stage in [
+        &mut pass.prefix_guard_us,
+        &mut pass.prepare_us,
+        &mut pass.wire_build_us,
+        &mut pass.serialize_us,
+        &mut pass.transport_and_encode_us,
+        &mut pass.apply_us,
+        &mut pass.other_us,
+    ] {
+        *stage = None;
+    }
+    assert!(ScaleReport::build(inputs(daemon_only)).is_ok());
     // A refused pass carries no daemon ledger and keeps its outcome count.
     let mut refused = rows;
     refused[3] = row(ScaleTier::Control10k, "ledger", 3, 900);
@@ -721,7 +749,10 @@ fn stage_percentiles_come_from_completed_rows_that_carry_the_stage() {
     // The report rebuilds from its rows, so a summary that disagrees with them is refused.
     let mut value = report.serialize().unwrap();
     value["tiers"][0]["states"][0]["stages"][0]["p50_us"] = json!(9);
-    assert!(parse_scale_report(&value).is_err());
+    assert!(matches!(
+        parse_scale_report(&value),
+        Err(ScaleReportError::SummaryMismatch { .. } | ScaleReportError::PercentileNotPooled { .. })
+    ));
 }
 
 #[test]

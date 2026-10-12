@@ -1,4 +1,4 @@
-//! `eval-scale-report/v1`: per-pass rows from a scale driver, the session and tier summaries
+//! `eval-scale-report/v2`: per-pass rows from a scale driver, the session and tier summaries
 //! derived from them, and the tier ratio and flatness gates of the scale measurement contract
 //! (#825 Verification Strategy). A report is built from its rows and parsed by rebuilding it, so
 //! every summary is a function of the rows the report carries.
@@ -19,8 +19,8 @@ use crate::statistics::{
     Ratio, StatisticsError, bootstrap_bounds, bootstrap_draw, check_bootstrap_draws,
 };
 
-pub const SCALE_REPORT_SCHEMA: &str = "eval-scale-report/v1";
-const SCALE_RESULT_DIGEST_PROTOCOL: &str = "eval-scale-report-result/v1";
+pub const SCALE_REPORT_SCHEMA: &str = "eval-scale-report/v2";
+const SCALE_RESULT_DIGEST_PROTOCOL: &str = "eval-scale-report-result/v2";
 /// A tier ratio claim needs this many independent sessions in the tier and in its control.
 pub const MIN_RATIO_SESSIONS: usize = 3;
 /// Bootstrap replicates behind every tier ratio interval.
@@ -29,7 +29,7 @@ pub const RATIO_REPLICATES: u32 = 1_000;
 pub const RATIO_GATE: (i64, u64) = (6, 5);
 /// The plugin stage fields of a row, in ledger order. With `daemon_total_us` they sum to
 /// `response_us` on a row that carries them.
-pub const PLUGIN_STAGES: [&str; 7] = [
+const PLUGIN_STAGES: [&str; 7] = [
     "prefix_guard_us",
     "prepare_us",
     "wire_build_us",
@@ -40,7 +40,7 @@ pub const PLUGIN_STAGES: [&str; 7] = [
 ];
 /// The daemon stage fields of a row, in ledger order. They sum to `daemon_total_us` on a row
 /// that carries them; `derive_ck_us` stays `null` until the daemon derives CK.
-pub const DAEMON_STAGES: [&str; 6] = [
+const DAEMON_STAGES: [&str; 6] = [
     "admit_us",
     "lane_gate_and_decode_us",
     "derive_ck_us",
@@ -48,47 +48,29 @@ pub const DAEMON_STAGES: [&str; 6] = [
     "native_attach_us",
     "daemon_residual_us",
 ];
-/// The optional fields a pre-ledger row omits: the stage fields, the daemon total, and the
-/// window the pass served.
-const LEDGER_FIELDS: [&str; 16] = [
-    "prefix_guard_us",
-    "prepare_us",
-    "wire_build_us",
-    "serialize_us",
-    "transport_and_encode_us",
-    "apply_us",
-    "other_us",
-    "admit_us",
-    "lane_gate_and_decode_us",
-    "derive_ck_us",
-    "transform_core_us",
-    "native_attach_us",
-    "daemon_residual_us",
-    "daemon_total_us",
-    "window_messages",
-    "window_blocks",
-];
+/// The served-window fields; they accompany exactly a present daemon ledger.
+const WINDOW_FIELDS: [&str; 2] = ["window_messages", "window_blocks"];
+/// Row measurements the result digest excludes beside the stage durations.
+const BASE_MEASUREMENTS: [&str; 4] = ["response_us", "service_us", "rss_bytes", "ipc_bytes"];
+
+/// Every stage the report summarizes, in ledger order, the daemon total last.
+fn stage_fields() -> impl Iterator<Item = &'static str> {
+    PLUGIN_STAGES
+        .into_iter()
+        .chain(DAEMON_STAGES)
+        .chain(["daemon_total_us"])
+}
+
+/// The optional fields a row written before the stage ledger omits.
+fn ledger_fields() -> impl Iterator<Item = &'static str> {
+    stage_fields().chain(WINDOW_FIELDS)
+}
+
 /// Row measurements the result digest excludes: every duration, RSS, and byte count.
-const ROW_MEASUREMENTS: [&str; 18] = [
-    "response_us",
-    "service_us",
-    "rss_bytes",
-    "ipc_bytes",
-    "prefix_guard_us",
-    "prepare_us",
-    "wire_build_us",
-    "serialize_us",
-    "transport_and_encode_us",
-    "apply_us",
-    "other_us",
-    "admit_us",
-    "lane_gate_and_decode_us",
-    "derive_ck_us",
-    "transform_core_us",
-    "native_attach_us",
-    "daemon_residual_us",
-    "daemon_total_us",
-];
+fn row_measurements() -> impl Iterator<Item = &'static str> {
+    BASE_MEASUREMENTS.into_iter().chain(stage_fields())
+}
+
 /// Sub-buckets per power of two in a [`Histogram`]; values below this count map to themselves.
 const HISTOGRAM_SUB_BUCKETS: u64 = 32;
 
@@ -245,13 +227,12 @@ impl PassRow {
         ]
     }
 
-    /// Every stage the report summarizes, named, with the daemon total last.
-    fn named_stages(&self) -> impl Iterator<Item = (&'static str, Option<u64>)> {
-        PLUGIN_STAGES
+    /// Every stage the report summarizes, in [`stage_fields`] order.
+    fn stage_values(&self) -> impl Iterator<Item = Option<u64>> {
+        self.plugin_stages()
             .into_iter()
-            .zip(self.plugin_stages())
-            .chain(DAEMON_STAGES.into_iter().zip(self.daemon_stages()))
-            .chain([("daemon_total_us", self.daemon_total_us)])
+            .chain(self.daemon_stages())
+            .chain([self.daemon_total_us])
     }
 }
 
@@ -617,7 +598,8 @@ pub enum ScaleReportError {
     SummaryMismatch {
         section: &'static str,
     },
-    /// A row carries part of a ledger group, or its stages do not sum to their total.
+    /// A row carries part of a ledger group or a served window without a daemon ledger, or its
+    /// stages do not sum to their total.
     LedgerMismatch {
         row: usize,
     },
@@ -697,32 +679,23 @@ fn window_cohorts(rows: &[&PassRow]) -> Vec<WindowCohort> {
 /// Per stage, the nearest-rank p50 and p90 of the completed passes in `state` that carry it;
 /// a stage no completed pass carries is left out.
 fn stage_summaries(rows: &[&PassRow], state: BoundaryState) -> Vec<StageSummary> {
-    let completed: Vec<&&PassRow> = rows
+    let mut values: Vec<Vec<(u64, bool)>> = stage_fields().map(|_| Vec::new()).collect();
+    for row in rows
         .iter()
         .filter(|row| row.boundary_state == state && row.outcome == PassOutcome::Completed)
-        .collect();
-    let Some(first) = completed.first() else {
-        return Vec::new();
-    };
-    first
-        .named_stages()
-        .map(|(stage, _)| stage)
-        .filter_map(|stage| {
-            let values: Vec<(u64, bool)> = completed
-                .iter()
-                .filter_map(|row| {
-                    row.named_stages()
-                        .find(|(name, _)| *name == stage)
-                        .and_then(|(_, value)| value)
-                })
-                .map(|value| (value, false))
-                .collect();
-            (!values.is_empty()).then(|| StageSummary {
-                stage: stage.to_string(),
-                passes: values.len() as u32,
-                p50_us: censored_percentile(&values, 50).value,
-                p90_us: censored_percentile(&values, 90).value,
-            })
+    {
+        for (stage, value) in values.iter_mut().zip(row.stage_values()) {
+            stage.extend(value.map(|value| (value, false)));
+        }
+    }
+    stage_fields()
+        .zip(values)
+        .filter(|(_, values)| !values.is_empty())
+        .map(|(stage, values)| StageSummary {
+            stage: stage.to_string(),
+            passes: values.len() as u32,
+            p50_us: censored_percentile(&values, 50).value,
+            p90_us: censored_percentile(&values, 90).value,
         })
         .collect()
 }
@@ -857,8 +830,9 @@ fn uncensored(observations: &[(u64, bool)]) -> u32 {
 }
 
 /// A ledger group is all present or all unavailable (`derive_ck_us` may stay unavailable in a
-/// present daemon group), a present daemon group sums to `daemon_total_us`, and a present
-/// plugin group plus `daemon_total_us` sums to `response_us`.
+/// present daemon group), the daemon total and the served window accompany exactly a present
+/// daemon group, a present daemon group sums to `daemon_total_us`, and a present plugin group
+/// plus `daemon_total_us` sums to `response_us`.
 fn ledger_reconciles(row: &PassRow) -> bool {
     let plugin = row.plugin_stages();
     let daemon = row.daemon_stages();
@@ -866,12 +840,19 @@ fn ledger_reconciles(row: &PassRow) -> bool {
     if !plugin_present && plugin.iter().any(Option::is_some) {
         return false;
     }
-    let daemon_present = daemon
-        .iter()
-        .enumerate()
-        .all(|(index, stage)| stage.is_some() || DAEMON_STAGES[index] == "derive_ck_us");
-    let daemon_any = daemon.iter().any(Option::is_some);
-    if daemon_present != row.daemon_total_us.is_some() || (!daemon_present && daemon_any) {
+    let [admit, lane_gate, derive_ck, core, attach, residual] = daemon;
+    let required = [
+        admit,
+        lane_gate,
+        core,
+        attach,
+        residual,
+        row.daemon_total_us,
+        row.window_messages,
+        row.window_blocks,
+    ];
+    let daemon_present = required.iter().all(Option::is_some);
+    if !daemon_present && (required.iter().any(Option::is_some) || derive_ck.is_some()) {
         return false;
     }
     let sum = |stages: &[Option<u64>]| {
@@ -1191,7 +1172,7 @@ impl ScaleReport {
                     .map(|row| {
                         let mut row = row.clone();
                         if let Some(row) = row.as_object_mut() {
-                            for field in ROW_MEASUREMENTS {
+                            for field in row_measurements() {
                                 row.remove(field);
                             }
                         }
@@ -1215,11 +1196,9 @@ pub fn parse_pass_row(value: &Value) -> Result<PassRow, ScaleReportError> {
     canonical_json_encode(value).map_err(ScaleReportError::NotCanonical)?;
     let mut expected = value.clone();
     if let Some(object) = expected.as_object_mut()
-        && LEDGER_FIELDS
-            .iter()
-            .all(|field| !object.contains_key(*field))
+        && ledger_fields().all(|field| !object.contains_key(field))
     {
-        for field in LEDGER_FIELDS {
+        for field in ledger_fields() {
             object.insert(field.to_string(), Value::Null);
         }
     }
@@ -1281,6 +1260,45 @@ debug_display!(ScaleReportError);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The field lists the parser, the digest, and the summaries read are the struct's own
+    /// optional fields.
+    #[test]
+    fn the_ledger_field_lists_are_the_row_struct_fields() {
+        let row: PassRow = serde_json::from_value(serde_json::json!({
+            "harness": "pi", "tier": "10k", "session": "s", "turn": 0,
+            "boundary_state": "steady", "outcome": "completed", "refusal": null,
+            "response_us": 1, "service_us": null, "rss_bytes": 1, "ipc_bytes": 1
+        }))
+        .unwrap();
+        let value = serde_json::to_value(row).unwrap();
+        let base = [
+            "harness",
+            "tier",
+            "session",
+            "turn",
+            "boundary_state",
+            "outcome",
+            "refusal",
+            "response_us",
+            "service_us",
+            "rss_bytes",
+            "ipc_bytes",
+        ];
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !base.contains(key))
+            .collect();
+        keys.sort_unstable();
+        let mut expected: Vec<&str> = ledger_fields().collect();
+        assert_eq!(expected.len(), 16, "no field is listed twice");
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        assert!(row_measurements().all(|field| value.get(field).is_some()));
+    }
 
     /// Sessions whose passes all share one value pool to a p99 equal to the largest value among
     /// the sessions drawn, so the interval is recomputable from the draws alone.

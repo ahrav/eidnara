@@ -1,6 +1,6 @@
 //! Scale driver support. `scale-seed` writes #826's synthetic history into the store a
 //! direct-host fixture opens at its state root, so a driver's first pass declares coverage that
-//! already exists; `scale-report` builds an `eval-scale-report/v1` report from a driver's rows
+//! already exists; `scale-report` builds an `eval-scale-report/v2` report from a driver's rows
 //! and manifest.
 
 use std::fs;
@@ -227,6 +227,7 @@ mod tests {
         .unwrap();
         let value: Value = serde_json::from_slice(&fs::read(&out).unwrap()).unwrap();
         let report = eval_core::parse_scale_report(&value).unwrap();
-        assert_eq!(report.rows.len(), 6);
+        let lines = fs::read_to_string(rows).unwrap().lines().count();
+        assert_eq!(report.rows.len(), lines);
     }
 }

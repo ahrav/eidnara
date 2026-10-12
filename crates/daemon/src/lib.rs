@@ -25338,9 +25338,26 @@ mod tests {
     async fn a_completed_pass_carries_a_reconciled_daemon_stage_ledger() {
         let (handler, _store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let two_blocks = IngressMessage {
+            mid: "m2".to_string(),
+            ordinal: 2,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![
+                    WireBlock::bare(BlockKind::Text {
+                        text: "there".to_string(),
+                    }),
+                    WireBlock::bare(BlockKind::Text {
+                        text: "again".to_string(),
+                    }),
+                ],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        };
         let parsed: TransformRequest =
-            serde_json::from_value(request(vec![ck("m1", 1, "hello"), ck("m2", 2, "there")]))
-                .unwrap();
+            serde_json::from_value(request(vec![ck("m1", 1, "hello"), two_blocks])).unwrap();
         let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
         let pool = TestPool::unbounded();
         let meter = ResidentMeter::new(&pool);
@@ -25380,7 +25397,9 @@ mod tests {
             ledger.total_us
         );
         assert!(ledger.total_us >= 40_000, "{ledger:?}");
-        assert_eq!((ledger.window_messages, ledger.window_blocks), (2, 2));
+        // The core instant follows the entry instants, so the pass's own work lands in its stage.
+        assert!(ledger.transform_core_us > 0, "{ledger:?}");
+        assert_eq!((ledger.window_messages, ledger.window_blocks), (2, 3));
         // The overlapping diagnostics keep their own brackets beside the ledger.
         assert!(response["timings"]["handler_total"].is_number());
 
