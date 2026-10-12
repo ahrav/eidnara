@@ -14,6 +14,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 
 use crate::injection::SYNTHETIC_TIMESTAMP;
+use crate::served_json::CanonicalScratch;
 use crate::wire::{
     BlockKind, HarnessMeta, IngressMessage, MediaBlock, MessageOrigin, OpaqueBlock, OutputKind,
     ProviderExtras, ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
@@ -21,7 +22,7 @@ use crate::wire::{
 
 use super::sidecar::{
     BlockMeta, DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary, HarnessMessageMeta,
-    decoded_block_fingerprint, is_synthetic_part, json_holds_float_zero, match_block_metas,
+    decoded_block_fingerprint_in, is_synthetic_part, json_holds_float_zero, match_block_metas,
     meta_for_ck, stable_hash_prefix, stamp_block_identity,
 };
 
@@ -125,6 +126,7 @@ fn decode_rows<'a, E>(
     let mut boundary = None;
     // A call id the window already carries contributes only its result, as the plugin encodes it.
     let mut emitted_calls = HashSet::new();
+    let mut scratch = CanonicalScratch::default();
 
     for (ordinal, raw_message) in rows {
         let info = message_info(raw_message);
@@ -145,8 +147,11 @@ fn decode_rows<'a, E>(
             .map(Vec::as_slice)
             .unwrap_or_default();
 
-        let mut content = Vec::new();
-        let mut block_metas = Vec::new();
+        let mut blocks = DecodedBlocks {
+            content: Vec::new(),
+            metas: Vec::new(),
+            scratch: &mut scratch,
+        };
 
         for (part_index, part) in parts.iter().enumerate() {
             let part_type = part
@@ -157,14 +162,7 @@ fn decode_rows<'a, E>(
                 "text" if part.get("ignored") != Some(&Value::Bool(true)) => {
                     let text = string_field(part, "text").unwrap_or_default();
                     let block = block_with_extras(BlockKind::Text { text }, part);
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        "text",
-                    );
+                    blocks.push(block, part_index, part, "text");
                 }
                 "reasoning" | "thinking" => {
                     let text = string_field(part, "text")
@@ -185,61 +183,26 @@ fn decode_rows<'a, E>(
                         },
                     };
                     let block = block_with_extras(kind, part);
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        "reasoning",
-                    );
+                    blocks.push(block, part_index, part, "reasoning");
                 }
                 "redacted_thinking" => {
                     let data = string_field(part, "data")
                         .or_else(|| string_field(part, "redacted"))
                         .unwrap_or_default();
                     let block = block_with_extras(BlockKind::RedactedReasoning { data }, part);
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        "redacted_reasoning",
-                    );
+                    blocks.push(block, part_index, part, "redacted_reasoning");
                 }
                 "tool" => {
-                    decode_tool_part(
-                        ordinal,
-                        part_index,
-                        part,
-                        &mut emitted_calls,
-                        &mut content,
-                        &mut block_metas,
-                    );
+                    decode_tool_part(ordinal, part_index, part, &mut emitted_calls, &mut blocks);
                 }
                 "file" | "image" => {
                     let media = media_from_part(part);
                     let block = WireBlock::bare(BlockKind::Media(media));
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        "file",
-                    );
+                    blocks.push(block, part_index, part, "file");
                 }
                 "step-start" | "step-finish" | "subtask" => {
                     let block = opaque_block(part_type, part.clone(), None);
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        part_type,
-                    );
+                    blocks.push(block, part_index, part, part_type);
                 }
                 "compaction" => {
                     boundary = Some(ExtractedBoundary {
@@ -255,18 +218,16 @@ fn decode_rows<'a, E>(
                 // An ignored text part stays in the window as an opaque `text` block.
                 _ => {
                     let block = opaque_block(part_type, part.clone(), opaque_arc(part));
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        part_type,
-                    );
+                    blocks.push(block, part_index, part, part_type);
                 }
             }
         }
 
+        let DecodedBlocks {
+            content,
+            metas: block_metas,
+            ..
+        } = blocks;
         let synthetic = is_synthetic_message(parts);
         let ck = WireMessage::from_parts(
             role.clone(),
@@ -437,8 +398,7 @@ fn decode_tool_part<'a>(
     part_index: usize,
     part: &'a Value,
     emitted_calls: &mut HashSet<Cow<'a, str>>,
-    content: &mut Vec<WireBlock>,
-    block_metas: &mut Vec<BlockMeta>,
+    blocks: &mut DecodedBlocks<'_>,
 ) {
     let tool_name = tool_name(part);
     let input = part
@@ -467,14 +427,7 @@ fn decode_tool_part<'a>(
             input,
             provider_executed,
         });
-        push_block_with_native_id(
-            content,
-            block_metas,
-            call_block,
-            part_index,
-            "tool_call",
-            Some(id.to_string()),
-        );
+        blocks.push_with_native_id(call_block, part_index, "tool_call", Some(id.to_string()));
     }
 
     let status = tool_status(part);
@@ -493,9 +446,7 @@ fn decode_tool_part<'a>(
             output,
             provider_executed,
         });
-        push_block_with_native_id(
-            content,
-            block_metas,
+        blocks.push_with_native_id(
             result_block,
             part_index,
             "tool_result",
@@ -504,38 +455,41 @@ fn decode_tool_part<'a>(
     }
 }
 
-fn push_block(
-    content: &mut Vec<WireBlock>,
-    block_metas: &mut Vec<BlockMeta>,
-    block: WireBlock,
-    part_index: usize,
-    raw: &Value,
-    kind: &str,
-) {
-    let native_id = string_field(raw, "id").or_else(|| string_field(raw, "callID"));
-    push_block_with_native_id(content, block_metas, block, part_index, kind, native_id);
+/// The CK blocks one message decodes to and their metas, fingerprinted through the decode's
+/// shared serialization buffers.
+struct DecodedBlocks<'s> {
+    content: Vec<WireBlock>,
+    metas: Vec<BlockMeta>,
+    scratch: &'s mut CanonicalScratch,
 }
 
-fn push_block_with_native_id(
-    content: &mut Vec<WireBlock>,
-    block_metas: &mut Vec<BlockMeta>,
-    mut block: WireBlock,
-    part_index: usize,
-    kind: &str,
-    native_id: Option<String>,
-) {
-    let block_index = content.len();
-    let content_fingerprint = decoded_block_fingerprint(&block);
-    stamp_block_identity(&mut block, block_index, part_index, &content_fingerprint);
-    content.push(block);
-    block_metas.push(BlockMeta {
-        block_index,
-        kind: kind.to_string(),
-        native_index: Some(part_index),
-        native_id,
-        item_id: None,
-        content_fingerprint: Some(content_fingerprint),
-    });
+impl DecodedBlocks<'_> {
+    /// Pushes `block` decoded from `raw`, whose `id`, else `callID`, is the native id.
+    fn push(&mut self, block: WireBlock, part_index: usize, raw: &Value, kind: &str) {
+        let native_id = string_field(raw, "id").or_else(|| string_field(raw, "callID"));
+        self.push_with_native_id(block, part_index, kind, native_id);
+    }
+
+    fn push_with_native_id(
+        &mut self,
+        mut block: WireBlock,
+        part_index: usize,
+        kind: &str,
+        native_id: Option<String>,
+    ) {
+        let block_index = self.content.len();
+        let content_fingerprint = decoded_block_fingerprint_in(self.scratch, &block);
+        stamp_block_identity(&mut block, block_index, part_index, &content_fingerprint);
+        self.content.push(block);
+        self.metas.push(BlockMeta {
+            block_index,
+            kind: kind.to_string(),
+            native_index: Some(part_index),
+            native_id,
+            item_id: None,
+            content_fingerprint: Some(content_fingerprint),
+        });
+    }
 }
 
 /// A block carrying the part's `metadata` and `cache_control` under the `opencode` namespace.

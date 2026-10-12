@@ -1104,15 +1104,44 @@ pub(crate) fn canonical_block_text(
     scratch: &mut CanonicalScratch,
     block: &memory_store::WireBlock,
 ) -> serde_json::Result<Arc<str>> {
+    let reordered = encode_block_into(scratch, block)?;
+    let CanonicalScratch { encoder, sorted } = scratch;
+    if !reordered {
+        let text = Arc::from(encoder.text.as_str());
+        release_oversized(&mut encoder.text);
+        return Ok(text);
+    }
+    release_oversized(&mut encoder.text);
+    let text = Arc::from(sorted.as_str());
+    release_oversized(sorted);
+    Ok(text)
+}
+
+/// [`canonical_block_bytes`] encoded through `scratch` and borrowed from it until its next use.
+pub(crate) fn canonical_block_in<'s>(
+    scratch: &'s mut CanonicalScratch,
+    block: &memory_store::WireBlock,
+) -> serde_json::Result<&'s str> {
+    Ok(if encode_block_into(scratch, block)? {
+        &scratch.sorted
+    } else {
+        &scratch.encoder.text
+    })
+}
+
+/// Encodes `block` into `scratch`; returns whether the canonical text is the reordered copy in
+/// `scratch.sorted` rather than the serialization buffer itself.
+fn encode_block_into(
+    scratch: &mut CanonicalScratch,
+    block: &memory_store::WireBlock,
+) -> serde_json::Result<bool> {
     scratch.encoder.reset();
     block.serialize(&mut scratch.encoder)?;
     #[cfg(test)]
     FINALIZATIONS.with(|count| count.set(count.get() + 1));
     let CanonicalScratch { encoder, sorted } = scratch;
     if !sort_all_fields(&encoder.text, encoder.objects.live_mut()) {
-        let text = Arc::from(encoder.text.as_str());
-        release_oversized(&mut encoder.text);
-        return Ok(text);
+        return Ok(false);
     }
     sorted.clear();
     sorted.reserve(encoder.text.len());
@@ -1122,10 +1151,7 @@ pub(crate) fn canonical_block_text(
         0..encoder.text.len(),
         sorted,
     );
-    release_oversized(&mut encoder.text);
-    let text = Arc::from(sorted.as_str());
-    release_oversized(sorted);
-    Ok(text)
+    Ok(true)
 }
 
 /// The largest buffer capacity a [`CanonicalScratch`] keeps between blocks. A larger buffer is
@@ -1185,6 +1211,14 @@ pub(crate) struct CanonicalScratch {
     encoder: Encoder,
     /// The reordered copy of a disordered document.
     sorted: String,
+}
+
+impl CanonicalScratch {
+    /// Frees each buffer whose capacity exceeds [`RETAINED_SCRATCH_BYTES`].
+    pub(crate) fn release_oversized(&mut self) {
+        release_oversized(&mut self.encoder.text);
+        release_oversized(&mut self.sorted);
+    }
 }
 
 /// Returns the serialization buffer itself when every object is already in
