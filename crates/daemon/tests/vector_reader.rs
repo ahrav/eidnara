@@ -1077,8 +1077,6 @@ fn a_walk_cancelled_mid_flight_ends_on_its_own_set_while_a_publish_prune_and_new
     let new_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     assert_eq!(new_view.members(), vec![new_base.digest.clone()]);
 
-    // The new reader's thread signals immediately before its ranking call, and the held walk is released only after that signal,
-    // so the call begins during the overlap; it completes once the held walk frees the connection.
     let new_work = Work {
         view: Arc::clone(&new_view),
         projection_store: Arc::clone(&projection.store),
@@ -1089,17 +1087,20 @@ fn a_walk_cancelled_mid_flight_ends_on_its_own_set_while_a_publish_prune_and_new
         grant: fixture.admission.clone(),
     };
     let (ranked, ranking_new) = mpsc::channel();
-    let (calling, called) = mpsc::channel::<()>();
+    let (contending, contended) = mpsc::channel();
     let new_reader = std::thread::spawn(move || {
-        calling.send(()).unwrap();
+        let attempt = new_work
+            .projection_store
+            .with_conn_within(Instant::now() + Duration::from_millis(50), |_| Ok(()));
+        contending.send(attempt).unwrap();
         ranked.send(new_work.run(&EvalBudget::unbounded())).unwrap();
     });
-    called
+    let attempt = contended
         .recv_timeout(STEP)
-        .expect("the new reader reaches its ranking call");
+        .expect("the new reader's bounded connection attempt returns");
     assert!(
-        ranking_new.try_recv().is_err(),
-        "the new reader cannot rank while the held walk owns the connection"
+        matches!(attempt, Err(storage::StoreError::Deadline)),
+        "the held walk owns the projection's only connection: {attempt:?}"
     );
     interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
     release.send(()).unwrap();
