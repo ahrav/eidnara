@@ -135,6 +135,7 @@ infer test execution merely from a workspace test command in a plan.
 | `crates/daemon/tests/vector_composition.rs:776-818` | A dropped successful publication reply reconciles as published on two fresh store handles, and the retry is refused by sequence and adds no record. | unaudited |
 | `crates/daemon/tests/vector_composition.rs:822-868` | Publication and the store's vector selector change both refuse a shared lifecycle lock before reading the selection, and nothing is staged or selected. | unaudited |
 | `crates/daemon/tests/vector_composition.rs:1494-1534` | Publication over a selected composition whose record exceeds the metadata cap, and over a selected generation of another owner, succeeds and reads fewer bytes on the calling thread than the selected generation's listed file. | unaudited |
+| `crates/daemon/tests/vector_composition.rs:1548-1601` | Publication over a selected generation of another owner that lists 1,024 files succeeds without growing the process descriptor table to that many slots. | unaudited |
 | `crates/host-runtime/src/generation.rs:4104-4151` | `streaming_every_file_checks_shape_and_defers_each_hash_to_finish`: validation with every manifest file streamed returns the manifest for bytes changed in place and refuses them only when it finishes, and still refuses a changed size or an unlisted file. | unaudited |
 
 ## Existing model and canonical-digest seams

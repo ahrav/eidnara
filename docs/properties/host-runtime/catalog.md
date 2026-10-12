@@ -2273,7 +2273,7 @@ daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
 that lands it.
 Status: active
 Exercised: partial - one byte-exact golden vector exists
-(`generation.rs:1401-1418`) but its fixture omits the optional field and
+(`generation.rs:2077-2092`) but its fixture omits the optional field and
 carries an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
@@ -2303,9 +2303,9 @@ Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-p
 Both structs, both encoding functions, and the existing fixture were read at
 HEAD, and the three blind spots were each confirmed by reasoning from the
 fixture's literal contents.
-Existing check: `generation.rs:1401-1418`
+Existing check: `generation.rs:2077-2092`
 `a_generation_staged_before_the_source_digest_field_still_decodes` asserts
-`decoded.canonical_bytes() == predecessor` against the literal at `:1407`. It
+`decoded.canonical_bytes() == predecessor` against the literal at `:2081`. It
 is the only byte-exact manifest vector in the crate and it does pin the
 relative order of the four leading scalars and `files`, and it does catch the
 addition of a required field, because `deny_unknown_fields` plus a missing
@@ -2340,8 +2340,8 @@ that leaves the existing golden test green must be detectable by some check.
 number does not change when a field moves, so there is no version in which the
 obligation lapses.
 Fault/timing angle: none, but the failure shape needed correcting. The break is
-**fail-closed, not silent**. `validate_in_dir` enforces the binding twice
-(`generation.rs:640-652`): first `hex(sha256(bytes)) != digest`, then
+**fail-closed, not silent**. `read_manifest_in_dir` enforces the binding twice
+(`generation.rs:1037-1043`): first `hex(sha256(bytes)) != digest`, then
 `manifest.canonical_bytes() != bytes`. Under a reordered struct the on-disk
 bytes still hash to the directory name, so the first check passes, and the
 re-encode of the decoded manifest differs, so the second fails with
@@ -2363,7 +2363,7 @@ Both equality checks were read at HEAD, and the fail-closed conclusion was
 derived from them rather than assumed; the prompt's "silently change every
 retained generation's digest" is corrected in the evidence file.
 Existing check: partial and narrow. The predecessor fixture at
-`generation.rs:1401-1418` is the only cross-version manifest test, and it
+`generation.rs:2077-2092` is the only cross-version manifest test, and it
 covers one specific evolution, a field added at the end and omitted when
 absent. Nothing covers a field that moves.
 Impact: the first start after an upgrade reports `native_payload_invalid` for

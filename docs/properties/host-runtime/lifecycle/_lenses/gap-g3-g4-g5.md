@@ -176,15 +176,16 @@ that a happy-path integration test covers by accident.
 
 ### O7. The digest is the directory name, and validation re-derives it twice
 
-`generation.rs:176-178` defines `canonical_bytes` as `serde_json::to_vec(self)`,
+`generation.rs:262-264` defines `canonical_bytes` as `serde_json::to_vec(self)`,
 so the byte order is exactly the struct declaration order at
-`:157-172`: `schema`, `target`, `release_contract_sha256`,
+`:236-246`: `schema`, `target`, `release_contract_sha256`,
 `inputs_lock_sha256`, then `source_payload_manifest_sha256` when present, then
 `files`. Within `files`, each entry serializes in `ManifestFile` declaration
-order at `:145-148`: `path`, `mode`, `size`, `sha256`. `:180-182` names the
+order at `:220-223`: `path`, `mode`, `size`, `sha256`. `:266-268` names the
 generation by the SHA-256 of those bytes.
 
-`validate_in_dir` enforces the binding twice (`generation.rs:640-652`):
+`read_manifest_in_dir`, called from `validate_in_dir`, enforces the binding twice
+(`generation.rs:1037-1043`):
 
 ```
 if hex(&sha2::Sha256::digest(&bytes)) != digest { ... }
@@ -192,7 +193,7 @@ if manifest.canonical_bytes() != bytes { ... }
 ```
 
 The second check is the one that makes declaration order a compatibility
-contract rather than a cosmetic detail. Its own comment (`:644-651`) explains
+contract rather than a cosmetic detail. Its own comment (`:1040`) explains
 that without it a manifest stored under the hash of non-canonical bytes would
 give one logical manifest two identities.
 
@@ -201,16 +202,17 @@ give one logical manifest two identities.
 The prompt's framing was that reordering "would silently change every retained
 generation's digest". Verified and corrected: the digest change is not silent.
 Reordering a field changes `canonical_bytes()` for the decoded manifest while the
-bytes on disk keep the old order, so `:649` fails with
+bytes on disk keep the old order, so `:1041-1043` fails with
 `invalid("manifest is not canonically encoded")` for every retained generation
 whose manifest contains the moved field. The result is a refusal, not a
 mis-selection.
 
 That is the same class of break the `source_payload_manifest_sha256` doc comment
-at `:161-169` was written to avoid: "requiring it would decode every retained
-predecessor as corrupt and fail the first no-`--payload-dir` start after an
-upgrade with `native_payload_invalid` -- refusing a payload that is intact."
-Reordering reaches the same outcome by a different route.
+at `:240-243` was written to avoid: "`#[serde(default)]` preserves decoding of
+schema-1 manifests that omit this field." The golden test's own comment at
+`:2080` states the consequence: rejecting a retained schema-1 manifest would
+report `native_payload_invalid` on the first no-`--payload-dir` start after an
+upgrade. Reordering reaches the same outcome by a different route.
 
 Both consequences are real and they are different properties:
 
@@ -221,14 +223,14 @@ Both consequences are real and they are different properties:
 
 ### O9. Existing protection is real but blind in three specific ways
 
-`generation.rs:1401-1418`
+`generation.rs:2077-2092`
 (`a_generation_staged_before_the_source_digest_field_still_decodes`) asserts
 
 ```
 assert_eq!(decoded.canonical_bytes(), predecessor);
 ```
 
-against the literal fixture at `:1407`:
+against the literal fixture at `:2081`:
 
 ```
 {"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}
@@ -239,12 +241,12 @@ the four leading scalar fields and `files`. It is the only such vector in the
 crate. Its blind spots:
 
 1. **The optional field's position is unpinned.** The fixture omits
-   `source_payload_manifest_sha256`, and `:170` marks it
+   `source_payload_manifest_sha256`, and `:244` marks it
    `skip_serializing_if = "Option::is_none"`, so moving it anywhere in the struct
    leaves this test green while changing the bytes of every generation that has
    it.
 2. **`ManifestFile`'s field order is unpinned.** `files` is `[]`, so permuting
-   `path`, `mode`, `size`, `sha256` at `:145-148` leaves this test green while
+   `path`, `mode`, `size`, `sha256` at `:220-223` leaves this test green while
    changing the bytes of every generation with at least one file, which in
    practice is every real one.
 3. **No digest is asserted.** The test compares bytes only. No test anywhere
@@ -278,8 +280,11 @@ classifying the errno. `rustix` issues `RenameFlags::EXCHANGE` as Linux
 `renameatx_np(RENAME_SWAP)`. Those are different kernel calls with independently
 documented behaviour, reached through one Rust expression.
 
-CI's macOS job (`the source repository`ci.yml`workflow:126-184`, matrix at `:132`) runs on
-macOS exactly four host-runtime steps:
+At HEAD `.github/workflows/ci.yml` runs every job on `ubuntu-latest` and contains
+no `macos` token; the catalog attributes the removal of the macOS job to PR #131
+(merge `5d638e3e8`) in the source repository. That former job (`the source
+repository`ci.yml`workflow:126-184`, matrix at `:139`; source-catalog coordinates)
+ran on macOS exactly four host-runtime steps:
 
 - `:156` `cargo build -p host-runtime` (build only, no test binaries)
 - `:178` `cargo nextest run -p host-runtime --test shm_soak`
@@ -288,11 +293,12 @@ macOS exactly four host-runtime steps:
 - `:182-183` `cargo test -p host-runtime --doc`
 
 No `--test lifecycle`, no `--test client`, no `--test activation`, and the only
-`--lib` invocation is filtered to one `shm_provider` test. The lib test binary is
-*compiled* on macOS by that filtered run, so a macOS type or cfg error would
-surface, but no `generation` or `lifecycle` test body executes. The step comment
-at `:171-174` says so in its own terms: the macOS job proves "side-effect-free
-omission (R15), not active parity".
+`--lib` invocation was filtered to one `shm_provider` test. The lib test binary
+was *compiled* on macOS by that filtered run, so a macOS type or cfg error would
+have surfaced, but no `generation` or `lifecycle` test body executed. The step
+comment at `:178-181` said so in its own terms: the macOS job proved
+"side-effect-free omission (R15), not active parity". With that job gone,
+nothing in this tree builds or tests host-runtime on macOS.
 
 So the macOS `RENAME_SWAP` call has never been observed to execute. Its call site
 is `generation.rs:1368`, inside `promote_temp`, reached only when the digest target
@@ -517,7 +523,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - one byte-exact golden vector exists
-(`generation.rs:1401-1418`) but its fixture omits the optional field and carries
+(`generation.rs:2077-2092`) but its fixture omits the optional field and carries
 an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
@@ -532,11 +538,11 @@ GOLDEN_DIGEST`, and assert the fixture round-trips by decoding `GOLDEN_BYTES` an
 re-encoding. `always` because the encoding is evaluated on every stage and every
 validate; there is no configuration in which it is unreached.
 Fault/timing angle: none. This is a static encoding contract. The mechanism is
-that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:176-178`),
-so the byte order is literally the declaration order at `:157-172` for the outer
-struct and `:145-148` for each file entry, and `digest` is the SHA-256 of exactly
-those bytes (`:180-182`). The optional field's `skip_serializing_if =
-"Option::is_none"` at `:170` is what makes the existing vector blind to its
+that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:262-264`),
+so the byte order is literally the declaration order at `:236-246` for the outer
+struct and `:220-223` for each file entry, and `digest` is the SHA-256 of exactly
+those bytes (`:266-268`). The optional field's `skip_serializing_if =
+"Option::is_none"` at `:244` is what makes the existing vector blind to its
 position: with the field absent, moving it changes nothing about the fixture's
 bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
@@ -545,9 +551,9 @@ pass.
 Confidence: high - [evidence](../../evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
 fixture were read at HEAD, and the three blind spots were each confirmed by
 reasoning from the fixture's literal contents.
-Existing check: `generation.rs:1401-1418`
+Existing check: `generation.rs:2077-2092`
 `a_generation_staged_before_the_source_digest_field_still_decodes` asserts
-`decoded.canonical_bytes() == predecessor` against the literal at `:1407`. It is
+`decoded.canonical_bytes() == predecessor` against the literal at `:2081`. It is
 the only byte-exact manifest vector in the crate and it does pin the relative
 order of the four leading scalars and `files`, and it does catch the addition of
 a required field, because `deny_unknown_fields` plus a missing field fails the
@@ -577,8 +583,8 @@ that leaves the existing golden test green must be detectable by some check.
 does not change when a field moves, so there is no version in which the
 obligation lapses.
 Fault/timing angle: none, but the failure shape needed correcting. The break is
-**fail-closed, not silent**. `validate_in_dir` enforces the binding twice
-(`generation.rs:640-652`): first `hex(sha256(bytes)) != digest`, then
+**fail-closed, not silent**. `read_manifest_in_dir` enforces the binding twice
+(`generation.rs:1037-1043`): first `hex(sha256(bytes)) != digest`, then
 `manifest.canonical_bytes() != bytes`. Under a reordered struct the on-disk bytes
 still hash to the directory name, so the first check passes, and the re-encode of
 the decoded manifest differs, so the second fails with
@@ -598,7 +604,7 @@ fail-closed conclusion was derived from them rather than assumed; the prompt's
 "silently change every retained generation's digest" is corrected in the evidence
 file.
 Existing check: partial and narrow. The predecessor fixture at
-`generation.rs:1401-1418` is the only cross-version manifest test, and it covers
+`generation.rs:2077-2092` is the only cross-version manifest test, and it covers
 one specific evolution, a field added at the end and omitted when absent. Nothing
 covers a field that moves.
 Impact: the first start after an upgrade reports `native_payload_invalid` for
@@ -647,16 +653,19 @@ occupying the digest target, plus a restage of the same digest. The existing tes
 (`generation.rs:2955`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
-Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
-read at HEAD; the claim that no macOS lifecycle or generation test executes is
-derived from the four host-runtime steps in that job rather than asserted.
+Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms and the call site were read at the authoring pass's HEAD, along
+with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
+since deleted that job with every other macOS job, so the claim that no macOS
+lifecycle or generation test executes now holds trivially: `.github/workflows/ci.yml`
+at HEAD contains only `ubuntu-latest` jobs.
 Existing check: partial, Linux only. `generation.rs:2955`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
-branch. CI's macOS job (`the source repository`ci.yml`workflow:126-184`) runs only
-`cargo build -p host-runtime` (`:160`), `--test shm_soak` (`:182`), one filtered
-`--lib shm_provider` test (`:183-185`), and `--doc` (`:186-187`). No `generation`
-or `lifecycle` test body runs on macOS; the step comment at `:175-178` says the
-job proves omission, not parity. Status unaudited.
+branch. The source repository's former macOS job
+(`the source repository`ci.yml`workflow:126-184`; source-catalog coordinates) ran only
+`cargo build -p host-runtime` (`:163`), `--test shm_soak` (`:185`), one filtered
+`--lib shm_provider` test (`:186-188`), and `--doc` (`:189-190`), and this tree's
+workflow has no macOS job, so no `generation` or `lifecycle` test body runs on
+macOS. Status unaudited.
 Impact: the exchange is the store's only repair primitive for a corrupt occupant,
 and it is immediately followed by a deletion. If macOS `RENAME_SWAP` behaves
 differently on APFS than `RENAME_EXCHANGE` on ext4, the failure mode is deleting
