@@ -2373,7 +2373,8 @@ fn the_frozen_oracle_witness_matrix_fires_every_declared_cell() {
         );
     });
 
-    // Stop cells: each builds its own fixture and ends the walk with its own incomplete reason, never `Complete`.
+    // Stop cells: each builds its own fixture and never yields a wrong `Complete`. The hooked cells end the walk
+    // with their own incomplete reason; the deadline cell accepts a refusal or a correct complete result.
     for (cell, state, pending, without_pending) in [
         ("stop/coverage_shortfall_pending", "pending", 1, 0),
         ("stop/coverage_shortfall_without_pending", "failed", 0, 1),
