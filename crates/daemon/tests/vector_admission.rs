@@ -324,6 +324,7 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
     let composition = fixture.compose(1, &base, &[one, two]).unwrap();
     let failure = publish(
         &composition,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),

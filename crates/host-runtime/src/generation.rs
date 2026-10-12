@@ -51,8 +51,15 @@ pub const MEMBERS_FILE_NAME: &str = "members.json";
 /// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
 const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
 
+/// One step of a selector replacement, reported in execution order: the temp write and its sync, the rename over the selector, and the lifecycle root's sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileEvent {
+    /// Before the selector temp is created and written.
+    BeforeTempWrite,
+    /// After the selector temp was written and before its `fsync`.
+    BeforeTempSync,
+    /// After the selector temp's `fsync` returned.
+    AfterTempSync,
     BeforeRename,
     AfterRename,
     BeforeDirectorySync,
@@ -903,7 +910,7 @@ impl GenerationStore {
 
     /// Failed validation never selects another generation.
     pub fn validate(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
-        self.validate_keeping(digest, false, &[])
+        self.validate_keeping(digest, false, &|_| false)
     }
 
     /// [`Self::validate`] that keeps open the descriptor it opened for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads a file without hashing it again. Each file in `streamed` has its shape checked and its hash left to the [`StreamedFile`] the caller reads it through, so each of its bytes is read once.
@@ -912,7 +919,16 @@ impl GenerationStore {
         digest: &str,
         streamed: &[&str],
     ) -> Result<PendingGeneration, GenerationError> {
-        let generation = self.validate_keeping(digest, true, streamed)?;
+        let generation = self.validate_keeping(digest, true, &|path| streamed.contains(&path))?;
+        Ok(PendingGeneration { generation })
+    }
+
+    /// [`Self::validate_streaming`] with every manifest file streamed: validation checks every manifest file's shape and defers hashing to its [`StreamedFile`] reader.
+    pub fn validate_streaming_all(
+        &self,
+        digest: &str,
+    ) -> Result<PendingGeneration, GenerationError> {
+        let generation = self.validate_keeping(digest, true, &|_| true)?;
         Ok(PendingGeneration { generation })
     }
 
@@ -920,7 +936,7 @@ impl GenerationStore {
         &self,
         digest: &str,
         retain: bool,
-        streamed: &[&str],
+        is_streamed: &dyn Fn(&str) -> bool,
     ) -> Result<ValidatedGeneration, GenerationError> {
         if !is_canonical_payload_digest(digest) {
             return Err(invalid("generation digest is noncanonical"));
@@ -928,7 +944,7 @@ impl GenerationStore {
         let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
             return Err(invalid("generation directory is missing or insecure"));
         };
-        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, streamed)?;
+        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, is_streamed)?;
         Ok(ValidatedGeneration {
             digest: digest.to_owned(),
             manifest,
@@ -1038,7 +1054,7 @@ impl GenerationStore {
         dir: &OwnedFd,
         digest: &str,
         retain: bool,
-        streamed: &[&str],
+        is_streamed: &dyn Fn(&str) -> bool,
     ) -> Result<(GenerationManifest, Vec<Retained>), GenerationError> {
         let manifest = Self::read_manifest_in_dir(dir, digest)?;
         let mut expected: BTreeSet<String> = BTreeSet::new();
@@ -1051,7 +1067,7 @@ impl GenerationStore {
             }
             let fd = open_rel_file(dir, &entry.path)
                 .ok_or_else(|| invalid("manifest-listed file is missing"))?;
-            let streamed = streamed.contains(&entry.path.as_str());
+            let streamed = is_streamed(&entry.path);
             if streamed {
                 check_file_shape(&fd, entry)?;
             } else {
@@ -1364,27 +1380,30 @@ impl GenerationStore {
         self.replace_profile_at(CURRENT_PROFILE_NAME, digest, &mut |_| Ok(()))
     }
 
+    /// Points the search selector at a generation. A shared `transaction` is refused before any read, so only the exclusive transaction holder changes a selector.
     pub fn select_search(
         &self,
         digest: &str,
-        _transaction: &LifecycleTransactionLock,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
-        self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
+        self.select_owner(SEARCH_PROFILE_NAME, digest, None, transaction, observer)
     }
 
     /// Points the vector selector at a composition. A generation whose manifest target is not [`VECTOR_SELECTION_TARGET`] belongs to another owner and is refused, and a composition whose members are not all present and valid is refused, so the selector never exposes a partial set.
     /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the composition and its members precedes this call and is not repeated here.
+    /// A shared `transaction` is refused before any read, as for [`Self::select_search`].
     pub fn select_vector(
         &self,
         digest: &str,
-        _transaction: &LifecycleTransactionLock,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
         self.select_owner(
             VECTOR_PROFILE_NAME,
             digest,
             Some(VECTOR_SELECTION_TARGET),
+            transaction,
             observer,
         )
     }
@@ -1394,8 +1413,14 @@ impl GenerationStore {
         name: &str,
         digest: &str,
         target: Option<&str>,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
+        if !transaction.is_exclusive() {
+            return Err(invalid(
+                "selector change requires the exclusive lifecycle transaction",
+            ));
+        }
         self.verify_named_identity()?;
         if self.read_profile(name)? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
@@ -1456,11 +1481,19 @@ impl GenerationStore {
         getrandom::getrandom(&mut suffix)
             .map_err(|_| GenerationError::Instance(InstanceError::Random))?;
         let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
-        let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
+        let mut write_and_rename = || {
+            observer(ProfileEvent::BeforeTempWrite)?;
+            let temp =
+                crate::store_fs::write_new_file_unsynced(&self.root_fd, &temp_name, &bytes, 0o600)
+                    .map_err(|e| storage_or(e, "file write failed"))?;
+            observer(ProfileEvent::BeforeTempSync)?;
+            fsync_preserving_storage(&temp, "profile temp fsync failed")?;
+            observer(ProfileEvent::AfterTempSync)?;
             observer(ProfileEvent::BeforeRename)?;
             renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name)
                 .map_err(|e| classify_errno(e, "profile rename failed"))
-        });
+        };
+        let result = write_and_rename();
         if result.is_err() {
             let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
         }
@@ -1857,17 +1890,6 @@ fn copy_source_into(
     ))
 }
 
-fn write_new_file(
-    dir: &OwnedFd,
-    name: &str,
-    bytes: &[u8],
-    mode: u32,
-) -> Result<(), GenerationError> {
-    crate::store_fs::write_new_file(dir, name, bytes, mode)
-        .map(drop)
-        .map_err(|e| storage_or(e, "file write failed"))
-}
-
 fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
     crate::store_fs::remove_tree(parent, name).map_err(|_| invalid("entry removal failed"))
 }
@@ -1997,6 +2019,17 @@ mod tests {
 
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
+    }
+
+    fn write_new_file(
+        dir: &OwnedFd,
+        name: &str,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<(), GenerationError> {
+        crate::store_fs::write_new_file(dir, name, bytes, mode)
+            .map(drop)
+            .map_err(|e| storage_or(e, "file write failed"))
     }
 
     #[test]
@@ -4066,5 +4099,54 @@ mod tests {
         ));
         store.validate(&other).unwrap();
         store.validate(&digest).unwrap();
+    }
+
+    #[test]
+    fn streaming_every_file_checks_shape_and_defers_each_hash_to_finish() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let sources = [
+            ("a.json", b"first".as_slice()),
+            ("b.json", b"second".as_slice()),
+        ]
+        .map(|(name, bytes)| SourceSpec {
+            rel_path: name.to_owned(),
+            source: write_source(src.path(), name, bytes),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        });
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+
+        let mut pending = store.validate_streaming_all(&digest).unwrap();
+        assert_eq!(pending.manifest().files.len(), 2);
+        let mut stream = pending.stream("a.json").unwrap();
+        assert_eq!(stream.read_rest().unwrap(), b"first");
+        let mut generation = pending.finish([stream]).unwrap();
+        assert_eq!(
+            read_all(generation.take_verified_file("b.json").unwrap()),
+            b"second"
+        );
+
+        // Bytes changed in place keep the file's shape, so validation succeeds and only finishing refuses them.
+        std::fs::write(dir.join("b.json"), b"SECOND").unwrap();
+        let pending = store.validate_streaming_all(&digest).unwrap();
+        assert_eq!(pending.manifest().files[1].path, "b.json");
+        assert!(matches!(
+            pending.finish([]),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file hash diverges from the manifest"
+            })
+        ));
+        std::fs::write(dir.join("b.json"), b"second").unwrap();
+
+        // Shape and inventory are still checked before any stream is handed out.
+        std::fs::write(dir.join("b.json"), b"second!").unwrap();
+        assert!(store.validate_streaming_all(&digest).is_err());
+        std::fs::write(dir.join("b.json"), b"second").unwrap();
+        std::fs::write(dir.join("stray"), b"x").unwrap();
+        assert!(store.validate_streaming_all(&digest).is_err());
     }
 }

@@ -19,13 +19,13 @@ the digest pathname while the manifest-listed files were verified through the
 retained descriptor, so a replacement holding only the expected names satisfied
 the walk while the returned `ValidatedGeneration` still pinned the original
 directory and its unlisted content. The fix is `walk_generation_tree(dir, ...)`
-at `crates/host-runtime/src/generation.rs:1068`, with the reasoning recorded at
-`:323` and `:575`. In `0827dbc8` `prune` enumerated with
+at `crates/host-runtime/src/generation.rs:1084`, with the reasoning recorded at
+`:330` and `:582`. In `0827dbc8` `prune` enumerated with
 `std::fs::read_dir(self.root.join(GENERATIONS_DIR_NAME))` while every
 `remove_tree` below it acted on `generations_fd`, so a replacement directory at
 that name, populated with chosen names, could drive deletions inside the pinned
-store. The fix is `read_dir_names_partitioned(&self.generations_fd)` at `:1616`,
-reasoning at `:1613-1614`. `read_dir_names_partitioned` (`store_fs.rs:278`) and
+store. The fix is `read_dir_names_partitioned(&self.generations_fd)` at `:1649`,
+reasoning at `:1646-1647`. `read_dir_names_partitioned` (`store_fs.rs:278`) and
 `read_dir_entries` (`:255-267`) enumerate the open directory
 description through `Dir::read_from` (`:257`), which is what makes the listing
 unredirectable.
@@ -36,17 +36,17 @@ Inside `generation.rs`, no third instance of that shape exists. Every
 directory-relative operation in production code resolves against a pinned
 descriptor - `root_fd`, `generations_fd`, `temp_fd`, or a `dir`/`parent`
 argument. The only non-descriptor filesystem call in production code is
-`open_source_file` (`generation.rs:1770-1778`), which opens a pathname from `CWD`
+`open_source_file` (`generation.rs:1803-1811`), which opens a pathname from `CWD`
 with `O_NOFOLLOW`, and its subject is a staging
-*source*, not a store object; `preflight_source` (`:1760`) uses it for capacity
-sizing, and `copy_source_into` re-opens the same source by pathname at `:1808`
-under a before/after identity check (`:1809`, `:1834-1835`).
+*source*, not a store object; `preflight_source` (`:1793`) uses it for capacity
+sizing, and `copy_source_into` re-opens the same source by pathname at `:1841`
+under a before/after identity check (`:1842`, `:1867-1868`).
 
 The class does survive, in two weaker forms.
 
 First, at the `ValidatedGeneration::descriptor_root_path()` boundary. That
-accessor (`:582`) is
-the deliberate escape hatch, documented at `:573-579` as requiring every consumer
+accessor (`:589`) is
+the deliberate escape hatch, documented at `:580-586` as requiring every consumer
 to perform its own validation. One consumer honours the descriptor:
 `generation_launcher` (`crates/daemon/src/bin/eidnara-host.rs:929-945`) uses
 `open_verified_file`. The other does not:
@@ -67,16 +67,16 @@ opens it a third
 time (`:1665`, then `store_fs.rs:239`): the classification descriptor and the
 removal
 descriptor are distinct opens. In `promote_temp`, `validate(digest)` at
-`generation.rs:1313`
-and again at `:1355` each open the digest name fresh (`:928`), and the
-`ValidatedGeneration` from `:1355` is discarded. In `walk_generation_tree`,
-`statat` decides an entry's type (`:1963`) and `open_child_dir` then opens it
-(`:1978`), while the `S_IFREG` arm (`:1982-1983`) records a name from `statat`
-alone even though the hash check opened that file separately at `:1052`.
+`generation.rs:1329`
+and again at `:1371` each open the digest name fresh (`:944`), and the
+`ValidatedGeneration` from `:1371` is discarded. In `walk_generation_tree`,
+`statat` decides an entry's type (`:1985`) and `open_child_dir` then opens it
+(`:2000`), while the `S_IFREG` arm (`:2004-2005`) records a name from `statat`
+alone even though the hash check opened that file separately at `:1068`.
 
 These are not the fixed shape: the parent is identical in each, so nothing at the
 `generations` name can redirect them, and `open_child_dir` re-applies the
-owner-only predicate on every open (`:1893-1900`). What they share with the class
+owner-only predicate on every open (`:1915-1922`). What they share with the class
 is exactly what the property statement names - the read, walk, or removal does not
 go through a descriptor the operation pinned for that entry. One limit is
 structural: `remove_tree`'s final `unlinkat(parent, name, AtFlags::REMOVEDIR)`

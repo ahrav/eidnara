@@ -20,7 +20,7 @@ Both constants, quoted at HEAD:
 const MAX_EVIDENCE_BYTES: usize = 65_536;
 ```
 
-`crates/host-runtime/src/generation.rs:141-142`
+`crates/host-runtime/src/generation.rs:148-149`
 
 ```rust
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
@@ -28,7 +28,7 @@ pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 ```
 
 The claim is the words "Manifest and lifecycle-evidence readers each cap input at
-1 MiB" at `generation.rs:141`. The values are 65,536 and 1,048,576. The ratio is
+1 MiB" at `generation.rs:148`. The values are 65,536 and 1,048,576. The ratio is
 exactly 16: 1,048,576 / 65,536 = 16. The comment is false as written: the
 lifecycle-evidence readers cap input at 64 KiB.
 
@@ -38,20 +38,20 @@ at all three. In `quarantined_record_present` (`lifecycle.rs:232`, read at `:253
 failing or oversize read returns `Ok(true)`, quarantined, refusing the start. In
 `remove_lifecycle_record` (`lifecycle.rs:416`, read at `:431`) the same failure
 returns early, so the record is not unlinked. In `read_evidence_file`
-(`lifecycle.rs:709`, read at `:729`) it yields `EvidenceFile::Insecure`, which the
-comment at `:717-719` explains is what stops a hostile shape from downgrading a
+(`lifecycle.rs:729`, read at `:749`) it yields `EvidenceFile::Insecure`, which the
+comment at `:737-739` explains is what stops a hostile shape from downgrading a
 `wedged` verdict. Oversize means "cannot decide, so hold" everywhere.
 
 `MAX_MANIFEST_BYTES` gates every generation-side read in `generation.rs`, and at
 HEAD each of the three execution-deciding paths quarantines an oversize file
 before reading it. `is_quarantined_schema` tests `st_size` against the cap at
-`:1513` and returns quarantined. `read_profile` tests the selector's `st_size` at
-`:887` and returns `CurrentProfile::Quarantined`, with the comment at `:885-886`
+`:1533` and returns quarantined. `read_profile` tests the selector's `st_size` at
+`:907` and returns `CurrentProfile::Quarantined`, with the comment at `:905-906`
 naming the manifest cap in `validate_in_dir` as what it matches. `read_manifest_in_dir`
-tests the manifest's `st_size` at `:1011` and returns
-`GenerationError::UnsupportedStateSchema`, with the comment at `:1010` naming
-`is_quarantined_schema` as what it matches. The capped reads that follow (`:890`,
-`:1014`, `:1517`) can still fail for other reasons and then report
+tests the manifest's `st_size` at `:1031` and returns
+`GenerationError::UnsupportedStateSchema`, with the comment at `:1030` naming
+`is_quarantined_schema` as what it matches. The capped reads that follow (`:910`,
+`:1034`, `:1537`) can still fail for other reasons and then report
 `invalid(...)`, which `crates/daemon/src/bin/eidnara-host.rs:347` maps to
 `native_payload_invalid`, but a file whose only fault is size never reaches them.
 The pre-write refusal at `:1255` stops this release writing such a manifest at
@@ -77,10 +77,10 @@ only one.
 
 The second consequence is the threshold split inside one release. A future
 manifest above 1 MiB is preserved by `prune`, which classifies it undecidable at
-`:1513`, and `read_manifest_in_dir` refuses it as `UnsupportedStateSchema` at
-`:1011-1013`, so the generation is retained on disk and unusable with an
+`:1533`, and `read_manifest_in_dir` refuses it as `UnsupportedStateSchema` at
+`:1031-1033`, so the generation is retained on disk and unusable with an
 `align_versions` remediation. The same applies to the selector itself:
-`current-profile.json` is read under `MAX_MANIFEST_BYTES` (`:887-890`), so the
+`current-profile.json` is read under `MAX_MANIFEST_BYTES` (`:907-910`), so the
 profile's threshold is 1 MiB while the lifecycle record's is 64 KiB, even though
 both are trusted persisted selectors.
 
@@ -105,17 +105,17 @@ Nothing to inject. Either an equality assertion over the two constants, or -
 since the two caps gate different decisions - separate assertions that an
 over-cap record quarantines and an over-cap manifest quarantines on every read
 path rather than only in `prune`. Both generation-side halves are exercised:
-`undecodable_generations_survive_prune_after_a_successor` (`generation.rs:2220`)
+`undecodable_generations_survive_prune_after_a_successor` (`generation.rs:2253`)
 plants an oversized manifest and `unknown_schemas_are_quarantined_and_block_mutation`
-(`:2539`) writes an oversized profile (`:2595-2600`). No test asserts the two
+(`:2572`) writes an oversized profile (`:2628-2633`). No test asserts the two
 constants agree.
 
 ## Investigation log
 
 ### Q: None recorded in the catalog. Verified here instead: what does each cap actually gate, and is the stated consequence the real one?
 
-- Sources examined: `lifecycle.rs:51`, `:232-256`, `:416-441`, `:709-733`;
-  `generation.rs:141-142`, `:887-891`, `:1011-1015`, `:1254-1257`, `:1511-1523`;
+- Sources examined: `lifecycle.rs:64-65`, `:257-284`, `:467-491`, `:803-830`;
+  `generation.rs:148-149`, `:894-898`, `:1027-1031`, `:1270-1273`, `:1544-1556`;
   `crates/host-runtime/src/instance.rs:852-865` for `read_all_fd`'s over-cap error;
   `eidnara-host.rs:344-350` for the error-to-reason mapping; every workspace
   occurrence of both identifiers.

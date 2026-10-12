@@ -460,12 +460,15 @@ impl InstanceGuard {
 pub struct LifecycleTransactionLock {
     _file: OwnedFd,
     path: PathBuf,
+    /// `true` for a lock from `acquire_exclusive*`, `false` for one from `acquire_shared`.
+    exclusive: bool,
 }
 
 impl std::fmt::Debug for LifecycleTransactionLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LifecycleTransactionLock")
             .field("path", &self.path)
+            .field("exclusive", &self.exclusive)
             .finish_non_exhaustive()
     }
 }
@@ -477,7 +480,11 @@ impl LifecycleTransactionLock {
     pub fn acquire_exclusive(data_dir_override: Option<&Path>) -> Result<Self, InstanceError> {
         let (file, path) = open_coordination_lock_create(data_dir_override, TRANSACTION_LOCK_NAME)?;
         flock_exclusive_bounded(&file, &path, "flock_transaction")?;
-        Ok(Self { _file: file, path })
+        Ok(Self {
+            _file: file,
+            path,
+            exclusive: true,
+        })
     }
 
     /// Waits on the calling thread until the transaction lock is acquired or the deadline expires.
@@ -491,7 +498,16 @@ impl LifecycleTransactionLock {
         }
         let (file, path) = open_coordination_lock_create(data_dir_override, TRANSACTION_LOCK_NAME)?;
         flock_exclusive_until(&file, &path, "flock_transaction", deadline)?;
-        Ok(Self { _file: file, path })
+        Ok(Self {
+            _file: file,
+            path,
+            exclusive: true,
+        })
+    }
+
+    /// `true` when this lock excludes every other lifecycle transaction, as a selector change requires.
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 
     /// `acquire_shared` never creates the coordination root or lock file.
@@ -515,7 +531,11 @@ impl LifecycleTransactionLock {
             "flock_transaction",
             FlockOperation::NonBlockingLockShared,
         )? {
-            Ok(Some(Self { _file: file, path }))
+            Ok(Some(Self {
+                _file: file,
+                path,
+                exclusive: false,
+            }))
         } else {
             Ok(None)
         }

@@ -620,6 +620,7 @@ fn vector_stage_select_prune_discard_and_exchange_repair_leave_the_deployment_se
     let composition = fixture.compose(1, &base, &[]).unwrap();
     publish(
         &composition,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
         &fixture.work_dir(),
         &mut |_| Ok(()),

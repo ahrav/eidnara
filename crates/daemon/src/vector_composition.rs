@@ -1,6 +1,6 @@
 //! Publishes and recovers one complete vector composition: one base layer plus bounded, ordered delta layers, named together by an immutable composition generation the vector selector points at.
 //!
-//! Publication stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
+//! Publication names the selection it was composed from and refuses unless the selector still names it, so a delta published by another writer in between is never dropped. It stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
 //! How far an attempt got is tracked as a ladder of separate facts; an unknown outcome is settled by reading the selector back and comparing digests, never by treating an error as a rollback.
 //! Recovery takes the selected composition when it verifies; otherwise it examines the other compositions newest first under a bound and takes the first whose every member verifies, reporting the selector as stale rather than silently repointing it.
 
@@ -10,8 +10,8 @@ use std::path::Path;
 
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
-    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET,
-    ValidatedGeneration, WireMembers,
+    MEMBERS_FILE_NAME, ManifestFile, PendingGeneration, ProfileEvent, StageMeta, StreamedFile,
+    VECTOR_SELECTION_TARGET, ValidatedGeneration, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -127,6 +127,13 @@ pub enum CompositionRefusal {
     MemberIdentity { digest: String, field: &'static str },
     #[error("sequence {sequence} does not exceed the selected composition's {selected}")]
     Sequence { sequence: u64, selected: u64 },
+    #[error("the composition extends {expected:?}, but the selector names {selected:?}")]
+    Predecessor {
+        expected: Option<String>,
+        selected: Option<String>,
+    },
+    #[error("publication requires the exclusive lifecycle transaction")]
+    SharedTransaction,
     #[error("the composition is not a vector composition: {0}")]
     NotComposition(&'static str),
     #[error("member {digest}: {refusal}")]
@@ -264,20 +271,28 @@ pub struct PublishFailure {
 }
 
 /// Stages `composition` through `staging` and points the vector selector at it. `observer` sees every selector event after this function has recorded it. A composition whose sequence does not exceed the selected composition's is refused, so two publishers under the same lock cannot reorder the namespace.
+/// `predecessor` is the digest the vector selector named when the caller read the selection it composed from, or `None` when nothing was selected. Publication refuses with [`CompositionRefusal::Predecessor`] before staging unless the selector still names it, so a composition built from a stale selection cannot replace a newer one and drop its deltas.
+///
+/// The predecessor check and the selector rename are atomic only under the exclusive lifecycle transaction of the store `staging` writes to: a shared `staging.transaction` is refused with [`CompositionRefusal::SharedTransaction`] before any read. The caller acquires that transaction on the same lifecycle root as `staging.store`; the lock does not record its root.
 ///
 /// # Errors
 ///
 /// A failure carries how far the attempt is known to have gone; a failure at or after `Acknowledged` is an unknown outcome the caller settles with [`reconcile`].
 pub fn publish(
     composition: &Composition,
+    predecessor: Option<&str>,
     staging: &Staging<'_>,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
 ) -> Result<String, Box<PublishFailure>> {
     let mut progress = Progress::NotStaged;
     let fail = |progress: Progress, refusal| Box::new(PublishFailure { progress, refusal });
-    if let Some(selected) =
-        selected_sequence(staging.store).map_err(|refusal| fail(progress, refusal))?
+    if !staging.transaction.is_exclusive() {
+        return Err(fail(progress, CompositionRefusal::SharedTransaction));
+    }
+    let (selected_digest, selected_sequence) =
+        selection(staging.store).map_err(|refusal| fail(progress, refusal))?;
+    if let Some(selected) = selected_sequence
         && composition.sequence <= selected
     {
         return Err(fail(
@@ -285,6 +300,15 @@ pub fn publish(
             CompositionRefusal::Sequence {
                 sequence: composition.sequence,
                 selected,
+            },
+        ));
+    }
+    if selected_digest.as_deref() != predecessor {
+        return Err(fail(
+            progress,
+            CompositionRefusal::Predecessor {
+                expected: predecessor.map(str::to_owned),
+                selected: selected_digest,
             },
         ));
     }
@@ -322,7 +346,11 @@ pub fn publish(
             match event {
                 ProfileEvent::AfterRename => progress = Progress::Acknowledged,
                 ProfileEvent::AfterDirectorySync => progress = Progress::Durable,
-                ProfileEvent::BeforeRename | ProfileEvent::BeforeDirectorySync => {}
+                ProfileEvent::BeforeTempWrite
+                | ProfileEvent::BeforeTempSync
+                | ProfileEvent::AfterTempSync
+                | ProfileEvent::BeforeRename
+                | ProfileEvent::BeforeDirectorySync => {}
             }
             observer(event)
         });
@@ -332,19 +360,69 @@ pub fn publish(
     }
 }
 
-/// Returns the selected composition's sequence, or `None` when no composition is selected or its record fails validation.
+/// Returns the digest the vector selector names and the selected composition's sequence; the sequence is `None` when no composition is selected or its record fails validation.
 ///
 /// # Errors
 ///
 /// Returns `Quarantined` when the selector is quarantined or the selected record has an unknown schema.
-fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, CompositionRefusal> {
+fn selection(store: &GenerationStore) -> Result<(Option<String>, Option<u64>), CompositionRefusal> {
     match store.read_vector_current()? {
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
-        CurrentProfile::Absent => Ok(None),
-        CurrentProfile::Current(digest) => Ok(record(store, &digest)?
-            .filter(|_| store.validate(&digest).is_ok())
-            .map(|record| record.sequence)),
+        CurrentProfile::Absent => Ok((None, None)),
+        CurrentProfile::Current(digest) => {
+            let sequence = selected_record(store, &digest)?.map(|record| record.sequence);
+            Ok((Some(digest), sequence))
+        }
     }
+}
+
+/// Metadata decoding uses bytes from streams accepted by `pending.finish(streams)`.
+fn selected_record(
+    store: &GenerationStore,
+    digest: &str,
+) -> Result<Option<Composition>, CompositionRefusal> {
+    let manifest = match store.manifest(digest) {
+        Ok(manifest) => manifest,
+        Err(GenerationError::UnsupportedStateSchema) => {
+            return Err(CompositionRefusal::Quarantined);
+        }
+        Err(_) => return Ok(None),
+    };
+    if !is_bounded_record(&manifest) {
+        return record(store, digest).map(|_| None);
+    }
+    let Ok(mut pending) = store.validate_streaming_all(digest) else {
+        return record(store, digest).map(|_| None);
+    };
+    let mut streams = Vec::with_capacity(2);
+    let composition = read_stream(&mut pending, COMPOSITION_FILE, &mut streams);
+    let members = read_stream(&mut pending, MEMBERS_FILE_NAME, &mut streams);
+    let Ok(generation) = pending.finish(streams) else {
+        return record(store, digest).map(|_| None);
+    };
+    let Some(bytes) = composition else {
+        return Ok(None);
+    };
+    if let Some(members) = members {
+        check_members_schema(&members)?;
+    }
+    match decode_record(&generation.manifest, &bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(CompositionRefusal::Quarantined) => Err(CompositionRefusal::Quarantined),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The stream remains in `streams` for [`PendingGeneration::finish`] even when `read_rest` fails.
+fn read_stream(
+    pending: &mut PendingGeneration,
+    rel_path: &str,
+    streams: &mut Vec<StreamedFile>,
+) -> Option<Vec<u8>> {
+    let mut stream = pending.stream(rel_path).ok()?;
+    let bytes = stream.read_rest().ok();
+    streams.push(stream);
+    bytes
 }
 
 /// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
@@ -476,15 +554,26 @@ pub fn verify_composition(
 
 /// Reads the manifest before any listed file is hashed or held in memory, so an oversized record is refused by its declared size.
 fn check_record_size(store: &GenerationStore, digest: &str) -> Result<(), CompositionRefusal> {
-    if store
-        .manifest(digest)?
-        .files
-        .iter()
-        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
-    {
+    if exceeds_metadata_cap(&store.manifest(digest)?) {
         return Err(CompositionRefusal::NotComposition("record size"));
     }
     Ok(())
+}
+
+fn exceeds_metadata_cap(manifest: &GenerationManifest) -> bool {
+    manifest
+        .files
+        .iter()
+        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
+}
+
+/// The files a composition record lists: [`COMPOSITION_FILE`] and [`MEMBERS_FILE_NAME`].
+const RECORD_FILES: usize = 2;
+
+fn is_bounded_record(manifest: &GenerationManifest) -> bool {
+    manifest.target == VECTOR_SELECTION_TARGET
+        && manifest.files.len() <= RECORD_FILES
+        && !exceeds_metadata_cap(manifest)
 }
 
 /// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.
