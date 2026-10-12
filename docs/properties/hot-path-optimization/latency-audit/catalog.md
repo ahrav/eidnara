@@ -1,5 +1,15 @@
 # Hot-path latency audit supplement
 
+> Dated note, 2026-10-13, #995 (spec #988 milestone U5, Q10/Q11): native attach
+> aligns served blocks with decoded blocks by canonical-text equality in both
+> alignment regimes, with signed zeros distinct, and takes no served-block
+> SHA-256; the codecs digest only message and synthetic-tool identities through
+> `stable_hash_prefix`. An unchanged OpenCode message encodes to its retained
+> input `Arc<Value>`, so the recipe keeps it by pointer, and reasoning clearing
+> writes a private successor through copy-on-write. B1 is re-evidenced in the
+> dated section of its evidence file. B3 stays invalidated: the tag baseline
+> cache it names is deleted.
+
 > Dated note, 2026-10-12, #994 (spec #988 milestone U4, Q9): the direct lane has
 > no tree-parse walk. An unpaged transform body the entry probe routes there is
 > tokenized once by a metered typed decode,

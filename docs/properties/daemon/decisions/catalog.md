@@ -1507,6 +1507,17 @@ Open questions:
 
 ### codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity
 
+> Dated note, 2026-10-13, #995 (spec #988 milestone U5, Q10/Q11): the stamp and
+> the stored fingerprint are deleted. The codecs write no `_eidnara_codec`
+> namespace, `BlockMeta` holds no `content_fingerprint` or `raw`, and each
+> message meta keeps its decoded blocks. Alignment pairs a served block with a
+> meta by canonical-text equality, which excludes only the codec namespace, in
+> both the optimal and the greedy regimes, and the Pi codec, sidecar pairing,
+> and unmatched-tool classification read origin from that alignment. A
+> caller-supplied `_eidnara_codec` namespace is ignored by equality and by
+> encode. The clauses below describe the removed stamp and are kept for
+> traceability.
+
 Type: safety
 Reachability: default-production
 Status: active
