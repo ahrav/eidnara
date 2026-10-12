@@ -1533,6 +1533,73 @@ fn publication_over_an_oversized_or_foreign_selection_reads_none_of_its_listed_f
     }
 }
 
+/// Linux `FDSize`: the number of descriptor-table slots allocated to the process.
+fn descriptor_table_size() -> usize {
+    fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("FDSize:"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn publication_over_a_foreign_selection_with_many_files_opens_none_of_them() {
+    const FILES: usize = 1024;
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let dir = fixture.work_dir().join("foreign");
+    fs::create_dir_all(&dir).unwrap();
+    let sources: Vec<SourceSpec> = (0..FILES)
+        .map(|index| {
+            let rel_path = format!("f{index}");
+            let source = dir.join(&rel_path);
+            fs::write(&source, b"x").unwrap();
+            SourceSpec {
+                rel_path,
+                source,
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }
+        })
+        .collect();
+    let meta = StageMeta {
+        target: "search-projection-seed".to_owned(),
+        release_contract_sha256: "a".repeat(64),
+        inputs_lock_sha256: "b".repeat(64),
+        source_payload_manifest_sha256: "c".repeat(64),
+    };
+    let foreign = fixture
+        .store
+        .stage(&sources, &meta, &BTreeSet::new())
+        .unwrap();
+    fixture.write_selector(
+        VECTOR_PROFILE_NAME,
+        &serde_json::to_vec(&serde_json::json!({ "schema": 1, "current": foreign })).unwrap(),
+    );
+    let before = descriptor_table_size();
+    assert!(before < FILES, "the table already holds {before} slots");
+
+    let composition = fixture.compose(2, &base, &[]).unwrap();
+    let published = publish(
+        &composition,
+        Some(&foreign),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .map_err(|failure| failure.refusal);
+    assert_eq!(published, Ok(composition.digest()));
+    let after = descriptor_table_size();
+    assert!(
+        after < FILES,
+        "publication grew the descriptor table from {before} to {after} slots: it opened the selected generation's listed files"
+    );
+}
+
 #[test]
 fn record_verification_refuses_an_oversized_record_before_opening_the_generation() {
     let fixture = Fixture::new();

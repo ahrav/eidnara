@@ -381,13 +381,19 @@ fn selected_record(
     store: &GenerationStore,
     digest: &str,
 ) -> Result<Option<Composition>, CompositionRefusal> {
+    let manifest = match store.manifest(digest) {
+        Ok(manifest) => manifest,
+        Err(GenerationError::UnsupportedStateSchema) => {
+            return Err(CompositionRefusal::Quarantined);
+        }
+        Err(_) => return Ok(None),
+    };
+    if !is_bounded_record(&manifest) {
+        return record(store, digest).map(|_| None);
+    }
     let Ok(mut pending) = store.validate_streaming_all(digest) else {
         return record(store, digest).map(|_| None);
     };
-    let manifest = pending.manifest();
-    if manifest.target != VECTOR_SELECTION_TARGET || exceeds_metadata_cap(manifest) {
-        return record(store, digest).map(|_| None);
-    }
     let mut streams = Vec::with_capacity(2);
     let composition = read_stream(&mut pending, COMPOSITION_FILE, &mut streams);
     let members = read_stream(&mut pending, MEMBERS_FILE_NAME, &mut streams);
@@ -559,6 +565,15 @@ fn exceeds_metadata_cap(manifest: &GenerationManifest) -> bool {
         .files
         .iter()
         .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
+}
+
+/// The files a composition record lists: [`COMPOSITION_FILE`] and [`MEMBERS_FILE_NAME`].
+const RECORD_FILES: usize = 2;
+
+fn is_bounded_record(manifest: &GenerationManifest) -> bool {
+    manifest.target == VECTOR_SELECTION_TARGET
+        && manifest.files.len() <= RECORD_FILES
+        && !exceeds_metadata_cap(manifest)
 }
 
 /// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.
