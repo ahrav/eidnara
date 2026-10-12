@@ -1066,6 +1066,7 @@ pub(crate) struct CanonicalMessage {
 
 /// Serializes a wire message once, preserving serde's scalar forms and field omissions, and
 /// reports the canonical bytes with their nesting depth.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn canonical_message(
     message: &memory_store::WireMessage,
 ) -> serde_json::Result<CanonicalMessage> {
@@ -1075,6 +1076,87 @@ pub(crate) fn canonical_message(
         bytes: finalize(encoded),
         nesting_depth,
     })
+}
+
+/// Serializes a wire message once, as [`canonical_message`] does, and reports where each
+/// content block's canonical text lies in the canonical bytes. Reordering moves whole field
+/// spans and keeps every span's length, so each block's canonical text is the slice of its
+/// element in the reordered `content` array, byte for byte the text [`canonical_block_bytes`]
+/// encodes for that block. The ranges are `None` when the encoding holds no root object with a
+/// `content` array of objects.
+pub(crate) fn canonical_message_with_blocks(
+    message: &memory_store::WireMessage,
+) -> serde_json::Result<(CanonicalMessage, Option<Vec<Range<usize>>>)> {
+    let mut encoded = serialize_with_spans(message)?;
+    let nesting_depth = encoded.max_depth;
+    #[cfg(test)]
+    FINALIZATIONS.with(|count| count.set(count.get() + 1));
+    let reordered = sort_all_fields(&encoded.bytes, &mut encoded.objects);
+    let blocks = content_block_ranges(&encoded, message.content().len());
+    let bytes = if reordered {
+        let mut out = String::with_capacity(encoded.bytes.len());
+        copy_sorted_range(
+            &encoded.bytes,
+            &encoded.objects,
+            0..encoded.bytes.len(),
+            &mut out,
+        );
+        out.into_bytes()
+    } else {
+        encoded.bytes.into_bytes()
+    };
+    Ok((
+        CanonicalMessage {
+            bytes,
+            nesting_depth,
+        },
+        blocks,
+    ))
+}
+
+/// The canonical byte range of each element of the root object's `content` array. `encoded`
+/// holds its fields in canonical order, so a field's canonical offset is the sum of the field
+/// spans before it, and an element's offset is the sum of the element spans before it.
+fn content_block_ranges(encoded: &Encoded, blocks: usize) -> Option<Vec<Range<usize>>> {
+    let text = encoded.bytes.as_bytes();
+    let root = encoded
+        .objects
+        .first()
+        .filter(|root| root.bytes == (0..text.len()))?;
+    let mut at = 1;
+    let mut content = None;
+    for (field, key_end) in &root.fields {
+        if text.get(field.start + 1..key_end - 1) == Some(b"content".as_slice()) {
+            content = Some((at + (key_end - field.start) + 1, key_end + 1..field.end));
+            break;
+        }
+        at += field.len() + 1;
+    }
+    let (mut at, source) = content?;
+    if text.get(source.start) != Some(&b'[') {
+        return None;
+    }
+    let mut position = source.start + 1;
+    at += 1;
+    let mut ranges = Vec::with_capacity(blocks);
+    while text.get(position) != Some(&b']') {
+        let index = encoded
+            .objects
+            .partition_point(|object| object.bytes.start < position);
+        let element = encoded
+            .objects
+            .get(index)
+            .filter(|object| object.bytes.start == position)?;
+        let len = element.bytes.len();
+        ranges.push(at..at + len);
+        position = element.bytes.end;
+        at += len;
+        if text.get(position) == Some(&b',') {
+            position += 1;
+            at += 1;
+        }
+    }
+    (position + 1 == source.end).then_some(ranges)
 }
 
 #[cfg(feature = "test-support")]
@@ -1970,7 +2052,99 @@ mod tests {
         });
     }
 
+    /// Each content range of a message's canonical bytes holds its block's own canonical text,
+    /// for blocks whose fields reorder and blocks already in canonical order alike.
+    fn assert_block_ranges_are_block_encodings(message: &memory_store::WireMessage) {
+        let (canonical, ranges) = canonical_message_with_blocks(message).unwrap();
+        let reference = canonical_message(message).unwrap();
+        assert_eq!(canonical.bytes, reference.bytes);
+        assert_eq!(canonical.nesting_depth, reference.nesting_depth);
+        let ranges = ranges.expect("a wire message encodes a content array of objects");
+        assert_eq!(ranges.len(), message.content().len());
+        for (range, block) in ranges.iter().zip(message.content()) {
+            assert_eq!(
+                &canonical.bytes[range.clone()],
+                canonical_block_bytes(block).unwrap().as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn content_block_ranges_hold_each_block_encoding() {
+        use memory_store::{
+            BlockKind, HarnessMeta, OutputKind, ProviderExtras, ToolOutput, WireBlock, WireMessage,
+        };
+        let mut extras = ProviderExtras::new();
+        extras.entry("zeta".to_string()).or_default().insert(
+            "b".to_string(),
+            serde_json::json!({"y": 1, "a": [{"z": 0, "b": -0.0}]}),
+        );
+        let blocks = vec![
+            WireBlock::bare(BlockKind::Text {
+                text: "plain \"quoted\" \n text".to_string(),
+            }),
+            WireBlock::with_provider_extras(
+                BlockKind::ToolCall {
+                    id: "call".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"z": [{"y": [["]}"]]}], "a": 1, "\u{1}": "\u{e9}"}),
+                    provider_executed: true,
+                },
+                extras.clone(),
+            ),
+            WireBlock::bare(BlockKind::ToolResult {
+                id: "call".into(),
+                tool_name: "read".into(),
+                output: ToolOutput::bare(OutputKind::Json {
+                    value: serde_json::json!({"k": [1, 2.5, "x"], "a": null}),
+                }),
+                provider_executed: false,
+            }),
+            WireBlock::bare(BlockKind::Reasoning {
+                text: "think".into(),
+                signature: Some("sig".into()),
+            }),
+        ];
+        for content in [Vec::new(), blocks[..1].to_vec(), blocks.clone()] {
+            for message_extras in [ProviderExtras::new(), extras.clone()] {
+                assert_block_ranges_are_block_encodings(&WireMessage::from_parts(
+                    "assistant",
+                    content.clone(),
+                    None,
+                    message_extras,
+                    HarnessMeta {
+                        harness_id: Some("m1".into()),
+                        ordinal: Some(3),
+                        ..HarnessMeta::default()
+                    },
+                ));
+            }
+        }
+    }
+
     proptest::proptest! {
+        #[test]
+        fn content_block_ranges_hold_generated_block_encodings(
+            values in proptest::collection::vec(generated_value(), 0..4),
+        ) {
+            let content = values
+                .into_iter()
+                .map(|input| memory_store::WireBlock::bare(memory_store::BlockKind::ToolCall {
+                    id: "call".to_string(),
+                    name: "tool".to_string(),
+                    input,
+                    provider_executed: false,
+                }))
+                .collect();
+            assert_block_ranges_are_block_encodings(&memory_store::WireMessage::from_parts(
+                "assistant",
+                content,
+                None,
+                memory_store::ProviderExtras::new(),
+                memory_store::HarnessMeta::default(),
+            ));
+        }
+
         #[test]
         fn encoder_matches_serde_json_on_generated_values(value in generated_value()) {
             proptest::prop_assert_eq!(

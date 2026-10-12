@@ -7,7 +7,7 @@
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -22,8 +22,8 @@ use crate::wire::{
 
 use super::sidecar::{
     BlockMeta, DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary, HarnessMessageMeta,
-    decoded_block_fingerprint_in, is_synthetic_part, json_holds_float_zero, match_block_metas,
-    meta_for_ck, stable_hash_prefix, stamp_block_identity,
+    MetaContent, decoded_block_fingerprint_in, is_synthetic_part, json_holds_float_zero,
+    match_block_metas_by, meta_for_ck, stable_hash_prefix, stamp_block_identity,
 };
 
 pub type MessageV2Json = Value;
@@ -36,19 +36,26 @@ pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessa
     decode_opencode_shared(&shared)
 }
 
+#[cfg(test)]
+pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
+    decode_window(messages, true)
+}
+
 /// Decodes shared messages.
 ///
 /// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
 /// clone, so callers that already share values pay no deep copy. A message's
 /// ordinal is its window position, `index + 1` with saturating arithmetic. The last compaction part becomes the extracted boundary and is
 /// omitted from CK content. Unknown parts remain opaque. A creation time no `i64` holds is
-/// left unset.
-pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
+/// left unset. With `stamp`, each block meta carries its decoded block's content fingerprint
+/// and each decoded block carries its origin and that fingerprint; without it, block metas
+/// carry no fingerprint and blocks carry no stamp.
+fn decode_window(messages: &[Arc<Value>], stamp: bool) -> DecodedHarnessMessages {
     let rows = messages
         .iter()
         .enumerate()
         .map(|(index, message)| (window_position(index), message));
-    let Ok(decoded) = decode_rows(rows, |time| Ok::<_, Infallible>(time.as_i64()));
+    let Ok(decoded) = decode_rows(rows, |time| Ok::<_, Infallible>(time.as_i64()), stamp);
     decoded
 }
 
@@ -69,9 +76,11 @@ pub(crate) fn derive_opencode_window(
         .enumerate()
         .filter(|(_, message)| !is_compaction_summary(message))
         .map(|(index, message)| (window_position(index), message));
-    decode_rows(rows, |time| {
-        <i64 as serde::Deserialize>::deserialize(time).map(Some)
-    })
+    decode_rows(
+        rows,
+        |time| <i64 as serde::Deserialize>::deserialize(time).map(Some),
+        true,
+    )
 }
 
 fn window_position(index: usize) -> u64 {
@@ -119,6 +128,7 @@ fn created_at<E>(
 fn decode_rows<'a, E>(
     rows: impl Iterator<Item = (u64, &'a Arc<Value>)>,
     mut read_time: impl FnMut(&Value) -> Result<Option<i64>, E>,
+    stamp: bool,
 ) -> Result<DecodedHarnessMessages, E> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
 
@@ -151,6 +161,7 @@ fn decode_rows<'a, E>(
             content: Vec::with_capacity(parts.len()),
             metas: Vec::with_capacity(parts.len()),
             folded: Vec::new(),
+            stamp,
             scratch: &mut scratch,
         };
 
@@ -281,9 +292,10 @@ pub fn encode_opencode(
     sidecar: &DecodeSidecar,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
+    let retained = RetainedContent::Fingerprints;
     match mutation_exempt_mid {
-        Some(mid) => encode_opencode_impl(messages, sidecar, None, false, &[mid]),
-        None => encode_opencode_impl(messages, sidecar, None, false, &[]),
+        Some(mid) => encode_opencode_impl(messages, sidecar, None, false, &[mid], retained),
+        None => encode_opencode_impl(messages, sidecar, None, false, &[], retained),
     }
 }
 
@@ -298,9 +310,10 @@ pub fn encode_opencode_with_session(
     session_id: Option<&str>,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
+    let retained = RetainedContent::Fingerprints;
     match mutation_exempt_mid {
-        Some(mid) => encode_opencode_impl(messages, sidecar, session_id, true, &[mid]),
-        None => encode_opencode_impl(messages, sidecar, session_id, true, &[]),
+        Some(mid) => encode_opencode_impl(messages, sidecar, session_id, true, &[mid], retained),
+        None => encode_opencode_impl(messages, sidecar, session_id, true, &[], retained),
     }
 }
 
@@ -310,7 +323,60 @@ pub fn encode_opencode_with_session_exemptions(
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
 ) -> Vec<MessageV2Json> {
-    encode_opencode_impl(messages, sidecar, session_id, true, mutation_exempt_mids)
+    encode_opencode_impl(
+        messages,
+        sidecar,
+        session_id,
+        true,
+        mutation_exempt_mids,
+        RetainedContent::Fingerprints,
+    )
+}
+
+/// Encodes CK messages against the native `window` they were served from, as
+/// [`encode_opencode_with_session_exemptions`] encodes them against that window's decoded
+/// sidecar. Each retained message's blocks align by their decoded content, which matches a
+/// block exactly when the content fingerprints would, so no block is fingerprinted.
+pub(crate) fn encode_opencode_against_window(
+    messages: &[WireMessage],
+    window: &[Arc<Value>],
+    session_id: Option<&str>,
+    mutation_exempt_mids: &[&str],
+) -> Vec<MessageV2Json> {
+    let decoded = decode_window(window, false);
+    // A repeated mid retains its last message, as its sidecar metadata does.
+    let mut blocks_by_mid = HashMap::with_capacity(decoded.messages.len());
+    for message in &decoded.messages {
+        blocks_by_mid.insert(message.mid.as_str(), message.ck.content().as_slice());
+    }
+    encode_opencode_impl(
+        messages,
+        &decoded.sidecar,
+        session_id,
+        true,
+        mutation_exempt_mids,
+        RetainedContent::Decoded(&blocks_by_mid),
+    )
+}
+
+/// Where an encode reads a retained message's pre-mutation block content.
+#[derive(Clone, Copy)]
+enum RetainedContent<'a> {
+    /// Each block meta's `content_fingerprint`.
+    Fingerprints,
+    /// Each retained message's decoded blocks, by mid; its block metas carry no fingerprint.
+    Decoded(&'a HashMap<&'a str, &'a [WireBlock]>),
+}
+
+impl<'a> RetainedContent<'a> {
+    fn of(self, meta: &HarnessMessageMeta) -> MetaContent<'a> {
+        match self {
+            Self::Fingerprints => MetaContent::Fingerprint,
+            Self::Decoded(blocks) => {
+                MetaContent::Decoded(blocks.get(meta.mid.as_str()).copied().unwrap_or_default())
+            }
+        }
+    }
 }
 
 fn encode_opencode_impl(
@@ -319,6 +385,7 @@ fn encode_opencode_impl(
     session_id: Option<&str>,
     preserve_compaction: bool,
     mutation_exempt_mids: &[&str],
+    retained: RetainedContent<'_>,
 ) -> Vec<MessageV2Json> {
     let mut encoded = Vec::with_capacity(messages.len());
     let mut index = 0;
@@ -355,7 +422,7 @@ fn encode_opencode_impl(
             Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
                 meta.raw.as_ref().clone()
             }
-            Some(meta) => encode_with_meta(msg, meta, preserve_compaction),
+            Some(meta) => encode_with_meta(msg, meta, preserve_compaction, retained.of(meta)),
             None => encode_new_message(msg, session_id),
         });
         index += 1;
@@ -461,12 +528,15 @@ fn decode_tool_part<'a>(
     }
 }
 
-/// The CK blocks one message decodes to and their metas, fingerprinted through the decode's
-/// shared serialization buffers. `folded` lists the parts whose content an earlier block holds.
+/// The CK blocks one message decodes to and their metas. With `stamp`, each block is
+/// fingerprinted through the decode's shared serialization buffers and stamped with its origin
+/// and that fingerprint, which its meta also carries. `folded` lists the parts whose content an
+/// earlier block holds.
 struct DecodedBlocks<'s> {
     content: Vec<WireBlock>,
     metas: Vec<BlockMeta>,
     folded: Vec<usize>,
+    stamp: bool,
     scratch: &'s mut CanonicalScratch,
 }
 
@@ -485,8 +555,11 @@ impl DecodedBlocks<'_> {
         native_id: Option<String>,
     ) {
         let block_index = self.content.len();
-        let content_fingerprint = decoded_block_fingerprint_in(self.scratch, &block);
-        stamp_block_identity(&mut block, block_index, part_index, &content_fingerprint);
+        let content_fingerprint = self.stamp.then(|| {
+            let content_fingerprint = decoded_block_fingerprint_in(self.scratch, &block);
+            stamp_block_identity(&mut block, block_index, part_index, &content_fingerprint);
+            content_fingerprint
+        });
         self.content.push(block);
         self.metas.push(BlockMeta {
             block_index,
@@ -494,7 +567,7 @@ impl DecodedBlocks<'_> {
             native_index: Some(part_index),
             native_id,
             item_id: None,
-            content_fingerprint: Some(content_fingerprint),
+            content_fingerprint,
         });
     }
 }
@@ -629,6 +702,7 @@ fn encode_with_meta(
     msg: &WireMessage,
     meta: &HarnessMessageMeta,
     preserve_compaction: bool,
+    content: MetaContent<'_>,
 ) -> Value {
     let mut raw = meta.raw.as_ref().clone();
     let mut parts = raw
@@ -636,7 +710,8 @@ fn encode_with_meta(
         .and_then(Value::as_array_mut)
         .map(std::mem::take)
         .unwrap_or_default();
-    let mut matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
+    let mut matched_metas =
+        match_block_metas_by(msg.content(), &meta.blocks, block_matches_meta, content);
     matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
     matched_metas.fold_native_parts(&meta.folded_native_indices);
 
@@ -665,7 +740,7 @@ fn encode_with_meta(
                     [(block_index, block_meta), (block_index + 1, result_meta)]
                 {
                     if !arc_meta.is_some_and(|meta| {
-                        matched_metas.block_is_unchanged(msg.content(), arc_index, meta)
+                        matched_metas.block_is_unchanged(msg.content(), arc_index, meta, content)
                     }) {
                         update_part_from_block(part, &msg.content()[arc_index]);
                     }
@@ -688,7 +763,7 @@ fn encode_with_meta(
             && let Some(part) = parts.get_mut(part_index)
         {
             if block_meta.is_some_and(|meta| {
-                matched_metas.block_is_unchanged(msg.content(), block_index, meta)
+                matched_metas.block_is_unchanged(msg.content(), block_index, meta, content)
             }) {
                 block_index += 1;
                 continue;
@@ -2354,5 +2429,154 @@ pub(crate) mod tests {
         assert_eq!(served[0]["parts"][1]["text"], "§18240§ answer");
         assert_eq!(served[0]["parts"][2]["type"], "text");
         assert_eq!(served[0]["parts"][2]["text"], "");
+    }
+
+    /// Every served variant of a window encodes against the window exactly as it encodes
+    /// against the window's fingerprinted sidecar: stamped and unstamped survivors, tagged
+    /// text, removed blocks and messages, signed float zeros, and a repeated mid.
+    #[test]
+    fn window_alignment_encodes_as_the_fingerprinted_sidecar_does() {
+        #[derive(serde::Deserialize)]
+        struct Golden {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            messages: Vec<Value>,
+        }
+        let golden: Golden =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let tool = |id: &str, x: Value| {
+            json!({
+                "type": "tool",
+                "tool": "read",
+                "callID": id,
+                "state": {
+                    "status": "completed",
+                    "input": { "x": x },
+                    "output": "out",
+                    "time": { "start": 1, "end": 2 }
+                }
+            })
+        };
+        let signed = vec![
+            json!({
+                "info": { "id": "zero", "role": "assistant" },
+                "parts": [
+                    tool("positive", json!(0.0)),
+                    tool("negative", json!(-0.0)),
+                    { "type": "text", "text": "after", "metadata": { "w": -0.0 } }
+                ]
+            }),
+            json!({
+                "info": { "id": "repeat", "role": "user" },
+                "parts": [{ "type": "text", "text": "first" }]
+            }),
+            json!({
+                "info": { "id": "mid", "role": "assistant" },
+                "parts": [
+                    { "type": "reasoning", "text": "think", "metadata": { "signature": "s" } },
+                    { "type": "text", "text": "same" },
+                    { "type": "text", "text": "same" }
+                ]
+            }),
+            json!({
+                "info": { "id": "repeat", "role": "user" },
+                "parts": [
+                    { "type": "text", "text": "second" },
+                    { "type": "text", "text": "third" }
+                ]
+            }),
+        ];
+        let mut windows = golden
+            .cases
+            .into_iter()
+            .map(|case| case.messages)
+            .collect::<Vec<_>>();
+        windows.push(signed);
+        // Above `MAX_ALIGNMENT_CELLS` blocks times metas, alignment takes the greedy walk.
+        windows.push(vec![json!({
+            "info": { "id": "wide", "role": "assistant" },
+            "parts": (0..1100)
+                .map(|index| json!({ "type": "text", "text": format!("part {}", index % 7) }))
+                .collect::<Vec<_>>()
+        })]);
+
+        for window in windows {
+            let shared = window.iter().cloned().map(Arc::new).collect::<Vec<_>>();
+            let fingerprinted = decode_opencode_shared(&shared);
+            let plain = decode_window(&shared, false)
+                .messages
+                .into_iter()
+                .map(|message| message.ck)
+                .collect::<Vec<_>>();
+            let stamped = fingerprinted
+                .messages
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect::<Vec<_>>();
+            let mut variants = vec![plain.clone(), stamped.clone()];
+            for base in [&plain, &stamped] {
+                let mut tagged = base.clone();
+                for message in &mut tagged {
+                    for block in message.content_mut() {
+                        if let BlockKind::Text { text } = block.kind_mut() {
+                            *text = format!("§1§ {text}");
+                        }
+                    }
+                }
+                variants.push(tagged);
+                let mut flipped = base.clone();
+                for message in &mut flipped {
+                    for block in message.content_mut() {
+                        if let BlockKind::ToolCall { input, .. } = block.kind_mut()
+                            && let Some(x) = input.get_mut("x")
+                            && let Some(value) = x.as_f64()
+                        {
+                            *x = json!(-value);
+                        }
+                    }
+                }
+                variants.push(flipped);
+                for message_index in 0..base.len() {
+                    let mut without_message = base.clone();
+                    without_message.remove(message_index);
+                    variants.push(without_message);
+                    let blocks = base[message_index].content().len();
+                    // The wide message removes three blocks; every other message removes each.
+                    let removed = if blocks > 64 {
+                        vec![0, blocks / 2, blocks - 1]
+                    } else {
+                        (0..blocks).collect()
+                    };
+                    for block_index in removed {
+                        let mut without_block = base.clone();
+                        without_block[message_index]
+                            .content_mut()
+                            .remove(block_index);
+                        variants.push(without_block);
+                    }
+                }
+            }
+            let exempt = plain
+                .first()
+                .and_then(|message| message.meta.harness_id.clone())
+                .unwrap_or_default();
+            for served in &variants {
+                for exemptions in [&[][..], &[exempt.as_str()][..]] {
+                    assert_eq!(
+                        encode_opencode_against_window(served, &shared, Some("ses"), exemptions),
+                        encode_opencode_with_session_exemptions(
+                            served,
+                            &fingerprinted.sidecar,
+                            Some("ses"),
+                            exemptions,
+                        ),
+                        "served {served:?}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -14213,9 +14213,9 @@ fn attach_native_messages_with_tags(
                 .iter()
                 .map(|message| message.deref().clone())
                 .collect::<Vec<_>>();
-            let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
+            let mut native_messages = codec::opencode::encode_opencode_against_window(
                 &served_messages,
-                &codec::opencode::decode_opencode_shared(native_input).sidecar,
+                native_input,
                 Some(&request.session_id),
                 &mutation_exempt_mids,
             );

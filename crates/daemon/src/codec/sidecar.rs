@@ -133,12 +133,14 @@ impl MatchedBlockMetas<'_> {
         blocks: &[WireBlock],
         block_index: usize,
         meta: &BlockMeta,
+        content: MetaContent<'_>,
     ) -> bool {
         debug_assert_eq!(blocks.len(), self.block_fingerprints.len());
-        meta.content_fingerprint.as_deref().is_some_and(|expected| {
-            memoized_fingerprint(&self.block_fingerprints[block_index], &blocks[block_index])
-                == expected
-        })
+        content.matches_memoized(
+            &blocks[block_index],
+            &self.block_fingerprints[block_index],
+            meta,
+        )
     }
 
     /// Adds `native_indices` to the decoded set that [`Self::remove_unretained_native_parts`]
@@ -483,6 +485,7 @@ const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
 /// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)` up to
 /// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
 /// first unpaired candidate at `O(blocks + metas)` memory, trading optimality for a bound.
+#[cfg(test)]
 pub(crate) fn match_block_metas<'a>(
     blocks: &[WireBlock],
     metas: &'a [BlockMeta],
@@ -983,7 +986,12 @@ mod tests {
             for (block_index, block) in blocks.iter().enumerate() {
                 for meta in &metas {
                     assert_eq!(
-                        matched.block_is_unchanged(&blocks, block_index, meta),
+                        matched.block_is_unchanged(
+                            &blocks,
+                            block_index,
+                            meta,
+                            MetaContent::Fingerprint
+                        ),
                         block_is_unchanged(block, meta),
                         "block {block_index} {block:?} vs meta {meta:?}"
                     );
