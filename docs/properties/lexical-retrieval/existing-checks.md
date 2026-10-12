@@ -102,7 +102,7 @@ reads `SQLITE_STMTSTATUS_VM_STEP` per statement.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `cancellation_and_deadline_are_observed_in_every_phase` | `query_route.rs:74` | cancellation and a passed deadline before each `Phase`, including `Phase::Lexical` (`crates/daemon/src/query_route.rs:1395`) | unaudited |
+| `cancellation_and_deadline_are_observed_in_every_phase` | `query_route.rs:74` | cancellation and a passed deadline before each `Phase`, including `Phase::Lexical` (`crates/daemon/src/query_route.rs:1397`) | unaudited |
 | `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion` | `lexical_retrieval.rs:1457` | a connection interrupt through `with_conn_interruptible` during the lexical scan | unaudited |
 | `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion` | `lexical_retrieval.rs:2543` | the progress handler fires at every point of counting, ranking, and a common scan; the connection serves the next request | unaudited |
 | `a_budget_that_ends_after_a_probe_yields_an_incomplete_result_with_no_contributions` | `lexical_retrieval.rs:1350` | a budget that ends between probes | unaudited |

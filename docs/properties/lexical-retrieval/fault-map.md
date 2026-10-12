@@ -23,7 +23,7 @@ reachability record needs a host campaign. Locations are verified against the
 | Retirement, correction, or snapshot move after a grant | `retrieve_with_hook_for_test` (`crates/retrieval/src/lexical/retrieve.rs:373`) between admission batches; a kernel restore; a foreign project | `lexical_retrieval.rs:1200`, `:1223`, `:1253`, `:1293`; `crates/daemon/tests/claim_eligibility.rs:184` |
 | A second eligibility caller | a planted `judge_eligibility` mention in any workspace member's `src` | `claim_eligibility.rs:456` (the scan; the plant is manual) |
 | Match counts at and past the thresholds | `project_thresholds` (`lexical_retrieval.rs:1599`), `small_thresholds` (`:2630`), a scan bound one below the match count, a result cap of one | `lexical_retrieval.rs:838`, `:1119`, `:1626`, `:2639`, `:2801`, `:2876` |
-| Cancellation or deadline inside a phase | `before_phase` hooks in the route (`crates/daemon/src/query_route.rs:1395` for `Phase::Lexical`) | `crates/daemon/tests/query_route.rs:74` |
+| Cancellation or deadline inside a phase | `before_phase` hooks in the route (`crates/daemon/src/query_route.rs:1397` for `Phase::Lexical`) | `crates/daemon/tests/query_route.rs:74` |
 | Engine interrupt mid-statement | `with_conn_interruptible` with a stop closure the progress handler polls every `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`) | `lexical_retrieval.rs:1457`, `:2543` |
 | Budget that ends between probes or holds a kernel reader | an `EvalBudget` deadline between probes | `lexical_retrieval.rs:1350`, `:1566` |
 | Payload table absent | `ALTER TABLE payloads RENAME` before `retrieve` | `lexical_retrieval.rs:1325` |

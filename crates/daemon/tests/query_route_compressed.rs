@@ -726,17 +726,23 @@ async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant(
     handler.set_dense_vectors(Some(renewed)).unwrap();
     handler.set_dense_vectors(None).unwrap();
 
-    // A gate closed after the pool is selected discards the ranking the request already scanned and rescored.
+    // A gate closed at `AfterSelection` lets the rescore run, then discards the ranking.
     let gate = Arc::clone(&composition.store.gate);
-    let closing = composition.observed(move |event| {
-        if event == RescoreEvent::AfterSelection {
-            gate.close();
-        }
+    let reads = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&reads);
+    let closing = composition.observed(move |event| match event {
+        RescoreEvent::AfterSelection => gate.close(),
+        RescoreEvent::ReadOriginal { .. } => *counted.lock().unwrap() += 1,
+        _ => {}
     });
     let outcome = run(&fixture, 2, closing, &budget).unwrap();
     assert_eq!(
         outcome.statuses[2],
         LaneStatus::Unavailable("activation_revoked")
+    );
+    assert!(
+        *reads.lock().unwrap() > 0,
+        "no row was rescored after the close"
     );
     assert_eq!(composition.charged(ResourceClass::Scratch), 0);
     fixture.daemon.shutdown().await;
