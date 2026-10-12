@@ -54,7 +54,7 @@ tests the manifest's `st_size` at `:1011` and returns
 `:1014`, `:1517`) can still fail for other reasons and then report
 `invalid(...)`, which `crates/daemon/src/bin/eidnara-host.rs:347` maps to
 `native_payload_invalid`, but a file whose only fault is size never reaches them.
-The pre-write refusal at `:1251` stops this release writing such a manifest at
+The pre-write refusal at `:1255` stops this release writing such a manifest at
 all.
 
 So exceeding the cap means quarantine on both sides. The two sides still use two
@@ -77,10 +77,10 @@ only one.
 
 The second consequence is the threshold split inside one release. A future
 manifest above 1 MiB is preserved by `prune`, which classifies it undecidable at
-`:1507`, and `read_manifest_in_dir` refuses it as `UnsupportedStateSchema` at
-`:1007-1009`, so the generation is retained on disk and unusable with an
+`:1513`, and `read_manifest_in_dir` refuses it as `UnsupportedStateSchema` at
+`:1011-1013`, so the generation is retained on disk and unusable with an
 `align_versions` remediation. The same applies to the selector itself:
-`current-profile.json` is read under `MAX_MANIFEST_BYTES` (`:883-886`), so the
+`current-profile.json` is read under `MAX_MANIFEST_BYTES` (`:887-890`), so the
 profile's threshold is 1 MiB while the lifecycle record's is 64 KiB, even though
 both are trusted persisted selectors.
 
@@ -97,7 +97,7 @@ ambiguous before the equality question is even asked.
 No fault and no window; both values are compile-time constants and the whole
 record is statically checkable. Depends on
 `an-undecidable-quarantine-witness-fails-closed`, whose single closed arm is the
-`:1507` size test against this cap.
+`:1513` size test against this cap.
 
 ## What a test must construct
 
@@ -121,9 +121,9 @@ constants agree.
   occurrence of both identifiers.
 - Findings: the values and the false comment are as quoted, ratio 16. The
   asymmetry the source catalog recorded, generation read paths reporting corrupt
-  payload for an oversize file, is closed at HEAD: `read_profile` (`:883-885`)
-  and `read_manifest_in_dir` (`:1007-1009`) quarantine on `st_size` before the
-  capped read, matching `is_quarantined_schema` (`:1507`). `read_all_fd` still
+  payload for an oversize file, is closed at HEAD: `read_profile` (`:887-889`)
+  and `read_manifest_in_dir` (`:1011-1013`) quarantine on `st_size` before the
+  capped read, matching `is_quarantined_schema` (`:1513`). `read_all_fd` still
   returns `InvalidData` when the accumulated length passes the cap, so a read
   path that reaches it cannot distinguish oversize from any other read error; at
   HEAD only a file that grows between `fstat` and the read can reach it.
