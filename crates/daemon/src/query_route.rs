@@ -161,7 +161,7 @@ impl QueryRouteLimits {
                 k: n(64),
                 page_rows: n(256),
                 max_rows: n(1_500_000),
-                unit_norm_tolerance: 1e-3,
+                unit_norm_tolerance: host_runtime::local_embeddings::bundle::UNIT_NORM_TOLERANCE,
             }),
         }
     }
