@@ -6,6 +6,7 @@
 //! single tool-part representation.
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -148,10 +149,12 @@ fn decode_rows<'a, E>(
         let mut block_metas = Vec::new();
 
         for (part_index, part) in parts.iter().enumerate() {
-            let part_type = string_field(part, "type").unwrap_or_else(|| "unknown".to_string());
-            let ignored = part.get("ignored").and_then(Value::as_bool) == Some(true);
-            match part_type.as_str() {
-                "text" if !ignored => {
+            let part_type = part
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            match part_type {
+                "text" if part.get("ignored") != Some(&Value::Bool(true)) => {
                     let text = string_field(part, "text").unwrap_or_default();
                     let block = block_with_extras(BlockKind::Text { text }, part);
                     push_block(
@@ -228,14 +231,14 @@ fn decode_rows<'a, E>(
                     );
                 }
                 "step-start" | "step-finish" | "subtask" => {
-                    let block = opaque_block(&part_type, part.clone(), None);
+                    let block = opaque_block(part_type, part.clone(), None);
                     push_block(
                         &mut content,
                         &mut block_metas,
                         block,
                         part_index,
                         part,
-                        &part_type,
+                        part_type,
                     );
                 }
                 "compaction" => {
@@ -251,14 +254,14 @@ fn decode_rows<'a, E>(
                 "snapshot" | "patch" | "agent" | "retry" => {}
                 // An ignored text part stays in the window as an opaque `text` block.
                 _ => {
-                    let block = opaque_block(&part_type, part.clone(), opaque_arc(part));
+                    let block = opaque_block(part_type, part.clone(), opaque_arc(part));
                     push_block(
                         &mut content,
                         &mut block_metas,
                         block,
                         part_index,
                         part,
-                        &part_type,
+                        part_type,
                     );
                 }
             }
@@ -429,11 +432,11 @@ fn assert_unique_tool_use_ids<'a>(messages: impl IntoIterator<Item = &'a Message
     );
 }
 
-fn decode_tool_part(
+fn decode_tool_part<'a>(
     ordinal: u64,
     part_index: usize,
-    part: &Value,
-    emitted_calls: &mut HashSet<String>,
+    part: &'a Value,
+    emitted_calls: &mut HashSet<Cow<'a, str>>,
     content: &mut Vec<WireBlock>,
     block_metas: &mut Vec<BlockMeta>,
 ) {
@@ -445,10 +448,13 @@ fn decode_tool_part(
         .or_else(|| part.get("args"))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let id = string_field(part, "callID")
-        .or_else(|| string_field(part, "callId"))
-        .or_else(|| string_field(part, "id"))
-        .unwrap_or_else(|| synth_tool_id(ordinal, part_index, &tool_name, &input));
+    let id = ["callID", "callId", "id"]
+        .into_iter()
+        .find_map(|key| part.get(key).and_then(Value::as_str))
+        .map_or_else(
+            || Cow::Owned(synth_tool_id(ordinal, part_index, &tool_name, &input)),
+            Cow::Borrowed,
+        );
     let provider_executed = part
         .get("metadata")
         .and_then(|m| m.get("providerExecuted"))
@@ -456,22 +462,20 @@ fn decode_tool_part(
         .unwrap_or(false);
     if emitted_calls.insert(id.clone()) {
         let call_block = WireBlock::bare(BlockKind::ToolCall {
-            id: id.clone(),
+            id: id.to_string(),
             name: tool_name.clone(),
             input,
             provider_executed,
         });
-        push_block(
+        push_block_with_native_id(
             content,
             block_metas,
             call_block,
             part_index,
             part,
             "tool_call",
+            Some(id.to_string()),
         );
-        if let Some(last) = block_metas.last_mut() {
-            last.native_id = Some(id.clone());
-        }
     }
 
     let status = tool_status(part);
@@ -485,32 +489,51 @@ fn decode_tool_part(
             .to_string();
         let output = tool_output_from_part(part, status.as_deref() == Some("error"), output_text);
         let result_block = WireBlock::bare(BlockKind::ToolResult {
-            id: id.clone(),
+            id: id.to_string(),
             tool_name,
             output,
             provider_executed,
         });
-        push_block(
+        push_block_with_native_id(
             content,
             block_metas,
             result_block,
             part_index,
             part,
             "tool_result",
+            Some(id.into_owned()),
         );
-        if let Some(last) = block_metas.last_mut() {
-            last.native_id = Some(id);
-        }
     }
 }
 
 fn push_block(
     content: &mut Vec<WireBlock>,
     block_metas: &mut Vec<BlockMeta>,
+    block: WireBlock,
+    part_index: usize,
+    raw: &Value,
+    kind: &str,
+) {
+    let native_id = string_field(raw, "id").or_else(|| string_field(raw, "callID"));
+    push_block_with_native_id(
+        content,
+        block_metas,
+        block,
+        part_index,
+        raw,
+        kind,
+        native_id,
+    );
+}
+
+fn push_block_with_native_id(
+    content: &mut Vec<WireBlock>,
+    block_metas: &mut Vec<BlockMeta>,
     mut block: WireBlock,
     part_index: usize,
     raw: &Value,
     kind: &str,
+    native_id: Option<String>,
 ) {
     let block_index = content.len();
     let content_fingerprint = decoded_block_fingerprint(&block);
@@ -520,7 +543,7 @@ fn push_block(
         block_index,
         kind: kind.to_string(),
         native_index: Some(part_index),
-        native_id: string_field(raw, "id").or_else(|| string_field(raw, "callID")),
+        native_id,
         item_id: None,
         content_fingerprint: Some(content_fingerprint),
         raw: raw.clone(),
@@ -529,10 +552,12 @@ fn push_block(
 
 /// A block carrying the part's `metadata` and `cache_control` under the `opencode` namespace.
 fn block_with_extras(kind: BlockKind, part: &Value) -> WireBlock {
-    let namespace: BTreeMap<String, Value> = ["metadata", "cache_control"]
-        .into_iter()
-        .filter_map(|key| Some((key.to_string(), part.get(key)?.clone())))
-        .collect();
+    let mut namespace = BTreeMap::new();
+    for key in ["metadata", "cache_control"] {
+        if let Some(value) = part.get(key) {
+            namespace.insert(key.to_string(), value.clone());
+        }
+    }
     if namespace.is_empty() {
         WireBlock::bare(kind)
     } else {
@@ -1608,6 +1633,43 @@ pub(crate) mod tests {
                 { "type": "text", "text": "A", "vendorPart": "A" },
                 { "type": "text", "text": "§3§ SURVIVE", "vendorPart": "survive" }
             ])
+        );
+    }
+
+    #[test]
+    fn tool_block_metas_carry_the_call_id_and_a_repeated_call_adds_only_its_result() {
+        let tool = |part_id: &str, output: &str| {
+            json!({
+                "id": part_id,
+                "type": "tool",
+                "callID": "call_a",
+                "tool": "read",
+                "state": { "status": "completed", "input": {}, "output": output }
+            })
+        };
+        let raw = vec![json!({
+            "info": { "id": "msg_tools", "role": "assistant" },
+            "parts": [tool("prt_1", "one"), tool("prt_2", "two")]
+        })];
+        let decoded = decode_opencode(&raw);
+        let metas = decoded.sidecar.messages["msg_tools"]
+            .blocks
+            .iter()
+            .map(|meta| {
+                (
+                    meta.kind.as_str(),
+                    meta.native_id.as_deref(),
+                    meta.native_index,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metas,
+            [
+                ("tool_call", Some("call_a"), Some(0)),
+                ("tool_result", Some("call_a"), Some(0)),
+                ("tool_result", Some("call_a"), Some(1)),
+            ]
         );
     }
 
