@@ -109,7 +109,6 @@ pub struct BlockMeta {
     pub item_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_fingerprint: Option<String>,
-    pub raw: Value,
 }
 
 /// Order-preserving block-to-metadata alignment and native-part retention sets.
@@ -763,7 +762,6 @@ mod tests {
             native_id: None,
             item_id: None,
             content_fingerprint: None,
-            raw: Value::Null,
         }
     }
 

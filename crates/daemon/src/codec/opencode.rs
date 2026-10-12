@@ -472,7 +472,6 @@ fn decode_tool_part<'a>(
             block_metas,
             call_block,
             part_index,
-            part,
             "tool_call",
             Some(id.to_string()),
         );
@@ -499,7 +498,6 @@ fn decode_tool_part<'a>(
             block_metas,
             result_block,
             part_index,
-            part,
             "tool_result",
             Some(id.into_owned()),
         );
@@ -515,15 +513,7 @@ fn push_block(
     kind: &str,
 ) {
     let native_id = string_field(raw, "id").or_else(|| string_field(raw, "callID"));
-    push_block_with_native_id(
-        content,
-        block_metas,
-        block,
-        part_index,
-        raw,
-        kind,
-        native_id,
-    );
+    push_block_with_native_id(content, block_metas, block, part_index, kind, native_id);
 }
 
 fn push_block_with_native_id(
@@ -531,7 +521,6 @@ fn push_block_with_native_id(
     block_metas: &mut Vec<BlockMeta>,
     mut block: WireBlock,
     part_index: usize,
-    raw: &Value,
     kind: &str,
     native_id: Option<String>,
 ) {
@@ -546,7 +535,6 @@ fn push_block_with_native_id(
         native_id,
         item_id: None,
         content_fingerprint: Some(content_fingerprint),
-        raw: raw.clone(),
     });
 }
 
