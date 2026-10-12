@@ -585,7 +585,8 @@ classifies to its stage.
   under the projection connection, keep their rankings; it returns a
   non-reusable report as `ExactAdmission::Moved`, folds eligibility as
   `Unjoinable` (`presence` is `None`), and the verdict is `Indeterminate`. The
-  same window opened at the lexical phase leaves every lane without a ranking;
+  same window held only while the lexical lane judges moves that lane alone:
+  lexical reports `snapshot_changed` and exact stays `Complete`;
   `a_window_opened_at_fusion_makes_revalidation_unjoinable_not_a_selection_loss`
   does the same from the fusion phase, so a moved revalidation is never a
   selection loss; `an_exact_lane_that_ends_after_reading_leaves_eligibility_unjoinable`

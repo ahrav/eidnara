@@ -51,7 +51,7 @@ inventoried below; other tables include checks bearing directly on this domain.
 | `crates/kernel/src/slice/read.rs:177-191` | Reject negative or future snapshot. | Does not check an export retention lease. | unaudited |
 | `crates/kernel/src/slice/read.rs:245-295` | Size query reads stored lengths; row decoder classifies invalid JSON. | Reusable metadata read, not page memory admission. | unaudited |
 | `crates/kernel/src/slice/read.rs:344-354` | JSON conversion error becomes `CorruptCanonicalRow`; other row errors use SQLite classification. | Failed decode must not look like empty export. | unaudited |
-| `crates/kernel/src/open.rs:414-422` | Refuse poisoned restore before and after writer lock acquisition. | Ack locking and recovery authority. | unaudited |
+| `crates/kernel/src/open.rs:459-467` | Refuse poisoned restore before and after writer lock acquisition. | Ack locking and recovery authority. | unaudited |
 | `crates/kernel/src/cas/gc.rs:437-534` | Separate artifact reclaim checks for purge, references, pins, reservations, and grace periods. | No evidence this is an export retention fence. | unaudited |
 | `crates/daemon/src/kernel_routes/serving.rs:19-63` | Inclusive lag thresholds; zero consumers unavailable for gated reads but available for canonical tip reads. | Pause/deregister surface distinction. | unaudited |
 | `crates/daemon/src/kernel_routes/serving.rs:68-100` | Lag is stale on explicit search and abstained on automatic surfaces. | Existing withheld semantics are reused. | unaudited |

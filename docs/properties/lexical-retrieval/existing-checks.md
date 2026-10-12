@@ -51,7 +51,7 @@ Production guard: `compile` quotes every atom with `quote_atom` in
 | `common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only_the_qualifying_probe` | `lexical_retrieval.rs:1689` | common probes read in descending rowid order; only the qualifying probe is ranked | unaudited |
 
 Production comparator: `by_id` (`crates/retrieval/src/lexical/retrieve.rs:280`),
-`rank.total_cmp` in `scan_ranked` (`:665`) and `merge_best` (`:697`), and
+`rank.total_cmp` in `scan_ranked` (`:668`) and `merge_best` (`:697`), and
 `by_id` then ordinal in `identify` (`:811`).
 
 ## Eligibility before accepted slots (AC3, AC4)
@@ -89,7 +89,7 @@ every admission batch and before the final re-judgment.
 | `a_mixed_query_records_both_its_common_skip_and_its_budget_skip` | `lexical_retrieval.rs:2639` | both skip reasons recorded under `small_thresholds` | unaudited |
 | `a_probe_with_no_match_leaves_the_common_probe_to_its_bounded_scan` | `lexical_retrieval.rs:2391` | a no-match probe beside a common probe | unaudited |
 | `allocations_follow_the_scan_bound_and_the_rank_budget` | `lexical_retrieval.rs:2801` | Rust allocation events and bytes at the bound, one row below it, and 32 rows past the common thresholds; the daemon's `alloc_recorder` as the global allocator | unaudited |
-| `work_counters_report_exact_and_over_bound_work` | `lexical_retrieval.rs:2876` | probes, counted rows, scanned rows, ranked matches, judgments, batches, and `sql_steps` at the bound and one row below it; equal work under a result cap of one | unaudited |
+| `work_counters_report_exact_and_over_bound_work` | `lexical_retrieval.rs:2876` | probes, counted rows, scanned rows, ranked matches, judgments, batches, and `sql_steps` at the bound and one row below it; equal scanned rows and fewer SQL steps under a result cap of one | unaudited |
 | `lexical_scan_p99_at_one_million_occurrences` | `lexical_retrieval.rs:2203` | D26b open-loop p99 at one million occurrences under production bounds; `#[ignore]`, release, D21 host | unaudited |
 | `each_bound_saturates_before_its_protected_work` | `crates/daemon/tests/query_route.rs:320` | each D23 limit refuses or truncates before the work it protects | unaudited |
 | `the_lexical_ranking_bounds_report_every_scope_they_skip` | `query_route.rs:679` | the route reports every skipped scope | unaudited |
@@ -161,7 +161,9 @@ exact, lexical, f32, fusion, packing, and application path.
   allocation recorder and `sql_steps`; no check bounds them.
 - `lexical_scan_p99_at_one_million_occurrences` is `#[ignore]`. The #896 runs
   on an AMD EPYC 9R14 pinned to four cores with the projection on NVMe pass
-  the 50 ms gate warm (p99 43.2 ms at 10 queries per second); no run on the
+  the 50 ms gate warm: p99 43.2 ms at 10 queries per second at `567aa08e7`,
+  33.8 ms at `414680607`, and 31.6 ms at `06d88a182`, each from that commit's
+  message, with raw samples kept outside the repository; no run on the
   D21 runner exists, and a cold page cache misses the gate by orders of
   magnitude.
 - The architecture scan in `claim_eligibility.rs:456` matches two string

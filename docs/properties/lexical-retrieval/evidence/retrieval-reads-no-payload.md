@@ -63,7 +63,7 @@ Test, `crates/retrieval/tests/lexical_retrieval.rs:1325`
   `Payload::Whole` rows, so the `payloads` table is populated.
 - The test retrieves `parse fetch io` with `bounds()` (`:153`: `scan_rows`
   64, `max_accepted` 64, `batch_rows` 2) and an unbounded budget, then opens a
-  raw connection (`raw`, `:509`) and runs
+  raw connection (`raw`, `:541`) and runs
   `ALTER TABLE payloads RENAME TO payloads_hidden`. It asserts
   `SELECT count(*) FROM payloads` now errors, so any payload read would fail
   rather than return zeroed bytes.

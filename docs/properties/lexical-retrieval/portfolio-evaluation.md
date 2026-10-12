@@ -126,14 +126,15 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    `eligibility-before-accepted-slots` covers the pre-slot judgment and
    `one-kernel-eligibility-policy` the agreement, neither the re-judgment.
    Queue `accepted-set-is-revalidated-before-return` (`always`,
-   default-production through `admit` at `query_route.rs:1258`): every
+   default-production through `admit` at `query_route.rs:1259`): every
    returned contribution was judged eligible in the final batch, and a
    retirement, snapshot move, or incarnation change after admission drops or
    marks it with the recorded precedence.
 2. **AC9 has no record and the scale gate is unanchored.** The RP2.9 corpus
    run is cited by no record; `lexical_scan_p99_at_one_million_occurrences`
-   (`lexical_retrieval.rs:2203`) is `#[ignore]` with one failed `ubuntu-latest`
-   run, and it measures `production_bounds()` (`:2141`), a hand copy of the
+   (`lexical_retrieval.rs:2203`) is `#[ignore]`; its one failed `ubuntu-latest`
+   run is superseded by the #896 warm runs recorded in `existing-checks.md`
+   and `fault-map.md`, none on the D21 runner, and it measures `production_bounds()` (`:2141`), a hand copy of the
    D23 values. No check ties that copy to
    `QueryRouteLimits::production().lexical_retrieval_bounds()`
    (`crates/daemon/src/query_route.rs:135`, `:170`); `retrieval` cannot depend

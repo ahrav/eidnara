@@ -88,7 +88,10 @@ hit reports the wrong rank and ordinal as provenance.
 
 None at the comparator. The order is computed in memory after every probe has
 run, and both sorts are total because identifier, rank, and ordinal together
-are unique per hit and identifiers are unique after dedup (comment at `:447`).
+are unique per hit. Two kept lexical rows may name one occurrence; admission
+keeps the first through `reached` in `admit_batches` (`:1017`, `:1052`), as
+`a_second_lexical_row_for_one_occurrence_yields_one_contribution`
+(`lexical_retrieval.rs:3074`) pins.
 The scan bound interacts with order: `scan_ranked` must finish a rank group
 before deciding which equal-rank rows fit. A dead row inside the bound keeps
 its slot, so liveness never moves the window.
@@ -112,7 +115,7 @@ its slot, so liveness never moves the window.
 
 - Sources examined: `Fixture::project` (`lexical_retrieval.rs:378`), which
   calls `apply_batch` on the opened `SqliteStore`; `Fixture::retrieve`
-  (`:469`), which calls `retrieve` (`retrieve.rs:359`); `lexical_read`
+  (`:429`), which calls `retrieve` (`retrieve.rs:359`); `lexical_read`
   (`query_route.rs:1076`) and the `admit` call (`:1259`).
 - Findings: the tests write rows through the retrieval projection write path
   and call the same `scan` and `admit` the daemon calls. They use `bounds()`

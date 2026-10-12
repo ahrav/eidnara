@@ -19,13 +19,14 @@ Route-level budget, `crates/daemon/src/query_route.rs`:
 - `:471` `check` returns `exhaustion(budget)` (`:464`), which maps
   `Exhaustion::Cancelled` to `Terminal::Cancelled` and a deadline or an
   unclassified stop to `Terminal::Deadline`.
-- `:1369` `projection.read_under(budget, ...)` holds the connection for the
-  exact, lexical, and dense phases. Inside it `:1383` through `:1385` run
+- `:1371` `projection.read_under(budget, ...)` holds the connection for the
+  exact, lexical, and dense phases. Inside it `:1385` through `:1387` run
   `before_phase(Phase::Lexical)`, `check(budget)`, then `lexical_read`
   (`:1076`), which passes `budget.eval()` into `retrieval::lexical::scan`
   and maps `LaneRefusal::Budget` to `exhaustion(budget)`.
-- `:1243` `admit_lexical` judges the scanned lane with `budget.eval()` after
-  the connection is released.
+- `:1243` `admit_lexical`, called at `:1389` inside the same closure, judges
+  the scanned lane with `budget.eval()` while the connection is held, inside
+  the `Phase::Lexical` window.
 - `crates/daemon/src/search_projection.rs:406` `read_under` builds
   `Access::ReadUnder` from `budget.deadline()` and `budget.stop_predicate()`
   (`crates/daemon/src/request_budget.rs:119`, true once cancelled or past the
@@ -47,9 +48,9 @@ Lexical lane, `crates/retrieval/src/lexical/retrieve.rs`:
   `scan_ranked` checks once more after partitioning the merged matches
   (`:687`).
 - `crates/retrieval/src/scan.rs` maps a SQLite `OperationInterrupted` error to
-  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:442`, `:442`),
+  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:442`, `:482`),
   and `admit_inner` turns it into `exhausted` through `AdmitStop::Budget`
-  (`:502`), so an interrupt and an exhausted budget share one exit.
+  (`:535`), so an interrupt and an exhausted budget share one exit.
 - `:972` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
   `IncompleteReason::BudgetExhausted`; `admit_inner` (`:508`) returns
   `exhausted` when the budget ends after revalidation.
@@ -83,8 +84,8 @@ Tests:
   contributions, and the `EvalBudget` itself stays unexhausted.
 - `:2543`
   `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`
-  uses the 10,001-row threshold corpus (`project_thresholds`, `:1682`). For
-  `t20001` tight and wide, `t20000`, and `c15000 d15000`, it measures the
+  uses the 10,001-row threshold corpus (`project_thresholds`, `:1599`). For
+  `t10001` tight and wide, `t10000`, and `c7500 d7500`, it measures the
   total poll count of a complete run, then stops at eight evenly spaced poll
   counts. Each stop yields `Err(BudgetExhausted)` or
   `Incomplete(BudgetExhausted)` with no contributions, and the connection

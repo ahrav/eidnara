@@ -48,16 +48,17 @@ through `apply_batch` (`Fixture::project`, `:378`) and a real `KernelStore`:
 
 - `:762` `an_ineligible_leader_is_excluded_without_taking_an_accepted_slot`
   builds `Fixture::new` (`:268`) with every corpus object admitted except
-  gamma, confirms the `parse` reference (`:483`) puts gamma first, and runs
+  gamma, confirms the `parse` reference (`:515`) puts gamma first, and runs
   with `max_accepted` 1 and `batch_rows` 1. It asserts the one contribution is
   `reference[1]`, `AcceptedBound`, `excluded == [(Hidden, 1)]`, `judged == 3`
   and `batches == 3` (two admission batches plus one revalidation), and that
   default bounds return `reference[1..]` as `Complete`.
 - `:797` `admission_batches_scale_the_open_slots_by_the_acceptance_so_far_and_an_exact_fill_stays_complete`
   uses the same fixture with `batch_rows` 4. With `max_accepted` 2 it asserts
-  `reference[1..3]`, `AcceptedBound`, `judged == 4 + 2`, `batches == 2`, and
-  `excluded == [(Hidden, 1)]`, so the fourth row in the batch is judged though
-  no slot remains. With `max_accepted` 3 it asserts `Complete` and
+  `reference[1..3]`, `AcceptedBound`, `judged == 2 + 2 + 2`, `batches == 3`,
+  and `excluded == [(Hidden, 1)]`: the two open slots take the hidden leader
+  and one eligible row, one acceptance in two reads scales the one slot left
+  to two candidates, and revalidation re-judges both accepted rows. With `max_accepted` 3 it asserts `Complete` and
   `reference[1..]`.
 - `:2742` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`
   projects three objects with identical text `sibling twin text`, sorts them
@@ -119,7 +120,7 @@ the leader's verdict is known before the first sibling is judged.
 
 ### Q: Is the leader hidden by the kernel or by the projection?
 
-- Sources examined: `:2253` lines 2262 to 2268, which commit the leader as a
+- Sources examined: `:2742` lines 2751 to 2758, which commit the leader as a
   decision without `record_admission`; kernel `judge` (`:198`, `:229`).
 - Findings: the projection holds all three rows and the engine matches all
   three; only the kernel's served-visibility check excludes the leader, and

@@ -83,7 +83,7 @@ Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.r
 is built by `select_inner` (`crates/retrieval/src/dense/candidates.rs:312`)
 under `select_candidates_observed`, which `rank_compressed` calls;
 `CompressedProducer::rank` (`crates/daemon/src/query_route.rs:718`) reaches
-`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1865`)
+`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1866`)
 installs a composition, and no production caller installs one at this HEAD.
 `TermTable::score_rows` (`scalar.rs:565`) is called from
 `crates/retrieval/tests/` only.
@@ -466,7 +466,7 @@ Type: safety
 Reachability: test-only - `rank_compressed`
 (`crates/daemon/src/vector_reader.rs:810`) is called by
 `CompressedProducer::rank` (`crates/daemon/src/query_route.rs:718`), which the
-route builds only after `set_dense_vectors` (`query_route.rs:1865`) installs a
+route builds only after `set_dense_vectors` (`query_route.rs:1866`) installs a
 composition; no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
@@ -622,7 +622,7 @@ Open questions:
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
 (`crates/daemon/src/query_route.rs:2012`) only when `set_dense_vectors`
-(`query_route.rs:1865`) has installed a composition, and no production caller
+(`query_route.rs:1866`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`

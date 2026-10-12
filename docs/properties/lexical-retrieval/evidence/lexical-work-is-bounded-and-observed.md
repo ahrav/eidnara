@@ -42,11 +42,14 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
   `scan_ranked` (`:650`) scores every ranked probe's matches with
   `ranked_rows` (`:730`), merges them by rowid (`merge_best`, `:697`), and
   keeps `scan_rows`; `scan_common` (`:857`) merges the common probes' rowid
-  streams and keeps `scan_rows` plus one lookahead row. Both read only
-  identifiers, through `identify` (`:759`), which walks one ascending
-  content-table cursor and steps past at most `STEP_ALLOWANCE_MAX` (`:302`,
-  four) rows between two kept rowids before seeking the next one, so a rank
-  group's identification visits at most five table rows per kept row.
+  streams and keeps `scan_rows` plus one lookahead row. The ranked scan
+  identifies the one rank group its bound cuts; every other group is
+  identified when admission reaches it, through `Kept::name_through`
+  (`:247`). Both paths read only identifiers, through `identify` (`:759`),
+  which walks one ascending content-table cursor and steps past at most
+  `STEP_ALLOWANCE_MAX` (`:302`, four) rows between two kept rowids before
+  seeking the next one, so a rank group's identification visits at most five
+  table rows per kept row.
 - `admit` (`:499`) and `admit_batches` (`:1006`) take at most `batch_rows`
   kept matches per batch, sized from the open accepted slots and the
   acceptance so far (`:1034`); a batch after one with no new acceptance
