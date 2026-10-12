@@ -1020,6 +1020,8 @@ struct GateState {
     evaluator: Option<EvidenceEvaluator>,
     /// `evaluator`'s [`EvidenceEvaluator::judge`] verdict for each hook, in [`ProjectionHook::ALL`] order, judged when `evaluator` is set. A verdict depends on the evaluator alone, so it holds until the evaluator is replaced.
     verdicts: Vec<Result<(), Denial>>,
+    /// Activation admissions reuse this [`EvidenceEvaluator::judge_compressed_activation`] verdict until `evaluator` is replaced.
+    activation: Result<(), Denial>,
     /// What admissions keep between them to read the control record.
     control_cache: crate::projection_lifecycle::ControlCache,
     disabled: bool,
@@ -1030,6 +1032,11 @@ struct GateState {
 impl GateState {
     fn set_evaluator(&mut self, evaluator: Option<EvidenceEvaluator>) {
         self.verdicts = evaluator.as_ref().map_or_else(Vec::new, judge_all);
+        self.activation = evaluator
+            .as_ref()
+            .map_or(Err(Denial::NoManifest), |evaluator| {
+                evaluator.judge_compressed_activation()
+            });
         self.evaluator = evaluator;
     }
 
@@ -1086,6 +1093,7 @@ impl HookGate {
             state: Mutex::new(GateState {
                 evaluator: None,
                 verdicts: Vec::new(),
+                activation: Err(Denial::NoManifest),
                 control_cache: Default::default(),
                 disabled: false,
                 invalidated: CancellationToken::new(),
@@ -1108,6 +1116,7 @@ impl HookGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let verdicts = judge_all(&evaluator);
+        let activation = evaluator.judge_compressed_activation();
         let renewal = if state.disabled {
             Renewal::Disabled
         } else if state.evaluator.as_ref().is_none_or(|old| {
@@ -1118,9 +1127,8 @@ impl HookGate {
                     .iter()
                     .zip(&verdicts)
                     .all(|(old, new)| old.is_err() || new.is_ok())
-                && (old.judge_compressed_activation().is_err()
-                    || (evaluator.judge_compressed_activation().is_ok()
-                        && old.binding == evaluator.binding))
+                && (state.activation.is_err()
+                    || (activation.is_ok() && old.binding == evaluator.binding))
         }) {
             Renewal::Kept
         } else {
@@ -1129,6 +1137,7 @@ impl HookGate {
         };
         state.evaluator = Some(evaluator);
         state.verdicts = verdicts;
+        state.activation = activation;
         renewal
     }
 
@@ -1387,8 +1396,10 @@ impl HookGate {
         if state.disabled {
             return Err(Denial::RecoveryRequired);
         }
-        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
-        evaluator.judge_compressed_activation()?;
+        if state.evaluator.is_none() {
+            return Err(Denial::NoManifest);
+        }
+        state.activation.clone()?;
         Ok(ActivationGrant {
             invalidated: state.invalidated.clone(),
         })
