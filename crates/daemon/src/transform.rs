@@ -11035,10 +11035,11 @@ fn renderer_transition_shapes(
             if call_id != result_id {
                 return None;
             }
-            let rewritten_block_is_unmatched = [call, result].into_iter().any(|block| {
-                frozen_targets.contains(block.id.as_str())
-                    && !crate::codec::sidecar::has_stamped_block_identity(&block.wire)
-            });
+            // The served window's blocks carry no native origin, so a frozen call or result
+            // is a rewritten block with no native part to pair with.
+            let rewritten_block_is_unmatched = [call, result]
+                .into_iter()
+                .any(|block| frozen_targets.contains(block.id.as_str()));
             rewritten_block_is_unmatched.then(|| call_id.clone())
         })
         .collect::<BTreeSet<_>>()
@@ -12148,16 +12149,21 @@ pub(crate) fn clear_served_native_reasoning(
     watermark: u64,
     mid_turn: bool,
 ) -> usize {
-    clear_served_native_reasoning_with_tags(
+    let mut shared: Vec<Arc<Value>> = native_messages.iter().cloned().map(Arc::new).collect();
+    let cleared = clear_served_native_reasoning_with_tags(
         profile,
         provider_accepts_empty_content,
-        native_messages,
+        &mut shared,
         served_messages,
         ingress_messages,
         watermark,
         mid_turn,
         &BTreeMap::new(),
-    )
+    );
+    for (native, cleared) in native_messages.iter_mut().zip(shared) {
+        *native = Arc::unwrap_or_clone(cleared);
+    }
+    cleared
 }
 
 // Ingress/tag ownership prevents the codec's latest-assistant shortcut from restoring old reasoning.
@@ -12165,7 +12171,7 @@ pub(crate) fn clear_served_native_reasoning(
 pub(crate) fn clear_served_native_reasoning_with_tags(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
+    native_messages: &mut [Arc<Value>],
     served_messages: &[WireMessage],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
@@ -12203,7 +12209,8 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     }
 
     let mut cleared = 0;
-    for raw_message in native_messages {
+    for shared_message in native_messages {
+        let raw_message: &Value = shared_message;
         let info = raw_message.get("info").unwrap_or(raw_message);
         let Some(mid) = info
             .get("id")
@@ -12225,23 +12232,29 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
             continue;
         }
 
-        let Some(parts) = raw_message.get_mut("parts").and_then(Value::as_array_mut) else {
+        let clears = |part: &Value| {
+            part.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
+                && (part.get("thinking").is_some() || part.get("text").is_some())
+                && !is_empty_reasoning_sentinel(part)
+        };
+        let Some(parts) = raw_message.get("parts").and_then(Value::as_array) else {
             continue;
         };
-        for part in parts {
-            let Some(part_type) = part.get("type").and_then(Value::as_str) else {
-                continue;
-            };
-            if !matches!(part_type, "reasoning" | "thinking")
-                || (part.get("thinking").is_none() && part.get("text").is_none())
-            {
-                continue;
+        if !parts.iter().any(clears) {
+            continue;
+        }
+        // The message may share its value with the request's input, so the clear writes a
+        // private copy and leaves the input as it was.
+        if let Some(parts) = Arc::make_mut(shared_message)
+            .get_mut("parts")
+            .and_then(Value::as_array_mut)
+        {
+            for part in parts.iter_mut().filter(|part| clears(part)) {
+                *part = empty_reasoning_sentinel(part);
+                cleared += 1;
             }
-            if is_empty_reasoning_sentinel(part) {
-                continue;
-            }
-            *part = empty_reasoning_sentinel(part);
-            cleared += 1;
         }
     }
     cleared
@@ -14500,10 +14513,10 @@ pub(crate) mod tests {
         assert!(!constructor.contains("serde_json::to_string("));
 
         let sidecar = include_str!("codec/sidecar.rs")
-            .split_once("pub(crate) fn decoded_block_fingerprint(")
+            .split_once("fn canonical_text(")
             .unwrap()
             .1
-            .split_once("pub(crate) fn stamp_block_identity(")
+            .split_once("pub(crate) fn decoded_block_fingerprint(")
             .unwrap()
             .0;
         assert_eq!(
@@ -19877,9 +19890,13 @@ pub(crate) mod tests {
             .iter()
             .map(|part| part["type"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
-        assert_eq!(types[1..3], ["reasoning", "tool"]);
-        assert_eq!(native_assistant["parts"][1], raw[0]["parts"][1]);
-        assert_eq!(native_assistant["parts"][2]["callID"], "call-tool");
+        // The signed reasoning part replays verbatim and the tool part keeps its call id, in
+        // native order.
+        let reasoning = types.iter().position(|kind| *kind == "reasoning").unwrap();
+        let tool = types.iter().position(|kind| *kind == "tool").unwrap();
+        assert!(reasoning < tool, "{types:?}");
+        assert_eq!(native_assistant["parts"][reasoning], raw[0]["parts"][1]);
+        assert_eq!(native_assistant["parts"][tool]["callID"], "call-tool");
     }
 
     #[test]

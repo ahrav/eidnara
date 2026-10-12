@@ -100,7 +100,10 @@ fn inputs(rows: Vec<PassRow>) -> ScaleInputs {
             sent: 10,
             completed: 9,
         }),
-        cohort: Some(eval_core::CohortManifest { window: 300 }),
+        cohort: Some(eval_core::CohortManifest {
+            window: 300,
+            mix: Some(eval_core::WindowMix::ToolHeavy),
+        }),
         seed: 825,
         rows,
     }
@@ -803,4 +806,24 @@ fn a_row_from_before_the_ledger_parses_with_every_stage_unavailable() {
     let mut unknown = serde_json::to_value(ledger_row("unknown", 0, 100)).unwrap();
     unknown["encode_us"] = json!(1);
     assert!(parse_pass_row(&unknown).is_err());
+}
+
+/// A manifest names its window mix; one written before the mix label parses as text only and
+/// serializes back without the field.
+#[test]
+fn a_cohort_manifest_labels_its_window_mix() {
+    let text: eval_core::CohortManifest = serde_json::from_str(r#"{"window":300}"#).unwrap();
+    assert_eq!(text.mix, None);
+    assert_eq!(serde_json::to_string(&text).unwrap(), r#"{"window":300}"#);
+    let tool: eval_core::CohortManifest =
+        serde_json::from_str(r#"{"window":300,"mix":"tool_heavy"}"#).unwrap();
+    assert_eq!(tool.mix, Some(eval_core::WindowMix::ToolHeavy));
+    assert_eq!(
+        serde_json::to_string(&tool).unwrap(),
+        r#"{"window":300,"mix":"tool_heavy"}"#
+    );
+    assert!(
+        serde_json::from_str::<eval_core::CohortManifest>(r#"{"window":300,"mix":"mixed"}"#)
+            .is_err()
+    );
 }

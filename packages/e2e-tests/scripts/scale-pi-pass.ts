@@ -650,7 +650,8 @@ writeFileSync(
             },
             host: hostManifest(),
             open_loop: null,
-            cohort: { window: windowSize },
+            // The Pi tier interleaves text, tool calls, tool results, and shell runs.
+            cohort: { window: windowSize, mix: "tool_heavy" },
             seed: baseSeed,
         },
         null,

@@ -44,6 +44,12 @@ on:
           early; zero runs every sample
         type: string
         default: "0"
+      scale_mix:
+        description: >-
+          OpenCode window content: text_only, or tool_heavy for text beside
+          completed tool calls
+        type: string
+        default: text_only
       qualification:
         description: >-
           Run the retained-history and outage qualification campaign, with its
@@ -1073,6 +1079,7 @@ jobs:
       SCALE_TIERS: ${{ inputs.scale_tiers }}
       SCALE_SAMPLES: ${{ inputs.scale_samples }}
       SCALE_STEADY: ${{ inputs.scale_steady }}
+      SCALE_MIX: ${{ inputs.scale_mix }}
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1148,6 +1155,13 @@ jobs:
             fi
           elif [ "${SCALE_STEADY:-0}" != 0 ]; then
             echo "scale_steady requires scale_samples" >&2; exit 1
+          fi
+          # Both arms run the measured checkout's driver, so both carry the same mix.
+          if [ "$SCALE_DRIVER" = opencode-pass ]; then
+            measured_flags+=(--mix "${SCALE_MIX:-text_only}")
+            base_flags+=(--mix "${SCALE_MIX:-text_only}")
+          elif [ "${SCALE_MIX:-text_only}" != text_only ]; then
+            echo "scale_mix applies to opencode-pass; the Pi tier is tool-heavy" >&2; exit 1
           fi
           out="$RUNNER_TEMP/scale"
           runner="$PWD/target/release/examples/eval_runner"

@@ -510,6 +510,19 @@ pub struct TierSummary {
 #[serde(deny_unknown_fields)]
 pub struct CohortManifest {
     pub window: u32,
+    /// The content the window's messages carry; a manifest without it ran text only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mix: Option<WindowMix>,
+}
+
+/// The content of a driver's window messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowMix {
+    /// One text part per message.
+    TextOnly,
+    /// Text beside tool calls and their results.
+    ToolHeavy,
 }
 
 /// One served-window size among a tier's completed passes, the cohort a latency belongs to.

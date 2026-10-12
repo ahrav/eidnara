@@ -14260,9 +14260,9 @@ fn attach_native_messages_with_tags(
                 .iter()
                 .map(|message| message.deref().clone())
                 .collect::<Vec<_>>();
-            let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
+            let mut native_messages = codec::opencode::encode_opencode_shared(
                 &served_messages,
-                &codec::opencode::decode_opencode_shared(native_input).sidecar,
+                &codec::opencode::decode_opencode_sidecar(native_input),
                 Some(&request.session_id),
                 &mutation_exempt_mids,
             );
@@ -14278,7 +14278,7 @@ fn attach_native_messages_with_tags(
                     tag_numbers,
                 );
             }
-            native_messages.into_iter().map(Arc::new).collect()
+            native_messages
         }
     };
     response.native_messages = Some(native_messages);
@@ -26650,6 +26650,189 @@ mod tests {
             None,
         );
         response.native_messages.expect("native output")
+    }
+
+    /// An OpenCode window of identified messages: users, an assistant whose reasoning and text
+    /// sit beside a finished tool call, and a nested signed zero in a tool input.
+    fn identified_opencode_window() -> Vec<Value> {
+        let assistant = |id: &str, text: &str| {
+            json!({
+                "info": { "id": id, "role": "assistant", "providerID": "anthropic", "modelID": "m" },
+                "parts": [
+                    { "type": "reasoning", "text": format!("thinking {id}"),
+                      "metadata": { "anthropic": { "signature": format!("sig-{id}") } } },
+                    { "type": "text", "text": text },
+                    { "type": "tool", "callID": format!("call-{id}"), "tool": "read",
+                      "state": { "status": "completed", "input": { "offset": -0.0, "nested": [0.0] },
+                                 "output": format!("output {id}") } }
+                ]
+            })
+        };
+        vec![
+            native_text_message("m1", "user", "first"),
+            assistant("m2", "older answer"),
+            native_text_message("m3", "user", "second"),
+            assistant("m4", "center answer"),
+            native_text_message("m5", "user", "third"),
+            assistant("m6", "newest answer"),
+        ]
+    }
+
+    /// The request over `native` and its derived CK, with ordinals as a resolved pass carries.
+    fn derived_native_request(native: &[Value]) -> (TransformRequest, Vec<WireMessage>) {
+        let shared: Vec<Arc<Value>> = native.iter().cloned().map(Arc::new).collect();
+        let mut messages = codec::opencode::derive_opencode_window(&shared).unwrap();
+        for (index, message) in messages.iter_mut().enumerate() {
+            message.ordinal = index as u64 + 1;
+        }
+        let served = messages.iter().map(|message| message.ck.clone()).collect();
+        let mut request = native_cache_request("ses", messages, native.to_vec());
+        request.native_messages = Some(shared);
+        (request, served)
+    }
+
+    fn pointer_operations(output: &[Arc<Value>], input: &[Arc<Value>]) -> Vec<(String, u64, u64)> {
+        let keyed = |values: &[Arc<Value>]| -> Vec<Keyed<Option<String>, Arc<Value>>> {
+            values
+                .iter()
+                .map(|value| Keyed {
+                    key: native_key(Some(SerializerProfile::OpencodeAiSdk), value),
+                    value: Arc::clone(value),
+                })
+                .collect()
+        };
+        // Pointer identity alone decides a keep, so a keep proves the output shares the input.
+        edit_recipe::build_operations(&keyed(output), &keyed(input), None, |a, b| {
+            Arc::ptr_eq(a, b)
+        })
+        .operations
+        .into_iter()
+        .map(|operation| match operation {
+            edit_recipe::Operation::Keep {
+                source,
+                start,
+                count,
+            } => (format!("keep {source:?}"), start, count),
+            edit_recipe::Operation::Insert { values } => {
+                ("insert".to_string(), values.len() as u64, 0)
+            }
+        })
+        .collect()
+    }
+
+    /// An unchanged native window attaches as the request's own values, so the recipe keeps
+    /// every input value by pointer; one changed center message is a private successor
+    /// between two kept runs; the mutation-exempt message replays its input value.
+    #[test]
+    fn native_attach_shares_unchanged_input_values_by_pointer() {
+        let native = identified_opencode_window();
+        let (request, served) = derived_native_request(&native);
+        let input = request.native_messages.clone().unwrap();
+        let output = encode_native_pass(&request, served.clone(), 0, &BTreeMap::new());
+        assert_eq!(output.len(), input.len());
+        assert!(
+            output
+                .iter()
+                .zip(&input)
+                .all(|(out, inp)| Arc::ptr_eq(out, inp))
+        );
+        assert_eq!(
+            pointer_operations(&output, &input),
+            [("keep Input".to_string(), 0, input.len() as u64)]
+        );
+
+        let mut changed = served.clone();
+        let BlockKind::Text { text } = changed[3].content_mut()[1].kind_mut() else {
+            panic!("the center's second block is its text");
+        };
+        *text = "§9§ center answer".to_string();
+        let output = encode_native_pass(&request, changed.clone(), 0, &BTreeMap::new());
+        assert!(!Arc::ptr_eq(&output[3], &input[3]));
+        assert_eq!(*input[3], native[3], "the input center is unchanged");
+        assert_eq!(
+            pointer_operations(&output, &input),
+            [
+                ("keep Input".to_string(), 0, 3),
+                ("insert".to_string(), 1, 0),
+                ("keep Input".to_string(), 4, 2),
+            ]
+        );
+
+        let mut response = transform::TransformResponse::passthrough(changed);
+        attach_native_messages_with_tags(
+            &mut response,
+            &request,
+            0,
+            &BTreeMap::new(),
+            Some("m4"),
+            None,
+        );
+        let exempt = response.native_messages.unwrap();
+        assert!(
+            exempt
+                .iter()
+                .zip(&input)
+                .all(|(out, inp)| Arc::ptr_eq(out, inp))
+        );
+    }
+
+    /// Clearing an old assistant's reasoning writes a private successor for that message alone:
+    /// the input message keeps its reasoning, and every other output value is the input's.
+    #[test]
+    fn reasoning_clear_writes_a_successor_and_keeps_the_input_and_neighbors() {
+        let native = identified_opencode_window();
+        let (request, served) = derived_native_request(&native);
+        let input = request.native_messages.clone().unwrap();
+        let tags = BTreeMap::from([("m2".to_string(), 1), ("m4".to_string(), 2)]);
+        let output = encode_native_pass(&request, served, 3, &tags);
+        for index in [1, 3] {
+            assert!(!Arc::ptr_eq(&output[index], &input[index]), "{index}");
+            assert_eq!(output[index]["parts"][0]["text"], "", "{index}");
+            assert_eq!(
+                *input[index], native[index],
+                "the input keeps its reasoning"
+            );
+        }
+        for index in [0, 2, 4, 5] {
+            assert!(Arc::ptr_eq(&output[index], &input[index]), "{index}");
+        }
+    }
+
+    /// Native attach takes no SHA-256 digest of served or native blocks: an identified window
+    /// with nested signed zeros attaches in both alignment regimes with no digest at all.
+    #[test]
+    fn native_attach_takes_no_block_digest_in_either_alignment_regime() {
+        let native = identified_opencode_window();
+        let (request, mut served) = derived_native_request(&native);
+        let before = codec::sidecar::identity_digests();
+        let output = encode_native_pass(&request, served.clone(), 0, &BTreeMap::new());
+        assert_eq!(output.len(), native.len());
+        let BlockKind::Text { text } = served[3].content_mut()[1].kind_mut() else {
+            panic!("the center's second block is its text");
+        };
+        *text = "§9§ center answer".to_string();
+        let output = encode_native_pass(&request, served, 0, &BTreeMap::new());
+        assert!(!Arc::ptr_eq(
+            &output[3],
+            &request.native_messages.as_ref().unwrap()[3]
+        ));
+        // The tool block, whose input holds signed zeros, pairs with its own native part.
+        assert_eq!(output[3]["parts"][2], native[3]["parts"][2]);
+
+        // One message of 1,100 text parts aligns on the greedy path.
+        let parts: Vec<Value> = (0..1_100)
+            .map(|index| json!({ "type": "text", "text": format!("part {index}") }))
+            .collect();
+        let wide = vec![json!({ "info": { "id": "wide", "role": "user" }, "parts": parts })];
+        let (request, mut served) = derived_native_request(&wide);
+        served[0].content_mut().remove(500);
+        let output = encode_native_pass(&request, served, 0, &BTreeMap::new());
+        assert_eq!(output[0]["parts"].as_array().unwrap().len(), 1_099);
+        assert_eq!(
+            codec::sidecar::identity_digests(),
+            before,
+            "no digest was taken"
+        );
     }
 
     fn rewrite_first_tool_result(messages: &mut [WireMessage], text: &str) {
