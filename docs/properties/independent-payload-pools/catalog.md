@@ -1,5 +1,15 @@
 # Property catalog: independent payload pools
 
+> Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+> unversioned contract, so every clause here that names a protocol version,
+> numbered revision, version-skew refusal, or retired-field refusal is
+> invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+> `channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+> validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first; the grant is 124 bytes and
+> carries no layout version, the lifecycle page carries no layout version, and
+> the setup grant and activation carry no descriptor schema or wire version.
+> Line anchors into files #989 changed are as of their earlier recorded head.
+
 Scope: `crates/shm-transport`, `crates/host-runtime/src/ring_transport.rs` and
 its callers, `packages/shm-native`, and the TypeScript host client where a
 transport property is only observable there. Domain: the payload-pool transport
@@ -289,7 +299,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2426`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
-Guarantee: The 21-byte header, JSON bodies, direct serializers, send outcomes, and the exact 67,108,864-byte maximum are unchanged; both directions accept one maximum frame on an admitted connection and refuse maximum-plus-one (R7).
+Guarantee: The 20-byte header, JSON bodies, direct serializers, send outcomes, and the exact 67,108,864-byte maximum are unchanged; both directions accept one maximum frame on an admitted connection and refuse maximum-plus-one (R7).
 Check: `always` - every published body of length `n <= MAX_FRAME_BYTES` is received with identical bytes and header, and `MAX_FRAME_BYTES + 1` is `BoundExceedsClass` before any block is taken.
 Fault/timing angle: None; boundary values are the enabling state.
 Required faults and enabling state: A body of exactly `MAX_FRAME_BYTES` in each direction on an otherwise empty connection. Markers: marker:`pool.maximum_frame_each_direction`, marker:`pool.zero_body_frame`.
@@ -305,13 +315,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:3136`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
-Guarantee: Only descriptor schema 4, layout version 4, and profile `host-payload-pool-v1` are accepted; any other identifier, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8).
+Exercised: yes - `sole_identifier_is_the_pool_profile` in `crates/shm-transport/tests/contract.rs`, `grant_round_trips_and_rejects_every_malformation` in `crates/shm-transport/src/backend/ring.rs`, `crates/shm-transport/tests/profile.rs`, and `activation_carrying_an_unknown_field_is_refused` in `crates/host-runtime/src/setup_socket.rs`.
+Guarantee: Only profile `host-payload-pool`, a 124-byte grant whose geometry and lifecycle page match the profile, and the closed setup messages are accepted; any other profile, grant length, unknown setup field, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8). Dated note, 2026-10-12, #989 (spec #988 A1): the descriptor-schema and layout-version clauses are invalidated; the grant and setup messages carry no version.
 Check: `always` - every mismatch path returns an error before `Mapping::attach` or before `activate` commits, and no code path decodes another layout.
 Fault/timing angle: None; this is fail-closed identity checking.
-Required faults and enabling state: A grant with layout version 3; a setup message with schema 3; an eventfd in a doorbell position; a non-fresh pool at attach. Markers: marker:`setup.stale_identifier_presented`, marker:`setup.wrong_doorbell_type_presented`, marker:`setup.non_fresh_pool_presented`.
+Required faults and enabling state: A grant of the former 126-byte layout; a setup message with an unknown field; an eventfd in a doorbell position; a non-fresh pool at attach. Markers: marker:`setup.stale_identifier_presented`, marker:`setup.wrong_doorbell_type_presented`, marker:`setup.non_fresh_pool_presented`.
 Confidence: high - [evidence](evidence/sole-identifiers-before-activation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:190`; `crates/shm-transport/src/backend/ring.rs:726`; `crates/host-runtime/src/ring_transport.rs:1511`; `packages/shm-native/src/lib.rs:306`.
-Existing check: `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:3136`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
+Existing check: `sole_identifier_is_the_pool_profile` in `crates/shm-transport/tests/contract.rs`, `grant_round_trips_and_rejects_every_malformation` in `crates/shm-transport/src/backend/ring.rs`, `crates/shm-transport/tests/profile.rs`, and `activation_carrying_an_unknown_field_is_refused` in `crates/host-runtime/src/setup_socket.rs`.
 Impact: An accepted stale identifier would decode another layout's bytes as this one's.
 Open questions:
 
@@ -738,7 +748,7 @@ Reachability: test-only
 Status: active
 Exercised: partial - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
 Guarantee: Acceptance runs load a wrapper and addon built from the tested source at the current layout.
-Check: `always` - the addon's `descriptorSchemaVersion()` and `qualifiedTestProfile()` equal the wrapper constants in every run.
+Check: `always` - the addon's `qualifiedTestProfile()` equals the wrapper constant in every run.
 Fault/timing angle: A stale prebuilt `shm_native.node`.
 Required faults and enabling state: A run against a stale artifact. Markers: marker:`gate.stale_artifact_present`.
 Confidence: medium - [evidence](evidence/acceptance-artifact-provenance.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/tests/mechanism.ts:50`; `.github/workflows/ci.yml:785`; `packages/shm-native/index.ts:38`.

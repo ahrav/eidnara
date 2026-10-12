@@ -249,7 +249,7 @@ pub struct PayloadLease {
     block: u32,
     generation: u64,
     body_len: usize,
-    wire_header: [u8; crate::descriptor::WIRE_V3_HEADER_BYTES],
+    wire_header: [u8; crate::descriptor::WIRE_HEADER_BYTES],
     returned: bool,
 }
 
@@ -261,7 +261,7 @@ impl PayloadLease {
         block: u32,
         generation: u64,
         body_len: usize,
-        wire_header: [u8; crate::descriptor::WIRE_V3_HEADER_BYTES],
+        wire_header: [u8; crate::descriptor::WIRE_HEADER_BYTES],
     ) -> Self {
         Self {
             retained,
@@ -284,7 +284,7 @@ impl PayloadLease {
     }
 
     /// Header the producer committed with the body, captured and validated at receive time.
-    pub const fn wire_header(&self) -> [u8; crate::descriptor::WIRE_V3_HEADER_BYTES] {
+    pub const fn wire_header(&self) -> [u8; crate::descriptor::WIRE_HEADER_BYTES] {
         self.wire_header
     }
 
@@ -521,9 +521,8 @@ mod tests {
         // covers; the atomic copy is the only access.
         unsafe { copy_in(body, ptr) };
         retained.mark_live(block, generation);
-        let mut header = [0u8; crate::descriptor::WIRE_V3_HEADER_BYTES];
+        let mut header = [0u8; crate::descriptor::WIRE_HEADER_BYTES];
         header[..4].copy_from_slice(&(body.len() as u32).to_le_bytes());
-        header[4] = crate::descriptor::WIRE_VERSION;
         PayloadLease::new(Arc::clone(retained), block, generation, body.len(), header)
     }
 
@@ -596,7 +595,7 @@ mod tests {
             0,
             11,
             0,
-            [0; crate::descriptor::WIRE_V3_HEADER_BYTES],
+            [0; crate::descriptor::WIRE_HEADER_BYTES],
         );
         drop(stale);
         assert_eq!(completion(&retained, 0), 12);

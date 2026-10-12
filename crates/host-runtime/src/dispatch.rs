@@ -350,7 +350,6 @@ async fn emit_reserved_frame(
             let len = u32::try_from(body.len).map_err(|_| ())?;
             let header = EnvelopeHeader {
                 len,
-                ver: crate::wire::PROTOCOL_VERSION,
                 ty,
                 flags,
                 channel: id.channel,

@@ -3997,7 +3997,6 @@ async fn a_second_begin_replaces_or_resumes_and_only_the_pending_cap_is_queue_fu
     // A total above the allowance is refused before it reserves anything.
     let huge = json!({
         "method": "kernel.artifact.ingest.begin",
-        "v": 1,
         "session_id": SESSION,
         "project_root": daemon.project.to_str().unwrap(),
         "upload_id": "huge",
@@ -4036,6 +4035,16 @@ async fn begin_refuses_layouts_and_digests_the_kernel_could_never_accept() {
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, too_many_pages).await,
         PreparedOutcome::Error { code, .. } if code == "invalid_params"
+    ));
+
+    // `kernel.*` bodies are strict: a field named `v` is an unknown field like any other. The
+    // body is otherwise a layout the kernel accepts, so only `v` can refuse it.
+    let mut carried_v = ingest_begin_request(&project, SESSION, "carried-v", b"x", 1);
+    carried_v["v"] = json!(1);
+    assert!(matches!(
+        daemon.handler.dispatch_value_for_test(daemon.route, carried_v).await,
+        PreparedOutcome::Error { code, message }
+            if code == "invalid_params" && message.contains("unknown field `v`")
     ));
 
     let payload = vec![b'q'; 64];

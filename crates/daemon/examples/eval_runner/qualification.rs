@@ -120,7 +120,6 @@ struct Anchor {
 fn transform(session: &str, anchor: Anchor, revision: String, messages: Vec<Value>) -> Value {
     json!({
         "kind": "transform",
-        "v": 3,
         "boundary": {"mid": format!("m{}", anchor.end), "sequence": anchor.sequence},
         "base_revision": revision,
         "session_id": session,

@@ -5,18 +5,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { markAsUntransferable } from "node:worker_threads";
 
-export const QUALIFIED_TEST_PROFILE = "host-payload-pool-v1";
-export const DESCRIPTOR_SCHEMA_VERSION = 4;
+export const QUALIFIED_TEST_PROFILE = "host-payload-pool";
 
-/** The addon's own values for the two constants above, or `null` when it cannot load. */
+/** The addon's own value for the constant above, or `null` when it cannot load. */
 export function nativeWireConstants(): {
-    descriptorSchemaVersion: number;
     qualifiedTestProfile: string;
 } | null {
     const native = addon();
     if (!native) return null;
     return {
-        descriptorSchemaVersion: native.descriptorSchemaVersion(),
         qualifiedTestProfile: native.qualifiedTestProfile(),
     };
 }
@@ -26,7 +23,6 @@ export interface NativeArtifactIdentity {
     buildProfile: string;
     buildTarget: string;
     napiVersion: number;
-    descriptorSchemaVersion: number;
     qualifiedTestProfile: string;
 }
 
@@ -42,7 +38,6 @@ export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
         buildProfile: native.buildProfile(),
         buildTarget: native.buildTarget(),
         napiVersion: native.napiVersion(),
-        descriptorSchemaVersion: native.descriptorSchemaVersion(),
         qualifiedTestProfile: native.qualifiedTestProfile(),
     };
 }
@@ -153,7 +148,6 @@ interface NativeAddon {
     napiVersion(): number;
     buildProfile(): string;
     buildTarget(): string;
-    descriptorSchemaVersion(): number;
     qualifiedTestProfile(): string;
     estimateTokens?: (text: string) => number;
     createExternalProbe(length: number): Uint8Array;

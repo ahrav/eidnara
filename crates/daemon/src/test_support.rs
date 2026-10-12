@@ -44,7 +44,6 @@ impl InProcessFixture {
     pub fn handle_transform(&self) -> Value {
         json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "serializer_profile": "owned-llmrunner",
             "session_id": self.session_id,

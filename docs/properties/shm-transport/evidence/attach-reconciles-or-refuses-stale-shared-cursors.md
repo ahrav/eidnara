@@ -203,3 +203,13 @@ check to emit: `shm_kill_with_leases_held`.
   - line 102, `ring.rs:389` (eventfd doorbell creation): No eventfd remains in the ring backend: `Doorbell::create` builds an AF_UNIX socketpair at `ring.rs:727-738`, and Linux-only support is enforced by the `compile_error!` at `ring.rs:18-19`.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the grant is 124 bytes and carries no layout
+version, the lifecycle page carries no layout version, and the setup grant and
+activation carry no descriptor schema or wire version. Line anchors into files
+#989 changed are as of their earlier recorded head.

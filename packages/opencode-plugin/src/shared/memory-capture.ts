@@ -308,7 +308,6 @@ export async function flushMemoryCapture(
             timeoutMs: 30_000,
             body: {
                 method,
-                v: 2,
                 session_id: input.sessionId,
                 project_root: input.projectRoot,
                 ...extra,
@@ -512,7 +511,6 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
                 method: "memory.capture",
                 body: {
                     method: "memory.capture",
-                    v: 2,
                     session_id: input.sessionId,
                     project_root: input.projectRoot,
                     model: input.model,

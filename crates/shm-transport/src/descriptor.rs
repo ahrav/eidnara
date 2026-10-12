@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::pool::{BlockPlacement, MAX_FRAME_BYTES, PoolGeometry};
 
-/// Shared descriptor schema version; the sole version either peer accepts.
-pub const DESCRIPTOR_SCHEMA_VERSION: u16 = 4;
 /// Pool mappings a grant transfers, one per direction.
 pub const SETUP_MAPPING_COUNT: usize = 2;
 /// Doorbell descriptors a grant transfers, two per direction. `profile` charges this many
@@ -15,16 +13,14 @@ pub const SETUP_DOORBELL_COUNT: usize = 4;
 /// File descriptors a grant transfers over the setup socket: the pool mappings and the
 /// doorbells. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
 pub const SETUP_DESCRIPTOR_COUNT: usize = SETUP_MAPPING_COUNT + SETUP_DOORBELL_COUNT;
-/// Frozen application header length.
-pub const WIRE_V3_HEADER_BYTES: usize = 21;
-/// Version byte at `wire_header[4]`.
-pub const WIRE_VERSION: u8 = 4;
+/// Application header length.
+pub const WIRE_HEADER_BYTES: usize = 20;
 
 /// Shared by the producer's commit and the consumer's receive so both paths agree on which
 /// wire headers are admissible. Callers that must reject a header before consuming a
 /// reservation use this ahead of `commit`, which runs the same check.
 pub fn check_wire_header(
-    wire_header: &[u8; WIRE_V3_HEADER_BYTES],
+    wire_header: &[u8; WIRE_HEADER_BYTES],
     body_len: u64,
 ) -> Result<(), DescriptorError> {
     let declared_len = u32::from_le_bytes([
@@ -33,7 +29,7 @@ pub fn check_wire_header(
         wire_header[2],
         wire_header[3],
     ]);
-    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_VERSION {
+    if u64::from(declared_len) != body_len {
         return Err(DescriptorError::WireHeaderMismatch);
     }
     Ok(())
@@ -88,22 +84,13 @@ crate::redacted_debug!(HardwareProfileId);
 /// Fixed pool profile identity carried by an authenticated grant.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TransportDescriptor {
-    schema_version: u16,
     hardware: HardwareProfileId,
 }
 
 impl TransportDescriptor {
     /// Constructs the transport descriptor.
     pub const fn new(hardware: HardwareProfileId) -> Self {
-        Self {
-            schema_version: DESCRIPTOR_SCHEMA_VERSION,
-            hardware,
-        }
-    }
-
-    /// Schema version.
-    pub const fn schema_version(&self) -> u16 {
-        self.schema_version
+        Self { hardware }
     }
 
     /// Tests equality with expected hardware-profile identifier.
@@ -248,7 +235,7 @@ impl PoolDescriptor {
         }
         placement
             .offset
-            .checked_add(WIRE_V3_HEADER_BYTES as u64)
+            .checked_add(WIRE_HEADER_BYTES as u64)
             .and_then(|start| start.checked_add(body_len))
             .ok_or(DescriptorError::Overflow)?;
         Ok(ValidatedDescriptor {
@@ -373,7 +360,7 @@ pub enum DescriptorError {
     /// An offset or length sum overflowed.
     #[error("descriptor arithmetic overflow")]
     Overflow,
-    /// The wire header's declared length or version disagrees with the descriptor.
+    /// The wire header's declared length disagrees with the descriptor.
     #[error("wire header disagrees with descriptor")]
     WireHeaderMismatch,
     /// A completion names a generation older than the live occupant; it frees nothing.

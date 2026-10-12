@@ -73,7 +73,6 @@ export interface BackendCounters {
 
 interface ReadyRecord {
     status: "ready";
-    wire_version: 4;
     catalog: ["context", "local_embeddings", "model_execution"];
 }
 
@@ -621,21 +620,14 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
         throw new Error("fixture readiness record was malformed");
     }
     const object = record(parsed);
-    const priorFields = ["catalog", "status", "wire_version"];
-    const measuredFields = [
-        "catalog",
-        "debug_assertions",
-        "model_workers",
-        "status",
-        "wire_version",
-    ];
+    const priorFields = ["catalog", "status"];
+    const measuredFields = ["catalog", "debug_assertions", "model_workers", "status"];
     if (!object || !(exactKeys(object, priorFields) || exactKeys(object, measuredFields))) {
         throw new Error("fixture readiness record had unknown fields");
     }
     const measured = "debug_assertions" in object;
     if (
         object.status !== "ready" ||
-        object.wire_version !== 4 ||
         !Array.isArray(object.catalog) ||
         (measured &&
             (typeof object.debug_assertions !== "boolean" ||
@@ -651,7 +643,6 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
     }
     return {
         status: "ready",
-        wire_version: 4,
         catalog: ["context", "local_embeddings", "model_execution"],
     };
 }
@@ -1122,7 +1113,7 @@ export class HermeticHostStack {
     ): Promise<Record<string, unknown>> {
         return this.contextRequest(
             { project_root: resolve(projectRoot), harness: "opencode", session: sessionId },
-            { ...extra, method, v: 1, session_id: sessionId },
+            { ...extra, method, session_id: sessionId },
         );
     }
 

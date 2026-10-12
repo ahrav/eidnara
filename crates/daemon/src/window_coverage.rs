@@ -1,4 +1,4 @@
-//! The per-session coverage authority of transform revision 3 (spec C5, D2, D7, D10, D11): what
+//! The per-session coverage authority of the transform window (spec C5, D2, D7, D10, D11): what
 //! a declared anchor means against one store snapshot, the ordinals the window's messages
 //! receive from the effective anchor, and the anchor pages `transform.boundary` answers.
 //! Nothing here writes; the transform commit persists what the pass does with a resolution.
@@ -210,7 +210,7 @@ pub fn resolve(
 /// Ordinals for a processed window (D11). A non-synthetic message counts one up from the
 /// head: the anchored head receives `anchor_ordinal`, and with no anchor the first
 /// non-synthetic message is `continuation_base + 1` (or 1). Synthetic messages follow the
-/// rule revision 2 plugins applied to unresolved synthetic messages, case for case: one with a non-synthetic
+/// rule plugin-assigned ordinals applied to unresolved synthetic messages, case for case: one with a non-synthetic
 /// message after it borrows the ordinal of the message before it, or, with none before it,
 /// 0 (the anchor's ordinal in an anchored window); the trailing run after the last
 /// non-synthetic message continues dense numbering from the message before it.
@@ -240,7 +240,7 @@ pub fn assign_ordinals(
     ordinals
 }
 
-/// Validates a `transform.boundary` body: `v: 3`, a non-blank `session_id`, an optional
+/// Validates a `transform.boundary` body: a non-blank `session_id`, an optional
 /// `before_sequence` that is a JavaScript safe integer, and nothing else beyond the envelope's
 /// `method`, `kind`, and `project_root`. Returns the session and the cursor.
 pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), String> {
@@ -250,13 +250,10 @@ pub fn parse_boundary_request(request: &Value) -> Result<(&str, Option<i64>), St
     if let Some(key) = fields.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "method" | "kind" | "v" | "session_id" | "project_root" | "before_sequence"
+            "method" | "kind" | "session_id" | "project_root" | "before_sequence"
         )
     }) {
         return Err(format!("transform.boundary does not accept {key:?}"));
-    }
-    if fields.get("v").and_then(Value::as_u64) != Some(3) {
-        return Err("transform.boundary requires v=3".to_string());
     }
     let Some(session_id) = fields
         .get("session_id")

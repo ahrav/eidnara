@@ -48,7 +48,6 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
             const readDaemonStatus = async () =>
                 (await callDaemonSession(deps, ctx, "session.status", {
                     method: "session.status",
-                    v: 1,
                     session_id: sessionId,
                 })) as RustSessionStatus;
 

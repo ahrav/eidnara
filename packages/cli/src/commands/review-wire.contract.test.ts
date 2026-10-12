@@ -78,7 +78,7 @@ describe("review vocabularies are pinned to docs/host-wire-protocol.md", () => {
         const read = backticked(
             sentence(paragraphStarting("`review.read` carries"), "with `t` one of"),
         );
-        const shared = paragraphStarting("**Review operations (protocol 3).**");
+        const shared = paragraphStarting("**Review operations.**");
         const listTerminals = [...shared.matchAll(/"terminal":"([a-z_]+)"/g)].map((m) => m[1]);
         expect(listTerminals).toEqual([...LIST_TERMINALS]);
         expect(new Set(READ_TERMINALS)).toEqual(

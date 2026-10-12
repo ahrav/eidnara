@@ -2,7 +2,7 @@
 
 Rust 1.98 workspace with a thin Bun/TypeScript layer.
 
-- Treat `docs/host-wire-protocol.md` as the normative host wire contract. Wire names and literals require a versioned protocol change.
+- `docs/host-wire-protocol.md` is the normative host wire contract. The wire has one contract, and a change to wire names, literals, or shapes lands in one PR with the document and every Rust and TypeScript peer.
 - Use `.github/workflows/ci.yml` as the source of truth for required checks. Pass `--locked` to Cargo commands except deliberate dependency-update checks.
 - Never append a comment-lint `allow(...)` override marker to a comment. `scripts/forbid-comment-markers.sh` rejects it in CI and in the tracked `.githooks/pre-commit` hook (installed by `bun install` through the root `prepare` script). Rewrite or delete the comment instead.
 - Before changing `crates/storage/`, `crates/shm-transport/`, `crates/host-runtime/`, `packages/shm-native/`, `packages/opencode-plugin/`, or `docs/properties/`, read that directory's scoped `AGENTS.md`.

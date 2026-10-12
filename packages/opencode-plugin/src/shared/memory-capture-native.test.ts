@@ -40,7 +40,7 @@ describe("native capture exchange", () => {
             "memory.capture.submit",
             "memory.capture.next",
         ]);
-        expect(calls.every((call) => call.v === 2)).toBe(true);
+        expect(calls.every((call) => !("v" in call))).toBe(true);
         expect(calls[1]).toMatchObject({ lease: work.lease, output: '{"version":1}' });
     });
 

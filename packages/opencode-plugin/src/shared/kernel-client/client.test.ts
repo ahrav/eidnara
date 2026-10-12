@@ -648,7 +648,6 @@ describe("KernelClient reads", () => {
         const result = await c.read({ surface: "explicit_search", asOf: 9, gated: true });
         expect(transport.bodies("kernel.read")[0]).toEqual({
             method: "kernel.read",
-            v: 1,
             session_id: SESSION,
             project_root: PROJECT,
             surface: "explicit_search",

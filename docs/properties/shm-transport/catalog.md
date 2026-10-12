@@ -7,6 +7,16 @@
 > hold for the replacement are re-authored under
 > [../independent-payload-pools/catalog.md](../independent-payload-pools/catalog.md);
 > treat the rest as `invalidated` history, kept for provenance.
+>
+> Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+> unversioned contract. The frame header is `len`, `type`, `flags`, `channel`,
+> `epoch`, `corr` (20 bytes) with no version byte; the grant carries no layout
+> version (124 bytes); the descriptor carries no schema number; the proof
+> domains are `eidnara-server` and `eidnara-client`. Every clause below that
+> names a version byte, `WIRE_VERSION`, `PROTOCOL_VERSION`,
+> `DESCRIPTOR_SCHEMA_VERSION`, a layout version, or a numbered proof domain is
+> invalidated. The transport's header check is `len` equal to the body length;
+> the host validates every other field before body allocation.
 
 Scope: `crates/shm-transport`, `packages/shm-native`. Boundary context
 from `crates/host-runtime/src/ring_transport.rs` is used where a transport property is
@@ -4987,7 +4997,7 @@ Type: safety
 Reachability: default-production - every setup handshake on both peers computes this transcript.
 Status: active
 Exercised: yes - the committed vectors are asserted against `compute_proof` on the host side and the addon side, and an independent HMAC oracle reproduced both vectors from the transcript layout.
-Guarantee: The setup-handshake proof is `HMAC-SHA256(key, domain || client_nonce || server_nonce || be32(len(daemon_ver)) || daemon_ver || daemon_id)` with domain `eidnara-server-v3` for the host and `eidnara-client-v3` for the peer, and the committed vectors in `setup_auth::vectors` are that function's output over the documented inputs.
+Guarantee: The setup-handshake proof is `HMAC-SHA256(key, domain || client_nonce || server_nonce || be32(len(daemon_ver)) || daemon_ver || daemon_id)` with domain `eidnara-server` for the host and `eidnara-client` for the peer, and the committed vectors in `setup_auth::vectors` are that function's output over the documented inputs.
 Check: `always` - `compute_proof(inputs) == vectors::SERVER_PROOF` and `== vectors::CLIENT_AUTH` for the committed inputs, where the vectors were produced outside the crate.
 Fault/timing angle: A transcript change (field order, length prefix, domain string) that both peers apply symmetrically still interoperates, so only a vector computed outside the implementation detects it.
 Required faults and enabling state: The committed inputs (key `00..1f`, nonces `20..3f` and `40..5f`, daemon id `60..6f`, `daemon_ver` `eidnara-host/0.1.0`) and an oracle that is not `compute_proof`.

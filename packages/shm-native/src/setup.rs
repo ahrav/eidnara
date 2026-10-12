@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 
 use shm_transport::setup_auth::{
     self, CLIENT_AUTH_DOMAIN, DAEMON_ID_LEN, DEFAULT_CLIENT_ROLE, MAX_AUTH_MESSAGE_LEN,
-    MAX_SETUP_MESSAGE_LEN, NONCE_LEN, PROOF_LEN, PROTOCOL_VERSION, SERVER_PROOF_DOMAIN,
+    MAX_SETUP_MESSAGE_LEN, NONCE_LEN, PROOF_LEN, SERVER_PROOF_DOMAIN,
 };
 
 #[derive(Serialize)]
@@ -42,16 +42,12 @@ struct ClientAuth {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum GrantMessage {
     Grant {
-        wire_version: u8,
-        descriptor_schema: u16,
         activation_token: String,
         descriptor: Descriptor,
     },
 }
 
 struct Grant {
-    wire_version: u8,
-    descriptor_schema: u16,
     activation_token: String,
     descriptor: Descriptor,
 }
@@ -67,11 +63,7 @@ struct Descriptor {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage<'a> {
-    Activate {
-        wire_version: u8,
-        descriptor_schema: u16,
-        activation_token: &'a str,
-    },
+    Activate { activation_token: &'a str },
     Commit,
     Goodbye,
 }
@@ -88,8 +80,6 @@ pub struct PendingSetup {
     descriptors: Option<[OwnedFd; SETUP_DESCRIPTOR_COUNT]>,
     pub host_to_peer_grant: PoolGrant,
     pub peer_to_host_grant: PoolGrant,
-    wire_version: u8,
-    descriptor_schema: u16,
     activation_token: String,
     deadline: Instant,
 }
@@ -114,11 +104,6 @@ pub fn begin_connect(
         deadline,
     )?;
     let (grant, descriptors) = receive_grant(&mut stream, deadline)?;
-    if grant.wire_version != PROTOCOL_VERSION
-        || grant.descriptor_schema != shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION
-    {
-        return Err(invalid());
-    }
     let host_to_peer_grant = decode_grant(&grant.descriptor.host_to_peer_grant)?;
     let peer_to_host_grant = decode_grant(&grant.descriptor.peer_to_host_grant)?;
     if grant.descriptor.profile != super::PROFILE
@@ -134,8 +119,6 @@ pub fn begin_connect(
         descriptors: Some(descriptors),
         host_to_peer_grant,
         peer_to_host_grant,
-        wire_version: grant.wire_version,
-        descriptor_schema: grant.descriptor_schema,
         activation_token: grant.activation_token,
         deadline,
     })
@@ -207,8 +190,6 @@ impl PendingSetup {
         write_message(
             &mut self.stream,
             &ClientMessage::Activate {
-                wire_version: self.wire_version,
-                descriptor_schema: self.descriptor_schema,
                 activation_token: &self.activation_token,
             },
             self.deadline,
@@ -360,14 +341,10 @@ fn receive_grant(
     let message: GrantMessage =
         read_message_from_prefix(stream, bytes, deadline, MAX_SETUP_MESSAGE_LEN)?;
     let GrantMessage::Grant {
-        wire_version,
-        descriptor_schema,
         activation_token,
         descriptor,
     } = message;
     let grant = Grant {
-        wire_version,
-        descriptor_schema,
         activation_token,
         descriptor,
     };
@@ -608,19 +585,19 @@ mod tests {
     fn grant_message_accepts_tagged_setup_envelope() {
         let message: GrantMessage = serde_json::from_value(serde_json::json!({
             "type": "grant",
-            "wire_version": 4,
-            "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
             "activation_token": "token",
             "descriptor": {
-                "profile": "host-payload-pool-v1",
+                "profile": "host-payload-pool",
                 "host_to_peer_grant": "aa",
                 "peer_to_host_grant": "bb"
             }
         }))
         .expect("tagged grant envelope decodes");
 
-        let GrantMessage::Grant { wire_version, .. } = message;
-        assert_eq!(wire_version, 4);
+        let GrantMessage::Grant {
+            activation_token, ..
+        } = message;
+        assert_eq!(activation_token, "token");
     }
 
     #[test]

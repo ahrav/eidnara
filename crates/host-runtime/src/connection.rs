@@ -177,8 +177,6 @@ pub async fn run_connection<H: HostHandler>(
         &mut stream,
         &descriptors,
         &descriptor,
-        crate::wire::PROTOCOL_VERSION,
-        shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
         token.as_str(),
         setup_deadline,
     )

@@ -445,7 +445,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 method: "agent_drops.append",
                 body: {
                     method: "agent_drops.append",
-                    v: 1,
                     session_id: sessionId,
                     drop,
                     command_id: commandId,
@@ -702,7 +701,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     method: "todo_state.set",
                     body: {
                         method: "todo_state.set",
-                        v: 1,
                         session_id: sessionId,
                         state_json: stateJson,
                         owner_message_id: ownerMessageId,

@@ -200,7 +200,7 @@ describe("createEidnaraCommandHandler", () => {
                 {
                     method: "session.flush",
                     projectRoot: process.cwd(),
-                    body: { method: "session.flush", v: 1, session_id: "ses-flush" },
+                    body: { method: "session.flush", session_id: "ses-flush" },
                     timeoutMs: undefined,
                 },
             ]);
@@ -323,7 +323,7 @@ describe("createEidnaraCommandHandler", () => {
                 {
                     method: "session.status",
                     projectRoot: process.cwd(),
-                    body: { method: "session.status", v: 1, session_id: "ses-status" },
+                    body: { method: "session.status", session_id: "ses-status" },
                     timeoutMs: undefined,
                 },
             ]);
@@ -545,7 +545,6 @@ describe("createEidnaraCommandHandler", () => {
             expect(calls[0]?.method).toBe("session.recomp");
             expect(calls[0]?.body).toMatchObject({
                 method: "session.recomp",
-                v: 1,
                 session_id: "ses-recomp",
             });
             expect(calls[0]?.body.command_id).toMatch(/^opencode-recomp-/);
@@ -620,7 +619,6 @@ describe("createEidnaraCommandHandler", () => {
             expect(calls[0]?.timeoutMs).toBe(MAX_WRAPUP_REQUEST_BUDGET_MS);
             expect(calls[0]?.body).toMatchObject({
                 method: "session.wrapup",
-                v: 1,
                 session_id: "ses-wrapup",
                 keep: 250,
             });

@@ -502,3 +502,13 @@ drop, which is the same attribution hole those two records already name from the
 receive side. **That composition is the strongest reason to have carried this
 group, and it is a relationship the map above could not have found, because the
 codec was outside every lens that produced it.**
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first. Line anchors into files #989
+changed are as of their earlier recorded head.

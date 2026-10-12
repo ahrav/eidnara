@@ -267,7 +267,7 @@ async function fetchRustSessionStatus(
         sessionId,
         projectRoot: directory,
         method: "session.status",
-        body: { method: "session.status", v: 1, session_id: sessionId },
+        body: { method: "session.status", session_id: sessionId },
     });
     const raw =
         response && typeof response === "object" ? (response as Record<string, unknown>) : {};

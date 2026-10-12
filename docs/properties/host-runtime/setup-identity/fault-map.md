@@ -350,3 +350,13 @@ question under
 `setup-a-an-abandoned-setup-strands-no-ring-charge` is a dependency on sub-part 2b,
 not work that can be scheduled here. Both are stated so a later pass does not read
 their absence from this ranking as a judgment that they do not matter.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the host publishes the connection file as exactly `setup_socket`,
+`key`, `daemon_id`, `pid`, and `daemon_ver`; stale-process skew is detected by
+connection identity and proof failure. Line anchors into files #989 changed
+are as of their earlier recorded head.

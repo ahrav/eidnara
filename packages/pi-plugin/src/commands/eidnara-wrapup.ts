@@ -52,7 +52,6 @@ export function registerCtxWrapupCommand(pi: ExtensionAPI, deps: RegisterCtxWrap
                         "session.wrapup",
                         {
                             method: "session.wrapup",
-                            v: 1,
                             session_id: sessionId,
                             keep: parsed.messagesToKeep,
                             command_id: rustCommandId("wrapup"),

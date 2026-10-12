@@ -1,5 +1,5 @@
 /**
- * The pass inputs a revision 3 transform request carries after its protocol fields, as a
+ * The pass inputs a transform request carries after its protocol fields, as a
  * harness adapter computes them. Both harness adapters build their requests' fields here.
  */
 

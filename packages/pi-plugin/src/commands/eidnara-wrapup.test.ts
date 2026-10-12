@@ -65,7 +65,6 @@ describe("Pi /eidnara-wrapup", () => {
         expect(calls[0]?.signal).toBe(signal);
         expect(calls[0]?.body).toMatchObject({
             method: "session.wrapup",
-            v: 1,
             session_id: "ses-1",
             keep: 20,
         });

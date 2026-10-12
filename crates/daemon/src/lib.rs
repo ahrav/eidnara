@@ -2846,7 +2846,6 @@ pub struct HandlerCore {
 
 const NOTE_EVALUATOR_LEASE_MS: i64 = 120_000;
 const NOTE_EVALUATOR_HEARTBEAT_MS: i64 = 60_000;
-const NOTE_EVALUATOR_PROTOCOL_VERSION: &str = "2.0";
 const NOTE_EVALUATOR_ID_MAX_BYTES: usize = 128;
 const NOTE_EVALUATOR_MAX_CAPACITY: i64 = 16;
 /// The per-project registration limit bounds memory and O(n) expiry purges because callers choose evaluator_instance.
@@ -6486,22 +6485,6 @@ impl HandlerCore {
         request: &Value,
         operation: &str,
     ) -> Result<(String, SessionBinding), PreparedOutcome> {
-        self.management_binding_version(channel, request, operation, 1)
-    }
-
-    fn management_binding_version(
-        &self,
-        channel: RouteHandle,
-        request: &Value,
-        operation: &str,
-        version: u64,
-    ) -> Result<(String, SessionBinding), PreparedOutcome> {
-        if request.get("v").and_then(Value::as_u64) != Some(version) {
-            return Err(PreparedOutcome::Error {
-                code: "bad_request".to_string(),
-                message: format!("{operation} requires v={version}"),
-            });
-        }
         let Some(session_id) = request.get("session_id").and_then(Value::as_str) else {
             return Err(PreparedOutcome::Error {
                 code: "bad_request".to_string(),
@@ -6543,9 +6526,7 @@ impl HandlerCore {
             Ok(parsed) => parsed,
             Err(message) => return invalid_params_error(message),
         };
-        if let Err(outcome) =
-            self.management_binding_version(channel, request, "transform.boundary", 3)
-        {
+        if let Err(outcome) = self.management_binding(channel, request, "transform.boundary") {
             return outcome;
         }
         let Some(store) = self.store() else {
@@ -8756,20 +8737,10 @@ impl HandlerCore {
             .and_then(|observed| i64::try_from(observed).ok())
             .map(|observed| decode_started_at_ms.saturating_sub(observed) as f64)
             .unwrap_or(0.0);
-        if parsed.v != transform::TRANSFORM_REVISION {
-            return PreparedOutcome::Error {
-                code: "transform_revision_unsupported".to_string(),
-                message: format!(
-                    "expected transform revision {}, received {}",
-                    transform::TRANSFORM_REVISION,
-                    parsed.v
-                ),
-            };
-        }
         match &parsed.boundary {
             None => {
                 return invalid_params_error(
-                    "transform revision 3 requires boundary: null or {mid, sequence}",
+                    "transform requires boundary: null or {mid, sequence}",
                 );
             }
             Some(Some(anchor))
@@ -8796,12 +8767,6 @@ impl HandlerCore {
                 }
                 _ => return serve_native_unsupported_profile_error(&parsed.serializer_profile),
             }
-        }
-        if parsed.tail_delta_retired {
-            return PreparedOutcome::Error {
-                code: "transform_tail_delta_retired".to_string(),
-                message: "tail_delta is retired; send the whole captured array".to_string(),
-            };
         }
         if parsed.base_revision.is_none() {
             return PreparedOutcome::Error {
@@ -11984,9 +11949,7 @@ impl HandlerCore {
         let body = match note_evaluation_body(
             request,
             &[
-                "v",
                 "evaluator_instance",
-                "protocol_version",
                 "policy_version",
                 "capacity",
                 "wake_owned",
@@ -11999,18 +11962,6 @@ impl HandlerCore {
             Ok(value) => value.to_string(),
             Err(outcome) => return outcome,
         };
-        let protocol_version = match note_evaluation_id_field(body, "protocol_version") {
-            Ok(value) => value,
-            Err(outcome) => return outcome,
-        };
-        if protocol_version != NOTE_EVALUATOR_PROTOCOL_VERSION {
-            return PreparedOutcome::Error {
-                code: "protocol_unsupported".to_string(),
-                message: format!(
-                    "evaluator protocol {protocol_version} is unsupported; this module accepts {NOTE_EVALUATOR_PROTOCOL_VERSION}"
-                ),
-            };
-        }
         // A heartbeat that changes policy increments the version, so the registered value must
         // leave room for at least one increment.
         let policy_version = match note_evaluation_i64_field(body, "policy_version") {
@@ -12082,7 +12033,6 @@ impl HandlerCore {
         let body = match note_evaluation_body(
             request,
             &[
-                "v",
                 "token",
                 "registration_generation",
                 "evaluator_instance",
@@ -12149,12 +12099,7 @@ impl HandlerCore {
     ) -> PreparedOutcome {
         let body = match note_evaluation_body(
             request,
-            &[
-                "v",
-                "token",
-                "registration_generation",
-                "evaluator_instance",
-            ],
+            &["token", "registration_generation", "evaluator_instance"],
         ) {
             Ok(body) => body,
             Err(outcome) => return outcome,
@@ -12193,7 +12138,6 @@ impl HandlerCore {
         let body = match note_evaluation_body(
             request,
             &[
-                "v",
                 "token",
                 "registration_generation",
                 "evaluator_instance",
@@ -12347,7 +12291,6 @@ impl HandlerCore {
         let body = match note_evaluation_body(
             request,
             &[
-                "v",
                 "token",
                 "registration_generation",
                 "evaluator_instance",
@@ -12403,7 +12346,6 @@ impl HandlerCore {
         let body = match note_evaluation_body(
             request,
             &[
-                "v",
                 "token",
                 "registration_generation",
                 "evaluator_instance",
@@ -12478,7 +12420,6 @@ impl HandlerCore {
         let body = match note_evaluation_body(
             request,
             &[
-                "v",
                 "token",
                 "registration_generation",
                 "evaluator_instance",
@@ -13452,7 +13393,6 @@ pub mod kernel_route_fixtures {
     pub fn route_request(method: &str, session: &str, project: &Path) -> Value {
         json!({
             "method": method,
-            "v": 1,
             "session_id": session,
             "project_root": project.to_str().unwrap(),
         })
@@ -16107,9 +16047,6 @@ fn note_evaluation_body<'a>(
             )));
         }
     }
-    if body.get("v").and_then(Value::as_i64) != Some(2) {
-        return Err(note_evaluation_bad_request("'v' must be 2"));
-    }
     Ok(body)
 }
 
@@ -18187,7 +18124,7 @@ impl Handler {
         let Some(session_id) = request["session_id"].as_str().map(str::to_owned) else {
             return request;
         };
-        // A null boundary over revision 2 ordinals is sent as the plugin would send it.
+        // A null boundary over plugin-assigned ordinals is sent as the plugin would send it.
         if request["boundary"].is_null()
             && request.get("native_messages").is_none()
             && let (Some(store), Ok(parsed)) = (
@@ -18329,14 +18266,14 @@ mod tests {
     mod fold_authority_handler_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
+    #[path = "transform/recorded_goldens.rs"]
+    mod recorded_goldens;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
-    #[path = "transform/revision_3.rs"]
-    mod revision_3;
-    #[path = "transform/revision_goldens.rs"]
-    mod revision_goldens;
     #[path = "source_recovery_tests.rs"]
     mod source_recovery_tests;
+    #[path = "transform/window_admission.rs"]
+    mod window_admission;
     #[path = "window_cap_tests.rs"]
     mod window_cap_tests;
     #[path = "window_coverage/dispatch_tests.rs"]
@@ -20277,7 +20214,7 @@ mod tests {
         let outcome = handler
             .dispatch_value(
                 new,
-                json!({"method": "session.status", "v": 1, "session_id": "ses"}),
+                json!({"method": "session.status", "session_id": "ses"}),
             )
             .await;
         assert!(
@@ -20530,7 +20467,7 @@ mod tests {
         let message = serde_json::to_string(&ck("m1", 1, "seed block + new_messages")).unwrap();
         let valid = |extra: &str| {
             format!(
-                r#"{{"kind":"transform","base_revision":"test-base","v":3,"boundary":null,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
+                r#"{{"kind":"transform","base_revision":"test-base","boundary":null,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
             )
             .into_bytes()
         };
@@ -20848,7 +20785,6 @@ mod tests {
         let messages = whole["messages"].take();
         let first = json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "session_id": "ses",
@@ -21438,7 +21374,7 @@ mod tests {
         let mut admitted_by_lower_charge = Vec::new();
         let mut expected = Vec::new();
         for ((name, body), frozen) in corpus.iter().zip(FROZEN_CORPUS_OUTCOMES) {
-            let has_revision = !matches!(
+            let has_envelope_fields = !matches!(
                 *name,
                 "malformed"
                     | "array body"
@@ -21447,14 +21383,15 @@ mod tests {
                     | "raw-value token under the discriminator"
             );
             let frozen = FrozenOutcome {
-                // `base_revision` (22 string bytes), then revision 3's `boundary` (8).
+                // Added since the freeze: `base_revision` (22 string bytes) and `boundary` (8).
+                // Removed since the freeze: the one-byte `v` key and its integer.
                 footprint: frozen.footprint
-                    + if has_revision {
-                        2 * 256 + 30 * FROZEN_STRING_COPIES
+                    + if has_envelope_fields {
+                        256 + 29 * FROZEN_STRING_COPIES
                     } else {
                         0
                     },
-                string_bytes: frozen.string_bytes + if has_revision { 30 } else { 0 },
+                string_bytes: frozen.string_bytes + if has_envelope_fields { 29 } else { 0 },
                 ..*frozen
             };
             assert_eq!(
@@ -21795,7 +21732,7 @@ mod tests {
                 dense_values()
             ),
             format!(
-                r#"{{"kind":"transform","v":3,"boundary":null,"session_id":"ses","serializer_profile":"owned-llmrunner","render_config":"cfg","messages":[],"junk":[{}]}}"#,
+                r#"{{"kind":"transform","boundary":null,"session_id":"ses","serializer_profile":"owned-llmrunner","render_config":"cfg","messages":[],"junk":[{}]}}"#,
                 dense_values()
             ),
         ];
@@ -22837,8 +22774,10 @@ mod tests {
                 ("project_root", json!(17)),
                 ("project_root", json!(".")),
                 ("unexpected", json!(true)),
+                // A field named `v` is an unknown field like any other on these strict bodies.
+                ("v", json!(2)),
             ] {
-                let mut request = json!({"method":method,"v":2,"session_id":"ses"});
+                let mut request = json!({"method":method,"session_id":"ses"});
                 request[field] = value;
                 let outcome = match method {
                     "memory.capture" => {
@@ -22860,6 +22799,12 @@ mod tests {
                     matches!(outcome, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
                     "{method}: {outcome:?}"
                 );
+                if field == "v" || field == "unexpected" {
+                    assert!(
+                        matches!(outcome, PreparedOutcome::Error { ref message, .. } if message.contains("unknown fields")),
+                        "{method} {field}: {outcome:?}"
+                    );
+                }
             }
         }
         assert_eq!(state.starts.load(Ordering::SeqCst), 0);
@@ -22873,7 +22818,7 @@ mod tests {
         let status = handler.handle_memory_capture_status(
             test_route(7),
             &json!({
-                "method":"memory.capture.status","v":2,"session_id":"ses","project_root":project,
+                "method":"memory.capture.status","session_id":"ses","project_root":project,
             }),
         );
         assert_eq!(tool_body(status)["state"], "available");
@@ -22895,7 +22840,7 @@ mod tests {
             },
         );
 
-        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging. Now fix the test."}]});
+        let request = json!({"method":"memory.capture","session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging. Now fix the test."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
@@ -22905,7 +22850,7 @@ mod tests {
             0,
             "checkpoint must not run a daemon model"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -22916,7 +22861,7 @@ mod tests {
         let output = json!({"version":1,"decisions":prompt["messages"].as_array().unwrap().iter().map(|message| json!({
             "message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":"Production uses port 4321.","quote":"Use port 4321 for staging."}]
         })).collect::<Vec<_>>()});
-        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+        let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
         assert_eq!(
             tool_body(
                 handler
@@ -23005,12 +22950,12 @@ mod tests {
                 ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
             },
         );
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let first = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -23043,7 +22988,7 @@ mod tests {
         assert_eq!(second["state"], "work");
         assert_ne!(first["lease"], second["lease"]);
         let text = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
-        let mut submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":first["lease"],"model":first["model"],"output":text});
+        let mut submit = json!({"method":"memory.capture.submit","session_id":"ses","lease":first["lease"],"model":first["model"],"output":text});
         assert_eq!(
             tool_body(
                 handler
@@ -23062,7 +23007,7 @@ mod tests {
             .core
             .handle_session_delete_value(
                 test_route(7),
-                &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+                &json!({"method":"session.delete","session_id":"ses"}),
             )
             .await;
         assert!(!matches!(deleted, PreparedOutcome::Error { .. }));
@@ -23108,19 +23053,18 @@ mod tests {
                 ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
             },
         );
-        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        let request = json!({"method":"memory.capture","session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
-        let next =
-            json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"test/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"test/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
                 .await,
         );
-        let submitted = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":"invalid response"});
+        let submitted = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":"invalid response"});
         assert_eq!(
             tool_body(
                 handler
@@ -23177,7 +23121,6 @@ mod tests {
     fn capture_transform_request(messages: &[IngressMessage]) -> TransformRequest {
         serde_json::from_value(json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "serializer_profile": "opencode-aisdk",
@@ -23271,7 +23214,7 @@ mod tests {
             .core
             .handle_session_delete_value(
                 test_route(7),
-                &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+                &json!({"method":"session.delete","session_id":"ses"}),
             )
             .await;
         assert_eq!(tool_body(deleted)["ok"], json!(true));
@@ -23336,7 +23279,7 @@ mod tests {
             (7, "ses", "native-user-1", "Use port 4321 for staging."),
             (8, "ses2", "native-user-2", "Production listens on 8080."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":session,"messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":session,"messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(
                     handler
@@ -23364,7 +23307,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(400));
         });
         std::thread::sleep(Duration::from_millis(30));
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         // The claim has read its queue and is publishing the frozen head when
         // the second session is swept out from under it.
         let (work, ()) = tokio::join!(
@@ -23392,7 +23335,7 @@ mod tests {
             survivor.attempts, 0,
             "no dispatch is recorded for a batch that was never issued"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -23410,19 +23353,19 @@ mod tests {
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
         let project_key = &capture_key(&project);
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
                 .await,
         );
         assert_eq!(work["state"], "work");
-        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"error":"cancelled"});
+        let submit = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"error":"cancelled"});
         assert_eq!(
             tool_body(
                 handler
@@ -23495,7 +23438,7 @@ mod tests {
             ("frozen", "Frozen plan at the head."),
             ("native-user-1", "Use port 4321 for staging."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
@@ -23519,7 +23462,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(400));
         });
         std::thread::sleep(Duration::from_millis(30));
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         // The reservation lapses while preparation is still publishing the head.
         let (outcome, ()) = tokio::join!(
             handler.handle_native_capture_next(test_route(7), &next),
@@ -23549,12 +23492,12 @@ mod tests {
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
         let project_key = &capture_key(&project);
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         assert_eq!(
             tool_body(
                 handler
@@ -23599,7 +23542,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(400));
         });
         std::thread::sleep(Duration::from_millis(30));
-        let delete = json!({"method":"session.delete","v":1,"session_id":"ses"});
+        let delete = json!({"method":"session.delete","session_id":"ses"});
         let cancelled = tokio::time::timeout(
             Duration::from_millis(100),
             handler
@@ -23647,7 +23590,7 @@ mod tests {
                 &metered_decode::unbounded_reserve(),
             )
             .expect("an unseen fragment needs the store");
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         assert_eq!(
             tool_body(
                 handler
@@ -23679,7 +23622,7 @@ mod tests {
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
@@ -23707,7 +23650,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(400));
         });
         std::thread::sleep(Duration::from_millis(30));
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let dropped = tokio::time::timeout(
             Duration::from_millis(100),
             handler.handle_native_capture_next(test_route(7), &next),
@@ -23761,7 +23704,7 @@ mod tests {
                 },
             );
         }
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
@@ -23779,7 +23722,7 @@ mod tests {
         let (handler, _store, _dir, project) =
             handler_with_store(Arc::clone(&state), default_test_config());
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":"0123456789ABCDEF0123456789ABCDEF","error":"cancelled"});
+        let submit = json!({"method":"memory.capture.submit","session_id":"ses","lease":"0123456789ABCDEF0123456789ABCDEF","error":"cancelled"});
         assert!(
             matches!(handler.handle_native_capture_submit(test_route(7), &submit).await, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
             "the wire contract requires 32 lowercase hexadecimal characters"
@@ -23793,7 +23736,7 @@ mod tests {
             handler_with_store(Arc::clone(&state), default_test_config());
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
         // Warm the store's first-write costs so the timing below measures the gate.
-        let warmup = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[
+        let warmup = json!({"method":"memory.capture","session_id":"ses","messages":[
             {"id":"u0","role":"user","text":"Warm up the capture store."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &warmup).await)["state"],
@@ -23807,7 +23750,7 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(30));
         let started = Instant::now();
-        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[
             {"id":"u1","role":"user","text":"Use port 4321 for staging."},
             {"id":"u2","role":"user","text":"Production listens on 8080."}]});
         let (accepted, ticked_at) = tokio::join!(
@@ -23837,12 +23780,12 @@ mod tests {
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
         let project_key = &capture_key(&project);
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -23851,7 +23794,7 @@ mod tests {
         assert_eq!(work["state"], "work");
         let text =
             json!({"version":1,"decisions":[{"message_id":"source_1","memories":[]}]}).to_string();
-        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":text});
+        let submit = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":text});
         // Publication waits on the gate, so the blocking settle outlives a
         // request future dropped while it runs.
         let gate = Arc::clone(&handler.capture_commit_gate);
@@ -23898,7 +23841,7 @@ mod tests {
         let (handler, store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
@@ -23909,7 +23852,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'injected capture attempt fault'); END;",
             )
             .unwrap();
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         assert_eq!(
             tool_body(
                 handler
@@ -23931,7 +23874,7 @@ mod tests {
         let canonical = canonical_root(&project);
         handler.bind_route(test_route(7), capture_binding(&link, "pi"));
         handler.bind_route(test_route(8), capture_binding(&canonical, "pi"));
-        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        let source = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
@@ -23941,7 +23884,7 @@ mod tests {
             replay["state"], "accepted",
             "a symlinked spelling of the bound root is the same project: {replay}"
         );
-        let status = json!({"method":"memory.capture.status","v":2,"session_id":"ses"});
+        let status = json!({"method":"memory.capture.status","session_id":"ses"});
         assert_eq!(
             tool_body(handler.handle_memory_capture_status(test_route(8), &status))["pending"],
             1
@@ -23959,7 +23902,7 @@ mod tests {
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
@@ -23980,7 +23923,7 @@ mod tests {
                     .unwrap()
             );
         }
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -23989,7 +23932,7 @@ mod tests {
         assert_eq!(work["state"], "work", "{work}");
         let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
         assert_eq!(prompt["messages"].as_array().unwrap().len(), 2);
-        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"error":"model_failed"});
+        let submit = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"error":"model_failed"});
         assert_eq!(
             tool_body(
                 handler
@@ -24095,12 +24038,12 @@ mod tests {
             .collect();
         let text = quotes.concat();
         assert_eq!(text.len(), memory_capture::MAX_CAPTURE_INPUT_BYTES);
-        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -24118,7 +24061,7 @@ mod tests {
             json!({"version":1,"decisions":[{"message_id":"source_1","memories":memories}]})
                 .to_string();
         assert!(output.len() <= memory_capture::MAX_CAPTURE_OUTPUT_BYTES);
-        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
         assert_eq!(
             tool_body(
                 handler
@@ -24166,12 +24109,12 @@ mod tests {
             },
         );
         let project_key = &capture_key(&project);
-        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -24180,7 +24123,7 @@ mod tests {
         assert_eq!(work["state"], "work");
         assert_eq!(work["model"], "custom-native/password=hunter-two");
         let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
-        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
         assert_eq!(
             tool_body(
                 handler
@@ -24229,7 +24172,7 @@ mod tests {
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
@@ -24254,7 +24197,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -24284,7 +24227,7 @@ mod tests {
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
@@ -24314,7 +24257,7 @@ mod tests {
             std::thread::sleep(hold);
         });
         std::thread::sleep(Duration::from_millis(30));
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -24349,7 +24292,7 @@ mod tests {
             std::thread::sleep(hold);
         });
         let started = acquired_at.recv().unwrap();
-        let delete = json!({ "method": "session.delete", "v": 1, "session_id": "ses" });
+        let delete = json!({ "method": "session.delete", "session_id": "ses" });
         let (deleted, ticked_at) = tokio::join!(
             handler
                 .core
@@ -24386,13 +24329,13 @@ mod tests {
             ("native-user-1", oversized.as_str()),
             ("native-user-2", "Use port 4321 for staging."),
         ] {
-            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
                 tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
             );
         }
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         assert_eq!(
             tool_body(
                 handler
@@ -24435,12 +24378,12 @@ mod tests {
         let (handler, store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
-        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -24452,7 +24395,7 @@ mod tests {
             {"category":"CONFIG_VALUES","content":"The staging port is 4321.","quote":"Use port 4321 for staging."}
         ]}]})
         .to_string();
-        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
         assert_eq!(
             tool_body(
                 handler
@@ -24491,7 +24434,6 @@ mod tests {
     fn claude_code_config_controls_fill_request_without_changing_default_request_bytes() {
         let value = json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "serializer_profile": "claude-code-anthropic",
@@ -24566,7 +24508,6 @@ mod tests {
         fn decision(wire_threshold: Option<f64>, config_threshold: f64) -> scheduler::BaseDecision {
             let mut request = json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "owned-llmrunner",
@@ -24782,7 +24723,6 @@ mod tests {
     ) -> Value {
         json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "serializer_profile": "owned-llmrunner",
@@ -25395,30 +25335,6 @@ mod tests {
         assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn transform_refuses_a_retired_tail_delta() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let mut request = request(vec![ck("m1", 1, "hello")]);
-        request["tail_delta"] = json!({ "after": "fp", "replace_from": 1 });
-        let outcome = call_transform_outcome(&handler, request.clone()).await;
-        assert_eq!(error_code(outcome), "transform_tail_delta_retired");
-        // The refusal commits no cache state and publishes no snapshot.
-        assert!(!store.has_cache_state("ses").unwrap());
-        assert!(
-            !handler
-                .transform_snapshots
-                .lock()
-                .unwrap()
-                .entries
-                .contains_key("ses")
-        );
-        // An explicit null is absence, not a delta.
-        request["tail_delta"] = Value::Null;
-        let response = call_transform_request(&handler, request).await;
-        assert_eq!(response["status"], "ok", "{response}");
-    }
-
     fn lineage_summary_user() -> IngressMessage {
         let summary = "This session is being continued from a previous conversation.\n\nSummary:\nDurable summary alpha\n\nFull transcript: /tmp/session.jsonl";
         IngressMessage {
@@ -25905,7 +25821,6 @@ mod tests {
     ) -> TransformRequest {
         serde_json::from_value(json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "serializer_profile": "opencode-aisdk",
@@ -26782,7 +26697,6 @@ mod tests {
             &handler,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "owned-llmrunner",
@@ -26816,7 +26730,6 @@ mod tests {
         }
         let opencode_request = json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "serializer_profile": "opencode-aisdk",
@@ -26852,7 +26765,6 @@ mod tests {
             8,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "claude-code-anthropic",
@@ -26881,7 +26793,6 @@ mod tests {
             9,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "pi",
@@ -26922,7 +26833,6 @@ mod tests {
         let request_for = |messages: Vec<IngressMessage>, input_tokens: u64, context_limit: u64| {
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "claude-code-anthropic",
@@ -27538,7 +27448,6 @@ mod tests {
             &handler,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "opencode-aisdk",
@@ -27919,9 +27828,7 @@ mod tests {
             channel,
             json!({
                 "method": "note.evaluation.register",
-                "v": 2,
                 "evaluator_instance": instance,
-                "protocol_version": "2.0",
                 "policy_version": 0,
                 "capacity": 2,
                 "wake_owned": wake_owned,
@@ -27945,7 +27852,6 @@ mod tests {
     ) -> Value {
         json!({
             "method": "note.evaluation.next",
-            "v": 2,
             "token": token,
             "registration_generation": generation,
             "evaluator_instance": instance,
@@ -27992,9 +27898,7 @@ mod tests {
         let register = |policy_version: i64| {
             json!({
                 "method": "note.evaluation.register",
-                "v": 2,
                 "evaluator_instance": "eval-a",
-                "protocol_version": "2.0",
                 "policy_version": policy_version,
                 "capacity": 2,
                 "wake_owned": false,
@@ -28016,7 +27920,6 @@ mod tests {
         let heartbeat = |wake_owned: bool| {
             json!({
                 "method": "note.evaluation.heartbeat",
-                "v": 2,
                 "token": registered["token"],
                 "registration_generation": registered["registration_generation"],
                 "evaluator_instance": "eval-a",
@@ -28035,7 +27938,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn conditional_note_writes_require_a_live_protocol_v2_registration() {
+    async fn conditional_note_writes_require_a_live_registration() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -28123,7 +28026,6 @@ mod tests {
             &handler,
             json!({
                 "method": "note.evaluation.heartbeat",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -28136,7 +28038,6 @@ mod tests {
             &handler,
             json!({
                 "method": "note.evaluation.unregister",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -28200,7 +28101,6 @@ mod tests {
                 test_route(7),
                 json!({
                     "method": "note.evaluation.heartbeat",
-                    "v": 2,
                     "token": expired_token,
                     "registration_generation": expired_generation,
                     "evaluator_instance": "eval-a",
@@ -28262,7 +28162,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn note_evaluator_registration_rejects_wrong_versions_and_stale_credentials() {
+    async fn note_evaluator_registration_rejects_unknown_fields_and_stale_credentials() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -28273,21 +28173,21 @@ mod tests {
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         insert_conditioned_note(&store, &identity, &route_root, "when evaluated", None);
 
-        let v1 = handler
+        // Registration bodies are strict: a field named `v` is an unknown field like any other.
+        let carried_v = handler
             .dispatch_value(
                 test_route(7),
                 json!({
                     "method": "note.evaluation.register",
                     "v": 2,
                     "evaluator_instance": "eval-a",
-                    "protocol_version": "1.0",
                     "policy_version": 0,
                     "capacity": 1,
                     "wake_owned": false,
                 }),
             )
             .await;
-        assert_eq!(error_code(v1), "protocol_unsupported");
+        assert_eq!(error_code(carried_v), "bad_request");
 
         let (stale_generation, stale_token) =
             register_note_evaluator(&handler, 7, "eval-a", false).await;
@@ -28321,7 +28221,6 @@ mod tests {
                 test_route(7),
                 json!({
                     "method": "note.evaluation.next",
-                    "v": 2,
                     "token": token,
                     "registration_generation": generation,
                     "evaluator_instance": "eval-a",
@@ -28412,7 +28311,6 @@ mod tests {
             &handler,
             json!({
                 "method": "note.evaluation.renew",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -28433,7 +28331,6 @@ mod tests {
         let complete_body = |completion_id: &str| {
             json!({
                 "method": "note.evaluation.complete",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -28507,7 +28404,6 @@ mod tests {
         let complete_with_outcome = |outcome: Value| {
             json!({
                 "method": "note.evaluation.complete",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -28560,7 +28456,6 @@ mod tests {
             &handler,
             json!({
                 "method": "note.evaluation.complete",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -28618,7 +28513,6 @@ mod tests {
             &handler,
             json!({
                 "method": "note.evaluation.heartbeat",
-                "v": 2,
                 "token": token_b,
                 "registration_generation": generation_b,
                 "evaluator_instance": "eval-b",
@@ -28726,7 +28620,6 @@ mod tests {
             handler,
             json!({
                 "method": "note.evaluation.complete",
-                "v": 2,
                 "token": token,
                 "registration_generation": generation,
                 "evaluator_instance": "eval-a",
@@ -29638,7 +29531,7 @@ mod tests {
                 .core
                 .handle_session_delete_value(
                     test_route(7),
-                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                    &json!({ "method": "session.delete", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -29987,7 +29880,7 @@ mod tests {
                 .core
                 .handle_session_delete_value(
                     test_route(7),
-                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                    &json!({ "method": "session.delete", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -30297,7 +30190,6 @@ mod tests {
             8,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "owned-llmrunner",
@@ -30313,7 +30205,6 @@ mod tests {
             9,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "owned-llmrunner",
@@ -30334,7 +30225,6 @@ mod tests {
             10,
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": null,
                 "base_revision": "test-base",
                 "serializer_profile": "owned-llmrunner",
@@ -31165,7 +31055,6 @@ mod tests {
     fn transform_page_scalar_digest_covers_non_array_fields_only() {
         let base = json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "session_id": "ses",
@@ -31682,7 +31571,6 @@ mod tests {
                 .handle_memory_classifier_run_task(
                     test_route(7),
                     &json!({
-                        "v": 1,
                         "session_id": "ses",
                         "task": CLASSIFY_TASK,
                         "command_id": command_id,
@@ -34553,7 +34441,6 @@ mod tests {
                 .handle_memory_classifier_run_task(
                     route,
                     &json!({
-                        "v": 1,
                         "session_id": "ses",
                         "task": CLASSIFY_TASK,
                         "command_id": "shared-command",
@@ -34625,7 +34512,6 @@ mod tests {
                 .handle_memory_classifier_run_task(
                     test_route(7),
                     &json!({
-                        "v": 1,
                         "session_id": "ses",
                         "task": CLASSIFY_TASK,
                         "command_id": "shared",
@@ -34714,7 +34600,6 @@ mod tests {
             .handle_memory_classifier_run_task(
                 test_route(8),
                 &json!({
-                    "v": 1,
                     "session_id": "ses",
                     "task": CLASSIFY_TASK,
                     "command_id": "shared",
@@ -35395,7 +35280,6 @@ mod tests {
         payload["object_ids"] = json!([]);
         let request = |generation: u64| {
             json!({
-                "v": 1,
                 "session_id": "ses",
                 "task": CLASSIFY_TASK,
                 "command_id": "shape-first",
@@ -35621,7 +35505,7 @@ mod tests {
 
         let session_status = tool_body(handler.handle_session_status_value(
             test_route(7),
-            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            &json!({ "method": "session.status", "session_id": "ses" }),
         ));
         assert!(session_status["pass_trace"]["first_divergence"].is_null());
         assert!(session_status["pass_trace"]["last_divergence"].is_string());
@@ -35700,7 +35584,7 @@ mod tests {
     fn session_tail_hygiene(handler: &Handler, session: &str) -> Value {
         tool_body(handler.handle_session_status_value(
             test_route(DERIVED_CHANNEL),
-            &json!({"method": "session.status", "v": 1, "session_id": session}),
+            &json!({"method": "session.status", "session_id": session}),
         ))["tail_hygiene"]
             .clone()
     }
@@ -36093,7 +35977,7 @@ mod tests {
             .core
             .handle_session_delete_value(
                 test_route(DERIVED_CHANNEL),
-                &json!({ "method": "session.delete", "v": 1, "session_id": session }),
+                &json!({ "method": "session.delete", "session_id": session }),
             )
             .await;
         assert_eq!(tool_body(deleted)["ok"], json!(true));
@@ -36335,7 +36219,7 @@ mod tests {
         let status = |handler: &Handler| {
             tool_body(handler.handle_session_status_value(
                 test_route(7),
-                &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+                &json!({ "method": "session.status", "session_id": "ses" }),
             ))
         };
         assert!(status(&handler).get("aws_credentials").is_none());
@@ -36404,7 +36288,6 @@ mod tests {
             test_route(7),
             &json!({
                 "method": "session.status",
-                "v": 1,
                 "session_id": "ses",
             }),
         ));
@@ -36754,7 +36637,7 @@ mod tests {
         );
         let status = tool_body(handler.handle_session_status_value(
             test_route(7),
-            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            &json!({ "method": "session.status", "session_id": "ses" }),
         ));
         let history = decay_render::extract_m0_block(&m0, "session-history").unwrap();
         assert_eq!(
@@ -36771,7 +36654,7 @@ mod tests {
         let status = || {
             tool_body(handler.handle_session_status_value(
                 test_route(7),
-                &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+                &json!({ "method": "session.status", "session_id": "ses" }),
             ))
         };
         call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
@@ -36819,7 +36702,7 @@ mod tests {
             .unwrap();
         let degraded = tool_body(handler.handle_session_status_value(
             test_route(7),
-            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            &json!({ "method": "session.status", "session_id": "ses" }),
         ));
         assert_eq!(
             degraded["history_summarizer"]["consecutive_publish_failures"],
@@ -36844,7 +36727,7 @@ mod tests {
             .unwrap();
         let recovered = tool_body(handler.handle_session_status_value(
             test_route(7),
-            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            &json!({ "method": "session.status", "session_id": "ses" }),
         ));
         assert_eq!(
             recovered["history_summarizer"]["consecutive_publish_failures"],
@@ -37296,7 +37179,6 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         let todo = json!({
             "method": "todo_state.set",
-            "v": 1,
             "session_id": "ses",
             "state_json": "[{\"content\":\"ship module\",\"status\":\"in_progress\",\"priority\":\"high\"}]",
             "owner_message_id": "m1",
@@ -37320,7 +37202,7 @@ mod tests {
 
         let flush = call_dispatch_request(
             &handler,
-            json!({ "method": "session.flush", "v": 1, "session_id": "ses" }),
+            json!({ "method": "session.flush", "session_id": "ses" }),
         )
         .await;
         assert_eq!(flush, json!({ "ok": true, "armed": true }));
@@ -37331,7 +37213,6 @@ mod tests {
             &handler,
             json!({
                 "method": "session.recomp",
-                "v": 1,
                 "session_id": "ses",
                 "command_id": "recomp-1",
             }),
@@ -37345,7 +37226,6 @@ mod tests {
             &handler,
             json!({
                 "method": "session.recomp",
-                "v": 1,
                 "session_id": "ses",
                 "command_id": "recomp-1",
             }),
@@ -37392,7 +37272,6 @@ mod tests {
             test_route(7),
             &json!({
                 "method": "session.status",
-                "v": 1,
                 "session_id": "ses",
                 "include_history_segments_after_seq": -1,
             }),
@@ -37413,7 +37292,6 @@ mod tests {
             test_route(7),
             &json!({
                 "method": "session.status",
-                "v": 1,
                 "session_id": "ses",
                 "include_history_segments_after_seq": 50,
             }),
@@ -37444,7 +37322,6 @@ mod tests {
             &handler,
             json!({
                 "method": "session.recomp",
-                "v": 1,
                 "session_id": "ses",
                 "command_id": "recomp-reset",
             }),
@@ -37466,7 +37343,6 @@ mod tests {
             &handler,
             json!({
                 "method": "session.recomp",
-                "v": 1,
                 "session_id": "ses",
                 "command_id": "recomp-reset",
             }),
@@ -37487,7 +37363,7 @@ mod tests {
         assert_eq!(first["action"], "HARD");
         let armed = call_dispatch_request(
             &handler,
-            json!({ "method": "session.flush", "v": 1, "session_id": "ses" }),
+            json!({ "method": "session.flush", "session_id": "ses" }),
         )
         .await;
         assert_eq!(armed, json!({ "ok": true, "armed": true }));
@@ -37502,7 +37378,7 @@ mod tests {
     fn session_status_rejects_unbound_and_mismatched_routes() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let request = json!({ "method": "session.status", "v": 1, "session_id": "ses" });
+        let request = json!({ "method": "session.status", "session_id": "ses" });
 
         assert_eq!(
             error_code(handler.handle_session_status_value(test_route(8), &request)),
@@ -37510,7 +37386,6 @@ mod tests {
         );
         let mismatch = json!({
             "method": "session.status",
-            "v": 1,
             "session_id": "other",
         });
         assert_eq!(
@@ -37602,7 +37477,7 @@ mod tests {
                 .core
                 .handle_session_delete_value(
                     test_route(7),
-                    &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
+                    &json!({ "method": "session.delete", "session_id": session_id }),
                 )
                 .await,
         );
@@ -37669,7 +37544,7 @@ mod tests {
 
         let body = tool_body(handler.handle_session_status_value(
             test_route(7),
-            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            &json!({ "method": "session.status", "session_id": "ses" }),
         ));
         assert_eq!(body["wrapup_active"], json!(true));
         assert_eq!(body["wrapup_rounds"], json!(3));
@@ -37690,7 +37565,7 @@ mod tests {
 
         let body = tool_body(handler.handle_session_status_value(
             test_route(7),
-            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            &json!({ "method": "session.status", "session_id": "ses" }),
         ));
         let summary = body["summary"].as_str().unwrap();
         assert!(!summary.chars().any(char::is_control));
@@ -38089,7 +37964,6 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let missing_request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "command_id": "missing-retry"
         });
@@ -38131,7 +38005,6 @@ mod tests {
             .finish_ready("ses", generation, Arc::new(malformed), revert_epoch, 1);
         let malformed_request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "command_id": "malformed-retry"
         });
@@ -38172,7 +38045,6 @@ mod tests {
         cache_wrapup_messages(&handler, wrapup_messages(80, 800));
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "command_id": "no-models"
         });
@@ -38238,7 +38110,6 @@ mod tests {
         cache_wrapup_messages(&handler, wrapup_messages(80, 800));
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "command_id": "runner-missing"
         });
@@ -38288,7 +38159,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -38319,7 +38190,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -38349,7 +38220,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 1
                     }),
@@ -38377,7 +38247,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 250
                     }),
@@ -38416,7 +38285,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 2
                     }),
@@ -38450,7 +38318,6 @@ mod tests {
                 test_route(7),
                 json!({
                     "method": "session.wrapup",
-                    "v": 1,
                     "session_id": "ses",
                     "command_id": ""
                 }),
@@ -38470,7 +38337,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": -3
                     }),
@@ -38506,7 +38372,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -38527,7 +38393,6 @@ mod tests {
         cache_wrapup_messages(&handler, wrapup_messages(80, 800));
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "command_id": "wrapup-one"
         });
@@ -38558,7 +38423,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "command_id": "wrapup-two"
                     }),
@@ -38594,7 +38458,6 @@ mod tests {
             .unwrap();
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "keep": 5,
             "command_id": "legacy-failed"
@@ -38659,7 +38522,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 5,
                         "command_id": "connect-conflict"
@@ -38723,7 +38585,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 5,
                         "command_id": "connect-retry"
@@ -38765,7 +38626,6 @@ mod tests {
         }));
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "keep": 5,
             "command_id": "recut-retry"
@@ -38847,7 +38707,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 5,
                         "command_id": "generation-retry"
@@ -38918,7 +38777,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 5 }),
                 )
                 .await,
         );
@@ -38986,7 +38845,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 5 }),
                 )
                 .await,
         );
@@ -39010,7 +38869,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 5 }),
                 )
                 .await,
         );
@@ -39059,7 +38918,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 5 }),
                 )
                 .await,
         );
@@ -39084,7 +38943,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 5 }),
                 )
                 .await,
         );
@@ -39135,7 +38994,6 @@ mod tests {
                         test_route(20 + index as u16),
                         json!({
                             "method": "session.wrapup",
-                            "v": 1,
                             "session_id": format!("lease-{index}"),
                             "keep": 5
                         }),
@@ -39151,7 +39009,6 @@ mod tests {
                 test_route(20 + ACTIVE_LEASE_LIMIT as u16),
                 json!({
                     "method": "session.wrapup",
-                    "v": 1,
                     "session_id": format!("lease-{ACTIVE_LEASE_LIMIT}"),
                     "keep": 5
                 }),
@@ -39178,7 +39035,6 @@ mod tests {
                     test_route(20 + ACTIVE_LEASE_LIMIT as u16),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": format!("lease-{ACTIVE_LEASE_LIMIT}"),
                         "keep": 5
                     }),
@@ -39214,7 +39070,7 @@ mod tests {
             first_handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 1 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 1 }),
                 )
                 .await
         });
@@ -39226,7 +39082,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 1,
                         "command_id": "joined-command"
@@ -39260,7 +39115,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "keep": 1,
                         "command_id": "joined-command"
@@ -39292,7 +39146,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 1 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 1 }),
                 )
                 .await,
         );
@@ -39321,7 +39175,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 1 }),
+                    json!({ "method": "session.wrapup", "session_id": "ses", "keep": 1 }),
                 )
                 .await,
         );
@@ -39378,7 +39232,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -39409,7 +39263,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "command_id": "stale-retry"
                     }),
@@ -39435,7 +39288,6 @@ mod tests {
                     test_route(7),
                     json!({
                         "method": "session.wrapup",
-                        "v": 1,
                         "session_id": "ses",
                         "command_id": "stale-retry"
                     }),
@@ -39460,7 +39312,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -39490,7 +39342,6 @@ mod tests {
 
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "keep": 5,
             "command_id": "budget-retry"
@@ -39554,7 +39405,7 @@ mod tests {
                 .core
                 .handle_session_delete_value(
                     test_route(7),
-                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                    &json!({ "method": "session.delete", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -39603,7 +39454,6 @@ mod tests {
 
         let request = json!({
             "method": "session.wrapup",
-            "v": 1,
             "session_id": "ses",
             "command_id": "backoff-retry"
         });
@@ -39662,7 +39512,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -39711,7 +39561,7 @@ mod tests {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         );
@@ -39747,7 +39597,7 @@ mod tests {
         let outcome = handler
             .dispatch_value(
                 test_route(7),
-                json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                json!({ "method": "session.wrapup", "session_id": "ses" }),
             )
             .await;
         assert!(
@@ -40029,7 +39879,7 @@ mod tests {
         let ring = || {
             tool_body(handler.handle_session_status_value(
                 test_route(7),
-                &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+                &json!({ "method": "session.status", "session_id": "ses" }),
             ))["pass_trace"]["scheduler_history"]
                 .as_array()
                 .unwrap()
@@ -41998,7 +41848,6 @@ mod tests {
         let messages = [ck("m1", 1, "seed block + new_messages payload")];
         let req = serde_json::json!({
             "kind": "transform",
-            "v": 3,
             "boundary": null,
             "base_revision": "test-base",
             "serializer_profile": "owned-llmrunner",
@@ -42087,7 +41936,6 @@ mod tests {
                 .collect();
             json!({
                 "kind": "transform",
-                "v": 3,
                 "boundary": {"mid": format!("m{end}"), "sequence": SEGMENTS},
                 "base_revision": format!("steady-{turn}"),
                 "serializer_profile": "owned-llmrunner",
@@ -42162,11 +42010,11 @@ mod release_contract_tests {
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
         assert_eq!(
             release_contract::release_contract_sha256(),
-            "27ff180f3ae5eddaaece60ef0d22768d5fefe958fd975f0dbe17015e1c8376f3"
+            "36afb934a7dabb937612f07a6953377829a68da5a141eb5dd642dee8bca86ea5"
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "3c800a42b034241a516537b5805095683a11d2970b8bf503819228c7b7386710"
+            "11a57fa634ff3b921b4fb1d243927e7f206e07a7af5046a5201e188e5331b03f"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
@@ -42177,10 +42025,6 @@ mod release_contract_tests {
         assert_eq!(
             contract["versions"]["daemon"],
             json!(release_contract::DAEMON_VERSION)
-        );
-        assert_eq!(
-            contract["versions"]["wire_protocol"].as_u64(),
-            Some(release_contract::WIRE_PROTOCOL_VERSION as u64)
         );
         // `versions.modules` is keyed by catalog module id so a compatibility consumer can join
         // it with `catalog.list`; the composition is fixed at exactly these three.

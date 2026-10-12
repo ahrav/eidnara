@@ -237,10 +237,6 @@ pub struct GenerationManifest {
     pub target: String,
     pub release_contract_sha256: String,
     pub inputs_lock_sha256: String,
-    /// `None` denotes a generation without a recorded source payload manifest.
-    ///
-    /// `#[serde(default)]` preserves decoding of schema-1 manifests that omit this field.
-    /// Generations without a source manifest digest fail only checks that require that digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_payload_manifest_sha256: Option<String>,
     pub files: Vec<ManifestFile>,
@@ -2074,21 +2070,16 @@ mod tests {
     }
 
     #[test]
-    fn a_generation_staged_before_the_source_digest_field_still_decodes() {
-        // Schema 1 omits `source_payload_manifest_sha256` without a schema-version change.
-        // The decoder must accept retained schema-1 manifests that omit `source_payload_manifest_sha256`.
-        // Rejecting a retained schema-1 manifest that omits `source_payload_manifest_sha256` would report `native_payload_invalid` on the first no-`--payload-dir` start after an upgrade.
-        let predecessor = br#"{"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}"#;
-        let decoded = match decode_with_schema::<GenerationManifest>(predecessor) {
+    fn a_manifest_without_a_source_digest_round_trips() {
+        let manifest = br#"{"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}"#;
+        let decoded = match decode_with_schema::<GenerationManifest>(manifest) {
             SchemaDecode::Valid(manifest) => manifest,
-            SchemaDecode::UnknownSchema => panic!("schema 1 must stay readable"),
-            SchemaDecode::Malformed => {
-                panic!("a predecessor generation is not corrupt merely for predating a field")
+            SchemaDecode::UnknownSchema | SchemaDecode::Malformed => {
+                panic!("a manifest without a source digest decodes")
             }
         };
         assert_eq!(decoded.source_payload_manifest_sha256, None);
-        // A predecessor manifest that omits the field serializes to its original bytes.
-        assert_eq!(decoded.canonical_bytes(), predecessor);
+        assert_eq!(decoded.canonical_bytes(), manifest);
     }
 
     fn meta() -> StageMeta {

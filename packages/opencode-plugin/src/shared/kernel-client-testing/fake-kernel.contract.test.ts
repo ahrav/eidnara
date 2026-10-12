@@ -458,7 +458,6 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
             method: "kernel.commit",
             body: {
                 method: "kernel.commit",
-                v: 1,
                 session_id: SESSION,
                 project_root: OTHER_PROJECT,
                 intent: {

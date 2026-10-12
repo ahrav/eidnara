@@ -8,7 +8,6 @@ async function raiseMemoriesAuthority(
     identity: BindIdentity,
 ): Promise<number> {
     const key = {
-        v: 1,
         session_id: identity.session,
         context_store_uuid: "bedrock-only-e2e",
         project: `bedrock-only-${identity.harness}`,
@@ -45,7 +44,6 @@ async function raiseMemoriesAuthority(
 async function memoryObjectIds(host: HermeticHostStack, identity: BindIdentity): Promise<string[]> {
     const read = await host.contextRequest(identity, {
         method: "kernel.read",
-        v: 1,
         session_id: identity.session,
         project_root: identity.project_root,
         surface: "explicit_search",
@@ -67,7 +65,6 @@ export async function classifyMemories(
     const objectIds = await memoryObjectIds(host, identity);
     const response = await host.contextRequest(identity, {
         method: "memory_classifier.run_task",
-        v: 1,
         session_id: identity.session,
         task: "classify",
         command_id: `bedrock-only-${identity.harness}-classify`,

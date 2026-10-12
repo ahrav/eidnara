@@ -90,10 +90,10 @@ fn every_decoder_corpus_replays_without_panic() {
 /// profile, so a change to grant layout or profile geometry shows up here as a fixture diff.
 #[test]
 fn golden_grant_fixture_matches_the_frozen_pool_profile_encoding() {
-    const GOLDEN_GRANT_HEX: &str = "0400d489c07ee46333a5fe7901df356f6f460000000020000000100000000010\
-                                    0000000000004000000000000100000000001000000000001000000000000800\
-                                    0000000080000000000002000000001000040000000001000000001000000000\
-                                    0000200000000080000000000000400000000030b6050000000000000000";
+    const GOLDEN_GRANT_HEX: &str = "d489c07ee46333a5fe7901df356f6f4600000000200000001000000000100000\
+                                    0000000040000000000001000000000010000000000010000000000008000000\
+                                    0000800000000000020000000010000400000000010000000010000000000000\
+                                    200000000080000000000000400000000030b6050000000000000000";
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/provider_grant/valid");
     let bytes = std::fs::read(path).expect("golden grant fixture is readable");
@@ -124,12 +124,7 @@ fn golden_grant_fixture_matches_the_frozen_pool_profile_encoding() {
         );
     }
     assert_eq!(
-        u16::from_le_bytes([bytes[0], bytes[1]]),
-        4,
-        "layout version"
-    );
-    assert_eq!(
-        &bytes[2..18],
+        &bytes[0..16],
         &[
             0xd4, 0x89, 0xc0, 0x7e, 0xe4, 0x63, 0x33, 0xa5, 0xfe, 0x79, 0x01, 0xdf, 0x35, 0x6f,
             0x6f, 0x46
@@ -138,19 +133,19 @@ fn golden_grant_fixture_matches_the_frozen_pool_profile_encoding() {
     );
     let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     let u64_at = |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    assert_eq!(u32_at(18), 0, "host-to-peer lane");
-    assert_eq!(u32_at(22), 32, "ordinary descriptors");
-    assert_eq!(u32_at(26), 16, "reserved descriptors");
+    assert_eq!(u32_at(16), 0, "host-to-peer lane");
+    assert_eq!(u32_at(20), 32, "ordinary descriptors");
+    assert_eq!(u32_at(24), 16, "reserved descriptors");
     let geometry = PoolGeometry::host_payload_pool();
     for (index, class) in geometry.classes().iter().enumerate() {
-        let offset = 30 + index * 12;
+        let offset = 28 + index * 12;
         assert_eq!(u64_at(offset), class.block_bytes, "class {index} bytes");
         assert_eq!(u32_at(offset + 8), class.count, "class {index} count");
     }
     assert_eq!(
-        u64_at(114),
+        u64_at(112),
         95_825_920,
         "total mapping bytes at 4 KiB pages"
     );
-    assert_eq!(u32_at(122), 0, "reserved tail");
+    assert_eq!(u32_at(120), 0, "reserved tail");
 }

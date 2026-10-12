@@ -133,7 +133,7 @@ async fn the_wrapup_path_folds_again_after_a_source_failure_and_cooldown() {
             handler
                 .dispatch_value(
                     test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                    json!({ "method": "session.wrapup", "session_id": "ses" }),
                 )
                 .await,
         )

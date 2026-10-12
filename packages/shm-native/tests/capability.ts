@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
         activeNativeChannels,
-        DESCRIPTOR_SCHEMA_VERSION,
         NativeChannel,
         nativeArtifactIdentity,
         probeCapabilities,
@@ -27,7 +26,6 @@ if (claimedTarget) {
         assert.ok(artifact, "claimed native target loaded no addon");
         assert.equal(artifact.buildProfile, "release");
         assert.equal(artifact.buildTarget, "linux-x86_64");
-        assert.equal(artifact.descriptorSchemaVersion, DESCRIPTOR_SCHEMA_VERSION);
         assert.equal(artifact.qualifiedTestProfile, QUALIFIED_TEST_PROFILE);
 }
 // A claimed target must at least load its addon on every runtime. Transfer prevention is

@@ -24,7 +24,6 @@ import {
     FrameType,
     HEADER_LEN,
     MAX_FRAME_BODY_LEN,
-    PROTOCOL_VERSION,
 } from "./protocol";
 import { ShmFrameChannel } from "./shm-frame-channel";
 import {
@@ -59,7 +58,6 @@ test("production shared-memory delivery has no timer polling", () => {
 function responseHeader(ty: FrameType, corr: bigint, length: number, flags = 0): EnvelopeHeader {
     return {
         len: length,
-        ver: PROTOCOL_VERSION,
         ty,
         flags,
         channel: 7,
@@ -201,7 +199,6 @@ const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) =
                 pair.second,
                 {
                     len: body.byteLength,
-                    ver: PROTOCOL_VERSION,
                     ty: fields.ty,
                     flags: fields.flags ?? 0,
                     channel: fields.channel ?? 0,
@@ -539,7 +536,6 @@ describe("mandatory shared-memory channel", () => {
             handlers: { onFrame: () => {}, onClosed: () => {} },
         });
         const header = {
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags: 0,
             channel: 7,
@@ -2062,11 +2058,11 @@ describe("mandatory shared-memory channel", () => {
         pair.second.close();
     });
 
-    test("wrong version is rejected before publication and role-invalid input closes", async () => {
+    test("a mismatched header length is rejected before publication and role-invalid input closes", async () => {
         if (!nativeAvailable()) return;
         const pair = NativeChannel.createTestPair();
         const encoded = encodeHeader(responseHeader(FrameType.Response, 1n, 0));
-        encoded[4] = PROTOCOL_VERSION + 1;
+        encoded[0] = 1;
         expect(() => pair.second.produce(encoded, 0, () => {})).toThrow();
         expect(pair.first.drainOne(() => {})).toBe(false);
         pair.first.close();
@@ -2201,7 +2197,6 @@ describe("mandatory shared-memory channel", () => {
                 peer,
                 {
                     len: 0,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType.Goodbye,
                     flags: 0,
                     channel: 0,

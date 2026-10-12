@@ -32,7 +32,6 @@ export function createPiRustToolBackends(moduleClient: RustModeModuleClient): Pi
                 method: "agent_drops.append",
                 body: {
                     method: "agent_drops.append",
-                    v: 1,
                     session_id: sessionId,
                     drop,
                     command_id: commandId,

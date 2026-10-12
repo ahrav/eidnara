@@ -99,8 +99,8 @@ function fakeDaemon(args: {
             if (method === "transform.boundary") {
                 expect(Object.keys(request).sort()).toEqual(
                     request.before_sequence === undefined
-                        ? ["method", "session_id", "v"]
-                        : ["before_sequence", "method", "session_id", "v"],
+                        ? ["method", "session_id"]
+                        : ["before_sequence", "method", "session_id"],
                 );
                 const before = request.before_sequence as number | undefined;
                 cursors.push(before);
@@ -215,7 +215,7 @@ describe("window capture and publication", () => {
         const output = { messages: [...first] as unknown[] };
         await transform.run(sessionId, output);
         const body = bodies[0] as Body;
-        expect(body.v).toBe(3);
+        expect(Object.hasOwn(body, "v")).toBe(false);
         expect(body.boundary).toEqual({ mid: "m-6", sequence: 3 });
         expect(body.native_messages).toEqual(first.slice(6));
         expect((body.messages as Array<{ mid: string }>).map((entry) => entry.mid)).toEqual([
@@ -564,7 +564,7 @@ describe("boundary discovery", () => {
                 code: "ETIMEDOUT",
             });
         },
-        "a revision 2 daemon": () => {
+        "a daemon without discovery": () => {
             throw Object.assign(new Error("unrecognized request shape"), {
                 code: "unrecognized_request_shape",
             });
@@ -583,10 +583,6 @@ describe("boundary discovery", () => {
                 await transform.run(sessionId, output);
                 const lines = [...logsOf(warn, sessionId), ...logsOf(debug, sessionId)];
                 expect(lines.some((line) => line.includes("discovery_declined"))).toBe(true);
-                if (name === "a revision 2 daemon")
-                    expect(logsOf(warn, sessionId).some((line) => line.includes("upgrade"))).toBe(
-                        true,
-                    );
             } finally {
                 warn.mockRestore();
                 debug.mockRestore();
@@ -947,12 +943,12 @@ describe("boundary discovery", () => {
         expect(JSON.stringify(ck[0]?.ck.content)).toContain('"type":"tool_call","id":"call-1"');
     });
 
-    it("serves raw and logs an upgrade hint when the daemon refuses the revision", async () => {
-        const sessionId = `revision-refused-${Date.now()}`;
+    it("serves raw when the daemon refuses the pass", async () => {
+        const sessionId = `pass-refused-${Date.now()}`;
         const { client } = fakeDaemon({
             transform: () => {
-                throw Object.assign(new Error("expected transform revision 3, received 2"), {
-                    code: "transform_revision_unsupported",
+                throw Object.assign(new Error("transform requires boundary"), {
+                    code: "invalid_params",
                 });
             },
         });
@@ -960,16 +956,19 @@ describe("boundary discovery", () => {
         const host = hostArray(sessionId, 3);
         const output = { messages: [...host] as unknown[] };
         const warn = spyOn(logger.sessionLog, "warn");
+        const debug = spyOn(logger.sessionLog, "debug");
         try {
             await transform.run(sessionId, output);
+            const lines = [...logsOf(warn, sessionId), ...logsOf(debug, sessionId)];
+            expect(lines).toContain("rust transform failed; serving the input unchanged:");
             expect(
-                logsOf(warn, sessionId).some(
-                    (line) =>
-                        line.includes("daemon_revision_unsupported") && line.includes("upgrade"),
+                lines.some(
+                    (line) => line.includes("decision=error") && line.includes("served_from=raw"),
                 ),
             ).toBe(true);
         } finally {
             warn.mockRestore();
+            debug.mockRestore();
         }
         expect(output.messages).toEqual(host);
     });

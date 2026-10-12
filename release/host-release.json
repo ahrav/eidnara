@@ -276,8 +276,8 @@
     "transaction_lock": "transaction.lock"
   },
   "credential_fingerprint": {
-    "canonicalization": "harness-provider-source/2",
-    "domain": "eidnara-model-execution-credential-v4"
+    "canonicalization": "harness-provider-source",
+    "domain": "eidnara-model-execution-credential"
   },
   "epochs": {
     "history_segment_render": 2,
@@ -470,7 +470,6 @@
     "supported_daemon_range": {
       "max_exclusive": "0.2.0",
       "min_inclusive": "0.1.0"
-    },
-    "wire_protocol": 4
+    }
   }
 }

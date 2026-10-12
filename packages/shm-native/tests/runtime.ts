@@ -97,14 +97,13 @@ function runAttachBoundary(): void {
 }
 
 function header(length = 0): Uint8Array {
-    const bytes = new Uint8Array(21);
+    const bytes = new Uint8Array(20);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, length, true);
-    view.setUint8(4, 4);
-    view.setUint8(5, 3);
-    view.setUint16(7, 1, true);
-    view.setUint32(9, 1, true);
-    view.setBigUint64(13, 1n, true);
+    view.setUint8(4, 3);
+    view.setUint16(6, 1, true);
+    view.setUint32(8, 1, true);
+    view.setBigUint64(12, 1n, true);
     return bytes;
 }
 

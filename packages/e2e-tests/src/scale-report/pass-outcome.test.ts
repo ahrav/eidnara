@@ -25,8 +25,8 @@ describe("scale report pass outcome", () => {
     it("names a daemon application error a daemon error", () => {
         const error = new HostCallError(
             "terminal",
-            "the daemon speaks another transform revision",
-            "transform_revision_unsupported",
+            "transform requires boundary: null or {mid, sequence}",
+            "invalid_params",
         );
         expect(classifyPass({ ok: false, error })).toEqual({
             outcome: "refused",

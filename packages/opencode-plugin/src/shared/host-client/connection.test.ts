@@ -23,13 +23,7 @@ import {
     ReceiveLease,
     type SetupFrameChannel,
 } from "./frame-channel";
-import {
-    type EnvelopeHeader,
-    FrameType,
-    HEADER_LEN,
-    MAX_CORRELATION,
-    PROTOCOL_VERSION,
-} from "./protocol";
+import { type EnvelopeHeader, FrameType, HEADER_LEN, MAX_CORRELATION } from "./protocol";
 
 const CHANNEL = 7;
 const EPOCH = 1;
@@ -219,7 +213,7 @@ class FakeChannel implements SetupFrameChannel {
 }
 
 function header(ty: FrameType, corr: bigint, len: number, flags = 0): EnvelopeHeader {
-    return { len, ver: PROTOCOL_VERSION, ty, flags, channel: CHANNEL, epoch: EPOCH, corr };
+    return { len, ty, flags, channel: CHANNEL, epoch: EPOCH, corr };
 }
 
 type HarnessOptions = Pick<
@@ -541,7 +535,6 @@ describe("connection generation inbound legality", () => {
     test("a reused or lower host Ping correlation retires the generation", async () => {
         const ping = (corr: bigint): EnvelopeHeader => ({
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Ping,
             flags: 0,
             channel: 0,
@@ -567,7 +560,6 @@ describe("connection generation inbound legality", () => {
         channel.deliver(
             {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType.Ping,
                 flags: 0,
                 channel: 0,
@@ -836,7 +828,6 @@ describe("connection generation control frames", () => {
             channel.deliver(
                 {
                     len: 0,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType.Ping,
                     flags: 0,
                     channel: 0,

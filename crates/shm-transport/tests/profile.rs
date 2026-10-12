@@ -260,12 +260,7 @@ fn split_admission_settles_worker_and_backing_charges_independently() {
 #[test]
 fn host_payload_pool_profile_names_one_geometry_and_complete_charges() {
     let profile = host_payload_pool_profile().unwrap();
-    assert!(
-        profile
-            .descriptor()
-            .hardware_matches("host-payload-pool-v1")
-    );
-    assert_eq!(profile.descriptor().schema_version(), 4);
+    assert!(profile.descriptor().hardware_matches("host-payload-pool"));
     let geometry = profile.geometry();
     assert_eq!(geometry.ordinary_descriptors(), 32);
     assert_eq!(geometry.reserved_descriptors(), 16);

@@ -6,9 +6,6 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-/// Wire version stamped into a grant and echoed by the activating peer; mismatch is fatal.
-pub const PROTOCOL_VERSION: u8 = 4;
-
 /// Nonce bytes each side contributes.
 pub const NONCE_LEN: usize = 32;
 /// Proof bytes carried by each auth message.
@@ -25,9 +22,9 @@ pub use crate::descriptor::SETUP_DESCRIPTOR_COUNT as RING_DESCRIPTOR_COUNT;
 
 /// Domain separator for the host's proof. A proof computed under the client domain never
 /// verifies here even with the same key and nonces.
-pub const SERVER_PROOF_DOMAIN: &str = "eidnara-server-v3";
+pub const SERVER_PROOF_DOMAIN: &str = "eidnara-server";
 /// Domain separator for the peer's proof.
-pub const CLIENT_AUTH_DOMAIN: &str = "eidnara-client-v3";
+pub const CLIENT_AUTH_DOMAIN: &str = "eidnara-client";
 /// Role string a connecting peer presents.
 pub const DEFAULT_CLIENT_ROLE: &str = "client";
 /// Prefix of every `daemon_ver` string the host publishes; the remainder is its version.
@@ -117,14 +114,14 @@ pub mod vectors {
 
     /// Host proof over the committed inputs.
     pub const SERVER_PROOF: [u8; PROOF_LEN] = [
-        8, 85, 246, 183, 53, 167, 124, 30, 98, 139, 55, 104, 107, 155, 175, 182, 20, 23, 143, 13,
-        243, 82, 19, 62, 37, 43, 103, 85, 123, 176, 4, 192,
+        221, 41, 211, 39, 105, 38, 36, 227, 218, 146, 108, 140, 44, 161, 195, 104, 113, 23, 2, 206,
+        170, 141, 151, 35, 1, 27, 126, 57, 158, 85, 209, 112,
     ];
 
     /// Peer proof over the committed inputs.
     pub const CLIENT_AUTH: [u8; PROOF_LEN] = [
-        96, 31, 69, 109, 112, 178, 81, 45, 173, 45, 35, 155, 120, 185, 24, 14, 40, 8, 205, 217, 4,
-        190, 7, 244, 224, 111, 20, 3, 121, 200, 83, 101,
+        161, 15, 9, 216, 159, 94, 127, 234, 216, 165, 252, 37, 93, 56, 218, 59, 100, 52, 116, 18,
+        7, 55, 91, 207, 160, 45, 227, 141, 45, 118, 114, 228,
     ];
 
     /// Key `00..1f`, client nonce `20..3f`, server nonce `40..5f`, daemon ID `60..6f`.
@@ -241,6 +238,30 @@ mod tests {
             ok,
             "domain",
         );
+        // The former domains carried a numbered suffix. A proof a peer computes under a former
+        // domain never verifies under the current one.
+        for (domain, current) in [
+            (SERVER_PROOF_DOMAIN, &vectors::SERVER_PROOF),
+            (CLIENT_AUTH_DOMAIN, &vectors::CLIENT_AUTH),
+        ] {
+            let former = format!("{domain}-v3");
+            let former_proof =
+                compute_proof(&key, &former, &client_nonce, &server_nonce, ver, &daemon_id);
+            assert_ne!(
+                &former_proof, current,
+                "{former} must not reproduce {domain}"
+            );
+            rejects(
+                &key,
+                domain,
+                &client_nonce,
+                &server_nonce,
+                ver,
+                &daemon_id,
+                &former_proof,
+                "domain literal",
+            );
+        }
         rejects(
             &key,
             SERVER_PROOF_DOMAIN,

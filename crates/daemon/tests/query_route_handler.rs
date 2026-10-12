@@ -55,7 +55,6 @@ fn limits() -> QueryRouteLimits {
 fn request(project: &Path, query: &str) -> Value {
     json!({
         "method": "retrieval.query",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "query": query,
@@ -600,7 +599,7 @@ async fn committed_memories_are_served_with_canonical_references_under_productio
 /// The `search_admission` block `session.status` reports.
 async fn search_admission(daemon: &KernelDaemon) -> Value {
     let status = daemon
-        .call(json!({"method": "session.status", "v": 1, "session_id": SESSION}))
+        .call(json!({"method": "session.status", "session_id": SESSION}))
         .await;
     status["search_admission"].clone()
 }

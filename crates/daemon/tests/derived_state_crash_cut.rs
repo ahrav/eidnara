@@ -17,7 +17,6 @@ fn transform_request() -> Value {
     let (second, second_native) = tail(SESSION, "and write the weekly schedule down", 2);
     json!({
         "kind": "transform",
-        "v": 3,
         "boundary": null,
         "base_revision": "crash-cut-base-1",
         "session_id": SESSION,
@@ -65,7 +64,7 @@ async fn tail_hygiene(fixture: &FixtureProcess) -> Value {
     let status = request_json(
         &client,
         route,
-        json!({"method": "session.status", "v": 1, "session_id": SESSION}),
+        json!({"method": "session.status", "session_id": SESSION}),
     )
     .await;
     client.close_route(route).await.expect("route closes");

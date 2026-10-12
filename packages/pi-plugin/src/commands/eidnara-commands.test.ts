@@ -78,7 +78,7 @@ describe("Pi /eidnara-flush", () => {
         expect(module.calls).toEqual([
             {
                 method: "session.flush",
-                body: { method: "session.flush", v: 1, session_id: "ses-1" },
+                body: { method: "session.flush", session_id: "ses-1" },
                 timeoutMs: undefined,
                 projectRoot: CWD_ROOT,
             },
@@ -170,7 +170,6 @@ describe("Pi /eidnara-status", () => {
         expect(module.calls[0]?.projectRoot).toBe(CWD_ROOT);
         expect(module.calls[0]?.body).toEqual({
             method: "session.status",
-            v: 1,
             session_id: "ses-1",
         });
         expect(entry?.text).toContain("### Module Cache");
@@ -322,7 +321,7 @@ describe("Pi /eidnara-recomp", () => {
             const body = module.calls[0]?.body ?? {};
             expect(module.calls[0]?.method).toBe("session.recomp");
             expect(module.calls[0]?.projectRoot).toBe(CWD_ROOT);
-            expect(body).toMatchObject({ method: "session.recomp", v: 1, session_id: "ses-1" });
+            expect(body).toMatchObject({ method: "session.recomp", session_id: "ses-1" });
             expect(String(body.command_id)).toMatch(/^opencode-recomp-/);
             expect(entry?.text).toContain(expected);
             expect(entry?.level).toBe(level);

@@ -532,7 +532,6 @@ export function createEidnaraCommandHandler(deps: {
                 try {
                     const value = await callRust("session.flush", {
                         method: "session.flush",
-                        v: 1,
                         session_id: sessionId,
                     });
                     result =
@@ -564,7 +563,6 @@ export function createEidnaraCommandHandler(deps: {
                         "session.status",
                         {
                             method: "session.status",
-                            v: 1,
                             session_id: sessionId,
                         },
                         undefined,
@@ -671,7 +669,6 @@ export function createEidnaraCommandHandler(deps: {
                             "session.wrapup",
                             {
                                 method: "session.wrapup",
-                                v: 1,
                                 session_id: sessionId,
                                 keep,
                                 command_id: rustCommandId("wrapup"),
@@ -697,7 +694,6 @@ export function createEidnaraCommandHandler(deps: {
                     try {
                         const value = await callRust("session.recomp", {
                             method: "session.recomp",
-                            v: 1,
                             session_id: sessionId,
                             command_id: rustCommandId("recomp"),
                         });

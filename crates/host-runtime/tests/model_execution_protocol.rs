@@ -42,20 +42,19 @@ fn mutate(text: &str, needle: &str, replacement: &str) -> Vec<u8> {
 }
 
 #[test]
-fn generation_revision_two_supports_native_temperature_without_relaxing_revision_one() {
+fn generation_without_temperature_keeps_native_decoding() {
     let mut params = send_params("hello", None, "amazon-bedrock/profile-model");
-    params["generation"] = serde_json::json!({"revision":2,"max_output_tokens":8192});
+    params["generation"] = serde_json::json!({"max_output_tokens":8192});
     let request = body(serde_json::json!({"method":"session.send","params":params}));
     let Request::Send(send) = protocol::parse_request(&request, false).unwrap() else {
         panic!("send");
     };
     assert_eq!(send.temperature, None);
     assert_eq!(send.max_output_tokens, 8192);
+    // `generation` is strict: a present null temperature and any unknown field are refused.
     for generation in [
-        serde_json::json!({"max_output_tokens":8192}),
-        serde_json::json!({"revision":1,"max_output_tokens":8192}),
-        serde_json::json!({"revision":2,"max_output_tokens":8192,"temperature":null}),
-        serde_json::json!({"revision":3,"max_output_tokens":8192}),
+        serde_json::json!({"max_output_tokens":8192,"temperature":null}),
+        serde_json::json!({"revision":2,"max_output_tokens":8192}),
     ] {
         params["generation"] = generation;
         assert!(

@@ -869,10 +869,10 @@ impl HandlerCore {
         operation: &str,
         extra_fields: &[&str],
     ) -> Result<(String, SessionBinding), PreparedOutcome> {
-        let bound = self.management_binding_version(channel, request, operation, 2)?;
+        let bound = self.management_binding(channel, request, operation)?;
         if request.as_object().is_none_or(|body| {
             body.keys().any(|key| {
-                !["method", "v", "session_id", "project_root"].contains(&key.as_str())
+                !["method", "session_id", "project_root"].contains(&key.as_str())
                     && !extra_fields.contains(&key.as_str())
             })
         }) {

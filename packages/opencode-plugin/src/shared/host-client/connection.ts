@@ -39,7 +39,6 @@ import {
     flagsBinary,
     MAX_CORRELATION,
     MAX_FRAME_BODY_LEN,
-    PROTOCOL_VERSION,
 } from "./protocol";
 import { ShmFrameChannel } from "./shm-frame-channel";
 import { AdmissionClass, Priority } from "./types";
@@ -597,7 +596,6 @@ export class ConnectionGeneration {
         const corr = this.nextCorr;
         const header: EnvelopeHeader = {
             len: body.byteLength,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags,
             channel: params.channel,
@@ -650,7 +648,6 @@ export class ConnectionGeneration {
             // `request` commits `corr` only after successful channel admission.
             ticket = this.channel.produce(
                 {
-                    ver: header.ver,
                     ty: header.ty,
                     flags: header.flags,
                     channel: header.channel,
@@ -709,7 +706,6 @@ export class ConnectionGeneration {
     enqueueCancel(channel: number, epoch: number, corr: bigint): void {
         this.enqueueControlHeader({
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Cancel,
             flags: buildFlags(false, Priority.Passive, false, AdmissionClass.Normal),
             channel,
@@ -722,7 +718,6 @@ export class ConnectionGeneration {
     enqueueRouteGoodbye(channel: number, epoch: number): void {
         this.enqueueControlHeader({
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Goodbye,
             flags: buildFlags(false, Priority.Passive, false, AdmissionClass.Normal),
             channel,
@@ -735,7 +730,6 @@ export class ConnectionGeneration {
     enqueueConnectionGoodbye(): void {
         this.enqueueControlHeader({
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Goodbye,
             flags: buildFlags(false, Priority.Passive, false, AdmissionClass.Normal),
             channel: 0,

@@ -22,7 +22,7 @@ to `shm_transport::setup_auth::compute_proof`
 (`crates/shm-transport/src/setup_auth.rs:40-59`), whose `transcript_mac`
 (`:89-107`) is `HMAC-SHA256(key, domain || client_nonce || server_nonce ||
 u32be(len(daemon_ver)) || daemon_ver || daemon_id)`. The domains are
-`eidnara-server-v3` and `eidnara-client-v3` (`:28`, `:30`), re-exported into
+`eidnara-server` and `eidnara-client` (`:28`, `:30`), re-exported into
 `auth.rs:13` as `SERVER_PROOF_DOMAIN` and `CLIENT_AUTH_DOMAIN`. The server
 side computes the server proof at `auth.rs:216-223` and the expected client
 auth at `:239-246`, comparing in constant time at `:247`. The client side
@@ -154,3 +154,14 @@ second question found would be caught by review rather than by a test.
 - Conclusion: resolved. The code, both tests, the independent reproduction,
   and the protocol document's section 5.2 examples agree; the stale bytes
   came from a transcript this tree does not contain.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the proof domains are `eidnara-server` and
+`eidnara-client`, the credential claim domain is
+`eidnara-model-execution-credential` with canonicalization
+`harness-provider-source`, and the pool profile is `host-payload-pool`. Line
+anchors into files #989 changed are as of their earlier recorded head.

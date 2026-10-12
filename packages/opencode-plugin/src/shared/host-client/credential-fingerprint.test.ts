@@ -9,11 +9,9 @@ const ENVIRONMENT = selectAwsSource({});
 describe("ModelExecution credential claims over environment rows", () => {
     test("derives its domain, canonicalization, and value cap from the release contract", () => {
         expect(hostRelease.credential_fingerprint.domain).toBe(
-            "eidnara-model-execution-credential-v4",
+            "eidnara-model-execution-credential",
         );
-        expect(hostRelease.credential_fingerprint.canonicalization).toBe(
-            "harness-provider-source/2",
-        );
+        expect(hostRelease.credential_fingerprint.canonicalization).toBe("harness-provider-source");
         expect(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES).toBe(
             hostRelease.harness_unavailable.value_cap_bytes,
         );
@@ -28,11 +26,11 @@ describe("ModelExecution credential claims over environment rows", () => {
                 entries: [["ANTHROPIC_API_KEY", "secret"]],
             }),
         ).toBe(
-            "25:harness-provider-source/28:opencode9:anthropic3:env17:ANTHROPIC_API_KEY1:66:secret",
+            "23:harness-provider-source8:opencode9:anthropic3:env17:ANTHROPIC_API_KEY1:66:secret",
         );
         expect(sourceClaims(key, "opencode", { ANTHROPIC_API_KEY: "secret" }, ENVIRONMENT)).toEqual(
             {
-                anthropic: "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218",
+                anthropic: "c399334cab603c9a8c69ad845a33cd824cb71c42e0ca7a8238e94d2226d6f651",
             },
         );
     });
@@ -43,7 +41,7 @@ describe("ModelExecution credential claims over environment rows", () => {
         // side fails one of the two suites instead of surfacing as `harness_unavailable`.
         const key = Uint8Array.from({ length: 32 }, (_value, index) => index);
         const staticRow = {
-            "amazon-bedrock": "036efb950878e220f1988e87733835bda23a3b98ae017d4971d3be89fea7b2dd",
+            "amazon-bedrock": "c8cf2fd5ca2dc64a6d27d744e39988a57a0b9f013bb166e238bb58578883c1af",
         };
         expect(
             sourceClaims(
@@ -84,7 +82,7 @@ describe("ModelExecution credential claims over environment rows", () => {
                 ENVIRONMENT,
             ),
         ).toEqual({
-            "amazon-bedrock": "c6facdc901d90bf91034af2c09d9eb88be046ed57f0c90440a0b6d1793b14221",
+            "amazon-bedrock": "70891b239b24f6e72c03bcde697dcae8be28ca83920db0309425931e949c2717",
         });
         expect(
             sourceClaims(

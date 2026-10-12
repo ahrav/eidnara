@@ -5,12 +5,13 @@ between two processes. It covers mapping layout, descriptors, completion cells,
 wakes, identifiers, and access to shared memory.
 
 `docs/host-wire-protocol.md` Section 7.7 defines the application protocol:
-the 21-byte header, JSON bodies, control operations, send outcomes, and the
+the 20-byte header, JSON bodies, control operations, send outcomes, and the
 exact 67,108,864-byte body maximum.
 
-Wire names and literals here are versioned. Changing any of them requires a
-protocol change and a new layout version. There is no negotiation, fallback,
-or second layout.
+This document describes the one payload-pool layout. A change to any name,
+literal, or layout here lands in one change with `docs/host-wire-protocol.md`
+and every Rust and TypeScript peer. There is no negotiation, fallback, or
+second layout.
 
 Implementation: `crates/shm-transport/src/{pool.rs, backend/retained.rs,
 backend/ring.rs, lease.rs, descriptor.rs, profile.rs}`.
@@ -19,14 +20,11 @@ backend/ring.rs, lease.rs, descriptor.rs, profile.rs}`.
 
 | Identifier | Value | Where it is checked |
 | --- | --- | --- |
-| Descriptor schema | `4` | `GrantMessage.descriptor_schema` on the setup socket; `TargetProfile::new`; the native addon's `descriptorSchemaVersion()` |
-| Mapping layout version | `4` | `PoolGrant::decode`; the lifecycle page of every mapping |
-| Hardware profile | `host-payload-pool-v1` | `WireDescriptor.profile` on the setup socket; `RingClientEndpoint::attach_with_descriptors`; the native addon's `attach` and `begin_connect` |
-| Application header version | 4 (`WIRE_VERSION`) | byte 4 of every frame header |
-| Discovery schema | unchanged (`2`) | connection file |
+| Hardware profile | `host-payload-pool` | `WireDescriptor.profile` on the setup socket; `RingClientEndpoint::attach_with_descriptors`; the native addon's `attach` and `begin_connect` |
+| Mapping magic | `0x4d43_5348_4d50_4f4c` | the lifecycle page of every mapping |
 
-A mismatch in any identifier retires the connection before application
-traffic. Peers do not decode old layouts. There is no compatibility matrix.
+A mismatch in either identifier, in the grant's length or geometry, or in any
+lifecycle-page field retires the connection before application traffic.
 
 ## 2. Geometry
 
@@ -45,9 +43,9 @@ mapping.
 | Control | 5 | 4,096 | 32 |
 | Terminal | 6 | 32,768 | 64 |
 
-Body capacity of a class is its block size minus the 21-byte header. Class
-boundaries for ordinary bodies are therefore 4,075; 65,515; 1,048,555;
-8,388,587 bytes; the largest class accepts exactly the protocol maximum of
+Body capacity of a class is its block size minus the 20-byte header. Class
+boundaries for ordinary bodies are therefore 4,076; 65,516; 1,048,556;
+8,388,588 bytes; the largest class accepts exactly the protocol maximum of
 67,108,864 body bytes. Block ids are dense in table order: ordinary class 0
 holds ids 0-63, class 1 holds 64-79, and so on; control blocks are 91-122 and
 terminal blocks are 123-186. There are 187 blocks, 187 completion cells, and
@@ -73,23 +71,23 @@ large allocation before validation.
 
 ## 3. Grant
 
-`PoolGrant` is 126 little-endian bytes sent as lowercase hex inside the setup
+`PoolGrant` is 124 little-endian bytes sent as lowercase hex inside the setup
 descriptor, one per direction:
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 2 | layout version, `4` |
-| 2 | 16 | incarnation, drawn from the OS random source per pool |
-| 18 | 4 | lane (`0` host-to-peer, `1` peer-to-host) |
-| 22 | 4 | ordinary descriptors |
-| 26 | 4 | reserved descriptors |
-| 30 | 7 x 12 | seven classes in table order: block bytes (8), count (4) |
-| 114 | 8 | total mapping bytes |
-| 122 | 4 | reserved, zero |
+| 0 | 16 | incarnation, drawn from the OS random source per pool |
+| 16 | 4 | lane (`0` host-to-peer, `1` peer-to-host) |
+| 20 | 4 | ordinary descriptors |
+| 24 | 4 | reserved descriptors |
+| 28 | 7 x 12 | seven classes in table order: block bytes (8), count (4) |
+| 112 | 8 | total mapping bytes |
+| 120 | 4 | reserved, zero |
 
-The decoder validates the geometry and recomputes the mapping layout at the
-host page size. It refuses a grant if the total differs from the computed
-layout, the reserved tail is nonzero, or the version is not 4.
+The decoder validates the length and geometry and recomputes the mapping
+layout at the host page size. It refuses a grant of any other length, a grant
+whose total differs from the computed layout, and a grant whose reserved tail
+is nonzero.
 
 The setup layer also requires both grants to match the sole profile's geometry.
 The host-to-peer field must carry lane `0`; the peer-to-host field must carry
@@ -119,8 +117,7 @@ control structure lies inside an atomic or an `UnsafeCell`, so a shared
 reference to a page tolerates concurrent peer stores. Plain lifecycle fields
 are read with volatile loads and never referenced.
 
-The lifecycle page carries magic `0x4d43_5348_4d50_3034`, the layout version,
-lane, incarnation, total bytes, both descriptor depths, and the seven class
+The lifecycle page carries magic `0x4d43_5348_4d50_4f4c`, the lane, incarnation, total bytes, both descriptor depths, and the seven class
 sizes and counts. Attachment compares every field with the grant.
 
 ## 5. Publication
@@ -156,7 +153,7 @@ never grows.
    class slack. Writes use relaxed atomic stores of the width `AccessShape`
    assigns to each byte.
 5. **Commit.** `commit(body_len)` requires `body_len == written()`. The header
-   must declare that `body_len` and carry the application version byte.
+   must declare that `body_len`.
    The producer copies the header into the block. It then stores `block`,
    `generation`, `body_len`, and finally `sequence` into slot
    `(sequence - 1) % 48` with relaxed stores. It advances `published` from its
@@ -181,8 +178,8 @@ relocation after serialization.
    `body_len <= 67,108,864`; `body_len` within the block's capacity; the
    receiver's own record shows no live lease on the block; the generation
    exceeds the greatest one the receiver has accepted for the block.
-3. Copy the 21-byte header out of the block and require its declared length to
-   equal `body_len` and its version byte to be the application version.
+3. Copy the 20-byte header out of the block and require its declared length to
+   equal `body_len`.
 4. Advance `consumed` from the private record to `sequence` with an `AcqRel`
    compare-exchange, mark the block live in the receiver record, and signal the
    capacity doorbell: consumption alone frees a descriptor slot.

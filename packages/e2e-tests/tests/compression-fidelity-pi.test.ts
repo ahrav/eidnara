@@ -126,7 +126,7 @@ function writeConfig(configHome: string, connectionFile: string, surface: string
 async function published(stack: HermeticHostStack, project: string): Promise<number> {
     const status = await stack.contextRequest(
         { project_root: project, harness: "pi", session: SESSION },
-        { method: "session.status", v: 1, session_id: SESSION },
+        { method: "session.status", session_id: SESSION },
     );
     return publishedOf(status);
 }

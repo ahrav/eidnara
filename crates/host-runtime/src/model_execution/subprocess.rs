@@ -2974,14 +2974,14 @@ mod tests {
             snapshot
                 .source_claim(&key, "opencode", "anthropic", None)
                 .expect("fingerprint"),
-            "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218"
+            "c399334cab603c9a8c69ad845a33cd824cb71c42e0ca7a8238e94d2226d6f651"
         );
         // A different connection key over the same row must not collide.
         assert_ne!(
             snapshot
                 .source_claim(&[0u8; 32], "opencode", "anthropic", None)
                 .expect("fingerprint"),
-            "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218"
+            "c399334cab603c9a8c69ad845a33cd824cb71c42e0ca7a8238e94d2226d6f651"
         );
     }
 
@@ -3207,13 +3207,13 @@ mod tests {
             static_row
                 .source_claim(&key, "opencode", "amazon-bedrock", None)
                 .expect("static fingerprint"),
-            "036efb950878e220f1988e87733835bda23a3b98ae017d4971d3be89fea7b2dd"
+            "c8cf2fd5ca2dc64a6d27d744e39988a57a0b9f013bb166e238bb58578883c1af"
         );
         assert_eq!(
             session_row
                 .source_claim(&key, "opencode", "amazon-bedrock", None)
                 .expect("session fingerprint"),
-            "c6facdc901d90bf91034af2c09d9eb88be046ed57f0c90440a0b6d1793b14221"
+            "70891b239b24f6e72c03bcde697dcae8be28ca83920db0309425931e949c2717"
         );
         let no_region = EnvSnapshot::capture_from(vec![
             (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),

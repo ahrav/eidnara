@@ -12,7 +12,7 @@ fn boundary_handler() -> (Handler, Arc<MemoryStore>, tempfile::TempDir) {
 }
 
 fn boundary_request(before_sequence: Option<Value>) -> Value {
-    let mut request = json!({ "method": "transform.boundary", "v": 3, "session_id": SESSION });
+    let mut request = json!({ "method": "transform.boundary", "session_id": SESSION });
     if let Some(before) = before_sequence {
         request["before_sequence"] = before;
     }
@@ -94,15 +94,14 @@ async fn malformed_boundary_bodies_are_invalid_params() {
         boundary_request(Some(json!("4"))),
         boundary_request(Some(Value::Null)),
     ];
-    let mut version = boundary_request(None);
-    version["v"] = json!(2);
-    let mut missing_version = boundary_request(None);
-    missing_version.as_object_mut().unwrap().remove("v");
+    // `transform.boundary` is strict: a field named `v` is an unknown field like any other.
+    let mut carried_v = boundary_request(None);
+    carried_v["v"] = json!(3);
     let mut extra = boundary_request(None);
     extra["limit"] = json!(10);
     let mut no_session = boundary_request(None);
     no_session.as_object_mut().unwrap().remove("session_id");
-    bodies.extend([version, missing_version, extra, no_session]);
+    bodies.extend([carried_v, extra, no_session]);
     for body in bodies {
         let outcome = handler.dispatch_value(test_route(9), body.clone()).await;
         assert_eq!(error_code(outcome), "invalid_params", "{body}");
@@ -110,7 +109,7 @@ async fn malformed_boundary_bodies_are_invalid_params() {
     let unknown = handler
         .dispatch_value(
             test_route(9),
-            json!({ "method": "transform.boundaries", "v": 3, "session_id": SESSION }),
+            json!({ "method": "transform.boundaries", "session_id": SESSION }),
         )
         .await;
     assert_eq!(error_code(unknown), "unrecognized_request_shape");

@@ -18,10 +18,8 @@ use support::kernel_daemon::{DOMAIN, KernelDaemon, SESSION, insert_decision, sta
 fn transform_request() -> Value {
     json!({
         "method": "transform",
-        "v": 3,
         "boundary": null,
         "kind": "transform",
-        "v": 3,
         "boundary": null,
         "base_revision": "canonical-memory-base",
         "serializer_profile": "owned-llmrunner",

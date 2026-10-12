@@ -363,7 +363,7 @@ fn the_null_anchor_intersection_matches_mids_at_their_positional_ordinals() {
     );
 }
 
-/// The revision 2 plugin's ordinal loops, transcribed: non-synthetic messages are its memoized
+/// The former plugin-assigned ordinal loops, transcribed: non-synthetic messages are its memoized
 /// (resolved) messages, numbered from the head; synthetic messages are unresolved. With no
 /// resolved message at all, the plugin's provisional base is the ordinal before the head.
 fn plugin_ordinal_model(synthetic: &[bool], anchor: Option<u64>, base: Option<u64>) -> Vec<u64> {

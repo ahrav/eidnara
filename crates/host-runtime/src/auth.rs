@@ -722,11 +722,11 @@ mod tests {
         for (domain, expected) in [
             (
                 SERVER_PROOF_DOMAIN,
-                "0855f6b735a77c1e628b37686b9bafb614178f0df352133e252b67557bb004c0",
+                "dd29d327692624e3da926c8c2ca1c368711702ceaa8d9723011b7e399e55d170",
             ),
             (
                 CLIENT_AUTH_DOMAIN,
-                "601f456d70b2512dad2d239b78b9180e2808cdd904be07f4e06f140379c85365",
+                "a10f09d89f5e7fead8a5fc255d38da3b6434741207375bcfa02de38d2d7672e4",
             ),
         ] {
             let proof = compute_proof(
@@ -1077,8 +1077,6 @@ mod tests {
         let key = vec![0x5a; MIN_KEY_LEN];
         let expected_daemon_id = [0x6b; DAEMON_ID_LEN];
         let conn = ConnectionInfo {
-            schema: crate::connection_file::SCHEMA_VERSION,
-            wire_version: crate::wire::PROTOCOL_VERSION,
             setup_socket: "/tmp/eidnara-host.sock".to_owned(),
             key: key.clone(),
             daemon_id: expected_daemon_id,

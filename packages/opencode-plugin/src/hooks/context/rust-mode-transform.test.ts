@@ -299,7 +299,6 @@ describe("Rust mode transform request", () => {
         expect(body).toMatchObject({
             method: "transform",
             kind: "transform",
-            v: 3,
             boundary: null,
             serializer_profile: "opencode-aisdk",
             serve_native: true,
@@ -1565,7 +1564,6 @@ describe("recipe application", () => {
                 generationSensitive: undefined,
                 body: {
                     method: "transform.ack",
-                    v: 1,
                     session_id: sessionId,
                     transform_pass_id: "pass-1",
                 },

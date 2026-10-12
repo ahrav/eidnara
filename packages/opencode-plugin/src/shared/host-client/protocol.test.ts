@@ -6,7 +6,6 @@ import {
     decodeHeader,
     type EnvelopeHeader,
     encodeHeader,
-    FROZEN_PREFIX_LEN,
     FrameType,
     flagsAdmissionClass,
     flagsBinary,
@@ -18,13 +17,12 @@ import {
     isPureHeader,
     MAX_CORRELATION,
     MAX_FRAME_BODY_LEN,
-    PROTOCOL_VERSION,
     settledCorrelationNamespace,
 } from "./protocol";
 import { AdmissionClass, Priority } from "./types";
 
-const ROUTE_OPEN_HEADER_HEX = "a70000000400020000000000000100000000000000";
-const ROUTED_REQUEST_HEADER_HEX = "2c00000004000407004d0000000200000000000000";
+const ROUTE_OPEN_HEADER_HEX = "a700000000020000000000000100000000000000";
+const ROUTED_REQUEST_HEADER_HEX = "2c000000000407004d0000000200000000000000";
 /** The wire doc Section 7.2 compact canonical `route.open` request body. */
 const ROUTE_OPEN_CANONICAL_BODY =
     '{"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}';
@@ -62,7 +60,6 @@ function validHeaderBytes(): Uint8Array {
         bytesToHex(
             encodeHeader({
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType.StreamData,
                 flags: 0,
                 channel: 7,
@@ -106,7 +103,6 @@ describe("committed wire-doc Section 6.4 vectors", () => {
         for (const vector of vectors) {
             const header = decodeHex(vector.hex);
             expect(header.len).toBe(vector.len);
-            expect(header.ver).toBe(4);
             expect(header.ty).toBe(FrameType.Request);
             expect(flagsBinary(header.flags)).toBe(false);
             expect(flagsPriority(header.flags)).toBe(vector.priority);
@@ -118,7 +114,6 @@ describe("committed wire-doc Section 6.4 vectors", () => {
 
             const bytes = encodeHeader({
                 len: vector.len,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType.Request,
                 flags: buildFlags(false, vector.priority, false),
                 channel: vector.channel,
@@ -134,7 +129,6 @@ describe("header round trips", () => {
     test("round-trips the minimum and maximum legal field values", () => {
         const minimum: EnvelopeHeader = {
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags: buildFlags(false, Priority.Passive, false),
             channel: 0,
@@ -147,7 +141,6 @@ describe("header round trips", () => {
 
         const maximum: EnvelopeHeader = {
             len: MAX_FRAME_BODY_LEN,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.StreamData,
             flags: buildFlags(true, Priority.Background, true, AdmissionClass.Sheddable),
             channel: 0xffff,
@@ -183,52 +176,45 @@ describe("structural rejections before body handling", () => {
         // Every row mutates one field of an otherwise valid routed StreamData header.
         const rows: { name: string; mutate: (bytes: Uint8Array) => void; code: DecodeErrorCode }[] =
             [
-                ...[0, 1, 2, 255].map((ver) => ({
-                    name: `version ${ver}`,
-                    mutate: (bytes: Uint8Array) => {
-                        bytes[4] = ver;
-                    },
-                    code: "unsupported_version" as const,
-                })),
                 ...[12, 13, 255].map((ty) => ({
                     name: `frame type ${ty}`,
                     mutate: (bytes: Uint8Array) => {
-                        bytes[5] = ty;
+                        bytes[4] = ty;
                     },
                     code: "unknown_frame_type" as const,
                 })),
                 {
                     name: "priority bits value 3",
                     mutate: (bytes) => {
-                        bytes[6] = 0b0000_0110;
+                        bytes[5] = 0b0000_0110;
                     },
                     code: "reserved_priority_bits",
                 },
                 {
                     name: "admission class bits value 3",
                     mutate: (bytes) => {
-                        bytes[6] = 0b0011_0000;
+                        bytes[5] = 0b0011_0000;
                     },
                     code: "reserved_admission_class",
                 },
                 ...[0b0100_0000, 0b1000_0000, 0b1100_0000].map((reserved) => ({
                     name: `reserved flag bits ${reserved.toString(2)}`,
                     mutate: (bytes: Uint8Array) => {
-                        bytes[6] = reserved;
+                        bytes[5] = reserved;
                     },
                     code: "reserved_flag_bits" as const,
                 })),
                 {
                     name: "nonzero epoch on the control channel",
                     mutate: (bytes) => {
-                        new DataView(bytes.buffer).setUint16(7, 0, true);
+                        new DataView(bytes.buffer).setUint16(6, 0, true);
                     },
                     code: "nonzero_epoch_on_control_channel",
                 },
                 {
                     name: "zero epoch on a routed channel",
                     mutate: (bytes) => {
-                        new DataView(bytes.buffer).setUint32(9, 0, true);
+                        new DataView(bytes.buffer).setUint32(8, 0, true);
                     },
                     code: "zero_epoch_on_routed_channel",
                 },
@@ -240,18 +226,26 @@ describe("structural rejections before body handling", () => {
         }
     });
 
-    test("rejects truncated prefix and truncated header", () => {
+    test("rejects a truncated header", () => {
         const bytes = validHeaderBytes();
-        expectDecodeError(bytes.subarray(0, FROZEN_PREFIX_LEN - 1), "too_short_for_prefix");
+        expectDecodeError(bytes.subarray(0, 4), "too_short_for_header");
         expectDecodeError(bytes.subarray(0, HEADER_LEN - 1), "too_short_for_header");
+    });
+
+    test("reads the former control-request layout as a structurally invalid header", () => {
+        // The former layout put a version byte at offset 4 and shifted every later field by one.
+        // Its Interactive channel-0 Request reads as routed channel 2 with epoch 0. Peers of the
+        // former layout never reach the ring: their proof domains fail authentication first.
+        const legacy = hexToBytes("a70000000400020000000000000100000000000000");
+        expectDecodeError(legacy.subarray(0, HEADER_LEN), "zero_epoch_on_routed_channel");
     });
 
     test("Sheddable admission is legal only on Push and StreamData", () => {
         const sheddable = buildFlags(false, Priority.Passive, false, AdmissionClass.Sheddable);
         for (const ty of [FrameType.Push, FrameType.StreamData]) {
             const bytes = validHeaderBytes();
-            bytes[5] = ty;
-            bytes[6] = sheddable;
+            bytes[4] = ty;
+            bytes[5] = sheddable;
             expect(decodeHeader(bytes).ty).toBe(ty);
         }
         for (const ty of [
@@ -261,8 +255,8 @@ describe("structural rejections before body handling", () => {
             FrameType.Error,
         ]) {
             const bytes = validHeaderBytes();
-            bytes[5] = ty;
-            bytes[6] = sheddable;
+            bytes[4] = ty;
+            bytes[5] = sheddable;
             expectDecodeError(bytes, "sheddable_illegal_frame_type");
         }
     });
@@ -272,8 +266,8 @@ describe("structural rejections before body handling", () => {
             expect(isPureHeader(ty)).toBe(true);
             const bytes = validHeaderBytes();
             const view = new DataView(bytes.buffer);
-            bytes[5] = ty;
-            bytes[6] = 0;
+            bytes[4] = ty;
+            bytes[5] = 0;
             view.setUint32(0, 1, true);
             expectDecodeError(bytes, "pure_header_frame_with_body");
         }
@@ -287,13 +281,13 @@ describe("structural rejections before body handling", () => {
         ];
         for (const flags of illegal) {
             const bytes = validHeaderBytes();
-            bytes[5] = FrameType.Ping;
-            bytes[6] = flags;
+            bytes[4] = FrameType.Ping;
+            bytes[5] = flags;
             expectDecodeError(bytes, "pure_header_frame_flags");
         }
         const bytes = validHeaderBytes();
-        bytes[5] = FrameType.Ping;
-        bytes[6] = buildFlags(false, Priority.Interactive, false);
+        bytes[4] = FrameType.Ping;
+        bytes[5] = buildFlags(false, Priority.Interactive, false);
         expect(decodeHeader(bytes).ty).toBe(FrameType.Ping);
     });
 });
@@ -302,7 +296,6 @@ describe("encode-side field validation", () => {
     function header(overrides: Partial<EnvelopeHeader>): EnvelopeHeader {
         return {
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags: 0,
             channel: 0,
@@ -323,7 +316,6 @@ describe("encode-side field validation", () => {
     });
 
     test("rejects structurally illegal headers with the shared decode taxonomy", () => {
-        expect(() => encodeHeader(header({ ver: 1 }))).toThrow(DecodeError);
         expect(() => encodeHeader(header({ ty: FrameType.Ping, len: 4 }))).toThrow(DecodeError);
         expect(() => encodeHeader(header({ channel: 7, epoch: 0 }))).toThrow(DecodeError);
     });
@@ -334,7 +326,6 @@ describe("frame build and encode", () => {
         const body = new TextEncoder().encode('{"op":"catalog.list"}');
         const frameHeader: EnvelopeHeader = {
             len: body.length,
-            ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags: buildFlags(false, Priority.Interactive, false),
             channel: 0,
@@ -375,9 +366,9 @@ describe("direction legality", () => {
         for (const ty of [FrameType.Hello, FrameType.HelloAck]) {
             const bytes = validHeaderBytes();
             const view = new DataView(bytes.buffer);
-            bytes[5] = ty;
-            view.setUint16(7, 0, true);
-            view.setUint32(9, 0, true);
+            bytes[4] = ty;
+            view.setUint16(6, 0, true);
+            view.setUint32(8, 0, true);
             expect(decodeHeader(bytes).ty).toBe(ty);
             expect(isLegalHostToConsumerType(ty)).toBe(false);
             expect(isLegalConsumerToHostType(ty)).toBe(false);

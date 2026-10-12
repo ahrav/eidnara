@@ -36,7 +36,7 @@ use crate::{
     ring_transport::{SendFailure, TrySend},
     wire::{
         AdmissionClass, EnvelopeHeader, Flags, FrameId, FrameType, HEADER_LEN, MAX_BODY_LEN,
-        MAX_CONTROL_BODY_LEN, PROTOCOL_VERSION, Priority, frame_header, pure_header_flags,
+        MAX_CONTROL_BODY_LEN, Priority, frame_header, pure_header_flags,
     },
 };
 
@@ -388,9 +388,6 @@ impl Client {
             let code = match error {
                 E::Replaced { .. } => "discovery_replaced",
                 E::Insecure { .. } => "discovery_insecure",
-                E::UnsupportedSchema { .. } | E::WireVersionMismatch { .. } => {
-                    "discovery_unsupported"
-                }
                 _ => "discovery_failed",
             };
             ClientError::new(code, "secure discovery failed")
@@ -3074,7 +3071,7 @@ fn request_deadline(timeout: Duration) -> Result<Instant, CallError> {
 }
 
 fn validate_inbound(header: &EnvelopeHeader) -> Result<(), ()> {
-    if header.ver != PROTOCOL_VERSION || header.len > MAX_BODY_LEN {
+    if header.len > MAX_BODY_LEN {
         return Err(());
     }
     // §7.1 caps channel-0 bodies at 65,536 bytes.
@@ -4431,7 +4428,6 @@ mod tests {
         .expect("body encodes");
         let header = |corr: u64| EnvelopeHeader {
             len: u32::try_from(body.len()).expect("fits"),
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Response,
             flags: response_flags(false, false),
             channel: 0,
@@ -4501,7 +4497,6 @@ mod tests {
             responder_inner.dispatch(
                 EnvelopeHeader {
                     len: u32::try_from(body.len()).expect("fits"),
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::Response,
                     flags: response_flags(false, false),
                     channel: 0,
@@ -4783,7 +4778,6 @@ mod tests {
                 Some(ty) => inner.dispatch(
                     EnvelopeHeader {
                         len: 0,
-                        ver: PROTOCOL_VERSION,
                         ty,
                         flags: response_flags(false, true),
                         channel: key.channel,
@@ -4925,7 +4919,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: 0,
@@ -5074,7 +5067,6 @@ mod tests {
         let (inner, _data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
         let ping = |corr: u64| EnvelopeHeader {
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Ping,
             flags: pure_header_flags(),
             channel: 0,
@@ -5156,7 +5148,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: 0,
@@ -5216,7 +5207,6 @@ mod tests {
                 inner.dispatch(
                     EnvelopeHeader {
                         len: u32::try_from(body.len()).expect("fits"),
-                        ver: PROTOCOL_VERSION,
                         ty: FrameType::Response,
                         flags: response_flags(false, false),
                         channel: key.channel,
@@ -5310,7 +5300,6 @@ mod tests {
         let header =
             |ty: FrameType, channel: u16, epoch: u32, corr: u64, len: u32| EnvelopeHeader {
                 len,
-                ver: PROTOCOL_VERSION,
                 ty,
                 flags: if ty.is_pure_header() {
                     pure_header_flags()
@@ -5372,7 +5361,6 @@ mod tests {
         // A binary terminal on channel 0 is malformed.
         let binary_control = EnvelopeHeader {
             len: 4,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Response,
             flags: response_flags(true, true),
             channel: 0,
@@ -5409,7 +5397,6 @@ mod tests {
             let flags = Flags::new(false, priority, false);
             let ping = EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Ping,
                 flags,
                 channel: 0,
@@ -5440,7 +5427,6 @@ mod tests {
         ] {
             let ping = EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Ping,
                 flags,
                 channel: 0,
@@ -5478,7 +5464,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::StreamData,
                 flags: response_flags(false, false),
                 channel: key.channel,
@@ -6056,7 +6041,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: control.channel,
@@ -6304,7 +6288,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, true),
                 channel: key.channel,
@@ -6358,7 +6341,6 @@ mod tests {
             inner.dispatch(
                 EnvelopeHeader {
                     len: 1,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::StreamData,
                     flags: response_flags(false, false),
                     channel: stream_key.channel,
@@ -6382,7 +6364,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, true),
                 channel: unary_key.channel,
@@ -6417,7 +6398,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: 1,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::StreamData,
                 flags: response_flags(false, false),
                 channel: key.channel,
@@ -6482,7 +6462,6 @@ mod tests {
             inner.dispatch(
                 EnvelopeHeader {
                     len: 8,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::StreamData,
                     flags: response_flags(false, false),
                     channel: key.channel,
@@ -6567,7 +6546,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits a frame length"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: control.channel,
@@ -6632,7 +6610,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits a frame length"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: control.channel,
@@ -6693,7 +6670,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits a frame length"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: control.channel,
@@ -6746,7 +6722,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits a frame length"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, false),
                 channel: 0,
@@ -6805,7 +6780,6 @@ mod tests {
             inner.dispatch(
                 EnvelopeHeader {
                     len: 8,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::StreamData,
                     flags: response_flags(false, false),
                     channel: key.channel,
@@ -6885,7 +6859,6 @@ mod tests {
             inner.dispatch(
                 EnvelopeHeader {
                     len: 8,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::StreamData,
                     flags: response_flags(false, false),
                     channel: key.channel,
@@ -6935,7 +6908,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(queued).expect("fits a frame length"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::StreamData,
                 flags: response_flags(true, false),
                 channel: key.channel,
@@ -6994,7 +6966,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: 1,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::StreamData,
                 flags: response_flags(false, false),
                 channel: key.channel,
@@ -7052,7 +7023,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: 0,
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Response,
                 flags: response_flags(false, true),
                 channel: 0,
@@ -7242,7 +7212,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Error,
                 flags: response_flags(false, false),
                 channel: key.channel,
@@ -7266,7 +7235,6 @@ mod tests {
         inner.dispatch(
             EnvelopeHeader {
                 len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
                 ty: FrameType::Error,
                 flags: response_flags(false, false),
                 channel: 7,
@@ -7286,7 +7254,6 @@ mod tests {
         // reads a repeated `op` as untagged.
         let unmatched = |body: &[u8]| EnvelopeHeader {
             len: u32::try_from(body.len()).expect("fits"),
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Response,
             flags: response_flags(false, false),
             channel: 0,
@@ -7369,7 +7336,6 @@ mod tests {
             inner.dispatch(
                 EnvelopeHeader {
                     len: u32::try_from(body.len()).expect("fits"),
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::Response,
                     flags: response_flags(false, false),
                     channel: key.channel,
@@ -7477,7 +7443,6 @@ mod tests {
 
         let outbound = EnvelopeHeader {
             len: 0,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: pure_header_flags(),
             channel: 1,
@@ -7506,7 +7471,6 @@ mod tests {
                 0,
                 EnvelopeHeader {
                     len: 0,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::Response,
                     flags: response_flags(false, true),
                     channel: 1,
@@ -7618,7 +7582,6 @@ mod tests {
         };
         let header = EnvelopeHeader {
             len: body.len() as u32,
-            ver: PROTOCOL_VERSION,
             ty,
             flags,
             channel,
@@ -7766,7 +7729,6 @@ mod tests {
         let (completed, expiring_rx) = oneshot::channel();
         let header = EnvelopeHeader {
             len: 1,
-            ver: PROTOCOL_VERSION,
             ty: FrameType::Request,
             flags: Flags::new(false, Priority::Interactive, false),
             channel: 1,
@@ -7828,7 +7790,6 @@ mod tests {
                 0,
                 EnvelopeHeader {
                     len: 0,
-                    ver: PROTOCOL_VERSION,
                     ty: FrameType::Response,
                     flags: response_flags(false, true),
                     channel: 1,

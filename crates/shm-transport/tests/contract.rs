@@ -4,18 +4,16 @@
 
 use shm_transport::backend::ring::{PoolGrant, Ring, RingError};
 use shm_transport::descriptor::{
-    CompletionRecord, DESCRIPTOR_SCHEMA_VERSION, DescriptorError, HardwareProfileId, Incarnation,
-    PayloadIdentity, PoolDescriptor, TransportDescriptor, WIRE_V3_HEADER_BYTES, WIRE_VERSION,
-    check_wire_header,
+    CompletionRecord, DescriptorError, HardwareProfileId, Incarnation, PayloadIdentity,
+    PoolDescriptor, TransportDescriptor, WIRE_HEADER_BYTES, check_wire_header,
 };
 use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
 use shm_transport::pool::{BlockClass, ClassSpec, Inventory, MAX_FRAME_BYTES, PoolGeometry};
 use shm_transport::profile::{host_payload_pool_profile, pool_profile};
 
-fn header(body_len: usize) -> [u8; WIRE_V3_HEADER_BYTES] {
-    let mut header = [0u8; WIRE_V3_HEADER_BYTES];
+fn header(body_len: usize) -> [u8; WIRE_HEADER_BYTES] {
+    let mut header = [0u8; WIRE_HEADER_BYTES];
     header[..4].copy_from_slice(&(body_len as u32).to_le_bytes());
-    header[4] = WIRE_VERSION;
     header
 }
 
@@ -71,12 +69,12 @@ fn descriptor_rejects_every_untrusted_identity_block_and_length_failure() {
             DescriptorError::FrameTooLarge,
         ),
         (
-            PoolDescriptor::from_untrusted(7, 3, 2, 4096 - 20),
+            PoolDescriptor::from_untrusted(7, 3, 2, 4096 - 19),
             7,
             DescriptorError::BodyExceedsBlock,
         ),
         (
-            PoolDescriptor::from_untrusted(7, 186, 2, 32 * 1024 - 20),
+            PoolDescriptor::from_untrusted(7, 186, 2, 32 * 1024 - 19),
             7,
             DescriptorError::BodyExceedsBlock,
         ),
@@ -155,35 +153,21 @@ fn wire_header_check_is_shared_by_producer_and_consumer() {
         check_wire_header(&header(10), 11),
         Err(DescriptorError::WireHeaderMismatch)
     );
-    for other in [WIRE_VERSION - 1, WIRE_VERSION + 1] {
-        let mut wrong_version = header(0);
-        wrong_version[4] = other;
-        assert_eq!(
-            check_wire_header(&wrong_version, 0),
-            Err(DescriptorError::WireHeaderMismatch)
-        );
-    }
-    assert_eq!(WIRE_VERSION, 4);
+    assert_eq!(WIRE_HEADER_BYTES, 20);
 }
 
 #[test]
-fn sole_identifiers_are_four_and_the_pool_profile() {
-    assert_eq!(DESCRIPTOR_SCHEMA_VERSION, 4);
-    assert_eq!(shm_transport::backend::retained::LAYOUT_VERSION, 4);
+fn sole_identifier_is_the_pool_profile() {
     let profile = host_payload_pool_profile().unwrap();
-    assert!(
-        profile
-            .descriptor()
-            .hardware_matches("host-payload-pool-v1")
-    );
+    assert!(profile.descriptor().hardware_matches("host-payload-pool"));
     assert!(!profile.descriptor().hardware_matches("host-test-ring-v1"));
     let ring = Ring::create(&profile, 0).unwrap();
     let bytes = ring.grant().encode();
-    assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), 4);
-    // The one supported layout version: any other value fails before a mapping exists.
-    let mut old = bytes;
-    old[0..2].copy_from_slice(&3u16.to_le_bytes());
-    assert_eq!(PoolGrant::decode(old), Err(RingError::InvalidGrant));
+    assert_eq!(bytes.len(), 124);
+    // A grant of the former 126-byte layout is refused by length before a mapping exists.
+    let mut old = vec![4, 0];
+    old.extend_from_slice(&bytes);
+    assert_eq!(PoolGrant::decode_slice(&old), Err(RingError::InvalidGrant));
 }
 
 #[test]
@@ -196,11 +180,11 @@ fn class_boundaries_are_full_frame_capacity_minus_the_header() {
     assert_eq!(
         boundaries,
         [
-            4096 - 21,
-            64 * 1024 - 21,
-            1024 * 1024 - 21,
-            8 * 1024 * 1024 - 21,
-            64 * 1024 * 1024 + 4096 - 21,
+            4096 - 20,
+            64 * 1024 - 20,
+            1024 * 1024 - 20,
+            8 * 1024 * 1024 - 20,
+            64 * 1024 * 1024 + 4096 - 20,
         ]
     );
     for (index, boundary) in boundaries.iter().enumerate().take(4) {
@@ -215,13 +199,13 @@ fn class_boundaries_are_full_frame_capacity_minus_the_header() {
     }
     assert_eq!(
         geometry.class(BlockClass::Terminal).body_capacity(),
-        32 * 1024 - 21
+        32 * 1024 - 20
     );
     assert!(geometry.class(BlockClass::Terminal).body_capacity() >= 25_406);
-    assert!(geometry.class(BlockClass::Terminal).block_bytes >= 25_427);
+    assert!(geometry.class(BlockClass::Terminal).block_bytes >= 25_426);
     assert_eq!(
         geometry.class(BlockClass::Control).body_capacity(),
-        4096 - 21
+        4096 - 20
     );
 }
 
@@ -372,13 +356,6 @@ fn payload_pool_protocol_document_agrees_with_the_implementation() {
         assert!(doc.contains(needle), "protocol document lacks `{needle}`");
     };
     row(&format!(
-        "| Descriptor schema | `{DESCRIPTOR_SCHEMA_VERSION}` |"
-    ));
-    row(&format!(
-        "| Mapping layout version | `{}` |",
-        shm_transport::backend::retained::LAYOUT_VERSION
-    ));
-    row(&format!(
         "| Hardware profile | `{}` |",
         shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE
     ));
@@ -425,5 +402,5 @@ fn payload_pool_protocol_document_agrees_with_the_implementation() {
             .total,
         95_825_920
     );
-    row("magic `0x4d43_5348_4d50_3034`");
+    row("magic `0x4d43_5348_4d50_4f4c`");
 }

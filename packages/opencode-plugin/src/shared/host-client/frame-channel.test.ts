@@ -7,13 +7,7 @@ import {
     type StorageReleaseOutcome,
     utf8FrameBody,
 } from "./frame-channel";
-import {
-    buildFlags,
-    type EnvelopeHeader,
-    FrameType,
-    MAX_CONTROL_BODY_LEN,
-    PROTOCOL_VERSION,
-} from "./protocol";
+import { buildFlags, type EnvelopeHeader, FrameType, MAX_CONTROL_BODY_LEN } from "./protocol";
 import { Priority } from "./types";
 
 /** Producer segments must be exact-bounds ArrayBuffers, so each segment gets its own backing store. */
@@ -342,7 +336,6 @@ describe("BoundedFrameProducer segment traversal", () => {
 function violationHeader(fields: Partial<EnvelopeHeader> & { ty: number }): EnvelopeHeader {
     return {
         len: 0,
-        ver: PROTOCOL_VERSION,
         flags: 0,
         channel: 7,
         epoch: 1,

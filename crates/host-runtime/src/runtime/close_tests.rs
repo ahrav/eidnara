@@ -380,7 +380,6 @@ async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_
     let budget = crate::wire::ByteBudget::new(16);
     let header = crate::wire::EnvelopeHeader {
         len: 1,
-        ver: crate::wire::PROTOCOL_VERSION,
         ty: crate::wire::FrameType::Request,
         flags: crate::wire::response_flags(false, true),
         channel: route.channel,
@@ -431,7 +430,6 @@ async fn a_request_losing_the_registration_race_retires_on_a_failed_return() {
     let budget = crate::wire::ByteBudget::new(16);
     let header = crate::wire::EnvelopeHeader {
         len: 1,
-        ver: crate::wire::PROTOCOL_VERSION,
         ty: crate::wire::FrameType::Request,
         flags: crate::wire::response_flags(false, true),
         channel: route.channel,
@@ -463,13 +461,10 @@ fn lease_whose_return_succeeds() -> (
     shm_transport::backend::ring::DuplexRing,
     shm_transport::lease::PayloadLease,
 ) {
-    use shm_transport::backend::ring::{DuplexRing, wire_v3_header};
+    use shm_transport::backend::ring::{DuplexRing, body_header};
     let rings = DuplexRing::create(&crate::ring_transport::ring_profile()).unwrap();
     let consumer = rings.first.attachment().unwrap().attach().unwrap();
-    let mut reservation = rings
-        .first
-        .try_reserve(1, wire_v3_header(1).unwrap())
-        .unwrap();
+    let mut reservation = rings.first.try_reserve(1, body_header(1).unwrap()).unwrap();
     reservation.write(&[1]).unwrap();
     reservation.commit(1).unwrap();
     let lease = consumer.try_receive().unwrap().unwrap();
@@ -481,7 +476,7 @@ fn lease_whose_return_succeeds() -> (
 /// Every lease stays held until the caller drops it: a drop before the frame under test would
 /// consume the parked marker and the later return would send nothing.
 fn leases_whose_return_wake_fails() -> Vec<shm_transport::lease::PayloadLease> {
-    use shm_transport::backend::ring::{DuplexRing, wire_v3_header};
+    use shm_transport::backend::ring::{DuplexRing, body_header};
     use shm_transport::pool::Inventory;
     let rings = DuplexRing::create(&crate::ring_transport::ring_profile()).unwrap();
     let consumer = rings.first.attachment().unwrap().attach().unwrap();
@@ -492,10 +487,7 @@ fn leases_whose_return_wake_fails() -> Vec<shm_transport::lease::PayloadLease> {
         .count as usize;
     let held: Vec<_> = (0..class_count)
         .map(|_| {
-            let mut reservation = rings
-                .first
-                .try_reserve(1, wire_v3_header(1).unwrap())
-                .unwrap();
+            let mut reservation = rings.first.try_reserve(1, body_header(1).unwrap()).unwrap();
             reservation.write(&[1]).unwrap();
             reservation.commit(1).unwrap();
             consumer.try_receive().unwrap().unwrap()
@@ -534,7 +526,6 @@ async fn a_pure_header_frame_with_a_failed_return_wake_ends_the_read_loop() {
     let budget = crate::wire::ByteBudget::new(16);
     let pong = crate::wire::EnvelopeHeader {
         len: 0,
-        ver: crate::wire::PROTOCOL_VERSION,
         ty: crate::wire::FrameType::Pong,
         flags: crate::wire::pure_header_flags(),
         channel: 0,
@@ -543,7 +534,6 @@ async fn a_pure_header_frame_with_a_failed_return_wake_ends_the_read_loop() {
     };
     let cancel = crate::wire::EnvelopeHeader {
         len: 0,
-        ver: crate::wire::PROTOCOL_VERSION,
         ty: crate::wire::FrameType::Cancel,
         flags: crate::wire::pure_header_flags(),
         channel: route.channel,
@@ -594,7 +584,6 @@ async fn a_rejected_request_whose_return_wake_fails_retires_the_generation() {
     let budget = crate::wire::ByteBudget::new(16);
     let header = crate::wire::EnvelopeHeader {
         len: 1,
-        ver: crate::wire::PROTOCOL_VERSION,
         ty: crate::wire::FrameType::Request,
         flags: crate::wire::response_flags(false, true),
         channel: route.channel,
@@ -638,7 +627,6 @@ async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_
     let budget = crate::wire::ByteBudget::new(16);
     let header = crate::wire::EnvelopeHeader {
         len: 1,
-        ver: crate::wire::PROTOCOL_VERSION,
         ty: crate::wire::FrameType::Request,
         flags: crate::wire::response_flags(false, true),
         channel: route.channel,

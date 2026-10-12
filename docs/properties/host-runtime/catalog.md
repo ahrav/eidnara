@@ -1,5 +1,45 @@
 # Host runtime property catalog
 
+> Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+> unversioned contract, so every clause here that names a protocol version,
+> numbered revision, version-skew refusal, or retired-field refusal is
+> invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+> `channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+> validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first; the grant is 124 bytes and
+> carries no layout version, the lifecycle page carries no layout version, and
+> the setup grant and activation carry no descriptor schema or wire version; the host publishes the connection file as exactly `setup_socket`, `key`, `daemon_id`, `pid`, and
+> `daemon_ver`; stale-process skew is detected by connection identity and proof
+> failure; the proof domains are `eidnara-server` and `eidnara-client`, the
+> credential claim domain is `eidnara-model-execution-credential` with
+> canonicalization `harness-provider-source`, and the pool profile is
+> `host-payload-pool`; routed envelope, context, memory-capture,
+> note-evaluation, discovery, and transform bodies carry no `v`; transform
+> ignores a field named `v` and the former carriers, strict bodies refuse them
+> as unknown fields, `transform_revision_unsupported` and
+> `transform_tail_delta_retired` no longer exist, `transform/revision_3.rs` is
+> `transform/window_admission.rs`, `transform/revision_goldens.rs` is
+> `transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
+> `transform-recorded-goldens.json`; `serve_native` remains until #993; the
+> `session.send` generation object carries `max_output_tokens` and an optional
+> `temperature` with no `revision`; absence of `temperature` selects the
+> model-native decoding policy. Line anchors into files #989 changed are as of
+> their earlier recorded head.
+>
+> Dated note, 2026-10-12, #989: the host carries no cross-build state handling.
+> The lifecycle record has one shape and one decoder: bytes of any other shape,
+> including an empty or noncanonical digest, are a corrupt record, and a host
+> start under the fences replaces it. Probe, start, stop, and restart treat such
+> a record like any corrupt record, so `unsupported_state_schema` is no longer a
+> lifecycle-record reason, `InstanceError::UnsupportedStateSchema` and
+> `quarantined_record_present` no longer exist, and a held runtime lock with a
+> free lifetime fence is `wedged` whatever the record carries. The active
+> harness selection likewise has one shape with no `schema` member: any other
+> shape is invalid, `stop` removes it, a fresh start replaces it, and
+> `active-selection.v1.json` is no longer written. Record
+> `legacy-incumbent-classification-needs-an-unforgeable-witness` is invalidated;
+> clauses below that cite the record quarantine gate or a pre-coordination
+> incumbent describe the earlier head.
+
 Records for `crates/host-runtime`, merged from six source catalogs (host lifecycle, ring datapath, setup identity,
 client peer, request path, runtime config) in the host repo at `39e823037`. This file is the only authority for its
 records; nothing generates or validates it. The record contract is [`../METHOD.md`](../METHOD.md). Each area keeps its existing-check inventory, fault map, and
@@ -1084,7 +1124,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 `crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
-Status: active
+Status: invalidated
 Exercised: partial - the regression test plants exactly the forgery by hand.
 Guarantee: A running verdict derived from a legacy record is accompanied by
 evidence the record's author cannot forge, or the verdict is wedged.
@@ -4120,7 +4160,11 @@ none of those checks targets these records.
 
 ## Group G: the wire header decode contract
 
-Four records on `crates/host-runtime/src/wire.rs`, the 21-byte envelope header, its
+Dated note, 2026-10-12, #989 (spec #988 A1): the header lost its version byte
+and frozen prefix; the records below describe the 20-byte header, and clauses
+that name `ver`, the frozen prefix, or an unsupported version are invalidated.
+
+Four records on `crates/host-runtime/src/wire.rs`, the 20-byte envelope header, its
 decoder and its encoders. **All four were carried into this sub-part from the
 superseded pre-refactor sub-part `part-2b-wire-and-channels`**, where they were
 records 1, 2, 3 and 6 of `_lenses/lens-a-wire-format.md`. See
@@ -4161,7 +4205,7 @@ refactor rewrote, and they stay salvage.
 decoders: `descriptor.rs`, `sample.rs`, `ring.rs` and `harness.rs`. That family
 guards the ring's own metadata, the descriptors and samples the transport reads
 before it hands anything to the host. `wire::decode_header` (`wire.rs:306`) is a
-different function in a different crate over a different byte layout: the 21-byte
+different function in a different crate over a different byte layout: the 20-byte
 envelope header two hosts exchange, whose frozen prefix is specified at
 `wire.rs:16-18` and whose eleven gates are listed in the first record below. The
 two families meet at exactly one line, `ring_transport.rs:503`, where
@@ -4268,7 +4312,7 @@ table-driven over single hand-picked inputs. Both run in CI in this tree through
 second test's span is `:745-774`, not `:745-773`; the closing brace is at 774
 and the lens range truncated it by one line.
 Impact: today, none observable, and the reason was refreshed at carry time. All
-three production callers pass an exactly-21-byte array, not a variable-length
+three production callers pass an exactly-20-byte array, not a variable-length
 slice: `ring_transport.rs:503` and `:730` pass `&lease.wire_header()`, typed
 `[u8; WIRE_V2_HEADER_BYTES]` at `crates/shm-transport/src/lease.rs:163` with
 that constant equal to 21 at `descriptor.rs:10`, and `client.rs:1978` passes
@@ -4302,10 +4346,10 @@ distinctive byte values, and `wire.rs:680-690` round-trips one header. Missing:
 a per-bit influence oracle, and any assertion that `decode_header` reads nothing
 past `HEADER_LEN`.
 Guarantee: For every accepted header, `encode` and `decode_header` are mutually
-inverse, every one of the 21 bytes influences exactly one decoded field, and no
-byte at or beyond offset 21 is consumed.
-Check: `always` - for every accepted 21-byte input, `decode_header(bytes)` then
-`.encode()` reproduces `bytes` exactly; flipping any single bit inside the 21
+inverse, every one of the 20 bytes influences exactly one decoded field, and no
+byte at or beyond offset 20 is consumed.
+Check: `always` - for every accepted 20-byte input, `decode_header(bytes)` then
+`.encode()` reproduces `bytes` exactly; flipping any single bit inside the 20
 bytes either changes the decoded value or causes rejection; and appending
 arbitrary trailing bytes changes nothing about the result. `always` rather than
 `reachable`: the condition is evaluated on every accepted decode, and the
@@ -10136,7 +10180,7 @@ Type: safety
 Reachability: default-production - every client and server handshake computes this proof.
 Status: active
 Exercised: yes - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal, and `production_proof_matches_the_oracle_across_perturbed_tuples` calls `compute_proof` and `raw_client::proof` on the same tuple for both domains over the committed inputs, each input perturbed alone, daemon versions of several lengths, and short and long keys, asserting equality and distinctness.
-Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v3` and `eidnara-client-v3`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
+Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server` and `eidnara-client`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
 Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle; the campaign does not assert global injectivity, since HMAC-SHA256 over a larger input space must collide somewhere and a found collision would say nothing about transcript conformance. `always` because the transcript is a pure function evaluated on every handshake.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
 Required faults and enabling state: The committed inputs and the test-local HMAC oracle.

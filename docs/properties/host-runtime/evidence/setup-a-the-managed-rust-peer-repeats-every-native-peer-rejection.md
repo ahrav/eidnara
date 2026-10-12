@@ -203,3 +203,17 @@ so a test can hand it an arbitrary object without touching `worker_descriptor`.
 - Conclusion: resolved as latent-today. Recorded on the record as its open
   question, with the threat model, a rogue or impersonating host, stated as the
   reason to hold it anyway.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first; the grant is 124 bytes and
+carries no layout version, the lifecycle page carries no layout version, and
+the setup grant and activation carry no descriptor schema or wire version; the host publishes the connection file as exactly `setup_socket`, `key`, `daemon_id`, `pid`, and
+`daemon_ver`; stale-process skew is detected by connection identity and proof
+failure. Line anchors into files #989 changed are as of their earlier recorded
+head.

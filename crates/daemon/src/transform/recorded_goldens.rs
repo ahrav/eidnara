@@ -1,24 +1,18 @@
-//! Revision 2 transform goldens: bounded generated traces of host-array edits and deterministic
+//! Recorded transform goldens: bounded generated traces of host-array edits and deterministic
 //! summary publications, driven through the transform handler against a real SQLite store.
-//! After every operation a step records the applied served array with every `ordinal` key
+//! After every operation a step holds the applied served array with every `ordinal` key
 //! removed, the frozen m0 bytes, and the session's tag rows, which are the input tag protection
 //! decides from.
 //!
-//! The recorder speaks revision 2, so it runs only on a daemon that serves revision 2. To
-//! re-record, check out the commit that adds this file (it sits directly on the base) and run
-//!
-//! ```text
-//! EIDNARA_RECORD_REV2_GOLDENS=1 cargo +1.98 test -p daemon --all-features --locked \
-//!     revision_goldens::record_revision_2_goldens -- --ignored --exact
-//! ```
-//!
-//! which rewrites `crates/daemon/tests/fixtures/transform-revision-2-goldens.json`.
+//! `crates/daemon/tests/fixtures/transform-recorded-goldens.json` holds the steps an earlier
+//! daemon served for these traces when each pass sent the whole host array with plugin-assigned
+//! ordinals. The fixture is frozen evidence; the replay below compares the current daemon to it.
 
 use super::*;
 
 pub(super) const GOLDENS_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/transform-revision-2-goldens.json"
+    "/tests/fixtures/transform-recorded-goldens.json"
 );
 
 /// One host-array edit or publication.
@@ -46,7 +40,8 @@ impl Op {
 }
 
 /// The traces: one fixed trace that visits every operation, then seeded traces. Once a revert
-/// removes every anchor, only appends and edits follow, since revision 2 served raw from then on.
+/// removes every anchor, only appends and edits follow, since the recording daemon served raw
+/// from then on.
 pub(super) fn traces() -> Vec<(String, Vec<Op>)> {
     use Op::*;
     let mut traces = vec![(
@@ -202,8 +197,8 @@ impl Host {
         }
     }
 
-    /// The host messages as CK ingress values from `from`, with revision 2 ordinals when asked.
-    pub(super) fn wire(&self, from: usize, ordinals: bool) -> Vec<Value> {
+    /// The host messages as CK ingress values from `from`, without ordinals.
+    pub(super) fn wire(&self, from: usize) -> Vec<Value> {
         self.messages[from..]
             .iter()
             .enumerate()
@@ -215,9 +210,7 @@ impl Host {
                     text,
                 ))
                 .unwrap();
-                if !ordinals {
-                    message.as_object_mut().unwrap().remove("ordinal");
-                }
+                message.as_object_mut().unwrap().remove("ordinal");
                 message
             })
             .collect()
@@ -239,7 +232,7 @@ pub(super) fn golden_handler() -> (Handler, Arc<MemoryStore>, tempfile::TempDir)
     (handler, store, dir)
 }
 
-/// The transform body both revisions share; the caller adds `v`, `messages`, and `boundary`.
+/// The transform body; the caller adds `messages` and `boundary`.
 pub(super) fn pass_body(messages: Vec<Value>) -> Value {
     json!({
         "kind": "transform",
@@ -307,32 +300,7 @@ pub(super) fn step(op: Op, response: &Value, store: &MemoryStore) -> Value {
     })
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "records revision 2 goldens; run on a revision 2 daemon, see the module docs"]
-async fn record_revision_2_goldens() {
-    if std::env::var("EIDNARA_RECORD_REV2_GOLDENS").as_deref() != Ok("1") {
-        return;
-    }
-    let mut recorded = Vec::new();
-    for (name, ops) in traces() {
-        let (handler, store, _dir) = golden_handler();
-        let mut host = Host::default();
-        let mut steps = Vec::new();
-        for op in ops.iter().copied() {
-            host.apply(op, &store);
-            let mut body = pass_body(host.wire(0, true));
-            body["v"] = json!(2);
-            let response = call(&handler, body).await;
-            steps.push(step(op, &response, &store));
-        }
-        recorded.push(json!({ "trace": name, "steps": steps }));
-    }
-    let mut text = serde_json::to_string_pretty(&Value::Array(recorded)).unwrap();
-    text.push('\n');
-    std::fs::write(GOLDENS_PATH, text).unwrap();
-}
-
-/// The revision 3 plugin's per-session boundary: `None` until discovered, then the last
+/// The plugin's per-session boundary: `None` until discovered, then the last
 /// response's rendered boundary (`Some(None)` sends the whole array).
 #[derive(Default)]
 struct Plugin {
@@ -345,8 +313,7 @@ impl Plugin {
     async fn discover(&mut self, handler: &Handler, host: &Host) {
         let mut before = None::<i64>;
         self.boundary = Some(loop {
-            let mut request =
-                json!({ "method": "transform.boundary", "v": 3, "session_id": SESSION });
+            let mut request = json!({ "method": "transform.boundary", "session_id": SESSION });
             if let Some(before) = before {
                 request["before_sequence"] = json!(before);
             }
@@ -392,8 +359,7 @@ impl Plugin {
             };
             let declared = self.boundary.clone().flatten();
             let at = if declared.is_some() { at } else { 0 };
-            let mut body = pass_body(host.wire(at, false));
-            body["v"] = json!(3);
+            let mut body = pass_body(host.wire(at));
             body["boundary"] = declared.unwrap_or(Value::Null);
             let response = call(handler, body).await;
             match response["status"].as_str() {
@@ -416,16 +382,16 @@ impl Plugin {
     }
 }
 
-/// The revision 2 goldens replayed against revision 3: after every operation of every trace,
-/// the served array without ordinals, the m0 bytes, and the tag rows equal the recorded ones.
-/// Where revision 2 served a revert before the first anchor raw and kept doing so, revision 3
-/// resets the session (spec D10), so from that step on every step equals a fresh session's step
-/// over the same host arrays instead, tag numbers aside. Where revision 2 refused an edit of a
-/// covered message (covered-drift rejection, deleted by spec D25) and every later pass of the
-/// trace with `transform_failed`, revision 3 serves, and the goldens have no output to compare
-/// until such a reset.
+/// The recorded goldens replayed against the current daemon: after every operation of every
+/// trace, the served array without ordinals, the m0 bytes, and the tag rows equal the recorded
+/// ones. Where the recording daemon served a revert before the first anchor raw and kept doing
+/// so, the current daemon resets the session (spec D10), so from that step on every step equals
+/// a fresh session's step over the same host arrays instead, tag numbers aside. Where the
+/// recording daemon refused an edit of a covered message (covered-drift rejection, deleted by
+/// spec D25) and every later pass of the trace with `transform_failed`, the current daemon
+/// serves, and the goldens have no output to compare until such a reset.
 #[tokio::test(flavor = "current_thread")]
-async fn revision_3_replays_the_revision_2_goldens() {
+async fn transform_replays_the_recorded_goldens() {
     let goldens: Value =
         serde_json::from_str(&std::fs::read_to_string(GOLDENS_PATH).unwrap()).unwrap();
     let goldens = goldens.as_array().unwrap();

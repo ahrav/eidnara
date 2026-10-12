@@ -13,9 +13,7 @@ use rustix::fs::{
     AtFlags, CWD, FlockOperation, Mode, OFlags, flock, fsync, mkdirat, openat, renameat, unlinkat,
 };
 
-use crate::connection_file::{
-    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN, SCHEMA_VERSION,
-};
+use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN};
 
 /// `CONNECTION_FILE_NAME` names the canonical publication file inside the runtime directory.
 pub const CONNECTION_FILE_NAME: &str = "connection.json";
@@ -59,10 +57,6 @@ pub enum InstanceError {
     AlreadyRunning,
     /// The supplied payload-manifest digest must contain 64 lowercase hexadecimal characters.
     InvalidPayloadDigest,
-    /// Unknown-schema lifecycle-state bytes are never interpreted, migrated, overwritten, or removed.
-    UnsupportedStateSchema {
-        path: PathBuf,
-    },
     /// `NamespaceDrift` requires the holder to abort its named-namespace result when a retained descriptor no longer matches the identity resolved by its name.
     NamespaceDrift {
         path: PathBuf,
@@ -94,11 +88,6 @@ impl fmt::Display for InstanceError {
                 f,
                 "payload-manifest digest must be {} lowercase hex characters",
                 crate::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN
-            ),
-            Self::UnsupportedStateSchema { path } => write!(
-                f,
-                "refusing to touch an unknown lifecycle state schema at {}",
-                path.display()
             ),
             Self::NamespaceDrift { path } => write!(
                 f,
@@ -254,12 +243,6 @@ impl InstanceGuard {
         let dir_path = runtime_dir_path(data_dir_override)?;
         let dir = secure_runtime_dir(&dir_path)?;
         lock_instance(&dir, &dir_path)?;
-        // An unknown lifecycle schema at the record name blocks startup to prevent overwrite.
-        if crate::lifecycle::quarantined_record_present(&dir, &dir_path)? {
-            return Err(InstanceError::UnsupportedStateSchema {
-                path: dir_path.join(crate::lifecycle::LIFECYCLE_RECORD_NAME),
-            });
-        }
         // Startup removes stale predecessor files left by incarnations that crashed before publication.
         sweep_stale_temps(&dir, &dir_path);
 
@@ -354,7 +337,7 @@ impl InstanceGuard {
         let _ = unlinkat(&self.dir, socket.name.as_os_str(), AtFlags::empty());
     }
 
-    /// Atomically publishes the schema-1 connection file for this incarnation
+    /// Atomically publishes the connection file for this incarnation
     /// (protocol §4.1, §4.2). The owner-only `O_EXCL` temp file and the rename
     /// over the canonical name both stay relative to the pinned directory
     /// descriptor, so the swap cannot cross filesystems or follow links.
@@ -370,8 +353,6 @@ impl InstanceGuard {
             });
         }
         let info = ConnectionInfo {
-            schema: SCHEMA_VERSION,
-            wire_version: crate::wire::PROTOCOL_VERSION,
             setup_socket: setup_socket
                 .to_str()
                 .ok_or_else(|| InstanceError::Insecure {
@@ -1287,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_matches_schema_2_shape() {
+    fn publication_matches_the_connection_file_shape() {
         let root = temp_root();
         let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
         guard
@@ -1296,8 +1277,17 @@ mod tests {
 
         let bytes = std::fs::read(published(&guard)).expect("read publication");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
-        assert_eq!(json["schema"], 2);
-        assert_eq!(json["wire_version"], 4);
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["daemon_id", "daemon_ver", "key", "pid", "setup_socket"]
+        );
         assert_eq!(
             json["setup_socket"],
             guard

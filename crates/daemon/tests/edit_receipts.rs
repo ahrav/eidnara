@@ -308,6 +308,35 @@ async fn the_route_is_disabled_until_an_approved_limit_set_is_installed() {
     daemon.shutdown().await;
 }
 
+/// Context bodies are strict: a field named `v` answers `invalid_params` as any unknown field
+/// does, and the refusal mints no preparation and forwards nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_body_carrying_v_is_an_unknown_field() {
+    let daemon = permissive_daemon().await;
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let consumer = Consumer::new(&daemon);
+    let mut carried = prepare(
+        daemon.project(),
+        context("rev-1", "repr-1", 10),
+        "append",
+        10,
+    );
+    carried["v"] = json!(1);
+    let refused = consumer.call(carried).await;
+    assert_eq!(refused["error"], "invalid_params", "{refused}");
+    assert_eq!(
+        consumer
+            .prepare(context("rev-1", "repr-1", 10), "append", 10)
+            .await["kind"],
+        "prepared"
+    );
+    assert!(consumer.effects().is_empty());
+    daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_key_and_digest_replays_the_known_outcome_with_one_effect() {
     let daemon = permissive_daemon().await;

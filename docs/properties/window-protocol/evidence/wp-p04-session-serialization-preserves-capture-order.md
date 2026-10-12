@@ -99,3 +99,18 @@ multi-thread contention.
   a declined pass.
 - Missing evidence: None.
 - Conclusion: resolved with answer: declined without publication.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, routed envelope, context, memory-capture,
+note-evaluation, discovery, and transform bodies carry no `v`; transform
+ignores a field named `v` and the former carriers, strict bodies refuse them
+as unknown fields, `transform_revision_unsupported` and
+`transform_tail_delta_retired` no longer exist, `transform/revision_3.rs` is
+`transform/window_admission.rs`, `transform/revision_goldens.rs` is
+`transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
+`transform-recorded-goldens.json`; `serve_native` remains until #993. Line
+anchors into files #989 changed are as of their earlier recorded head.

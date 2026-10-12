@@ -178,3 +178,13 @@ and states the gap rather than proving it closed.
   - line 67, `frame_channel.rs:30-32` (allow(dead_code) on ReadClose): ReadClose no longer carries an allow(dead_code) attribute; the enum is declared at frame_channel.rs:26-39.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
+`channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
+validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first. Line anchors into files #989
+changed are as of their earlier recorded head.

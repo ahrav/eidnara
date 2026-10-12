@@ -23,7 +23,6 @@ pub const DOMAIN: &str = "stage1-domain";
 pub fn envelope(method: &str, project: &Path, body: Value) -> Value {
     let mut request = json!({
         "method": method,
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
     });
@@ -300,7 +299,6 @@ impl KernelDaemon {
     pub async fn eligibility(&self, destination: &str, candidates: Vec<Value>) -> Value {
         self.call(json!({
             "method": "kernel.eligibility.batch",
-            "v": 1,
             "session_id": SESSION,
             "project_root": self.project.to_str().unwrap(),
             "destination": destination,
@@ -359,7 +357,6 @@ fn digest(seed: &str) -> String {
 fn commit_request(project: &Path, key: &str, digest_seed: &str, operations: Vec<Value>) -> Value {
     json!({
         "method": "kernel.commit",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "intent": {
@@ -378,7 +375,6 @@ fn commit_request(project: &Path, key: &str, digest_seed: &str, operations: Vec<
 fn read_request(project: &Path, surface: &str, as_of: Option<i64>) -> Value {
     json!({
         "method": "kernel.read",
-        "v": 1,
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "surface": surface,

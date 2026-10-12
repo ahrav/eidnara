@@ -79,8 +79,6 @@ use crate::wire::{
 /// Maximum CAS retries before returning a conflict.
 /// On a shared store, each retry reloads state and recomputes the pass.
 pub(crate) const MAX_CAS_RETRIES: u32 = 8;
-/// The transform application revision this daemon serves (`docs/host-wire-protocol.md` 7.10).
-pub const TRANSFORM_REVISION: u64 = 3;
 
 /// Real conversation items never use reserved synthetic-block IDs.
 #[cfg(test)]
@@ -642,9 +640,6 @@ pub struct TransformGeometry {
 pub struct TransformRequest {
     #[serde(default)]
     pub kind: String,
-    /// The transform revision as received; anything but 3 is refused before the pass.
-    #[serde(default)]
-    pub v: Value,
     /// `None` when the body omits `boundary`, `Some(None)` for `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary: Option<Option<BoundaryAnchor>>,
@@ -798,9 +793,6 @@ pub struct TransformRequest {
     pub constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     pub compaction_observed: bool,
-    /// Set when the body carries the retired `tail_delta` field; the handler refuses it.
-    #[serde(skip)]
-    pub(crate) tail_delta_retired: bool,
 }
 
 fn default_clear_reasoning_age() -> u64 {
@@ -843,8 +835,6 @@ fn default_protected_tags() -> usize {
 struct TransformRequestWire {
     #[serde(default)]
     kind: String,
-    #[serde(default)]
-    v: Value,
     #[serde(default, deserialize_with = "crate::deserialize_nullable")]
     boundary: Option<Option<BoundaryAnchor>>,
     #[serde(default)]
@@ -946,9 +936,6 @@ struct TransformRequestWire {
     constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     compaction_observed: bool,
-    /// Presence tombstone: a pre-#829 plugin pairs `tail_delta` with a suffix-only `messages`.
-    #[serde(default)]
-    tail_delta: Option<serde::de::IgnoredAny>,
 }
 
 fn admitted_cache_usage<'de, D>(
@@ -970,7 +957,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
         let messages = wire.messages;
         Ok(Self {
             kind: wire.kind,
-            v: wire.v,
             boundary: wire.boundary,
             coverage: None,
             serializer_profile: wire.serializer_profile.unwrap_or_default(),
@@ -1023,7 +1009,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
             new_epoch: wire.new_epoch,
             constituents: wire.constituents,
             compaction_observed: wire.compaction_observed,
-            tail_delta_retired: wire.tail_delta.is_some(),
         })
     }
 }
@@ -12949,11 +12934,11 @@ pub(crate) mod tests {
         req
     }
 
-    /// What the plugin sends for a request written with revision 2 ordinals, when the test
+    /// What the plugin sends for a request written with plugin-assigned ordinals, when the test
     /// leaves `boundary` null: the window from the newest anchor present (the rendered boundary
     /// first), declared, and with a filler message at every ordinal the test skipped, so the
     /// daemon derives the ordinals the test wrote. A test that declares its own boundary, a
-    /// descent, or a request without increasing positive ordinals (a revision 3 body carries
+    /// descent, or a request without increasing positive ordinals (a transform body carries
     /// none) is sent as written.
     pub(crate) fn plugin_window(store: &MemoryStore, req: &TransformRequest) -> TransformRequest {
         let mut window = req.clone();
@@ -13553,7 +13538,6 @@ pub(crate) mod tests {
             auto_search_score_threshold: DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
             auto_search_min_prompt_chars: 0,
             kind: "transform".to_string(),
-            v: Value::from(TRANSFORM_REVISION),
             boundary: Some(None),
             coverage: None,
             serializer_profile: "owned-llmrunner".to_string(),
@@ -13601,7 +13585,6 @@ pub(crate) mod tests {
             constituents: Vec::new(),
             compaction_observed: false,
             prev_response_cache_usage: None,
-            tail_delta_retired: false,
         }
     }
 
@@ -15879,7 +15862,6 @@ pub(crate) mod tests {
         let body = |cache: Option<Value>| {
             let mut body = json!({
                 "kind": "transform",
-                "v": 2,
                 "serializer_profile": "opencode-aisdk",
                 "session_id": "cache",
                 "render_config": "cfg0",
@@ -18117,7 +18099,6 @@ pub(crate) mod tests {
     fn transform_request_parses_full_flat_wire_envelope() {
         let value = json!({
             "kind": "transform",
-            "v": 2,
             "serializer_profile": "owned-llmrunner",
             "session_id": "ses",
             "render_config": "cfg",
@@ -18128,7 +18109,6 @@ pub(crate) mod tests {
         });
         let parsed: TransformRequest = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.kind, "transform");
-        assert_eq!(parsed.v, 2);
         assert_eq!(parsed.serializer_profile, "owned-llmrunner");
         assert_eq!(parsed.messages[0].mid, "m");
         assert_eq!(parsed.usage.unwrap().context_limit_tokens, 2);

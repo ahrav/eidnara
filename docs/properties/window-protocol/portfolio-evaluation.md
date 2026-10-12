@@ -204,7 +204,7 @@ each.
 edited outside the window (#883 deviation). The issue is correctly surfaced as
 needing human input.
 
-**W2 - refinement.** The acceptance differential (`revision_goldens.rs:428`)
+**W2 - refinement.** The acceptance differential (`recorded_goldens.rs:428`)
 substitutes a fresh session's expected output after a revert before the first
 anchor, and after the deleted covered-drift refusal. `existing-checks.md`
 labels this "acceptance differential" without that caveat.
@@ -267,7 +267,7 @@ this part's files, but the draft says they block landing.
 | I4 | refinement | Applied: WP-P25's `Check` names the first ordinary commit and excludes a revert's SOFT commit (`transform.rs:5266-5268`) |
 | I5 | gap | Kept queued (Q5 to Q11) |
 | W1 | bias | Surfaced below |
-| W2 | refinement | Applied: the `revision_goldens.rs:428` row in `existing-checks.md` states that the differential compares against a fresh session's step after a revert before the first anchor, and has no revision 2 output after a covered-drift refusal |
+| W2 | refinement | Applied: the `recorded_goldens.rs:428` row in `existing-checks.md` states that the differential compares against a fresh session's step after a revert before the first anchor, and has no revision 2 output after a covered-drift refusal |
 | W3 | gap | Queued as Q4 |
 | W4 | note | Applied by #833 in the same PR: TE18 `Status: invalidated`, the TE21 note, the TE23 memo-copy clause and #832 inventory bullet, the history_summarizer fence pruning bullet, and four stale `rust-mode-transform.ts` citations (see "Existing-catalog dispositions") |
 | Mismatch: the plugin placeholder | refinement | Applied: filled from the `58dbe556` plugin run in WP-P15, WP-FM07, its evidence, and "Executed state" |
@@ -416,3 +416,18 @@ checked at `f2442b2f`.
 | Status | 35 `active`, 2 `invalidated` |
 | Confidence | 23 high, 14 medium, 0 low |
 | Fault map | 22 rows, 22 unique occurrence markers (`WP-FM01` to `WP-FM22`) |
+
+## Dated note (2026-10-12, #989)
+
+Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
+unversioned contract, so every clause here that names a protocol version,
+numbered revision, version-skew refusal, or retired-field refusal is
+invalidated. At the #989 head, routed envelope, context, memory-capture,
+note-evaluation, discovery, and transform bodies carry no `v`; transform
+ignores a field named `v` and the former carriers, strict bodies refuse them
+as unknown fields, `transform_revision_unsupported` and
+`transform_tail_delta_retired` no longer exist, `transform/revision_3.rs` is
+`transform/window_admission.rs`, `transform/revision_goldens.rs` is
+`transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
+`transform-recorded-goldens.json`; `serve_native` remains until #993. Line
+anchors into files #989 changed are as of their earlier recorded head.

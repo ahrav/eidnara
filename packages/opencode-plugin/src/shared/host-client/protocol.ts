@@ -1,16 +1,13 @@
 /**
  *
  * `docs/host-wire-protocol.md` is normative for this codec.
- * Section 6 defines the 21-byte little-endian header, frame types, flags layout, pure-header rules, and 64 MiB body cap.
+ * Section 6 defines the 20-byte little-endian header, frame types, flags layout, pure-header rules, and 64 MiB body cap.
  * Sections 6.2 and 8.3 define direction and correlation namespaces.
  */
 
 import { AdmissionClass, type Priority } from "./types";
 
-export const PROTOCOL_VERSION = 4;
-export const HEADER_LEN = 21;
-/** Bytes 0..4 (`len` then `ver`) never change layout across versions. */
-export const FROZEN_PREFIX_LEN = 5;
+export const HEADER_LEN = 20;
 /** The protocol caps frame bodies at 64 MiB. */
 export const MAX_FRAME_BODY_LEN = 67_108_864;
 /** Section 7.1 caps a channel-0 body at 64 KiB even though framing permits more. */
@@ -19,7 +16,7 @@ export const MAX_CONTROL_BODY_LEN = 65_536;
 export const MAX_CORRELATION = 0xffff_ffff_ffff_ffffn;
 
 /**
- * The `type` byte occupies offset 5.
+ * The `type` byte occupies offset 4.
  */
 export const FrameType = {
     Request: 0,
@@ -104,8 +101,6 @@ export function flagsAdmissionClass(flags: number): AdmissionClass {
 }
 
 export type DecodeErrorCode =
-    | "too_short_for_prefix"
-    | "unsupported_version"
     | "too_short_for_header"
     | "unknown_frame_type"
     | "reserved_flag_bits"
@@ -132,7 +127,6 @@ export class DecodeError extends Error {
 
 export interface EnvelopeHeader {
     len: number;
-    ver: number;
     ty: FrameType;
     flags: number;
     channel: number;
@@ -156,9 +150,6 @@ function requireUint(value: number, max: number, field: string): void {
  * The decoder throws `DecodeError` for the first invalid header field.
  */
 export function validateHeader(header: EnvelopeHeader): void {
-    if (header.ver !== PROTOCOL_VERSION) {
-        throw new DecodeError(`unsupported envelope version ${header.ver}`, "unsupported_version");
-    }
     if (!Number.isInteger(header.ty) || header.ty < 0 || header.ty > FRAME_TYPE_MAX) {
         throw new DecodeError(`unknown frame type byte ${header.ty}`, "unknown_frame_type");
     }
@@ -232,7 +223,6 @@ export function validateHeader(header: EnvelopeHeader): void {
  */
 export function encodeHeader(header: EnvelopeHeader): Uint8Array {
     requireUint(header.len, 0xffff_ffff, "header len");
-    requireUint(header.ver, 0xff, "header ver");
     requireUint(header.ty, 0xff, "header type");
     requireUint(header.flags, 0xff, "header flags");
     requireUint(header.channel, 0xffff, "header channel");
@@ -244,47 +234,33 @@ export function encodeHeader(header: EnvelopeHeader): Uint8Array {
     const buffer = new Uint8Array(HEADER_LEN);
     const view = new DataView(buffer.buffer);
     view.setUint32(0, header.len, true);
-    buffer[4] = header.ver;
-    buffer[5] = header.ty;
-    buffer[6] = header.flags;
-    view.setUint16(7, header.channel, true);
-    view.setUint32(9, header.epoch, true);
-    view.setBigUint64(13, header.corr, true);
+    buffer[4] = header.ty;
+    buffer[5] = header.flags;
+    view.setUint16(6, header.channel, true);
+    view.setUint32(8, header.epoch, true);
+    view.setBigUint64(12, header.corr, true);
     return buffer;
 }
 
 /**
- * The decoder validates the complete header before returning it.
- * The decoder reads `len` and `ver` before rejecting unsupported versions.
- * The decoder reads the remaining header bytes only after accepting the version.
- * The decoder validates the complete header before reading body bytes.
+ * The decoder reads all 20 header bytes and validates the complete header before
+ * returning it, so a caller reads no body bytes for an invalid header.
  */
 export function decodeHeader(bytes: Uint8Array): EnvelopeHeader {
-    if (bytes.length < FROZEN_PREFIX_LEN) {
-        throw new DecodeError(
-            `header shorter than frozen prefix: have ${bytes.length} bytes`,
-            "too_short_for_prefix",
-        );
-    }
-    const ver = bytes[4] as number;
-    if (ver !== PROTOCOL_VERSION) {
-        throw new DecodeError(`unsupported envelope version ${ver}`, "unsupported_version");
-    }
     if (bytes.length < HEADER_LEN) {
         throw new DecodeError(
-            `header too short for version: have ${bytes.length} bytes, need ${HEADER_LEN}`,
+            `header too short: have ${bytes.length} bytes, need ${HEADER_LEN}`,
             "too_short_for_header",
         );
     }
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const header: EnvelopeHeader = {
         len: view.getUint32(0, true),
-        ver,
-        ty: bytes[5] as number as FrameType,
-        flags: bytes[6] as number,
-        channel: view.getUint16(7, true),
-        epoch: view.getUint32(9, true),
-        corr: view.getBigUint64(13, true),
+        ty: bytes[4] as number as FrameType,
+        flags: bytes[5] as number,
+        channel: view.getUint16(6, true),
+        epoch: view.getUint32(8, true),
+        corr: view.getBigUint64(12, true),
     };
     validateHeader(header);
     return header;

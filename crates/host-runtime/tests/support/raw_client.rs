@@ -18,11 +18,10 @@ use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-pub const HEADER_LEN: usize = 21;
-pub const WIRE_VERSION: u8 = 4;
+pub const HEADER_LEN: usize = 20;
 pub const MAX_AUTH_MESSAGE_LEN: u32 = 4096;
-pub const SERVER_DOMAIN: &[u8] = b"eidnara-server-v3";
-pub const CLIENT_DOMAIN: &[u8] = b"eidnara-client-v3";
+pub const SERVER_DOMAIN: &[u8] = b"eidnara-server";
+pub const CLIENT_DOMAIN: &[u8] = b"eidnara-client";
 
 pub const TY_REQUEST: u8 = 0;
 pub const TY_RESPONSE: u8 = 1;
@@ -51,19 +50,13 @@ pub const FLAGS_PURE_HEADER_FORBIDDEN: u8 = 0b1111_1001;
 
 /// `connection_frame_violation` validates host-originated ping, push, and goodbye frames before a receiver skips them.
 /// A receiver validates skipped connection frames against the wire contract's structural rules.
-/// Ping frames require the supported version, pure-header flags, and channel/epoch/correlation values of `0/0/nonzero`.
+/// Ping frames require pure-header flags and channel/epoch/correlation values of `0/0/nonzero`.
 /// Goodbye frames require pure-header flags, zero correlation, and a route-shaped or connection-shaped identity.
 /// Push frames require a route-shaped identity, zero correlation, and clear reserved bits.
 /// Type-only acceptance can hide wire regressions when the test run otherwise succeeds.
-/// A terminal channel-0 `Response` must carry wire version 2, identity `0/0`, and the
-/// canonical text-terminal flags; anything else is a host envelope regression.
+/// A terminal channel-0 `Response` must carry identity `0/0` and the canonical
+/// text-terminal flags; anything else is a host envelope regression.
 pub fn control_response_violation(frame: &RawFrame) -> Option<String> {
-    if frame.ver != WIRE_VERSION {
-        return Some(format!(
-            "control response with unsupported wire version {}",
-            frame.ver
-        ));
-    }
     if frame.channel != 0 || frame.epoch != 0 {
         return Some(format!(
             "control response on identity {}/{} instead of 0/0",
@@ -80,12 +73,6 @@ pub fn control_response_violation(frame: &RawFrame) -> Option<String> {
 }
 
 pub fn connection_frame_violation(frame: &RawFrame) -> Option<String> {
-    if frame.ver != WIRE_VERSION {
-        return Some(format!(
-            "connection frame type {} with unsupported wire version {}",
-            frame.ty, frame.ver
-        ));
-    }
     // Bits 6-7 must be zero, and `0b11` is reserved for both priority and admission.
     if frame.flags & 0b1100_0000 != 0 {
         return Some(format!(
@@ -160,7 +147,6 @@ pub fn connection_frame_violation(frame: &RawFrame) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawFrame {
     pub len: u32,
-    pub ver: u8,
     pub ty: u8,
     pub flags: u8,
     pub channel: u16,
@@ -225,7 +211,6 @@ pub fn proof(
 pub fn header(len: u32, ty: u8, flags: u8, channel: u16, epoch: u32, corr: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN);
     out.extend_from_slice(&len.to_le_bytes());
-    out.push(WIRE_VERSION);
     out.push(ty);
     out.push(flags);
     out.extend_from_slice(&channel.to_le_bytes());
@@ -235,15 +220,14 @@ pub fn header(len: u32, ty: u8, flags: u8, channel: u16, epoch: u32, corr: u64) 
 }
 
 pub fn decode_header(bytes: &[u8]) -> RawFrame {
-    assert_eq!(bytes.len(), HEADER_LEN, "header must be 21 bytes");
+    assert_eq!(bytes.len(), HEADER_LEN, "header must be 20 bytes");
     RawFrame {
         len: u32::from_le_bytes(bytes[0..4].try_into().expect("len")),
-        ver: bytes[4],
-        ty: bytes[5],
-        flags: bytes[6],
-        channel: u16::from_le_bytes(bytes[7..9].try_into().expect("channel")),
-        epoch: u32::from_le_bytes(bytes[9..13].try_into().expect("epoch")),
-        corr: u64::from_le_bytes(bytes[13..21].try_into().expect("corr")),
+        ty: bytes[4],
+        flags: bytes[5],
+        channel: u16::from_le_bytes(bytes[6..8].try_into().expect("channel")),
+        epoch: u32::from_le_bytes(bytes[8..12].try_into().expect("epoch")),
+        corr: u64::from_le_bytes(bytes[12..20].try_into().expect("corr")),
         body: Vec::new(),
     }
 }
@@ -785,7 +769,7 @@ fn publish_raw(
                 Err(error) => {
                     return Err(format!(
                         "{error} at correlation {}",
-                        u64::from_le_bytes(header[13..21].try_into().expect("correlation field"))
+                        u64::from_le_bytes(header[12..20].try_into().expect("correlation field"))
                     ));
                 }
             }
