@@ -29,11 +29,13 @@ static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
 const DIMENSION: u32 = 384;
 const BASE: usize = 10_000;
 
+/// At least one run, so every median has a sample.
 fn runs() -> usize {
     std::env::var("EIDNARA_RP25_RUNS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(11)
+        .max(1)
 }
 
 fn median(mut samples: Vec<Duration>) -> Duration {

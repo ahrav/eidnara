@@ -38,7 +38,7 @@ Production code:
   `LaneRead::Ended(LaneStatus::Undeclared)` on `:1108` when the analysis is
   empty, and `admit_lanes` (`crates/daemon/src/query_route.rs:1365`) refuses
   a request whose exact, lexical, and dense lanes are all undeclared with
-  `InvalidQuery("the query yields no probe")` on `:1431`.
+  `InvalidQuery("the query yields no probe")` on `:1433`.
 
 Tests cited by the record, read at the branch:
 

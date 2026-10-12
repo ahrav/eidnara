@@ -149,7 +149,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    handler is removed, which is one connection in sequence, not a late
    cancel against a running peer. Either list the dense and storage checks
    under `original-budget-stops-sql` with a sentence saying the lane shares
-   the connection path, or add a lexical cell beside `:289`.
+   the connection path, or add a lexical cell beside `:291`.
 
 ## Biases for a human
 
