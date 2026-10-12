@@ -93,6 +93,10 @@ pub enum StageEvent {
     BeforeRename,
     /// After the rename returned and published the digest name.
     AfterRename,
+    /// Before the repair path atomically exchanges a corrupt, unprotected occupant of the digest name with the temp.
+    BeforeExchange,
+    /// After the exchange returned: the digest name holds the temp's content and the temp name holds the former occupant.
+    AfterExchange,
     /// Before a `fsync` of the generations directory.
     BeforeGenerationsSync,
     AfterGenerationsSync,
@@ -1360,7 +1364,9 @@ impl GenerationStore {
             Reclamation::Pinned => invalid("corrupt generation is pinned"),
             Reclamation::Unopenable(err) => err,
         })?;
+        observe(observer, StageEvent::BeforeExchange)?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
+        observe(observer, StageEvent::AfterExchange)?;
         sync_generations(observer)?;
         self.validate(digest)?;
         let _ = remove_tree(&self.generations_fd, temp_name);

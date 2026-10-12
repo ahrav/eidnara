@@ -11,10 +11,10 @@ silent consequence is a different one.
 ## Evidence trail
 
 The generation's name is the SHA-256 of its manifest bytes
-(`generation.rs:262-264`), and those bytes are declaration order
-(`:172-174`, structs at `:138-145` and `:147-169`).
+(`generation.rs:266-268`), and those bytes are declaration order
+(`:262-264`, structs at `:219-224` and `:235-247`).
 
-`validate_in_dir` binds name to bytes twice, `generation.rs:636-648`:
+`validate_in_dir` binds name to bytes twice, `generation.rs:640-652`:
 
 ```
 if hex(&sha2::Sha256::digest(&bytes)) != digest {
@@ -36,7 +36,7 @@ Trace a reordered struct against a retained generation:
 
 1. The bytes on disk are unchanged, so `hex(sha256(bytes)) == digest` and the first
    check passes.
-2. `decode_with_schema` (`generation.rs:273-286`) decodes by key name, not
+2. `decode_with_schema` (`generation.rs:277-290`) decodes by key name, not
    position, so the decode succeeds regardless of order.
 3. `manifest.canonical_bytes()` now re-encodes in the *new* order, so it differs
    from the on-disk bytes, and the second check fails with
@@ -44,7 +44,7 @@ Trace a reordered struct against a retained generation:
 
 `invalid(..)` maps to the payload-invalid error class, which surfaces as
 `native_payload_invalid`. That is the same operator-visible outcome the
-`source_payload_manifest_sha256` doc comment at `generation.rs:157-165` was
+`source_payload_manifest_sha256` doc comment at `generation.rs:161-169` was
 written to avoid:
 
 > Schema 1 shipped without it and the schema number did not change when it was
@@ -128,12 +128,12 @@ not prevent the defect, so it complements rather than replaces the golden.
 
 ### Q: Is the reordering break silent or fail-closed?
 
-- Sources examined: `generation.rs:636-648` (both equality checks and the comment
-  between them), `:188-206` (`decode_with_schema`), `:172-178` (encoding and
-  digest), `:157-165` (the `Option` field's rationale), `:602-616`
+- Sources examined: `generation.rs:640-652` (both equality checks and the comment
+  between them), `:192-210` (`decode_with_schema`), `:176-182` (encoding and
+  digest), `:161-169` (the `Option` field's rationale), `:606-620`
   (`validate`'s entry).
 - Findings: fail-closed for retained generations, via `manifest.canonical_bytes()
-  != bytes` at `:645`. Silent for new staging, because the digest changes and
+  != bytes` at `:649`. Silent for new staging, because the digest changes and
   nothing compares it to a previous one. The prompt's framing captured the second
   and missed the first.
 - Missing evidence: none needed; both paths are direct reads.
@@ -144,15 +144,15 @@ not prevent the defect, so it complements rather than replaces the golden.
 
 ### Q: Should the canonical encoding be decoupled from declaration order?
 
-- Sources examined: `:148-150` (the struct doc stating order is the contract),
-  `:172-174` (`serde_json::to_vec`), `:640-647` (the comment justifying the
+- Sources examined: `:152-154` (the struct doc stating order is the contract),
+  `:176-178` (`serde_json::to_vec`), `:644-651` (the comment justifying the
   canonical-bytes equality).
 - Findings: the current design states the contract in a doc comment and enforces
   it with a runtime equality check, but the contract's *content* lives implicitly
   in the field order of a struct that an ordinary refactor can change. An explicit
   field-order list, a canonical-JSON serializer, or a hand-written `Serialize`
   would state it once. Each has a cost, and the store has other canonical-encoding
-  consumers (`WireProfile` at `:914-918`) that would want the same treatment.
+  consumers (`WireProfile` at `:918-922`) that would want the same treatment.
 - Missing evidence: whether any other component outside this crate encodes or
   decodes these manifests, which would make the encoding a cross-crate contract
   rather than an internal one. Not established in this pass.

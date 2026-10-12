@@ -7,8 +7,8 @@ an in-process `u64` lifecycle id. Nothing in this record involves async code.
 
 ## Discovery trigger
 
-Reading `stage_and_promote` (`crates/host-runtime/src/generation.rs:1107-1123`) top to
-bottom against its own doc comment (`:714-723`), which promises `current` is
+Reading `stage_and_promote` (`crates/host-runtime/src/generation.rs:1117-1127`) top to
+bottom against its own doc comment (`:1111-1116`), which promises `current` is
 unchanged on every failure. The promise is per-error-class, and the sequence has
 two renames and four distinct sync points, so "unchanged" has to be checked
 against a crash between them rather than against a returned `Err`.
@@ -16,55 +16,62 @@ against a crash between them rather than against a returned `Err`.
 ## Evidence trail
 
 The durability order is explicit and, read against the syscalls, correct.
-Staging (`:807-864`) synces bottom-up: each copied file is fsynced inside
-`copy_source_into` (`:1127`), the manifest is written and fsynced by
-`write_new_file` (`:854`, sync at `:1187`), then every directory the run created
-entries in is reopened and fsynced deepest-first (`:857-861`), then the temp root
-itself (`:862`). The deepest-first claim rests on `dirs.iter().rev()` over a
-`BTreeSet<String>` of relative paths: a prefix sorts before its extensions, so
-`a` precedes `a/b` lexicographically and the reversed walk emits `a/b` before
-`a`. Children are durable before the parent entry naming them.
+Staging (`:1238-1299`) syncs bottom-up: each copied file is written by
+`copy_source_into` (`:1835`) and its descriptor is kept, the manifest is written
+unsynced by `write_new_file_unsynced` (`:1276`), then every kept descriptor is
+fsynced in groups of `CONCURRENT_SYNCS` through `sync_group` (`:1263`, `:1286`),
+then every directory the run created entries in is reopened and fsynced
+deepest-first (`:1288-1294`), then the temp root itself (`:1296`). The
+deepest-first claim rests on `dirs.iter().rev()` over a `BTreeSet<String>` of
+relative paths: a prefix sorts before its extensions, so `a` precedes `a/b`
+lexicographically and the reversed walk emits `a/b` before `a`. Children are
+durable before the parent entry naming them.
 
-Promotion (`:876-912`) is the first rename. `rename_no_replace` (`:1216-1242`)
-must not replace, because POSIX `renameat` succeeds onto an existing empty
-directory (`:872-875`); on success `generations_fd` is fsynced (`:883`) before
-returning. Only then does `replace_profile` (`:914-932`) write the profile temp
-(`:922`, fsynced at `:1187`), rename it over `current-profile.json` (`:923-929`),
-and fsync the root (`:930`). So the ordering is: temp contents durable, digest
-entry durable, profile durable - never inverted.
+Promotion (`:1307-1374`) is the first rename. `rename_no_replace`
+(`store_fs.rs:53-79`) must not replace, because POSIX `renameat` succeeds onto an
+existing empty directory (`generation.rs:1303`); on success `generations_fd` is
+fsynced (`:1324`) and the digest is validated (`:1326`) before returning. Only
+then does `replace_profile` (`:1379-1381`, through `replace_profile_at` at
+`:1469-1506`) write the profile temp unsynced (`:1487`, through
+`write_new_file_unsynced`, `store_fs.rs:317`), fsync it (`:1490`), rename it over
+`current-profile.json` (`:1493-1494`), and fsync the root (`:1503`). So the
+ordering is: temp contents durable, digest entry durable, profile durable - never
+inverted.
 
 Two forward guards keep the profile from naming something unreadable. Staging
-refuses a manifest above `MAX_MANIFEST_BYTES` *before* writing it (`:851-853`),
+refuses a manifest above `MAX_MANIFEST_BYTES` *before* writing it (`:1270-1273`),
 whose comment states the reason: validation reads under that cap, so a larger
 manifest could never be revalidated after promotion. And a quarantined profile
-aborts the whole mutation up front (`:732-734`).
+aborts the whole mutation up front (`:1149-1152`).
 
 The failure paths preserve the selector. Staging failure removes the temp and
-returns (`:758-762`). Promotion failure removes the temp and returns
-(`:764-767`). `replace_profile` failing after a successful promote leaves an
+returns (`:1179-1182`). Promotion failure removes the temp and returns
+(`:1185-1188`). `replace_profile` failing after a successful promote leaves an
 orphan directory at the digest name that no profile references; `prune`
-(`:976-1016`) removes it as unprotected, since only the current profile target,
-lock-held digests, and the active candidate are protected (`:970-975`).
+(`:1631`) removes it as unprotected, since only the owner selections, the
+current profile target, retained composition members, and the caller's protected
+set are protected (`:1632-1653`).
 
 ## Failure scenario
 
-The fast path never validates what it promoted. When `rename_no_replace`
-succeeds at `:882`, `promote_temp` returns immediately and `replace_profile`
-names the digest without any call to `validate`. Correctness there rests
-entirely on the digest being computed from the exact bytes just written
-(`:763`, `:838-846`). Any defect that lets staged content diverge from the
-manifest it hashed becomes a profile naming an unvalidatable generation, with no
-second check to catch it.
+The fast path validates by pathname after the rename. When `rename_no_replace`
+succeeds at `:1320-1322`, `promote_temp` fsyncs and calls `validate(digest)` at
+`:1326` before returning, so `replace_profile` names a digest that has passed one
+validation. Correctness there rests on the digest being computed from the exact
+bytes just written (`:1184`, `:1268-1269`) and on that one validation; the
+comment at `:1325` names the same-UID writer who can alter a staged file between
+its copy and the rename as the reason the validation exists.
 
 The exchange-then-revalidate window is the other shape. On same-digest repair the
-sequence is `exchange_dirs` (`:905`), fsync (`:906`), `validate(digest)` (`:909`),
-then delete the orphan now at the temp name (`:910`). Between `:906` and `:910`
-the digest name holds the candidate and the temp name holds the corrupt orphan,
-both durable. A crash there is benign: the profile still names the same digest
-string, that name now holds the repaired directory, and a later prune removes the
-temp by its `tmp-` prefix (`:992-996`). The residue is that `validate` at `:909`
-re-resolves the digest pathname rather than inspecting the descriptor the
-exchange acted on, so it attests to whatever occupies the name at that instant.
+sequence is `exchange_dirs` (`:1368`), fsync (`:1370`), `validate(digest)`
+(`:1371`), then delete the orphan now at the temp name (`:1372`). Between `:1370`
+and `:1372` the digest name holds the candidate and the temp name holds the
+corrupt orphan, both durable. A crash there is benign: the profile still names
+the same digest string, that name now holds the repaired directory, and a later
+prune removes the temp by its `tmp-` shape (`:1659-1667`). The residue is that
+`validate` at `:1371` re-resolves the digest pathname rather than inspecting the
+descriptor the exchange acted on, so it attests to whatever occupies the name at
+that instant.
 
 ## Timing windows and dependencies
 
@@ -72,22 +79,31 @@ Fault class H4, plus a real termination. Every window is inside one
 `transaction.lock` hold: `promote_temp`'s two renames, and the gap between the
 promote and `replace_profile`. Depends on
 `validation-and-enumeration-address-one-directory-object` for the meaning of
-`validate` at `:909`, and on `persisted-state-quarantine-caps-agree`, since the
-`:851` pre-write refusal is stated in terms of the same cap.
+`validate` at `:1371`, and on `persisted-state-quarantine-caps-agree`, since the
+`:1271` pre-write refusal is stated in terms of the same cap.
 
 ## What a test must construct
 
 Storage exhaustion at each write and sync point, which needs `fsync`-time
 exhaustion on a delayed-allocation filesystem to reach the
-`fsync_preserving_storage` classification (`:111-119`), and a process kill between
-the promoting rename and the profile rename. No fault injection and no crash
-test exists. Four in-crate tests cover adjacent ground:
-`stage_validate_and_read_current_roundtrip` (`:1456`), the same-digest repair
+`fsync_preserving_storage` classification (`:202-207`, through `classify_errno` at
+`:104-109`), and a process kill between
+the promoting rename and the profile rename. The staging half is covered through
+`stage_observed`: `crates/daemon/tests/vector_staging_cuts.rs:476-490` injects
+`EIO`, `ENOSPC`, and `EDQUOT` at every `StageEvent`, `:508-578` sends a child
+`SIGKILL` at every event and checks what the next process finds and reclaims, and
+`:663-676` checks the deployment selector's bytes across a cut. Those cells are
+hook-simulated errors and process kills, not kernel `fsync` exhaustion or power
+loss, and they stop at `stage`: the window between promotion and the
+`current-profile.json` rename in `stage_and_promote` (`:1123-1124`) has no cut,
+because `replace_profile` (`:1379-1381`) runs with the no-op `ProfileEvent`
+observer. Four in-crate tests cover adjacent ground:
+`stage_validate_and_read_current_roundtrip` (`:2135`), the same-digest repair
 including the protected-target refusal
-(`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`, `:1689`),
-post-hoc tampering (`validation_rejects_every_tampered_shape`, `:1516`), and the
-quarantine abort (`unknown_schemas_are_quarantined_and_block_mutation`, `:1571`).
-`interrupted_staging_leaves_the_old_profile_complete` (`:1736`) plants a leftover
+(`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`, `:2955`),
+post-hoc tampering (`validation_rejects_every_tampered_shape`, `:2443`), and the
+quarantine abort (`unknown_schemas_are_quarantined_and_block_mutation`, `:2572`).
+`interrupted_staging_leaves_the_old_profile_complete` (`:2997`) plants a leftover
 temp and a leftover profile temp rather than interrupting anything, so it proves
 inertness of residue, not crash recovery.
 
@@ -95,8 +111,11 @@ inertness of residue, not crash recovery.
 
 ### Q: Should the exchange-then-revalidate window be crash-tested? Whether any reader can observe the intermediate was not established.
 
-- Sources examined: `generation.rs:876-912`, `:914-932`, `:566-597`,
-  `:1195-1205`, `:1216-1242`; every `GenerationStore` construction site
+- Sources examined: `generation.rs:1307-1374` (`promote_temp`), `:1379-1381` and
+  `:1469-1506` (`replace_profile` and `replace_profile_at`), `:912` and
+  `:1052-1096` (`validate` and `validate_in_dir`), `store_fs.rs:112-120`
+  (`exchange_dirs`), `:53-79` (`rename_no_replace`); every `GenerationStore`
+  construction site
   (`crates/daemon/src/bin/eidnara-host.rs:845`, `:966`, `:1001`;
   `crates/daemon/src/bin/eidnara_host/serve.rs:544`); `preflight_generation`
   (`eidnara-host.rs:813-847`), `resolve_generation` (`:952-1010`),

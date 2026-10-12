@@ -19,13 +19,13 @@ the digest pathname while the manifest-listed files were verified through the
 retained descriptor, so a replacement holding only the expected names satisfied
 the walk while the returned `ValidatedGeneration` still pinned the original
 directory and its unlisted content. The fix is `walk_generation_tree(dir, ...)`
-at `crates/host-runtime/src/generation.rs:1080`, with the reasoning recorded at
-`:666-673`. In `0827dbc8` `prune` enumerated with
+at `crates/host-runtime/src/generation.rs:1084`, with the reasoning recorded at
+`:670-677`. In `0827dbc8` `prune` enumerated with
 `std::fs::read_dir(self.root.join(GENERATIONS_DIR_NAME))` while every
 `remove_tree` below it acted on `generations_fd`, so a replacement directory at
 that name, populated with chosen names, could drive deletions inside the pinned
-store. The fix is `read_dir_names(&self.generations_fd)` at `:990`, reasoning at
-`:986-989`. `read_dir_names` (`:1369-1384`) enumerates the open directory
+store. The fix is `read_dir_names(&self.generations_fd)` at `:994`, reasoning at
+`:990-993`. `read_dir_names` (`:1375-1390`) enumerates the open directory
 description through `Dir::read_from`, which is what makes the listing
 unredirectable.
 
@@ -35,15 +35,15 @@ Inside `generation.rs`, no third instance of that shape exists. Every
 directory-relative operation in production code resolves against a pinned
 descriptor - `root_fd`, `generations_fd`, `temp_fd`, or a `dir`/`parent`
 argument. The only non-descriptor filesystem call in production code is
-`std::fs::symlink_metadata(&spec.source)` at `:738`, and its subject is a staging
+`std::fs::symlink_metadata(&spec.source)` at `:742`, and its subject is a staging
 *source*, not a store object; it feeds capacity sizing only, and
-`copy_source_into` re-opens the same source by pathname at `:1038` under a
-before/after identity check (`:1045`, `:1132-1141`).
+`copy_source_into` re-opens the same source by pathname at `:1042` under a
+before/after identity check (`:1049`, `:1136-1145`).
 
 The class does survive, in two weaker forms.
 
-First, at the `ValidatedGeneration::path()` boundary. That accessor (`:315`) is
-the deliberate escape hatch, documented at `:312-314` as requiring every consumer
+First, at the `ValidatedGeneration::path()` boundary. That accessor (`:319`) is
+the deliberate escape hatch, documented at `:316-318` as requiring every consumer
 to perform its own validation. One consumer honours the descriptor:
 `generation_launcher` (`crates/daemon/src/bin/eidnara-host.rs:929-945`) uses
 `open_verified_file`. The other does not:
