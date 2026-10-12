@@ -191,6 +191,52 @@ fn a_newer_lower_scoring_row_replaces_an_older_higher_one_and_enumeration_order_
 }
 
 #[test]
+fn winners_from_different_layers_with_equal_scores_order_by_identifier_bytes_whichever_layer_holds_the_smaller()
+ {
+    let fixture = Fixture::all_admitted();
+    let query = axis(0);
+    // The reference check below confirms the tied pair leads, so the k = 1 cut lands inside the tie.
+    let tie = unit([0.95, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    for (in_base, in_delta) in [("alpha", "beta"), ("beta", "alpha")] {
+        let mut map = corpus_map(&fixture);
+        map.insert(in_base, tie.clone());
+        let base_rows: Vec<(&str, Vec<f32>)> = map
+            .iter()
+            .map(|(object, vector)| (*object, vector.clone()))
+            .collect();
+        let base = owned(&fixture, 0, &base_rows, &[]);
+        let delta = owned(&fixture, 1, &[(in_delta, tie.clone())], &[]);
+        map.insert(in_delta, tie.clone());
+
+        let (base_id, delta_id) = (fixture.id(in_base), fixture.id(in_delta));
+        let tied_score = reference_over(&query, [(base_id.clone(), tie.as_slice())])[0].1;
+        let mut tied = [base_id, delta_id];
+        tied.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let expected = reference(&fixture, &query, &map);
+        assert_eq!(
+            expected[..2],
+            [(tied[0].clone(), tied_score), (tied[1].clone(), tied_score)]
+        );
+
+        for layers in [[base.layer(), delta.layer()], [delta.layer(), base.layer()]] {
+            let ranking = rank_plain(&fixture, &layers, &query, 8);
+            assert_eq!(keyed(&ranking.ranking), expected, "{in_base} in base");
+            assert_eq!(
+                ranking.ranking.ranked[0].score,
+                ranking.ranking.ranked[1].score
+            );
+            assert_eq!(ranking.layers.superseded, 1);
+            let top = rank_plain(&fixture, &layers, &query, 1);
+            assert_eq!(
+                ids_of(&top.ranking),
+                vec![tied[0].clone()],
+                "{in_base} in base"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_tombstoned_winner_is_a_coverage_shortfall_and_a_later_row_over_a_tombstone_wins() {
     let fixture = Fixture::all_admitted();
     let query = axis(0);
