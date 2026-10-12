@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use host_runtime::generation::{
     FILE_HASH_BUFFER_BYTES, GenerationError, GenerationManifest, GenerationStore, ManifestFile,
-    RETAINED_FILE_BYTES, StageEvent, StageMeta, StreamedFile, ValidatedGeneration,
+    RETAINED_FILE_BYTES, StageMeta, StageObserver, StreamedFile, ValidatedGeneration,
 };
 use host_runtime::lifecycle::{LifecycleTransactionLock, PAYLOAD_MANIFEST_DIGEST_LEN};
 use retrieval::ProjectionIdentity;
@@ -667,13 +667,13 @@ impl Staging<'_> {
         self.stage_manifest_observed(manifest, meta, resolve, &mut |_| Ok(()))
     }
 
-    /// Runs [`Self::stage_manifest`] and reports each store [`StageEvent`] to `observer`, as [`GenerationStore::stage_observed`] does.
+    /// Runs [`Self::stage_manifest`] and reports each store [`StageEvent`](host_runtime::generation::StageEvent) to `observer`, as [`GenerationStore::stage_observed`] does.
     fn stage_manifest_observed(
         &self,
         manifest: &GenerationManifest,
         meta: &StageMeta,
         resolve: impl Fn(&str) -> PathBuf,
-        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+        observer: &mut StageObserver<'_>,
     ) -> Result<String, VectorRefusal> {
         let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
         self.gate
@@ -716,7 +716,7 @@ pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, Vect
     stage_built(built, staging, &mut |_| Ok(()))
 }
 
-/// Runs [`stage`] and reports each store [`StageEvent`] to `observer`, so a test can cut staging at any step.
+/// Runs [`stage`] and reports each store [`StageEvent`](host_runtime::generation::StageEvent) to `observer`, so a test can cut staging at any step.
 ///
 /// # Errors
 ///
@@ -725,7 +725,7 @@ pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, Vect
 pub fn stage_observed(
     built: &BuiltVectors,
     staging: &Staging<'_>,
-    observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+    observer: &mut StageObserver<'_>,
 ) -> Result<String, VectorRefusal> {
     stage_built(built, staging, observer)
 }
@@ -733,7 +733,7 @@ pub fn stage_observed(
 fn stage_built(
     built: &BuiltVectors,
     staging: &Staging<'_>,
-    observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+    observer: &mut StageObserver<'_>,
 ) -> Result<String, VectorRefusal> {
     let sidecar = &built.sidecar;
     let identity = staging.identity;

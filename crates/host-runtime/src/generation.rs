@@ -91,15 +91,22 @@ pub enum StageEvent {
     AfterGenerationsSync,
 }
 
-/// Runs the stage observer at `event`, classifying its errno the way the store classifies a failed syscall: `ENOSPC` and `EDQUOT` are storage exhaustion, anything else a payload fault.
-fn observe(
-    observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
-    event: StageEvent,
-) -> Result<(), GenerationError> {
-    observer(event).map_err(|e| match e {
+/// The observer [`GenerationStore::stage_observed`] reports each [`StageEvent`] to; an `Err` cuts staging at that event.
+pub type StageObserver<'a> = dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno> + 'a;
+
+/// Classifies a failed syscall's errno: `ENOSPC` and `EDQUOT` are storage exhaustion, any other errno is a payload fault carrying `detail`.
+///
+/// The syscall's errno is the quota signal because `statvfs` reports filesystem free blocks, not the caller's remaining quota.
+fn classify_errno(errno: rustix::io::Errno, detail: &'static str) -> GenerationError {
+    match errno {
         rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("staging step failed"),
-    })
+        _ => invalid(detail),
+    }
+}
+
+/// Runs the stage observer at `event` and classifies its errno with [`classify_errno`], the classifier the store's write, sync, and rename sites use.
+fn observe(observer: &mut StageObserver<'_>, event: StageEvent) -> Result<(), GenerationError> {
+    observer(event).map_err(|e| classify_errno(e, "staging step failed"))
 }
 
 /// The `files` array excludes `manifest.json` because its bytes produce the generation digest.
@@ -192,21 +199,7 @@ fn fsync_preserving_storage<Fd: rustix::fd::AsFd>(
     fd: Fd,
     detail: &'static str,
 ) -> Result<(), GenerationError> {
-    fsync(fd).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid(detail),
-    })
-}
-
-///
-/// `statvfs` cannot detect per-user quota exhaustion because it reports filesystem free blocks, not the caller's remaining quota.
-fn is_storage_exhausted(err: &std::io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(code)
-            if code == rustix::io::Errno::NOSPC.raw_os_error()
-                || code == rustix::io::Errno::DQUOT.raw_os_error()
-    )
+    fsync(fd).map_err(|e| classify_errno(e, detail))
 }
 
 /// `GenerationManifest::files` paths are relative, contain no parent segments, and are unique and sorted in canonical encoding.
@@ -1125,13 +1118,13 @@ impl GenerationStore {
         self.stage_observed(sources, meta, protected, &mut |_| Ok(()))
     }
 
-    /// Runs [`Self::stage`] and reports each [`StageEvent`] to `observer` before or after its step. An observer error stops staging at that step with the error the store returns for that errno at a syscall: the temp is removed when the cut precedes the rename, and the published digest directory stays for `prune` when it follows.
+    /// Runs [`Self::stage`] and reports each [`StageEvent`] to `observer` before or after its step. An observer error stops staging at that step with the error class the store gives that errno at a syscall, carrying the detail `staging step failed`: the temp is removed when the cut precedes the rename, and the published digest directory stays for `prune` when it follows.
     pub fn stage_observed(
         &self,
         sources: &[SourceSpec],
         meta: &StageMeta,
         protected: &BTreeSet<String>,
-        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+        observer: &mut StageObserver<'_>,
     ) -> Result<String, GenerationError> {
         // A quarantined profile blocks mutation because its references are uncertain.
         if self.read_current()? == CurrentProfile::Quarantined {
@@ -1202,12 +1195,7 @@ impl GenerationStore {
             temp_name.as_str(),
             Mode::from_raw_mode(0o700),
         )
-        .map_err(|e| match e {
-            rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
-                GenerationError::InsufficientStorage
-            }
-            _ => invalid("staging temp creation failed"),
-        })?;
+        .map_err(|e| classify_errno(e, "staging temp creation failed"))?;
         // `mkdirat` rejects `EEXIST`, so success proves this call created the entry and the pathname `chmod` cannot follow a planted symlink.
         // A failure after creation must remove the entry here, because the caller never learns
         // the name and repeated attempts would otherwise accumulate `tmp-*` directories.
@@ -1233,7 +1221,7 @@ impl GenerationStore {
         sources: &[SourceSpec],
         preflighted: &[PreflightSource],
         meta: &StageMeta,
-        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+        observer: &mut StageObserver<'_>,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
         let mut written = Vec::with_capacity(sources.len() + 1);
@@ -1301,22 +1289,16 @@ impl GenerationStore {
         temp_name: &str,
         digest: &str,
         protected: &BTreeSet<String>,
-        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+        observer: &mut StageObserver<'_>,
     ) -> Result<(), GenerationError> {
-        let sync_generations =
-            |observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>| {
-                observe(observer, StageEvent::BeforeGenerationsSync)?;
-                fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
-                observe(observer, StageEvent::AfterGenerationsSync)
-            };
-        observe(observer, StageEvent::BeforeRename)?;
-        let result = match rename_no_replace(&self.generations_fd, temp_name, digest) {
-            Ok(renamed) => renamed,
-            Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
-                return Err(GenerationError::InsufficientStorage);
-            }
-            Err(_) => return Err(invalid("generation rename failed")),
+        let sync_generations = |observer: &mut StageObserver<'_>| {
+            observe(observer, StageEvent::BeforeGenerationsSync)?;
+            fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+            observe(observer, StageEvent::AfterGenerationsSync)
         };
+        observe(observer, StageEvent::BeforeRename)?;
+        let result = rename_no_replace(&self.generations_fd, temp_name, digest)
+            .map_err(|e| classify_errno(e, "generation rename failed"))?;
         if result {
             observe(observer, StageEvent::AfterRename)?;
             sync_generations(observer)?;
@@ -1470,12 +1452,8 @@ impl GenerationStore {
         let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
         let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
             observer(ProfileEvent::BeforeRename)?;
-            renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name).map_err(|e| match e {
-                rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
-                    GenerationError::InsufficientStorage
-                }
-                _ => invalid("profile rename failed"),
-            })
+            renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name)
+                .map_err(|e| classify_errno(e, "profile rename failed"))
         });
         if result.is_err() {
             let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
@@ -1728,10 +1706,9 @@ fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
 }
 
 fn storage_or(e: std::io::Error, detail: &'static str) -> GenerationError {
-    if is_storage_exhausted(&e) {
-        GenerationError::InsufficientStorage
-    } else {
-        invalid(detail)
+    match e.raw_os_error() {
+        Some(code) => classify_errno(rustix::io::Errno::from_raw_os_error(code), detail),
+        None => invalid(detail),
     }
 }
 
@@ -1744,9 +1721,8 @@ fn ensure_parent_dirs(
     dirs: &mut BTreeSet<String>,
 ) -> Result<(OwnedFd, String), GenerationError> {
     let (parent, basename) = open_or_create_parents(temp_fd, rel_path).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
         rustix::io::Errno::PERM => invalid("staging directory failed security checks"),
-        _ => invalid("staging directory creation failed"),
+        e => classify_errno(e, "staging directory creation failed"),
     })?;
     let mut prefix = String::new();
     for component in rel_path.split('/').take(rel_path.matches('/').count()) {
@@ -1801,17 +1777,14 @@ fn open_source_file(path: &Path) -> Result<(OwnedFd, rustix::fs::Stat), Generati
 }
 
 fn sync_staged(files: &[OwnedFd]) -> Result<(), GenerationError> {
-    crate::store_fs::fsync_all(files).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("staging output fsync failed"),
-    })
+    crate::store_fs::fsync_all(files).map_err(|e| classify_errno(e, "staging output fsync failed"))
 }
 
 /// Syncs one group of staged outputs together, reporting [`StageEvent::BeforeFileSyncs`] and [`StageEvent::AfterFileSyncs`] with the group's index around it.
 fn sync_group(
     files: &[OwnedFd],
     group: usize,
-    observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+    observer: &mut StageObserver<'_>,
 ) -> Result<(), GenerationError> {
     observe(observer, StageEvent::BeforeFileSyncs(group))?;
     sync_staged(files)?;
@@ -1839,10 +1812,7 @@ fn copy_source_into(
         OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(raw_mode(mode)),
     )
-    .map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("staging output creation failed"),
-    })?;
+    .map_err(|e| classify_errno(e, "staging output creation failed"))?;
     rustix::fs::fchmod(&dest_fd, Mode::from_raw_mode(raw_mode(mode)))
         .map_err(|_| invalid("staging output chmod failed"))?;
 
@@ -1897,10 +1867,8 @@ fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
 }
 
 fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
-    crate::store_fs::exchange_dirs(dir, a, b).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("atomic digest-target exchange failed"),
-    })
+    crate::store_fs::exchange_dirs(dir, a, b)
+        .map_err(|e| classify_errno(e, "atomic digest-target exchange failed"))
 }
 
 /// A lifecycle root is an owned directory whose ancestry cannot be replaced under the process.
@@ -2023,6 +1991,47 @@ mod tests {
 
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
+    }
+
+    #[test]
+    fn the_errno_classifier_maps_exhaustion_to_insufficient_storage_and_keeps_the_site_detail() {
+        /// `None` is `InsufficientStorage`; `Some(detail)` is a payload fault with that detail.
+        fn class(err: GenerationError) -> Option<&'static str> {
+            match err {
+                GenerationError::InsufficientStorage => None,
+                GenerationError::NativePayloadInvalid { detail } => Some(detail),
+                other => panic!("unexpected class {other:?}"),
+            }
+        }
+        let detail = "staging output fsync failed";
+        for (errno, expected) in [
+            (rustix::io::Errno::NOSPC, None),
+            (rustix::io::Errno::DQUOT, None),
+            (rustix::io::Errno::IO, Some(detail)),
+            (rustix::io::Errno::PERM, Some(detail)),
+        ] {
+            assert_eq!(class(classify_errno(errno, detail)), expected, "{errno:?}");
+            let io = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert_eq!(class(storage_or(io, detail)), expected, "{errno:?} via io");
+        }
+        assert_eq!(
+            class(storage_or(std::io::Error::other("no errno"), detail)),
+            Some(detail)
+        );
+        for (errno, expected) in [
+            (rustix::io::Errno::DQUOT, None),
+            (rustix::io::Errno::IO, Some("staging step failed")),
+        ] {
+            let mut cut = |_| Err(errno);
+            let observed = observe(&mut cut, StageEvent::BeforeRootSync).unwrap_err();
+            assert_eq!(class(observed), expected, "observer {errno:?}");
+        }
+        // A pipe rejects `fsync` with `EINVAL`, so a batched sync reports the staging output detail.
+        let (reader, _writer) = rustix::pipe::pipe().expect("pipe");
+        assert_eq!(
+            class(sync_staged(&[reader]).unwrap_err()),
+            Some("staging output fsync failed")
+        );
     }
 
     #[test]

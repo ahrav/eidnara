@@ -1,12 +1,13 @@
 //! Cuts inside the lifecycle store's staging path, driven through its [`StageEvent`] observer.
 //!
-//! Every cell of the frozen table is cut three ways: a hook-simulated `EIO`, hook-simulated storage exhaustion (`ENOSPC`, `EDQUOT`), and a process kill in a re-executed child that writes and syncs a witness file and then aborts. The hook cells exercise the store's error classification and cleanup at each step; they are not kernel `fsync` evidence. The kill cells show what a crash at each step leaves on disk for the next process, not what survives power loss.
+//! Every cell of the frozen table is cut three ways: a hook-simulated `EIO`, hook-simulated storage exhaustion (`ENOSPC`, `EDQUOT`), and a process kill in a re-executed child that writes and syncs a witness file and then sends itself `SIGKILL`. The hook cells exercise the store's error classification and cleanup at each step; they are not kernel `fsync` evidence. The kill cells show what a crash at each step leaves on disk for the next process, not what survives power loss.
 
 mod support;
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,7 @@ use daemon::vector_generation::{
 use host_runtime::generation::{
     CURRENT_PROFILE_NAME, CurrentProfile, GENERATIONS_DIR_NAME, GenerationError,
     GenerationManifest, GenerationStore, ManifestFile, SourceSpec, StageEvent, StageMeta,
+    StageObserver,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use rustix::io::Errno;
@@ -28,18 +30,23 @@ use support::vector_store::*;
 /// The workload whose staging a cell cuts. Vector layers are flat, so the nested-directory sync is cut on a store-level generation with one nested file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Workload {
+    /// A fresh vector layer: the rename publishes the digest name.
     Vector,
     Nested,
+    /// The vector layer restaged over a corrupt occupant of its digest name: the rename finds the name taken and the store exchanges the occupant out.
+    Repair,
+    /// The vector layer restaged over a valid occupant of its digest name: the store keeps the occupant and drops the temp.
+    Retry,
 }
 
 const NESTED_DIR: &str = "nested";
 const NESTED_FILE: &str = "nested/payload.bin";
 
-/// The frozen cell count: six vector files cut before and after their copy, the manifest cut before and after its write, the one sync group of the six files and the manifest cut before and after its syncs, six root, rename, and generations-directory events, and two nested-directory sync events.
-const CELL_COUNT: usize = 24;
+/// The frozen cell count: the fresh vector trace (six files cut before and after their copy, the manifest before and after its write, the one sync group of the six files and the manifest before and after its syncs, two root, two rename, and two generations-directory events) is 22, the repair and retry traces omit `AfterRename` and are 21 each, and the nested workload adds two directory-sync events.
+const CELL_COUNT: usize = 66;
 
-/// Every vector event in the order staging reports it; `the_cell_table_is_the_complete_event_trace` holds the store to exactly this sequence.
-fn vector_cells() -> Vec<StageEvent> {
+/// Every event a vector `workload` fires, in the order staging reports it; `the_cell_table_is_the_complete_event_trace` holds the store to exactly this sequence.
+fn vector_cells(workload: Workload) -> Vec<StageEvent> {
     let mut files = [
         CODES_FILE,
         ROW_IDS_FILE,
@@ -62,7 +69,11 @@ fn vector_cells() -> Vec<StageEvent> {
         StageEvent::BeforeRootSync,
         StageEvent::AfterRootSync,
         StageEvent::BeforeRename,
-        StageEvent::AfterRename,
+    ]);
+    if workload == Workload::Vector {
+        cells.push(StageEvent::AfterRename);
+    }
+    cells.extend([
         StageEvent::BeforeGenerationsSync,
         StageEvent::AfterGenerationsSync,
     ]);
@@ -70,9 +81,13 @@ fn vector_cells() -> Vec<StageEvent> {
 }
 
 fn cells() -> Vec<(Workload, StageEvent)> {
-    let mut cells: Vec<_> = vector_cells()
+    let mut cells: Vec<_> = [Workload::Vector, Workload::Repair, Workload::Retry]
         .into_iter()
-        .map(|event| (Workload::Vector, event))
+        .flat_map(|workload| {
+            vector_cells(workload)
+                .into_iter()
+                .map(move |event| (workload, event))
+        })
         .collect();
     cells.push((
         Workload::Nested,
@@ -88,12 +103,56 @@ fn cells() -> Vec<(Workload, StageEvent)> {
 
 /// A cut at or before the rename leaves no digest-named directory; after it, every file and directory was synced before the rename, so the published directory is complete.
 fn precedes_rename(event: &StageEvent) -> bool {
-    !matches!(
+    !matches!(event, StageEvent::AfterRename) && !syncs_generations(event)
+}
+
+/// On the repair and retry paths the generations-directory sync follows the exchange or the temp's removal.
+fn syncs_generations(event: &StageEvent) -> bool {
+    matches!(
         event,
-        StageEvent::AfterRename
-            | StageEvent::BeforeGenerationsSync
-            | StageEvent::AfterGenerationsSync
+        StageEvent::BeforeGenerationsSync | StageEvent::AfterGenerationsSync
     )
+}
+
+/// What a cut at one cell leaves on disk.
+#[derive(Debug, PartialEq, Eq)]
+struct Expected {
+    /// Staging temps left in the generations directory.
+    temps: usize,
+    /// Whether a directory has the digest name.
+    present: bool,
+    /// Whether that directory validates.
+    valid: bool,
+    /// For repair and retry, whether the digest name still holds the seeded occupant's inode.
+    same_occupant: Option<bool>,
+}
+
+/// The residue a hook error (`killed == false`) or a process kill at `cut` leaves. A hook error removes this attempt's temp; a crash abandons it. A repair cut after the exchange leaves the repaired generation under the digest name and the corrupt occupant in the temp a crash abandons.
+fn residue(workload: Workload, cut: &StageEvent, killed: bool) -> Expected {
+    let exchanged = syncs_generations(cut);
+    match workload {
+        Workload::Vector | Workload::Nested => {
+            let published = !precedes_rename(cut);
+            Expected {
+                temps: usize::from(killed && !published),
+                present: published,
+                valid: published,
+                same_occupant: None,
+            }
+        }
+        Workload::Retry => Expected {
+            temps: usize::from(killed && !exchanged),
+            present: true,
+            valid: true,
+            same_occupant: Some(true),
+        },
+        Workload::Repair => Expected {
+            temps: usize::from(killed),
+            present: true,
+            valid: exchanged,
+            same_occupant: Some(!exchanged),
+        },
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,7 +162,7 @@ enum Outcome {
     Fault,
 }
 
-type Observer<'a> = &'a mut dyn FnMut(StageEvent) -> Result<(), Errno>;
+type Observer<'a> = &'a mut StageObserver<'a>;
 
 fn nested_meta() -> StageMeta {
     StageMeta {
@@ -133,6 +192,23 @@ fn vector_build(fixture: &Fixture) -> BuiltVectors {
     build(&fixture.expected(), &export(1, 10), &fixture.work_dir()).unwrap()
 }
 
+/// Stages the occupant a repair or retry workload restages over, corrupting it for repair, and returns its directory inode.
+fn seed(fixture: &Fixture, workload: Workload) -> Option<u64> {
+    if !matches!(workload, Workload::Repair | Workload::Retry) {
+        return None;
+    }
+    let digest = stage(&vector_build(fixture), &fixture.staging()).unwrap();
+    if workload == Workload::Repair {
+        fixture.corrupt(&digest, CODES_FILE);
+        assert!(fixture.store.validate(&digest).is_err());
+    }
+    Some(occupant_inode(&fixture.generation_dir(&digest)))
+}
+
+fn occupant_inode(dir: &Path) -> u64 {
+    fs::metadata(dir).unwrap().ino()
+}
+
 /// Stages `workload` into `staging`'s store under `observer` and returns the digest it stages to with the outcome.
 fn run(
     fixture: &Fixture,
@@ -141,7 +217,7 @@ fn run(
     observer: Observer<'_>,
 ) -> (String, Outcome) {
     match workload {
-        Workload::Vector => {
+        Workload::Vector | Workload::Repair | Workload::Retry => {
             let built = vector_build(fixture);
             let outcome = match stage_observed(&built, staging, observer) {
                 Ok(digest) => Outcome::Staged(digest),
@@ -207,14 +283,14 @@ fn is_temp(name: &str) -> bool {
     name.starts_with("tmp-")
 }
 
-/// Checks the store at `root` after a cut at `cut` left `temps` staging temps: two reopenings agree, nothing is selected, an unpublished digest is refused by validation, verification, and both selectors, `prune` reclaims all residue, and a complete restaging then succeeds and selects.
+/// Checks the store at `root` after a cut at `cut` left the `expected` residue: two reopenings agree, nothing is selected, a repair or retry occupant is replaced only by the exchange, a digest that does not validate is refused by verification and both selectors, `prune` reclaims all residue, and a complete restaging then succeeds and selects.
 fn assert_cut_recovers(
     fixture: &Fixture,
     root: &Path,
-    workload: Workload,
-    cut: &StageEvent,
+    (workload, cut): (Workload, &StageEvent),
     digest: &str,
-    temps: usize,
+    expected: &Expected,
+    occupant: Option<u64>,
 ) {
     let first = reopen(root, digest);
     assert_eq!(first, reopen(root, digest), "{cut:?}: reopening is stable");
@@ -225,12 +301,14 @@ fn assert_cut_recovers(
             "{cut:?}: nothing selected"
         );
     }
-    let published = !precedes_rename(cut);
-    let expected_entries: BTreeSet<String> =
-        published.then(|| digest.to_owned()).into_iter().collect();
+    let expected_entries: BTreeSet<String> = expected
+        .present
+        .then(|| digest.to_owned())
+        .into_iter()
+        .collect();
     assert_eq!(
         first.entries.iter().filter(|name| is_temp(name)).count(),
-        temps,
+        expected.temps,
         "{cut:?}: {:?}",
         first.entries
     );
@@ -244,17 +322,23 @@ fn assert_cut_recovers(
         expected_entries,
         "{cut:?}"
     );
-    assert_eq!(first.valid, published, "{cut:?}");
-
+    assert_eq!(first.valid, expected.valid, "{cut:?}");
     let store = GenerationStore::open(Some(root)).unwrap();
+    let dir = store.root().join(GENERATIONS_DIR_NAME).join(digest);
+    assert_eq!(
+        occupant.map(|inode| inode == occupant_inode(&dir)),
+        expected.same_occupant,
+        "{cut:?}: the occupant is replaced only by the exchange"
+    );
+
     let tx = LifecycleTransactionLock::acquire_exclusive(Some(root)).unwrap();
     let verified = verify(&store, digest, &fixture.expected(), u64::MAX).is_ok();
     assert_eq!(
         verified,
-        published && workload == Workload::Vector,
+        expected.valid && workload != Workload::Nested,
         "{cut:?}"
     );
-    if !published {
+    if !expected.valid {
         assert!(
             store.select_search(digest, &tx, &mut |_| Ok(())).is_err(),
             "{cut:?}"
@@ -265,10 +349,10 @@ fn assert_cut_recovers(
         );
     }
     let report = store.prune(&BTreeSet::new()).unwrap();
-    assert_eq!(report.removed_temps, temps, "{cut:?}");
+    assert_eq!(report.removed_temps, expected.temps, "{cut:?}");
     assert_eq!(
         report.removed_generations,
-        usize::from(published),
+        usize::from(expected.present),
         "{cut:?}"
     );
     assert!(reopen(root, digest).entries.is_empty(), "{cut:?}");
@@ -286,7 +370,7 @@ fn assert_cut_recovers(
     };
     let (_, outcome) = run(fixture, &staging, workload, &mut |_| Ok(()));
     assert_eq!(outcome, Outcome::Staged(digest.to_owned()), "{cut:?}");
-    if workload == Workload::Vector {
+    if workload != Workload::Nested {
         assert!(verify(&store, digest, &fixture.expected(), u64::MAX).is_ok());
     }
     store.select_search(digest, &tx, &mut |_| Ok(())).unwrap();
@@ -302,6 +386,7 @@ fn assert_cut_recovers(
 /// Cuts `cut` with `errno` in-process and checks the reported class, the cleanup, and recovery.
 fn hook_cut(workload: Workload, cut: &StageEvent, errno: Errno) {
     let mut fixture = Fixture::new();
+    let occupant = seed(&fixture, workload);
     let mut fired = false;
     let (digest, outcome) = run(&fixture, &fixture.staging(), workload, &mut |event| {
         if event == *cut {
@@ -320,30 +405,36 @@ fn hook_cut(workload: Workload, cut: &StageEvent, errno: Errno) {
     assert_eq!(outcome, expected, "{cut:?} {errno:?}");
     fixture.release_transaction();
     let root = fixture.root.path().to_owned();
-    // A hook error before the rename removes this attempt's temp, so only a crash leaves one.
-    assert_cut_recovers(&fixture, &root, workload, cut, &digest, 0);
+    let expected = residue(workload, cut, false);
+    assert_cut_recovers(
+        &fixture,
+        &root,
+        (workload, cut),
+        &digest,
+        &expected,
+        occupant,
+    );
 }
 
 #[test]
 fn the_cell_table_is_the_complete_event_trace() {
-    let fixture = Fixture::new();
-    let mut vector = Vec::new();
-    let (digest, outcome) = run(
-        &fixture,
-        &fixture.staging(),
-        Workload::Vector,
-        &mut |event| {
-            vector.push(event);
+    for workload in [Workload::Vector, Workload::Repair, Workload::Retry] {
+        let fixture = Fixture::new();
+        seed(&fixture, workload);
+        let mut trace = Vec::new();
+        let (digest, outcome) = run(&fixture, &fixture.staging(), workload, &mut |event| {
+            trace.push(event);
             Ok(())
-        },
-    );
-    assert_eq!(outcome, Outcome::Staged(digest));
-    assert_eq!(
-        vector,
-        vector_cells(),
-        "every vector event is a declared cell, in order"
-    );
+        });
+        assert_eq!(outcome, Outcome::Staged(digest), "{workload:?}");
+        assert_eq!(
+            trace,
+            vector_cells(workload),
+            "every {workload:?} event is a declared cell, in order"
+        );
+    }
 
+    let fixture = Fixture::new();
     let mut nested = Vec::new();
     let (digest, outcome) = run(
         &fixture,
@@ -372,6 +463,7 @@ fn the_cell_table_is_the_complete_event_trace() {
     assert_eq!(dir_events, declared);
 }
 
+/// The `After*` sync cells double as the delayed write and sync failure cells: the observer reports `EIO` once the step returned.
 #[test]
 fn a_hook_error_at_every_stage_event_selects_nothing_and_prune_reclaims_the_residue() {
     for (workload, cut) in cells() {
@@ -389,46 +481,21 @@ fn hook_simulated_storage_exhaustion_at_every_stage_event_reports_insufficient_s
     }
 }
 
-/// Hook-simulated: `EIO` at each `After*` sync event models a delayed write or sync failure reported once the step returned.
-#[test]
-fn hook_simulated_delayed_sync_failure_after_every_sync_is_a_payload_fault() {
-    let delayed: Vec<_> = cells()
-        .into_iter()
-        .filter(|(_, event)| {
-            matches!(
-                event,
-                StageEvent::AfterFileSyncs(_)
-                    | StageEvent::AfterDirectorySync(_)
-                    | StageEvent::AfterRootSync
-                    | StageEvent::AfterGenerationsSync
-            )
-        })
-        .collect();
-    assert_eq!(
-        delayed.len(),
-        4,
-        "the file group, nested, root, generations"
-    );
-    for (workload, cut) in delayed {
-        hook_cut(workload, &cut, Errno::IO);
-    }
-}
-
 const KILL_CELL: &str = "EIDNARA_STAGE_KILL_CELL";
 const KILL_WITNESS: &str = "EIDNARA_STAGE_KILL_WITNESS";
-/// The signal `std::process::abort` raises.
-const SIGABRT: i32 = 6;
-
-/// Writes the witness file, syncs it, and aborts, so the parent knows the child reached the cut before it died.
-fn witness_and_abort(witness: &Path, root: &Path, cut: &StageEvent) -> ! {
+/// Writes the witness file naming the store, the cell, and any seeded occupant's inode, syncs it, and kills the process with `SIGKILL`, so the parent knows the child reached the cut before it died and no core dump is written.
+fn witness_and_kill(witness: &Path, root: &Path, cut: &StageEvent, occupant: Option<u64>) -> ! {
     let mut file = fs::File::create(witness).unwrap();
     writeln!(file, "{}", root.display()).unwrap();
-    write!(file, "{cut:?}").unwrap();
+    writeln!(file, "{cut:?}").unwrap();
+    write!(file, "{occupant:?}").unwrap();
     file.sync_all().unwrap();
-    std::process::abort();
+    rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL)
+        .unwrap();
+    unreachable!("SIGKILL ends the process");
 }
 
-/// Each child stages one workload and aborts at its cell after syncing a witness; the parent reads the witness, reopens the abandoned store twice, and checks refusal, reclamation, and a complete control.
+/// Each child seeds any occupant, stages one workload, and kills itself at its cell after syncing a witness; the parent reads the witness, reopens the abandoned store twice, and checks refusal, reclamation, and a complete control.
 #[test]
 fn a_process_killed_at_every_stage_event_leaves_residue_the_next_process_refuses_and_reclaims() {
     if let Some(index) = std::env::var_os(KILL_CELL) {
@@ -437,9 +504,10 @@ fn a_process_killed_at_every_stage_event_leaves_residue_the_next_process_refuses
         let witness = PathBuf::from(std::env::var_os(KILL_WITNESS).unwrap());
         let fixture = Fixture::new();
         let root = fixture.root.path().to_owned();
+        let occupant = seed(&fixture, workload);
         run(&fixture, &fixture.staging(), workload, &mut |event| {
             if event == cut {
-                witness_and_abort(&witness, &root, &cut);
+                witness_and_kill(&witness, &root, &cut, occupant);
             }
             Ok(())
         });
@@ -463,22 +531,41 @@ fn a_process_killed_at_every_stage_event_leaves_residue_the_next_process_refuses
             .unwrap();
         assert_eq!(
             output.status.signal(),
-            Some(SIGABRT),
-            "declared cell {cut:?} did not abort the child: {}\n{}",
+            Some(libc::SIGKILL),
+            "declared cell {cut:?} did not kill the child: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         let witnessed = fs::read_to_string(&witness).unwrap();
-        let (root, event) = witnessed.split_once('\n').unwrap();
+        let [root, event, occupant] = witnessed.lines().collect::<Vec<_>>()[..] else {
+            panic!("malformed witness {witnessed:?}");
+        };
         assert_eq!(event, format!("{cut:?}"), "the witness names the cell");
         let root = PathBuf::from(root);
-        // A crash before the rename abandons the staging temp; prune reclaims it.
-        let temps = usize::from(precedes_rename(&cut));
-        let digest = match workload {
-            Workload::Vector => vector_build(&parent).digest(),
-            Workload::Nested => nested_digest(),
+        let occupant = match occupant {
+            "None" => None,
+            inode => Some(
+                inode
+                    .strip_prefix("Some(")
+                    .and_then(|inode| inode.strip_suffix(')'))
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            ),
         };
-        assert_cut_recovers(&parent, &root, workload, &cut, &digest, temps);
+        let digest = match workload {
+            Workload::Nested => nested_digest(),
+            Workload::Vector | Workload::Repair | Workload::Retry => vector_build(&parent).digest(),
+        };
+        let expected = residue(workload, &cut, true);
+        assert_cut_recovers(
+            &parent,
+            &root,
+            (workload, &cut),
+            &digest,
+            &expected,
+            occupant,
+        );
     }
 }
 

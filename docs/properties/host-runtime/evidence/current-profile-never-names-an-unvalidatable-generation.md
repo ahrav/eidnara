@@ -7,7 +7,7 @@ an in-process `u64` lifecycle id. Nothing in this record involves async code.
 
 ## Discovery trigger
 
-Reading `stage_and_promote` (`crates/host-runtime/src/generation.rs:1098-1114`) top to
+Reading `stage_and_promote` (`crates/host-runtime/src/generation.rs:1091-1107`) top to
 bottom against its own doc comment (`:714-723`), which promises `current` is
 unchanged on every failure. The promise is per-error-class, and the sequence has
 two renames and four distinct sync points, so "unchanged" has to be checked

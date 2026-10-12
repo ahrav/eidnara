@@ -21,7 +21,7 @@ Both constants, quoted at HEAD:
 const MAX_EVIDENCE_BYTES: usize = 65_536;
 ```
 
-`crates/host-runtime/src/generation.rs:130-131`
+`crates/host-runtime/src/generation.rs:137-138`
 
 ```rust
 /// Manifest and evidence read cap, matching the lifecycle evidence cap.
@@ -29,7 +29,7 @@ const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 ```
 
 The claim is the words "matching the lifecycle evidence cap" at
-`generation.rs:130`. The values are 65,536 and 1,048,576. The ratio is exactly 16:
+`generation.rs:137`. The values are 65,536 and 1,048,576. The ratio is exactly 16:
 1,048,576 / 65,536 = 16. The comment is false as written.
 
 The more consequential half is what each cap gates, because the two are not
@@ -109,7 +109,7 @@ path rather than only in `prune`. No test exists.
 ### Q: None recorded in the catalog. Verified here instead: what does each cap actually gate, and is the stated consequence the real one?
 
 - Sources examined: `lifecycle.rs:64-65`, `:257-284`, `:467-491`, `:803-830`;
-  `generation.rs:130-131`, `:590`, `:637`, `:856-858`, `:961-968`;
+  `generation.rs:137-138`, `:883-887`, `:1007-1011`, `:1250-1253`, `:1505-1517`;
   `crates/host-runtime/src/instance.rs:852-865` for `read_all_fd`'s over-cap error;
   `eidnara-host.rs:344-350` for the error-to-reason mapping; every workspace
   occurrence of both identifiers.
