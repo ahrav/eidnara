@@ -22,8 +22,8 @@ pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
 /// The bound is linear in what the codecs copy: every native byte at most
 /// [`DERIVED_CK_BYTES_PER_NATIVE_BYTE`] times (a reasoning signature is copied out of its
 /// metadata, which is copied whole), a fixed cost per message and per block-producing element
-/// (an OpenCode part or attachment, a Pi content block), and each message id once per copy the
-/// decoders keep of it.
+/// (an OpenCode part or attachment, a Pi content block), and each message and tool-call id once
+/// per copy the decoders keep of it.
 pub fn derived_ck_charge(native: &[std::sync::Arc<serde_json::Value>]) -> usize {
     native
         .iter()
@@ -44,7 +44,8 @@ pub const DERIVED_CK_BYTES_PER_NATIVE_BYTE: usize = 2;
 pub const DERIVED_CK_BYTES_PER_MESSAGE: usize = 2048;
 /// The fixed derived bytes of one block-producing element: its block, opaque source, and ids.
 pub const DERIVED_CK_BYTES_PER_ELEMENT: usize = 3072;
-/// Copies the decoders keep of a message id: the mid, the harness id, and the decode's keys.
+/// Copies the decoders keep of an id: a message's mid, harness id, and decode keys, or a tool
+/// call's call, result, and native ids.
 pub const DERIVED_CK_ID_COPIES: usize = 5;
 
 /// OpenCode parts and their tool attachments, and Pi content blocks, of one native message.
@@ -70,14 +71,33 @@ fn element_count(message: &serde_json::Value) -> usize {
             .and_then(|message| message.get("content")))
 }
 
-/// The bytes of a message's ids: its own `id` and its `info.id`.
+/// The bytes of a message's ids, which the decoders copy several times: the message's own `id`
+/// and `info.id`, a Pi tool result's `toolCallId`, and every `id`, `callID`, `callId`, and
+/// `toolCallId` of its OpenCode parts and Pi content blocks.
 fn id_bytes(message: &serde_json::Value) -> usize {
-    let len = |value: Option<&serde_json::Value>| {
-        value
-            .and_then(serde_json::Value::as_str)
-            .map_or(0, str::len)
+    use serde_json::Value;
+    let len = |value: Option<&Value>| value.and_then(Value::as_str).map_or(0, str::len);
+    let element_ids = |element: &Value| -> usize {
+        ["id", "callID", "callId", "toolCallId"]
+            .into_iter()
+            .map(|key| len(element.get(key)))
+            .sum()
     };
-    len(message.get("id")) + len(message.get("info").and_then(|info| info.get("id")))
+    let pi_message = message.get("message");
+    let elements: usize = [
+        message.get("parts"),
+        pi_message.and_then(|message| message.get("content")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_array)
+    .flatten()
+    .map(element_ids)
+    .sum();
+    len(message.get("id"))
+        + len(message.get("info").and_then(|info| info.get("id")))
+        + len(pi_message.and_then(|message| message.get("toolCallId")))
+        + elements
 }
 
 #[cfg(test)]

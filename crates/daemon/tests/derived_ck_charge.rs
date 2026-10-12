@@ -124,6 +124,10 @@ fn opencode_windows() -> Vec<(&'static str, Vec<Value>)> {
                 .map(|_| json!({ "role": "user", "parts": [{ "type": "text", "text": "\u{1}".repeat(1 << 20) }] }))
                 .collect(),
         ),
+        ("long_call_ids", vec![json!({ "info": { "id": "m" }, "parts": [{
+            "type": "tool", "callID": "c".repeat(1 << 20), "tool": "bash",
+            "state": { "status": "completed", "input": {}, "output": "ok" }
+        }] })]),
         ("scalar_parts", vec![json!({ "info": { "id": "m" }, "parts": vec![json!(0); 50_000] })]),
         ("bare_tools", vec![json!({ "info": { "id": "m" }, "parts": vec![json!({ "type": "tool" }); 50_000] })]),
         ("bare_tools_completed", vec![json!({ "parts": vec![json!({ "type": "tool", "state": { "status": "error" } }); 50_000] })]),
@@ -153,6 +157,15 @@ fn pi_windows() -> Vec<(&'static str, Vec<Value>)> {
         ("scalar_blocks", vec![pi(1, json!({ "role": "user", "content": vec![json!(0); 50_000], "timestamp": 1 }))]),
         ("bare_calls", vec![pi(1, json!({ "role": "assistant", "content": vec![json!({ "type": "toolCall" }); 50_000], "timestamp": 1 }))]),
         ("long_ids", (0..8).map(|i| pi(0, json!({ "role": "user", "content": "x", "timestamp": 1 })).as_object().cloned().map(|mut row| { row.insert("id".into(), json!(format!("{i}{}", "a".repeat(1 << 20)))); Value::Object(row) }).unwrap()).collect()),
+        ("long_tool_ids", vec![pi(1, json!({
+            "role": "assistant",
+            "content": [{ "type": "toolCall", "id": long, "name": "bash", "arguments": {} }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": 1
+        }))]),
+        ("long_tool_result_ids", vec![pi(1, json!({
+            "role": "toolResult", "toolCallId": format!("x|{long}"), "toolName": "bash",
+            "content": [{ "type": "text", "text": "ok" }], "isError": false, "timestamp": 1
+        }))]),
         ("bash_output", vec![pi(1, json!({ "role": "bashExecution", "command": "ls", "output": long, "exitCode": 2, "timestamp": 1 }))]),
         ("bash_command_and_path", vec![pi(1, json!({
             "role": "bashExecution", "command": long, "output": long, "truncated": true,
