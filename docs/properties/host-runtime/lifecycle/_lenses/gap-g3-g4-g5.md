@@ -176,15 +176,16 @@ that a happy-path integration test covers by accident.
 
 ### O7. The digest is the directory name, and validation re-derives it twice
 
-`generation.rs:172-174` defines `canonical_bytes` as `serde_json::to_vec(self)`,
+`generation.rs:255-257` defines `canonical_bytes` as `serde_json::to_vec(self)`,
 so the byte order is exactly the struct declaration order at
-`:153-168`: `schema`, `target`, `release_contract_sha256`,
+`:229-239`: `schema`, `target`, `release_contract_sha256`,
 `inputs_lock_sha256`, then `source_payload_manifest_sha256` when present, then
 `files`. Within `files`, each entry serializes in `ManifestFile` declaration
-order at `:141-144`: `path`, `mode`, `size`, `sha256`. `:176-178` names the
+order at `:213-216`: `path`, `mode`, `size`, `sha256`. `:259-261` names the
 generation by the SHA-256 of those bytes.
 
-`validate_in_dir` enforces the binding twice (`generation.rs:636-648`):
+`read_manifest_in_dir`, called from `validate_in_dir`, enforces the binding twice
+(`generation.rs:1021-1027`):
 
 ```
 if hex(&sha2::Sha256::digest(&bytes)) != digest { ... }
@@ -192,7 +193,7 @@ if manifest.canonical_bytes() != bytes { ... }
 ```
 
 The second check is the one that makes declaration order a compatibility
-contract rather than a cosmetic detail. Its own comment (`:640-647`) explains
+contract rather than a cosmetic detail. Its own comment (`:1024`) explains
 that without it a manifest stored under the hash of non-canonical bytes would
 give one logical manifest two identities.
 
@@ -201,16 +202,17 @@ give one logical manifest two identities.
 The prompt's framing was that reordering "would silently change every retained
 generation's digest". Verified and corrected: the digest change is not silent.
 Reordering a field changes `canonical_bytes()` for the decoded manifest while the
-bytes on disk keep the old order, so `:645` fails with
+bytes on disk keep the old order, so `:1025-1027` fails with
 `invalid("manifest is not canonically encoded")` for every retained generation
 whose manifest contains the moved field. The result is a refusal, not a
 mis-selection.
 
 That is the same class of break the `source_payload_manifest_sha256` doc comment
-at `:157-165` was written to avoid: "requiring it would decode every retained
-predecessor as corrupt and fail the first no-`--payload-dir` start after an
-upgrade with `native_payload_invalid` -- refusing a payload that is intact."
-Reordering reaches the same outcome by a different route.
+at `:233-236` was written to avoid: "`#[serde(default)]` preserves decoding of
+schema-1 manifests that omit this field." The golden test's own comment at
+`:2047` states the consequence: rejecting a retained schema-1 manifest would
+report `native_payload_invalid` on the first no-`--payload-dir` start after an
+upgrade. Reordering reaches the same outcome by a different route.
 
 Both consequences are real and they are different properties:
 
@@ -221,14 +223,14 @@ Both consequences are real and they are different properties:
 
 ### O9. Existing protection is real but blind in three specific ways
 
-`generation.rs:1395-1412`
+`generation.rs:2044-2059`
 (`a_generation_staged_before_the_source_digest_field_still_decodes`) asserts
 
 ```
 assert_eq!(decoded.canonical_bytes(), predecessor);
 ```
 
-against the literal fixture at `:1401`:
+against the literal fixture at `:2048`:
 
 ```
 {"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}
@@ -239,12 +241,12 @@ the four leading scalar fields and `files`. It is the only such vector in the
 crate. Its blind spots:
 
 1. **The optional field's position is unpinned.** The fixture omits
-   `source_payload_manifest_sha256`, and `:166` marks it
+   `source_payload_manifest_sha256`, and `:237` marks it
    `skip_serializing_if = "Option::is_none"`, so moving it anywhere in the struct
    leaves this test green while changing the bytes of every generation that has
    it.
 2. **`ManifestFile`'s field order is unpinned.** `files` is `[]`, so permuting
-   `path`, `mode`, `size`, `sha256` at `:141-144` leaves this test green while
+   `path`, `mode`, `size`, `sha256` at `:213-216` leaves this test green while
    changing the bytes of every generation with at least one file, which in
    practice is every real one.
 3. **No digest is asserted.** The test compares bytes only. No test anywhere
@@ -517,7 +519,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - one byte-exact golden vector exists
-(`generation.rs:1395-1412`) but its fixture omits the optional field and carries
+(`generation.rs:2044-2059`) but its fixture omits the optional field and carries
 an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
@@ -532,11 +534,11 @@ GOLDEN_DIGEST`, and assert the fixture round-trips by decoding `GOLDEN_BYTES` an
 re-encoding. `always` because the encoding is evaluated on every stage and every
 validate; there is no configuration in which it is unreached.
 Fault/timing angle: none. This is a static encoding contract. The mechanism is
-that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:172-174`),
-so the byte order is literally the declaration order at `:153-168` for the outer
-struct and `:141-144` for each file entry, and `digest` is the SHA-256 of exactly
-those bytes (`:176-178`). The optional field's `skip_serializing_if =
-"Option::is_none"` at `:166` is what makes the existing vector blind to its
+that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:255-257`),
+so the byte order is literally the declaration order at `:229-239` for the outer
+struct and `:213-216` for each file entry, and `digest` is the SHA-256 of exactly
+those bytes (`:259-261`). The optional field's `skip_serializing_if =
+"Option::is_none"` at `:237` is what makes the existing vector blind to its
 position: with the field absent, moving it changes nothing about the fixture's
 bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
@@ -545,9 +547,9 @@ pass.
 Confidence: high - [evidence](../../evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
 fixture were read at HEAD, and the three blind spots were each confirmed by
 reasoning from the fixture's literal contents.
-Existing check: `generation.rs:1395-1412`
+Existing check: `generation.rs:2044-2059`
 `a_generation_staged_before_the_source_digest_field_still_decodes` asserts
-`decoded.canonical_bytes() == predecessor` against the literal at `:1401`. It is
+`decoded.canonical_bytes() == predecessor` against the literal at `:2048`. It is
 the only byte-exact manifest vector in the crate and it does pin the relative
 order of the four leading scalars and `files`, and it does catch the addition of
 a required field, because `deny_unknown_fields` plus a missing field fails the
@@ -577,8 +579,8 @@ that leaves the existing golden test green must be detectable by some check.
 does not change when a field moves, so there is no version in which the
 obligation lapses.
 Fault/timing angle: none, but the failure shape needed correcting. The break is
-**fail-closed, not silent**. `validate_in_dir` enforces the binding twice
-(`generation.rs:636-648`): first `hex(sha256(bytes)) != digest`, then
+**fail-closed, not silent**. `read_manifest_in_dir` enforces the binding twice
+(`generation.rs:1021-1027`): first `hex(sha256(bytes)) != digest`, then
 `manifest.canonical_bytes() != bytes`. Under a reordered struct the on-disk bytes
 still hash to the directory name, so the first check passes, and the re-encode of
 the decoded manifest differs, so the second fails with
@@ -598,7 +600,7 @@ fail-closed conclusion was derived from them rather than assumed; the prompt's
 "silently change every retained generation's digest" is corrected in the evidence
 file.
 Existing check: partial and narrow. The predecessor fixture at
-`generation.rs:1395-1412` is the only cross-version manifest test, and it covers
+`generation.rs:2044-2059` is the only cross-version manifest test, and it covers
 one specific evolution, a field added at the end and omitted when absent. Nothing
 covers a field that moves.
 Impact: the first start after an upgrade reports `native_payload_invalid` for

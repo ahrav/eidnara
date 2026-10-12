@@ -57,9 +57,15 @@ So a non-atomic or partially-applied exchange means `remove_tree` deletes the wr
 directory. `promote_temp`'s contract at `:1285-1290` depends on the swap being
 all-or-nothing.
 
-**macOS executes no test in this scope.** CI's matrix job is
+**macOS executes no test in this scope.** At HEAD this holds trivially:
+`.github/workflows/ci.yml` contains fifteen `runs-on: ubuntu-latest` jobs and no
+`macos` token, so no CI executor for the macOS arm exists in this tree. The
+catalog entry attributes the removal of the macOS job to PR #131 (merge
+`5d638e3e8`) in the source repository. The analysis that follows describes that
+source-repository job as it then existed, and its `ci.yml` anchors are
+source-catalog coordinates. CI's matrix job was
 `the source repository `ci.yml` workflow:126-184`, `os: [ubuntu-latest, macos-latest]` at `:132`.
-The host-runtime steps that run on macOS are exactly four:
+The host-runtime steps that ran on macOS were exactly four:
 
 | Line | Step | What it runs |
 | --- | --- | --- |
@@ -133,9 +139,10 @@ atomically and the orphan temp being removed.
 
 What is missing is executing it on macOS. Concretely:
 
-1. Add the generation and lifecycle test selection to the macOS branch of
-   `the source repository `ci.yml` workflow:175-181`, or add a macOS entry that runs the
-   `generation::tests` filter of `--lib`. The binary already compiles there.
+1. Add a macOS job to `.github/workflows/ci.yml` that builds `host-runtime` and
+   runs the `generation::tests` filter of `--lib`; at HEAD the workflow has no
+   macOS job at all, so this is a new job rather than a selection change to the
+   source repository's former macOS branch (`ci.yml` workflow:175-181`).
 2. For the stub platforms, a compile-time assertion is the only available check:
    call `exchange_dirs` under `#[cfg(not(any(target_os = "linux", target_os =
    "macos")))]` and assert it returns `Err`. That branch has no CI target in this
@@ -160,16 +167,17 @@ portfolio evaluation asked a human to separate.
   `:1900`, `:1922`, `:1961` are the only `target_os` gates in either file; the
   production gates moved to `store_fs.rs:58`, `:112`, and `:117`).
 - Findings: the evidence points both ways and cannot be resolved from the code.
-  For support: macOS gets a real syscall mapping rather than the stub, host-runtime is
-  built on macOS in CI, and `lifecycle.rs`'s Linux-only gates are all inside test
-  code rather than production paths, so the production lifecycle path compiles and
-  is intended to work on macOS. Against support: the macOS job runs no lifecycle or
-  generation test, and its own comment frames macOS as proving omission rather than
-  parity, which is a statement about the shared-memory provider rather than about
-  the store.
+  For support: macOS gets a real syscall mapping rather than the stub, host-runtime
+  was built on macOS in the source repository's CI, and `lifecycle.rs`'s Linux-only
+  gates are all inside test code rather than production paths, so the production
+  lifecycle path compiles and is intended to work on macOS. Against support: that
+  macOS job ran no lifecycle or generation test, its own comment framed macOS as
+  proving omission rather than parity, which is a statement about the shared-memory
+  provider rather than about the store, and at HEAD `.github/workflows/ci.yml` has
+  no macOS job, so nothing builds or tests host-runtime on macOS in this tree.
 - Missing evidence: no product document, target list, or release manifest was
   examined in this pass, and none is cited in either source file.
 - Conclusion: needs human input. If macOS is supported, this is a real coverage gap
-  and the fix is a CI selection change. If it is not, the honest shape is to move
+  and the fix is a new macOS CI job. If it is not, the honest shape is to move
   macOS to the fail-closed stub at `store_fs.rs:117-120`, which would turn a silent
   divergence into an explicit refusal.
