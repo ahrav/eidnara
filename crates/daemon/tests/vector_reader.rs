@@ -872,3 +872,277 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
         daemon::vector_admission::Census::default()
     );
 }
+
+/// Acquires under the reader's own shared protection while `observe` borrows the fixture.
+fn acquire_observed(
+    fixture: &Fixture,
+    observe: &mut dyn FnMut(AcquireEvent),
+) -> Result<Arc<PinnedVectors>, AcquireRefusal> {
+    acquire(
+        Some(fixture.root.path()),
+        &fixture.expected(),
+        bounds(),
+        &fixture.ledger,
+        &fixture.admission,
+        observe,
+    )
+}
+
+#[test]
+fn a_member_corrupted_while_pinned_for_verification_hands_out_no_view_and_recovery_takes_the_older_composition()
+ {
+    // The selected composition is the only one: the corrupted delta leaves nothing to hand out.
+    let mut alone = Fixture::new();
+    let base = alone.layer_from(&export(&corpus(), &[], 10));
+    let delta = alone.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    let composition = alone
+        .compose(1, &base, std::slice::from_ref(&delta))
+        .unwrap();
+    let digest = alone.publish(&composition).unwrap();
+    let lock = transaction_lock(&alone);
+    alone.release_transaction();
+    let mut verifications = 0;
+    let refusal = acquire_observed(&alone, &mut |event| {
+        if event == AcquireEvent::BeforeVerification {
+            verifications += 1;
+            assert!(
+                !try_exclusive(&alone.generation_dir(&delta.digest)),
+                "the delta is pinned when it is corrupted"
+            );
+            alone.corrupt(&delta.digest, ROWS_FILE);
+        }
+    })
+    .unwrap_err();
+    assert_eq!(
+        refusal,
+        AcquireRefusal::Unavailable(
+            daemon::vector_composition::Unavailable::NoCompatibleTarget { examined: 1 }
+        )
+    );
+    assert_eq!(verifications, 1);
+    assert!(try_exclusive(&lock));
+    for member in composition.members().iter().chain([&digest]) {
+        assert!(
+            try_exclusive(&alone.generation_dir(member)),
+            "{member} is not left pinned by the refused acquisition"
+        );
+    }
+    assert_eq!(
+        alone.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
+    alone.reacquire_transaction();
+
+    // An older composition over the same base is the documented recovery fallback; the corrupted delta and its record stay unpinned.
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let older = fixture.compose(1, &base, &[]).unwrap();
+    let older_digest = fixture.publish(&older).unwrap();
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    let newer = fixture
+        .compose(2, &base, std::slice::from_ref(&delta))
+        .unwrap();
+    let newer_digest = fixture.publish(&newer).unwrap();
+    fixture.release_transaction();
+    let mut verifications = 0;
+    let view = acquire_observed(&fixture, &mut |event| {
+        if event == AcquireEvent::BeforeVerification {
+            verifications += 1;
+            if verifications == 1 {
+                fixture.corrupt(&delta.digest, ROWS_FILE);
+            }
+        }
+    })
+    .unwrap();
+    fixture.reacquire_transaction();
+    assert_eq!(verifications, 2);
+    assert_eq!(view.digest(), older_digest);
+    assert_eq!(view.members(), vec![base.digest.clone()]);
+    for released in [&delta.digest, &newer_digest] {
+        assert!(
+            try_exclusive(&fixture.generation_dir(released)),
+            "{released} is released when its candidate fails verification"
+        );
+    }
+    assert!(!try_exclusive(&fixture.generation_dir(&base.digest)));
+    let census = fixture.ledger.census();
+    assert_eq!(
+        census.resident,
+        resident_bytes(&fixture, std::slice::from_ref(&base.digest)),
+        "only the fallback's tables stay reserved"
+    );
+    assert_eq!(
+        census.pinned,
+        manifest_bytes(&fixture, &[older_digest.clone(), base.digest.clone()])
+    );
+    drop(view);
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
+    for member in [&base.digest, &delta.digest, &older_digest, &newer_digest] {
+        assert!(try_exclusive(&fixture.generation_dir(member)));
+    }
+}
+
+/// Long enough for any step of these tests on a loaded host; a wait past it fails the test instead of hanging it.
+const STEP: Duration = Duration::from_secs(60);
+
+#[test]
+fn a_walk_cancelled_mid_flight_ends_on_its_own_set_while_a_publish_prune_and_new_reader_overlap_it()
+{
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let corpus = corpus();
+    let old_base = fixture.layer_from(&export(&corpus, &[], 10));
+    let old = fixture.compose(1, &old_base, &[]).unwrap();
+    let old_digest = fixture.publish(&old).unwrap();
+    let old_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+
+    let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = EvalBudget::new(None, Arc::clone(&interrupt));
+    let (entered, entering) = mpsc::channel::<()>();
+    let (release, gate) = mpsc::channel::<()>();
+    let (finished, finishing) = mpsc::channel();
+    // The walk holds the projection's only connection while it waits at the gate, so every other projection read waits for the walk to end.
+    let worker = {
+        let view = Arc::clone(&old_view);
+        let store = Arc::clone(&projection.store);
+        let kernel = Arc::clone(&projection.kernel);
+        let project = projection.project.clone();
+        let generation = fixture.generation.clone();
+        std::thread::spawn(move || {
+            let layers = view.resolver_layers();
+            let query = axis(0);
+            let request = retrieval::dense::LayeredQuery {
+                generation: &generation,
+                metric: view.layout().metric,
+                unit_norm_tolerance: view.layout().unit_norm_tolerance,
+                query: &query,
+                authority: retrieval::eligibility::Authority {
+                    project: &project,
+                    destination: kernel::ArtifactDestination::Local,
+                },
+                bounds: oracle_bounds(8),
+                layers: &layers,
+                max_entries: NonZeroUsize::new(64).unwrap(),
+            };
+            let mut visited = Vec::new();
+            let ranking = store
+                .with_conn(|conn| {
+                    Ok(retrieval::dense::layered::rank_layers_with_hook_for_test(
+                        conn,
+                        &kernel,
+                        &request,
+                        &budget,
+                        |window| {
+                            if let retrieval::dense::Window::Visited(id) = window {
+                                visited.push(id.to_owned());
+                                // Held on the third row, after two rows of the old set are scored.
+                                if visited.len() == 3 {
+                                    entered.send(()).unwrap();
+                                    gate.recv_timeout(STEP)
+                                        .expect("the test releases the held walk");
+                                }
+                            }
+                        },
+                    ))
+                })
+                .unwrap();
+            finished
+                .send((view.digest().to_owned(), ranking, visited))
+                .unwrap();
+        })
+    };
+    entering
+        .recv_timeout(STEP)
+        .expect("the walk reaches its third row");
+    drop(old_view);
+
+    // While the old walk is held: a new composition is published, a prune keeps the old set, and a new reader takes the new set.
+    let (replaced, new_base) = publish_replacement(&fixture, &corpus, 2);
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!((report.removed_generations, report.retained_pinned), (0, 1));
+    // The held walk's handle keeps the ledger's pin on the old record and its base, and the prune's readback stays within it.
+    let reconciliation = fixture.ledger.reconcile(&report);
+    assert_eq!(
+        reconciliation.ledger_pinned,
+        manifest_bytes(&fixture, &[old_digest.clone(), old_base.digest.clone()])
+    );
+    assert!(!reconciliation.unaccounted());
+    for retained in [&old_digest, &old_base.digest] {
+        assert!(fixture.generations().contains(retained));
+        assert!(!try_exclusive(&fixture.generation_dir(retained)));
+    }
+    let new_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(new_view.members(), vec![new_base.digest.clone()]);
+
+    let new_work = Work {
+        view: Arc::clone(&new_view),
+        projection_store: Arc::clone(&projection.store),
+        kernel: Arc::clone(&projection.kernel),
+        generation: fixture.generation.clone(),
+        kernel_incarnation_id: fixture.identity.kernel_incarnation_id.clone(),
+        project: projection.project.clone(),
+        grant: fixture.admission.clone(),
+    };
+    let (ranked, ranking_new) = mpsc::channel();
+    let (contending, contended) = mpsc::channel();
+    let new_reader = std::thread::spawn(move || {
+        let attempt = new_work
+            .projection_store
+            .with_conn_within(Instant::now() + Duration::from_millis(50), |_| Ok(()));
+        contending.send(attempt).unwrap();
+        ranked.send(new_work.run(&EvalBudget::unbounded())).unwrap();
+    });
+    let attempt = contended
+        .recv_timeout(STEP)
+        .expect("the new reader's bounded connection attempt returns");
+    assert!(
+        matches!(attempt, Err(storage::StoreError::Deadline)),
+        "the held walk owns the projection's only connection: {attempt:?}"
+    );
+    interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+    release.send(()).unwrap();
+    let (walked, ranking, visited) = finishing
+        .recv_timeout(STEP)
+        .expect("the cancelled walk returns");
+    let new_ranking = ranking_new
+        .recv_timeout(STEP)
+        .expect("the new reader ranks once the connection is free");
+    new_reader.join().unwrap();
+    worker.join().unwrap();
+
+    assert_eq!(
+        keyed(&new_ranking.unwrap()),
+        reference(&axis(0), &map(&replaced))
+    );
+    let ranking = ranking.unwrap();
+    assert_eq!(walked, old_digest);
+    assert_eq!(
+        ranking.ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(ranking.layers.unvisited > 0, "{:?}", ranking.layers);
+    let old_ids: BTreeSet<String> = map(&corpus).into_iter().map(|(id, _)| id).collect();
+    assert!(visited.iter().all(|id| old_ids.contains(id)));
+    assert_eq!(visited.len(), 3);
+    // A budget that ends mid-walk discards the ranked rows; the account still names the old set's five winners, where the new set has four.
+    assert!(ranking.ranking.ranked.is_empty());
+    assert_eq!(ranking.layers.winners, corpus.len());
+    assert_eq!(replaced.len(), corpus.len() - 1);
+
+    // The worker held the last handle; with it gone, the old record and then its base are reclaimed, and the new reader's set stays.
+    assert!(try_exclusive(&fixture.generation_dir(&old_digest)));
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!((report.removed_generations, report.retained_pinned), (1, 0));
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(report.removed_generations, 1);
+    assert!(!fixture.generations().contains(&old_base.digest));
+    assert!(!try_exclusive(&fixture.generation_dir(&new_base.digest)));
+    drop(new_view);
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
+}
