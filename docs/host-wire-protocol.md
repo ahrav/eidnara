@@ -735,7 +735,7 @@ Producers publish before signaling readiness. Consumers arm by generation, reche
 
 ### 7.8 Context application protocol
 
-The context application protocol rides on the daemon's routed request envelope (`method`, `v: 1`, `session_id`, `project_root`) and adds ten method literals, two closed outcome vocabularies, one capability gate, and one accounting-profile binding. Protocol 2 carried the three `retrieval.*` methods; protocol 3 adds the two `review.*` methods below; protocol 4 adds the five `search.lifecycle.*` methods below. The literals below change only by an edit to this section, which replaces the prior text.
+The context application protocol rides on the daemon's routed request envelope (`method`, `session_id`, `project_root`) and adds ten method literals, two closed outcome vocabularies, one capability gate, and one accounting-profile binding: the three `retrieval.*` methods, the two `review.*` methods, and the five `search.lifecycle.*` methods below. The envelope carries no version field; a strict body that carries a field named `v` answers `invalid_params` as any unknown field does. The literals below change only by an edit to this section, which replaces the prior text.
 
 Methods: `retrieval.prepare`, `retrieval.apply`, `retrieval.confirm`, `review.list`, `review.read`. Every body is parsed strictly, including each `spans` item; an unknown field is an `invalid_params` transport error. The route binding decides scope: a `project_root` the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state before the body is read. Receipts belong to the bound project: a `preparation_id` this incarnation minted under another project is `receipt_unavailable` on this route, and a read-back recorded under one project is `unknown` under another. Until the daemon installs an approved receipt limit set, every `retrieval.*` method answers `{"kind":"terminal","terminal":"disabled"}`.
 
@@ -757,7 +757,7 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 `retrieval.confirm` carries `preparation_id`, `forwarded_identity`, `applied_identity` (string or null; omitting the field is `invalid_params`), and `outcome`. `outcome` is exactly one of `keep`, `append`, `applied_replacement`, `preparation_failure`; `unknown` is a receipt state and is never accepted as an outcome. A confirm whose `applied_identity` equals the recorded forwarded identity completes the receipt; a confirm without an applied identity leaves it `unknown` with the forwarded identity still recorded; a `forwarded_identity` other than the recorded one, an applied identity other than the recorded one, a confirm of a preparation that was never forwarded, or a second acknowledgment with another outcome is `conflict`. A `preparation_id` of this incarnation that this project holds no receipt for is `receipt_unavailable`. For a key of another daemon incarnation the daemon holds no record: a confirm whose `preparation_id` has the minted shape and whose `forwarded_identity` and `applied_identity` are equal 64-character lowercase hex identities completes and is recorded under the bound project; a read-back the project cannot record because every receipt is in flight or unknown is `receipt_unavailable` and records nothing; anything else leaves `unknown`. A later confirm of a recorded read-back is judged like any recorded receipt: the same forwarded identity, applied identity, and outcome answer `complete`, anything else `conflict`. An empty replacement is `applied_replacement`. A daemon receipt alone never yields a complete state: only a confirm carrying the applied identity does.
 
-**Review operations (protocol 3).** `review.list` and `review.read` are local reads of the bound project's completed MemoryReviewer review outcomes and the proposals they select. Neither contacts a model, mutates a receipt, or accepts anything; acceptance is a later protocol. They do not depend on the receipt limit set: a route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state and an unready Kernel its kernel state, as every kernel route does; an uninstalled Memory Store, or a root whose memories authority is not MODULE, answers `{"kind":"terminal","terminal":"disabled"}`; a Memory Store that cannot be read, during the authority lookup or the read itself, answers `{"kind":"terminal","terminal":"store_unavailable"}`. A closed activation gate does not disable them, because an outcome already recorded is readable whether or not new disclosure is admitted. Bodies are parsed strictly after the envelope keys are removed; any other unknown field is `invalid_params`.
+**Review operations.** `review.list` and `review.read` are local reads of the bound project's completed MemoryReviewer review outcomes and the proposals they select. Neither contacts a model, mutates a receipt, or accepts anything; acceptance is a later protocol. They do not depend on the receipt limit set: a route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state and an unready Kernel its kernel state, as every kernel route does; an uninstalled Memory Store, or a root whose memories authority is not MODULE, answers `{"kind":"terminal","terminal":"disabled"}`; a Memory Store that cannot be read, during the authority lookup or the read itself, answers `{"kind":"terminal","terminal":"store_unavailable"}`. A closed activation gate does not disable them, because an outcome already recorded is readable whether or not new disclosure is admitted. Bodies are parsed strictly after the envelope keys are removed; any other unknown field is `invalid_params`.
 
 `review.list` carries an optional `after` (a causal identity, hex64, the page starts after it; absent or `null` starts at the first identity, as a response's `next: null` spells the end of a walk; any other spelling is `invalid_params`) and an optional `limit` (1–64; absent, `null`, zero, or larger is clamped into that range). It answers `{"kind":"page","items":[...],"next": string | null}`, the completed receipts in causal-identity order, `next` the last identity when the page is full and `null` otherwise; a page exactly filling the limit yields a `next` whose follow-up may be empty. The walk is live, not a snapshot: a receipt that completes while a walk is under way is listed on that walk only if its identity orders after the cursor, and otherwise on the next walk from the start. A receipt still in progress is not an outcome and is not listed. Each item is `{"causal_identity": hex64, "generation": u64, "outcome": "complete" | "abstained" | "failed" | "cancelled" | "unknown" | "expired", "selected": bool}` with `"reason"` present only under `abstained`, one of `owner_sensitive`, `wrong_scope`, `secret`, `expectation_changed`, `undisclosed_citation`, `partial_disclosure`, `model_declined`, `budget_exhausted`, `invalid_proposal`. An item lists from the receipt row alone; no Kernel row is read and no payload, evidence, or project text appears.
 
@@ -765,7 +765,7 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 Receipt state is in memory and cleared by a daemon restart or by uninstalling the limit set; either retires the incarnation, so the earlier keys are `unknown`. It is bounded per project by a key count enforced when a key is minted or a read-back is recorded, and store-wide by a retention measured from creation that MUST be at least twice the 30 s request deadline of Section 11 so one request plus one full-length retry never meets an expired key. The key count has a fixed ceiling; a limit set above it or below the retention floor is refused at installation. A limits change keeps the receipts and applies the new bounds to them at the next access: a narrower count evicts the excess settled receipts at the next mint, and a shorter retention expires the receipts already past it.
 
-**Search lifecycle operations (protocol 4).** `search.lifecycle.status`, `search.lifecycle.rebuild`, `search.lifecycle.disable`, `search.lifecycle.recover`, and `search.lifecycle.abandon` are the operator surface for the search projection's lifecycle record. `eidnara-host search` sends them over a route bound with harness `cli`. The connection key is the operator's authority, as for `host.shutdown` (Section 2), so any route holding it may call them; the harness grants nothing. Bodies are parsed strictly after the envelope keys are removed; any unknown field is `invalid_params`. A route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel its kernel state, as every kernel route does. A daemon with no search lifecycle owner answers `{"kind":"terminal","terminal":"unavailable"}`. A request the owner refuses answers `{"kind":"terminal","terminal":"refused","reason": string}`, the reason bounded to 512 characters.
+**Search lifecycle operations.** `search.lifecycle.status`, `search.lifecycle.rebuild`, `search.lifecycle.disable`, `search.lifecycle.recover`, and `search.lifecycle.abandon` are the operator surface for the search projection's lifecycle record. `eidnara-host search` sends them over a route bound with harness `cli`. The connection key is the operator's authority, as for `host.shutdown` (Section 2), so any route holding it may call them; the harness grants nothing. Bodies are parsed strictly after the envelope keys are removed; any unknown field is `invalid_params`. A route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel its kernel state, as every kernel route does. A daemon with no search lifecycle owner answers `{"kind":"terminal","terminal":"unavailable"}`. A request the owner refuses answers `{"kind":"terminal","terminal":"refused","reason": string}`, the reason bounded to 512 characters.
 
 | Method | Body | Answer |
 | --- | --- | --- |
@@ -777,19 +777,19 @@ Receipt state is in memory and cleared by a daemon restart or by uninstalling th
 
 `R` is `{"state":"absent"}`; `{"state":"intent"|"current","transition","cause","attempt_id","consumer_id","generation_id","recovery_target": i64 | null,"episodes":{"allowance","consumed","deadline"}}`; `{"state":"disabled","consumer_id": string | null,"through": i64 | null,"deregistered": bool}`; or `{"state":"unavailable","reason": string}`. A rebuild names the Current seed and reads through the next consumer under cause `OperatorRequest`. A recovery is a new `AuthorizedRecovery` operation under cause `DisabledRecovery` over the current selection. It reads through the consumer that an unfinished construction in the disabled record registered, and otherwise through the consumer after the disabled one. A replayed recovery that finds admission still latched reconciles the recorded recovery before it answers. `authorization_ref` follows the authorization-reference rule (1–128 ASCII letters, digits, `-`, `_`, `.`, `:`). A disable's cleanup runs within the cleanup envelope its record fixes, the shorter of `physical_drain_ms` and `B_recovery_ms` measured from when the disable was recorded, and within the request budget, whichever ends first. An abandonment records the kernel's audited `ConsumerAbandonment` with `operator_id` and `reason`, each 1–512 bytes and redacted before storage, and then runs the disable's cleanup again under the same request budget. It commits only while more than one second of the cleanup envelope remains, and otherwise answers `refused` with the consumer still registered, so an authorized recovery remains available. Its kernel commit is keyed by the consumer, so a retry with the same fields replays it, and a retry that finds the consumer already released runs the cleanup again. A default disable never abandons a consumer.
 
-### 7.9 Native automatic memory capture, application revision 2
+### 7.9 Native automatic memory capture
 
 `memory.capture`, `memory.capture.next`, `memory.capture.submit`, and
-`memory.capture.status` use the Context route and `v: 2`. Revision 1 capture
-requests are refused. These are harness lifecycle calls, not model tools. The
-route supplies project, harness, and session identity. Unknown fields are
-refused. Optional `project_root` must be an absolute path matching the route,
+`memory.capture.status` use the Context route. These are harness lifecycle
+calls, not model tools. The route supplies project, harness, and session
+identity. Unknown fields, including a field named `v`, are refused with
+`invalid_params`. Optional `project_root` must be an absolute path matching the route,
 never null or another type.
 
 A checkpoint is:
 
 ```json
-{"method":"memory.capture","v":2,"session_id":"session-1","project_root":"/workspace/project","messages":[{"id":"native-message-1","role":"user","text":"Project conversation text."}]}
+{"method":"memory.capture","session_id":"session-1","project_root":"/workspace/project","messages":[{"id":"native-message-1","role":"user","text":"Project conversation text."}]}
 ```
 
 `messages` contains 1 to 32 entries with exactly `id`, `role`, and `text`.
@@ -866,7 +866,7 @@ content-free `error`: `cancelled`, `provider_unavailable`, `model_failed`, or
 `output_limit`. Both forms carry `lease` and the common envelope:
 
 ```json
-{"method":"memory.capture.submit","v":2,"session_id":"session-1","lease":"0123456789abcdef0123456789abcdef","model":"provider/model","output":"{\"version\":1,\"decisions\":[]}"}
+{"method":"memory.capture.submit","session_id":"session-1","lease":"0123456789abcdef0123456789abcdef","model":"provider/model","output":"{\"version\":1,\"decisions\":[]}"}
 ```
 
 `processed` acknowledges processing the proposal, not successful capture of
@@ -927,29 +927,28 @@ claimed. Pi's status line shows pending or unconfirmed capture; OpenCode warns
 only when a checkpoint or drain fails. Notification failure never discards the
 answer.
 
-### 7.10 Transform application revision 3
+### 7.10 Transform
 
-Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v4 and the context application protocol is the one Section 7.8 names. This section specifies the whole revision: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). Revision 3 is neither backward nor forward compatible with any earlier transform body: a daemon serves exactly this revision, and a consumer and daemon of one release speak it together.
+This section specifies the `transform` method family on the Context route: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). The family has one shape, and a consumer and daemon of one build speak it together.
 
 #### 7.10.1 Per-session admission and `session_busy`
 
 The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
 
-A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`, `"boundary_unknown"`); `"need_full_sync"` was retired by #829 and is never reused; `session_busy` is not an error code and is not retried by the transport. The daemon emits `session_busy` whatever transform revision the request negotiated. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
+A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`, `"boundary_unknown"`); `session_busy` is not an error code and is not retried by the transport. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
 
 #### 7.10.2 `transform.boundary`
 
-`transform.boundary` is a read-only method on the Context route. Its body is `{"method": "transform.boundary", "v": 3, "session_id": string, "before_sequence"?: integer}`; the envelope's `kind` and `project_root` are also accepted. `v` MUST be `3`, `session_id` MUST be a non-blank string (not empty and not only whitespace) naming the route's bound session, and `before_sequence`, when present, MUST be an integer whose magnitude is at most `2^53 - 1` (a JavaScript safe integer); `null`, a fraction, a string, or a larger magnitude is refused. A body with any other field, or failing any of these rules, answers the `invalid_params` error. A route bound to another session answers `session_mismatch`, and an unbound route `route_unbound`. A daemon that does not implement this revision answers the method with `unrecognized_request_shape`, which a consumer MUST treat as a declined discovery, never as an exhausted one.
+`transform.boundary` is a read-only method on the Context route. Its body is `{"method": "transform.boundary", "session_id": string, "before_sequence"?: integer}`; the envelope's `kind` and `project_root` are also accepted. `session_id` MUST be a non-blank string (not empty and not only whitespace) naming the route's bound session, and `before_sequence`, when present, MUST be an integer whose magnitude is at most `2^53 - 1` (a JavaScript safe integer); `null`, a fraction, a string, or a larger magnitude is refused. A body with any other field, including a field named `v`, or failing any of these rules, answers the `invalid_params` error. A route bound to another session answers `session_mismatch`, and an unbound route `route_unbound`. A consumer MUST treat any error answer, including `unrecognized_request_shape`, as a declined discovery, never as an exhausted one.
 
 The answer is `{"anchors": [{"mid": string, "sequence": integer}]}`. An anchor is a history segment's end message: `sequence` is the segment's primary key and `mid` the bare message id of its end block. A segment's end block id is an anchor only when it has the form `<mid>#<index>`, where `<mid>` is non-empty and contains no `#` and `<index>` is one or more ASCII digits. A `sequence` can be reused after a suffix removal, so an anchor is identified by its `(mid, sequence)` pair, not by `sequence` alone. The page lists the anchors whose `sequence` is at or below the rendered boundary (the segment whose end block is the core boundary id, or, while a revert's removal has committed and its fold has not, the newest surviving segment, or, when the removal left none, no coverage; the next pass sends `null`) and below `before_sequence` when present, newest first with strictly decreasing `sequence`, at most 4,096 of them. A segment newer than the rendered boundary is never listed, so a correct consumer never declares one; a daemon that holds no coverage answers an empty page. A consumer walks by passing the last `sequence` of a page as the next `before_sequence`; an empty page ends the walk. Every production writer of history segments appends at the newest sequence or removes a suffix, so an empty page is complete evidence for the anchor set as of the walk. A segment whose end block carries no message id is not an anchor and is not listed; such segments are skipped and never shorten a page, so an empty page still ends the walk only when no anchor remains. A segment whose `sequence` has a magnitude above `2^53 - 1` is not listed either, so every `sequence` in a response is a JavaScript safe integer. The method changes no state.
 
 #### 7.10.3 The `transform` request
 
-A `transform` request is one JSON object on the Context route, discriminated by `"kind": "transform"` or `"method": "transform"`, answering the route's bound session. Unknown fields are ignored. Its fields:
+A `transform` request is one JSON object on the Context route, discriminated by `"kind": "transform"` or `"method": "transform"`, answering the route's bound session. Unknown fields are ignored and never read, including a field named `v` and the former carriers `absolute_ordinal`, `declared_trim`, `tail_delta`, and `full_array_fingerprint`: a body carrying any of them is served exactly as the same body without them. Its fields:
 
 | Field | Presence | Value |
 | --- | --- | --- |
-| `v` | required | the integer `3` |
 | `boundary` | required, may be `null` | `{"mid": string, "sequence": integer}`: the history segment whose end message the window starts at, as `transform.boundary` lists it; `null` submits the consumer's whole array or, above half the window cap (400 blocks or 16 MiB of CK block bytes), its newest half-cap suffix, headed by the same pinned message on every pass until the first anchor exists |
 | `session_id` | required | the bound session |
 | `base_revision` | required | opaque revision token (1 to 128 UTF-8 bytes) naming this attempt's input snapshot |
@@ -974,13 +973,13 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `lineage_switched`, `descent_edge_id`, `prior_conversation_key`, `prior_epoch`, `new_epoch`, `constituents`, `compaction_observed` | optional | the lineage owner's descent edge; absent means no switch |
 | `transform_page_id`, `transform_generation`, `transform_page_index`, `transform_page_total`, `transform_page_complete`, `transform_page_digest` | paged requests only, all or none | the paging rule below |
 
-No field carries an ordinal. A message's ordinal is the daemon's: the head of a window with a non-null `boundary` takes the declared segment's end ordinal, each later non-synthetic message the next integer; with `null`, the first non-synthetic message is 1, or the session's lineage continuation base plus 1. A synthetic message followed by a non-synthetic one takes the ordinal before it (0, or the anchor's, when none precedes it); a trailing run of synthetic messages continues the numbering. An `ordinal` member of an ingress message or of its CK `meta` is ignored and never echoed. The removed carriers of earlier bodies (`absolute_ordinal`, `declared_trim`, `tail_delta`, `full_array_fingerprint`) are not fields of this revision; a body carrying `tail_delta` is refused with `transform_tail_delta_retired`.
+No field carries an ordinal. A message's ordinal is the daemon's: the head of a window with a non-null `boundary` takes the declared segment's end ordinal, each later non-synthetic message the next integer; with `null`, the first non-synthetic message is 1, or the session's lineage continuation base plus 1. A synthetic message followed by a non-synthetic one takes the ordinal before it (0, or the anchor's, when none precedes it); a trailing run of synthetic messages continues the numbering. An `ordinal` member of an ingress message or of its CK `meta` is ignored and never echoed.
 
 Window rules. With a non-null `boundary`, `messages` is the complete host suffix starting at the message `boundary.mid`, in both representations; the first message MUST be that mid. With `null`, `messages` is the whole host array, or, when that array exceeds half the window cap, its newest half-cap suffix, headed by the same pinned message on every pass until the first anchor exists (the cold-import rule below). Message ids are unique within the window and at most 128 UTF-8 bytes each; the daemon refuses a repeated or longer `mid` and does not look outside the window. `session_id`, `render_config`, `system_prompt_hash`, `upgrade_state`, `provider_id`, `model_key`, and `prior_conversation_key` are at most 256 UTF-8 bytes each. `sequence` MUST be an integer whose magnitude is at most `2^53 - 1`.
 
 Tool pairing rule. A tool result answers a tool call in the same window: the call is in the nearest earlier assistant message, and the daemon refuses a window holding a result with no such call. The window's head message is the exception when it is the resolved anchor's end message (every anchored resolution of Section 7.10.4; a first pass and a `null` pass that resets the session have no anchor): the history segment that ends on that message covers the calls its results answer, so the daemon projects the head's tool results without a call in the window. Every later message's tool result still answers a call in the window. A consumer therefore keeps a segment that ends on a tool result as its boundary and heads the next window on that result; its own array stays valid only while it keeps the message carrying the call, so an eviction that lands on such a result keeps from the assistant message carrying the call.
 
-Paging rule. A request may be split into pages that share one `transform_page_id` and `transform_generation`, numbered by `transform_page_index` out of `transform_page_total`, the last marked `transform_page_complete: true`, each carrying the digest of its own content in `transform_page_digest`. The daemon concatenates the pages' `messages` and `native_messages` in page order. `v`, `boundary`, and every other non-array field are final-page scalars: a non-final page carries only `method`, `session_id`, `shadow_generation`, the paging fields, and array fields, and a non-final page with any other field answers `authority_transform_page_protocol_mismatch`. Every rule of this section applies to the request the pages assemble, so a final page without `boundary`, or with `v` other than 3, answers exactly as the unpaged request would.
+Paging rule. A request may be split into pages that share one `transform_page_id` and `transform_generation`, numbered by `transform_page_index` out of `transform_page_total`, the last marked `transform_page_complete: true`, each carrying the digest of its own content in `transform_page_digest`. The daemon concatenates the pages' `messages` and `native_messages` in page order. `boundary` and every other non-array field are final-page scalars: a non-final page carries only `method`, `session_id`, `shadow_generation`, the paging fields, and array fields, and a non-final page with any other field answers `authority_transform_page_protocol_mismatch`. Every rule of this section applies to the request the pages assemble, so a final page without `boundary` answers exactly as the unpaged request would.
 
 #### 7.10.4 Outcomes and errors
 
@@ -1001,18 +1000,16 @@ Errors, each an application `Error` (Section 10.2) with a stable `code` and a hu
 
 | Code | Cause |
 | --- | --- |
-| `transform_revision_unsupported` | `v` is absent or not the integer 3; the message is `expected transform revision 3, received <v>`, with `<v>` the received JSON value or `null` |
 | `invalid_params` | `boundary` absent; an integer `boundary.sequence` outside the safe-integer range; a window whose first message is not `boundary.mid`; a declared segment whose end message is not `boundary.mid`; a declared segment newer than the rendered boundary; a repeated `mid` in the window; a `mid` over 128 bytes; a request identity string over 256 bytes; a blank prompt-surface tool description; a `pi` native row that is not `{id, message}`, whose `message.role` is outside Pi's `AgentMessage` role set (`user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `branchSummary`, `compactionSummary`), whose `id` is outside its id space (a `custom`, `branchSummary`, or `compactionSummary` row must carry an id beginning `eidnara:`, and every other row must not), or whose `id` is not the `mid` of the `messages` entry at its position, including a `native_messages` array of another length, or a `pi` window whose CK message at some position carries a `meta.harness_id` other than its `mid`; a consumer treats each of these refusals as a declined pass |
 | `bad_request` | a body that does not decode as a transform request, including a `boundary` that is neither `null` nor an object with a string `mid` and an integer `sequence` (a missing member, `5`, a `sequence` of `1.5` or `"2"`, or one outside the signed 64-bit range) |
 | `unknown_serializer_profile`, `serve_native_unsupported_profile` | a missing or unknown profile, or `serve_native` with a profile other than `opencode-aisdk` or `pi` |
 | `transform_base_revision_missing` | no `base_revision` |
-| `transform_tail_delta_retired` | a `tail_delta` field |
 | `route_unbound`, `session_mismatch`, `store_unavailable` | route and store preconditions |
 | `authority_transform_page_in_progress` | an unpaged pass while a page stream of its session is staging |
 | `transform_failed` | the pass itself failed; the message names the failure |
 | `transform_output_too_large` | the reconstructed output would exceed the wire body cap |
 
-`transform_revision_unsupported` is checked before every rule except request decoding, so a body of any earlier revision that decodes receives it; a body that fails decoding receives `bad_request` whatever its `v`. A consumer that receives it serves its raw array for that pass.
+A body that fails decoding receives `bad_request` whatever else it carries. A consumer that receives any error code above serves its raw array for that pass.
 
 #### 7.10.5 The response and recipe coordinates
 
@@ -1066,7 +1063,7 @@ sequenceDiagram
   C->>H: setup socket + three-message authentication
   H-->>C: ring descriptors, grant, activation token
   C->>C: attach both ring directions
-  C->>H: application v4 envelope traffic
+  C->>H: application envelope traffic
 ```
 
 ### 8.2 Route allocation and bind
@@ -1135,7 +1132,7 @@ Client sends pure-header `Cancel` with target route and correlation. If request 
 
 ### 9.3 Liveness and health
 
-Consumer liveness uses pure-header `Ping`/`Pong`, not a channel-0 JSON health operation. Host sends Ping on channel 0; client returns Pong with identical version, flags, channel, epoch, and correlation. A missed Pong invalidates the connection only under host's bounded liveness policy.
+Consumer liveness uses pure-header `Ping`/`Pong`, not a channel-0 JSON health operation. Host sends Ping on channel 0; client returns Pong with identical flags, channel, epoch, and correlation. A missed Pong invalidates the connection only under host's bounded liveness policy.
 
 Managed Rust and TypeScript readers own Ping/Pong independently of application waits and stream consumption. A Ping during a unary or streaming request MUST produce Pong without settling, cancelling, or delaying the application request. Stream queue saturation MUST NOT block this liveness path.
 
@@ -1248,7 +1245,7 @@ An authenticated `host.shutdown` (Section 7.6) initiates this same graceful orde
 
 ### 13.1 Startup, route, call, close
 
-1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes schema 2 with `wire_version: 4`.
+1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes the connection file (Section 4.1).
 2. Client validates one descriptor-anchored snapshot and completes all three auth messages.
 3. Client receives two memfds and four stream-socket doorbells, validates both grants, attaches, and commits activation.
 4. Client sends channel-0 `route.open` correlation 1 through the ring.
@@ -1280,13 +1277,13 @@ Client completes or may partially complete a request write, then deadline expire
 
 Old host fences connection-file removal by daemon ID, closes generations, and drops handler after route-gone. New host creates unrelated key/daemon ID and atomically publishes. Client invalidates old state, rereads file, authenticates, and opens new routes. Old credentials, route handles, correlations, and late frames cannot affect new generation.
 
-### 13.7 Source binding and generation upgrade
+### 13.7 Source binding and prior-generation selection
 
 The owner selects the model credential source once per client process. A nonempty process-owned `AWS_PROFILE` selects profile mode and requires `AWS_REGION`; an absent `AWS_PROFILE` selects the nonrefreshable environment mode; an empty one is invalid. The selector is the closed object `{"kind":"profile","profile","region","config_file","credentials_file","sso_cache_root"}`. `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` overrides are absolute; defaults and `sso_cache_root` derive from the owner's absolute `HOME`. Paths are normalized lexically, and project configuration never selects credentials.
 
 The launcher envelope (schema 2), the serve envelope (schema 3), and the active selection (schema 2) carry the selector as optional `aws_source`. Absence is environment mode, and `null` is invalid. Profile mode removes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` from the legacy credential map, and both native hops reject an envelope that carries both. The launcher captures and admits the selected profile graph before it starts a host; an inadmissible graph fails the start with `harness_unavailable`. A profile-mode host always verifies route claims, including when its legacy credential map is empty. A running host keeps its selector: an owner that supplies a different one is refused.
 
-Upgrade from version 3 quiesces version-3 clients, stops the host through its own launcher, confirms teardown, and starts the version-4 generation. The version-3 `stop` removes its schema-1 selection, so this path leaves no prior-generation record. A schema-1 selection remains only when a version-3 host ended without its launcher's `stop`. Version 4 never reads that file as source authority: it marks the running selection stale, `stop` keeps it, and the next fresh start moves it to `active-selection.v1.json` before committing schema 2. That record holds the most recent prior-generation selection; a later move replaces it. Rollback quiesces version-4 clients, stops the version-4 host through the version-4 launcher, which removes the schema-2 selection, and starts the prior generation from an absent selection, the same state its own `stop` leaves. When `active-selection.v1.json` exists, the operator may move it back to `active-selection.json` before that start; the prior generation's reader validates it as its own schema-1 record, and its fresh start replaces it. A prior-generation reader refuses a schema-2 selection as an unsupported state schema.
+A schema-1 active selection is a record a prior host generation wrote. The host never reads it as source authority: it marks the running selection stale, `stop` keeps it, and the next fresh start moves it to `active-selection.v1.json` before committing its schema-2 selection. That record holds the most recent prior-generation selection; a later move replaces it. A host stopped through its own launcher removes its schema-2 selection, so a prior generation starts from an absent selection; the operator may first move `active-selection.v1.json` back to `active-selection.json`, which that generation validates as its own record. A prior-generation reader refuses a schema-2 selection as an unsupported state schema. These selection schemas are persisted-state identities of the launcher, not wire fields.
 
 ## 14. Conformance scenario matrix
 
@@ -1294,8 +1291,8 @@ Every scenario has one required outcome. These are review vectors; executable fi
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
-| AE1 | Fresh authenticated call | Valid version-4 file, three-message auth, fixed payload-pool attachment, tagged route response, and matching terminal succeed |
-| AE2 | Malformed envelope or setup | Unsupported frame version, type, flags, oversize, truncation, invalid descriptor, identity mismatch, or attachment failure closes the generation; no application dispatch or alternate transport |
+| AE1 | Fresh authenticated call | Valid connection file, three-message auth, fixed payload-pool attachment, tagged route response, and matching terminal succeed |
+| AE2 | Malformed envelope or setup | Invalid frame type, flags, channel, epoch, oversize, truncation, invalid descriptor, identity mismatch, or attachment failure closes the generation; no application dispatch or alternate transport |
 | AE3 | Caller-supplied identity | Key holder may select identity; fields scope handler state and add no authority |
 | AE4 | Temporarily unavailable module | Each `unknown_module` terminates one correlation; policy retry uses a new correlation and never sends body early |
 | AE5 | Unknown routed channel | Host dispatch count stays zero; client may reopen and retry body exactly once on fresh route |
@@ -1341,7 +1338,7 @@ Every scenario has one required outcome. These are review vectors; executable fi
 | V32 | Reused channel receives old-epoch Cancel/Goodbye | Idempotent no-op; new binding and pending work remain live |
 | V33 | Cancel wins race | Cancellation is requested; one `cancelled` terminal wins; no later frame settles that correlation |
 | V34 | Completion wins Cancel race | Original terminal remains sole terminal; late Cancel is no-op |
-| V35 | Host Ping | Client Pong exactly echoes version, flags, channel 0, epoch 0, correlation |
+| V35 | Host Ping | Client Pong exactly echoes flags, channel 0, epoch 0, correlation |
 | V36 | Handler rejects bind | Error follows bind; route-gone occurs once; channel not reused before callback completes |
 | V37 | Proven zero-byte write | Result `not_sent`; policy may issue fresh RPC with new correlation |
 | V38 | Normal stream | Ordered zero-or-more StreamData then one StreamEnd/Error; duplicate terminal ignored |
@@ -1357,7 +1354,7 @@ Every scenario has one required outcome. These are review vectors; executable fi
 | V48 | Reserved-class saturation | Every reserved pending/task permit held through blocked settlement rejects the next reserved-class request `server_busy` while a general request still dispatches and settles; saturating the general class never consumes a reserved permit |
 | V49 | Declarations exceed configured limits | A reservation that leaves zero general pending slots, zero general task slots, or less than one maximum ingress body fails startup before publication |
 | V50 | Child shutdown failure | A ModelExecution shutdown panic or returned error still drains LocalEmbeddings and Eidnara; the incarnation reports one deterministic redacted non-graceful failure |
-| V51 | Missing, null, string, fractional, or non-4 `wire_version` | Client rejects before setup-socket dial |
+| V51 | Connection file missing `setup_socket`, `key`, `daemon_id`, `pid`, or `daemon_ver` | Client rejects before setup-socket dial |
 | V52 | Setup socket receives an application envelope | Host retires setup; zero application dispatch |
 | V53 | Descriptor count, identity, token, or pool geometry is invalid | Client retires setup before mapping or application traffic |
 | V54 | Native addon, attachment, or pool operation fails | Connection fails terminally; no alternate transport or frame replay |
@@ -1371,7 +1368,7 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 
 | Consumer | Required contract | Verification owner |
 | --- | --- | --- |
-| `HostModuleTransport` | strict version-4 discovery, mandatory ring attachment, generation and epoch route cache, opaque bodies, close races, outcome-safe retry | direct host-client tests |
+| `HostModuleTransport` | strict discovery, mandatory ring attachment, generation and epoch route cache, opaque bodies, close races, outcome-safe retry | direct host-client tests |
 | LocalEmbeddings and wake-plane callers | managed calls, typed send outcomes, truthful catalog, and absent `wake.create` fail-open behavior | direct TypeScript caller tests |
 | `HistorySummarizerProducer` | `host_runtime::Client`, mandatory ring attachment, full route handles, streaming, Ping/Pong, same-incarnation exact-byte replay fence, and both-route cleanup | module history_summarizer and managed-client tests |
 | session resolver | local typed `session_unresolved` absence with zero resolver route attempts when no session is proven | module resolver tests |
@@ -1383,7 +1380,7 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 | Contract | Normative sections | Scenarios |
 | --- | --- | --- |
 | one host-owned wire and client authority | 1-3, 15, 17-18 | AE1-AE13 |
-| strict descriptor version and secure snapshot | 4 | V1-V7, V51 |
+| strict connection-file shape and secure snapshot | 4 | V1-V7, V51 |
 | authentication and secret handling | 5 | V8-V11, V23-V24, V39 |
 | framing, control, and canonical literals | 6-7 | V12-V17, V40-V42 |
 | mandatory payload-pool attachment and fail-closed setup | 7.7 | AE1-AE2, V52-V54 |
@@ -1393,14 +1390,14 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 
 ## 17. Scope boundaries
 
-This direct boundary owns secure connection-file primitives, version-4 wire and authentication, mandatory payload-pool attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
+This direct boundary owns secure connection-file primitives, the wire and authentication, mandatory payload-pool attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
 
 The product daemon crate owns the production host executable and launcher, production connection-file orchestration during startup and teardown, user-facing configuration and doctor behavior, packaging, and distribution. This contract does not claim those lifecycle flows are delivered here.
 
-The ModelExecution application protocol remains normative in its owning revision. The context application protocol's literals and outcome vocabulary are normative in Section 7.8; the daemon's ranking route (`retrieval.query`) is handler business semantics. Flow credit, dynamic module supervision, remote transport, new plugin/tool APIs, storage semantics, and other handler business semantics remain outside this wire contract.
+The ModelExecution application protocol remains normative in its owning component. The context application protocol's literals and outcome vocabulary are normative in Section 7.8; the daemon's ranking route (`retrieval.query`) is handler business semantics. Flow credit, dynamic module supervision, remote transport, new plugin/tool APIs, storage semantics, and other handler business semantics remain outside this wire contract.
 
 ## 18. Provenance ledger
 
-`host-runtime` source and conformance tests are current authority. Historical package sources established the frozen numeric values, version-3 frame layout, authentication domains and proof order, schema-1 fields, and control JSON shapes.
+`host-runtime` source and conformance tests are current authority. Historical package sources established the numeric values, authentication proof order, and control JSON shapes; they enable no compatibility path.
 
 Any disagreement with old published or private behavior is migration history, not permission to add a compatibility branch.

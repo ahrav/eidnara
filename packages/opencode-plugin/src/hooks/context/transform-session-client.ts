@@ -1,5 +1,5 @@
 /**
- * The revision 3 transform pass core, shared by every harness adapter. One client owns, per
+ * The transform pass core, shared by every harness adapter. One client owns, per
  * session, the declared boundary, the retained output a later pass may keep from or fail open to,
  * and the capture basis that lets a later window skip re-taping its verified prefix. A pass reads
  * plain data through a {@link TransformPassSource}: the host's length and ids for discovery, the
@@ -496,7 +496,7 @@ export function applyTransformRecipe(
     return { ...applied, outputRevision: parsed.recipe.outputRevision };
 }
 
-/** The protocol fields of one revision 3 transform request, ahead of the adapter's pass inputs. */
+/** The protocol fields of one transform request, ahead of the adapter's pass inputs. */
 export interface TransformRequestCore {
     sessionId: string;
     boundary: TransformBoundary | null;

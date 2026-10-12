@@ -114,12 +114,14 @@ pub mod vectors {
 
     /// Host proof over the committed inputs.
     pub const SERVER_PROOF: [u8; PROOF_LEN] = [
-        221, 41, 211, 39, 105, 38, 36, 227, 218, 146, 108, 140, 44, 161, 195, 104, 113, 23, 2, 206, 170, 141, 151, 35, 1, 27, 126, 57, 158, 85, 209, 112,
+        221, 41, 211, 39, 105, 38, 36, 227, 218, 146, 108, 140, 44, 161, 195, 104, 113, 23, 2, 206,
+        170, 141, 151, 35, 1, 27, 126, 57, 158, 85, 209, 112,
     ];
 
     /// Peer proof over the committed inputs.
     pub const CLIENT_AUTH: [u8; PROOF_LEN] = [
-        161, 15, 9, 216, 159, 94, 127, 234, 216, 165, 252, 37, 93, 56, 218, 59, 100, 52, 116, 18, 7, 55, 91, 207, 160, 45, 227, 141, 45, 118, 114, 228,
+        161, 15, 9, 216, 159, 94, 127, 234, 216, 165, 252, 37, 93, 56, 218, 59, 100, 52, 116, 18,
+        7, 55, 91, 207, 160, 45, 227, 141, 45, 118, 114, 228,
     ];
 
     /// Key `00..1f`, client nonce `20..3f`, server nonce `40..5f`, daemon ID `60..6f`.
@@ -236,10 +238,12 @@ mod tests {
             ok,
             "domain",
         );
-        for retired in ["eidnara-server-v3", "eidnara-client-v3"] {
+        // The former domains carried a numbered suffix; a proof under either never verifies.
+        for former in [SERVER_PROOF_DOMAIN, CLIENT_AUTH_DOMAIN].map(|domain| format!("{domain}-v3"))
+        {
             rejects(
                 &key,
-                retired,
+                &former,
                 &client_nonce,
                 &server_nonce,
                 ver,

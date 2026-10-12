@@ -464,10 +464,7 @@ fn lease_whose_return_succeeds() -> (
     use shm_transport::backend::ring::{DuplexRing, body_header};
     let rings = DuplexRing::create(&crate::ring_transport::ring_profile()).unwrap();
     let consumer = rings.first.attachment().unwrap().attach().unwrap();
-    let mut reservation = rings
-        .first
-        .try_reserve(1, body_header(1).unwrap())
-        .unwrap();
+    let mut reservation = rings.first.try_reserve(1, body_header(1).unwrap()).unwrap();
     reservation.write(&[1]).unwrap();
     reservation.commit(1).unwrap();
     let lease = consumer.try_receive().unwrap().unwrap();
@@ -490,10 +487,7 @@ fn leases_whose_return_wake_fails() -> Vec<shm_transport::lease::PayloadLease> {
         .count as usize;
     let held: Vec<_> = (0..class_count)
         .map(|_| {
-            let mut reservation = rings
-                .first
-                .try_reserve(1, body_header(1).unwrap())
-                .unwrap();
+            let mut reservation = rings.first.try_reserve(1, body_header(1).unwrap()).unwrap();
             reservation.write(&[1]).unwrap();
             reservation.commit(1).unwrap();
             consumer.try_receive().unwrap().unwrap()

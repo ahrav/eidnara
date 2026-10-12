@@ -2,7 +2,7 @@
  * The OpenCode adapter over the transform session client. It owns what only OpenCode has: the
  * `messages.transform` output array it captures and publishes into in place (#824 D21), the
  * session directory, and the OpenCode database reads behind the pass inputs (model, mid-turn
- * state, and the first-user tool policy of #824 D23). Every revision 3 protocol step runs in
+ * state, and the first-user tool policy of #824 D23). Every transform protocol step runs in
  * `transform-session-client`.
  */
 

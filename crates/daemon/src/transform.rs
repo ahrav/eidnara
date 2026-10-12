@@ -12934,7 +12934,7 @@ pub(crate) mod tests {
         req
     }
 
-    /// What the plugin sends for a request written with revision 2 ordinals, when the test
+    /// What the plugin sends for a request written with plugin-assigned ordinals, when the test
     /// leaves `boundary` null: the window from the newest anchor present (the rendered boundary
     /// first), declared, and with a filler message at every ordinal the test skipped, so the
     /// daemon derives the ordinals the test wrote. A test that declares its own boundary, a

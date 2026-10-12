@@ -18,8 +18,10 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use shm_transport::setup_auth::DAEMON_VER_PREFIX;
 
+use crate::instance::{
+    S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd,
+};
 use crate::store_fs::same_snapshot;
-use crate::instance::{S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd};
 
 pub const MIN_KEY_LEN: usize = 32;
 pub const KEY_LEN: usize = 32;

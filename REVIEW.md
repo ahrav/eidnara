@@ -8,8 +8,9 @@ Do not turn a PR review into a repository-wide redesign.
 ## Project contracts
 
 - Read root `AGENTS.md` and scoped `AGENTS.md` files for affected directories.
-- Treat `docs/host-wire-protocol.md` as the host wire authority. Wire names and
-  literals require a versioned protocol change. Check Rust and TypeScript peers.
+- `docs/host-wire-protocol.md` is the normative host wire contract. The wire has
+  one contract, and a change to wire names, literals, or shapes lands in one PR
+  with the document and every Rust and TypeScript peer. Check both peers.
 - Preserve single-baseline storage. Reject schema mismatches; do not propose
   migrations, version ledgers, or compatibility layers.
 - Use `.github/workflows/ci.yml` for required checks and supported configurations.

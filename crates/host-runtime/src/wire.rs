@@ -650,11 +650,35 @@ mod tests {
         );
         assert_eq!(
             decode_header(&[0u8; HEADER_LEN - 1]),
-            Err(DecodeError::TooShortForHeader { have: HEADER_LEN - 1 })
+            Err(DecodeError::TooShortForHeader {
+                have: HEADER_LEN - 1
+            })
         );
         // The former layout put a version byte at offset 4 and shifted every later field by
         // one. Its Interactive channel-0 Request reads as a routed channel with epoch 0.
-        let legacy: [u8; 21] = [0, 0, 0, 0, 4, 0, 0b0000_0010, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        let legacy: [u8; 21] = [
+            0,
+            0,
+            0,
+            0,
+            4,
+            0,
+            0b0000_0010,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         assert_eq!(
             decode_header(&legacy),
             Err(DecodeError::ZeroEpochOnRoutedChannel { channel: 2 })

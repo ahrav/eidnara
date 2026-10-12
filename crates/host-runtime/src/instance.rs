@@ -13,9 +13,7 @@ use rustix::fs::{
     AtFlags, CWD, FlockOperation, Mode, OFlags, flock, fsync, mkdirat, openat, renameat, unlinkat,
 };
 
-use crate::connection_file::{
-    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN,
-};
+use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN};
 
 /// `CONNECTION_FILE_NAME` names the canonical publication file inside the runtime directory.
 pub const CONNECTION_FILE_NAME: &str = "connection.json";

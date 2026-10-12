@@ -313,8 +313,7 @@ impl Plugin {
     async fn discover(&mut self, handler: &Handler, host: &Host) {
         let mut before = None::<i64>;
         self.boundary = Some(loop {
-            let mut request =
-                json!({ "method": "transform.boundary", "session_id": SESSION });
+            let mut request = json!({ "method": "transform.boundary", "session_id": SESSION });
             if let Some(before) = before {
                 request["before_sequence"] = json!(before);
             }

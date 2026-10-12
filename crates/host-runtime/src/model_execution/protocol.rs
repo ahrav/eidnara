@@ -41,7 +41,7 @@ pub struct SendRequest {
     pub provider: String,
     pub model: String,
     pub max_output_tokens: u64,
-    /// None is generation revision 2's model-native decoding policy.
+    /// None leaves decoding to the model's native policy.
     pub temperature: Option<f64>,
 }
 
@@ -104,15 +104,9 @@ struct ModelParams {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GenerationParams {
-    #[serde(default = "legacy_generation_revision")]
-    revision: u8,
     max_output_tokens: u64,
     #[serde(default, deserialize_with = "present_temperature")]
     temperature: Option<f64>,
-}
-
-fn legacy_generation_revision() -> u8 {
-    1
 }
 
 fn present_temperature<'de, D: serde::Deserializer<'de>>(
@@ -261,12 +255,6 @@ fn parse_send(params: SendParams) -> Result<Request, RequestError> {
     let generation = params.generation.0;
     if generation.max_output_tokens == 0 || generation.max_output_tokens > MAX_OUTPUT_TOKENS_BOUND {
         return Err(schema("max_output_tokens out of bounds"));
-    }
-    if !matches!(generation.revision, 1 | 2) {
-        return Err(schema("unsupported generation revision"));
-    }
-    if generation.revision == 1 && generation.temperature.is_none() {
-        return Err(schema("generation revision 1 requires temperature"));
     }
     // `-0.0` satisfies `contains` under IEEE 754 but some providers reject it.
     if generation.temperature.is_some_and(|temperature| {

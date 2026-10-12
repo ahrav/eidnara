@@ -159,11 +159,7 @@ fn wire_header_check_is_shared_by_producer_and_consumer() {
 #[test]
 fn sole_identifier_is_the_pool_profile() {
     let profile = host_payload_pool_profile().unwrap();
-    assert!(
-        profile
-            .descriptor()
-            .hardware_matches("host-payload-pool")
-    );
+    assert!(profile.descriptor().hardware_matches("host-payload-pool"));
     assert!(!profile.descriptor().hardware_matches("host-test-ring-v1"));
     let ring = Ring::create(&profile, 0).unwrap();
     let bytes = ring.grant().encode();

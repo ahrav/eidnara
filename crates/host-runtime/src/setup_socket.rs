@@ -75,9 +75,7 @@ impl std::fmt::Debug for GrantMessage {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum ClientMessage {
-    Activate {
-        activation_token: String,
-    },
+    Activate { activation_token: String },
     Commit,
     Goodbye,
 }

@@ -6526,9 +6526,7 @@ impl HandlerCore {
             Ok(parsed) => parsed,
             Err(message) => return invalid_params_error(message),
         };
-        if let Err(outcome) =
-            self.management_binding(channel, request, "transform.boundary")
-        {
+        if let Err(outcome) = self.management_binding(channel, request, "transform.boundary") {
             return outcome;
         }
         let Some(store) = self.store() else {
@@ -12101,11 +12099,7 @@ impl HandlerCore {
     ) -> PreparedOutcome {
         let body = match note_evaluation_body(
             request,
-            &[
-                "token",
-                "registration_generation",
-                "evaluator_instance",
-            ],
+            &["token", "registration_generation", "evaluator_instance"],
         ) {
             Ok(body) => body,
             Err(outcome) => return outcome,
@@ -18130,7 +18124,7 @@ impl Handler {
         let Some(session_id) = request["session_id"].as_str().map(str::to_owned) else {
             return request;
         };
-        // A null boundary over revision 2 ordinals is sent as the plugin would send it.
+        // A null boundary over plugin-assigned ordinals is sent as the plugin would send it.
         if request["boundary"].is_null()
             && request.get("native_messages").is_none()
             && let (Some(store), Ok(parsed)) = (
@@ -18272,16 +18266,16 @@ mod tests {
     mod fold_authority_handler_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
-    #[path = "request_budget/host_tests.rs"]
-    mod request_budget_host_tests;
     #[path = "transform/recorded_goldens.rs"]
     mod recorded_goldens;
+    #[path = "request_budget/host_tests.rs"]
+    mod request_budget_host_tests;
     #[path = "source_recovery_tests.rs"]
     mod source_recovery_tests;
-    #[path = "window_cap_tests.rs"]
-    mod window_cap_tests;
     #[path = "transform/window_admission.rs"]
     mod window_admission;
+    #[path = "window_cap_tests.rs"]
+    mod window_cap_tests;
     #[path = "window_coverage/dispatch_tests.rs"]
     mod window_coverage_dispatch_tests;
 
@@ -23056,8 +23050,7 @@ mod tests {
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
-        let next =
-            json!({"method":"memory.capture.next","session_id":"ses","model":"test/model"});
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"test/model"});
         let work = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)

@@ -6,8 +6,8 @@
 // payload, this hook owns the final generation contract.
 //
 // It replaces the provider-native output-token fields and any explicitly
-// requested temperature. Generation revision 2 can leave temperature absent
-// so reasoning-only models keep their native decoding behavior. A model whose
+// requested temperature. A request can leave temperature absent so
+// reasoning-only models keep their native decoding behavior. A model whose
 // Pi registry entry sets `compat.supportsTemperature: false` receives no
 // temperature at all: the hook sends none, as Pi's own provider does, and
 // removes any `temperature` an earlier handler left in a spelling it owns,

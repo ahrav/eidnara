@@ -663,7 +663,7 @@ describe("encodeOpenCodeMessagesToCk", () => {
             "redacted_thinking",
             "reasoning_cache_control",
         ]);
-        // The golden predates revision 3, whose CK ingress carries no ordinal.
+        // The golden predates the ordinal-free CK ingress.
         const withoutOrdinals = (value: unknown): unknown =>
             JSON.parse(
                 JSON.stringify(value, (key, field) => (key === "ordinal" ? undefined : field)),

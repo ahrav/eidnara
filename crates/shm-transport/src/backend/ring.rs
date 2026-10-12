@@ -50,8 +50,8 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::backend::retained::{
-    Mapping, MappingError, Retained, WakeEpoch, initialize_mapping, seal_object,
-    system_page_size, validate_lifecycle, validate_object_len,
+    Mapping, MappingError, Retained, WakeEpoch, initialize_mapping, seal_object, system_page_size,
+    validate_lifecycle, validate_object_len,
 };
 use crate::backend::sys;
 use crate::descriptor::{
@@ -2223,10 +2223,7 @@ mod tests {
     use crate::pool::{BlockClass, ClassSpec, Inventory, PoolGeometry};
     use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology};
 
-    use super::{
-        PoolGrant, ProducerError, Ring, RingAttachment, RingError, sys,
-        body_header,
-    };
+    use super::{PoolGrant, ProducerError, Ring, RingAttachment, RingError, body_header, sys};
 
     pub(crate) fn tiny_geometry() -> PoolGeometry {
         PoolGeometry::new(
@@ -2393,9 +2390,7 @@ mod tests {
         ));
         assert_eq!(producer.inventory().classes[0].free, free_before);
         assert_eq!(producer.inventory().descriptors_outstanding, 0);
-        let mut short = producer
-            .try_reserve(100, body_header(10).unwrap())
-            .unwrap();
+        let mut short = producer.try_reserve(100, body_header(10).unwrap()).unwrap();
         short.write(&[8; 10]).unwrap();
         let identity = short.commit(10).unwrap();
         assert_eq!(producer.inventory().classes[0].free, free_before - 1);

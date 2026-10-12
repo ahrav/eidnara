@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::auth::{MAX_AUTH_MESSAGE_LEN, server_proof_message_bytes};
-use crate::connection_file::{
-    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN,
-};
+use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN};
 use crate::wire::{HEADER_LEN, MAX_BODY_LEN};
 
 pub use shm_transport::setup_auth::DAEMON_VER_PREFIX;

@@ -237,7 +237,10 @@ async fn a_boundary_that_does_not_decode_is_bad_request() {
     let mut carried = body(&["m4"], json!({ "mid": "m4" }));
     carried["v"] = json!(2);
     let (code, _) = error_frame(raw(&handler, with_base(carried)).await);
-    assert_eq!(code, "bad_request", "an ignored field leaves decoding as it was");
+    assert_eq!(
+        code, "bad_request",
+        "an ignored field leaves decoding as it was"
+    );
     assert_eq!(durable(&store), before);
 }
 
@@ -1078,8 +1081,7 @@ fn reopened(dir: &tempfile::TempDir) -> (Handler, Arc<MemoryStore>) {
 async fn plugin_pass(handler: &Handler, host: &[&str]) -> Value {
     let mut before = None::<i64>;
     loop {
-        let mut request =
-            json!({ "method": "transform.boundary", "session_id": session() });
+        let mut request = json!({ "method": "transform.boundary", "session_id": session() });
         if let Some(before) = before {
             request["before_sequence"] = json!(before);
         }
@@ -1171,13 +1173,14 @@ async fn assert_steady(handler: &Handler, store: &MemoryStore, epoch: u64) {
 /// the retry folds against it and the request answers the HARD, never `boundary_unknown`.
 #[tokio::test(flavor = "current_thread")]
 async fn a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request() {
-    let (handler, store, _dir, epoch, answer) = interrupted_revert("admit-cas", |store, session| {
-        let loaded = store.load(session).unwrap();
-        store
-            .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-    })
-    .await;
+    let (handler, store, _dir, epoch, answer) =
+        interrupted_revert("admit-cas", |store, session| {
+            let loaded = store.load(session).unwrap();
+            store
+                .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+        })
+        .await;
     assert_folded(&store, &answer, epoch);
     assert_steady(&handler, &store, epoch).await;
 }

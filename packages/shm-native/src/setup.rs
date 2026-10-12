@@ -63,9 +63,7 @@ struct Descriptor {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage<'a> {
-    Activate {
-        activation_token: &'a str,
-    },
+    Activate { activation_token: &'a str },
     Commit,
     Goodbye,
 }

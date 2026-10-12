@@ -367,11 +367,7 @@ fn two_process_exchange_holds_a_reuses_b_and_wakes_on_return() {
         // Three 4 KiB blocks: A plus two B generations fit, so the third cycle parks on the
         // capacity doorbell until the child returns an earlier B from its own process.
         let mut reservation = to_child
-            .reserve_until(
-                b_bytes.len(),
-                body_header(b_bytes.len()).unwrap(),
-                deadline,
-            )
+            .reserve_until(b_bytes.len(), body_header(b_bytes.len()).unwrap(), deadline)
             .unwrap();
         reservation.write(&b_bytes).unwrap();
         b_blocks.push(reservation.commit(b_bytes.len()).unwrap().block());
