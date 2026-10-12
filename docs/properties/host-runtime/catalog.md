@@ -2407,9 +2407,9 @@ Fault/timing angle: the risk is platform divergence behind one expression.
 `rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, which `rustix` issues as
 `renameat2(RENAME_EXCHANGE)` on Linux and `renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
 with independent semantics, error sets, and filesystem support, reached through
-one line of Rust. The call site at `:905` sits between an exchange and a
-revalidate-then-delete (`:907-910`), so a non-atomic or partially-applied
-exchange deletes the wrong directory. `promote_temp`'s contract at `:865-876`
+one line of Rust. The call site at `generation.rs:1352` sits between an exchange and a
+revalidate-then-delete (`:1355-1356`), so a non-atomic or partially-applied
+exchange deletes the wrong directory. `promote_temp`'s contract at `:1285-1290`
 depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing
@@ -2471,18 +2471,18 @@ the window and cannot fail on the race the guarantee forbids. `always` because t
 replaced is a violation rather than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one
 platform and load-bearing on another. `store_fs.rs:53-79`: the Linux
-block at `:58-68` returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`,
-falling through only on `INVAL`, `NOSYS`, or `OPNOTSUPP`, so on a current
+block at `:58-68` returns on `Ok`, `EXIST`, `NOTEMPTY`, and every errno other
+than `INVAL`, `NOSYS`, and `OPNOTSUPP`, so on a current
 kernel with ext4, tmpfs, or overlayfs the fallback never runs. On macOS that
 block is absent by cfg, so `statat` at `:69-73` followed by `renameat` at
 `:74-78` is the only path. POSIX `rename` replaces an existing *empty*
 directory, which `promote_temp`'s comment at `generation.rs:1287` calls out by name as
 the thing that must not happen, so the flagged path and the fallback do not
-implement the same guarantee. The fallback's justification at `:1211-1215` is a
-prose claim that `transaction.lock` (`lifecycle.rs:44`, `:495-496`) excludes
+implement the same guarantee. The fallback's justification at `store_fs.rs:49-52` is a
+prose claim that `transaction.lock` (`lifecycle.rs:37`, `:444-445`) excludes
 concurrent creation. That is a claim about actors inside the trust model only,
 and the same file defends against out-of-model directory replacement elsewhere:
-the walk comment at `:669-678` describes exactly that attack, and the catalog's
+the `ValidatedGeneration` comments at `generation.rs:323` and `:575` name exactly that attack, and the catalog's
 `validation-and-enumeration-address-one-directory-object` records two shipped
 defects from the class.
 Required faults and enabling state: a directory appearing at the target between
