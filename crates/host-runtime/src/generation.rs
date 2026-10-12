@@ -59,6 +59,49 @@ pub enum ProfileEvent {
     AfterDirectorySync,
 }
 
+/// One step of [`GenerationStore::stage_observed`], reported to its observer in execution order. Paths are relative to the staged generation root.
+///
+/// A `Before*` event fires before its operation runs and an `After*` event fires after it returned; an observer error at a `Before*` event stands in for that operation failing, and at an `After*` event for a failure reported after it completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageEvent {
+    /// Before the source for this manifest path is opened and copied.
+    BeforeCopy(String),
+    /// After every byte of this manifest path was copied; the copy is unsynced until its group's sync.
+    AfterCopy(String),
+    /// Before `manifest.json` is created and written.
+    BeforeManifestWrite,
+    /// After `manifest.json` was written; it is unsynced until the last group's sync.
+    AfterManifestWrite,
+    /// Before one group of copied files is fsynced together. The value is the group's index: groups hold up to eight outputs in copy order, and the last group ends with `manifest.json`.
+    BeforeFileSyncs(usize),
+    /// After every `fsync` in the group returned.
+    AfterFileSyncs(usize),
+    /// Before a nested staged directory's `fsync`; directories sync deepest first.
+    BeforeDirectorySync(String),
+    AfterDirectorySync(String),
+    /// Before the staging temp root's `fsync`.
+    BeforeRootSync,
+    AfterRootSync,
+    /// Before the temp is renamed to its digest name.
+    BeforeRename,
+    /// After the rename returned and published the digest name.
+    AfterRename,
+    /// Before a `fsync` of the generations directory.
+    BeforeGenerationsSync,
+    AfterGenerationsSync,
+}
+
+/// Runs the stage observer at `event`, classifying its errno the way the store classifies a failed syscall: `ENOSPC` and `EDQUOT` are storage exhaustion, anything else a payload fault.
+fn observe(
+    observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+    event: StageEvent,
+) -> Result<(), GenerationError> {
+    observer(event).map_err(|e| match e {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        _ => invalid("staging step failed"),
+    })
+}
+
 /// The `files` array excludes `manifest.json` because its bytes produce the generation digest.
 pub const GENERATION_MANIFEST_NAME: &str = "manifest.json";
 
@@ -1079,6 +1122,17 @@ impl GenerationStore {
         meta: &StageMeta,
         protected: &BTreeSet<String>,
     ) -> Result<String, GenerationError> {
+        self.stage_observed(sources, meta, protected, &mut |_| Ok(()))
+    }
+
+    /// Runs [`Self::stage`] and reports each [`StageEvent`] to `observer` before or after its step. An observer error stops staging at that step with the error the store returns for that errno at a syscall: the temp is removed when the cut precedes the rename, and the published digest directory stays for `prune` when it follows.
+    pub fn stage_observed(
+        &self,
+        sources: &[SourceSpec],
+        meta: &StageMeta,
+        protected: &BTreeSet<String>,
+        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+    ) -> Result<String, GenerationError> {
         // A quarantined profile blocks mutation because its references are uncertain.
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
@@ -1106,7 +1160,7 @@ impl GenerationStore {
         }
 
         let (temp_name, temp_fd) = self.create_staging_temp()?;
-        let result = self.stage_into_temp(&temp_fd, sources, &preflighted, meta);
+        let result = self.stage_into_temp(&temp_fd, sources, &preflighted, meta, observer);
         let manifest = match result {
             Ok(manifest) => manifest,
             Err(err) => {
@@ -1115,7 +1169,7 @@ impl GenerationStore {
             }
         };
         let digest = manifest.digest();
-        if let Err(err) = self.promote_temp(&temp_name, &digest, protected) {
+        if let Err(err) = self.promote_temp(&temp_name, &digest, protected, observer) {
             let _ = remove_tree(&self.generations_fd, &temp_name);
             return Err(err);
         }
@@ -1179,9 +1233,11 @@ impl GenerationStore {
         sources: &[SourceSpec],
         preflighted: &[PreflightSource],
         meta: &StageMeta,
+        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
         let mut written = Vec::with_capacity(sources.len() + 1);
+        let mut groups = 0;
         let mut seen = BTreeSet::new();
         // The code fsyncs each directory that receives an entry because fsyncing a file does not persist its parent entry.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
@@ -1190,11 +1246,14 @@ impl GenerationStore {
             if !seen.insert(spec.rel_path.clone()) {
                 return Err(invalid("duplicate staged path"));
             }
+            observe(observer, StageEvent::BeforeCopy(spec.rel_path.clone()))?;
             let (entry, output) = copy_source_into(temp_fd, spec, source, &mut dirs)?;
+            observe(observer, StageEvent::AfterCopy(spec.rel_path.clone()))?;
             files.push(entry);
             written.push(output);
             if written.len() == crate::store_fs::CONCURRENT_SYNCS {
-                sync_staged(&written)?;
+                sync_group(&written, groups, observer)?;
+                groups += 1;
                 written.clear();
             }
         }
@@ -1204,6 +1263,7 @@ impl GenerationStore {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(invalid("staged manifest exceeds the manifest size cap"));
         }
+        observe(observer, StageEvent::BeforeManifestWrite)?;
         written.push(
             crate::store_fs::write_new_file_unsynced(
                 temp_fd,
@@ -1213,15 +1273,20 @@ impl GenerationStore {
             )
             .map_err(|e| storage_or(e, "file write failed"))?,
         );
+        observe(observer, StageEvent::AfterManifestWrite)?;
         // Every staged file and the manifest are durable before any directory that names them is synced; the temp stays unnamed by the store until promotion, so the file syncs need no order among themselves.
-        sync_staged(&written)?;
+        sync_group(&written, groups, observer)?;
         // The code fsyncs directories deepest-first so each directory's entries are durable before its entry in its parent.
         for rel in dirs.iter().rev() {
             let dir = open_rel_nofollow(temp_fd, rel, true)
                 .map_err(|_| invalid("staged directory reopen failed"))?;
+            observe(observer, StageEvent::BeforeDirectorySync(rel.clone()))?;
             fsync_preserving_storage(&dir, "staged directory fsync failed")?;
+            observe(observer, StageEvent::AfterDirectorySync(rel.clone()))?;
         }
+        observe(observer, StageEvent::BeforeRootSync)?;
         fsync_preserving_storage(temp_fd, "staging temp fsync failed")?;
+        observe(observer, StageEvent::AfterRootSync)?;
         Ok(manifest)
     }
 
@@ -1236,7 +1301,15 @@ impl GenerationStore {
         temp_name: &str,
         digest: &str,
         protected: &BTreeSet<String>,
+        observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
     ) -> Result<(), GenerationError> {
+        let sync_generations =
+            |observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>| {
+                observe(observer, StageEvent::BeforeGenerationsSync)?;
+                fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+                observe(observer, StageEvent::AfterGenerationsSync)
+            };
+        observe(observer, StageEvent::BeforeRename)?;
         let result = match rename_no_replace(&self.generations_fd, temp_name, digest) {
             Ok(renamed) => renamed,
             Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
@@ -1245,7 +1318,8 @@ impl GenerationStore {
             Err(_) => return Err(invalid("generation rename failed")),
         };
         if result {
-            fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+            observe(observer, StageEvent::AfterRename)?;
+            sync_generations(observer)?;
             // A same-UID writer can alter a staged file between its copy and this rename.
             self.validate(digest)?;
             return Ok(());
@@ -1256,7 +1330,7 @@ impl GenerationStore {
             // before the profile names it.
             Ok(_) => {
                 let _ = remove_tree(&self.generations_fd, temp_name);
-                fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+                sync_generations(observer)?;
                 return Ok(());
             }
             // An unsupported manifest schema is quarantined because exchange would delete bytes that `prune` preserves.
@@ -1289,7 +1363,7 @@ impl GenerationStore {
             Reclamation::Unopenable(err) => err,
         })?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
-        fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+        sync_generations(observer)?;
         self.validate(digest)?;
         let _ = remove_tree(&self.generations_fd, temp_name);
         Ok(())
@@ -1726,8 +1800,6 @@ fn open_source_file(path: &Path) -> Result<(OwnedFd, rustix::fs::Stat), Generati
     Ok((fd, stat))
 }
 
-/// The copy reopens the preflighted path and fails if the source's identity or timestamps
-/// differ from the preflight snapshot or change before the copy completes.
 fn sync_staged(files: &[OwnedFd]) -> Result<(), GenerationError> {
     crate::store_fs::fsync_all(files).map_err(|e| match e {
         rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
@@ -1735,6 +1807,19 @@ fn sync_staged(files: &[OwnedFd]) -> Result<(), GenerationError> {
     })
 }
 
+/// Syncs one group of staged outputs together, reporting [`StageEvent::BeforeFileSyncs`] and [`StageEvent::AfterFileSyncs`] with the group's index around it.
+fn sync_group(
+    files: &[OwnedFd],
+    group: usize,
+    observer: &mut dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno>,
+) -> Result<(), GenerationError> {
+    observe(observer, StageEvent::BeforeFileSyncs(group))?;
+    sync_staged(files)?;
+    observe(observer, StageEvent::AfterFileSyncs(group))
+}
+
+/// The copy reopens the preflighted path and fails if the source's identity or timestamps
+/// differ from the preflight snapshot or change before the copy completes.
 fn copy_source_into(
     temp_fd: &OwnedFd,
     spec: &SourceSpec,
@@ -2030,6 +2115,57 @@ mod tests {
 
         let again = stage_default(&store, src.path());
         assert_eq!(again, digest);
+    }
+
+    #[test]
+    fn each_sync_group_is_reported_after_its_copies_and_the_last_ends_with_the_manifest() {
+        let sync = crate::store_fs::CONCURRENT_SYNCS;
+        for count in [1, sync, sync * 2 + 3] {
+            let root = tempfile::tempdir().expect("root");
+            let src = tempfile::tempdir().expect("src");
+            let store = store_at(root.path());
+            let sources: Vec<SourceSpec> = (0..count)
+                .map(|index| SourceSpec {
+                    rel_path: format!("part/{index:02}.txt"),
+                    source: write_source(src.path(), &format!("source-{index}"), b"bytes"),
+                    executable: false,
+                    expected_size: None,
+                    expected_sha256: None,
+                })
+                .collect();
+            let mut trace = Vec::new();
+            store
+                .stage_observed(&sources, &meta(), &BTreeSet::new(), &mut |event| {
+                    trace.push(event);
+                    Ok(())
+                })
+                .expect("stage");
+            let mut expected = Vec::new();
+            for index in 0..count {
+                let rel = format!("part/{index:02}.txt");
+                expected.push(StageEvent::BeforeCopy(rel.clone()));
+                expected.push(StageEvent::AfterCopy(rel));
+                if (index + 1) % sync == 0 {
+                    expected.push(StageEvent::BeforeFileSyncs(index / sync));
+                    expected.push(StageEvent::AfterFileSyncs(index / sync));
+                }
+            }
+            expected.extend([
+                StageEvent::BeforeManifestWrite,
+                StageEvent::AfterManifestWrite,
+                StageEvent::BeforeFileSyncs(count / sync),
+                StageEvent::AfterFileSyncs(count / sync),
+                StageEvent::BeforeDirectorySync("part".to_owned()),
+                StageEvent::AfterDirectorySync("part".to_owned()),
+                StageEvent::BeforeRootSync,
+                StageEvent::AfterRootSync,
+                StageEvent::BeforeRename,
+                StageEvent::AfterRename,
+                StageEvent::BeforeGenerationsSync,
+                StageEvent::AfterGenerationsSync,
+            ]);
+            assert_eq!(trace, expected, "{count} files");
+        }
     }
 
     #[test]
