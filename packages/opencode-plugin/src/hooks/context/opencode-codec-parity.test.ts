@@ -37,8 +37,4 @@ describe("OpenCode codec parity", () => {
             );
         });
     }
-
-    it("records every refusal the daemon answers a malformed window with", () => {
-        for (const parity of fixture.refusals) expect(parity.refusal?.code).toBeString();
-    });
 });

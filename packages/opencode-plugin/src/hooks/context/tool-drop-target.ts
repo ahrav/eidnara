@@ -270,7 +270,7 @@ export function hasMeaningfulPart(part: unknown): boolean {
     const type = part.type;
     if (type === "text") {
         if (typeof part.text !== "string") return false;
-        // `crates/daemon/src/codec/opencode.rs` skips text parts with `ignored: true` when decoding.
+        // An ignored text part carries no model-visible text; the CK keeps it as an opaque block.
         if (part.ignored === true) return false;
         return stripTagPrefix(part.text).trim().length > 0;
     }

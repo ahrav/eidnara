@@ -1106,7 +1106,7 @@
             "content": [
               {
                 "kind": {
-                  "text": "héllo 🌍   \"quoted\"",
+                  "text": "h\u00e9llo \ud83c\udf0d \u2028 \"quoted\"",
                   "type": "text"
                 }
               }
@@ -1139,7 +1139,7 @@
                     "c": -7,
                     "d": 1e+21,
                     "e": 0.1,
-                    "f": "ü"
+                    "f": "\u00fc"
                   },
                   "name": "calc",
                   "type": "tool_call"
@@ -1178,7 +1178,7 @@
                   "input": [
                     1,
                     2.25,
-                    "三"
+                    "\u4e09"
                   ],
                   "name": "calc",
                   "type": "tool_call"
@@ -1204,7 +1204,7 @@
           },
           "parts": [
             {
-              "text": "héllo 🌍   \"quoted\"",
+              "text": "h\u00e9llo \ud83c\udf0d \u2028 \"quoted\"",
               "type": "text"
             }
           ]
@@ -1223,7 +1223,7 @@
                   "c": -7,
                   "d": 1e+21,
                   "e": 0.1,
-                  "f": "ü"
+                  "f": "\u00fc"
                 },
                 "output": "ok",
                 "status": "completed"
@@ -1259,7 +1259,7 @@
                 "input": [
                   1,
                   2.25,
-                  "三"
+                  "\u4e09"
                 ],
                 "status": "pending"
               },
@@ -2346,7 +2346,7 @@
       "name": "malformed_envelopes_take_defaults"
     }
   ],
-  "description": "OpenCode native windows and the CK the OpenCode plugin encodes from each (opencode-transform-adapter.ts encodeOpenCodeWindowToCk). The daemon's OpenCode codec derives the same CK from `messages` after removing only its ordinals and block identity stamps (crates/daemon/src/codec/opencode.rs). Each refusal records the code and text the daemon answers the window with on either path. Regenerate `expected` with EIDNARA_WRITE_OPENCODE_CODEC_PARITY=1 bun test.",
+  "description": "OpenCode native windows and the CK the OpenCode plugin encodes from each (opencode-transform-adapter.ts encodeOpenCodeWindowToCk). The daemon's OpenCode codec derives the same CK from `messages` after removing only its ordinals and block identity stamps (crates/daemon/src/codec/opencode.rs). Each refusal records the code and text the daemon answers the window with on either path. Regenerate with EIDNARA_WRITE_OPENCODE_CODEC_PARITY=1: first `bun test opencode-codec-parity` for `expected`, then `cargo nextest run -p daemon -E 'test(a_malformed_opencode_window)'` for each `refusal`.",
   "refusals": [
     {
       "expected": [

@@ -55,8 +55,9 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
 /// A compaction summary row, one whose `info` holds `summary: true` and `finish: "stop"`,
 /// leaves the window, and every kept message keeps its unfiltered window position as its
 /// ordinal, so synthetic tool-call ids match the plugin's. A creation time the request decode
-/// would refuse is refused with the same error. The parity corpus proves it against the plugin
-/// encoder; the native-only transform window is its production caller.
+/// would refuse is refused with the same error, which the caller answers as `bad_request` like
+/// the request decode. The parity corpus proves it against the plugin encoder; the native-only
+/// transform window is its production caller.
 #[cfg(test)]
 pub(crate) fn derive_opencode_window(
     messages: &[Arc<Value>],
@@ -1917,6 +1918,36 @@ pub(crate) mod tests {
         assert_eq!(
             encode_opencode(&[decoded.messages[0].ck.clone()], &decoded.sidecar, None),
             raw
+        );
+    }
+
+    #[test]
+    fn an_edited_text_block_never_lands_on_an_ignored_part() {
+        let raw = vec![json!({
+            "info": { "id": "msg_1", "role": "user" },
+            "parts": [
+                { "type": "text", "text": "hidden", "ignored": true },
+                { "type": "text", "text": "shown" }
+            ]
+        })];
+        let decoded = decode_opencode(&raw);
+        let mut message = decoded.messages[0].ck.clone();
+        message.content_mut().remove(0);
+        *message.content_mut()[0].kind_mut() = BlockKind::Text {
+            text: "edited".to_string(),
+        };
+        let encoded = encode_opencode(&[message], &decoded.sidecar, None);
+        let parts = encoded[0]["parts"].as_array().unwrap();
+        assert!(
+            parts
+                .iter()
+                .all(|part| part["ignored"] != true || part["text"] == "hidden"),
+            "{parts:?}"
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| part["text"] == "edited" && part["ignored"] != true)
         );
     }
 
