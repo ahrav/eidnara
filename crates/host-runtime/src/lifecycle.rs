@@ -23,13 +23,6 @@ use crate::instance::{
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
 pub const LIFECYCLE_RECORD_NAME: &str = "host-lifecycle.json";
 
-/// Persisted records that do not have the lifecycle record's shape are quarantined.
-/// Quarantined records are preserved without repair.
-///
-/// `InstanceGuard::acquire` refuses records quarantined for `UNSUPPORTED_STATE_SCHEMA_REASON`.
-/// Probe consumers must recognize `UNSUPPORTED_STATE_SCHEMA_REASON` in `Stopped` when both fences are free and in `Wedged` when a fence is held.
-pub const UNSUPPORTED_STATE_SCHEMA_REASON: &str = "unsupported_state_schema";
-
 /// `COORDINATION_DIR_NAME` names the version-neutral coordination directory under the data root.
 pub const COORDINATION_DIR_NAME: &str = ".eidnara-coordination";
 
@@ -222,40 +215,6 @@ fn lifetime_lock_free(data_dir_override: Option<&Path>) -> Result<bool, Instance
     }
 }
 
-/// Returns `true` when a regular lifecycle record lacks the record's shape or cannot be read.
-/// Supported code must not interpret, migrate, overwrite, or remove quarantined bytes.
-///
-/// Startup refuses when record bytes could exist but cannot be proven to carry the record's shape.
-/// Open failures other than `NOENT`, `LOOP`, and `NOTDIR`, plus `fstat` failures and read failures, refuse startup because the record's shape cannot be proven.
-/// A record larger than [`MAX_EVIDENCE_BYTES`] refuses startup rather than permit an overwrite.
-/// Startup's atomic rename replaces a non-regular lifecycle-record name without following it.
-pub(crate) fn quarantined_record_present(
-    dir: &OwnedFd,
-    dir_path: &Path,
-) -> Result<bool, InstanceError> {
-    let path = || dir_path.join(LIFECYCLE_RECORD_NAME);
-    let fd = match openat(
-        dir,
-        LIFECYCLE_RECORD_NAME,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(rustix::io::Errno::NOENT)
-        | Err(rustix::io::Errno::LOOP)
-        | Err(rustix::io::Errno::NOTDIR) => return Ok(false),
-        Err(e) => return Err(io_err("open_lifecycle_record", &path(), e)),
-    };
-    let stat = rustix::fs::fstat(&fd).map_err(|e| io_err("fstat_lifecycle_record", &path(), e))?;
-    if (mode_bits(&stat) & S_IFMT) != S_IFREG {
-        return Ok(false);
-    }
-    let Ok(bytes) = read_all_fd(&fd, MAX_EVIDENCE_BYTES) else {
-        return Ok(true);
-    };
-    Ok(matches!(decode_record(&bytes), RecordDecode::UnknownShape))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecyclePhase {
     Starting,
@@ -305,75 +264,36 @@ struct WireRecord {
     written_at_ms: u64,
 }
 
-/// The complete key set of a lifecycle record. A JSON object with any other key set does not
-/// have the record's shape and is quarantined rather than interpreted.
-const RECORD_KEYS: [&str; 6] = [
-    "daemon_id",
-    "launch_id",
-    "payload_manifest_digest",
-    "phase",
-    "pid",
-    "written_at_ms",
-];
-
 const HEX_LAUNCH_LEN: usize = 32;
 const HEX_DAEMON_LEN: usize = 32;
 
-/// A JSON object whose key set differs from `RECORD_KEYS` is `UnknownShape`: it is classified
-/// separately from corruption because it is quarantined rather than repaired.
-/// `Legacy` records have the record's shape and an empty `payload_manifest_digest`; all other validated fields are valid.
-/// `Legacy` records are not `Malformed` when only `payload_manifest_digest` is empty.
-#[derive(Debug, PartialEq, Eq)]
-enum RecordDecode {
-    Valid(LifecycleRecord),
-    Legacy(LifecycleRecord),
-    UnknownShape,
-    Malformed,
-}
-
-fn decode_record(bytes: &[u8]) -> RecordDecode {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return RecordDecode::Malformed;
-    };
-    let Some(object) = value.as_object() else {
-        return RecordDecode::Malformed;
-    };
-    if object.len() != RECORD_KEYS.len() || !RECORD_KEYS.iter().all(|key| object.contains_key(*key))
-    {
-        return RecordDecode::UnknownShape;
+fn decode_record(bytes: &[u8]) -> Option<LifecycleRecord> {
+    // Serde decodes a struct from a JSON array as well as an object; the record is only an object.
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    if !value.is_object() {
+        return None;
     }
-    let Ok(wire) = serde_json::from_value::<WireRecord>(value) else {
-        return RecordDecode::Malformed;
-    };
-    let Some(phase) = LifecyclePhase::parse(&wire.phase) else {
-        return RecordDecode::Malformed;
-    };
+    let wire = serde_json::from_value::<WireRecord>(value).ok()?;
+    let phase = LifecyclePhase::parse(&wire.phase)?;
     let is_hex = |s: &str, len: usize| {
         s.len() == len
             && s.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     };
-    // `payload_manifest_digest` is legacy only when empty; other noncanonical values are malformed.
-    let legacy_digest = wire.payload_manifest_digest.is_empty();
     if !is_hex(&wire.launch_id, HEX_LAUNCH_LEN)
         || !is_hex(&wire.daemon_id, HEX_DAEMON_LEN)
-        || !(legacy_digest || is_canonical_payload_digest(&wire.payload_manifest_digest))
+        || !is_canonical_payload_digest(&wire.payload_manifest_digest)
     {
-        return RecordDecode::Malformed;
+        return None;
     }
-    let record = LifecycleRecord {
+    Some(LifecycleRecord {
         phase,
         launch_id: wire.launch_id,
         daemon_id: wire.daemon_id,
         payload_manifest_digest: wire.payload_manifest_digest,
         pid: wire.pid,
         written_at_ms: wire.written_at_ms,
-    };
-    if legacy_digest {
-        RecordDecode::Legacy(record)
-    } else {
-        RecordDecode::Valid(record)
-    }
+    })
 }
 
 fn now_ms() -> u64 {
@@ -443,7 +363,7 @@ impl InstanceGuard {
         let Ok(bytes) = read_all_fd(&fd, MAX_EVIDENCE_BYTES) else {
             return;
         };
-        let RecordDecode::Valid(record) = decode_record(&bytes) else {
+        let Some(record) = decode_record(&bytes) else {
             return;
         };
         if record.launch_id != hex(self.launch_id()) || record.daemon_id != hex(self.daemon_id()) {
@@ -463,12 +383,6 @@ impl InstanceGuard {
 /// A holder that mutates named entries must anchor mutations to retained descriptors.
 /// `NamespaceAnchor` requires holders to abort mutations on identity drift.
 /// The lock serializes mutators but does not prove that names still resolve to the opened tree.
-///
-/// The exclusion holds only among coordination-aware releases.
-/// A release that predates `transaction.lock` serializes transactions on the `${dataDir}/eidnara/lifecycle` directory inode instead.
-/// `transaction.lock` and the legacy `lifecycle` directory inode are unrelated, so their flocks never contend.
-/// A pre-coordination launcher's transaction can overlap one taken here.
-/// Stop the daemon before mutating if a pre-coordination launcher may run.
 pub struct LifecycleTransactionLock {
     _file: OwnedFd,
     path: PathBuf,
@@ -913,16 +827,7 @@ pub fn probe_lifecycle(
             std::thread::sleep(GRACE_DELAY);
             continue;
         }
-        // The probe retries absent or stale legacy records while both fences are held, up to `ABSENT_RECORD_GRACE` times.
-        let stale_legacy = !lock_free
-            && !lifetime_free
-            && matches!(
-                after.record.bytes().map(decode_record),
-                Some(RecordDecode::Legacy(_))
-            );
-        if !lock_free
-            && (after.record == EvidenceFile::Absent || stale_legacy)
-            && grace_rereads < ABSENT_RECORD_GRACE
+        if !lock_free && after.record == EvidenceFile::Absent && grace_rereads < ABSENT_RECORD_GRACE
         {
             grace_rereads += 1;
             std::thread::sleep(GRACE_DELAY);
@@ -945,19 +850,11 @@ fn classify(
     lifetime_free: bool,
     freshness: &ProbeFreshness,
 ) -> LifecycleProbe {
-    let decoded = sample.record.bytes().map(decode_record);
-    let unknown_shape = matches!(decoded, Some(RecordDecode::UnknownShape));
-    let (record, legacy_record) = match decoded {
-        Some(RecordDecode::Valid(record)) => (Some(record), None),
-        Some(RecordDecode::Legacy(record)) => (None, Some(record)),
-        _ => (None, None),
-    };
+    let record = sample.record.bytes().and_then(decode_record);
     let publication = sample.publication.bytes().and_then(publication_summary);
 
     if lock_free && lifetime_free {
-        let reason = if unknown_shape {
-            UNSUPPORTED_STATE_SCHEMA_REASON
-        } else if sample.record != EvidenceFile::Absent
+        let reason = if sample.record != EvidenceFile::Absent
             || sample.publication != EvidenceFile::Absent
         {
             "instance lock free; stale evidence remains"
@@ -983,27 +880,16 @@ fn classify(
         lifetime_lock_free: lifetime_free,
     };
 
-    let incumbent = !lock_free && lifetime_free && legacy_record.is_some();
-    if lock_free != lifetime_free && !incumbent {
+    if lock_free != lifetime_free {
         return wedged("lifetime and runtime locks disagree", record);
     }
 
-    if unknown_shape {
-        return wedged(UNSUPPORTED_STATE_SCHEMA_REASON, record);
-    }
     if sample.record == EvidenceFile::Insecure {
         return wedged("lifecycle record failed security checks", record);
     }
     if sample.publication == EvidenceFile::Insecure {
         return wedged("publication failed security checks", record);
     }
-    let record = if incumbent {
-        legacy_record
-    } else if legacy_record.is_some() {
-        return wedged("record carries no payload digest", None);
-    } else {
-        record
-    };
     let Some(record) = record else {
         let reason = if sample.record == EvidenceFile::Absent {
             "instance lock held without a lifecycle record"
@@ -1192,7 +1078,7 @@ mod tests {
             guard.write_lifecycle_record(phase).expect("write");
 
             let bytes = std::fs::read(record_path(&guard)).expect("read record");
-            let RecordDecode::Valid(record) = decode_record(&bytes) else {
+            let Some(record) = decode_record(&bytes) else {
                 panic!("strict decode for {phase:?}");
             };
             assert_eq!(record.phase, phase);
@@ -1237,35 +1123,6 @@ mod tests {
         }
     }
 
-    /// `RECORD_KEYS` and `WireRecord` name one shape; a field added to one alone would
-    /// quarantine every record this build writes.
-    #[test]
-    fn record_keys_are_the_serialized_record_fields() {
-        let record = WireRecord {
-            phase: "running".to_owned(),
-            launch_id: "ab".repeat(16),
-            daemon_id: "cd".repeat(16),
-            payload_manifest_digest: TEST_DIGEST.to_owned(),
-            pid: 1,
-            written_at_ms: 1,
-        };
-        let value = serde_json::to_value(&record).unwrap();
-        let mut keys: Vec<&str> = value
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        let mut expected = RECORD_KEYS;
-        expected.sort_unstable();
-        assert_eq!(keys, expected);
-        assert!(matches!(
-            decode_record(&serde_json::to_vec(&value).unwrap()),
-            RecordDecode::Valid(_)
-        ));
-    }
-
     #[test]
     fn strict_decode_rejects_wrong_shapes() {
         let valid = serde_json::json!({
@@ -1276,10 +1133,7 @@ mod tests {
             "pid": 42,
             "written_at_ms": 1
         });
-        assert!(matches!(
-            decode_record(&serde_json::to_vec(&valid).unwrap()),
-            RecordDecode::Valid(_)
-        ));
+        assert!(decode_record(&serde_json::to_vec(&valid).unwrap()).is_some());
 
         let mutate = |f: &dyn Fn(&mut serde_json::Value)| {
             let mut v = valid.clone();
@@ -1288,34 +1142,26 @@ mod tests {
         };
         assert_eq!(
             mutate(&|v| v["schema"] = 1.into()),
-            RecordDecode::UnknownShape,
-            "an added key leaves the record's shape"
+            None,
+            "an added key is malformed"
         );
         assert_eq!(
             mutate(&|v| {
                 v.as_object_mut().expect("object").remove("pid");
             }),
-            RecordDecode::UnknownShape,
-            "a missing key leaves the record's shape"
+            None,
+            "a missing key is malformed"
         );
-        assert_eq!(
-            mutate(&|v| v["phase"] = "paused".into()),
-            RecordDecode::Malformed
-        );
-        assert_eq!(
-            mutate(&|v| v["launch_id"] = "short".into()),
-            RecordDecode::Malformed
-        );
-        assert_eq!(
-            mutate(&|v| v["daemon_id"] = "zz".repeat(16).into()),
-            RecordDecode::Malformed
-        );
+        assert_eq!(mutate(&|v| v["phase"] = "paused".into()), None);
+        assert_eq!(mutate(&|v| v["launch_id"] = "short".into()), None);
+        assert_eq!(mutate(&|v| v["daemon_id"] = "zz".repeat(16).into()), None);
         assert_eq!(
             mutate(&|v| v["pid"] = "42".into()),
-            RecordDecode::Malformed,
+            None,
             "a field of the wrong type is malformed"
         );
         for digest in [
+            String::new(),
             "d".repeat(PAYLOAD_MANIFEST_DIGEST_LEN - 1),
             "d".repeat(PAYLOAD_MANIFEST_DIGEST_LEN + 1),
             "d".repeat(129),
@@ -1325,16 +1171,22 @@ mod tests {
         ] {
             assert_eq!(
                 mutate(&|v| v["payload_manifest_digest"] = digest.clone().into()),
-                RecordDecode::Malformed,
+                None,
                 "digest {digest:?} must be rejected"
             );
         }
-        assert!(matches!(
-            mutate(&|v| v["payload_manifest_digest"] = "".into()),
-            RecordDecode::Legacy(_)
-        ));
-        assert_eq!(decode_record(b"not json"), RecordDecode::Malformed);
-        assert_eq!(decode_record(b"[1,2]"), RecordDecode::Malformed);
+        assert_eq!(decode_record(b"not json"), None);
+        assert_eq!(decode_record(b"[1,2]"), None);
+        let as_array = serde_json::to_vec(&serde_json::json!([
+            "running",
+            "ab".repeat(16),
+            "cd".repeat(16),
+            TEST_DIGEST,
+            42,
+            1
+        ]))
+        .unwrap();
+        assert_eq!(decode_record(&as_array), None, "a record is a JSON object");
     }
 
     #[test]
@@ -2342,11 +2194,10 @@ mod tests {
         );
     }
 
-    /// A lifecycle record of unknown shape is preserved byte-for-byte and classified `unsupported_state_schema` under held and free fences.
     #[test]
-    fn an_unknown_lifecycle_shape_is_quarantined_not_interpreted() {
+    fn a_record_outside_the_shape_is_corrupt_and_replaced_by_a_start() {
         let root = temp_root();
-        let future_record = serde_json::to_vec(&serde_json::json!({
+        let foreign_record = serde_json::to_vec(&serde_json::json!({
             "schema": 7,
             "phase": "hibernating",
             "carried": {"unknown": ["fields"]},
@@ -2356,150 +2207,94 @@ mod tests {
         let record_path = {
             let guard = acquire(root.path());
             let path = record_path(&guard);
-            std::fs::write(&path, &future_record).expect("plant future record");
+            std::fs::write(&path, &foreign_record).expect("plant foreign record");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
 
-            // The classifier never treats an unknown schema under a held fence as a coherent incarnation.
             let observed = probe(root.path());
             assert_eq!(observed.state, LifecycleState::Wedged);
-            assert_eq!(observed.reason, "unsupported_state_schema");
+            assert_eq!(observed.reason, "lifecycle record is corrupt");
             path
         };
 
-        // With both fences free, an unknown schema yields `Stopped` and preserves the record.
-        assert!(record_path.exists(), "drop must not remove foreign bytes");
         let observed = probe(root.path());
         assert_eq!(observed.state, LifecycleState::Stopped);
-        assert_eq!(observed.reason, "unsupported_state_schema");
-
-        // A start against an unknown-schema record must refuse rather than overwrite the record.
-        assert!(
-            matches!(
-                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST),
-                Err(InstanceError::UnsupportedStateSchema { .. })
-            ),
-            "starting over an unknown schema must fail closed"
-        );
         assert_eq!(
-            std::fs::read(&record_path).expect("reread"),
-            future_record,
-            "the unknown schema bytes must be preserved byte-for-byte"
+            observed.reason,
+            "instance lock free; stale evidence remains"
+        );
+
+        let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST)
+            .expect("a start replaces a corrupt record");
+        guard
+            .write_lifecycle_record(LifecyclePhase::Starting)
+            .expect("write starting record");
+        let bytes = std::fs::read(&record_path).expect("reread");
+        assert!(
+            decode_record(&bytes).is_some(),
+            "the start must have replaced the corrupt bytes with its own record"
         );
     }
 
-    /// A canonical-digest record with a held runtime lock and no lifetime fence yields `Wedged`.
-    /// A held runtime lock without a lifetime fence makes a canonical-digest record incoherent.
     #[test]
     fn lifetime_and_runtime_lock_disagreement_is_wedged() {
-        let root = temp_root();
-        // Dropping `guard` removes both files and releases both fences, so the canonical
-        // record and publication are captured first and replanted before the probe.
-        let (record_file, record_bytes, publication_file, publication_bytes) = {
-            let mut guard = acquire(root.path());
-            guard
-                .write_lifecycle_record(LifecyclePhase::Running)
-                .expect("running");
-            guard
-                .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
-                .expect("publish");
-            let record_file = record_path(&guard);
-            let publication_file = guard.dir_path().join(CONNECTION_FILE_NAME);
-            let record_bytes = std::fs::read(&record_file).expect("read record");
-            let publication_bytes = std::fs::read(&publication_file).expect("read publication");
-            (
-                record_file,
-                record_bytes,
-                publication_file,
-                publication_bytes,
+        for digest in [TEST_DIGEST, ""] {
+            let root = temp_root();
+            // Dropping `guard` removes both files and releases both fences, so the record and
+            // publication are captured first and replanted before the probe.
+            let (record_file, record_bytes, publication_file, publication_bytes) = {
+                let mut guard = acquire(root.path());
+                guard
+                    .write_lifecycle_record(LifecyclePhase::Running)
+                    .expect("running");
+                guard
+                    .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+                    .expect("publish");
+                let record_file = record_path(&guard);
+                let publication_file = guard.dir_path().join(CONNECTION_FILE_NAME);
+                let record_bytes = std::fs::read(&record_file).expect("read record");
+                let publication_bytes = std::fs::read(&publication_file).expect("read publication");
+                (
+                    record_file,
+                    record_bytes,
+                    publication_file,
+                    publication_bytes,
+                )
+            };
+            let mut json: serde_json::Value = serde_json::from_slice(&record_bytes).expect("parse");
+            json["payload_manifest_digest"] = serde_json::Value::String(digest.to_owned());
+            for (path, bytes) in [
+                (&record_file, serde_json::to_vec(&json).expect("encode")),
+                (&publication_file, publication_bytes),
+            ] {
+                std::fs::write(path, bytes).expect("replant");
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .expect("mode");
+            }
+
+            let dir_path = runtime_dir_path(Some(root.path())).expect("path");
+            let dir = openat(
+                rustix::fs::CWD,
+                dir_path.as_path(),
+                OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
             )
-        };
-        for (path, bytes) in [
-            (&record_file, &record_bytes),
-            (&publication_file, &publication_bytes),
-        ] {
-            std::fs::write(path, bytes).expect("replant");
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+            .expect("open run dir");
+            flock(&dir, FlockOperation::NonBlockingLockExclusive).expect("exclusive runtime lock");
+
+            let observed = probe(root.path());
+            assert_eq!(observed.state, LifecycleState::Wedged, "digest {digest:?}");
+            assert_eq!(
+                observed.reason, "lifetime and runtime locks disagree",
+                "digest {digest:?}"
+            );
+            assert!(!observed.instance_lock_free);
+            assert!(observed.lifetime_lock_free);
+            assert_eq!(
+                observed.record.map(|record| record.payload_manifest_digest),
+                (digest == TEST_DIGEST).then(|| TEST_DIGEST.to_owned()),
+                "only a canonical-digest record decodes"
+            );
         }
-
-        let dir_path = runtime_dir_path(Some(root.path())).expect("path");
-        let dir = openat(
-            rustix::fs::CWD,
-            dir_path.as_path(),
-            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .expect("open run dir");
-        flock(&dir, FlockOperation::NonBlockingLockExclusive).expect("exclusive runtime lock");
-
-        let observed = probe(root.path());
-        assert_eq!(observed.state, LifecycleState::Wedged);
-        assert_eq!(observed.reason, "lifetime and runtime locks disagree");
-        assert!(!observed.instance_lock_free);
-        assert!(observed.lifetime_lock_free);
-        let record = observed
-            .record
-            .expect("the canonical-digest record must be read, not classified as absent");
-        assert_eq!(record.payload_manifest_digest, TEST_DIGEST);
-    }
-
-    /// The probe classifies a held runtime lock with an empty-digest record and no lifetime fence as `Wedged`.
-    #[test]
-    fn a_pre_coordination_incumbent_classifies_by_its_record() {
-        let root = temp_root();
-        // Dropping `guard` removes both files and releases both fences.
-        // both fences).
-        let (record_file, record_bytes, publication_file, publication_bytes) = {
-            let mut guard = acquire(root.path());
-            guard
-                .write_lifecycle_record(LifecyclePhase::Running)
-                .expect("running");
-            guard
-                .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
-                .expect("publish");
-            let record_file = record_path(&guard);
-            let publication_file = guard.dir_path().join(CONNECTION_FILE_NAME);
-            let record_bytes = std::fs::read(&record_file).expect("read record");
-            let publication_bytes = std::fs::read(&publication_file).expect("read publication");
-            (
-                record_file,
-                record_bytes,
-                publication_file,
-                publication_bytes,
-            )
-        };
-        let mut json: serde_json::Value = serde_json::from_slice(&record_bytes).expect("parse");
-        json["payload_manifest_digest"] = serde_json::Value::String(String::new());
-        for (path, bytes) in [
-            (&record_file, serde_json::to_vec(&json).expect("encode")),
-            (&publication_file, publication_bytes),
-        ] {
-            std::fs::write(path, bytes).expect("replant");
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("mode");
-        }
-
-        // release does.
-        let dir_path = runtime_dir_path(Some(root.path())).expect("path");
-        let dir = openat(
-            rustix::fs::CWD,
-            dir_path.as_path(),
-            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .expect("open run dir");
-        flock(&dir, FlockOperation::NonBlockingLockExclusive).expect("exclusive runtime lock");
-
-        let observed = probe(root.path());
-        assert_eq!(
-            observed.state,
-            LifecycleState::Running,
-            "a live pre-coordination incumbent must classify, not alarm: {}",
-            observed.reason
-        );
-        assert!(!observed.instance_lock_free);
-        assert!(
-            observed.lifetime_lock_free,
-            "the free lifetime fence is the incumbent signal for control paths"
-        );
     }
 
     #[test]

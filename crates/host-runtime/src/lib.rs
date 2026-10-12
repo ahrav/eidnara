@@ -73,8 +73,7 @@ pub use lifecycle::{
     COORDINATION_DIR_NAME, LIFECYCLE_RECORD_NAME, LIFETIME_LOCK_NAME, LifecyclePhase,
     LifecycleProbe, LifecycleRecord, LifecycleState, LifecycleTransactionLock, NamespaceAnchor,
     PAYLOAD_MANIFEST_DIGEST_LEN, ProbeFreshness, PublicationSummary, TRANSACTION_LOCK_NAME,
-    UNSUPPORTED_STATE_SCHEMA_REASON, coordination_dir_path, is_canonical_payload_digest,
-    lifecycle_dir_path, probe_lifecycle,
+    coordination_dir_path, is_canonical_payload_digest, lifecycle_dir_path, probe_lifecycle,
 };
 pub use runtime::{HostError, run, run_with_publish_hook};
 /// The version-2 body cap. Published so a consumer preparing an output can

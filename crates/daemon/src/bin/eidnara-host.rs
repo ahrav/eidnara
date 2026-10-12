@@ -560,7 +560,6 @@ fn instance_failure(error: &InstanceError) -> (&'static str, &'static str) {
         InstanceError::NoDataDir => ("unavailable", "no_data_dir"),
         InstanceError::UnsupportedPlatform => ("stopped", "unsupported_platform"),
         InstanceError::AlreadyRunning => ("stopped", "lifecycle_busy"),
-        InstanceError::UnsupportedStateSchema { .. } => ("wedged", "unsupported_state_schema"),
         InstanceError::Insecure { .. } | InstanceError::NamespaceDrift { .. } => {
             ("wedged", "wedged")
         }
@@ -595,17 +594,6 @@ fn probe_state(state: LifecycleState) -> &'static str {
         LifecycleState::Stopping => "stopping",
         LifecycleState::Wedged => "wedged",
     }
-}
-
-/// Maps an unsupported state schema to its observed lifecycle state and closed reason.
-fn quarantined_observation(observed: &LifecycleProbe) -> Option<(&'static str, &'static str)> {
-    if observed.reason != host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON {
-        return None;
-    }
-    Some((
-        probe_state(observed.state),
-        host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON,
-    ))
 }
 
 // Lifecycle observation helpers.
@@ -778,9 +766,6 @@ fn cmd_probe() -> DaemonResult {
 }
 
 fn probe_verdict(observed: &LifecycleProbe) -> (bool, &'static str) {
-    if let Some((_, reason)) = quarantined_observation(observed) {
-        return (false, reason);
-    }
     match observed.state {
         LifecycleState::Running => match publication_daemon_ver(observed) {
             Some(daemon_ver) if !daemon_version_compatible(&daemon_ver) => {
@@ -1609,18 +1594,11 @@ fn cmd_start(
             return DaemonResult::new(command, false, state, reason);
         }
     };
-    // Quarantined records must block startup in every state, so classify them before dispatching on `wedged`.
-    if let Some((state, reason)) = quarantined_observation(&observed) {
-        return DaemonResult::new(command, false, state, reason);
-    }
     // A stopped observation starts the requested generation; a running one is authenticated and, when its credential is gone, re-probed so an incumbent that exited between the settle probe and authentication is replaced instead of reported.
     let start_from_stopped = |launcher_envelope: serve::LauncherEnvelope| {
         let prepared =
             match prepare_launcher_envelope(launcher_envelope, serve::SelectionMode::Fresh) {
                 Ok(prepared) => prepared,
-                Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
-                    return DaemonResult::new(command, false, "wedged", "unsupported_state_schema");
-                }
                 Err(_) => {
                     return DaemonResult::new(command, false, "stopped", "harness_unavailable");
                 }
@@ -1687,9 +1665,6 @@ fn cmd_start(
                 },
             ) {
                 Ok(prepared) => prepared,
-                Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
-                    return DaemonResult::new(command, false, "wedged", "unsupported_state_schema");
-                }
                 Err(_) => {
                     return DaemonResult::new(command, false, "running", "harness_unavailable");
                 }
@@ -1822,27 +1797,13 @@ fn cmd_stop() -> DaemonResult {
             return DaemonResult::new(command, false, state, reason);
         }
     };
-    // The function classifies quarantined records before state dispatch to avoid reporting `already_stopped`.
-    // Quarantined records require `align_versions` and block the next start.
-    if let Some((state, reason)) = quarantined_observation(&observed) {
-        return DaemonResult::new(command, false, state, reason);
-    }
     match observed.state {
         // The transaction lock confines selector cleanup to stale-state removal.
-        LifecycleState::Stopped => match serve::clear_active_selection() {
-            Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
-                DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
-            }
-            Ok(()) | Err(_) => DaemonResult::new(command, true, "stopped", "already_stopped"),
-        },
-        LifecycleState::Wedged => {
-            let reason = if observed.reason == "unsupported_state_schema" {
-                "unsupported_state_schema"
-            } else {
-                "wedged"
-            };
-            DaemonResult::new(command, false, "wedged", reason)
+        LifecycleState::Stopped => {
+            let _ = serve::clear_active_selection();
+            DaemonResult::new(command, true, "stopped", "already_stopped")
         }
+        LifecycleState::Wedged => DaemonResult::new(command, false, "wedged", "wedged"),
         LifecycleState::Starting | LifecycleState::Stopping => DaemonResult::new(
             command,
             false,
@@ -1850,12 +1811,10 @@ fn cmd_stop() -> DaemonResult {
             "lifecycle_busy",
         ),
         LifecycleState::Running => match stop_phase(&runtime, outer) {
-            (_, Ok(())) => match serve::clear_active_selection() {
-                Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
-                    DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
-                }
-                Ok(()) | Err(_) => DaemonResult::new(command, true, "stopped", "stopped"),
-            },
+            (_, Ok(())) => {
+                let _ = serve::clear_active_selection();
+                DaemonResult::new(command, true, "stopped", "stopped")
+            }
             (_, Err((state, reason))) => DaemonResult::new(command, false, state, reason),
         },
     }
@@ -1908,11 +1867,6 @@ fn cmd_restart(
                 .with_effects(effects(false, false));
         }
     };
-    // A quarantined record prevents successor startup before any stop.
-    if let Some((state, reason)) = quarantined_observation(&observed) {
-        return DaemonResult::new(command, false, state, reason)
-            .with_effects(effects(false, false));
-    }
     match observed.state {
         LifecycleState::Wedged => {
             return DaemonResult::new(command, false, "wedged", "wedged")
@@ -1992,10 +1946,6 @@ fn cmd_restart(
         },
     ) {
         Ok(prepared) => prepared,
-        Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
-            return DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
-                .with_effects(effects(false, false));
-        }
         Err(_) => {
             return DaemonResult::new(
                 command,
@@ -2927,13 +2877,6 @@ mod tests {
         let mut stopped = running(None);
         stopped.state = LifecycleState::Stopped;
         assert_eq!(probe_verdict(&stopped), (false, "not_running"));
-
-        let mut quarantined = running(Some("eidnara-host/0.1.0"));
-        quarantined.reason = host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON;
-        assert_eq!(
-            probe_verdict(&quarantined),
-            (false, host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON)
-        );
     }
 
     #[test]

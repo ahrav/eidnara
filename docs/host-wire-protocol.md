@@ -125,26 +125,24 @@ The host additionally maintains `${dataDir}/eidnara/run/host-lifecycle.json`, an
 }
 ```
 
-`payload_manifest_digest` is the canonical 64-character lowercase-hex payload manifest digest. Exactly one other value is accepted: the empty string, which classifies the record as a legacy incumbent rather than a current one. Any other value is corruption and the record is rejected as malformed.
+`payload_manifest_digest` is the canonical 64-character lowercase-hex payload manifest digest. Any other value is corruption, and the record is rejected as malformed.
 
 `phase` is `starting` (after lock acquisition, before publication), `running` (after publication), or `stopping` (from graceful-shutdown step 1). `pid` is display metadata only: no reader may signal it, infer liveness from it, or authorize anything with it. Record cleanup is fenced by matching launch and daemon identity and runs under the instance lock before lock release, mirroring publication cleanup.
 
-`payload_manifest_digest` is required payload identity: exactly 64 lowercase hex characters, validated as host input before any lock is taken, and byte-identical across every `starting`, `running`, and `stopping` record one incarnation writes. An empty, oversized, or otherwise noncanonical digest never decodes as a valid record, so it can never support a `running` classification. A record whose JSON object does not have exactly the record's keys (an added, missing, or renamed key) is outside the record's shape and is quarantined: its bytes are preserved byte-for-byte, probes classify it `unsupported_state_schema`, and a host start against it fails closed rather than interpreting, migrating, or overwriting it. A record with the record's keys but an invalid value is malformed. A record a crashed host of an earlier build left behind carries that build's shape and is quarantined the same way; clean shutdown removes the record, so an upgrade stops the running host through its own launcher before the new build starts. When a quarantined record remains, the operator confirms that both fences are free (the probe reports `stopped` with `unsupported_state_schema`) and removes the record before starting the host.
+`payload_manifest_digest` is required payload identity: exactly 64 lowercase hex characters, validated as host input before any lock is taken, and byte-identical across every `starting`, `running`, and `stopping` record one incarnation writes. The record has one shape: exactly the keys above, each with a valid value. Bytes of any other shape, including an added, missing, or renamed key or an empty or noncanonical digest, are a corrupt record. A corrupt record never supports a `running` classification, and a host start under the fences replaces it with its own record.
 
 Lifecycle state is derived from lock ownership plus this evidence, never from PID existence. Two locks participate: the stable lifetime fence (`lifetime.lock`, below) and the runtime-directory instance lock.
 
 | Lifetime fence | Instance lock | Evidence | State |
 | --- | --- | --- | --- |
-| free | free | anything, including stale record or publication | `stopped`; nothing is unlinked |
-| free | free | record of unknown shape | `stopped` with `unsupported_state_schema`; bytes preserved |
+| free | free | anything, including stale or corrupt record or publication | `stopped`; nothing is unlinked |
 | held | free (or the runtime directory is missing) | anything | `wedged` after a bounded reread: a live incarnation's namespace was replaced, or a start/teardown window persisted |
 | free | held | anything | `wedged` after a bounded reread: a holder without the stable fence is never coherent |
 | held | held | fresh `starting` record, with or without a predecessor's leftover publication | `starting` |
 | held | held | `running` record and publication with the same daemon ID | `running` |
 | held | held | `running` record with a missing or daemon-ID-mismatched publication | `wedged` |
 | held | held | fresh `stopping` record, with or without a predecessor's leftover publication | `stopping` |
-| held | held | record of unknown shape | `wedged` with `unsupported_state_schema`; bytes preserved |
-| held | held | missing, corrupt, insecure, or expired *record* (including a noncanonical digest), or a corrupt or insecure *publication* (any phase) | `wedged` |
+| held | held | missing, corrupt, insecure, or expired *record*, or a corrupt or insecure *publication* (any phase) | `wedged` |
 
 A missing publication is `wedged` only under a `running` record (the row above); `starting` and `stopping` require no publication at all. A free replacement runtime-directory lock is never proof that the first daemon ended; only the stable lifetime fence proves that.
 
@@ -1277,13 +1275,13 @@ Client completes or may partially complete a request write, then deadline expire
 
 Old host fences connection-file removal by daemon ID, closes generations, and drops handler after route-gone. New host creates unrelated key/daemon ID and atomically publishes. Client invalidates old state, rereads file, authenticates, and opens new routes. Old credentials, route handles, correlations, and late frames cannot affect new generation.
 
-### 13.7 Source binding and prior-generation selection
+### 13.7 Source binding
 
 The owner selects the model credential source once per client process. A nonempty process-owned `AWS_PROFILE` selects profile mode and requires `AWS_REGION`; an absent `AWS_PROFILE` selects the nonrefreshable environment mode; an empty one is invalid. The selector is the closed object `{"kind":"profile","profile","region","config_file","credentials_file","sso_cache_root"}`. `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` overrides are absolute; defaults and `sso_cache_root` derive from the owner's absolute `HOME`. Paths are normalized lexically, and project configuration never selects credentials.
 
-The launcher envelope (schema 2), the serve envelope (schema 3), and the active selection (schema 2) carry the selector as optional `aws_source`. Absence is environment mode, and `null` is invalid. Profile mode removes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` from the legacy credential map, and both native hops reject an envelope that carries both. The launcher captures and admits the selected profile graph before it starts a host; an inadmissible graph fails the start with `harness_unavailable`. A profile-mode host always verifies route claims, including when its legacy credential map is empty. A running host keeps its selector: an owner that supplies a different one is refused.
+The launcher envelope (schema 2), the serve envelope (schema 3), and the active selection carry the selector as optional `aws_source`. Absence is environment mode, and `null` is invalid. Profile mode removes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` from the environment credential map, and both native hops reject an envelope that carries both. The launcher captures and admits the selected profile graph before it starts a host; an inadmissible graph fails the start with `harness_unavailable`. A profile-mode host always verifies route claims, including when its environment credential map is empty. A running host keeps its selector: an owner that supplies a different one is refused.
 
-A schema-1 active selection is a record a prior host generation wrote. The host never reads it as source authority: it marks the running selection stale, `stop` keeps it, and the next fresh start moves it to `active-selection.v1.json` before committing its schema-2 selection. That record holds the most recent prior-generation selection; a later move replaces it. A host stopped through its own launcher removes its schema-2 selection, so a prior generation starts from an absent selection; the operator may first move `active-selection.v1.json` back to `active-selection.json`, which that generation validates as its own record. A prior-generation reader refuses a schema-2 selection as an unsupported state schema. These selection schemas are persisted-state identities of the launcher, not wire fields.
+The active selection has one shape: the optional `opencode`, `pi`, `credential_identities`, and `aws_source` members and no others. A selection of any other shape is invalid: a fresh start replaces it, `stop` removes it, and a join to a running host is refused with `harness_unavailable`.
 
 ## 14. Conformance scenario matrix
 

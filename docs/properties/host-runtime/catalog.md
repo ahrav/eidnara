@@ -24,6 +24,21 @@
 > `temperature` with no `revision`; absence of `temperature` selects the
 > model-native decoding policy. Line anchors into files #989 changed are as of
 > their earlier recorded head.
+>
+> Dated note, 2026-10-12, #989: the host carries no cross-build state handling.
+> The lifecycle record has one shape and one decoder: bytes of any other shape,
+> including an empty or noncanonical digest, are a corrupt record, and a host
+> start under the fences replaces it. Probe, start, stop, and restart treat such
+> a record like any corrupt record, so `unsupported_state_schema` is no longer a
+> lifecycle-record reason, `InstanceError::UnsupportedStateSchema` and
+> `quarantined_record_present` no longer exist, and a held runtime lock with a
+> free lifetime fence is `wedged` whatever the record carries. The active
+> harness selection likewise has one shape with no `schema` member: any other
+> shape is invalid, `stop` removes it, a fresh start replaces it, and
+> `active-selection.v1.json` is no longer written. Record
+> `legacy-incumbent-classification-needs-an-unforgeable-witness` is invalidated;
+> clauses below that cite the record quarantine gate or a pre-coordination
+> incumbent describe the earlier head.
 
 Records for `crates/host-runtime`, merged from six source catalogs (host lifecycle, ring datapath, setup identity,
 client peer, request path, runtime config) in the host repo at `39e823037`. This file is the only authority for its
@@ -1109,7 +1124,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 `crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
-Status: active
+Status: invalidated
 Exercised: partial - the regression test plants exactly the forgery by hand.
 Guarantee: A running verdict derived from a legacy record is accompanied by
 evidence the record's author cannot forge, or the verdict is wedged.
