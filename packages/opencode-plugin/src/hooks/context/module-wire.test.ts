@@ -792,7 +792,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         const body = {
             method: "transform",
             session_id: "ses-unpaged",
-            input: [{ mid: "m1", ordinal: 1, ck: { text: "hi" } }],
+            native_messages: [{ info: { id: "m1" }, parts: [{ type: "text", text: "hi" }] }],
         };
         const pages = buildPagedModuleTransformPayloads(body);
         expect(pages).toHaveLength(1);
@@ -853,10 +853,10 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         }));
         delete input[3];
         delete input[40];
-        const body = { method: "transform", session_id: "ses-sparse", input };
+        const body = { method: "transform", session_id: "ses-sparse", native_messages: input };
         const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
         const paged = pages.flatMap(
-            ({ page }) => JSON.parse(JSON.stringify(page.input)) as unknown[],
+            ({ page }) => JSON.parse(JSON.stringify(page.native_messages)) as unknown[],
         );
         const unpaged = JSON.parse(JSON.stringify(input)) as unknown[];
         expect(paged).toHaveLength(unpaged.length);
@@ -870,7 +870,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             mid: "carrier",
             ordinal: 1,
             [MODULE_ITEM_CONTINUATION_KEY]: {
-                field: "input",
+                field: "native_messages",
                 item_index: 9,
                 chunk_index: 0,
                 chunk_total: 1,
@@ -879,7 +879,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         const body = {
             method: "transform",
             session_id: "ses-reserved",
-            input: [
+            native_messages: [
                 carrier,
                 ...Array.from({ length: 80 }, (_, index) => ({
                     mid: `m${index}`,
@@ -889,10 +889,17 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             ],
         };
         const pages = buildPagedModuleTransformPayloads(body, MODULE_PAGE_MAX_BYTES);
-        const units = pages.flatMap(({ page }) => page.input as Array<Record<string, unknown>>);
+        const units = pages.flatMap(
+            ({ page }) => page.native_messages as Array<Record<string, unknown>>,
+        );
         expect(units.filter((unit) => unit.mid === "carrier")).toHaveLength(0);
         const marker = units[0]?.[MODULE_ITEM_CONTINUATION_KEY] as Record<string, unknown>;
-        expect(marker).toEqual({ field: "input", item_index: 0, chunk_index: 0, chunk_total: 1 });
+        expect(marker).toEqual({
+            field: "native_messages",
+            item_index: 0,
+            chunk_index: 0,
+            chunk_total: 1,
+        });
         expect(JSON.parse(units[0]?.chunk as string)).toEqual(carrier);
     });
 
@@ -923,7 +930,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         const body = {
             method: "transform",
             session_id: "ses-paged",
-            input: Array.from({ length: 80 }, (_, index) => ({
+            native_messages: Array.from({ length: 80 }, (_, index) => ({
                 mid: `m${index}`,
                 ordinal: index + 1,
                 ck: { text: "x".repeat(8_000) },
