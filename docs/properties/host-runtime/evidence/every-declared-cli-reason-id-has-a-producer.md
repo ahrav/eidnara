@@ -61,25 +61,27 @@ after admission has passed. Three sites turn a filesystem-capability failure int
 a payload verdict.
 
 The atomic exchange is the first. On Linux and macOS
-`exchange_dirs` (`crates/host-runtime/src/generation.rs:1195-1198`) maps every
-`renameat_with(..., RenameFlags::EXCHANGE)` error through
-`.map_err(|_| invalid("atomic digest-target exchange failed"))`, so `EINVAL`,
+`exchange_dirs` (`crates/host-runtime/src/store_fs.rs:112-115`) returns the raw
+`renameat_with(..., RenameFlags::EXCHANGE)` errno, and the caller in
+`generation.rs:1875-1878` maps it through `classify_errno` (`:104-109`). That
+classifier sends `ENOSPC` and `EDQUOT` to `InsufficientStorage` and every other
+errno to `invalid("atomic digest-target exchange failed")`, so `EINVAL`,
 `ENOSYS`, and `EOPNOTSUPP` from a filesystem without `RENAME_EXCHANGE` or
 `RENAME_SWAP` all become `NativePayloadInvalid`. On any other platform the cfg
-arm at `:1200-1205` returns
-`invalid("atomic digest-target exchange is unsupported on this platform")`,
-which is the same class - though `unsupported_platform` fires earlier there, so
+arm at `store_fs.rs:117-120` returns `EOPNOTSUPP`, which the same classifier
+maps to the same class - though `unsupported_platform` fires earlier there, so
 that arm is unlikely to be the observed reason.
 
-The portable rename fallback is the second. `rename_no_replace` (`:1216-1242`)
+The portable rename fallback is the second. `rename_no_replace` (`store_fs.rs:53-79`)
 handles missing `renameat2` flags gracefully: `EINVAL`, `ENOSYS`, and
-`EOPNOTSUPP` fall through to an occupancy check (`:1225-1227`). But the fallback's
-own `renameat` at `:1236` collapses `Err(_)` to
-`invalid("generation rename failed")` at `:1240`, which is where a cross-device
-`EXDEV` or a read-only-mount `EPERM` lands, and the preceding `statat` failure at
-`:1234` becomes `invalid("generation target stat failed")`.
+`EOPNOTSUPP` fall through to an occupancy check (`:69-73`). But the fallback's
+own `renameat` at `:74` returns every errno other than `EEXIST` and `ENOTEMPTY`
+raw (`:77`), and the caller at `generation.rs:1304-1305` maps it through
+`classify_errno(e, "generation rename failed")`, which is where a cross-device
+`EXDEV` or a read-only-mount `EPERM` lands as `NativePayloadInvalid`; the
+preceding `statat` failure at `store_fs.rs:72` takes the same path.
 
-All of these are `GenerationError::NativePayloadInvalid`, which
+All of these capability failures are `GenerationError::NativePayloadInvalid`, which
 `generation_failure` maps at `eidnara-host.rs:347` to
 `("stopped", "native_payload_invalid")`. Its remediation, per both the contract
 and `remediation_for` at `:93`, is **`reinstall_eidnara`**. A user whose
@@ -92,10 +94,11 @@ higher-precedence one.
 
 ## Timing windows and dependencies
 
-No timing angle. The enabling state is structural: the exchange at `:905` is
-reached only when `rename_no_replace` reported the digest name occupied (`:882`),
-validation of that occupant failed (`:887`, falling to `:900`), and the digest is
-not protected (`:902`). So the fault needs a corrupt unprotected occupant at the
+No timing angle. The enabling state is structural: the exchange at
+`generation.rs:1352` is reached only when `rename_no_replace` reported the digest
+name occupied (`:1304-1306`), validation of that occupant failed (`:1313`, falling
+to `:1326`), and the digest is not protected (`:1328`). So the fault needs a
+corrupt unprotected occupant at the
 digest name, on a filesystem lacking atomic exchange. Groups with
 `current-profile-never-names-an-unvalidatable-generation`, which owns the same
 promotion path.
@@ -117,7 +120,8 @@ whether any id can be emitted.
 
 - Sources examined: `release/host-release.json:71` onward, all 31 entries;
   a per-id grep of `crates/` for each; `eidnara-host.rs:86-118`, `:330-350`,
-  `:1753-1785`; `generation.rs:1195-1205`, `:1216-1242`, `:876-912`;
+  `:1753-1785`; `store_fs.rs:112-120`, `:53-79`; `generation.rs:104-109`, `:1291-1358`,
+  `:1875-1878`;
   `packages/plugin/src/shared/host-lifecycle/paths.ts:178-196`, `:355-438`;
   `managed-policy.ts:185-202`.
 - Findings: 17 ids have Rust producers, 14 do not. `unsupported_filesystem` has a

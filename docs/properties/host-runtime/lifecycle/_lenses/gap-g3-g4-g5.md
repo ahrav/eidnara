@@ -20,14 +20,14 @@ The prompt's references are accurate except for these, which are narrowed:
 - `LivenessPolicy` is `config.rs:234-245`, not `234-300`. The `liveness` field is
   `config.rs:282`, its default `None` is `config.rs:296`, and validation is
   `config.rs:370-382`.
-- The manifest structs are `generation.rs:138-145` (`ManifestFile`) and
-  `:147-169` (`GenerationManifest`), with `canonical_bytes` at `:172-174` and
-  `digest` at `:176-178`. The prompt's `147-177` covers both correctly.
-- `exchange_dirs` is `generation.rs:1191-1198` (macOS and Linux arm) and
-  `:1200-1205` (the fail-closed stub), so the prompt's `1191-1204` is right.
-- `rename_no_replace` is `generation.rs:1207-1242`: doc comment `:1207-1215`,
-  body `:1216-1242`.
-- The golden test is `generation.rs:1395-1412`, confirmed.
+- The manifest structs are `generation.rs:212-217` (`ManifestFile`) and
+  `:228-240` (`GenerationManifest`), with `canonical_bytes` at `:255-257` and
+  `digest` at `:259-261`. The prompt's `147-177` is stale at HEAD.
+- `exchange_dirs` is `store_fs.rs:112-115` (macOS and Linux arm) and
+  `:117-120` (the fail-closed stub); the prompt's `1191-1204` is stale at HEAD.
+- `rename_no_replace` is `store_fs.rs:47-79`: doc comment `:47-52`,
+  body `:53-79`.
+- The golden test is `generation.rs:2044-2059`, confirmed.
 
 ## G3 observations: normal configured liveness
 
@@ -176,15 +176,16 @@ that a happy-path integration test covers by accident.
 
 ### O7. The digest is the directory name, and validation re-derives it twice
 
-`generation.rs:172-174` defines `canonical_bytes` as `serde_json::to_vec(self)`,
+`generation.rs:255-257` defines `canonical_bytes` as `serde_json::to_vec(self)`,
 so the byte order is exactly the struct declaration order at
-`:153-168`: `schema`, `target`, `release_contract_sha256`,
+`:229-239`: `schema`, `target`, `release_contract_sha256`,
 `inputs_lock_sha256`, then `source_payload_manifest_sha256` when present, then
 `files`. Within `files`, each entry serializes in `ManifestFile` declaration
-order at `:141-144`: `path`, `mode`, `size`, `sha256`. `:176-178` names the
+order at `:213-216`: `path`, `mode`, `size`, `sha256`. `:259-261` names the
 generation by the SHA-256 of those bytes.
 
-`validate_in_dir` enforces the binding twice (`generation.rs:636-648`):
+`read_manifest_in_dir`, called from `validate_in_dir`, enforces the binding twice
+(`generation.rs:1021-1027`):
 
 ```
 if hex(&sha2::Sha256::digest(&bytes)) != digest { ... }
@@ -192,7 +193,7 @@ if manifest.canonical_bytes() != bytes { ... }
 ```
 
 The second check is the one that makes declaration order a compatibility
-contract rather than a cosmetic detail. Its own comment (`:640-647`) explains
+contract rather than a cosmetic detail. Its own comment (`:1024`) explains
 that without it a manifest stored under the hash of non-canonical bytes would
 give one logical manifest two identities.
 
@@ -201,16 +202,17 @@ give one logical manifest two identities.
 The prompt's framing was that reordering "would silently change every retained
 generation's digest". Verified and corrected: the digest change is not silent.
 Reordering a field changes `canonical_bytes()` for the decoded manifest while the
-bytes on disk keep the old order, so `:645` fails with
+bytes on disk keep the old order, so `:1025-1027` fails with
 `invalid("manifest is not canonically encoded")` for every retained generation
 whose manifest contains the moved field. The result is a refusal, not a
 mis-selection.
 
 That is the same class of break the `source_payload_manifest_sha256` doc comment
-at `:157-165` was written to avoid: "requiring it would decode every retained
-predecessor as corrupt and fail the first no-`--payload-dir` start after an
-upgrade with `native_payload_invalid` -- refusing a payload that is intact."
-Reordering reaches the same outcome by a different route.
+at `:233-236` was written to avoid: "`#[serde(default)]` preserves decoding of
+schema-1 manifests that omit this field." The golden test's own comment at
+`:2047` states the consequence: rejecting a retained schema-1 manifest would
+report `native_payload_invalid` on the first no-`--payload-dir` start after an
+upgrade. Reordering reaches the same outcome by a different route.
 
 Both consequences are real and they are different properties:
 
@@ -221,14 +223,14 @@ Both consequences are real and they are different properties:
 
 ### O9. Existing protection is real but blind in three specific ways
 
-`generation.rs:1395-1412`
+`generation.rs:2044-2059`
 (`a_generation_staged_before_the_source_digest_field_still_decodes`) asserts
 
 ```
 assert_eq!(decoded.canonical_bytes(), predecessor);
 ```
 
-against the literal fixture at `:1401`:
+against the literal fixture at `:2048`:
 
 ```
 {"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}
@@ -239,12 +241,12 @@ the four leading scalar fields and `files`. It is the only such vector in the
 crate. Its blind spots:
 
 1. **The optional field's position is unpinned.** The fixture omits
-   `source_payload_manifest_sha256`, and `:166` marks it
+   `source_payload_manifest_sha256`, and `:237` marks it
    `skip_serializing_if = "Option::is_none"`, so moving it anywhere in the struct
    leaves this test green while changing the bytes of every generation that has
    it.
 2. **`ManifestFile`'s field order is unpinned.** `files` is `[]`, so permuting
-   `path`, `mode`, `size`, `sha256` at `:141-144` leaves this test green while
+   `path`, `mode`, `size`, `sha256` at `:213-216` leaves this test green while
    changing the bytes of every generation with at least one file, which in
    practice is every real one.
 3. **No digest is asserted.** The test compares bytes only. No test anywhere
@@ -262,23 +264,27 @@ inserting an optional field in a natural-reading position and tidying
 
 ### O10. macOS compiles the exchange and never runs it
 
-`generation.rs:1191-1198` gives Linux and macOS one shared arm:
+`store_fs.rs:111-115` gives Linux and macOS one shared arm:
 
 ```
+/// Atomically swaps the entries `a` and `b` under `dir`; both must exist.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
+pub(crate) fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> rustix::io::Result<()> {
     rustix::fs::renameat_with(dir, a, dir, b, rustix::fs::RenameFlags::EXCHANGE)
-        .map_err(|_| invalid("atomic digest-target exchange failed"))
 }
 ```
 
-with `:1200-1205` failing closed elsewhere. The doc comment at `:1191-1193`
-states the mapping: Linux `renameat2(RENAME_EXCHANGE)`, macOS
+with `:117-120` failing closed elsewhere and the caller at `generation.rs:1875-1878`
+classifying the errno. `rustix` issues `RenameFlags::EXCHANGE` as Linux
+`renameat2(RENAME_EXCHANGE)` and macOS
 `renameatx_np(RENAME_SWAP)`. Those are different kernel calls with independently
 documented behaviour, reached through one Rust expression.
 
-CI's macOS job (`the source repository`ci.yml`workflow:126-184`, matrix at `:132`) runs on
-macOS exactly four host-runtime steps:
+At HEAD `.github/workflows/ci.yml` runs every job on `ubuntu-latest` and contains
+no `macos` token; the catalog attributes the removal of the macOS job to PR #131
+(merge `5d638e3e8`) in the source repository. That former job (`the source
+repository`ci.yml`workflow:126-184`, matrix at `:132`; source-catalog coordinates)
+ran on macOS exactly four host-runtime steps:
 
 - `:156` `cargo build -p host-runtime` (build only, no test binaries)
 - `:178` `cargo nextest run -p host-runtime --test shm_soak`
@@ -287,23 +293,24 @@ macOS exactly four host-runtime steps:
 - `:182-183` `cargo test -p host-runtime --doc`
 
 No `--test lifecycle`, no `--test client`, no `--test activation`, and the only
-`--lib` invocation is filtered to one `shm_provider` test. The lib test binary is
-*compiled* on macOS by that filtered run, so a macOS type or cfg error would
-surface, but no `generation` or `lifecycle` test body executes. The step comment
-at `:171-174` says so in its own terms: the macOS job proves "side-effect-free
-omission (R15), not active parity".
+`--lib` invocation was filtered to one `shm_provider` test. The lib test binary
+was *compiled* on macOS by that filtered run, so a macOS type or cfg error would
+have surfaced, but no `generation` or `lifecycle` test body executed. The step
+comment at `:171-174` said so in its own terms: the macOS job proved
+"side-effect-free omission (R15), not active parity". With that job gone,
+nothing in this tree builds or tests host-runtime on macOS.
 
 So the macOS `RENAME_SWAP` call has never been observed to execute. Its call site
-is `generation.rs:905`, inside `promote_temp`, reached only when the digest target
-is occupied by a corrupt unprotected generation (`:886-905`).
+is `generation.rs:1352`, inside `promote_temp`, reached only when the digest target
+is occupied by a corrupt unprotected generation (`:1313-1350`).
 
 ### O11. The portable fallback is dead on Linux and load-bearing on macOS
 
-`rename_no_replace` (`generation.rs:1216-1242`) has a Linux-only flagged block at
-`:1217-1230` that returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`, and falls
+`rename_no_replace` (`store_fs.rs:53-79`) has a Linux-only flagged block at
+`:58-68` that returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`, and falls
 through only on `INVAL`, `NOSYS`, or `OPNOTSUPP`. On a current Linux kernel with
 ext4, tmpfs, or overlayfs, `RENAME_NOREPLACE` is supported, so the fallback at
-`:1231-1241` never executes.
+`:69-78` never executes.
 
 On macOS the `#[cfg(target_os = "linux")]` block is absent entirely, so the
 fallback is the **only** path. Combined with O10, that means the check-then-act
@@ -323,36 +330,34 @@ match renameat(dir, from, dir, to) { ... }
 
 ### O12. The fallback cannot deliver the guarantee its caller documents
 
-`promote_temp`'s doc comment at `generation.rs:865-876` states the requirement
+`promote_temp`'s doc comment at `generation.rs:1285-1290` states the requirement
 explicitly:
 
-> The rename must not replace: POSIX `renameat` succeeds when the target is an
-> existing empty directory, so a plain rename would silently destroy a protected
-> occupant that had been corrupted into an empty directory before the protection
-> check below ever ran.
+> `renameat` can replace an empty target directory, bypassing the protected-target
+> check.
 
-The fallback's own comment at `:1211-1215` acknowledges the gap and justifies it
-by serialization:
+The fallback's own comment at `store_fs.rs:49-52` acknowledges the gap and leaves
+serialization to the caller:
 
-> Filesystems that reject `renameat2` flags, and platforms without them, fall
-> back to checking occupancy first; that check is sound here because every
-> mutating entry point holds `transaction.lock`, so no other participant in the
-> trust model creates the target concurrently.
+> The fallback checks occupancy first because plain `renameat` replaces an empty
+> target directory. The fallback is not atomic against a concurrent creator of
+> `to`, so callers must exclude concurrent writers.
 
 Two things are true at once. The flagged Linux path enforces "must not replace"
 unconditionally, because `RENAME_NOREPLACE` makes the occupant's emptiness
 irrelevant. The fallback path enforces it only for the interval between the
 `statat` and the `renameat`, and only against actors inside the trust model. An
 empty directory that appears at `to` in that window is silently replaced, which
-is exactly the outcome `:868-871` says must not happen.
+is exactly the outcome `generation.rs:1287` says must not happen.
 
 The justification is a prose claim about `transaction.lock`
-(`lifecycle.rs:44`, `:495-496`, `:534`), not a mechanism in
+(`lifecycle.rs:37`, `:444-445`, `:479`), not a mechanism in
 `rename_no_replace` itself. The lock excludes other lifecycle participants. It
 does not exclude anything outside the trust model that can write into the
 generations directory, and the store's own threat model elsewhere assumes hostile
-planting is possible: `validate_in_dir` at `:669-678` documents a directory
-replacement attack against the walk in detail, and
+planting is possible: the `ValidatedGeneration` comments at `generation.rs:323`
+and `:575` state that the retained descriptor pins the tree against pathname
+replacement, and
 `validation-and-enumeration-address-one-directory-object` in the catalog records
 two shipped defects from that class. So the store defends against planted
 replacements in the validation path while relying on the lock in the rename
@@ -518,7 +523,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - one byte-exact golden vector exists
-(`generation.rs:1395-1412`) but its fixture omits the optional field and carries
+(`generation.rs:2044-2059`) but its fixture omits the optional field and carries
 an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
@@ -533,11 +538,11 @@ GOLDEN_DIGEST`, and assert the fixture round-trips by decoding `GOLDEN_BYTES` an
 re-encoding. `always` because the encoding is evaluated on every stage and every
 validate; there is no configuration in which it is unreached.
 Fault/timing angle: none. This is a static encoding contract. The mechanism is
-that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:172-174`),
-so the byte order is literally the declaration order at `:153-168` for the outer
-struct and `:141-144` for each file entry, and `digest` is the SHA-256 of exactly
-those bytes (`:176-178`). The optional field's `skip_serializing_if =
-"Option::is_none"` at `:166` is what makes the existing vector blind to its
+that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:255-257`),
+so the byte order is literally the declaration order at `:229-239` for the outer
+struct and `:213-216` for each file entry, and `digest` is the SHA-256 of exactly
+those bytes (`:259-261`). The optional field's `skip_serializing_if =
+"Option::is_none"` at `:237` is what makes the existing vector blind to its
 position: with the field absent, moving it changes nothing about the fixture's
 bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
@@ -546,9 +551,9 @@ pass.
 Confidence: high - [evidence](../../evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
 fixture were read at HEAD, and the three blind spots were each confirmed by
 reasoning from the fixture's literal contents.
-Existing check: `generation.rs:1395-1412`
+Existing check: `generation.rs:2044-2059`
 `a_generation_staged_before_the_source_digest_field_still_decodes` asserts
-`decoded.canonical_bytes() == predecessor` against the literal at `:1401`. It is
+`decoded.canonical_bytes() == predecessor` against the literal at `:2048`. It is
 the only byte-exact manifest vector in the crate and it does pin the relative
 order of the four leading scalars and `files`, and it does catch the addition of
 a required field, because `deny_unknown_fields` plus a missing field fails the
@@ -578,8 +583,8 @@ that leaves the existing golden test green must be detectable by some check.
 does not change when a field moves, so there is no version in which the
 obligation lapses.
 Fault/timing angle: none, but the failure shape needed correcting. The break is
-**fail-closed, not silent**. `validate_in_dir` enforces the binding twice
-(`generation.rs:636-648`): first `hex(sha256(bytes)) != digest`, then
+**fail-closed, not silent**. `read_manifest_in_dir` enforces the binding twice
+(`generation.rs:1021-1027`): first `hex(sha256(bytes)) != digest`, then
 `manifest.canonical_bytes() != bytes`. Under a reordered struct the on-disk bytes
 still hash to the directory name, so the first check passes, and the re-encode of
 the decoded manifest differs, so the second fails with
@@ -599,7 +604,7 @@ fail-closed conclusion was derived from them rather than assumed; the prompt's
 "silently change every retained generation's digest" is corrected in the evidence
 file.
 Existing check: partial and narrow. The predecessor fixture at
-`generation.rs:1395-1412` is the only cross-version manifest test, and it covers
+`generation.rs:2044-2059` is the only cross-version manifest test, and it covers
 one specific evolution, a field added at the end and omitted when absent. Nothing
 covers a field that moves.
 Impact: the first start after an upgrade reports `native_payload_invalid` for
@@ -619,7 +624,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - the Linux arm has one test through `promote_temp`
-(`generation.rs:1689`), and the macOS arm has never executed under observation.
+(`generation.rs:2922`), and the macOS arm has never executed under observation.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
 atomically inside one directory, or an error is returned and neither name is left
 unoccupied; on a platform without the primitive it fails closed.
@@ -630,34 +635,37 @@ orphan, with no observable state in which either name is absent. Also assert the
 non-Linux non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when the
 digest target is occupied by a corrupt unprotected generation
-(`generation.rs:886-905`), so a run that never meets that condition owes nothing
+(`generation.rs:1313-1350`), so a run that never meets that condition owes nothing
 and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
-`generation.rs:1191-1198` gives Linux and macOS a shared arm calling
-`rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, and its own doc comment
-at `:1191-1193` records that this is `renameat2(RENAME_EXCHANGE)` on Linux and
+`store_fs.rs:112-115` gives Linux and macOS a shared arm calling
+`rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, which `rustix` issues as
+`renameat2(RENAME_EXCHANGE)` on Linux and
 `renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
 with independent semantics, error sets, and filesystem support, reached through
-one line of Rust. The call site at `:905` sits between an exchange and a
-revalidate-then-delete (`:907-910`), so a non-atomic or partially-applied
-exchange deletes the wrong directory. `promote_temp`'s contract at `:865-876`
+one line of Rust. The call site at `generation.rs:1352` sits between an exchange and a
+revalidate-then-delete (`:1355-1356`), so a non-atomic or partially-applied
+exchange deletes the wrong directory. `promote_temp`'s contract at `:1285-1290`
 depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing test
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-(`generation.rs:1689`) already builds that fixture, so the fault is available; the
+(`generation.rs:2922`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
-Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
-read at HEAD; the claim that no macOS lifecycle or generation test executes is
-derived from the four host-runtime steps in that job rather than asserted.
-Existing check: partial, Linux only. `generation.rs:1689`
+Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms and the call site were read at the authoring pass's HEAD, along
+with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
+since deleted that job with every other macOS job, so the claim that no macOS
+lifecycle or generation test executes now holds trivially: `.github/workflows/ci.yml`
+at HEAD contains only `ubuntu-latest` jobs.
+Existing check: partial, Linux only. `generation.rs:2922`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
-branch. CI's macOS job (`the source repository`ci.yml`workflow:126-184`) runs only
+branch. The source repository's former macOS job
+(`the source repository`ci.yml`workflow:126-184`; source-catalog coordinates) ran only
 `cargo build -p host-runtime` (`:156`), `--test shm_soak` (`:178`), one filtered
-`--lib shm_provider` test (`:179-181`), and `--doc` (`:182-183`). No `generation`
-or `lifecycle` test body runs on macOS; the step comment at `:171-174` says the
-job proves omission, not parity. Status unaudited.
+`--lib shm_provider` test (`:179-181`), and `--doc` (`:182-183`), and this tree's
+workflow has no macOS job, so no `generation` or `lifecycle` test body runs on
+macOS. Status unaudited.
 Impact: the exchange is the store's only repair primitive for a corrupt occupant,
 and it is immediately followed by a deletion. If macOS `RENAME_SWAP` behaves
 differently on APFS than `RENAME_EXCHANGE` on ext4, the failure mode is deleting
@@ -684,23 +692,24 @@ it returns `Ok(false)` and leaves both names as they were. Run the assertion for
 an empty occupant and a nonempty occupant, on both the flagged Linux path and the
 portable path, forcing the portable path either by a filesystem that rejects
 `renameat2` flags or by extracting the fallback so it can be called directly.
-`always` because the caller's contract at `generation.rs:868-871` is
+`always` because the caller's contract at `generation.rs:1287` is
 unconditional, so an occupied target that gets replaced is a violation rather
 than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one platform
-and load-bearing on another. `generation.rs:1216-1242`: the Linux block at
-`:1217-1230` returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`, falling through
+and load-bearing on another. `store_fs.rs:53-79`: the Linux block at
+`:58-68` returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`, falling through
 only on `INVAL`, `NOSYS`, or `OPNOTSUPP`, so on a current kernel with ext4,
 tmpfs, or overlayfs the fallback never runs. On macOS that block is absent by
-cfg, so `statat` at `:1231-1235` followed by `renameat` at `:1236-1241` is the
+cfg, so `statat` at `:69-73` followed by `renameat` at `:74-78` is the
 only path. POSIX `rename` replaces an existing *empty* directory, which
-`promote_temp`'s comment at `:868-871` calls out by name as the thing that must
+`promote_temp`'s comment at `generation.rs:1287` calls out by name as the thing that must
 not happen, so the flagged path and the fallback do not implement the same
-guarantee. The fallback's justification at `:1211-1215` is a prose claim that
-`transaction.lock` (`lifecycle.rs:44`, `:495-496`) excludes concurrent creation.
+guarantee. The fallback's justification at `store_fs.rs:49-52` is a prose claim that
+`transaction.lock` (`lifecycle.rs:37`, `:444-445`) excludes concurrent creation.
 That is a claim about actors inside the trust model only, and the same file
-defends against out-of-model directory replacement elsewhere: the walk comment at
-`:669-678` describes exactly that attack, and the catalog's
+defends against out-of-model directory replacement elsewhere: the
+`ValidatedGeneration` comments at `generation.rs:323` and `:575` name exactly that
+attack, and the catalog's
 `validation-and-enumeration-address-one-directory-object` records two shipped
 defects from the class.
 Required faults and enabling state: a directory appearing at the target between

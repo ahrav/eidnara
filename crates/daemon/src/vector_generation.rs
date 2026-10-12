@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use host_runtime::generation::{
     FILE_HASH_BUFFER_BYTES, GenerationError, GenerationManifest, GenerationStore, ManifestFile,
-    RETAINED_FILE_BYTES, StageMeta, StreamedFile, ValidatedGeneration,
+    RETAINED_FILE_BYTES, StageMeta, StageObserver, StreamedFile, ValidatedGeneration,
 };
 use host_runtime::lifecycle::{LifecycleTransactionLock, PAYLOAD_MANIFEST_DIGEST_LEN};
 use retrieval::ProjectionIdentity;
@@ -664,6 +664,17 @@ impl Staging<'_> {
         meta: &StageMeta,
         resolve: impl Fn(&str) -> PathBuf,
     ) -> Result<String, VectorRefusal> {
+        self.stage_manifest_observed(manifest, meta, resolve, &mut |_| Ok(()))
+    }
+
+    /// Runs [`Self::stage_manifest`] and reports each store [`StageEvent`](host_runtime::generation::StageEvent) to `observer`, as [`GenerationStore::stage_observed`] does.
+    fn stage_manifest_observed(
+        &self,
+        manifest: &GenerationManifest,
+        meta: &StageMeta,
+        resolve: impl Fn(&str) -> PathBuf,
+        observer: &mut StageObserver<'_>,
+    ) -> Result<String, VectorRefusal> {
         let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
         self.gate
             .check_limits(
@@ -686,7 +697,9 @@ impl Staging<'_> {
             .map_err(VectorRefusal::Reservation)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
-        let digest = self.store.stage(&sources, meta, self.protected)?;
+        let digest = self
+            .store
+            .stage_observed(&sources, meta, self.protected, observer)?;
         // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
         debug_assert_eq!(digest, manifest.digest());
         Ok(digest)
@@ -700,6 +713,28 @@ impl Staging<'_> {
 ///
 /// A build of another identity, an admission denial, or the store's refusal.
 pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, VectorRefusal> {
+    stage_built(built, staging, &mut |_| Ok(()))
+}
+
+/// Runs [`stage`] and reports each store [`StageEvent`](host_runtime::generation::StageEvent) to `observer`, so a test can cut staging at any step.
+///
+/// # Errors
+///
+/// As [`stage`], plus the store's classification of an observer errno.
+#[cfg(feature = "test-support")]
+pub fn stage_observed(
+    built: &BuiltVectors,
+    staging: &Staging<'_>,
+    observer: &mut StageObserver<'_>,
+) -> Result<String, VectorRefusal> {
+    stage_built(built, staging, observer)
+}
+
+fn stage_built(
+    built: &BuiltVectors,
+    staging: &Staging<'_>,
+    observer: &mut StageObserver<'_>,
+) -> Result<String, VectorRefusal> {
     let sidecar = &built.sidecar;
     let identity = staging.identity;
     let field = |field| VectorRefusal::Identity { field };
@@ -718,9 +753,12 @@ pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, Vect
     if sidecar.kernel_incarnation_id != identity.kernel_incarnation_id {
         return Err(field("kernel_incarnation_id"));
     }
-    staging.stage_manifest(&sidecar.stage_manifest(), &sidecar.stage_meta(), |path| {
-        built.dir.join(path)
-    })
+    staging.stage_manifest_observed(
+        &sidecar.stage_manifest(),
+        &sidecar.stage_meta(),
+        |path| built.dir.join(path),
+        observer,
+    )
 }
 
 /// A generation whose files, sidecar, and meaning were all checked. The row and code artifacts stay open on the descriptors verification read them through, and the tables it decoded stay with it, so a reader takes the files as verified without opening or hashing them again.
