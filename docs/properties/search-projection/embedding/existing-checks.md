@@ -90,7 +90,7 @@ branch; it is not a proposed RP2.1 error vocabulary.
 | `crates/host-runtime/src/local_embeddings/mod.rs:647-722`, `:725-767` | Query deadline gates admission, native start, result receipt, and output construction. Worker owns query permit and text charge through the native call. | unaudited |
 | `crates/host-runtime/src/local_embeddings/mod.rs:1148-1161` | Shutdown closes admission, joins tracked work, clears jobs, and waits for an in-process CPU holder. There is no finite native-call deadline here. | unaudited |
 | `crates/kernel/src/applicability/checkout.rs:170-203` | Cancellation is sticky; crossing the deadline raises the shared interrupt and `check` returns BudgetExhausted. | unaudited |
-| `crates/kernel/src/open.rs:1379-1409` | SQLite progress calls the shared stop predicate, but the installer is crate-private. | unaudited |
+| `crates/kernel/src/open.rs:1413-1443` | SQLite progress calls the shared stop predicate, but the installer is crate-private. | unaudited |
 | `crates/daemon/src/memory_classifier_scheduler.rs:163-220` | Cancellation can drop an in-flight tick; failed store work waits the idle poll. This is not an embedding sweep. | unaudited |
 
 ## Claim-bearing tests at current coordinates

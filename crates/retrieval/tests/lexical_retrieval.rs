@@ -147,8 +147,8 @@ fn batch_bounds() -> BatchBounds {
 }
 
 /// D26b's qualification threshold and ranked-match budget, the values the threshold fixtures are built around.
-const QUALIFYING_MATCHES: usize = 20_000;
-const RANK_BUDGET: usize = 30_000;
+const QUALIFYING_MATCHES: usize = 10_000;
+const RANK_BUDGET: usize = 15_000;
 
 fn bounds() -> RetrievalBounds {
     RetrievalBounds {
@@ -240,8 +240,23 @@ fn corpus() -> Vec<Row> {
     ]
 }
 
+/// A fixture's directory: a temporary one removed on drop, or one an earlier scale run kept.
+enum Root {
+    Temp(tempfile::TempDir),
+    Kept(std::path::PathBuf),
+}
+
+impl Root {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Temp(dir) => dir.path(),
+            Self::Kept(path) => path,
+        }
+    }
+}
+
 struct Fixture {
-    root: tempfile::TempDir,
+    root: Root,
     kernel: KernelStore,
     store: SqliteStore,
     incarnation: String,
@@ -303,7 +318,7 @@ impl Fixture {
             })
             .unwrap();
         let fixture = Self {
-            root,
+            root: Root::Temp(root),
             kernel,
             store,
             incarnation,
@@ -316,6 +331,23 @@ impl Fixture {
 
     fn all_admitted() -> Self {
         Self::new(&OBJECTS)
+    }
+
+    /// Reopens a projection and kernel a scale run kept with `EIDNARA_LEXICAL_SCALE_KEEP`, so later measurements reuse one build.
+    fn reopen(root: Root) -> Self {
+        let kernel = KernelStore::open(root.path().join("kernel")).unwrap();
+        let incarnation = kernel
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap();
+        let store = open_store(root.path());
+        Self {
+            root,
+            kernel,
+            store,
+            incarnation,
+            project: ProjectScope::new(PROJECT_A).unwrap(),
+            rows: corpus(),
+        }
     }
 
     fn retire(&self, object: &str) {
@@ -410,6 +442,19 @@ impl Fixture {
                     bounds,
                     budget,
                 ))
+            })
+            .unwrap()
+    }
+
+    /// The occurrence identifiers `scan` keeps, in comparator order, before any occurrence row is read.
+    fn kept(&self, probes: &[Probe], bounds: RetrievalBounds) -> Vec<String> {
+        self.store
+            .with_conn(|conn| {
+                let budget = EvalBudget::unbounded();
+                Ok(scan(conn, probes, bounds, &budget)
+                    .unwrap()
+                    .hit_ids(&budget)
+                    .unwrap())
             })
             .unwrap()
     }
@@ -604,26 +649,27 @@ fn zero_probes_run_no_match_while_a_control_probe_contributes() {
 }
 
 #[test]
-fn admitting_a_released_scan_equals_retrieve_and_carries_the_judged_candidate() {
+fn scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate() {
     let fixture = Fixture::all_admitted();
     let request = probes("parse fetch io");
     let reference = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
-    let scanned = fixture
+    let admitted = fixture
         .store
-        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+        .with_conn(|conn| {
+            let scanned = scan(conn, &request, bounds(), &EvalBudget::unbounded()).unwrap();
+            assert_eq!(scanned.hits(), 6);
+            // Admission reads each candidate's occurrence row under the connection the scan used.
+            Ok(admit(
+                scanned,
+                &fixture.kernel,
+                fixture.authority(),
+                &EvalBudget::unbounded(),
+            ))
+        })
         .unwrap()
         .unwrap();
-    assert_eq!(scanned.hits(), 6);
-    // The projection connection is released here; admission needs only the kernel.
-    let admitted = admit(
-        &fixture.kernel,
-        fixture.authority(),
-        scanned,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
     assert_eq!(admitted, reference);
     for contribution in &admitted.contributions {
         let candidate = contribution.occurrence_candidate();
@@ -746,8 +792,10 @@ fn an_ineligible_leader_is_excluded_without_taking_an_accepted_slot() {
     assert_eq!(ids_of(&all), reference[1..].to_vec());
 }
 
+/// The first batch judges the open accepted slots and each later one scales the slots left by the matches read per acceptance so far, so a short tail is judged in one small batch rather than one candidate at a time.
 #[test]
-fn the_accepted_bound_inside_a_batch_still_tallies_the_rest_and_an_exact_fill_stays_complete() {
+fn admission_batches_scale_the_open_slots_by_the_acceptance_so_far_and_an_exact_fill_stays_complete()
+ {
     let fixture = Fixture::new(&["alpha", "beta", "delta", "epsilon", "zeta"]);
     let request = probes("parse");
     let reference = fixture.reference(&request);
@@ -766,8 +814,9 @@ fn the_accepted_bound_inside_a_batch_still_tallies_the_rest_and_an_exact_fill_st
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::AcceptedBound)
     );
-    assert_eq!(retrieval.consumed.judged, 4 + 2);
-    assert_eq!(retrieval.consumed.batches, 2);
+    // Two open slots take the hidden leader and one eligible row; one acceptance in two reads scales the one slot left to two candidates, and revalidation re-judges both accepted rows.
+    assert_eq!(retrieval.consumed.judged, 2 + 2 + 2);
+    assert_eq!(retrieval.consumed.batches, 3);
     assert_eq!(
         retrieval.consumed.excluded,
         vec![(EligibilityVerdict::Hidden, 1)]
@@ -908,9 +957,9 @@ fn an_orphaned_lexical_row_is_excluded_at_the_engine() {
     assert_stale_row_excluded_at_every_scan_bound(&fixture, &request, &before, "gamma");
 }
 
-/// `before` is the reference order with `stale` still live. For every `scan_rows` from 1 through
-/// `before.len()`, retrieval must return the live prefix of that order and report truncation only
-/// while live rows remain past the bound, wherever `stale` sat in the shortlist.
+/// `before` is the reference order with `stale` still live. For every `scan_rows` from 1 through `before.len()`, the
+/// window keeps the first `scan_rows` matches of that order with `stale` among them, admission drops `stale` without
+/// replacing it, and truncation is reported while matches remain past the bound.
 fn assert_stale_row_excluded_at_every_scan_bound(
     fixture: &Fixture,
     request: &[Probe],
@@ -922,15 +971,11 @@ fn assert_stale_row_excluded_at_every_scan_bound(
         .retrieve(request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.completion, Completion::Complete);
-    assert_eq!(retrieval.consumed.scanned_rows, before.len() - 1);
+    assert_eq!(retrieval.consumed.scanned_rows, before.len());
+    assert_eq!(retrieval.consumed.dead_rows, 1);
     assert!(!ids_of(&retrieval).contains(&stale_id));
     assert_eq!(retrieval.contributions.len(), before.len() - 1);
 
-    let expected: Vec<String> = before
-        .iter()
-        .filter(|id| **id != stale_id)
-        .cloned()
-        .collect();
     let stale_at = before.iter().position(|id| *id == stale_id).unwrap();
     for scan_rows in 1..=before.len() {
         let tight = RetrievalBounds {
@@ -940,11 +985,20 @@ fn assert_stale_row_excluded_at_every_scan_bound(
         let retrieval = fixture
             .retrieve(request, tight, &EvalBudget::unbounded())
             .unwrap();
-        let want = &expected[..scan_rows.min(expected.len())];
+        let want: Vec<String> = before[..scan_rows]
+            .iter()
+            .filter(|id| **id != stale_id)
+            .cloned()
+            .collect();
         assert_eq!(ids_of(&retrieval), want, "scan_rows={scan_rows}");
         assert_eq!(
+            retrieval.consumed.dead_rows,
+            usize::from(stale_at < scan_rows),
+            "scan_rows={scan_rows} stale_at={stale_at}"
+        );
+        assert_eq!(
             retrieval.completion,
-            if scan_rows < expected.len() {
+            if scan_rows < before.len() {
                 Completion::Incomplete(IncompleteReason::ScanBound)
             } else {
                 Completion::Complete
@@ -981,38 +1035,28 @@ fn tombstone_raw(fixture: &Fixture, occurrence_id: &str) {
         .unwrap();
 }
 
+/// Tombstoned rows inside the scan bound keep their window slots and are dropped unjudged at admission, so the live rows past the bound stay unread and truncation is still reported.
 #[test]
-fn tombstoned_rows_inside_the_scan_bound_do_not_take_slots_or_hide_truncation() {
+fn tombstoned_rows_inside_the_scan_bound_are_dropped_without_replacement() {
     let fixture = Fixture::all_admitted();
     let bulk = project_bulk(&fixture, 2500);
     let request = probes("parse");
     let reference = fixture.reference(&request);
     let scan = bounds().scan_rows.get();
-    let page = scan + 1;
     assert!(reference.len() > 2 * scan);
 
-    // Dead rows cover the whole first page and part of the second, so the live prefix spans three pages.
-    let dead = scan + 6;
+    let dead = 6;
     for occurrence_id in &reference[..dead] {
         tombstone_raw(&fixture, occurrence_id);
     }
-    // Admitted sentinels sit at every edge a paging error could move, so the contributions are exactly the sentinels the scan took.
-    let boundary = (dead / page + 1) * page;
-    assert!(dead < boundary - 1 && boundary < dead + scan - 1);
-    let sentinels = [
-        dead - 1,
-        dead,
-        boundary - 1,
-        boundary,
-        dead + scan - 1,
-        dead + scan,
-    ];
+    // Admitted sentinels sit on the last dead row, the first live row, the last kept row, and the first row past the bound.
+    let sentinels = [dead - 1, dead, scan - 1, scan];
     let objects: Vec<&str> = sentinels
         .iter()
         .map(|&index| object_of(&bulk, &reference[index]))
         .collect();
     fixture.admit(&objects);
-    let expected: Vec<String> = [dead, boundary - 1, boundary, dead + scan - 1]
+    let expected: Vec<String> = [dead, scan - 1]
         .iter()
         .map(|&index| reference[index].clone())
         .collect();
@@ -1027,15 +1071,17 @@ fn tombstoned_rows_inside_the_scan_bound_do_not_take_slots_or_hide_truncation() 
         .unwrap();
     assert_eq!(ids_of(&retrieval), expected);
     assert_eq!(retrieval.consumed.scanned_rows, scan);
-    assert_eq!(retrieval.consumed.judged, scan + expected.len());
+    assert_eq!(retrieval.consumed.dead_rows, dead);
+    assert_eq!(retrieval.consumed.judged, scan - dead + expected.len());
     assert_eq!(
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::ScanBound)
     );
 }
 
+/// A dead row inside the window still counts toward the scan bound: one match past the bound reports truncation even though the live matches would fit.
 #[test]
-fn a_dead_row_that_fills_the_page_past_the_bound_leaves_the_result_complete() {
+fn a_dead_row_inside_the_window_still_counts_toward_the_bound() {
     let fixture = Fixture::all_admitted();
     let request = probes("parse");
     let scan = bounds().scan_rows.get();
@@ -1056,13 +1102,17 @@ fn a_dead_row_that_fills_the_page_past_the_bound_leaves_the_result_complete() {
             &EvalBudget::unbounded(),
         )
         .unwrap();
-    assert_eq!(ids_of(&retrieval), fixture.eligible(&reference[1..]));
+    assert_eq!(ids_of(&retrieval), fixture.eligible(&reference[1..scan]));
     assert_eq!(retrieval.consumed.scanned_rows, scan);
+    assert_eq!(retrieval.consumed.dead_rows, 1);
     assert_eq!(
         retrieval.consumed.judged,
-        scan + retrieval.contributions.len()
+        scan - 1 + retrieval.contributions.len()
     );
-    assert_eq!(retrieval.completion, Completion::Complete);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
 }
 
 #[test]
@@ -1544,20 +1594,20 @@ fn a_held_kernel_reader_does_not_outlive_the_budget() {
     assert_eq!(retrieval.consumed.probes, 1);
 }
 
-/// 20,001 rows whose terms match exactly the counts the D26b boundaries name: `t19999`, `t20000`, and `t20001` match that many rows;
-/// `c15000` matches 15,000 rows and `d14999`, `d15000`, `d15001` match that many, so a pair sums to 29,999, 30,000, or 30,001.
+/// 10,001 rows whose terms match exactly the counts the D26b boundaries name: `t9999`, `t10000`, and `t10001` match that many rows;
+/// `c7500` matches 7,500 rows and `d7499`, `d7500`, `d7501` match that many, so a pair sums to 14,999, 15,000, or 15,001.
 fn project_thresholds(fixture: &Fixture) -> Vec<Row> {
-    let rows: Vec<Row> = (0..20_001)
+    let rows: Vec<Row> = (0..10_001)
         .map(|n: usize| {
             let mut terms = vec![format!("row{n}")];
             for (term, count) in [
-                ("t19999", 19_999),
-                ("t20000", 20_000),
-                ("t20001", 20_001),
-                ("c15000", 15_000),
-                ("d14999", 14_999),
-                ("d15000", 15_000),
-                ("d15001", 15_001),
+                ("t9999", 9_999),
+                ("t10000", 10_000),
+                ("t10001", 10_001),
+                ("c7500", 7_500),
+                ("d7499", 7_499),
+                ("d7500", 7_500),
+                ("d7501", 7_501),
             ] {
                 if n < count {
                     terms.push(term.to_string());
@@ -1574,7 +1624,7 @@ fn project_thresholds(fixture: &Fixture) -> Vec<Row> {
 
 #[test]
 fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
-    assert_eq!((QUALIFYING_MATCHES, RANK_BUDGET), (20_000, 30_000));
+    assert_eq!((QUALIFYING_MATCHES, RANK_BUDGET), (10_000, 15_000));
     let fixture = Fixture::all_admitted();
     project_thresholds(&fixture);
     let run = |request: &str| {
@@ -1584,7 +1634,7 @@ fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
     };
 
     // A probe at or under the threshold is counted exactly and ranked; one row past it is common and unranked.
-    for (term, count) in [("t19999", 19_999), ("t20000", 20_000)] {
+    for (term, count) in [("t9999", 9_999), ("t10000", 10_000)] {
         let ranked = run(term);
         assert_eq!(ranked.consumed.counted_rows, count, "{term}");
         assert_eq!(ranked.consumed.ranked_matches, count, "{term}");
@@ -1593,9 +1643,9 @@ fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
             Completion::Incomplete(IncompleteReason::ScanBound)
         );
     }
-    let common = run("t20001");
+    let common = run("t10001");
     assert_eq!(
-        common.consumed.counted_rows, 20_001,
+        common.consumed.counted_rows, 10_001,
         "one lookahead row past the threshold"
     );
     assert_eq!(common.consumed.ranked_matches, 0);
@@ -1605,33 +1655,33 @@ fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
     );
     assert_eq!(common.consumed.scanned_rows, bounds().scan_rows.get());
 
-    // The cumulative budget admits a pair summing to 29,999 or 30,000 and skips the larger probe at 30,001.
-    for (second, count) in [("d14999", 14_999), ("d15000", 15_000)] {
-        let both = run(&format!("c15000 {second}"));
-        assert_eq!(both.consumed.ranked_matches, 15_000 + count, "{second}");
+    // The cumulative budget admits a pair summing to 14,999 or 15,000 and skips the larger probe at 15,001.
+    for (second, count) in [("d7499", 7_499), ("d7500", 7_500)] {
+        let both = run(&format!("c7500 {second}"));
+        assert_eq!(both.consumed.ranked_matches, 7_500 + count, "{second}");
         assert_eq!(
             both.completion,
             Completion::Incomplete(IncompleteReason::ScanBound)
         );
     }
-    let skipped = run("c15000 d15001");
-    assert_eq!(skipped.consumed.ranked_matches, 15_000);
+    let skipped = run("c7500 d7501");
+    assert_eq!(skipped.consumed.ranked_matches, 7_500);
     assert_eq!(
         skipped.completion,
         Completion::Incomplete(IncompleteReason::RankBudget)
     );
     // Admission follows increasing count, not request order: the smaller probe is ranked even when it comes second.
-    let reordered = run("d15001 c15000");
-    assert_eq!(reordered.consumed.ranked_matches, 15_000);
+    let reordered = run("d7501 c7500");
+    assert_eq!(reordered.consumed.ranked_matches, 7_500);
     assert_eq!(
         reordered.completion,
         Completion::Incomplete(IncompleteReason::RankBudget)
     );
 
     // A repeated probe is counted and ranked once.
-    let repeated = run("t19999 t19999");
-    assert_eq!(repeated.consumed.counted_rows, 19_999);
-    assert_eq!(repeated.consumed.ranked_matches, 19_999);
+    let repeated = run("t9999 t9999");
+    assert_eq!(repeated.consumed.counted_rows, 9_999);
+    assert_eq!(repeated.consumed.ranked_matches, 9_999);
     assert_eq!(repeated.consumed.probes, 2);
 }
 
@@ -1644,36 +1694,25 @@ fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only
         scan_rows: NonZeroUsize::new(5).unwrap(),
         ..bounds()
     };
-    let scanned = fixture
-        .store
-        .with_conn(|conn| {
-            Ok(scan(
-                conn,
-                &probes("t20001"),
-                tight,
-                &EvalBudget::unbounded(),
-            ))
-        })
-        .unwrap()
-        .unwrap();
+    let scanned = fixture.kept(&probes("t10001"), tight);
     let mut highest: Vec<String> = fixture
         .raw()
-        .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 't20001' ORDER BY rowid DESC LIMIT 5")
+        .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 't10001' ORDER BY rowid DESC LIMIT 5")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     highest.sort();
-    assert_eq!(scanned.hits(), 5);
-    let mut hit: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
+    assert_eq!(scanned.len(), 5);
+    let mut hit: Vec<String> = scanned.clone();
     hit.sort();
     assert_eq!(hit, highest, "the common scan keeps the highest rowids");
     // Admitting the kept rows' sources makes every one of them a contribution, so the assertion below sees them all.
     let objects: Vec<&str> = highest.iter().map(|id| object_of(&rows, id)).collect();
     fixture.admit(&objects);
     let only_common = fixture
-        .retrieve(&probes("t20001"), tight, &EvalBudget::unbounded())
+        .retrieve(&probes("t10001"), tight, &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(
         only_common.completion,
@@ -1690,7 +1729,7 @@ fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only
 
     // The rare probe is ranked and the common one skipped; the skip stays visible.
     let mixed = fixture
-        .retrieve(&probes("row7 t20001"), tight, &EvalBudget::unbounded())
+        .retrieve(&probes("row7 t10001"), tight, &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(mixed.consumed.ranked_matches, 1);
     assert_eq!(
@@ -1698,6 +1737,403 @@ fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only
         Completion::Incomplete(IncompleteReason::CommonTerms)
     );
     assert_eq!(mixed.consumed.scanned_rows, 1);
+}
+
+/// An interrupt from the connection's progress handler while admission reads a later batch's occurrence rows ends the request as budget exhaustion with no contributions, though the request's own budget never ends.
+#[test]
+fn an_interrupt_while_admission_reads_occurrence_rows_is_budget_exhaustion() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 600);
+    // Every other bulk row is eligible, so the first batch leaves slots open and a second batch reads more occurrence rows.
+    let admitted: Vec<&str> = bulk
+        .iter()
+        .step_by(2)
+        .map(|row| row.object.as_str())
+        .collect();
+    fixture.admit(&admitted);
+    let request = probes("parse");
+    let wide = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4096).unwrap(),
+        max_accepted: NonZeroUsize::new(128).unwrap(),
+        batch_rows: NonZeroUsize::new(128).unwrap(),
+        ..bounds()
+    };
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let stop = {
+        let interrupt = Arc::clone(&interrupt);
+        move || interrupt.load(Ordering::Relaxed)
+    };
+    let budget = EvalBudget::unbounded();
+    let interrupted = fixture
+        .store
+        .with_conn_interruptible(Instant::now() + Duration::from_secs(30), stop, |conn| {
+            Ok(retrieve_with_hook_for_test(
+                conn,
+                &fixture.kernel,
+                &request,
+                fixture.authority(),
+                wide,
+                &budget,
+                |window| {
+                    if window == Window::AfterBatch(1) {
+                        interrupt.store(true, Ordering::Relaxed);
+                    }
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        !budget.is_exhausted(),
+        "only the connection was interrupted"
+    );
+    assert_eq!(
+        interrupted.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(interrupted.contributions.is_empty());
+    assert_eq!(interrupted.consumed.batches, 1);
+
+    let control = fixture
+        .retrieve(&request, wide, &EvalBudget::unbounded())
+        .unwrap();
+    assert!(
+        control.consumed.batches > 2,
+        "the control reads a second batch"
+    );
+    assert_eq!(control.contributions.len(), 128);
+}
+
+/// Equal-rank matches from two probes that straddle the shared window's cut are kept by occurrence identifier, whichever probe matched them.
+#[test]
+fn equal_ranks_from_two_probes_across_the_window_cut_keep_the_lowest_identifiers() {
+    let fixture = Fixture::all_admitted();
+    // The two terms match equally many rows of equal length, so every match of either ranks the same.
+    let rows: Vec<Row> = (0..40)
+        .map(|n| {
+            let term = if n % 2 == 0 { "tiea" } else { "tieb" };
+            Row::claim(&format!("straddle-{n}"), &format!("{term} filler"))
+        })
+        .collect();
+    project_admitted(&fixture, &rows);
+    let request = probes("tiea tieb");
+    let keyed = fixture.keyed_reference(&request);
+    assert_eq!(keyed.len(), 40);
+    assert!(
+        keyed
+            .windows(2)
+            .all(|pair| pair[0].1.to_bits() == pair[1].1.to_bits()),
+        "every match of both probes ties"
+    );
+    let mut lowest: Vec<String> = rows.iter().map(Row::occurrence_id).collect();
+    lowest.sort();
+    lowest.truncate(13);
+    for term in ["tiea", "tieb"] {
+        assert!(
+            rows.iter()
+                .any(|row| row.text.starts_with(term) && lowest.contains(&row.occurrence_id())),
+            "the cut keeps {term} rows"
+        );
+    }
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(13).unwrap(),
+        ..bounds()
+    };
+    assert_eq!(fixture.kept(&request, tight), lowest);
+    let reversed = probes("tieb tiea");
+    assert_eq!(fixture.kept(&reversed, tight), lowest);
+    let retrieval = fixture
+        .retrieve(&request, tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), lowest);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+}
+
+/// A repeated common probe is counted and merged once, so it adds no engine work to the common scan.
+#[test]
+fn a_repeated_common_probe_adds_no_work() {
+    let fixture = Fixture::all_admitted();
+    project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let once = fixture
+        .retrieve(&probes("t10001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    let twice = fixture
+        .retrieve(&probes("t10001 t10001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(twice.consumed.probes, 2);
+    assert_eq!(twice.consumed.counted_rows, once.consumed.counted_rows);
+    assert_eq!(twice.consumed.sql_steps, once.consumed.sql_steps);
+    assert_eq!(ids_of(&twice), ids_of(&once));
+    assert!(twice.contributions.iter().all(|c| c.ordinal == 0));
+}
+
+/// On the common path an ineligible leader keeps its window slot and is judged and excluded, so it never reaches the result.
+#[test]
+fn an_ineligible_leader_of_a_common_probe_is_excluded_and_keeps_its_slot() {
+    let fixture = Fixture::all_admitted();
+    let rows = project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let mut kept = fixture.kept(&probes("t10001"), tight);
+    assert_eq!(kept.len(), 5);
+    kept.sort();
+    // Admitting all but the comparator's first kept occurrence leaves that leader without an admission.
+    let objects: Vec<&str> = kept[1..].iter().map(|id| object_of(&rows, id)).collect();
+    fixture.admit(&objects);
+    let retrieval = fixture
+        .retrieve(&probes("t10001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), kept[1..].to_vec());
+    assert_eq!(retrieval.consumed.scanned_rows, 5);
+    assert_eq!(
+        retrieval.consumed.excluded,
+        vec![(EligibilityVerdict::Retracted, 1)]
+    );
+}
+
+/// A common scan wider than one stream page refills each stream below its last rowid, so the window is exactly the highest rowids across pages and across probes.
+#[test]
+fn common_streams_refill_across_pages_without_repeating_or_skipping_rowids() {
+    let fixture = Fixture::all_admitted();
+    project_bulk(&fixture, 1100);
+    let wide = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(1030).unwrap(),
+        ..small_thresholds()
+    };
+    let raw = fixture.raw();
+    let highest = |query: &str| {
+        let mut ids: Vec<String> = raw
+            .prepare(&format!(
+                "SELECT occurrence_id FROM lexical WHERE lexical MATCH '{query}' ORDER BY rowid DESC LIMIT 1030"
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        ids.sort();
+        ids
+    };
+    for (request, matched) in [("parse", "parse"), ("parse bulk", "parse OR bulk")] {
+        let mut kept = fixture.kept(&probes(request), wide);
+        kept.sort();
+        assert_eq!(kept, highest(matched), "{request}");
+        let retrieval = fixture
+            .retrieve(&probes(request), wide, &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(retrieval.consumed.scanned_rows, 1030, "{request}");
+        assert!(retrieval.reasons.contains(&IncompleteReason::ScanBound));
+    }
+}
+
+/// Each sizing rule decides a batch: a later batch with nothing accepted takes a whole batch, and a fractional ratio rounds up.
+#[test]
+fn admission_batch_sizes_follow_each_sizing_rule() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 12);
+    let request = probes("bulk");
+    let order = fixture.reference(&request);
+    assert_eq!(order.len(), 12);
+    // Leaves the first `hidden` comparator rows unadmitted and admits the rest.
+    let admit_after = |fixture: &Fixture, hidden: usize| {
+        let objects: Vec<&str> = order[hidden..]
+            .iter()
+            .map(|id| object_of(&bulk, id))
+            .collect();
+        fixture.admit(&objects);
+    };
+    let run = |fixture: &Fixture, max_accepted: usize, batch_rows: usize| {
+        fixture
+            .retrieve(
+                &request,
+                RetrievalBounds {
+                    max_accepted: NonZeroUsize::new(max_accepted).unwrap(),
+                    batch_rows: NonZeroUsize::new(batch_rows).unwrap(),
+                    ..bounds()
+                },
+                &EvalBudget::unbounded(),
+            )
+            .unwrap()
+    };
+
+    // Two open slots read two ineligible rows; with nothing accepted the next batch takes all eight rows, then revalidation re-judges two.
+    admit_after(&fixture, 2);
+    let empty_first = run(&fixture, 2, 8);
+    assert_eq!(empty_first.consumed.judged, 2 + 8 + 2);
+    assert_eq!(empty_first.consumed.batches, 3);
+    assert_eq!(ids_of(&empty_first), order[2..4].to_vec());
+
+    // A fresh fixture with one ineligible leader: three open slots accept two of three reads, so one open slot becomes ceil(1 * 3 / 2) = 2 rows.
+    let fixture = Fixture::all_admitted();
+    project_bulk(&fixture, 12);
+    assert_eq!(fixture.reference(&request), order);
+    admit_after(&fixture, 1);
+    let fractional = run(&fixture, 3, 8);
+    assert_eq!(fractional.consumed.judged, 3 + 2 + 3);
+    assert_eq!(fractional.consumed.batches, 3);
+    assert_eq!(ids_of(&fractional), order[1..4].to_vec());
+    assert!(
+        fractional
+            .reasons
+            .contains(&IncompleteReason::AcceptedBound)
+    );
+}
+
+/// After an eligible prefix leaves one accepted slot open, each batch that accepts nothing doubles the next batch up to `batch_rows`, so an ineligible tail is judged in seven admission batches.
+#[test]
+fn a_dry_batch_after_an_eligible_prefix_doubles_the_next_batch() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 64);
+    let request = probes("bulk");
+    let order = fixture.reference(&request);
+    assert_eq!(order.len(), 64);
+    let prefix: Vec<&str> = order[..15].iter().map(|id| object_of(&bulk, id)).collect();
+    fixture.admit(&prefix);
+
+    let retrieval = fixture
+        .retrieve(
+            &request,
+            RetrievalBounds {
+                max_accepted: NonZeroUsize::new(16).unwrap(),
+                batch_rows: NonZeroUsize::new(16).unwrap(),
+                ..bounds()
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), order[..15].to_vec());
+    assert_eq!(retrieval.completion, Completion::Complete);
+    // Sixteen open slots accept fifteen; one slot left takes ceil(1 * 16 / 15) = 2 rows, and each batch that accepts nothing doubles the next: 4, 8, then 16, 16, and the last 2 rows. Revalidation re-judges the fifteen.
+    assert_eq!(retrieval.consumed.judged, 64 + 15);
+    assert_eq!(retrieval.consumed.batches, 7 + 1);
+    assert_eq!(
+        retrieval.consumed.excluded,
+        vec![(EligibilityVerdict::Retracted, 64 - 15)]
+    );
+}
+
+/// Projects `rows` and admits their sources, so every one of their occurrences is an eligible contribution.
+fn project_admitted(fixture: &Fixture, rows: &[Row]) {
+    fixture.project(rows);
+    let objects: Vec<&str> = rows.iter().map(|row| row.object.as_str()).collect();
+    fixture.admit(&objects);
+}
+
+/// The scan bound is one window for the whole request: ranked probes merge in comparator order before any slot is taken, so the request keeps the best `scan_rows` occurrences across its probes rather than `scan_rows` per probe.
+#[test]
+fn ranked_probes_share_one_scan_window_in_comparator_order() {
+    let fixture = Fixture::all_admitted();
+    // Filler lengths spread the ranks, and the two terms interleave across them.
+    let rows: Vec<Row> = (0..12)
+        .map(|n| {
+            let term = if n % 2 == 0 { "aa" } else { "bb" };
+            Row::claim(
+                &format!("window-{n}"),
+                &format!("{term}{}", " pad".repeat(n)),
+            )
+        })
+        .collect();
+    project_admitted(&fixture, &rows);
+    let request = probes("aa bb");
+    let reference = fixture.reference(&request);
+    assert_eq!(reference.len(), 12);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4).unwrap(),
+        ..bounds()
+    };
+    let retrieval = fixture
+        .retrieve(&request, tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), reference[..4].to_vec());
+    assert_eq!(retrieval.consumed.scanned_rows, 4);
+    assert_eq!(retrieval.consumed.ranked_matches, 12);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+    // Either probe's best rows alone would differ from the shared window's.
+    for single in ["aa", "bb"] {
+        let alone = fixture
+            .retrieve(&probes(single), tight, &EvalBudget::unbounded())
+            .unwrap();
+        assert_ne!(ids_of(&alone), ids_of(&retrieval), "{single}");
+    }
+    let whole = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&whole), reference);
+    assert_eq!(whole.completion, Completion::Complete);
+}
+
+/// Common probes merge their rowids in descending order into one window; a row both probes match takes one slot, under the lower probe ordinal.
+#[test]
+fn common_probes_share_one_descending_rowid_window() {
+    let fixture = Fixture::all_admitted();
+    let rows: Vec<Row> = (0..10)
+        .map(|n| {
+            let text = match n % 3 {
+                0 => "cc",
+                1 => "dd",
+                _ => "cc dd",
+            };
+            Row::claim(&format!("common-{n}"), text)
+        })
+        .collect();
+    project_admitted(&fixture, &rows);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4).unwrap(),
+        qualifying_matches: NonZeroUsize::new(2).unwrap(),
+        rank_budget: NonZeroUsize::new(2).unwrap(),
+        ..bounds()
+    };
+    let raw = fixture.raw();
+    let mut expected: Vec<String> = raw
+        .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 'cc OR dd' ORDER BY rowid DESC LIMIT 4")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    expected.sort();
+    let both: Vec<String> = raw
+        .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 'cc AND dd'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        expected.iter().any(|id| both.contains(id)),
+        "the window holds a row both probes match"
+    );
+    let retrieval = fixture
+        .retrieve(&probes("cc dd"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), expected);
+    assert_eq!(retrieval.consumed.scanned_rows, 4);
+    assert_eq!(retrieval.consumed.ranked_matches, 0);
+    assert_eq!(
+        retrieval.reasons,
+        vec![IncompleteReason::CommonTerms, IncompleteReason::ScanBound]
+    );
+    for contribution in &retrieval.contributions {
+        let shared = both.contains(&contribution.occurrence_id);
+        let only_dd = rows
+            .iter()
+            .any(|row| row.text == "dd" && row.occurrence_id() == contribution.occurrence_id);
+        let expected_ordinal = if shared || !only_dd { 0 } else { 1 };
+        assert_eq!(contribution.ordinal, expected_ordinal);
+        assert_eq!(contribution.rank, 0.0);
+    }
 }
 
 /// The lexical lane's production retrieval bounds. The daemon's `production_limits_are_the_d23_set` pins
@@ -1714,27 +2150,8 @@ fn production_bounds() -> RetrievalBounds {
     }
 }
 
-/// D26b lexical gate at one million occurrences under the production lexical bounds: an open-loop Poisson schedule of
-/// rare, qualifying, mixed, and common-only queries, each timed from its scheduled arrival to the end of its scan and
-/// admission. Every occurrence whose index is not a multiple of 16 is admitted, so admission judges, accepts, and
-/// revalidates as it does for a mostly eligible corpus. Run in release on the D21 host with `--ignored`;
-/// `EIDNARA_LEXICAL_SCALE_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
-#[test]
-#[ignore = "builds a 1M-occurrence projection; run in release on the D21 host with --ignored"]
-fn lexical_scan_p99_at_one_million_occurrences() {
-    fn setting<T: std::str::FromStr>(name: &str) -> Option<T> {
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-    }
-    let occurrences: usize = setting("EIDNARA_LEXICAL_SCALE_OCCURRENCES").unwrap_or(1_000_000);
-    let queries: usize = setting("EIDNARA_LEXICAL_SCALE_QUERIES").unwrap_or(600);
-    let rate_per_second: f64 = setting("EIDNARA_LEXICAL_SCALE_RATE").unwrap_or(10.0);
-    let first_after_build = queries.min(50);
-    assert!(
-        queries > first_after_build,
-        "the warm window needs queries past the first {first_after_build}"
-    );
+/// A projection of `occurrences` claims, every one whose index is not a multiple of 16 admitted.
+fn build_scale_fixture(occurrences: usize) -> Fixture {
     let fixture = Fixture::all_admitted();
     let built = Instant::now();
     let mut chunk = Vec::with_capacity(1000);
@@ -1754,12 +2171,12 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         chunk.clear();
     };
     for n in 0..occurrences {
-        // Filler of 0 to 96 tokens spreads the ranks, and at one million occurrences each `k*` term matches exactly 20,000 rows, the largest qualifying probe.
+        // Filler of 0 to 96 tokens spreads the ranks, and at one million occurrences each `k*` term matches exactly 10,000 rows, the largest qualifying probe.
         let text = format!(
             "w{} m{} k{} c{} common{}",
             n % 50_000,
             n % 500,
-            n % 50,
+            n % 100,
             n % 5,
             " filler".repeat(n % 97)
         );
@@ -1773,6 +2190,40 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         "projected and admitted {occurrences} occurrences in {:?}",
         built.elapsed()
     );
+    fixture
+}
+
+/// D26b lexical gate at one million occurrences under the production lexical bounds: an open-loop Poisson schedule of
+/// rare, qualifying, mixed, budget-skipping, and common-only queries, each timed from its scheduled arrival to the end of its scan and
+/// admission. Every occurrence whose index is not a multiple of 16 is admitted, so admission judges, accepts, and
+/// revalidates as it does for a mostly eligible corpus. Run in release on the D21 host with `--ignored`;
+/// `EIDNARA_LEXICAL_SCALE_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
+#[test]
+#[ignore = "builds a 1M-occurrence projection; run in release on the D21 host with --ignored"]
+fn lexical_scan_p99_at_one_million_occurrences() {
+    fn setting<T: std::str::FromStr>(name: &str) -> Option<T> {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+    }
+    let occurrences: usize = setting("EIDNARA_LEXICAL_SCALE_OCCURRENCES").unwrap_or(1_000_000);
+    let queries: usize = setting("EIDNARA_LEXICAL_SCALE_QUERIES").unwrap_or(600);
+    let rate_per_second: f64 = setting("EIDNARA_LEXICAL_SCALE_RATE").unwrap_or(10.0);
+    let first_after_build = queries.min(50);
+    assert!(
+        queries > first_after_build,
+        "the warm window needs queries past the first {first_after_build}"
+    );
+    // `EIDNARA_LEXICAL_SCALE_ROOT` names a projection an earlier run kept; the run reuses it instead of building one.
+    let fixture = match std::env::var_os("EIDNARA_LEXICAL_SCALE_ROOT") {
+        Some(root) => Fixture::reopen(Root::Kept(root.into())),
+        None => build_scale_fixture(occurrences),
+    };
+    // A reused projection reports the occurrences it holds, not the requested count.
+    let occurrences: i64 = fixture
+        .raw()
+        .query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))
+        .unwrap();
     let mix = [
         "w123",
         "m42",
@@ -1784,6 +2235,7 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         "w4242 m17",
         "k3",
         "k3 m5",
+        "k3 k4",
     ];
     // A fixed linear congruential stream keeps the schedule reproducible.
     let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -1904,6 +2356,22 @@ fn lexical_scan_p99_at_one_million_occurrences() {
     }
     // A refused, exhausted, or empty answer is not a latency sample the gate may pass on.
     assert_eq!(completed, queries, "every offered query must complete");
+    // The mix exercises the ranked regime it names: the largest qualifying probe, a budget skip, and no request past the budget.
+    for sample in &samples {
+        assert!(sample.ranked <= RANK_BUDGET, "{}", sample.request);
+        match sample.request {
+            "k3" => assert_eq!(
+                sample.ranked, QUALIFYING_MATCHES,
+                "k3 matches exactly the qualifying threshold only at one million occurrences"
+            ),
+            "k3 k4" => assert!(
+                sample.outcome.contains("RankBudget"),
+                "k3 k4 passes the ranked budget only at one million occurrences: {}",
+                sample.outcome
+            ),
+            _ => {}
+        }
+    }
     for sample in &samples {
         assert!(
             sample.contributions > 0,
@@ -1929,7 +2397,7 @@ fn a_probe_with_no_match_leaves_the_common_probe_to_its_bounded_scan() {
     };
     let retrieval = fixture
         .retrieve(
-            &probes("absentterm t20001"),
+            &probes("absentterm t10001"),
             tight,
             &EvalBudget::unbounded(),
         )
@@ -1960,13 +2428,9 @@ fn a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers() {
     let mut expected: Vec<String> = tied.iter().map(Row::occurrence_id).collect();
     expected.sort();
     expected.truncate(64);
-    let scanned = fixture
-        .store
-        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-        .unwrap()
-        .unwrap();
-    assert_eq!(scanned.hits(), 64);
-    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let scanned = fixture.kept(&request, bounds());
+    assert_eq!(scanned.len(), 64);
+    assert_eq!(scanned, expected);
     let reference = fixture.reference(&request);
     assert_eq!(
         &reference[..64],
@@ -1983,8 +2447,47 @@ fn a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers() {
     assert_eq!(retrieval.consumed.ranked_matches, 3000);
 }
 
+/// Tie-breaking by occurrence identifier selects the same 64 rows whether the tie group fills the table or shares it with 3,000 unrelated rows.
 #[test]
-fn dead_rows_at_the_front_of_a_large_tie_group_neither_take_slots_nor_hide_truncation() {
+fn a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers() {
+    let fixture = Fixture::all_admitted();
+    let mut rows: Vec<Row> = (0..3000)
+        .map(|n| Row::claim(&format!("gap-{n}"), &format!("unrelated filler {n}")))
+        .collect();
+    let tied: Vec<Row> = (0..240)
+        .map(|n| Row::claim(&format!("tie-{n}"), &format!("tiegroup filler {n}")))
+        .collect();
+    rows.extend(tied.iter().cloned());
+    for chunk in rows.chunks(1000) {
+        fixture.project(chunk);
+    }
+    let request = probes("tiegroup");
+    let mut expected: Vec<String> = tied.iter().map(Row::occurrence_id).collect();
+    expected.sort();
+    let whole = fixture.kept(
+        &request,
+        RetrievalBounds {
+            scan_rows: NonZeroUsize::new(240).unwrap(),
+            ..bounds()
+        },
+    );
+    assert_eq!(whole, expected, "every tied row is identified");
+    expected.truncate(64);
+    let scanned = fixture.kept(&request, bounds());
+    assert_eq!(scanned, expected);
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+    assert_eq!(retrieval.consumed.ranked_matches, 240);
+    assert_eq!(retrieval.consumed.scanned_rows, 64);
+}
+
+#[test]
+fn dead_rows_in_a_large_tie_group_keep_their_window_slots() {
     let fixture = Fixture::all_admitted();
     let mut tied: Vec<Row> = (0..3000)
         .map(|n| Row::claim(&format!("tie-{n}"), &format!("tiegroup filler {n}")))
@@ -2009,38 +2512,29 @@ fn dead_rows_at_the_front_of_a_large_tie_group_neither_take_slots_nor_hide_trunc
     };
     let request = probes("tiegroup");
     let scan_rows = bounds().scan_rows.get();
-    let scanned = |fixture: &Fixture| {
-        fixture
-            .store
-            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-            .unwrap()
-            .unwrap()
-    };
+    let scanned = |fixture: &Fixture| fixture.kept(&request, bounds());
 
-    let dead = 2 * scan_rows + 7;
+    // Dead rows at the front of the group keep their slots: the window is the group's lowest identifiers whatever their liveness.
+    let dead = 7;
     tombstone(&ids[..dead]);
     let kept = scanned(&fixture);
-    assert_eq!(
-        kept.hit_ids().collect::<Vec<_>>(),
-        ids[dead..dead + scan_rows].to_vec()
-    );
+    assert_eq!(kept, ids[..scan_rows].to_vec());
     let retrieval = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(retrieval.consumed.dead_rows, dead);
     assert!(retrieval.reasons.contains(&IncompleteReason::ScanBound));
 
-    tombstone(&ids[dead..ids.len() - scan_rows]);
-    let kept = scanned(&fixture);
-    assert_eq!(
-        kept.hit_ids().collect::<Vec<_>>(),
-        ids[ids.len() - scan_rows..].to_vec()
-    );
+    // Rows past the window take no slot a dead row leaves, so a window of dead rows returns nothing and still reports truncation.
+    tombstone(&ids[dead..scan_rows]);
     let retrieval = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
-    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
-    assert!(!retrieval.reasons.contains(&IncompleteReason::ScanBound));
+    assert!(retrieval.contributions.is_empty());
+    assert_eq!(retrieval.consumed.dead_rows, scan_rows);
+    assert_eq!(retrieval.consumed.judged, 0);
+    assert!(retrieval.reasons.contains(&IncompleteReason::ScanBound));
 }
 
 /// An interrupt from the connection's progress handler at any point of counting, ranking, or a common scan ends the request as
@@ -2086,17 +2580,17 @@ fn an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhausti
             });
         (outcome, polls.load(Ordering::Relaxed))
     };
-    // A wide scan bound makes the common scan, not its count, most of the `t20001` work at 4,096 rows.
+    // A wide scan bound makes the common scan, not its count, most of the `t10001` work at 4,096 rows.
     let wide = RetrievalBounds {
         scan_rows: NonZeroUsize::new(4096).unwrap(),
         max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
         ..bounds()
     };
     for (request, tight) in [
-        ("t20001", tight),
-        ("t20001", wide),
-        ("t20000", tight),
-        ("c15000 d15000", tight),
+        ("t10001", tight),
+        ("t10001", wide),
+        ("t10000", tight),
+        ("c7500 d7500", tight),
     ] {
         let (complete, total) = run_until(request, tight, usize::MAX);
         assert!(!matches!(
@@ -2196,7 +2690,7 @@ fn an_authority_move_outranks_a_coverage_bound_already_recorded() {
 }
 
 #[test]
-fn dead_rows_leading_a_common_probe_neither_take_its_scan_bound_nor_hide_truncation() {
+fn dead_rows_leading_a_common_probe_keep_their_window_slots() {
     let fixture = Fixture::all_admitted();
     project_bulk(&fixture, 20);
     let scan_rows = 5;
@@ -2215,26 +2709,15 @@ fn dead_rows_leading_a_common_probe_neither_take_its_scan_bound_nor_hide_truncat
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(descending.len(), 24);
-    // The dead rows fill one whole read of `scan_rows + 1` rows and one more, so a single read finds no live row.
-    let dead = scan_rows + 2;
+    // Dead rows lead the descending order; the window keeps them, and admission drops them without reading further rows.
+    let dead = 2;
     for occurrence_id in &descending[..dead] {
         tombstone_raw(&fixture, occurrence_id);
     }
-    let scanned = fixture
-        .store
-        .with_conn(|conn| {
-            Ok(scan(
-                conn,
-                &probes("parse"),
-                common,
-                &EvalBudget::unbounded(),
-            ))
-        })
-        .unwrap()
-        .unwrap();
-    let mut kept: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
+    let scanned = fixture.kept(&probes("parse"), common);
+    let mut kept: Vec<String> = scanned.clone();
     kept.sort();
-    let mut expected = descending[dead..dead + scan_rows].to_vec();
+    let mut expected = descending[..scan_rows].to_vec();
     expected.sort();
     assert_eq!(kept, expected);
 
@@ -2242,6 +2725,12 @@ fn dead_rows_leading_a_common_probe_neither_take_its_scan_bound_nor_hide_truncat
         .retrieve(&probes("parse"), common, &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(retrieval.consumed.dead_rows, dead);
+    assert!(
+        ids_of(&retrieval)
+            .iter()
+            .all(|id| descending[dead..scan_rows].contains(id))
+    );
     assert_eq!(
         retrieval.reasons,
         vec![IncompleteReason::CommonTerms, IncompleteReason::ScanBound]
@@ -2355,17 +2844,23 @@ fn allocations_follow_the_scan_bound_and_the_rank_budget() {
         (
             common_grown.consumed.counted_rows,
             common_grown.consumed.scanned_rows,
-            common_grown.consumed.sql_steps,
         ),
-        (
-            common.consumed.counted_rows,
-            common.consumed.scanned_rows,
-            common.consumed.sql_steps,
-        ),
+        (common.consumed.counted_rows, common.consumed.scanned_rows),
     );
     assert_eq!(
         common_after.allocation_events, common_before.allocation_events,
         "a common scan stops counting at its threshold and scanning at its bound, so matches past both allocate nothing"
+    );
+    let (common_tighter, _) = measure(scan(2, small_thresholds()));
+    assert_eq!(common_tighter.consumed.scanned_rows, 2);
+    assert!(
+        common_tighter.consumed.sql_steps < common_grown.consumed.sql_steps
+            && common_grown.consumed.sql_steps
+                < common.consumed.sql_steps + common_tighter.consumed.sql_steps,
+        "the grown table's common scan follows its scan bound: {} steps at two rows, {} at three, {} at three before growth",
+        common_tighter.consumed.sql_steps,
+        common_grown.consumed.sql_steps,
+        common.consumed.sql_steps
     );
     let (ranked, ranked_after) = measure(scan(3, bounds()));
     assert_eq!(ranked.consumed.ranked_matches, 36);
@@ -2376,7 +2871,7 @@ fn allocations_follow_the_scan_bound_and_the_rank_budget() {
     );
 }
 
-/// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. Below the match count, a smaller scan bound runs fewer steps on the same counted rows, a result cap leaves the scan work unchanged, and one more matching row adds SQL steps on a ranked run and on a common run.
+/// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. Below the match count, a smaller scan bound runs fewer steps on the same counted rows, a result cap keeps the scan bound and reads fewer occurrence rows, and one more matching row adds SQL steps on a ranked run and on a common run.
 #[test]
 fn work_counters_report_exact_and_over_bound_work() {
     let fixture = Fixture::all_admitted();
@@ -2432,7 +2927,12 @@ fn work_counters_report_exact_and_over_bound_work() {
         capped.consumed.scanned_rows, consumed.scanned_rows,
         "the result cap leaves the scan bound to bound scan work"
     );
-    assert_eq!(capped.consumed.sql_steps, consumed.sql_steps);
+    assert!(
+        capped.consumed.sql_steps < consumed.sql_steps,
+        "admission reads occurrence rows only for the candidates it judges: {} against {}",
+        capped.consumed.sql_steps,
+        consumed.sql_steps
+    );
 
     // `parse` is common past two qualifying matches, so this run takes the common scan.
     let common_before = run(small_thresholds());
@@ -2465,9 +2965,9 @@ fn work_counters_report_exact_and_over_bound_work() {
     );
 }
 
-/// A ranked probe with more matches than the scan bound and one rank per match keeps the first `scan_rows` live matches of the reference order when dead rows sit at its front and inside its first `scan_rows + 1` matches, and reports truncation only while a live match lies past the bound.
+/// A ranked probe with more matches than the scan bound and one rank per match keeps the first `scan_rows` matches of the reference order whatever their liveness, drops the dead ones at admission, and reports truncation while matches lie past the bound.
 #[test]
-fn dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation() {
+fn dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots() {
     let fixture = Fixture::all_admitted();
     // Each row adds one more filler token, so every match has its own document length and rank.
     let rows: Vec<Row> = (0..150)
@@ -2489,52 +2989,121 @@ fn dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation
     let reference: Vec<String> = keyed.into_iter().map(|(id, _)| id).collect();
     let scan_rows = bounds().scan_rows.get();
     assert!(reference.len() > 2 * scan_rows);
-    let scanned = |fixture: &Fixture| {
-        fixture
-            .store
-            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-            .unwrap()
-            .unwrap()
+    // Admitting every ladder row makes each live kept match a contribution.
+    let objects: Vec<&str> = rows.iter().map(|row| row.object.as_str()).collect();
+    fixture.admit(&objects);
+    let wide = RetrievalBounds {
+        max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        batch_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..bounds()
     };
 
     let dead: Vec<usize> = (0..10).chain(scan_rows - 4..scan_rows + 6).collect();
     for &index in &dead {
         tombstone_raw(&fixture, &reference[index]);
     }
-    let live: Vec<String> = (0..reference.len())
+    let kept = fixture.kept(&request, wide);
+    assert_eq!(kept, reference[..scan_rows].to_vec());
+    let retrieval = fixture
+        .retrieve(&request, wide, &EvalBudget::unbounded())
+        .unwrap();
+    let live: Vec<String> = (0..scan_rows)
         .filter(|index| !dead.contains(index))
         .map(|index| reference[index].clone())
         .collect();
-    let kept = scanned(&fixture);
-    assert_eq!(
-        kept.hit_ids().collect::<Vec<_>>(),
-        live[..scan_rows].to_vec()
-    );
-    let retrieval = fixture
-        .retrieve(&request, bounds(), &EvalBudget::unbounded())
-        .unwrap();
+    assert_eq!(ids_of(&retrieval), live);
     assert_eq!(retrieval.consumed.ranked_matches, reference.len());
     assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(retrieval.consumed.dead_rows, 14);
     assert_eq!(
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::ScanBound)
     );
+}
 
-    // Exactly `scan_rows` live matches remain, including three after the dead run, so retrieval reports `Completion::Complete`.
-    let survivors = scan_rows - 3;
-    for occurrence_id in &live[survivors..live.len() - 3] {
-        tombstone_raw(&fixture, occurrence_id);
+/// With `max_accepted = 1`, retrieval reads identifiers for the first rank group and the group cut by `scan_rows`. Reading the entire tied group requires more SQL steps than reading distinct-rank groups, with equal counted, ranked, scanned, and judged work.
+#[test]
+fn identifiers_are_read_for_the_rank_groups_admission_reaches() {
+    let scan_rows = bounds().scan_rows.get();
+    let matches = 150;
+    let run = |text: &dyn Fn(usize) -> String| {
+        let fixture = Fixture::all_admitted();
+        let rows: Vec<Row> = (0..matches)
+            .map(|n| Row::claim(&format!("lazy-{n}"), &text(n)))
+            .collect();
+        fixture.project(&rows);
+        let objects: Vec<&str> = rows.iter().map(|row| row.object.as_str()).collect();
+        fixture.admit(&objects);
+        let one = RetrievalBounds {
+            max_accepted: NonZeroUsize::new(1).unwrap(),
+            ..bounds()
+        };
+        fixture
+            .retrieve(&probes("lazy"), one, &EvalBudget::unbounded())
+            .unwrap()
+    };
+    // The increasing token counts give each `ladder` match a distinct rank.
+    let ladder = run(&|n| format!("lazy{}", " pad".repeat(n)));
+    let tied = run(&|_| "lazy pad".to_string());
+    for retrieval in [&ladder, &tied] {
+        assert_eq!(retrieval.consumed.counted_rows, matches);
+        assert_eq!(retrieval.consumed.ranked_matches, matches);
+        assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+        assert_eq!(retrieval.contributions.len(), 1);
+        assert_eq!(
+            (retrieval.consumed.judged, retrieval.consumed.batches),
+            (2, 2),
+            "retrieval judges one candidate at admission and re-judges that candidate once"
+        );
+        assert_eq!(retrieval.consumed.dead_rows, 0);
+        assert_eq!(
+            retrieval.completion,
+            Completion::Incomplete(IncompleteReason::ScanBound)
+        );
     }
-    let mut remaining = live[..survivors].to_vec();
-    remaining.extend_from_slice(&live[live.len() - 3..]);
-    assert_eq!(remaining.len(), scan_rows);
-    let kept = scanned(&fixture);
-    assert_eq!(kept.hit_ids().collect::<Vec<_>>(), remaining);
-    let retrieval = fixture
+    assert!(
+        ladder.consumed.sql_steps < tied.consumed.sql_steps,
+        "distinct ranks read two identifiers against {scan_rows}: {} steps against {}",
+        ladder.consumed.sql_steps,
+        tied.consumed.sql_steps
+    );
+}
+
+/// Retrieval counts a duplicate lexical row, which only an inconsistent projection stores, toward `scanned_rows` and deduplicates its `occurrence_id` before judgment, retaining the better rank for the single contribution.
+#[test]
+fn a_second_lexical_row_for_one_occurrence_yields_one_contribution() {
+    let fixture = Fixture::all_admitted();
+    let delta = fixture.id("delta");
+    let request = probes("io");
+    let before = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
-    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
-    assert_eq!(retrieval.completion, Completion::Complete);
+    assert_eq!(ids_of(&before), [delta.as_str()]);
+    assert_eq!(before.consumed.scanned_rows, 1);
+    // Rowid 7 lets both lexical rows coexist; the inserted row's better rank makes it supply the contribution.
+    fixture
+        .raw()
+        .execute(
+            "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (7, 'io io io', 'io io io', ?1)",
+            [&delta],
+        )
+        .unwrap();
+    let after = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&after), [delta.as_str()]);
+    assert_eq!(after.consumed.scanned_rows, 2);
+    assert_eq!(after.consumed.dead_rows, 0);
+    assert_eq!(
+        (after.consumed.judged, after.consumed.batches),
+        (before.consumed.judged, before.consumed.batches),
+        "the duplicate row adds no kernel judgment"
+    );
+    assert!(
+        after.contributions[0].rank < before.contributions[0].rank,
+        "the better-ranked row supplies the contribution's rank"
+    );
+    assert_eq!(after.completion, Completion::Complete);
 }
 
 /// When a ranked probe's `scan_rows` bound ends at a rank change, one match from the next rank group suffices to prove truncation, so that group's size leaves the probe's SQL steps unchanged.
@@ -2561,12 +3130,8 @@ fn a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group() {
         );
         head.sort_by_key(Row::occurrence_id);
         let expected: Vec<String> = head.iter().map(Row::occurrence_id).collect();
-        let scanned = fixture
-            .store
-            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-            .unwrap()
-            .unwrap();
-        assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+        let scanned = fixture.kept(&request, bounds());
+        assert_eq!(scanned, expected);
         let retrieval = fixture
             .retrieve(&request, bounds(), &EvalBudget::unbounded())
             .unwrap();
@@ -2600,9 +3165,9 @@ fn a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group() {
     );
 }
 
-/// A dead row inside a bound that ends at a rank change opens a slot for the next rank group, and that group's lowest occurrence identifier takes it, whichever of its rows was stored first.
+/// A dead row inside a bound that ends at a rank change keeps its slot, so no row of the next rank group enters the window.
 #[test]
-fn a_slot_a_dead_row_opens_goes_to_the_next_rank_groups_lowest_identifier() {
+fn a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group() {
     let fixture = Fixture::all_admitted();
     let scan_rows = bounds().scan_rows.get();
     let mut head: Vec<Row> = (0..scan_rows)
@@ -2620,21 +3185,80 @@ fn a_slot_a_dead_row_opens_goes_to_the_next_rank_groups_lowest_identifier() {
     assert!(keyed[scan_rows - 1].1 < keyed[scan_rows].1);
     head.sort_by_key(Row::occurrence_id);
     tombstone_raw(&fixture, &head[0].occurrence_id());
-    let mut expected: Vec<String> = head[1..].iter().map(Row::occurrence_id).collect();
-    expected.push(tail.last().unwrap().occurrence_id());
+    let expected: Vec<String> = head.iter().map(Row::occurrence_id).collect();
 
-    let scanned = fixture
-        .store
-        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
-        .unwrap()
-        .unwrap();
-    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let scanned = fixture.kept(&request, bounds());
+    assert_eq!(scanned, expected);
     let retrieval = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(retrieval.consumed.dead_rows, 1);
     assert_eq!(
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::ScanBound)
     );
+}
+
+/// `hit_ids` reads the identifiers admission would otherwise read, so a scan admitted after `hit_ids` reports the same `sql_steps` as `retrieve`.
+#[test]
+fn hit_ids_before_admission_charges_the_identifier_reads_to_sql_steps() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse fetch io");
+    let reference = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    let admitted = fixture
+        .store
+        .with_conn(|conn| {
+            let budget = EvalBudget::unbounded();
+            let mut scanned = scan(conn, &request, bounds(), &budget).unwrap();
+            assert_eq!(scanned.hit_ids(&budget).unwrap().len(), 6);
+            Ok(admit(
+                scanned,
+                &fixture.kernel,
+                fixture.authority(),
+                &budget,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.contributions, reference.contributions);
+    assert_eq!(
+        admitted.consumed.sql_steps, reference.consumed.sql_steps,
+        "the identifier reads `hit_ids` ran are retrieval work"
+    );
+}
+
+/// The scan bound limits the match window; `usize::MAX` keeps every match on both the ranked and the common path.
+#[test]
+fn a_scan_bound_of_usize_max_keeps_every_match_on_both_paths() {
+    let fixture = Fixture::all_admitted();
+    let unbounded_window = |thresholds: RetrievalBounds| RetrievalBounds {
+        scan_rows: NonZeroUsize::MAX,
+        ..thresholds
+    };
+    let ranked = fixture
+        .retrieve(
+            &probes("parse"),
+            unbounded_window(bounds()),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranked.completion, Completion::Complete);
+    assert_eq!(ranked.consumed.ranked_matches, 4);
+    assert_eq!(ids_of(&ranked), fixture.reference(&probes("parse")));
+    let common = fixture
+        .retrieve(
+            &probes("parse"),
+            unbounded_window(small_thresholds()),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        common.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    assert_eq!(common.consumed.scanned_rows, 4);
+    assert_eq!(common.contributions.len(), 4);
 }

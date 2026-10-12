@@ -14,33 +14,36 @@ catalog.
 
 Contract:
 
-- `crates/retrieval/AGENTS.md:15` through `:17`: `lexical::retrieve` reads
-  `lexical`, `occurrences`, and `occurrence_tombstones` only; the caller loads
-  bytes after its own authorization step. This is the documented obligation,
-  a claim under test, and the code below is the evidence for it.
+- `crates/retrieval/AGENTS.md:15` through `:21`: `lexical::retrieve` reads
+  `lexical`, the rowid and occurrence identifier columns of its FTS5 content
+  shadow table `lexical_content`, `occurrences`, and `occurrence_tombstones`
+  only; the caller loads bytes after its own authorization step. This is the
+  documented obligation, a claim under test, and the code below is the
+  evidence for it.
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- Every statement the lane runs is one of the six constants at `:256`
-  `COUNT_SQL`, `:259` `RANKED_SQL`, `:264` `WHOLE_SQL`, `:270` `COMMON_SQL`,
-  `:276` `IDS_SQL`, and `:280` `DETAILS_SQL`. Their `FROM` and `JOIN` clauses
-  name `lexical`, `occurrences`, `occurrence_tombstones`, and `json_each`.
-  The selected columns are `rank`, `rowid`, `occurrence_id`, `class`,
-  `source_object_id`, `revision`, `source_artifact_digest`, and the tombstone
-  predicate. No statement names `payloads`, `payload_id`, or `bytes`, and none
-  selects the FTS5 `original` or `parts` text columns.
-- `:59` `Contribution` carries `occurrence_id`, `class`, `rank`, `ordinal`,
-  and the kernel `candidate`. `:131` `Retrieval` carries contributions,
+- Every statement the lane runs is one of the five constants at `:287`
+  `COUNT_SQL`, `:290` `RANKED_SQL`, `:294` `COMMON_SQL`, `:299` `IDS_FROM_SQL`,
+  and `:306` `DETAILS_SQL`. Their `FROM` and `JOIN` clauses name `lexical`,
+  `lexical_content`, `occurrences`, `occurrence_tombstones`, and `json_each`.
+  The selected columns are `rank`, `rowid`, the content table's `c2`
+  occurrence identifier, `class`, `source_object_id`, `revision`,
+  `source_artifact_digest`, and the tombstone predicate. No statement names
+  `payloads`, `payload_id`, or `bytes`, and none selects the FTS5 `original`
+  or `parts` text columns or their content-table columns `c0` and `c1`.
+- `:65` `Contribution` carries `occurrence_id`, `class`, `rank`, `ordinal`,
+  and the kernel `candidate`. `:139` `Retrieval` carries contributions,
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
   has a byte field.
-- `:317` `retrieve` is the lane entry; the daemon's `lexical_read`
-  (`crates/daemon/src/query_route.rs:1075`) calls `scan` (`:349`) and
-  `admit_lexical` (`query_route.rs:1242`) calls `admit`.
+- `:359` `retrieve` is the lane entry; the daemon's `lexical_read`
+  (`crates/daemon/src/query_route.rs:1076`) calls `scan` (`:1099`) and
+  `admit_lexical` (`query_route.rs:1243`) calls `admit` (`:1259`).
 
 Schema, `crates/retrieval/baseline.sql`:
 
-- `:30` `payloads(payload_id, bytes, byte_length, created_at)` holds the
-  bytes; `:49` `occurrences.payload_id` references it. `:94` `lexical` is the
+- `:31` `payloads(payload_id, bytes, byte_length, created_at)` holds the
+  bytes; `:50` `occurrences.payload_id` references it. `:94` `lexical` is the
   FTS5 table with `occurrence_id UNINDEXED`.
 
 Payload loading after authorization, `crates/daemon/src/packing/mod.rs`:
@@ -52,15 +55,15 @@ Payload loading after authorization, `crates/daemon/src/packing/mod.rs`:
   `crates/daemon/src/query_route.rs:1` states the route reads no payload bytes
   and packing materializes them under its own bounds.
 
-Test, `crates/retrieval/tests/lexical_retrieval.rs:1275`
+Test, `crates/retrieval/tests/lexical_retrieval.rs:1325`
 `retrieval_reads_no_payload_bytes`:
 
-- `Fixture::all_admitted` (`:317`) opens a kernel and a projection store,
+- `Fixture::all_admitted` (`:332`) opens a kernel and a projection store,
   installs an identity, and projects the corpus through `apply_batch` with
   `Payload::Whole` rows, so the `payloads` table is populated.
 - The test retrieves `parse fetch io` with `bounds()` (`:153`: `scan_rows`
   64, `max_accepted` 64, `batch_rows` 2) and an unbounded budget, then opens a
-  raw connection (`raw`, `:496`) and runs
+  raw connection (`raw`, `:541`) and runs
   `ALTER TABLE payloads RENAME TO payloads_hidden`. It asserts
   `SELECT count(*) FROM payloads` now errors, so any payload read would fail
   rather than return zeroed bytes.
@@ -93,8 +96,8 @@ before the fault and an equality assertion on the full result afterward.
 
 ### Q: Is the test exercised against a real projection schema?
 
-- Sources examined: `crates/retrieval/tests/lexical_retrieval.rs:243`
-  through `:316` (`Fixture`, `Fixture::new`), `:346` (`Fixture::project`),
+- Sources examined: `crates/retrieval/tests/lexical_retrieval.rs:258`
+  through `:330` (`Fixture`, `Fixture::new`), `:378` (`Fixture::project`),
   `:109` (`open_store`).
 - Findings: the fixture opens a `SqliteStore` through `open_sqlite`, installs
   a `ProjectionIdentity`, and writes rows with `apply_batch`, the production
@@ -107,7 +110,7 @@ before the fault and an equality assertion on the full result afterward.
 ### Q: Does the route read payload bytes anywhere before packing?
 
 - Sources examined: `crates/daemon/src/query_route.rs:1`, `:69` through
-  `:71`, `:1708` through `:1722`; `crates/retrieval/src/claims.rs:441`
+  `:71`, `:1707` through `:1721`; `crates/retrieval/src/claims.rs:441`
   `read_selected_claims`; `crates/kernel/src/claim_facts.rs:43` and `:427`.
 - Findings: the route's module doc states no payload read. Claim validation
   passes `max_causal_payload_bytes` of 1 MiB into `read_selected_claims`,

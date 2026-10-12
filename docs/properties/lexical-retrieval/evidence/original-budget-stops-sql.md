@@ -14,18 +14,19 @@ branch. PR #967 lists AC6 as met by existing tests and names
 
 Route-level budget, `crates/daemon/src/query_route.rs`:
 
-- `:1328` `execute` calls `admit_lanes` (`:1353`) then `select` (`:1462`). Both
+- `:1328` `execute` calls `admit_lanes` (`:1353`) then `select` (`:1461`). Both
   take one `&SharedBudget`; no phase derives another.
-- `:470` `check` returns `exhaustion(budget)` (`:463`), which maps
+- `:471` `check` returns `exhaustion(budget)` (`:464`), which maps
   `Exhaustion::Cancelled` to `Terminal::Cancelled` and a deadline or an
   unclassified stop to `Terminal::Deadline`.
-- `:1369` `projection.read_under(budget, ...)` holds the connection for the
-  exact, lexical, and dense phases. Inside it `:1383` through `:1385` run
+- `:1371` `projection.read_under(budget, ...)` holds the connection for the
+  exact, lexical, and dense phases. Inside it `:1385` through `:1387` run
   `before_phase(Phase::Lexical)`, `check(budget)`, then `lexical_read`
-  (`:1075`), which passes `budget.eval()` into `retrieval::lexical::scan`
+  (`:1076`), which passes `budget.eval()` into `retrieval::lexical::scan`
   and maps `LaneRefusal::Budget` to `exhaustion(budget)`.
-- `:1242` `admit_lexical` judges the scanned lane with `budget.eval()` after
-  the connection is released.
+- `:1243` `admit_lexical`, called at `:1389` inside the same closure, judges
+  the scanned lane with `budget.eval()` while the connection is held, inside
+  the `Phase::Lexical` window.
 - `crates/daemon/src/search_projection.rs:406` `read_under` builds
   `Access::ReadUnder` from `budget.deadline()` and `budget.stop_predicate()`
   (`crates/daemon/src/request_budget.rs:119`, true once cancelled or past the
@@ -37,21 +38,25 @@ Route-level budget, `crates/daemon/src/query_route.rs`:
 
 Lexical lane, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- `:317` `retrieve` and `:349` `scan` take the caller's `&EvalBudget`. `scan`
-  checks it first (`:355` through `:357`) and refuses `BudgetExhausted` before
+- `:359` `retrieve` and `:391` `scan` take the caller's `&EvalBudget`. `scan`
+  checks it first (`:397` through `:399`) and refuses `BudgetExhausted` before
   any probe.
-- Every statement loop calls `budget.check()` per row: `count_probe` (`:566`,
-  check at `:572`), `scan_whole` (`:623`, check at `:638`), `ranked_rows`
-  (`:712`, check at `:726`), and `scan_common` (`:828`, check at `:844`).
+- Every statement loop calls `budget.check()` per row: `count_probe` (`:618`,
+  check at `:624`), `ranked_rows` (`:730`, check at `:745`), `identify`
+  (`:759`, check at `:778`), the common streams' `Descending::head` (`:833`,
+  check at `:843`), and admission's `resolve` (`:921`, check at `:936`);
+  `scan_ranked` checks once more after partitioning the merged matches
+  (`:687`).
 - `crates/retrieval/src/scan.rs` maps a SQLite `OperationInterrupted` error to
-  `ScanStop::Budget`; `retrieve.rs:400` and `:452` turn it into
-  `exhausted_scan`, so an interrupt and an exhausted budget share one exit.
-- `:925` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
-  `IncompleteReason::BudgetExhausted`; `admit_inner` (`:482`) returns
+  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:442`, `:482`),
+  and `admit_inner` turns it into `exhausted` through `AdmitStop::Budget`
+  (`:535`), so an interrupt and an exhausted budget share one exit.
+- `:972` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
+  `IncompleteReason::BudgetExhausted`; `admit_inner` (`:508`) returns
   `exhausted` when the budget ends after revalidation.
-- `:523` `exhausted`: zero completed probes refuse
-  `RetrievalRefusal::BudgetExhausted` (`:525`); otherwise contributions clear
-  and the result is `Completion::Incomplete(BudgetExhausted)` (`:527`, `:528`).
+- `:582` `exhausted`: zero completed probes refuse
+  `RetrievalRefusal::BudgetExhausted` (`:584`); otherwise contributions clear
+  and the result is `Completion::Incomplete(BudgetExhausted)` (`:586`, `:587`).
 
 Tests:
 
@@ -68,7 +73,7 @@ Tests:
   `claim_validation_stops_waiting_for_a_held_connection_when_the_budget_ends`
   holds the projection connection for 3 s during claim validation and asserts
   a 400 ms deadline and a 200 ms cancellation each end the wait in under 2 s.
-- `crates/retrieval/tests/lexical_retrieval.rs:1407`
+- `crates/retrieval/tests/lexical_retrieval.rs:1457`
   `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`
   projects 2,500 `bulk parse` rows, runs under `with_conn_interruptible` with a
   stop closure that trips on its third poll, and asserts
@@ -77,15 +82,15 @@ Tests:
   eleventh poll while `parse` is counted: one probe consumed, counted rows
   above zero, zero scanned rows, `Incomplete(BudgetExhausted)`, no
   contributions, and the `EvalBudget` itself stays unexhausted.
-- `:2049`
+- `:2543`
   `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`
-  uses the 20,001-row threshold corpus (`project_thresholds`, `:1549`). For
-  `t20001` tight and wide, `t20000`, and `c15000 d15000`, it measures the
+  uses the 10,001-row threshold corpus (`project_thresholds`, `:1599`). For
+  `t10001` tight and wide, `t10000`, and `c7500 d7500`, it measures the
   total poll count of a complete run, then stops at eight evenly spaced poll
   counts. Each stop yields `Err(BudgetExhausted)` or
   `Incomplete(BudgetExhausted)` with no contributions, and the connection
   serves an unbudgeted request afterward.
-- `:1516` `a_held_kernel_reader_does_not_outlive_the_budget` holds kernel
+- `:1566` `a_held_kernel_reader_does_not_outlive_the_budget` holds kernel
   readers for 3 s and asserts a 300 ms deadline returns within 1.5 s with
   `Incomplete(BudgetExhausted)` and zero batches.
 
@@ -125,8 +130,8 @@ most of the work in a count, a ranked read, or a common scan.
 - Findings: the hook runs in `before_phase`, before `check(budget)` and before
   `lexical_read`. The cancel and the sleep therefore end the request at the
   phase entry check, not inside a MATCH statement. In-flight interruption is
-  proved only by the retrieval tests at `lexical_retrieval.rs:1407` and
-  `:2049`, which install the handler through `with_conn_interruptible`, the
+  proved only by the retrieval tests at `lexical_retrieval.rs:1457` and
+  `:2543`, which install the handler through `with_conn_interruptible`, the
   same storage entry `read_under` uses in production.
 - Missing evidence: a route-level test that cancels while a lexical statement
   is stepping.

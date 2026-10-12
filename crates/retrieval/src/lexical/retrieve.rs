@@ -1,9 +1,10 @@
 //! Each occurrence keeps its best probe; canonical eligibility is judged in bounded batches before acceptance; accepted contributions are re-judged before return.
 //! This module does not read payload bytes; each contribution contains an occurrence identifier and raw FTS rank.
 //!
-//! [`scan`] needs only the projection connection and [`admit`] needs only the kernel, so a caller
-//! can release the projection connection before any kernel reader is taken; [`retrieve`] runs both
-//! under one connection for callers that hold nothing else.
+//! [`scan`] reads only the projection: each match's rank and rowid, and the occurrence identifiers of the one rank
+//! group the scan bound cuts. [`admit`] reads each rank group's identifiers as it reaches the group and each
+//! candidate's occurrence row just before the kernel judges it, both under the same projection connection, so
+//! identifiers and occurrence rows are read only for the matches admission reaches; [`retrieve`] runs both.
 //!
 //! Ordering is one comparator throughout: lower raw rank first, then occurrence identifier bytes ascending.
 //! An occurrence hit by several probes keeps the lowest rank, and among equal ranks the lowest probe ordinal, so duplicate or permuted probes leave the ranking unchanged.
@@ -13,8 +14,13 @@
 //! [`RetrievalBounds::qualifying_matches`] plus one lookahead row. Probes with at most
 //! [`RetrievalBounds::qualifying_matches`] matches qualify and are ranked in increasing count order, original probe
 //! order breaking ties, while the counts of the ranked probes sum to at most [`RetrievalBounds::rank_budget`]. When no
-//! probe qualifies, the common probes are read in descending rowid order under the scan bound instead. A skipped probe
-//! of either kind leaves the result incomplete.
+//! probe qualifies, the common probes are read in descending rowid order instead. A skipped probe of either kind leaves
+//! the result incomplete.
+//!
+//! One request keeps at most [`RetrievalBounds::scan_rows`] distinct lexical matches across all of its probes: the
+//! ranked probes' matches merge in comparator order, and the common probes' rowid streams merge in descending rowid
+//! order. A kept match whose occurrence is missing or tombstoned, which only an inconsistent projection holds, is
+//! dropped at admission and no later match replaces it.
 
 use rusqlite::StatementStatus;
 use std::cmp::Ordering;
@@ -42,7 +48,7 @@ use crate::scan::ScanStop;
 pub struct RetrievalBounds {
     /// Probes one request may run; a request compiling to more is refused before any runs.
     pub max_probes: NonZeroUsize,
-    /// Rows one probe may return from the engine, taken in comparator order.
+    /// Distinct lexical matches one request keeps, taken across its probes in comparator order for ranked probes and in descending rowid order for common ones.
     pub scan_rows: NonZeroUsize,
     /// A request accepts at most [`MAX_ELIGIBILITY_CANDIDATES`] occurrences so final re-judgment fits one batch.
     pub max_accepted: NonZeroUsize,
@@ -79,9 +85,9 @@ impl Contribution {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncompleteReason {
-    /// A probe matched more rows than its scan bound, so lower-ranked hits were never seen.
+    /// The request's probes matched more distinct rows than its scan bound, so lower-ranked hits were never seen.
     ScanBound,
-    /// A probe matched more than [`RetrievalBounds::qualifying_matches`] rows. When every matching probe is over that limit, retrieval reads each one's rows in descending rowid order and scores each row `0.0`.
+    /// A probe matched more than [`RetrievalBounds::qualifying_matches`] rows. When every matching probe is over that limit, retrieval merges their rows in descending rowid order and scores each row `0.0`.
     /// Lexical rowids derive from occurrence identifier words, so this order follows identifier placement rather than occurrence age.
     CommonTerms,
     /// A qualifying probe's count would take the ranked matches past [`RetrievalBounds::rank_budget`], so the engine skipped it.
@@ -107,15 +113,17 @@ pub enum Completion {
 pub struct Consumed {
     /// Probes the request compiled to, repeats included; a repeated probe is counted here without running the engine again.
     pub probes: usize,
-    /// Live rows kept within the scan bound, summed over the distinct probes that ran; a repeated probe adds nothing.
+    /// Distinct lexical matches the request kept within its scan bound; a row several probes match counts once.
     pub scanned_rows: usize,
+    /// Kept matches whose occurrence admission found missing or tombstoned, so they were dropped unjudged.
+    pub dead_rows: usize,
     /// Rows read to count the distinct probes, lookahead rows included.
     pub counted_rows: usize,
     /// Matches the engine ranked: the summed counts of the ranked probes, at most [`RetrievalBounds::rank_budget`].
     pub ranked_matches: usize,
     pub judged: usize,
     pub batches: usize,
-    /// SQLite virtual-machine operations (`SQLITE_STMTSTATUS_VM_STEP`) the count, scan, and lookup statements executed for the probes that finished; the count grows with the rows those statements visit. FTS5's rank function reads each ranked match's document size through a statement FTS5 keeps internal, so that part of scoring is observed through `ranked_matches`.
+    /// SQLite virtual-machine operations (`SQLITE_STMTSTATUS_VM_STEP`) the count, scan, and identifier statements executed for the probes that finished, plus admission's occurrence reads; the count grows with the rows those statements visit. FTS5's rank function reads each ranked match's document size through a statement FTS5 keeps internal, so that part of scoring is observed through `ranked_matches`.
     pub sql_steps: u64,
     /// Candidates the kernel judged ineligible before or at final revalidation, by verdict in judgment order.
     pub excluded: Vec<(EligibilityVerdict, usize)>,
@@ -169,60 +177,96 @@ struct Span {
     end: usize,
 }
 
-/// One buffer holding every string a scan's hits name, so all hits share one growing allocation.
+/// One buffer holding every identifier a scan's hits name, so all hits share one growing allocation.
 #[derive(Debug, Clone, Default)]
 struct Text(String);
 
 impl Text {
-    fn push(&mut self, value: &str) -> Span {
+    fn push(&mut self, occurrence_id: &str) -> Id {
         let start = self.0.len();
-        self.0.push_str(value);
-        Span {
-            start,
-            end: self.0.len(),
+        self.0.push_str(occurrence_id);
+        let mut key = [0u8; 8];
+        let prefix = &occurrence_id.as_bytes()[..occurrence_id.len().min(8)];
+        key[..prefix.len()].copy_from_slice(prefix);
+        Id {
+            key: u64::from_be_bytes(key),
+            span: Span {
+                start,
+                end: self.0.len(),
+            },
         }
     }
 
-    fn get(&self, span: Span) -> &str {
-        &self.0[span.start..span.end]
+    fn get(&self, id: Id) -> &str {
+        &self.0[id.span.start..id.span.end]
     }
 }
 
-/// One probe hit; its occurrence identifier, object identifier, and artifact digest are spans of the scan's [`Text`].
+/// One occurrence identifier held in a scan's [`Text`].
+#[derive(Debug, Clone, Copy)]
+struct Id {
+    /// The identifier's first eight bytes, big-endian and zero-padded, which order identifiers as their bytes do whenever the keys differ.
+    key: u64,
+    span: Span,
+}
+
+/// One kept match before its rank group is identified.
 #[derive(Debug, Clone, Copy)]
 struct Hit {
-    /// The identifier's first eight bytes, big-endian and zero-padded, which order hits as their identifiers do whenever the keys differ.
-    key: u64,
-    id: Span,
-    object: Span,
-    digest: Span,
-    class: OccurrenceClass,
-    revision: i64,
+    /// The probe's raw rank, or [`UNRANKED`] for a common probe's row.
     rank: f64,
+    rowid: i64,
     ordinal: usize,
 }
 
-impl Hit {
-    fn id<'t>(&self, text: &'t Text) -> &'t str {
-        text.get(self.id)
-    }
-
-    fn candidate(&self, text: &Text) -> OccurrenceCandidate {
-        OccurrenceCandidate::new(
-            self.id(text).to_string(),
-            self.class,
-            text.get(self.object).to_string(),
-            self.revision,
-            text.get(self.digest).to_string(),
-        )
-    }
+/// A kept match whose occurrence identifier has been read; its occurrence row is read at admission.
+#[derive(Debug, Clone, Copy)]
+struct Named {
+    hit: Hit,
+    id: Id,
 }
 
-/// A scan's hits and the text they point into.
+/// The kept matches in comparator order. A rank group's identifiers are read when admission reaches the group, except the group the scan bound cut, which the scan identifies to decide which of its members the bound keeps.
 #[derive(Debug, Clone, Default)]
-struct Found {
-    hits: Vec<Hit>,
+struct Kept {
+    /// Rank groups not yet identified, in rank order; each group holds the order its scan read.
+    pending: VecDeque<Hit>,
+    /// Identified hits in comparator order: the pending groups identified so far, then `tail` once `pending` is spent.
+    named: Vec<Named>,
+    /// The group the scan bound cut, identified, in comparator order, and cut at the bound; it ranks after every pending group.
+    tail: Vec<Named>,
     text: Text,
+}
+
+impl Kept {
+    fn len(&self) -> usize {
+        self.named.len() + self.pending.len() + self.tail.len()
+    }
+
+    /// Identifies pending rank groups, in order, until `named` holds at least `end` hits or every hit, and returns the VM steps the statements ran.
+    fn name_through(
+        &mut self,
+        conn: &GuardedConn<'_>,
+        end: usize,
+        budget: &EvalBudget,
+    ) -> Result<u64, ScanStop> {
+        let mut steps = 0;
+        while self.named.len() < end {
+            let Some(first) = self.pending.front() else {
+                self.named.append(&mut self.tail);
+                break;
+            };
+            let rank = first.rank;
+            let size = self
+                .pending
+                .iter()
+                .take_while(|hit| hit.rank.total_cmp(&rank) == Ordering::Equal)
+                .count();
+            let group: Vec<Hit> = self.pending.drain(..size).collect();
+            steps += identify(conn, group, &mut self.text, &mut self.named, budget)?;
+        }
+        Ok(steps)
+    }
 }
 
 /// An accepted hit with the facts the kernel judged.
@@ -233,80 +277,78 @@ struct Accepted {
     ordinal: usize,
 }
 
-fn by_id(left: &Hit, right: &Hit, text: &Text) -> Ordering {
+fn by_id(left: Id, right: Id, text: &Text) -> Ordering {
     left.key
         .cmp(&right.key)
-        .then_with(|| left.id(text).cmp(right.id(text)))
-}
-
-/// Sorting with `best_first` lets `dedup_by` retain each occurrence's lowest-rank hit, breaking ties by probe ordinal.
-fn best_first(left: &Hit, right: &Hit, text: &Text) -> Ordering {
-    by_id(left, right, text)
-        .then_with(|| left.rank.total_cmp(&right.rank))
-        .then_with(|| left.ordinal.cmp(&right.ordinal))
-}
-
-fn comparator(left: &Hit, right: &Hit, text: &Text) -> Ordering {
-    left.rank
-        .total_cmp(&right.rank)
-        .then_with(|| by_id(left, right, text))
+        .then_with(|| text.get(left).cmp(text.get(right)))
 }
 
 /// Counts a probe's matches in the engine's rowid order inside SQLite, computing no rank; `?2` is the count limit.
 const COUNT_SQL: &str = "SELECT count(*) FROM (SELECT rowid FROM lexical WHERE lexical MATCH ?1 ORDER BY rowid LIMIT ?2)";
 
-/// [`ranked_rows`] sorts these matches by rank in memory; `?2` is the probe's match count from [`count_probe`].
+/// [`scan_ranked`] sorts these matches by rank in memory; `?2` is the probe's match count from [`count_probe`].
 const RANKED_SQL: &str =
     "SELECT rank, rowid FROM lexical WHERE lexical MATCH ?1 ORDER BY rowid LIMIT ?2";
 
-/// Each lexical row joins its occurrence: the occurrence columns are NULL for a missing occurrence and the last column is `false` for a tombstoned one.
+/// One page of a common probe's rowids below `?2`, in descending order; `?3` is the page size.
+const COMMON_SQL: &str =
+    "SELECT rowid FROM lexical WHERE lexical MATCH ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT ?3";
+
+/// The content rows from lexical rowid `?1` upward, in rowid order.
+/// The index's content table holds each row's columns as `c0`, `c1`, and `c2` in [`super::fts5_table_args`] order, so `c2` is the occurrence identifier; seeking a rowid is one table lookup and the rows after it follow in table order.
+const IDS_FROM_SQL: &str = "SELECT id, c2 FROM lexical_content WHERE id >= ?1 ORDER BY id";
+
+/// The most rows [`identify`] steps past between two wanted rowids before it seeks the next one; a step costs about a fifth of a seek, so the allowance tracks how dense the group's rowids are in the table.
+const STEP_ALLOWANCE_MAX: u32 = 4;
+
+/// `?1` is a JSON array of occurrence identifiers, and `j.key` is each identifier's index in it. The occurrence columns are NULL for a missing occurrence and the last column is `false` for a tombstoned one.
 /// Under the [`super::index`] invariant that tombstoning deletes the lexical row, such a dead row means an inconsistent projection.
-const WHOLE_SQL: &str = "SELECT l.rank, l.occurrence_id, o.class, o.source_object_id, o.revision, o.source_artifact_digest,
-            NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=l.occurrence_id)
-     FROM lexical l LEFT JOIN occurrences o ON o.occurrence_id=l.occurrence_id
-     WHERE lexical MATCH ?1 ORDER BY l.rowid LIMIT ?2";
-
-/// Joins each row's occurrence as [`WHOLE_SQL`] does.
-const COMMON_SQL: &str = "SELECT l.rowid, l.occurrence_id, o.class, o.source_object_id, o.revision, o.source_artifact_digest,
-            NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=l.occurrence_id)
-     FROM lexical l LEFT JOIN occurrences o ON o.occurrence_id=l.occurrence_id
-     WHERE lexical MATCH ?1 AND l.rowid <= ?2 ORDER BY l.rowid DESC LIMIT ?3";
-
-/// `?1` is a JSON array of lexical rowids, and `j.key` is each rowid's index in it.
-const IDS_SQL: &str =
-    "SELECT j.key, l.occurrence_id FROM json_each(?1) j JOIN lexical l ON l.rowid=j.value";
-
-/// `?1` is a JSON array of occurrence identifiers, and `j.key` is each identifier's index in it; the occurrence columns read as in [`WHOLE_SQL`].
 const DETAILS_SQL: &str =
     "SELECT j.key, o.class, o.source_object_id, o.revision, o.source_artifact_digest,
             NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=j.value)
      FROM json_each(?1) j LEFT JOIN occurrences o ON o.occurrence_id=j.value";
 
+/// Rowids one common stream reads per page, so a probe that contributes few rows to the merge reads few rows.
+const COMMON_PAGE_ROWS: usize = 512;
+
 /// The raw score a common probe's rows carry: they are read in rowid order, not ranked.
 const UNRANKED: f64 = 0.0;
 
-/// Probe hits read from the projection in comparator order, not yet judged by the kernel.
+/// The kept matches in comparator order, not yet resolved to occurrence rows or judged by the kernel.
 ///
-/// Retains its `RetrievalBounds` so admission uses the bounds that produced its hits.
-#[derive(Debug, Clone)]
-pub struct Scan {
-    ordered: Found,
+/// Retains the projection connection it was read under and its `RetrievalBounds`, so admission reads identifiers and occurrence rows from the same read transaction and uses the bounds that produced its hits.
+#[derive(Clone)]
+pub struct Scan<'c> {
+    conn: &'c GuardedConn<'c>,
+    kept: Kept,
     retrieval: Retrieval,
     bounds: RetrievalBounds,
 }
 
-impl Scan {
-    /// Distinct occurrences the probes hit, before any kernel verdict.
+impl Scan<'_> {
+    /// Distinct lexical matches kept, before any occurrence row is read or kernel verdict given.
     pub fn hits(&self) -> usize {
-        self.ordered.hits.len()
+        self.kept.len()
     }
 
-    /// The hit occurrences in comparator order, before any kernel verdict.
-    pub fn hit_ids(&self) -> impl Iterator<Item = &str> {
-        self.ordered
-            .hits
+    /// The hit occurrences in comparator order, before any kernel verdict; reads the identifiers of every rank group not yet identified.
+    ///
+    /// # Errors
+    ///
+    /// Projection errors of the identifier reads; a budget or interrupt that ends them is [`RetrievalRefusal::BudgetExhausted`].
+    pub fn hit_ids(&mut self, budget: &EvalBudget) -> Result<Vec<String>, RetrievalRefusal> {
+        let end = self.kept.len();
+        match self.kept.name_through(self.conn, end, budget) {
+            Ok(steps) => self.retrieval.consumed.sql_steps += steps,
+            Err(ScanStop::Budget) => return Err(RetrievalRefusal::BudgetExhausted),
+            Err(ScanStop::Projection(error)) => return Err(error.into()),
+        }
+        Ok(self
+            .kept
+            .named
             .iter()
-            .map(|hit| hit.id(&self.ordered.text))
+            .map(|named| self.kept.text.get(named.id).to_string())
+            .collect())
     }
 }
 
@@ -323,7 +365,7 @@ pub fn retrieve(
     budget: &EvalBudget,
 ) -> Result<Retrieval, RetrievalRefusal> {
     let scanned = scan(conn, probes, bounds, budget)?;
-    admit_inner(kernel, authority, scanned, budget, |_| {})
+    admit_inner(scanned, kernel, authority, budget, |_| {})
 }
 
 /// `hook` runs after every admission batch and once before the final re-judgment, so a test can change the kernel or the budget in those windows.
@@ -338,7 +380,7 @@ pub fn retrieve_with_hook_for_test(
     hook: impl FnMut(Window),
 ) -> Result<Retrieval, RetrievalRefusal> {
     let scanned = scan(conn, probes, bounds, budget)?;
-    admit_inner(kernel, authority, scanned, budget, hook)
+    admit_inner(scanned, kernel, authority, budget, hook)
 }
 
 /// Runs every probe against the projection and keeps each occurrence's best hit.
@@ -346,12 +388,12 @@ pub fn retrieve_with_hook_for_test(
 /// # Errors
 ///
 /// Refuses bounds the kernel's eligibility batch could never serve, more probes than `max_probes`, and a budget that ends before any probe completes; a budget that ends later yields a [`Scan`] whose admission is already [`Completion::Incomplete`] with no hits.
-pub fn scan(
-    conn: &GuardedConn<'_>,
+pub fn scan<'c>(
+    conn: &'c GuardedConn<'c>,
     probes: &[Probe],
     bounds: RetrievalBounds,
     budget: &EvalBudget,
-) -> Result<Scan, RetrievalRefusal> {
+) -> Result<Scan<'c>, RetrievalRefusal> {
     budget
         .check()
         .map_err(|_| RetrievalRefusal::BudgetExhausted)?;
@@ -381,13 +423,13 @@ pub fn scan(
         consumed: Consumed::default(),
         reasons: Vec::new(),
     };
-    let mut found = Found::default();
+    let mut kept = Kept::default();
     // Each distinct probe is counted once, under its first ordinal.
     let mut counted: HashSet<&Probe> = HashSet::new();
     let mut distinct: Vec<(usize, &Probe, usize)> = Vec::new();
     for (ordinal, probe) in probes.iter().enumerate() {
         if budget.is_exhausted() {
-            return exhausted_scan(retrieval, bounds);
+            return exhausted_scan(conn, retrieval, bounds);
         }
         if !counted.contains(probe) {
             match count_probe(conn, probe, bounds.qualifying_matches, budget) {
@@ -397,7 +439,7 @@ pub fn scan(
                     counted.insert(probe);
                     distinct.push((ordinal, probe, count));
                 }
-                Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
+                Err(ScanStop::Budget) => return exhausted_scan(conn, retrieval, bounds),
                 Err(ScanStop::Projection(error)) => return Err(error.into()),
             }
         }
@@ -412,11 +454,12 @@ pub fn scan(
     if !common.is_empty() {
         incomplete(&mut retrieval, IncompleteReason::CommonTerms);
     }
-    let runs = if qualifying.is_empty() {
-        common
+    let scanned = if qualifying.is_empty() {
+        let common: Vec<(usize, &Probe)> = common
             .into_iter()
-            .map(|(ordinal, probe, _)| (ordinal, probe, Run::Common))
-            .collect::<Vec<_>>()
+            .map(|(ordinal, probe, _)| (ordinal, probe))
+            .collect();
+        scan_common(conn, &common, bounds.scan_rows.get(), budget, &mut kept)
     } else {
         let mut ranked = Vec::new();
         for (ordinal, probe, count) in qualifying {
@@ -425,84 +468,73 @@ pub fn scan(
                 break;
             }
             retrieval.consumed.ranked_matches += count;
-            ranked.push((ordinal, probe, Run::Ranked(count)));
+            ranked.push((ordinal, probe, count));
         }
-        ranked
+        scan_ranked(conn, &ranked, bounds.scan_rows.get(), budget, &mut kept)
     };
-    for (ordinal, probe, run) in runs {
-        if budget.is_exhausted() {
-            return exhausted_scan(retrieval, bounds);
-        }
-        match scan_probe(
-            conn,
-            probe,
-            ordinal,
-            run,
-            bounds.scan_rows,
-            budget,
-            &mut found,
-        ) {
-            Ok((rows, truncated, steps)) => {
-                retrieval.consumed.scanned_rows += rows;
-                retrieval.consumed.sql_steps += steps;
-                if truncated {
-                    incomplete(&mut retrieval, IncompleteReason::ScanBound);
-                }
+    match scanned {
+        Ok((truncated, steps)) => {
+            retrieval.consumed.sql_steps += steps;
+            if truncated {
+                incomplete(&mut retrieval, IncompleteReason::ScanBound);
             }
-            Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
-            Err(ScanStop::Projection(error)) => return Err(error.into()),
         }
+        Err(ScanStop::Budget) => return exhausted_scan(conn, retrieval, bounds),
+        Err(ScanStop::Projection(error)) => return Err(error.into()),
     }
-    // Each hit's identifier, rank, and ordinal together are unique, and each deduplicated hit's identifier is unique, so both orders are total.
-    let Found { hits, text } = &mut found;
-    hits.sort_unstable_by(|left, right| best_first(left, right, text));
-    hits.dedup_by(|later, kept| by_id(later, kept, text) == Ordering::Equal);
-    hits.sort_unstable_by(|left, right| comparator(left, right, text));
+    retrieval.consumed.scanned_rows = kept.len();
     Ok(Scan {
-        ordered: found,
+        conn,
+        kept,
         retrieval,
         bounds,
     })
 }
 
-/// Judges the scan's hits in bounded kernel batches, accepts eligible ones until `max_accepted` fills, and re-judges the accepted set once before returning.
+/// Reads each kept match's occurrence row as admission reaches it, through the projection connection and read transaction `scanned` was read under, judges the live ones in bounded kernel batches, accepts eligible ones until `max_accepted` fills, and re-judges the accepted set once before returning.
 ///
 /// # Errors
 ///
-/// Returns kernel errors except [`KernelError::Deadline`], which leaves the result [`Completion::Incomplete`] with no contributions.
+/// Returns kernel and projection errors except [`KernelError::Deadline`], which leaves the result [`Completion::Incomplete`] with no contributions.
 pub fn admit(
+    scanned: Scan<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
-    scanned: Scan,
     budget: &EvalBudget,
 ) -> Result<Retrieval, RetrievalRefusal> {
-    admit_inner(kernel, authority, scanned, budget, |_| {})
+    admit_inner(scanned, kernel, authority, budget, |_| {})
 }
 
 fn admit_inner(
+    scanned: Scan<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
-    scanned: Scan,
     budget: &EvalBudget,
     mut hook: impl FnMut(Window),
 ) -> Result<Retrieval, RetrievalRefusal> {
     let Scan {
-        ordered,
+        conn,
+        mut kept,
         mut retrieval,
         bounds,
     } = scanned;
     if retrieval.completion == Completion::Incomplete(IncompleteReason::BudgetExhausted) {
         return Ok(retrieval);
     }
-    let accepted = admit_batches(
+    let accepted = match admit_batches(
+        conn,
         kernel,
         authority,
         bounds,
         budget,
-        &ordered,
+        &mut kept,
         &mut retrieval,
         &mut hook,
-    )?;
+    ) {
+        Ok(accepted) => accepted,
+        Err(AdmitStop::Budget) => return exhausted(retrieval),
+        Err(AdmitStop::Refused(refusal)) => return Err(refusal),
+    };
     hook(Window::BeforeRevalidation);
     revalidate(kernel, authority, budget, accepted, &mut retrieval)?;
     if budget.is_exhausted() {
@@ -511,10 +543,37 @@ fn admit_inner(
     Ok(retrieval)
 }
 
+/// Why admission stopped before revalidation.
+enum AdmitStop {
+    /// The budget ended while an occurrence row was read.
+    Budget,
+    Refused(RetrievalRefusal),
+}
+
+impl From<RetrievalRefusal> for AdmitStop {
+    fn from(refusal: RetrievalRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+impl From<ScanStop> for AdmitStop {
+    fn from(stop: ScanStop) -> Self {
+        match stop {
+            ScanStop::Budget => Self::Budget,
+            ScanStop::Projection(error) => Self::Refused(error.into()),
+        }
+    }
+}
+
 /// A budget-exhausted scan retains no hits; admission returns its recorded completion unchanged.
-fn exhausted_scan(retrieval: Retrieval, bounds: RetrievalBounds) -> Result<Scan, RetrievalRefusal> {
+fn exhausted_scan<'c>(
+    conn: &'c GuardedConn<'c>,
+    retrieval: Retrieval,
+    bounds: RetrievalBounds,
+) -> Result<Scan<'c>, RetrievalRefusal> {
     Ok(Scan {
-        ordered: Found::default(),
+        conn,
+        kept: Kept::default(),
         retrieval: exhausted(retrieval)?,
         bounds,
     })
@@ -555,13 +614,6 @@ fn precedence(reason: IncompleteReason) -> u8 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Run {
-    /// Ranked by the engine; the probe's counted matches.
-    Ranked(usize),
-    Common,
-}
-
 /// The probe's match count in rowid order, stopping one row past `qualifying` so an overflow is told apart from exactly the threshold without a full count.
 fn count_probe(
     conn: &GuardedConn<'_>,
@@ -590,220 +642,176 @@ fn vm_steps(statement: &rusqlite::Statement<'_>) -> u64 {
     )
 }
 
-/// The probe scan appends its best `scan_rows` live rows to `found`; the returned boolean is `true` when additional live rows exist past the bound.
-fn scan_probe(
-    conn: &GuardedConn<'_>,
-    probe: &Probe,
-    ordinal: usize,
-    run: Run,
-    scan_rows: NonZeroUsize,
-    budget: &EvalBudget,
-    found: &mut Found,
-) -> Result<(usize, bool, u64), ScanStop> {
-    let bound = scan_rows.get();
-    let mut taken = Taken {
-        hits: Vec::new(),
-        text: &mut found.text,
-    };
-    let (truncated, steps) = match run {
-        Run::Common => scan_common(conn, probe, ordinal, bound, budget, &mut taken)?,
-        // Every live match fits the bound, so the scan keeps each one and the probe ends within its bound.
-        Run::Ranked(count) if count <= bound => (
-            false,
-            scan_whole(conn, probe, ordinal, count, budget, &mut taken)?,
-        ),
-        Run::Ranked(count) => scan_ranked(conn, probe, ordinal, count, bound, budget, &mut taken)?,
-    };
-    let seen = taken.hits.len();
-    found.hits.append(&mut taken.hits);
-    Ok((seen, truncated, steps))
-}
-
-/// Keeps every live match of a probe whose `count` matches fit the scan bound and returns the VM steps its statement ran.
-fn scan_whole(
-    conn: &GuardedConn<'_>,
-    probe: &Probe,
-    ordinal: usize,
-    count: usize,
-    budget: &EvalBudget,
-    taken: &mut Taken<'_>,
-) -> Result<u64, ScanStop> {
-    let mut statement = conn.prepare_cached(WHOLE_SQL)?;
-    statement.reset_status(StatementStatus::VmStep);
-    let mut rows = statement.query(rusqlite::params![
-        probe,
-        i64::try_from(count).unwrap_or(i64::MAX)
-    ])?;
-    while let Some(row) = rows.next()? {
-        budget.check().map_err(|_| ScanStop::Budget)?;
-        taken.offer(row, 2, text(row, 1)?, row.get(0)?, ordinal)?;
-    }
-    drop(rows);
-    Ok(vm_steps(&statement))
-}
-
-/// Keeps the best `bound` live matches of a probe with more matches than the bound, in rank order and then occurrence identifier order, and returns `true` when a live match lies past the bound, with the VM steps its statements ran.
-/// `scan_ranked` reads identifiers for the open slots and the rest of their final rank group, so occurrence identifiers decide which equal-rank rows the bound keeps.
-/// A window that exactly fills the open slots adds one witness row to detect live rows past the bound. `scan_ranked` reads the witness's rank group only when an open slot could accept the witness.
-/// Once the bound is full, `scan_ranked` reads one row at a time until it finds a live row, which witnesses that live rows extend past the bound.
+/// Keeps the request's best `bound` matches across the ranked probes, each given as its ordinal, probe, and counted matches, and returns `true` when more distinct matches exist, with the VM steps the statements ran.
+/// Every match of every probe is scored once, the matches merge in rank order, and an occurrence several probes match keeps its lowest rank, then its lowest probe ordinal.
+/// Identifiers are read for the rank group the bound cuts, so occurrence identifiers decide which equal-rank matches the bound keeps.
+///
+/// Each probe must yield matches in ascending rowid order so [`merge_best`] can deduplicate occurrences across probes.
 fn scan_ranked(
     conn: &GuardedConn<'_>,
-    probe: &Probe,
-    ordinal: usize,
-    count: usize,
+    probes: &[(usize, &Probe, usize)],
     bound: usize,
     budget: &EvalBudget,
-    taken: &mut Taken<'_>,
+    kept: &mut Kept,
 ) -> Result<(bool, u64), ScanStop> {
-    let (rows, ranked_steps) = ranked_rows(conn, probe, count, budget)?;
-    let mut ids = conn.prepare_cached(IDS_SQL)?;
-    ids.reset_status(StatementStatus::VmStep);
-    let mut details = conn.prepare_cached(DETAILS_SQL)?;
-    details.reset_status(StatementStatus::VmStep);
-    let mut next = 0;
-    let mut pending: VecDeque<(f64, String)> = VecDeque::new();
-    let mut witness: Option<(f64, String)> = None;
-    let truncated = loop {
-        budget.check().map_err(|_| ScanStop::Budget)?;
-        let open = bound - taken.hits.len();
-        if pending.is_empty() {
-            if next == rows.len() {
-                break false;
-            }
-            let mut end = rows.len().min(next + open.max(1));
-            if open > 0 {
-                while end < rows.len() && rows[end].0.total_cmp(&rows[end - 1].0) == Ordering::Equal
-                {
-                    end += 1;
-                }
-            }
-            // `rows` is in ascending rank order and the window ends at a rank change, so a witness ranks after every window row.
-            let read = if open > 0 && end == next + open && end < rows.len() {
-                end + 1
-            } else {
-                end
-            };
-            let mut identified = identify(&mut ids, &rows[next..read])?;
-            witness = if read > end { identified.pop() } else { None };
-            identified.sort_by(|left, right| {
-                left.0
-                    .total_cmp(&right.0)
-                    .then_with(|| left.1.cmp(&right.1))
-            });
-            pending.extend(identified);
-            next = end;
+    let mut matches: Vec<Hit> = Vec::new();
+    let mut steps = 0;
+    for &(ordinal, probe, count) in probes {
+        let mut rows: Vec<Hit> = Vec::with_capacity(count);
+        steps += ranked_rows(conn, probe, ordinal, count, budget, &mut rows)?;
+        matches = if matches.is_empty() {
+            rows
+        } else {
+            merge_best(&matches, &rows)
+        };
+    }
+    let by_rank = |left: &Hit, right: &Hit| left.rank.total_cmp(&right.rank);
+    if matches.len() <= bound {
+        matches.sort_unstable_by(by_rank);
+        kept.pending.extend(matches);
+        return Ok((false, steps));
+    }
+    // After the partition, every match below the cut rank precedes the cut element and every match above it follows, while the cut group may straddle it.
+    let (_, cut, _) = matches.select_nth_unstable_by(bound - 1, by_rank);
+    let cut = cut.rank;
+    let mut pending: Vec<Hit> = Vec::with_capacity(bound);
+    let mut group: Vec<Hit> = Vec::new();
+    for hit in &matches {
+        match hit.rank.total_cmp(&cut) {
+            Ordering::Less => pending.push(*hit),
+            Ordering::Equal => group.push(*hit),
+            Ordering::Greater => {}
         }
-        let mut batch: Vec<(f64, String)> = pending.drain(..pending.len().min(open + 1)).collect();
-        let keep = batch.len();
-        if keep <= open && pending.is_empty() {
-            batch.extend(witness.take());
-        }
-        if resolve(&mut details, &batch, keep, ordinal, bound, taken)? {
-            break true;
-        }
-    };
-    Ok((
-        truncated,
-        ranked_steps + vm_steps(&ids) + vm_steps(&details),
-    ))
+    }
+    drop(matches);
+    budget.check().map_err(|_| ScanStop::Budget)?;
+    pending.sort_unstable_by(by_rank);
+    let start = pending.len();
+    kept.pending.extend(pending);
+    steps += identify(conn, group, &mut kept.text, &mut kept.tail, budget)?;
+    kept.tail.truncate(bound - start);
+    Ok((true, steps))
 }
 
-/// Every match of a ranked probe with its rank and rowid, ordered by rank and then rowid, with the VM steps the statement ran.
+/// A lexical row names one occurrence, so the match kept for a rowid is that occurrence's best across the two lists.
+fn merge_best(left: &[Hit], right: &[Hit]) -> Vec<Hit> {
+    let mut merged: Vec<Hit> = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].rowid.cmp(&right[j].rowid) {
+            Ordering::Less => {
+                merged.push(left[i]);
+                i += 1;
+            }
+            Ordering::Greater => {
+                merged.push(right[j]);
+                j += 1;
+            }
+            Ordering::Equal => {
+                let (a, b) = (left[i], right[j]);
+                let best = match a.rank.total_cmp(&b.rank) {
+                    Ordering::Less => a,
+                    Ordering::Greater => b,
+                    Ordering::Equal if a.ordinal <= b.ordinal => a,
+                    Ordering::Equal => b,
+                };
+                merged.push(best);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    merged
+}
+
+/// Appends every match of a ranked probe with its rank, rowid, and the probe's ordinal to `matches` and returns the VM steps the statement ran.
 fn ranked_rows(
     conn: &GuardedConn<'_>,
     probe: &Probe,
+    ordinal: usize,
     count: usize,
     budget: &EvalBudget,
-) -> Result<(Vec<(f64, i64)>, u64), ScanStop> {
+    matches: &mut Vec<Hit>,
+) -> Result<u64, ScanStop> {
     let mut statement = conn.prepare_cached(RANKED_SQL)?;
     statement.reset_status(StatementStatus::VmStep);
-    let mut rows = Vec::with_capacity(count);
     let mut cursor = statement.query(rusqlite::params![
         probe,
         i64::try_from(count).unwrap_or(i64::MAX)
     ])?;
     while let Some(row) = cursor.next()? {
         budget.check().map_err(|_| ScanStop::Budget)?;
-        rows.push((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?));
+        matches.push(Hit {
+            rank: row.get(0)?,
+            rowid: row.get(1)?,
+            ordinal,
+        });
     }
     drop(cursor);
-    let steps = vm_steps(&statement);
-    rows.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
-    Ok((rows, steps))
+    Ok(vm_steps(&statement))
 }
 
-/// Each row's rank with its occurrence identifier, in the order of `rows`.
-/// The statement reads the rows in ascending rowid order, which keeps successive lookups near each other in the index.
+/// Appends one rank group, `group`, to `named` with each lexical row's occurrence identifier and returns the statement's VM step count.
+/// The rows are visited in ascending rowid order through one cursor: a wanted rowid near the cursor is reached by stepping past the rows between, a distant one by a fresh seek, and the step allowance adapts to how often each happens.
+/// A rowid with no content row is a lexical row the index cannot name.
 fn identify(
-    statement: &mut storage::CachedStatement<'_>,
-    rows: &[(f64, i64)],
-) -> Result<Vec<(f64, String)>, ScanStop> {
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_unstable_by_key(|&index| rows[index].1);
-    let json = json_array(order.iter().map(|&index| rows[index].1.to_string()));
-    let mut found: Vec<Option<String>> = vec![None; rows.len()];
-    let mut cursor = statement.query([json])?;
-    while let Some(row) = cursor.next()? {
-        let slot = found
-            .get_mut(order[key(row)?])
-            .ok_or(ProjectionError::CorruptRow)?;
-        *slot = Some(row.get(1)?);
-    }
-    rows.iter()
-        .zip(found)
-        .map(|(&(rank, _), id)| Ok((rank, id.ok_or(ProjectionError::CorruptRow)?)))
-        .collect()
-}
-
-/// Offers each of `batch`'s occurrences to `taken` in the order of `batch` and returns `true` when a live one lies past `bound`.
-/// Entries from index `keep` on are witnesses: a live witness returns `true` once the bound is full and `false` while a slot is open, leaving that row for the next window.
-/// The statement reads the identifiers in ascending order, which keeps successive lookups near each other in the index.
-fn resolve(
-    statement: &mut storage::CachedStatement<'_>,
-    batch: &[(f64, String)],
-    keep: usize,
-    ordinal: usize,
-    bound: usize,
-    taken: &mut Taken<'_>,
-) -> Result<bool, ScanStop> {
-    let mut order: Vec<usize> = (0..batch.len()).collect();
-    order.sort_unstable_by(|&left, &right| batch[left].1.cmp(&batch[right].1));
-    let json = serde_json::to_string(
-        &order
-            .iter()
-            .map(|&index| batch[index].1.as_str())
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| ProjectionError::CorruptRow)?;
-    let mut found: Vec<Option<Hit>> = vec![None; batch.len()];
-    let mut seen = vec![false; batch.len()];
-    let start = taken.hits.len();
-    let mut cursor = statement.query([json])?;
-    while let Some(row) = cursor.next()? {
-        let index = *order.get(key(row)?).ok_or(ProjectionError::CorruptRow)?;
-        if std::mem::replace(&mut seen[index], true) {
-            return Err(ProjectionError::CorruptRow.into());
-        }
-        let (rank, occurrence_id) = &batch[index];
-        if taken.offer(row, 1, occurrence_id, *rank, ordinal)? {
-            found[index] = taken.hits.pop();
+    conn: &GuardedConn<'_>,
+    mut group: Vec<Hit>,
+    text: &mut Text,
+    named: &mut Vec<Named>,
+    budget: &EvalBudget,
+) -> Result<u64, ScanStop> {
+    let mut statement = conn.prepare_cached(IDS_FROM_SQL)?;
+    statement.reset_status(StatementStatus::VmStep);
+    group.sort_unstable_by_key(|hit| hit.rowid);
+    let start = named.len();
+    let mut allowance: u32 = STEP_ALLOWANCE_MAX / 2;
+    let mut next = 0;
+    while next < group.len() {
+        // One run: a seek at the next wanted rowid, then steps while wanted rowids stay within the allowance.
+        let mut rows = statement.query([group[next].rowid])?;
+        let mut sought = true;
+        let mut stepped: u32 = 0;
+        loop {
+            budget.check().map_err(|_| ScanStop::Budget)?;
+            let wanted = group[next].rowid;
+            let Some(row) = rows.next()? else {
+                return Err(ProjectionError::CorruptRow.into());
+            };
+            match row.get::<_, i64>(0)?.cmp(&wanted) {
+                Ordering::Equal => {
+                    let id = text.push(str_column(row, 1)?);
+                    named.push(Named {
+                        hit: group[next],
+                        id,
+                    });
+                    next += 1;
+                    if !sought {
+                        allowance = (allowance + 1).min(STEP_ALLOWANCE_MAX);
+                    }
+                    if next == group.len() || allowance == 0 {
+                        break;
+                    }
+                    sought = false;
+                    stepped = 0;
+                }
+                Ordering::Less if !sought && stepped < allowance => stepped += 1,
+                Ordering::Less if !sought => {
+                    allowance /= 2;
+                    break;
+                }
+                Ordering::Less | Ordering::Greater => {
+                    return Err(ProjectionError::CorruptRow.into());
+                }
+            }
         }
     }
-    drop(cursor);
-    debug_assert_eq!(taken.hits.len(), start);
-    for (index, hit) in found.into_iter().enumerate() {
-        let Some(hit) = hit else {
-            continue;
-        };
-        if taken.hits.len() == bound {
-            return Ok(true);
-        }
-        if index >= keep {
-            return Ok(false);
-        }
-        taken.hits.push(hit);
-    }
-    Ok(false)
+    named[start..].sort_unstable_by(|left, right| {
+        by_id(left.id, right.id, text).then(left.hit.ordinal.cmp(&right.hit.ordinal))
+    });
+    Ok(vm_steps(&statement))
 }
 
 /// The `j.key` array index in column 0 of a batched lookup row.
@@ -811,62 +819,96 @@ fn key(row: &rusqlite::Row<'_>) -> Result<usize, ScanStop> {
     Ok(usize::try_from(row.get::<_, i64>(0)?).map_err(|_| ProjectionError::CorruptRow)?)
 }
 
-fn json_array(items: impl Iterator<Item = String>) -> String {
-    let mut json = String::from("[");
-    for (index, item) in items.enumerate() {
-        if index > 0 {
-            json.push(',');
-        }
-        json.push_str(&item);
-    }
-    json.push(']');
-    json
+/// One common probe's rowids in descending order, read a page at a time below the last rowid seen.
+struct Descending<'p> {
+    ordinal: usize,
+    probe: &'p Probe,
+    ceiling: i64,
+    page: VecDeque<i64>,
+    ended: bool,
 }
 
-/// `scan_common` takes a common probe's first `bound` live rows in descending rowid order and returns `true` when another live row exists, with the VM steps its page statement ran.
-/// Each page reads `bound + 1` rows below the last rowid seen, so a dead row costs one read and no kept slot, and a short page ends the match set.
+impl Descending<'_> {
+    /// The probe's next rowid without consuming it, reading the next page when the current one is spent; a short page ends the match set.
+    fn head(
+        &mut self,
+        statement: &mut storage::CachedStatement<'_>,
+        page: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<i64>, ScanStop> {
+        if self.page.is_empty() && !self.ended {
+            let mut rows = statement.query(rusqlite::params![self.probe, self.ceiling, page])?;
+            let mut fetched: i64 = 0;
+            while let Some(row) = rows.next()? {
+                budget.check().map_err(|_| ScanStop::Budget)?;
+                fetched += 1;
+                let rowid: i64 = row.get(0)?;
+                self.ceiling = rowid.saturating_sub(1);
+                self.page.push_back(rowid);
+            }
+            self.ended = fetched < page;
+        }
+        Ok(self.page.front().copied())
+    }
+}
+
+/// Keeps the first `bound` distinct rowids of the common probes, each given as its ordinal and probe, in descending rowid order across all of them, and returns `true` when another exists, with the VM steps the statements ran.
+/// Each probe's rowids are read a page of at most [`COMMON_PAGE_ROWS`] at a time and merged; a rowid several probes match is kept once, under the lowest of their ordinals.
 fn scan_common(
     conn: &GuardedConn<'_>,
-    probe: &Probe,
-    ordinal: usize,
+    probes: &[(usize, &Probe)],
     bound: usize,
     budget: &EvalBudget,
-    taken: &mut Taken<'_>,
+    kept: &mut Kept,
 ) -> Result<(bool, u64), ScanStop> {
-    let mut statement = conn.prepare_cached(COMMON_SQL)?;
-    statement.reset_status(StatementStatus::VmStep);
-    let page = i64::try_from(bound.saturating_add(1)).unwrap_or(i64::MAX);
-    let mut ceiling = i64::MAX;
-    let truncated = 'pages: loop {
-        let mut rows = statement.query(rusqlite::params![probe, ceiling, page])?;
-        let mut fetched: i64 = 0;
-        while let Some(row) = rows.next()? {
-            budget.check().map_err(|_| ScanStop::Budget)?;
-            fetched += 1;
-            let rowid: i64 = row.get(0)?;
-            ceiling = rowid.saturating_sub(1);
-            if taken.hits.len() == bound {
-                if live(row, 2)? {
-                    break 'pages true;
+    let mut pages = conn.prepare_cached(COMMON_SQL)?;
+    pages.reset_status(StatementStatus::VmStep);
+    let page_rows = bound.saturating_add(1).min(COMMON_PAGE_ROWS);
+    let page = i64::try_from(page_rows).unwrap_or(i64::MAX);
+    let mut streams: Vec<Descending<'_>> = probes
+        .iter()
+        .map(|&(ordinal, probe)| Descending {
+            ordinal,
+            probe,
+            ceiling: i64::MAX,
+            page: VecDeque::new(),
+            ended: false,
+        })
+        .collect();
+    // One row past the bound tells a truncated merge from one that ends exactly at it. The initial capacity is one page, so the upfront allocation stays bounded for a large caller-supplied bound.
+    let mut merged: Vec<Hit> = Vec::with_capacity(page_rows);
+    while merged.len() <= bound {
+        let mut next: Option<(i64, usize)> = None;
+        for stream in &mut streams {
+            if let Some(rowid) = stream.head(&mut pages, page, budget)? {
+                // Streams are in ordinal order, so the first stream holding the greatest rowid has the lowest ordinal.
+                if next.is_none_or(|(best, _)| rowid > best) {
+                    next = Some((rowid, stream.ordinal));
                 }
-            } else {
-                taken.offer(row, 2, text(row, 1)?, UNRANKED, ordinal)?;
             }
         }
-        if fetched < page {
-            break false;
+        let Some((rowid, ordinal)) = next else {
+            break;
+        };
+        for stream in &mut streams {
+            if stream.page.front() == Some(&rowid) {
+                stream.page.pop_front();
+            }
         }
-    };
-    Ok((truncated, vm_steps(&statement)))
-}
-
-/// Whether a joined row names a live occurrence; the occurrence columns start at `at`, with the tombstone test four columns later.
-fn live(row: &rusqlite::Row<'_>, at: usize) -> Result<bool, ScanStop> {
-    Ok(row.get_ref(at)? != rusqlite::types::ValueRef::Null && row.get::<_, bool>(at + 4)?)
+        merged.push(Hit {
+            rank: UNRANKED,
+            rowid,
+            ordinal,
+        });
+    }
+    let truncated = merged.len() > bound;
+    merged.truncate(bound);
+    kept.pending.extend(merged);
+    Ok((truncated, vm_steps(&pages)))
 }
 
 /// Column `index` of `row` as text; any other value fails exactly as `Row::get::<String>` fails.
-fn text<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> Result<&'r str, ScanStop> {
+fn str_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> Result<&'r str, ScanStop> {
     if let Ok(text) = row.get_ref(index)?.as_str() {
         return Ok(text);
     }
@@ -874,50 +916,55 @@ fn text<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> Result<&'r str, ScanSto
     Err(ProjectionError::CorruptRow.into())
 }
 
-/// The hits one probe keeps, with the text they point into.
-struct Taken<'t> {
-    hits: Vec<Hit>,
-    text: &'t mut Text,
-}
-
-impl Taken<'_> {
-    /// Keeps the live occurrence a joined row names and returns `true`, or returns `false` for a dead row; the occurrence columns start at `at` as for [`live`].
-    fn offer(
-        &mut self,
-        row: &rusqlite::Row<'_>,
-        at: usize,
-        occurrence_id: &str,
-        rank: f64,
-        ordinal: usize,
-    ) -> Result<bool, ScanStop> {
-        if !live(row, at)? {
-            return Ok(false);
+/// `resolve` returns occurrence rows in `ids` order, uses `None` for missing or tombstoned occurrences, and returns the statement's VM step count.
+/// The statement reads the identifiers in ascending order, which keeps successive lookups near each other in the index.
+fn resolve(
+    conn: &GuardedConn<'_>,
+    ids: &[&str],
+    budget: &EvalBudget,
+) -> Result<(Vec<Option<OccurrenceCandidate>>, u64), ScanStop> {
+    let mut statement = conn.prepare_cached(DETAILS_SQL)?;
+    statement.reset_status(StatementStatus::VmStep);
+    let mut order: Vec<usize> = (0..ids.len()).collect();
+    order.sort_unstable_by_key(|&index| ids[index]);
+    let json = serde_json::to_string(&order.iter().map(|&index| ids[index]).collect::<Vec<_>>())
+        .map_err(|_| ProjectionError::CorruptRow)?;
+    let mut resolved: Vec<Option<OccurrenceCandidate>> = vec![None; ids.len()];
+    let mut read = 0;
+    let mut cursor = statement.query([json])?;
+    while let Some(row) = cursor.next()? {
+        budget.check().map_err(|_| ScanStop::Budget)?;
+        read += 1;
+        let index = *order.get(key(row)?).ok_or(ProjectionError::CorruptRow)?;
+        // Column 1 is NULL for a missing occurrence and column 5 is `false` for a tombstoned one.
+        let present = row.get_ref(1)? != rusqlite::types::ValueRef::Null;
+        let untombstoned: bool = row.get(5)?;
+        if !(present && untombstoned) {
+            continue;
         }
         let class = row
-            .get_ref(at)?
+            .get_ref(1)?
             .as_str()
             .ok()
             .and_then(OccurrenceClass::from_code)
             .ok_or(ProjectionError::CorruptRow)?;
-        let mut key = [0u8; 8];
-        let prefix = &occurrence_id.as_bytes()[..occurrence_id.len().min(8)];
-        key[..prefix.len()].copy_from_slice(prefix);
-        let id = self.text.push(occurrence_id);
-        let object = self.text.push(text(row, at + 1)?);
-        let revision = row.get(at + 2)?;
-        let digest = self.text.push(text(row, at + 3)?);
-        self.hits.push(Hit {
-            key: u64::from_be_bytes(key),
-            id,
-            object,
-            digest,
+        resolved[index] = Some(OccurrenceCandidate::new(
+            ids[index].to_string(),
             class,
-            revision,
-            rank,
-            ordinal,
-        });
-        Ok(true)
+            text_column(row, 2)?,
+            row.get(3)?,
+            text_column(row, 4)?,
+        ));
     }
+    drop(cursor);
+    if read != ids.len() {
+        return Err(ProjectionError::CorruptRow.into());
+    }
+    Ok((resolved, vm_steps(&statement)))
+}
+
+fn text_column(row: &rusqlite::Row<'_>, index: usize) -> Result<String, ScanStop> {
+    Ok(str_column(row, index)?.to_string())
 }
 
 /// Returns `SnapshotChanged` or `KernelIncarnationChanged` if kernel state differs from the first batch,
@@ -953,19 +1000,25 @@ fn judge_batch(
     Ok(Some((report, moved)))
 }
 
-/// Judges candidates in comparator order, `batch_rows` at a time, and accepts eligible ones until `max_accepted` fills.
+/// Judges candidates in comparator order and accepts eligible ones until `max_accepted` fills. The first batch targets the open accepted slots; each later batch scales the open slots by the matches read per accepted occurrence so far. After a batch with no new acceptance, the next target is the larger of that estimate and twice the previous batch. Every batch takes at most `batch_rows` kept matches, reads their occurrence rows, and judges the live ones.
 /// An ineligible leader consumes judgment work and no accepted slot, so eligible tails behind it are still reached.
+#[allow(clippy::too_many_arguments)]
 fn admit_batches(
+    conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
     bounds: RetrievalBounds,
     budget: &EvalBudget,
-    ordered: &Found,
+    kept: &mut Kept,
     retrieval: &mut Retrieval,
     hook: &mut impl FnMut(Window),
-) -> Result<Vec<Accepted>, RetrievalRefusal> {
+) -> Result<Vec<Accepted>, AdmitStop> {
     let mut accepted: Vec<Accepted> = Vec::new();
-    for batch in ordered.hits.chunks(bounds.batch_rows.get()) {
+    let mut reached: HashSet<String> = HashSet::new();
+    let mut next = 0;
+    // `previous` holds the previous batch's kept-match count and the accepted count before that batch ran.
+    let mut previous: (usize, usize) = (0, 0);
+    while next < kept.len() {
         if accepted.len() == bounds.max_accepted.get() {
             incomplete(retrieval, IncompleteReason::AcceptedBound);
             break;
@@ -974,10 +1027,52 @@ fn admit_batches(
             incomplete(retrieval, IncompleteReason::BudgetExhausted);
             break;
         }
-        let candidates: Vec<OccurrenceCandidate> = batch
-            .iter()
-            .map(|hit| hit.candidate(&ordered.text))
-            .collect();
+        let open = bounds.max_accepted.get() - accepted.len();
+        // The matches read per accepted occurrence so far predict how many fill the open slots; a batch that has accepted none yet takes a whole batch.
+        // A batch that adds no accepted occurrence sets the next batch's floor at twice its own size, capped at `batch_rows`, so a run of such batches grows geometrically to whole batches.
+        let (previous_rows, accepted_before) = previous;
+        let want = match (next, accepted.len()) {
+            (0, _) => open,
+            (_, 0) => bounds.batch_rows.get(),
+            (read, kept) if kept == accepted_before => open
+                .saturating_mul(read)
+                .div_ceil(kept)
+                .max(previous_rows.saturating_mul(2)),
+            (read, kept) => open.saturating_mul(read).div_ceil(kept),
+        };
+        let end = kept
+            .len()
+            .min(next + want.clamp(1, bounds.batch_rows.get()));
+        previous = (end - next, accepted.len());
+        retrieval.consumed.sql_steps += kept.name_through(conn, end, budget)?;
+        let mut batch: Vec<&Named> = Vec::with_capacity(end - next);
+        let mut ids: Vec<&str> = Vec::with_capacity(end - next);
+        for named in &kept.named[next..end] {
+            let id = kept.text.get(named.id);
+            if reached.contains(id) {
+                continue;
+            }
+            reached.insert(id.to_string());
+            batch.push(named);
+            ids.push(id);
+        }
+        let (resolved, steps) = resolve(conn, &ids, budget)?;
+        retrieval.consumed.sql_steps += steps;
+        let mut live: Vec<&Named> = Vec::with_capacity(resolved.len());
+        let mut candidates: Vec<OccurrenceCandidate> = Vec::with_capacity(resolved.len());
+        for (named, candidate) in batch.into_iter().zip(resolved) {
+            match candidate {
+                Some(candidate) => {
+                    live.push(named);
+                    candidates.push(candidate);
+                }
+                None => retrieval.consumed.dead_rows += 1,
+            }
+        }
+        next = end;
+        if candidates.is_empty() {
+            continue;
+        }
         let Some((report, moved)) = judge_batch(kernel, authority, &candidates, budget, retrieval)?
         else {
             break;
@@ -992,15 +1087,15 @@ fn admit_batches(
             }
             break;
         }
-        for ((hit, candidate), judged) in batch.iter().zip(candidates).zip(report.occurrences) {
+        for ((named, candidate), judged) in live.iter().zip(candidates).zip(report.occurrences) {
             match judged.disposition {
                 Disposition::Eligible if accepted.len() == bounds.max_accepted.get() => {
                     incomplete(retrieval, IncompleteReason::AcceptedBound);
                 }
                 Disposition::Eligible => accepted.push(Accepted {
                     candidate,
-                    rank: hit.rank,
-                    ordinal: hit.ordinal,
+                    rank: named.hit.rank,
+                    ordinal: named.hit.ordinal,
                 }),
                 Disposition::PolicyExcluded(verdict) => retrieval.consumed.exclude(verdict),
             }

@@ -2372,11 +2372,15 @@ fn lexical_objects(reader: &SearchReader, term: &str, bounds: RetrievalBounds) -
     let probes = compile(&analysis);
     reader
         .read(&slice_budget(), |conn| {
-            let scanned = scan(conn, &probes, bounds, &slice_budget())
+            let budget = slice_budget();
+            let mut scanned = scan(conn, &probes, bounds, &budget)
                 .map_err(|_| retrieval::ProjectionError::CorruptRow)?;
             assert!(scanned.hits() <= bounds.max_accepted.get());
             let mut objects = Vec::new();
-            for occurrence in scanned.hit_ids() {
+            for occurrence in scanned
+                .hit_ids(&budget)
+                .map_err(|_| retrieval::ProjectionError::CorruptRow)?
+            {
                 objects.push(conn.query_row(
                     "SELECT source_object_id FROM occurrences WHERE occurrence_id=?1",
                     [occurrence],

@@ -422,24 +422,25 @@ Exercised: partial - the join-before-settle clause is covered by
 `crates/daemon/src/request_budget/host_tests.rs`
 `cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`,
 and the connection-release clause by `crates/daemon/tests/query_route.rs`
-`the_projection_connection_is_free_while_the_lanes_are_admitted`; the route's
+`the_projection_connection_is_free_while_the_exact_lane_is_admitted`; the route's
 own holders and the envelope bound are not yet measured.
 Guarantee: Once a request is cancelled, the tracked blocking work that runs
 its lanes finishes, the lifecycle pin and the projection connection it holds
 are released, and the request settles within an approved fault-free envelope;
 a permanently blocked read stays visible as unresolved work rather than being
 settled early. The projection connection is held only while the lanes read
-the projection; every kernel reader the exact and lexical lanes take is
-acquired after it is released, so those lanes never wait for a kernel reader
-while other projection readers and writers wait for it. The dense oracle
-judges each page it scores under the connection, so a dense request holds the
-connection across its eligibility batches.
+the projection; every kernel reader the exact lane takes is acquired after it
+is released, so that lane never waits for a kernel reader while other
+projection readers and writers wait for it. The lexical lane reads each
+candidate's occurrence row just before the kernel judges it, and the dense
+oracle judges each page it scores, both under the connection, so a lexical or
+dense request holds the connection across its eligibility batches.
 Check: `always` - the handler awaits `run_unit` with the budget guard alive
 and drops the guard only after the join; the closure owns the pin for its
 whole run; a second budgeted projection read placed by the `before_phase` hook
 at the admission, fusion, and revalidation phases succeeds, so the connection
-is free during every exact and lexical judgment; the dense lane is undeclared
-in that witness. The envelope bound and a holder census
+is free during every exact judgment; the lexical and dense lanes finish
+before the admission phase. The envelope bound and a holder census
 over the pin and the guard are not yet asserted. `always` because every
 cancelled request must drain.
 Fault/timing angle: Cancellation while the lanes hold the projection

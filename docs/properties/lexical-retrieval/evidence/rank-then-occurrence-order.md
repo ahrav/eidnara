@@ -15,57 +15,65 @@ acceptance criteria and verifies it against the #391 branch.
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- `by_id` (`:236`) compares the eight-byte identifier prefix `Hit.key`, then
+- `by_id` (`:280`) compares the eight-byte identifier prefix `Id.key`, then
   the full identifier bytes, so the tie-break is occurrence identifier order.
-- `best_first` (`:243`) orders by identifier, then `rank.total_cmp`, then probe
-  ordinal.
-- `comparator` (`:249`) orders by `rank.total_cmp`, then `by_id`.
-- `scan` (`:349`) sorts hits with `best_first` (`:458`), runs `dedup_by` on
-  `by_id` equality (`:459`) so each occurrence keeps its lowest rank and, among
-  equal ranks, its lowest ordinal, then sorts with `comparator` (`:460`).
-- `scan_probe` (`:594`) keeps each probe's best `scan_rows` live rows.
-  `ranked_rows` (`:712`) reads a ranked probe in rowid order with the `rank`
-  column and sorts in memory by rank then rowid. `scan_ranked` (`:649`)
-  extends each window to the end of its rank group, `identify` (`:737`)
-  fetches identifiers, and `resolve` (`:761`) offers rows in rank then
-  identifier order, so identifiers decide which equal-rank rows the bound
-  keeps. `Taken::offer` (`:885`) skips dead rows before any slot is taken.
-- `admit_batches` (`:958`) and `revalidate` (`:1014`) carry each accepted hit's
+- `scan_ranked` (`:650`) keeps the request's best `scan_rows` matches across
+  its ranked probes. `ranked_rows` (`:730`) reads each ranked probe in rowid
+  order with the `rank` column; `merge_best` (`:697`) merges the probes' rowid
+  streams and keeps one match per rowid, the lowest rank then the lowest
+  ordinal; `select_nth_unstable_by` on `rank.total_cmp` (`:675`) partitions the
+  merged matches at the bound, every group below the cut rank goes to
+  `Kept::pending` in rank order (`:688`), the cut group is read through
+  `identify` (`:759`), which sorts it by `by_id` then ordinal (`:811`), and
+  `Kept::tail` is truncated at the bound, so identifiers decide which
+  equal-rank matches the bound keeps. A dead row keeps its slot;
+  `admit_batches` (`:1006`) drops it unjudged.
+- `admit_batches` and `revalidate` (`:1109`) carry each accepted hit's
   `rank` and `ordinal` into `Contribution` unchanged.
 
-Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1098`)
-and the route calls `admit` (`:1258`) with `lexical_retrieval_bounds` (`:170`)
-from `QueryRouteLimits::production` (`:135`).
+Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1099`)
+and `admit_lexical` calls `admit` (`:1259`) under the same projection
+connection, with `lexical_retrieval_bounds` (`:170`) from
+`QueryRouteLimits::production` (`:135`).
 
 Tests, `crates/retrieval/tests/lexical_retrieval.rs`, all on a projection
-written through `apply_batch` (`Fixture::project`, `:346`) and a real
-`KernelStore` (`Fixture::new`, `:253`), with `bounds()` (`:153`): `scan_rows`
+written through `apply_batch` (`Fixture::project`, `:378`) and a real
+`KernelStore` (`Fixture::new`, `:268`), with `bounds()` (`:153`): `scan_rows`
 64, `max_accepted` 64, `batch_rows` 2:
 
-- `keyed_reference` (`:478`) is the oracle: `ranks` (`:511`) reads every
+- `keyed_reference` (`:523`) is the oracle: `ranks` (`:556`) reads every
   match's `occurrence_id` and `rank` with a plain `MATCH`, keeps each
   identifier's minimum rank, and sorts by `total_cmp` then identifier.
-- `:641` `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`
+- `:687` `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`
   runs `parse fetch io` on the six-row corpus, asserts `keyed` equals the
   reference, six contributions, non-decreasing ranks, equal keyed output for
   `io fetch parse` and `parse parse io fetch fetch parse`, `probes == 6` for
   the duplicated request, and gamma's ordinal 0, 2, 0 across the three runs.
-- `:682` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal` confirms
+- `:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal` confirms
   `note` and `unrelated` rank delta equally, asserts ordinal 0 under both
   probe orders, and equal keyed output.
-- `:1950` `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`
+- `:2418` `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`
   projects 3000 tied rows in reversed order over three batches, asserts the
   scan keeps exactly the 64 lowest identifiers, that the reference agrees,
-  `ScanBound`, and `ranked_matches == 3000`.
-- `:2470` `dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation`
+  `ScanBound`, and `ranked_matches == 3000`. The tied rows fill the table, so
+  `identify` reaches each kept rowid by stepping its cursor.
+- `:2452` `a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers`
+  projects 240 tied rows among 3000 rows no probe matches, asserts a 240-row
+  window identifies every tied row in identifier order and a 64-row window
+  keeps exactly the 64 lowest identifiers, with `ScanBound`,
+  `ranked_matches == 240`, and `scanned_rows == 64`. The kept rowids are a
+  sparse subsequence of the table, so `identify` falls back to seeking each
+  one.
+- `:2970` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`
   projects 150 rows with distinct ranks, tombstones indexes 0..10 and 60..70
-  through `tombstone_raw` (`:974`), asserts the scan keeps the first 64 live
-  reference rows with `scanned_rows == 64` and `ScanBound`, then tombstones
-  until exactly 64 live rows remain and asserts `Complete`.
-- `:2605` `a_slot_a_dead_row_opens_goes_to_the_next_rank_groups_lowest_identifier`
+  through `tombstone_raw` (`:1028`), asserts the scan keeps the first 64
+  reference rows whatever their liveness, and asserts the contributions are
+  the 50 live ones among them, with `dead_rows == 14`, `scanned_rows == 64`,
+  and `ScanBound`.
+- `:3170` `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group`
   ends the bound at a rank change, stores the tail with its highest identifier
-  first, tombstones the head's lowest identifier, and asserts the open slot
-  goes to the tail's lowest identifier with `ScanBound`.
+  first, tombstones the head's lowest identifier, and asserts the window is
+  still the whole head with `dead_rows == 1` and `ScanBound`.
 
 ## Failure scenario
 
@@ -80,10 +88,13 @@ hit reports the wrong rank and ordinal as provenance.
 
 None at the comparator. The order is computed in memory after every probe has
 run, and both sorts are total because identifier, rank, and ordinal together
-are unique per hit and identifiers are unique after dedup (comment at `:456`).
+are unique per hit. Two kept lexical rows may name one occurrence; admission
+keeps the first through `reached` in `admit_batches` (`:1017`, `:1052`), as
+`a_second_lexical_row_for_one_occurrence_yields_one_contribution`
+(`lexical_retrieval.rs:3074`) pins.
 The scan bound interacts with order: `scan_ranked` must finish a rank group
-before deciding which equal-rank rows fit, and a dead row inside the bound
-opens a slot that the next group's lowest identifier takes.
+before deciding which equal-rank rows fit. A dead row inside the bound keeps
+its slot, so liveness never moves the window.
 
 ## What a test must construct
 
@@ -93,7 +104,8 @@ opens a slot that the next group's lowest identifier takes.
 - An equal-rank group larger than `scan_rows`, stored in reversed identifier
   order, so rowid order and identifier order disagree at the bound.
 - Dead rows at the front of and across the scan bound in a distinct-rank probe,
-  written as raw tombstones so the engine still matches them.
+  written as raw tombstones so the engine still matches them and the window
+  must keep their slots.
 - An independent oracle reading `rank` through plain `MATCH` and sorting with
   `total_cmp` then identifier bytes.
 
@@ -101,10 +113,10 @@ opens a slot that the next group's lowest identifier takes.
 
 ### Q: Do the cited tests exercise the production projection or a fixture engine?
 
-- Sources examined: `Fixture::project` (`lexical_retrieval.rs:346`), which
+- Sources examined: `Fixture::project` (`lexical_retrieval.rs:378`), which
   calls `apply_batch` on the opened `SqliteStore`; `Fixture::retrieve`
-  (`:397`), which calls `retrieve` (`retrieve.rs:317`); `lexical_read`
-  (`query_route.rs:1098`) and the `admit` call (`:1258`).
+  (`:429`), which calls `retrieve` (`retrieve.rs:359`); `lexical_read`
+  (`query_route.rs:1076`) and the `admit` call (`:1259`).
 - Findings: the tests write rows through the retrieval projection write path
   and call the same `scan` and `admit` the daemon calls. They use `bounds()`
   with `scan_rows` 64 and `max_accepted` 64, while production uses 4096 and

@@ -585,8 +585,9 @@ fn a_held_classification_window_makes_eligibility_unjoinable_never_absent() {
             StageVerdict::Clean
         );
 
-        // The dense lane judges under the projection connection, before the
-        // admission phase, so it alone keeps a ranking once the window opens.
+        // The lexical and dense lanes judge under the projection connection,
+        // before the admission phase, so they keep their rankings once the
+        // window opens there.
         let mut window = None;
         let run = drive(
             &fixture,
@@ -605,10 +606,7 @@ fn a_held_classification_window_makes_eligibility_unjoinable_never_absent() {
             *view.status(Lane::Exact),
             LaneStatus::Unavailable("snapshot_changed")
         );
-        assert_eq!(
-            *view.status(Lane::Lexical),
-            LaneStatus::Unavailable("snapshot_changed")
-        );
+        assert_eq!(*view.status(Lane::Lexical), LaneStatus::Complete);
         assert_eq!(*view.status(Lane::Dense), LaneStatus::Complete);
         let ExactAdmission::Moved(report) = &view.exact.admission else {
             panic!("{:?}", view.exact.admission);
@@ -626,7 +624,10 @@ fn a_held_classification_window_makes_eligibility_unjoinable_never_absent() {
             Some(Presence::Reached)
         );
         assert_eq!(run.ledger.presence(ChainStage::Eligibility, &rule), None);
-        assert_eq!(run.ledger.presence(ChainStage::Lexical, &rule), None);
+        assert_eq!(
+            run.ledger.presence(ChainStage::Lexical, &rule),
+            Some(Presence::Reached)
+        );
         assert_eq!(
             run.outcome.as_ref().err(),
             Some(&QueryFailure::Unavailable("snapshot_changed")),
@@ -638,6 +639,31 @@ fn a_held_classification_window_makes_eligibility_unjoinable_never_absent() {
             StageVerdict::Indeterminate,
             "a loss behind the unjoinable window is never placed at eligibility"
         );
+        // A window held only while the lexical lane judges moves that lane's own admission and no other lane's.
+        let mut window = None;
+        let lexical_window = drive(
+            &fixture,
+            &limits,
+            QUERY,
+            dense_ready(&query, &producer),
+            |phase| match phase {
+                Phase::Lexical => {
+                    window = Some(fixture.store.hold_classification_change_for_test());
+                }
+                Phase::Dense => window = None,
+                _ => {}
+            },
+        );
+        drop(window);
+        let moved = lexical_window
+            .view
+            .as_ref()
+            .expect("the lanes were admitted");
+        assert_eq!(
+            *moved.status(Lane::Lexical),
+            LaneStatus::Unavailable("snapshot_changed")
+        );
+        assert_eq!(*moved.status(Lane::Exact), LaneStatus::Complete);
         fixture.daemon.shutdown().await;
     });
 }

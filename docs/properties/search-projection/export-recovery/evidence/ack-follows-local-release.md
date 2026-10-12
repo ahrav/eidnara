@@ -23,8 +23,8 @@ ack-loss observations. Projection references the canonical definitions in
   starts a fenced write transaction for each acknowledgement.
 - `crates/kernel/src/outbox.rs:551-570` validates monotonic existing sequence,
   writes the checkpoint, completes barriers, and commits locally to kernel.
-- `crates/kernel/src/open.rs:410-418` uses blocking writer acquisition.
-  `crates/kernel/src/open.rs:421-427` has a separate bounded internal helper;
+- `crates/kernel/src/open.rs:459-467` uses blocking writer acquisition.
+  `crates/kernel/src/open.rs:472-477` has a separate bounded internal helper;
   ack does not call that helper.
 - `crates/kernel/src/retention.rs:203-211` explicitly commits and drops its
   writer before artifact GC acquires it again. This is a reuse precedent for

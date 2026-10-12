@@ -18,7 +18,7 @@ slice or shared LocalEmbeddings EvalBudget bridge exists at the pinned revision.
 - `memory_classifier_scheduler.rs:334-371` uses one review-user-memories task identity.
 - `crates/kernel/src/applicability/checkout.rs:146-203` defines cloneable
   EvalBudget, sticky cancellation, absolute deadline, and BudgetExhausted.
-- `crates/kernel/src/open.rs:1379-1387` installs SQLite progress privately;
+- `crates/kernel/src/open.rs:1413-1421` installs SQLite progress privately;
   retrieval cannot simply call that installer from another crate.
 - `crates/host-runtime/src/handler.rs:450-455` exposes request cancellation.
 - `crates/host-runtime/src/local_embeddings/mod.rs:669-722` retains a query permit and
@@ -86,7 +86,7 @@ instead of interpreting an arbitrary harness timeout as a successful join.
 ### Q: Does a query keep one budget and its ownership through native work?
 
 The fused route awaits the in-process embedding under its request budget and
-submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1711-1735`).
+submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1712-1736`).
 `LocalEmbeddingsComponent::embed_query` ends its wait at the request deadline and
 leaves the queue (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`); a
 started native call keeps its grant, admission permit, and input charge in the

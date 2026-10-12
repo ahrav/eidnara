@@ -258,7 +258,7 @@ async fn exact_lane_positions_and_bounds_count_only_eligible_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_projection_connection_is_free_while_the_lanes_are_admitted() {
+async fn the_projection_connection_is_free_while_the_exact_lane_is_admitted() {
     let fixture = Fixture::build().await;
     let (_token, budget) = request_budget(10_000);
     let mut probed = Vec::new();
@@ -550,7 +550,7 @@ fn production_limits_are_the_d23_set() {
             limits.lexical_qualifying_matches.get(),
             limits.lexical_rank_budget.get()
         ),
-        (20_000, 30_000)
+        (10_000, 15_000)
     );
     // `lexical_scan_p99_at_one_million_occurrences` in the retrieval crate measures these bounds.
     let lexical = limits.lexical_retrieval_bounds();
@@ -563,7 +563,7 @@ fn production_limits_are_the_d23_set() {
             lexical.qualifying_matches.get(),
             lexical.rank_budget.get(),
         ],
-        [16, 4096, 128, 128, 20_000, 30_000]
+        [16, 4096, 128, 128, 10_000, 15_000]
     );
     assert_eq!(limits.deadline_ceiling, Duration::from_secs(5));
     let dense = limits.dense.unwrap();

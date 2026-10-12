@@ -581,9 +581,12 @@ classifies to its stage.
 - `a_held_classification_window_makes_eligibility_unjoinable_never_absent`
   (`sls-eligibility-report-non-reusable-window-constructible`):
   `hold_classification_change_for_test` from the admission phase leaves the
-  exact and lexical lanes `snapshot_changed`, returns a non-reusable report as
-  `ExactAdmission::Moved`, folds eligibility as `Unjoinable` (`presence` is
-  `None`), and the verdict is `Indeterminate`;
+  exact lane `snapshot_changed` while the lexical and dense lanes, which judge
+  under the projection connection, keep their rankings; it returns a
+  non-reusable report as `ExactAdmission::Moved`, folds eligibility as
+  `Unjoinable` (`presence` is `None`), and the verdict is `Indeterminate`. The
+  same window held only while the lexical lane judges moves that lane alone:
+  lexical reports `snapshot_changed` and exact stays `Complete`;
   `a_window_opened_at_fusion_makes_revalidation_unjoinable_not_a_selection_loss`
   does the same from the fusion phase, so a moved revalidation is never a
   selection loss; `an_exact_lane_that_ends_after_reading_leaves_eligibility_unjoinable`

@@ -104,7 +104,7 @@ None.
 ### Q: What does `busy` mean once queries wait for the inference slot?
 
 The route awaits the embedding in place under the request budget and drops the
-wait on cancellation (`crates/daemon/src/query_route.rs:1711-1713`). The query
+wait on cancellation (`crates/daemon/src/query_route.rs:1712-1714`). The query
 waits asynchronously for the slot ahead of background texts; it is refused as
 `LaneBusy` when `max_waiting_queries` queries already wait, which maps to the
 dense lane's `busy` reason (`query_route.rs:638-647`). The component also ends a

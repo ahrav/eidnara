@@ -19,32 +19,32 @@ Production code:
   true when the atom list is empty; its doc comment on `:47` states the
   contract: a successful empty analysis compiles to no probe and the caller
   issues no MATCH for it.
-- `scan` (`crates/retrieval/src/lexical/retrieve.rs:349`) initializes the
-  result's completion on `:374` to `Completion::Empty` when `probes` is empty
+- `scan` (`crates/retrieval/src/lexical/retrieve.rs:391`) initializes the
+  result's completion on `:418` to `Completion::Empty` when `probes` is empty
   and `Completion::Complete` otherwise. The probe loop and the run loop that
   follow iterate zero times, so `count_probe`
-  (`crates/retrieval/src/lexical/retrieve.rs:566`) and the scan statements
+  (`crates/retrieval/src/lexical/retrieve.rs:618`) and the scan statements
   run for no probe. `Consumed` stays at its default of zero probes, zero
   counted rows, zero scanned rows.
-- `Completion::Empty` (`crates/retrieval/src/lexical/retrieve.rs:102`) is
+- `Completion::Empty` (`crates/retrieval/src/lexical/retrieve.rs:104`) is
   documented as "Zero probes: no MATCH ran and there is nothing to rank".
-  `incomplete` (`:538`) lets only `BudgetExhausted` replace it, so a
+  `incomplete` (`:591`) lets only `BudgetExhausted` replace it, so a
   zero-probe result reports `Empty` rather than a scan or rank reason.
-- `admit_inner` (`crates/retrieval/src/lexical/retrieve.rs:482`) judges the
+- `admit_inner` (`crates/retrieval/src/lexical/retrieve.rs:508`) judges the
   empty hit list in zero batches, so `batches` stays zero and `snapshot` and
   `incarnation` stay `None`.
 - The daemon ends the lane before `scan`: `lexical_read`
-  (`crates/daemon/src/query_route.rs:1075`) returns
-  `LaneRead::Ended(LaneStatus::Undeclared)` on `:1094` when the analysis is
+  (`crates/daemon/src/query_route.rs:1076`) returns
+  `LaneRead::Ended(LaneStatus::Undeclared)` on `:1095` when the analysis is
   empty, and `admit_lanes` (`crates/daemon/src/query_route.rs:1353`) refuses
   a request whose exact, lexical, and dense lanes are all undeclared with
-  `InvalidQuery("the query yields no probe")` on `:1420`.
+  `InvalidQuery("the query yields no probe")` on `:1419`.
 
 Tests cited by the record, read at the branch:
 
 - `zero_probes_run_no_match_while_a_control_probe_contributes`
-  (`crates/retrieval/tests/lexical_retrieval.rs:582`) runs `retrieve` over a
-  projection from `Fixture::all_admitted` (`:317`) with `probes("!!! ...")`,
+  (`crates/retrieval/tests/lexical_retrieval.rs:627`) runs `retrieve` over a
+  projection from `Fixture::all_admitted` (`:332`) with `probes("!!! ...")`,
   where `probes` (`:164`) runs `analyze` then `compile`. It asserts
   `completion == Completion::Empty`, no contributions, `consumed.probes == 0`,
   `consumed.scanned_rows == 0`, `consumed.batches == 0`, and `snapshot ==
@@ -97,15 +97,15 @@ statement is prepared, and the daemon's `is_empty` check runs before `scan`.
 
 ### Q: Can a zero-probe request reach `scan` through the daemon, and does `scan` still hold the guarantee if it does?
 
-- Sources examined: `crates/daemon/src/query_route.rs:1075` through `:1097`
-  and `:1412` through `:1423`; `crates/retrieval/src/lexical/retrieve.rs:349`
-  and `:374`; `crates/retrieval/tests/lexical_retrieval.rs:582`;
+- Sources examined: `crates/daemon/src/query_route.rs:1076` through `:1098`
+  and `:1494` through `:1505`; `crates/retrieval/src/lexical/retrieve.rs:391`
+  and `:378`; `crates/retrieval/tests/lexical_retrieval.rs:627`;
   `crates/daemon/tests/query_route.rs:499`.
 - Findings: the daemon returns `Undeclared` on an empty analysis before
   calling `scan`, so production zero-term requests never reach the retrieval
   function. `scan` itself guards the case independently: with an empty slice
   it sets `Completion::Empty` and its two loops iterate zero times, which the
-  `:582` test observes on the production `retrieve` function. The guarantee
+  `:627` test observes on the production `retrieve` function. The guarantee
   holds at both layers, each checked by its own test.
 - Missing evidence: a daemon test asserting the lexical lane's status is
   `Undeclared` for a prose-only request of punctuation while another lane is

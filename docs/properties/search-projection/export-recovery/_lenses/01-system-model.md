@@ -40,7 +40,7 @@ Lead: separate fixed-S input, retention ownership, and replacement state.
 ## Concurrency model
 
 Kernel connections have mutex guards; ordinary writer acquisition blocks
-(`crates/kernel/src/open.rs:410-418`). Acknowledgement takes that guard and a
+(`crates/kernel/src/open.rs:459-467`). Acknowledgement takes that guard and a
 fenced SQLite transaction (`crates/kernel/src/outbox.rs:540-570`). The plan
 requires local COMMIT and release before this acquisition. Existing staging
 maintenance explicitly drops its writer before artifact GC reacquires it
