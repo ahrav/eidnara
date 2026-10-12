@@ -6,7 +6,8 @@
 //! single tool-part representation.
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
@@ -38,16 +39,93 @@ pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessa
 /// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
 /// clone, so callers that already share values pay no deep copy. A message's
 /// ordinal is its window position, `index + 1` with saturating arithmetic. The last compaction part becomes the extracted boundary and is
-/// omitted from CK content. Unknown parts remain opaque.
+/// omitted from CK content. Unknown parts remain opaque. A creation time no `i64` holds is
+/// left unset.
 pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
+    let rows = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (window_position(index), message));
+    let Ok(decoded) = decode_rows(rows, |time| Ok::<_, Infallible>(time.as_i64()));
+    decoded
+}
+
+/// Derives the CK window the OpenCode plugin encodes from the native window `messages`.
+///
+/// A compaction summary row, one whose `info` holds `summary: true` and `finish: "stop"`,
+/// leaves the window, and every kept message keeps its unfiltered window position as its
+/// ordinal, so synthetic tool-call ids match the plugin's. A creation time the request decode
+/// would refuse is refused with the same error. The parity corpus proves it against the plugin
+/// encoder; the native-only transform window is its production caller.
+#[cfg(test)]
+pub(crate) fn derive_opencode_window(
+    messages: &[Arc<Value>],
+) -> Result<DecodedHarnessMessages, serde_json::Error> {
+    let rows = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| !is_compaction_summary(message))
+        .map(|(index, message)| (window_position(index), message));
+    decode_rows(rows, |time| {
+        <i64 as serde::Deserialize>::deserialize(time).map(Some)
+    })
+}
+
+fn window_position(index: usize) -> u64 {
+    (index as u64).saturating_add(1)
+}
+
+#[cfg(test)]
+fn is_compaction_summary(message: &Value) -> bool {
+    message
+        .get("info")
+        .and_then(Value::as_object)
+        .is_some_and(|info| {
+            info.get("summary") == Some(&Value::Bool(true))
+                && info.get("finish").and_then(Value::as_str) == Some("stop")
+        })
+}
+
+/// The envelope a message's fields are read from: its `info` object, else the message itself.
+fn message_info(message: &Value) -> &Value {
+    match message.get("info") {
+        Some(info @ (Value::Object(_) | Value::Array(_))) => info,
+        _ => message,
+    }
+}
+
+/// The first numeric creation time among `time.created`, `time_created`, and `timeCreated`.
+fn created_at<E>(
+    info: &Value,
+    read: impl FnOnce(&Value) -> Result<Option<i64>, E>,
+) -> Result<Option<i64>, E> {
+    let time = info
+        .get("time")
+        .filter(|time| time.is_object() || time.is_array());
+    let found = [
+        time.and_then(|time| time.get("created")),
+        info.get("time_created"),
+        info.get("timeCreated"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| value.is_number());
+    found.map_or(Ok(None), read)
+}
+
+fn decode_rows<'a, E>(
+    rows: impl Iterator<Item = (u64, &'a Arc<Value>)>,
+    mut read_time: impl FnMut(&Value) -> Result<Option<i64>, E>,
+) -> Result<DecodedHarnessMessages, E> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
 
-    let mut decoded = Vec::with_capacity(messages.len());
+    let mut decoded = Vec::with_capacity(rows.size_hint().0);
     let mut boundary = None;
+    // A call id the window already carries contributes only its result, as the plugin encodes it.
+    let mut emitted_calls = HashSet::new();
 
-    for (message_index, raw_message) in messages.iter().enumerate() {
-        let info = raw_message.get("info").unwrap_or(raw_message.as_ref());
-        let ordinal = (message_index as u64).saturating_add(1);
+    for (ordinal, raw_message) in rows {
+        let info = message_info(raw_message);
         let stable_key = string_field(info, "id")
             .or_else(|| string_field(raw_message, "id"))
             .unwrap_or_else(|| format!("opencode-hash-{}", stable_hash_prefix(raw_message, 24)));
@@ -58,6 +136,7 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
             .or_else(|| string_field(raw_message, "role"))
             .unwrap_or_else(|| "user".to_string());
         let origin = opencode_origin(info).or_else(|| opencode_origin(raw_message));
+        let created_at_ms = created_at(info, &mut read_time)?;
         let parts = raw_message
             .get("parts")
             .and_then(Value::as_array)
@@ -69,20 +148,11 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
 
         for (part_index, part) in parts.iter().enumerate() {
             let part_type = string_field(part, "type").unwrap_or_else(|| "unknown".to_string());
+            let ignored = part.get("ignored").and_then(Value::as_bool) == Some(true);
             match part_type.as_str() {
-                "text" => {
-                    if part
-                        .get("ignored")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
+                "text" if !ignored => {
                     let text = string_field(part, "text").unwrap_or_default();
-                    let block = block_with_metadata(
-                        BlockKind::Text { text },
-                        part.get("metadata").cloned(),
-                    );
+                    let block = block_with_extras(BlockKind::Text { text }, part);
                     push_block(
                         &mut content,
                         &mut block_metas,
@@ -92,27 +162,25 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
                         "text",
                     );
                 }
-                "reasoning" => {
+                "reasoning" | "thinking" => {
                     let text = string_field(part, "text")
                         .or_else(|| string_field(part, "thinking"))
                         .unwrap_or_default();
-                    let metadata = part.get("metadata").cloned();
-                    let kind = if text.is_empty() {
-                        if let Some(data) = redacted_reasoning_data(part) {
-                            BlockKind::RedactedReasoning { data }
-                        } else {
-                            BlockKind::Reasoning {
-                                text,
-                                signature: metadata.as_ref().and_then(find_signature),
-                            }
-                        }
-                    } else {
-                        BlockKind::Reasoning {
+                    let redacted = text
+                        .is_empty()
+                        .then(|| redacted_reasoning_data(part))
+                        .flatten();
+                    let kind = match redacted {
+                        Some(data) => BlockKind::RedactedReasoning { data },
+                        None => BlockKind::Reasoning {
                             text,
-                            signature: metadata.as_ref().and_then(find_signature),
-                        }
+                            signature: part
+                                .get("metadata")
+                                .and_then(find_signature)
+                                .or_else(|| string_field(part, "signature")),
+                        },
                     };
-                    let block = block_with_metadata(kind, metadata);
+                    let block = block_with_extras(kind, part);
                     push_block(
                         &mut content,
                         &mut block_metas,
@@ -122,8 +190,29 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
                         "reasoning",
                     );
                 }
+                "redacted_thinking" => {
+                    let data = string_field(part, "data")
+                        .or_else(|| string_field(part, "redacted"))
+                        .unwrap_or_default();
+                    let block = block_with_extras(BlockKind::RedactedReasoning { data }, part);
+                    push_block(
+                        &mut content,
+                        &mut block_metas,
+                        block,
+                        part_index,
+                        part,
+                        "redacted_reasoning",
+                    );
+                }
                 "tool" => {
-                    decode_tool_part(ordinal, part_index, part, &mut content, &mut block_metas);
+                    decode_tool_part(
+                        ordinal,
+                        part_index,
+                        part,
+                        &mut emitted_calls,
+                        &mut content,
+                        &mut block_metas,
+                    );
                 }
                 "file" | "image" => {
                     let media = media_from_part(part);
@@ -137,15 +226,15 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
                         "file",
                     );
                 }
-                "step-start" => {
-                    let block = opaque_block("step-start", part.clone(), None);
+                "step-start" | "step-finish" | "subtask" => {
+                    let block = opaque_block(&part_type, part.clone(), None);
                     push_block(
                         &mut content,
                         &mut block_metas,
                         block,
                         part_index,
                         part,
-                        "step-start",
+                        &part_type,
                     );
                 }
                 "compaction" => {
@@ -158,29 +247,8 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
                         raw: part.clone(),
                     });
                 }
-                "subtask" => {
-                    let block = opaque_block("subtask", part.clone(), None);
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        "subtask",
-                    );
-                }
-                "step-finish" => {
-                    let block = opaque_block("step-finish", part.clone(), None);
-                    push_block(
-                        &mut content,
-                        &mut block_metas,
-                        block,
-                        part_index,
-                        part,
-                        "step-finish",
-                    );
-                }
                 "snapshot" | "patch" | "agent" | "retry" => {}
+                // An ignored text part stays in the window as an opaque `text` block.
                 _ => {
                     let block = opaque_block(&part_type, part.clone(), opaque_arc(part));
                     push_block(
@@ -205,7 +273,10 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
                 harness_id: Some(mid.clone()),
                 ordinal: Some(ordinal),
                 synthetic,
-                ..Default::default()
+                summary: info.get("summary") == Some(&Value::Bool(true)),
+                errored: info.get("error").is_some_and(|error| !error.is_null()),
+                finish: string_field(info, "finish"),
+                created_at_ms,
             },
         );
         decoded.push(IngressMessage {
@@ -226,11 +297,11 @@ pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessM
         );
     }
 
-    DecodedHarnessMessages {
+    Ok(DecodedHarnessMessages {
         messages: decoded,
         boundary,
         sidecar,
-    }
+    })
 }
 
 /// Encodes CK messages and reuses retained native envelopes when available.
@@ -361,6 +432,7 @@ fn decode_tool_part(
     ordinal: u64,
     part_index: usize,
     part: &Value,
+    emitted_calls: &mut HashSet<String>,
     content: &mut Vec<WireBlock>,
     block_metas: &mut Vec<BlockMeta>,
 ) {
@@ -381,22 +453,24 @@ fn decode_tool_part(
         .and_then(|m| m.get("providerExecuted"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let call_block = WireBlock::bare(BlockKind::ToolCall {
-        id: id.clone(),
-        name: tool_name.clone(),
-        input,
-        provider_executed,
-    });
-    push_block(
-        content,
-        block_metas,
-        call_block,
-        part_index,
-        part,
-        "tool_call",
-    );
-    if let Some(last) = block_metas.last_mut() {
-        last.native_id = Some(id.clone());
+    if emitted_calls.insert(id.clone()) {
+        let call_block = WireBlock::bare(BlockKind::ToolCall {
+            id: id.clone(),
+            name: tool_name.clone(),
+            input,
+            provider_executed,
+        });
+        push_block(
+            content,
+            block_metas,
+            call_block,
+            part_index,
+            part,
+            "tool_call",
+        );
+        if let Some(last) = block_metas.last_mut() {
+            last.native_id = Some(id.clone());
+        }
     }
 
     let status = tool_status(part);
@@ -452,15 +526,19 @@ fn push_block(
     });
 }
 
-fn block_with_metadata(kind: BlockKind, metadata: Option<Value>) -> WireBlock {
-    if let Some(metadata) = metadata {
-        let mut extras = ProviderExtras::new();
-        let mut ns = BTreeMap::new();
-        ns.insert("metadata".to_string(), metadata);
-        extras.insert(HARNESS.to_string(), ns);
-        WireBlock::with_provider_extras(kind, extras)
-    } else {
+/// A block carrying the part's `metadata` and `cache_control` under the `opencode` namespace.
+fn block_with_extras(kind: BlockKind, part: &Value) -> WireBlock {
+    let namespace: BTreeMap<String, Value> = ["metadata", "cache_control"]
+        .into_iter()
+        .filter_map(|key| Some((key.to_string(), part.get(key)?.clone())))
+        .collect();
+    if namespace.is_empty() {
         WireBlock::bare(kind)
+    } else {
+        WireBlock::with_provider_extras(
+            kind,
+            ProviderExtras::from([(HARNESS.to_string(), namespace)]),
+        )
     }
 }
 
@@ -1153,9 +1231,128 @@ fn set_nested_value(value: &mut Value, object_key: &str, key: &str, next: Value)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE;
     use crate::wire::MediaKind;
+
+    pub(crate) const PARITY_FIXTURE: &str = include_str!(
+        "../../../../packages/opencode-plugin/src/hooks/context/__fixtures__/opencode-codec-parity.json"
+    );
+
+    pub(crate) fn native_window(case: &Value) -> Vec<Arc<Value>> {
+        case["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect()
+    }
+
+    /// The derived window as the OpenCode plugin sends it: the daemon's ordinals and block
+    /// identity stamps removed, and nothing else.
+    pub(crate) fn plugin_form(decoded: &DecodedHarnessMessages) -> Vec<IngressMessage> {
+        decoded
+            .messages
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message.ordinal = 0;
+                message.ck.meta.ordinal = None;
+                for block in message.ck.content_mut() {
+                    block.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
+                }
+                message
+            })
+            .collect()
+    }
+
+    /// The plugin encoder is the oracle: for every corpus window the daemon derives the CK the
+    /// plugin encodes, equal as typed values and as canonical bytes.
+    #[test]
+    fn the_daemon_derives_the_ck_the_opencode_plugin_encodes() {
+        let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let derived = plugin_form(&derive_opencode_window(&native_window(case)).unwrap());
+            let plugin: Vec<IngressMessage> =
+                serde_json::from_value(case["expected"].clone()).unwrap();
+            assert_eq!(derived, plugin, "{name}");
+            assert_eq!(
+                serde_json::to_string(&derived).unwrap(),
+                serde_json::to_string(&plugin).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Compaction summary rows leave the window, the last compaction part is the boundary, and
+    /// summary and finish rows that are not compaction summaries stay with their flags.
+    #[test]
+    fn the_compaction_pin_holds_for_one_and_several_compactions() {
+        let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let case = |name: &str| {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == name)
+                .unwrap();
+            derive_opencode_window(&native_window(case)).unwrap()
+        };
+        let mids = |decoded: &DecodedHarnessMessages| {
+            decoded
+                .messages
+                .iter()
+                .map(|message| (message.mid.clone(), message.ordinal))
+                .collect::<Vec<_>>()
+        };
+
+        let one = case("one_compaction");
+        assert_eq!(
+            mids(&one),
+            [("msg_k1", 1), ("msg_k2", 2), ("msg_k3", 3), ("msg_k5", 5)]
+                .map(|(mid, ordinal)| (mid.to_string(), ordinal))
+        );
+        let boundary = one.boundary.unwrap();
+        assert_eq!(
+            (boundary.message_id.as_str(), boundary.part_index),
+            ("msg_k3", Some(0))
+        );
+        assert!(one.messages[2].ck.content().is_empty());
+
+        let several = case("multiple_compactions");
+        assert_eq!(
+            mids(&several),
+            [("msg_m1", 1), ("msg_m3", 3), ("msg_m4", 4), ("msg_m6", 6)]
+                .map(|(mid, ordinal)| (mid.to_string(), ordinal))
+        );
+        let boundary = several.boundary.unwrap();
+        assert_eq!(
+            (boundary.message_id.as_str(), boundary.part_index),
+            ("msg_m4", Some(1))
+        );
+        assert_eq!(boundary.raw, json!({ "type": "compaction", "auto": false }));
+
+        let flagged = case("summary_finish_and_error");
+        let meta = |mid: &str| {
+            &flagged
+                .messages
+                .iter()
+                .find(|message| message.mid == mid)
+                .unwrap()
+                .ck
+                .meta
+        };
+        assert!(meta("msg_s3").summary);
+        assert_eq!(meta("msg_s3").finish.as_deref(), Some("length"));
+        assert!(meta("msg_s6").summary && meta("msg_s6").finish.is_none());
+        assert_eq!(meta("msg_s2").finish.as_deref(), Some("tool-calls"));
+        assert!(meta("msg_s4").errored && !meta("msg_s5").errored);
+    }
 
     fn fresh_tool_transform_fixture() -> Vec<WireMessage> {
         let paired_id = "folded-call";
@@ -1700,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_text_and_ignored_text_obey_wire_reachability() {
+    fn empty_text_stays_text_and_ignored_text_stays_opaque() {
         let raw = vec![json!({
             "info": { "id": "msg_1", "role": "user" },
             "parts": [
@@ -1709,10 +1906,13 @@ mod tests {
             ]
         })];
         let decoded = decode_opencode(&raw);
-        assert_eq!(decoded.messages[0].ck.content().len(), 1);
+        // The plugin encodes an ignored text part as an opaque `text` block, so the CK keeps it.
+        let content = decoded.messages[0].ck.content();
+        assert_eq!(content.len(), 2);
+        assert!(matches!(content[0].kind(), BlockKind::Text { text } if text.is_empty()));
         assert!(matches!(
-            decoded.messages[0].ck.content()[0].kind(),
-            BlockKind::Text { text } if text.is_empty()
+            content[1].kind(),
+            BlockKind::Opaque(opaque) if opaque.kind == "text" && opaque.raw == raw[0]["parts"][1]
         ));
         assert_eq!(
             encode_opencode(&[decoded.messages[0].ck.clone()], &decoded.sidecar, None),

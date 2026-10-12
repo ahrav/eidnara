@@ -1,0 +1,2664 @@
+{
+  "cases": [
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "why?",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1777654348000,
+              "errored": false,
+              "harness_id": "msg_t1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_t1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "signature": "sig-meta",
+                  "text": "step one",
+                  "type": "reasoning"
+                },
+                "provider_extras": {
+                  "opencode": {
+                    "metadata": {
+                      "anthropic": {
+                        "signature": "sig-meta"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "signature": "sig-top",
+                  "text": "step two",
+                  "type": "reasoning"
+                }
+              },
+              {
+                "kind": {
+                  "data": "opaque-meta",
+                  "type": "redacted_reasoning"
+                },
+                "provider_extras": {
+                  "opencode": {
+                    "metadata": {
+                      "redacted": "opaque-meta"
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "data": "opaque-data",
+                  "type": "redacted_reasoning"
+                }
+              },
+              {
+                "kind": {
+                  "data": "opaque-redacted",
+                  "type": "redacted_reasoning"
+                }
+              },
+              {
+                "kind": {
+                  "data": "opaque-alt",
+                  "type": "redacted_reasoning"
+                }
+              },
+              {
+                "kind": {
+                  "text": "",
+                  "type": "reasoning"
+                }
+              },
+              {
+                "kind": {
+                  "text": "because",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1777654349000,
+              "errored": false,
+              "harness_id": "msg_t2",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_t2"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_t1",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": 1777654348000
+            }
+          },
+          "parts": [
+            {
+              "text": "why?",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_t2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": 1777654349000
+            }
+          },
+          "parts": [
+            {
+              "metadata": {
+                "anthropic": {
+                  "signature": "sig-meta"
+                }
+              },
+              "text": "step one",
+              "type": "reasoning"
+            },
+            {
+              "signature": "sig-top",
+              "thinking": "step two",
+              "type": "thinking"
+            },
+            {
+              "metadata": {
+                "redacted": "opaque-meta"
+              },
+              "text": "",
+              "type": "reasoning"
+            },
+            {
+              "data": "opaque-data",
+              "text": "",
+              "type": "reasoning"
+            },
+            {
+              "data": "opaque-redacted",
+              "type": "redacted_thinking"
+            },
+            {
+              "redacted": "opaque-alt",
+              "type": "redacted_thinking"
+            },
+            {
+              "text": "",
+              "type": "reasoning"
+            },
+            {
+              "text": "because",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "thinking"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "cached",
+                  "type": "text"
+                },
+                "provider_extras": {
+                  "opencode": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "text": "tagged",
+                  "type": "text"
+                },
+                "provider_extras": {
+                  "opencode": {
+                    "cache_control": {
+                      "ttl": "1h",
+                      "type": "ephemeral"
+                    },
+                    "metadata": {
+                      "source": "ui"
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_c1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_c1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "r",
+                  "type": "reasoning"
+                },
+                "provider_extras": {
+                  "opencode": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    },
+                    "metadata": {
+                      "openai": {
+                        "itemId": "rs_1"
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_c2",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_c2"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_c1",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "cached",
+              "type": "text"
+            },
+            {
+              "cache_control": {
+                "ttl": "1h",
+                "type": "ephemeral"
+              },
+              "metadata": {
+                "source": "ui"
+              },
+              "text": "tagged",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_c2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "metadata": {
+                "openai": {
+                  "itemId": "rs_1"
+                }
+              },
+              "text": "r",
+              "type": "reasoning"
+            }
+          ]
+        }
+      ],
+      "name": "cache_control"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "go",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_s1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_s1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_s",
+                  "input": {
+                    "path": "a"
+                  },
+                  "name": "read",
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_s",
+                  "output": {
+                    "kind": {
+                      "text": "A",
+                      "type": "text"
+                    }
+                  },
+                  "tool_name": "read",
+                  "type": "tool_result"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "step-finish",
+                  "raw": {
+                    "reason": "tool-calls",
+                    "type": "step-finish"
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "finish": "tool-calls",
+              "harness_id": "msg_s2",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s2"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "partial summary",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "finish": "length",
+              "harness_id": "msg_s3",
+              "summary": true,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s3"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "failed",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": true,
+              "finish": "error",
+              "harness_id": "msg_s4",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s4"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "null error is no error",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_s5",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s5"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "summary without finish",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_s6",
+              "summary": true,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_s6"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_s1",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "go",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "tool-calls",
+            "id": "msg_s2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            },
+            {
+              "callID": "call_s",
+              "state": {
+                "input": {
+                  "path": "a"
+                },
+                "output": "A",
+                "status": "completed"
+              },
+              "tool": "read",
+              "type": "tool"
+            },
+            {
+              "reason": "tool-calls",
+              "type": "step-finish"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "length",
+            "id": "msg_s3",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "text": "partial summary",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "error": {
+              "data": {
+                "message": "overloaded"
+              },
+              "name": "APIError"
+            },
+            "finish": "error",
+            "id": "msg_s4",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "failed",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "error": null,
+            "id": "msg_s5",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "null error is no error",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_s6",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "text": "summary without finish",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "summary_finish_and_error"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "a",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1777654348688,
+              "errored": false,
+              "harness_id": "msg_ts1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "b",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1777654348689,
+              "errored": false,
+              "harness_id": "msg_ts2",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts2"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "c",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1777654348690,
+              "errored": false,
+              "harness_id": "msg_ts3",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts3"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "d",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 17,
+              "errored": false,
+              "harness_id": "msg_ts4",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts4"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "e",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1152921504606847000,
+              "errored": false,
+              "harness_id": "msg_ts5",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts5"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "f",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": -5,
+              "errored": false,
+              "harness_id": "msg_ts6",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts6"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "g",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_ts7",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_ts7"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_ts1",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": 1777654348688
+            }
+          },
+          "parts": [
+            {
+              "text": "a",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_ts2",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time_created": 1777654348689
+          },
+          "parts": [
+            {
+              "text": "b",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_ts3",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "timeCreated": 1777654348690
+          },
+          "parts": [
+            {
+              "text": "c",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_ts4",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": "soon"
+            },
+            "time_created": 17
+          },
+          "parts": [
+            {
+              "text": "d",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_ts5",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": 1152921504606847000
+            }
+          },
+          "parts": [
+            {
+              "text": "e",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_ts6",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": -5
+            }
+          },
+          "parts": [
+            {
+              "text": "f",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_ts7",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "completed": 3
+            }
+          },
+          "parts": [
+            {
+              "text": "g",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "timestamps"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "id": "call_r",
+                  "input": {
+                    "cmd": "ls"
+                  },
+                  "name": "bash",
+                  "type": "tool_call"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_r1",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_r1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "id": "call_r",
+                  "output": {
+                    "kind": {
+                      "text": "a b",
+                      "type": "text"
+                    }
+                  },
+                  "tool_name": "bash",
+                  "type": "tool_result"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_r",
+                  "output": {
+                    "kind": {
+                      "text": "again",
+                      "type": "error_text"
+                    }
+                  },
+                  "tool_name": "bash",
+                  "type": "tool_result"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_camel",
+                  "input": {
+                    "q": "x"
+                  },
+                  "name": "grep",
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_by_id",
+                  "input": {
+                    "p": "*"
+                  },
+                  "name": "glob",
+                  "provider_executed": true,
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_by_id",
+                  "output": {
+                    "kind": {
+                      "text": "",
+                      "type": "text"
+                    }
+                  },
+                  "provider_executed": true,
+                  "tool_name": "glob",
+                  "type": "tool_result"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_r2",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_r2"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_r1",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "callID": "call_r",
+              "state": {
+                "input": {
+                  "cmd": "ls"
+                },
+                "status": "running"
+              },
+              "tool": "bash",
+              "type": "tool"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_r2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "callID": "call_r",
+              "state": {
+                "input": {
+                  "cmd": "ls"
+                },
+                "output": "a b",
+                "status": "completed"
+              },
+              "tool": "bash",
+              "type": "tool"
+            },
+            {
+              "callID": "call_r",
+              "state": {
+                "error": "again",
+                "input": {
+                  "cmd": "ls"
+                },
+                "status": "error"
+              },
+              "tool": "bash",
+              "type": "tool"
+            },
+            {
+              "callId": "call_camel",
+              "input": {
+                "q": "x"
+              },
+              "status": "pending",
+              "toolName": "grep",
+              "type": "tool"
+            },
+            {
+              "args": {
+                "p": "*"
+              },
+              "id": "call_by_id",
+              "metadata": {
+                "providerExecuted": true
+              },
+              "name": "glob",
+              "state": {
+                "output": {
+                  "not": "a string"
+                },
+                "status": "completed"
+              },
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "name": "repeated_call_id"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "héllo 🌍   \"quoted\"",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "opencode-hash-fe3cd6a9460a94d9037fe9d1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "opencode-hash-fe3cd6a9460a94d9037fe9d1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "",
+                  "type": "text"
+                }
+              },
+              {
+                "kind": {
+                  "id": "synth-tool-2-1-calc-ab1e97fc4825",
+                  "input": {
+                    "a": 1.5,
+                    "b": 10000000000000000000,
+                    "c": -7,
+                    "d": 1e+21,
+                    "e": 0.1,
+                    "f": "ü"
+                  },
+                  "name": "calc",
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "synth-tool-2-1-calc-ab1e97fc4825",
+                  "output": {
+                    "kind": {
+                      "text": "ok",
+                      "type": "text"
+                    }
+                  },
+                  "tool_name": "calc",
+                  "type": "tool_result"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "opencode-hash-fa8d4c17b08b6528749a8515",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "assistant"
+          },
+          "mid": "opencode-hash-fa8d4c17b08b6528749a8515"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "id": "synth-tool-4-0-calc-79c33badcbfa",
+                  "input": [
+                    1,
+                    2.25,
+                    "三"
+                  ],
+                  "name": "calc",
+                  "type": "tool_call"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "opencode-hash-5819ea5304ff7a08bc65ab71",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "assistant"
+          },
+          "mid": "opencode-hash-5819ea5304ff7a08bc65ab71"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "héllo 🌍   \"quoted\"",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "parts": [
+            {
+              "text": 12345,
+              "type": "text"
+            },
+            {
+              "state": {
+                "input": {
+                  "a": 1.5,
+                  "b": 10000000000000000000,
+                  "c": -7,
+                  "d": 1e+21,
+                  "e": 0.1,
+                  "f": "ü"
+                },
+                "output": "ok",
+                "status": "completed"
+              },
+              "tool": "calc",
+              "type": "tool"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "text": "compaction summary without id",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "state": {
+                "input": [
+                  1,
+                  2.25,
+                  "三"
+                ],
+                "status": "pending"
+              },
+              "tool": "calc",
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "name": "id_less_unicode_and_numbers"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "filename": "a.png",
+                  "kind": "image",
+                  "media_type": "image/png",
+                  "source": {
+                    "data": "AAAA",
+                    "type": "data_base64"
+                  },
+                  "type": "media"
+                }
+              },
+              {
+                "kind": {
+                  "filename": "b.pdf",
+                  "kind": "document",
+                  "media_type": "application/pdf",
+                  "source": {
+                    "type": "url",
+                    "url": "https://example.com/b.pdf"
+                  },
+                  "type": "media"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "file",
+                  "media_type": "text/plain",
+                  "source": {
+                    "data": "aGk=",
+                    "type": "data_base64"
+                  },
+                  "type": "media"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "file",
+                  "media_type": "application/octet-stream",
+                  "source": {
+                    "raw": {
+                      "type": "file"
+                    },
+                    "type": "opaque"
+                  },
+                  "type": "media"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "text",
+                  "raw": {
+                    "ignored": true,
+                    "text": "hidden",
+                    "type": "text"
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "text": "shown",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_o1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_o1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "arc": {
+                    "id": "ap_1",
+                    "kind": "Approval",
+                    "role": "Request"
+                  },
+                  "kind": "tool-approval-request",
+                  "raw": {
+                    "approvalId": "ap_1",
+                    "detail": {
+                      "k": 1
+                    },
+                    "type": "tool-approval-request"
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "arc": {
+                    "id": "ap_1",
+                    "kind": "Approval",
+                    "role": "Response"
+                  },
+                  "kind": "tool-approval-response",
+                  "raw": {
+                    "approvalId": "ap_1",
+                    "approved": true,
+                    "type": "tool-approval-response"
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "subtask",
+                  "raw": {
+                    "agent": "a",
+                    "prompt": "p",
+                    "type": "subtask"
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "unknown",
+                  "raw": "loose string part",
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "unknown",
+                  "raw": null,
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "kind": "unknown",
+                  "raw": {
+                    "no_type": true
+                  },
+                  "source": {
+                    "harness": "opencode",
+                    "type": "harness"
+                  },
+                  "type": "opaque"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_att",
+                  "input": {},
+                  "name": "screenshot",
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_att",
+                  "output": {
+                    "kind": {
+                      "blocks": [
+                        {
+                          "kind": {
+                            "media": {
+                              "kind": "image",
+                              "media_type": "image/png",
+                              "source": {
+                                "data": "BBBB",
+                                "type": "data_base64"
+                              }
+                            },
+                            "type": "media"
+                          },
+                          "provider_extras": {
+                            "opencode": {
+                              "rawAttachment": {
+                                "mime": "image/png",
+                                "type": "file",
+                                "url": "data:image/png;base64,BBBB"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "kind": {
+                            "opaque": {
+                              "kind": "note",
+                              "raw": {
+                                "body": "x",
+                                "type": "note"
+                              },
+                              "source": {
+                                "harness": "opencode",
+                                "type": "harness"
+                              }
+                            },
+                            "type": "opaque"
+                          },
+                          "provider_extras": {
+                            "opencode": {
+                              "rawAttachment": {
+                                "body": "x",
+                                "type": "note"
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "type": "content"
+                    }
+                  },
+                  "tool_name": "screenshot",
+                  "type": "tool_result"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_att_err",
+                  "input": {},
+                  "name": "screenshot",
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "call_att_err",
+                  "output": {
+                    "kind": {
+                      "blocks": [
+                        {
+                          "kind": {
+                            "text": "denied",
+                            "type": "text"
+                          }
+                        },
+                        {
+                          "kind": {
+                            "media": {
+                              "kind": "file",
+                              "media_type": "text/plain",
+                              "source": {
+                                "data": "eA==",
+                                "type": "data_base64"
+                              }
+                            },
+                            "type": "media"
+                          },
+                          "provider_extras": {
+                            "opencode": {
+                              "rawAttachment": {
+                                "data": "eA==",
+                                "mime": "text/plain"
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "type": "error_content"
+                    }
+                  },
+                  "tool_name": "screenshot",
+                  "type": "tool_result"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_o2",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_o2"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_o1",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "filename": "a.png",
+              "mime": "image/png",
+              "type": "file",
+              "url": "data:image/png;base64,AAAA"
+            },
+            {
+              "mimeType": "application/pdf",
+              "name": "b.pdf",
+              "type": "image",
+              "url": "https://example.com/b.pdf"
+            },
+            {
+              "data": "aGk=",
+              "mime": "text/plain",
+              "type": "file"
+            },
+            {
+              "type": "file"
+            },
+            {
+              "ignored": true,
+              "text": "hidden",
+              "type": "text"
+            },
+            {
+              "ignored": false,
+              "text": "shown",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_o2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "approvalId": "ap_1",
+              "detail": {
+                "k": 1
+              },
+              "type": "tool-approval-request"
+            },
+            {
+              "approvalId": "ap_1",
+              "approved": true,
+              "type": "tool-approval-response"
+            },
+            {
+              "agent": "a",
+              "prompt": "p",
+              "type": "subtask"
+            },
+            {
+              "snapshot": "s",
+              "type": "snapshot"
+            },
+            {
+              "files": [],
+              "hash": "h",
+              "type": "patch"
+            },
+            {
+              "name": "build",
+              "type": "agent"
+            },
+            {
+              "attempt": 1,
+              "type": "retry"
+            },
+            "loose string part",
+            null,
+            {
+              "no_type": true
+            },
+            {
+              "callID": "call_att",
+              "state": {
+                "attachments": [
+                  {
+                    "mime": "image/png",
+                    "type": "file",
+                    "url": "data:image/png;base64,BBBB"
+                  },
+                  {
+                    "body": "x",
+                    "type": "note"
+                  },
+                  "skip",
+                  [
+                    1
+                  ]
+                ],
+                "input": {},
+                "output": "",
+                "status": "completed"
+              },
+              "tool": "screenshot",
+              "type": "tool"
+            },
+            {
+              "callID": "call_att_err",
+              "state": {
+                "attachments": [
+                  {
+                    "data": "eA==",
+                    "mime": "text/plain"
+                  }
+                ],
+                "error": "denied",
+                "input": {},
+                "status": "error"
+              },
+              "tool": "screenshot",
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "name": "opaque_media_and_excluded_parts"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "old",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_k1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_k1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "old answer",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_k2",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_k2"
+        },
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_k3",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_k3"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "new",
+                  "type": "text"
+                }
+              },
+              {
+                "kind": {
+                  "id": "synth-tool-5-1-read-22a71637c71a",
+                  "input": {
+                    "path": "z"
+                  },
+                  "name": "read",
+                  "type": "tool_call"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_k5",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_k5"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_k1",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "old",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_k2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "old answer",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_k3",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "auto": true,
+              "type": "compaction"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_k4",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "text": "the summary",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_k5",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "new",
+              "type": "text"
+            },
+            {
+              "state": {
+                "input": {
+                  "path": "z"
+                },
+                "status": "pending"
+              },
+              "tool": "read",
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "name": "one_compaction"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_m1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_m1"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "between",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_m3",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_m3"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "again",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_m4",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_m4"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "id": "synth-tool-6-0-read-64cebbf0eb6b",
+                  "input": {
+                    "path": "after"
+                  },
+                  "name": "read",
+                  "type": "tool_call"
+                }
+              },
+              {
+                "kind": {
+                  "id": "synth-tool-6-0-read-64cebbf0eb6b",
+                  "output": {
+                    "kind": {
+                      "text": "x",
+                      "type": "text"
+                    }
+                  },
+                  "tool_name": "read",
+                  "type": "tool_result"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_m6",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_m6"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_m1",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "auto": true,
+              "type": "compaction"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_m2",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "text": "first summary",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_m3",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "between",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_m4",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "again",
+              "type": "text"
+            },
+            {
+              "auto": false,
+              "type": "compaction"
+            }
+          ]
+        },
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_m5",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "text": "second summary",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_m6",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "state": {
+                "input": {
+                  "path": "after"
+                },
+                "output": "x",
+                "status": "completed"
+              },
+              "tool": "read",
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "name": "multiple_compactions"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "opencode-hash-73475cb40a568e8da8a045ce",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "opencode-hash-73475cb40a568e8da8a045ce"
+        },
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "opencode-hash-74234e98afe7498fb5daf1f3",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "opencode-hash-74234e98afe7498fb5daf1f3"
+        },
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "opencode-hash-99d1e8b5c7779447051bf472",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "opencode-hash-99d1e8b5c7779447051bf472"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "envelope id",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_e1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_e1"
+        },
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_e2",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_e2"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "no role",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_e3",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_e3"
+        },
+        {
+          "ck": {
+            "content": [],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_e4",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "p",
+              "model": "m",
+              "provider": "p"
+            },
+            "role": "user"
+          },
+          "mid": "msg_e4"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "all synthetic",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_e5",
+              "summary": false,
+              "synthetic": true
+            },
+            "role": "user"
+          },
+          "mid": "msg_e5"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "nested model",
+                  "type": "text"
+                }
+              },
+              {
+                "kind": {
+                  "text": "not synthetic",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_e6",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "openai",
+              "model": "gpt-5",
+              "provider": "openai"
+            },
+            "role": "user"
+          },
+          "mid": "msg_e6"
+        }
+      ],
+      "messages": [
+        42,
+        null,
+        [
+          "array",
+          "message"
+        ],
+        {
+          "id": "msg_e1",
+          "info": "not an object",
+          "parts": [
+            {
+              "text": "envelope id",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "info": {
+            "id": "msg_e2",
+            "role": 7
+          },
+          "parts": {
+            "text": "parts not an array",
+            "type": "text"
+          }
+        },
+        {
+          "info": {
+            "id": "msg_e3"
+          },
+          "parts": [
+            {
+              "text": "no role",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "id": "msg_e4",
+          "info": null,
+          "modelID": "m",
+          "parts": [],
+          "providerID": "p",
+          "role": "user"
+        },
+        {
+          "id": "msg_e5",
+          "info": {
+            "id": 12,
+            "role": "user"
+          },
+          "parts": [
+            {
+              "synthetic": true,
+              "text": "all synthetic",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_e6",
+            "model": {
+              "modelID": "gpt-5",
+              "providerID": "openai"
+            },
+            "role": "user"
+          },
+          "parts": [
+            {
+              "syntheticTodoMarker": true,
+              "text": "nested model",
+              "type": "text"
+            },
+            {
+              "text": "not synthetic",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "malformed_envelopes_take_defaults"
+    }
+  ],
+  "description": "OpenCode native windows and the CK the OpenCode plugin encodes from each (opencode-transform-adapter.ts encodeOpenCodeWindowToCk). The daemon's OpenCode codec derives the same CK from `messages` after removing only its ordinals and block identity stamps (crates/daemon/src/codec/opencode.rs). Each refusal records the code and text the daemon answers the window with on either path. Regenerate `expected` with EIDNARA_WRITE_OPENCODE_CODEC_PARITY=1 bun test.",
+  "refusals": [
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "x",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg#1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg#1"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg#1",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "reserved_hash_mid",
+      "refusal": {
+        "code": "transform_failed",
+        "message": "wire: message id contains reserved '#': msg#1"
+      }
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "x",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_d",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_d"
+        },
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "y",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_d",
+              "summary": false,
+              "synthetic": false
+            },
+            "origin": {
+              "api": "anthropic",
+              "model": "claude-sonnet-4-5",
+              "provider": "anthropic"
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_d"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_d",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_d",
+            "modelID": "claude-sonnet-4-5",
+            "providerID": "anthropic",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "y",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "duplicate_mid",
+      "refusal": {
+        "code": "invalid_params",
+        "message": "message id \"msg_d\" appears twice in the window"
+      }
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "x",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": ""
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "empty_mid",
+      "refusal": {
+        "code": "transform_failed",
+        "message": "wire: message id at ordinal 1 is empty"
+      }
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "x",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+            "role": "user",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "overlong_mid",
+      "refusal": {
+        "code": "invalid_params",
+        "message": "message id at index 0 is 129 bytes, over the 128-byte bound"
+      }
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "x",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 1777654348000.5,
+              "errored": false,
+              "harness_id": "msg_f",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_f"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_f",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": 1777654348000.5
+            }
+          },
+          "parts": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "non_integer_timestamp",
+      "refusal": {
+        "code": "bad_request",
+        "message": "invalid type: floating point `1777654348000.5`, expected i64"
+      }
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "text": "x",
+                  "type": "text"
+                }
+              }
+            ],
+            "meta": {
+              "created_at_ms": 10000000000000000000,
+              "errored": false,
+              "harness_id": "msg_b",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "user"
+          },
+          "mid": "msg_b"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "id": "msg_b",
+            "role": "user",
+            "sessionID": "ses_parity",
+            "time": {
+              "created": 10000000000000000000
+            }
+          },
+          "parts": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ]
+        }
+      ],
+      "name": "timestamp_beyond_i64",
+      "refusal": {
+        "code": "bad_request",
+        "message": "invalid value: integer `10000000000000000000`, expected i64"
+      }
+    }
+  ]
+}

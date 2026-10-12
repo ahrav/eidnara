@@ -25438,6 +25438,53 @@ mod tests {
         );
     }
 
+    /// Each malformed corpus window refuses with one code and text whether the daemon reads the
+    /// CK the OpenCode plugin encodes or derives the CK from the native window itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_malformed_opencode_window_refuses_alike_from_plugin_ck_and_derived_ck() {
+        use codec::opencode::tests::{PARITY_FIXTURE, native_window, plugin_form};
+        let mut fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let write = std::env::var_os("EIDNARA_WRITE_OPENCODE_CODEC_PARITY").is_some();
+        let refusals = fixture["refusals"].as_array_mut().unwrap();
+        assert!(refusals.len() >= 6);
+        for case in refusals {
+            let name = case["name"].as_str().unwrap();
+            let expected = (
+                case["refusal"]["code"].as_str().unwrap().to_string(),
+                case["refusal"]["message"].as_str().unwrap().to_string(),
+            );
+            let dispatch = |messages: Value| async move {
+                let (handler, _store, _dir, _project) =
+                    handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+                let mut body = request(Vec::new());
+                body["serializer_profile"] = json!("opencode-aisdk");
+                body["messages"] = messages;
+                error_frame(call_transform_outcome(&handler, body).await)
+            };
+            let from_plugin = dispatch(case["expected"].clone()).await;
+            let derived = match codec::opencode::derive_opencode_window(&native_window(case)) {
+                Ok(decoded) => dispatch(serde_json::to_value(plugin_form(&decoded)).unwrap()).await,
+                Err(error) => ("bad_request".to_string(), error.to_string()),
+            };
+            if write {
+                case["refusal"] = json!({ "code": from_plugin.0, "message": from_plugin.1 });
+                continue;
+            }
+            assert_eq!(from_plugin, expected, "{name}");
+            assert_eq!(derived, expected, "{name}");
+        }
+        if write {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../packages/opencode-plugin/src/hooks/context/__fixtures__/opencode-codec-parity.json"
+                ),
+                format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap()),
+            )
+            .unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn serve_native_rejects_unsupported_profiles() {
         let producer = Arc::new(ProducerState::default());
