@@ -22774,6 +22774,8 @@ mod tests {
                 ("project_root", json!(17)),
                 ("project_root", json!(".")),
                 ("unexpected", json!(true)),
+                // A field named `v` is an unknown field like any other on these strict bodies.
+                ("v", json!(2)),
             ] {
                 let mut request = json!({"method":method,"session_id":"ses"});
                 request[field] = value;

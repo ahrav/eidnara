@@ -301,7 +301,10 @@ async fn paged_boundary_is_a_final_page_scalar_checked_on_the_assembled_request(
     let (row_version, meta, _) = durable(&store);
     assert_eq!((row_version, meta), (before.0, before.1));
 
-    let PreparedOutcome::Response(bytes) = send_pages(&handler, window).await else {
+    // A field named `v` on the final page is a scalar the transform ignores.
+    let mut carried = window;
+    carried["v"] = json!(3);
+    let PreparedOutcome::Response(bytes) = send_pages(&handler, carried).await else {
         panic!("the assembled request is served");
     };
     let served: Value = serde_json::from_slice(&bytes).unwrap();

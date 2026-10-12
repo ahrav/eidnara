@@ -58,9 +58,8 @@ export interface ContractPeerFrameFields {
     epoch?: number;
     corr?: bigint;
     body?: Uint8Array;
-    /** `len` and `ver` override encoded values for malformed frames; otherwise they use the encoded values. */
+    /** `len` overrides the encoded value for malformed frames; otherwise it uses the encoded value. */
     len?: number;
-    ver?: number;
 }
 
 /* */

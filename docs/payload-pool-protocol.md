@@ -21,7 +21,7 @@ backend/ring.rs, lease.rs, descriptor.rs, profile.rs}`.
 | Identifier | Value | Where it is checked |
 | --- | --- | --- |
 | Hardware profile | `host-payload-pool` | `WireDescriptor.profile` on the setup socket; `RingClientEndpoint::attach_with_descriptors`; the native addon's `attach` and `begin_connect` |
-| Mapping magic | `0x4d43_5348_4d50_3034` | the lifecycle page of every mapping |
+| Mapping magic | `0x4d43_5348_4d50_4f4c` | the lifecycle page of every mapping |
 
 A mismatch in either identifier, in the grant's length or geometry, or in any
 lifecycle-page field retires the connection before application traffic.
@@ -117,7 +117,7 @@ control structure lies inside an atomic or an `UnsafeCell`, so a shared
 reference to a page tolerates concurrent peer stores. Plain lifecycle fields
 are read with volatile loads and never referenced.
 
-The lifecycle page carries magic `0x4d43_5348_4d50_3034`, the lane, incarnation, total bytes, both descriptor depths, and the seven class
+The lifecycle page carries magic `0x4d43_5348_4d50_4f4c`, the lane, incarnation, total bytes, both descriptor depths, and the seven class
 sizes and counts. Attachment compares every field with the grant.
 
 ## 5. Publication

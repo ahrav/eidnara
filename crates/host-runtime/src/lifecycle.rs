@@ -253,7 +253,7 @@ pub(crate) fn quarantined_record_present(
     let Ok(bytes) = read_all_fd(&fd, MAX_EVIDENCE_BYTES) else {
         return Ok(true);
     };
-    Ok(matches!(decode_record(&bytes), RecordDecode::UnknownSchema))
+    Ok(matches!(decode_record(&bytes), RecordDecode::UnknownShape))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,7 +319,7 @@ const RECORD_KEYS: [&str; 6] = [
 const HEX_LAUNCH_LEN: usize = 32;
 const HEX_DAEMON_LEN: usize = 32;
 
-/// A JSON object whose key set differs from `RECORD_KEYS` is `UnknownSchema`: it is classified
+/// A JSON object whose key set differs from `RECORD_KEYS` is `UnknownShape`: it is classified
 /// separately from corruption because it is quarantined rather than repaired.
 /// `Legacy` records have the record's shape and an empty `payload_manifest_digest`; all other validated fields are valid.
 /// `Legacy` records are not `Malformed` when only `payload_manifest_digest` is empty.
@@ -327,7 +327,7 @@ const HEX_DAEMON_LEN: usize = 32;
 enum RecordDecode {
     Valid(LifecycleRecord),
     Legacy(LifecycleRecord),
-    UnknownSchema,
+    UnknownShape,
     Malformed,
 }
 
@@ -340,7 +340,7 @@ fn decode_record(bytes: &[u8]) -> RecordDecode {
     };
     if object.len() != RECORD_KEYS.len() || !RECORD_KEYS.iter().all(|key| object.contains_key(*key))
     {
-        return RecordDecode::UnknownSchema;
+        return RecordDecode::UnknownShape;
     }
     let Ok(wire) = serde_json::from_value::<WireRecord>(value) else {
         return RecordDecode::Malformed;
@@ -946,7 +946,7 @@ fn classify(
     freshness: &ProbeFreshness,
 ) -> LifecycleProbe {
     let decoded = sample.record.bytes().map(decode_record);
-    let unknown_schema = matches!(decoded, Some(RecordDecode::UnknownSchema));
+    let unknown_shape = matches!(decoded, Some(RecordDecode::UnknownShape));
     let (record, legacy_record) = match decoded {
         Some(RecordDecode::Valid(record)) => (Some(record), None),
         Some(RecordDecode::Legacy(record)) => (None, Some(record)),
@@ -955,7 +955,7 @@ fn classify(
     let publication = sample.publication.bytes().and_then(publication_summary);
 
     if lock_free && lifetime_free {
-        let reason = if unknown_schema {
+        let reason = if unknown_shape {
             UNSUPPORTED_STATE_SCHEMA_REASON
         } else if sample.record != EvidenceFile::Absent
             || sample.publication != EvidenceFile::Absent
@@ -988,7 +988,7 @@ fn classify(
         return wedged("lifetime and runtime locks disagree", record);
     }
 
-    if unknown_schema {
+    if unknown_shape {
         return wedged(UNSUPPORTED_STATE_SCHEMA_REASON, record);
     }
     if sample.record == EvidenceFile::Insecure {
@@ -1237,6 +1237,35 @@ mod tests {
         }
     }
 
+    /// `RECORD_KEYS` and `WireRecord` name one shape; a field added to one alone would
+    /// quarantine every record this build writes.
+    #[test]
+    fn record_keys_are_the_serialized_record_fields() {
+        let record = WireRecord {
+            phase: "running".to_owned(),
+            launch_id: "ab".repeat(16),
+            daemon_id: "cd".repeat(16),
+            payload_manifest_digest: TEST_DIGEST.to_owned(),
+            pid: 1,
+            written_at_ms: 1,
+        };
+        let value = serde_json::to_value(&record).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = RECORD_KEYS;
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        assert!(matches!(
+            decode_record(&serde_json::to_vec(&value).unwrap()),
+            RecordDecode::Valid(_)
+        ));
+    }
+
     #[test]
     fn strict_decode_rejects_wrong_shapes() {
         let valid = serde_json::json!({
@@ -1259,14 +1288,14 @@ mod tests {
         };
         assert_eq!(
             mutate(&|v| v["schema"] = 1.into()),
-            RecordDecode::UnknownSchema,
+            RecordDecode::UnknownShape,
             "an added key leaves the record's shape"
         );
         assert_eq!(
             mutate(&|v| {
                 v.as_object_mut().expect("object").remove("pid");
             }),
-            RecordDecode::UnknownSchema,
+            RecordDecode::UnknownShape,
             "a missing key leaves the record's shape"
         );
         assert_eq!(

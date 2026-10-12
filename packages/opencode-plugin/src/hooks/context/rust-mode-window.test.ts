@@ -955,7 +955,21 @@ describe("boundary discovery", () => {
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
         const host = hostArray(sessionId, 3);
         const output = { messages: [...host] as unknown[] };
-        await transform.run(sessionId, output);
+        const warn = spyOn(logger.sessionLog, "warn");
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, output);
+            const lines = [...logsOf(warn, sessionId), ...logsOf(debug, sessionId)];
+            expect(lines).toContain("rust transform failed; serving the input unchanged:");
+            expect(
+                lines.some(
+                    (line) => line.includes("decision=error") && line.includes("served_from=raw"),
+                ),
+            ).toBe(true);
+        } finally {
+            warn.mockRestore();
+            debug.mockRestore();
+        }
         expect(output.messages).toEqual(host);
     });
 });

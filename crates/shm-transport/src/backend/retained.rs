@@ -29,7 +29,7 @@ use crate::pool::{
 use crate::profile::BackingAdmission;
 
 /// Magic at the start of the lifecycle page; distinguishes a pool mapping from any other memfd.
-pub(crate) const MAPPING_MAGIC: u64 = 0x4d43_5348_4d50_3034;
+pub(crate) const MAPPING_MAGIC: u64 = 0x4d43_5348_4d50_4f4c;
 
 /// Bytes of padding that keep a control page exactly one cacheline. Explicit padding lets
 /// `shared_page` hand out `&Page` over peer-writable memory: a shared reference permits

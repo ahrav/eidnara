@@ -352,7 +352,7 @@ impl InstanceGuard {
         let _ = unlinkat(&self.dir, socket.name.as_os_str(), AtFlags::empty());
     }
 
-    /// Atomically publishes the schema-1 connection file for this incarnation
+    /// Atomically publishes the connection file for this incarnation
     /// (protocol §4.1, §4.2). The owner-only `O_EXCL` temp file and the rename
     /// over the canonical name both stay relative to the pinned directory
     /// descriptor, so the swap cannot cross filesystems or follow links.

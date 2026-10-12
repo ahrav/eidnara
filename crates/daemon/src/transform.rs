@@ -12938,7 +12938,7 @@ pub(crate) mod tests {
     /// leaves `boundary` null: the window from the newest anchor present (the rendered boundary
     /// first), declared, and with a filler message at every ordinal the test skipped, so the
     /// daemon derives the ordinals the test wrote. A test that declares its own boundary, a
-    /// descent, or a request without increasing positive ordinals (a revision 3 body carries
+    /// descent, or a request without increasing positive ordinals (a transform body carries
     /// none) is sent as written.
     pub(crate) fn plugin_window(store: &MemoryStore, req: &TransformRequest) -> TransformRequest {
         let mut window = req.clone();

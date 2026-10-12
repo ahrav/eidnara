@@ -32,7 +32,7 @@ Situation markers that must fire independently of the safety check:
 
 - `gate.stale_artifact_present`
 
-Check semantics: `always` - the addon's `descriptorSchemaVersion()` and `qualifiedTestProfile()` equal the wrapper constants in every run.
+Check semantics: `always` - the addon's `qualifiedTestProfile()` equals the wrapper constant in every run.
 
 ## Investigation log
 

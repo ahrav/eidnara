@@ -458,12 +458,33 @@ async fn structural_corruption_is_rejected_before_dispatch() {
 
     let cases = vec![
         Case {
-            name: "unsupported version",
-            bytes: {
-                let mut header = raw_client::header(0, TY_GOODBYE, FLAGS_PURE_HEADER, 0, 0, 0);
-                header[4] = 3;
-                header
-            },
+            // The former 21-byte layout put a version byte at offset 4. Its routed Request
+            // declaring a one-byte body reads, in the 20-byte layout, as a consumer-originated
+            // StreamEnd, which the role gate refuses before dispatch.
+            name: "former 21-byte routed request",
+            bytes: vec![
+                1,
+                0,
+                0,
+                0,
+                4,
+                TY_REQUEST,
+                FLAGS_INTERACTIVE,
+                7,
+                0,
+                77,
+                0,
+                0,
+                0,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
         },
         Case {
             name: "unknown frame type",

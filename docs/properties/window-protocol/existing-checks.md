@@ -103,7 +103,7 @@ names no other tree was found again at `f0501b3d` and cites that tree.
 | `a_pending_reconcile_renders_the_newest_row_the_truncate_left` | `crates/daemon/src/window_coverage/tests.rs:254` | WP-P02, WP-E02 | #881 | unaudited |
 | `a_null_anchor_hit_above_the_rendered_row_is_not_cut_at` | `crates/daemon/src/window_coverage/tests.rs:580` | WP-P02 | #881 | unaudited |
 | `a_legacy_meta_row_with_the_retired_divergence_counter_loads` | `crates/memory-store/src/lib.rs:25989` | WP-P25 (decode compatibility only) | #881 | unaudited |
-| `revision_3_replays_the_revision_2_goldens` | `crates/daemon/src/transform/recorded_goldens.rs:428` (fixture `crates/daemon/tests/fixtures/transform-recorded-goldens.json`, 9 traces) | WP-P02, WP-P03, WP-P05 (acceptance differential; after a revert before the first anchor it compares against a fresh session's step instead of the revision 2 golden, and after a pass revision 2 refused as covered drift the golden has no output to compare until such a reset, `recorded_goldens.rs:421-426`; it is not strict equivalence with revision 2) | #881 | unaudited |
+| `transform_replays_the_recorded_goldens` | `crates/daemon/src/transform/recorded_goldens.rs:394` (fixture `crates/daemon/tests/fixtures/transform-recorded-goldens.json`, 9 traces) | WP-P02, WP-P03, WP-P05 (acceptance differential; after a revert before the first anchor it compares against a fresh session's step instead of the revision 2 golden, and after a pass revision 2 refused as covered drift the golden has no output to compare until such a reset, `recorded_goldens.rs:385-392`; it is not strict equivalence with the recording daemon) | #881 | unaudited |
 | `a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_first_pass` | `crates/daemon/src/transform/window_admission.rs:447` | WP-E03 (D10 reset contrast), WP-P03 | #833 | unaudited |
 | `a_cas_conflict_on_the_no_survivor_reset_resolves_again_and_resets_once` | `crates/daemon/src/transform/window_admission.rs:498` | WP-E03 | #833 | unaudited |
 | `a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window` | `crates/daemon/src/transform/window_admission.rs:567` | WP-P06 (revert prunes only at its HARD), WP-E02 | #833 | unaudited |
@@ -244,8 +244,8 @@ invalidated. At the #989 head, routed envelope, context, memory-capture,
 note-evaluation, discovery, and transform bodies carry no `v`; transform
 ignores a field named `v` and the former carriers, strict bodies refuse them
 as unknown fields, `transform_revision_unsupported` and
-`transform_tail_delta_retired` no longer exist, `transform/window_admission.rs` is
-`transform/window_admission.rs`, `transform/recorded_goldens.rs` is
-`transform/recorded_goldens.rs`, and the golden fixture is
+`transform_tail_delta_retired` no longer exist, `transform/revision_3.rs` is
+`transform/window_admission.rs`, `transform/revision_goldens.rs` is
+`transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
 `transform-recorded-goldens.json`; `serve_native` remains until #993. Line
 anchors into files #989 changed are as of their earlier recorded head.

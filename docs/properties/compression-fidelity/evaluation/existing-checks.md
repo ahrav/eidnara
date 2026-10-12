@@ -160,7 +160,7 @@ adequacy questions to the owners named in the catalog.
 Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
 unversioned contract, so every clause here that names a protocol version,
 numbered revision, version-skew refusal, or retired-field refusal is
-invalidated. At the #989 head, the connection file is exactly `setup_socket`,
+invalidated. At the #989 head, the host publishes the connection file as exactly `setup_socket`,
 `key`, `daemon_id`, `pid`, and `daemon_ver`; stale-process skew is detected by
 connection identity and proof failure. Line anchors into files #989 changed
 are as of their earlier recorded head.

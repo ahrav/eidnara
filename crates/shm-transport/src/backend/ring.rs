@@ -1922,7 +1922,9 @@ impl fmt::Debug for DuplexRing {
     }
 }
 
-/// Header with `body_len` in the first four bytes, zeros elsewhere.
+/// Header with `body_len` in the first four bytes, zeros elsewhere. The ring checks only the
+/// declared length, so this is a length-only header for ring-level callers; a host-level
+/// decoder reads its zero type byte as a `Request` on channel 0.
 pub fn body_header(body_len: usize) -> Result<[u8; WIRE_HEADER_BYTES], ProducerError> {
     let body_len = u32::try_from(body_len).map_err(|_| ProducerError::BoundExceedsClass)?;
     if body_len as usize > MAX_FRAME_BYTES {

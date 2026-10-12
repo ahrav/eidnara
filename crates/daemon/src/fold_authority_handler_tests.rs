@@ -35,6 +35,14 @@ async fn status_summary(handler: &Handler, channel: u16) -> String {
         json!({ "method": "session.status", "session_id": "ses" }),
     )
     .await;
+    // `session.status` ignores fields outside its shape: a body carrying `v` is answered too.
+    let carried = call_dispatch_request_on_channel(
+        handler,
+        channel,
+        json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+    )
+    .await;
+    assert!(carried["summary"].is_string(), "{carried}");
     status["summary"].as_str().unwrap().to_string()
 }
 

@@ -105,6 +105,15 @@ describe("direct-file snapshot", () => {
         expect(Object.isFrozen(snapshot)).toBe(true);
     });
 
+    test("ignores fields outside the shape so a stale daemon's file is refused by its proofs", async () => {
+        const filePath = freshPath("extra-fields.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson({ schema: 2, former_field: 4 })));
+        const snapshot = await readConnectionFile(filePath, options());
+        expect(snapshot.setupSocket).toBe("/tmp/eidnara-host.sock");
+        expect(Array.from(snapshot.key)).toEqual(KEY);
+        expect(snapshot.daemonVer).toBe("eidnara-host/0.1.0");
+    });
+
     test("accepts a whitespace-padded file of exactly 65,536 bytes and rejects 65,537 as oversize", async () => {
         const padded = freshPath("padded.json");
         const body = JSON.stringify(validJson()).padEnd(MAX_CONNECTION_FILE_LEN, " ");

@@ -232,10 +232,11 @@ describe("structural rejections before body handling", () => {
         expectDecodeError(bytes.subarray(0, HEADER_LEN - 1), "too_short_for_header");
     });
 
-    test("reads the former 21-byte layout as a structurally invalid header", () => {
+    test("reads the former control-request layout as a structurally invalid header", () => {
         // The former layout put a version byte at offset 4 and shifted every later field by one.
-        // Its Interactive channel-0 Request reads as routed channel 2 with epoch 0.
-        const legacy = hexToBytes("a7000000040002000000000000010000000000000000");
+        // Its Interactive channel-0 Request reads as routed channel 2 with epoch 0. Peers of the
+        // former layout never reach the ring: their proof domains fail authentication first.
+        const legacy = hexToBytes("a70000000400020000000000000100000000000000");
         expectDecodeError(legacy.subarray(0, HEADER_LEN), "zero_epoch_on_routed_channel");
     });
 

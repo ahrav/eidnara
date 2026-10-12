@@ -772,7 +772,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(task.await.expect("server task").is_err());
+        assert!(matches!(
+            task.await.expect("server task"),
+            Err(SetupError::InvalidMessage)
+        ));
     }
 
     /// Serde emits but does not check the struct-level `type` tag, so the client

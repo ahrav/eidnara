@@ -5,11 +5,9 @@
 > numbered revision, version-skew refusal, or retired-field refusal is
 > invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
 > `channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
-> validates the complete header before allocating or reading the body; a former
-> 21-byte header is refused by header validation; the grant is 124 bytes and
+> validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first; the grant is 124 bytes and
 > carries no layout version, the lifecycle page carries no layout version, and
-> the setup grant and activation carry no descriptor schema or wire version; the
-> connection file is exactly `setup_socket`, `key`, `daemon_id`, `pid`, and
+> the setup grant and activation carry no descriptor schema or wire version; the host publishes the connection file as exactly `setup_socket`, `key`, `daemon_id`, `pid`, and
 > `daemon_ver`; stale-process skew is detected by connection identity and proof
 > failure; the proof domains are `eidnara-server` and `eidnara-client`, the
 > credential claim domain is `eidnara-model-execution-credential` with
@@ -18,9 +16,9 @@
 > note-evaluation, discovery, and transform bodies carry no `v`; transform
 > ignores a field named `v` and the former carriers, strict bodies refuse them
 > as unknown fields, `transform_revision_unsupported` and
-> `transform_tail_delta_retired` no longer exist, `transform/window_admission.rs` is
-> `transform/window_admission.rs`, `transform/recorded_goldens.rs` is
-> `transform/recorded_goldens.rs`, and the golden fixture is
+> `transform_tail_delta_retired` no longer exist, `transform/revision_3.rs` is
+> `transform/window_admission.rs`, `transform/revision_goldens.rs` is
+> `transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
 > `transform-recorded-goldens.json`; `serve_native` remains until #993; the
 > `session.send` generation object carries `max_output_tokens` and an optional
 > `temperature` with no `revision`; absence of `temperature` selects the

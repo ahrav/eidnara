@@ -5,8 +5,7 @@
 > numbered revision, version-skew refusal, or retired-field refusal is
 > invalidated. At the #989 head, the frame header is `len`, `type`, `flags`,
 > `channel`, `epoch`, `corr` (20 bytes) with no version byte, and every reader
-> validates the complete header before allocating or reading the body; a former
-> 21-byte header is refused by header validation; the grant is 124 bytes and
+> validates the complete header before allocating or reading the body; a frame of the former 21-byte layout never reaches the ring, because the former proof domains fail authentication first; the grant is 124 bytes and
 > carries no layout version, the lifecycle page carries no layout version, and
 > the setup grant and activation carry no descriptor schema or wire version.
 > Line anchors into files #989 changed are as of their earlier recorded head.
@@ -749,7 +748,7 @@ Reachability: test-only
 Status: active
 Exercised: partial - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
 Guarantee: Acceptance runs load a wrapper and addon built from the tested source at the current layout.
-Check: `always` - the addon's `descriptorSchemaVersion()` and `qualifiedTestProfile()` equal the wrapper constants in every run.
+Check: `always` - the addon's `qualifiedTestProfile()` equals the wrapper constant in every run.
 Fault/timing angle: A stale prebuilt `shm_native.node`.
 Required faults and enabling state: A run against a stale artifact. Markers: marker:`gate.stale_artifact_present`.
 Confidence: medium - [evidence](evidence/acceptance-artifact-provenance.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/tests/mechanism.ts:50`; `.github/workflows/ci.yml:785`; `packages/shm-native/index.ts:38`.

@@ -1,4 +1,4 @@
-//! The per-session coverage authority of transform revision 3 (spec C5, D2, D7, D10, D11): what
+//! The per-session coverage authority of the transform window (spec C5, D2, D7, D10, D11): what
 //! a declared anchor means against one store snapshot, the ordinals the window's messages
 //! receive from the effective anchor, and the anchor pages `transform.boundary` answers.
 //! Nothing here writes; the transform commit persists what the pass does with a resolution.

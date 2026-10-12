@@ -628,8 +628,7 @@ unversioned contract, so every clause here that names a protocol version,
 numbered revision, version-skew refusal, or retired-field refusal is
 invalidated. At the #989 head, the grant is 124 bytes and carries no layout
 version, the lifecycle page carries no layout version, and the setup grant and
-activation carry no descriptor schema or wire version; the connection file is
-exactly `setup_socket`, `key`, `daemon_id`, `pid`, and `daemon_ver`;
+activation carry no descriptor schema or wire version; the host publishes the connection file as exactly `setup_socket`, `key`, `daemon_id`, `pid`, and `daemon_ver`;
 stale-process skew is detected by connection identity and proof failure; the
 proof domains are `eidnara-server` and `eidnara-client`, the credential claim
 domain is `eidnara-model-execution-credential` with canonicalization

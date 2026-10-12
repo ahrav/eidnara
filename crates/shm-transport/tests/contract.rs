@@ -402,5 +402,5 @@ fn payload_pool_protocol_document_agrees_with_the_implementation() {
             .total,
         95_825_920
     );
-    row("magic `0x4d43_5348_4d50_3034`");
+    row("magic `0x4d43_5348_4d50_4f4c`");
 }

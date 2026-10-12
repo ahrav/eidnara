@@ -341,6 +341,18 @@ mod tests {
         }
     }
 
+    /// A publication carrying fields outside the shape still decodes; a stale daemon's file is
+    /// then refused by its proofs, never by a field check.
+    #[test]
+    fn extra_publication_fields_are_ignored() {
+        let mut value = serde_json::to_value(info()).unwrap();
+        value["schema"] = 2.into();
+        value["former_field"] = 4.into();
+        let decoded: ConnectionInfo = serde_json::from_value(value).unwrap();
+        assert!(decoded == info());
+        assert!(decoded.validate().is_ok());
+    }
+
     #[test]
     fn daemon_version_must_carry_the_published_prefix() {
         assert!(info().validate().is_ok());

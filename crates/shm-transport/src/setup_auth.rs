@@ -238,17 +238,27 @@ mod tests {
             ok,
             "domain",
         );
-        // The former domains carried a numbered suffix; a proof under either never verifies.
-        for former in [SERVER_PROOF_DOMAIN, CLIENT_AUTH_DOMAIN].map(|domain| format!("{domain}-v3"))
-        {
+        // The former domains carried a numbered suffix. A proof a peer computes under a former
+        // domain never verifies under the current one.
+        for (domain, current) in [
+            (SERVER_PROOF_DOMAIN, &vectors::SERVER_PROOF),
+            (CLIENT_AUTH_DOMAIN, &vectors::CLIENT_AUTH),
+        ] {
+            let former = format!("{domain}-v3");
+            let former_proof =
+                compute_proof(&key, &former, &client_nonce, &server_nonce, ver, &daemon_id);
+            assert_ne!(
+                &former_proof, current,
+                "{former} must not reproduce {domain}"
+            );
             rejects(
                 &key,
-                &former,
+                domain,
                 &client_nonce,
                 &server_nonce,
                 ver,
                 &daemon_id,
-                ok,
+                &former_proof,
                 "domain literal",
             );
         }
