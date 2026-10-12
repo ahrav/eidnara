@@ -460,7 +460,7 @@ async fn structural_corruption_is_rejected_before_dispatch() {
         Case {
             // The former 21-byte layout put a version byte at offset 4. Its routed Request
             // declaring a one-byte body reads, in the 20-byte layout, as a consumer-originated
-            // StreamEnd, which the role gate refuses before dispatch.
+            // StreamEnd, and the host retires the generation before dispatch.
             name: "former 21-byte routed request",
             bytes: vec![
                 1,

@@ -4037,12 +4037,14 @@ async fn begin_refuses_layouts_and_digests_the_kernel_could_never_accept() {
         PreparedOutcome::Error { code, .. } if code == "invalid_params"
     ));
 
-    // `kernel.*` bodies are strict: a field named `v` is an unknown field like any other.
-    let mut carried_v = ingest_begin_request(&project, SESSION, "carried-v", b"", 1);
+    // `kernel.*` bodies are strict: a field named `v` is an unknown field like any other. The
+    // body is otherwise a layout the kernel accepts, so only `v` can refuse it.
+    let mut carried_v = ingest_begin_request(&project, SESSION, "carried-v", b"x", 1);
     carried_v["v"] = json!(1);
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, carried_v).await,
-        PreparedOutcome::Error { code, .. } if code == "invalid_params"
+        PreparedOutcome::Error { code, message }
+            if code == "invalid_params" && message.contains("unknown field `v`")
     ));
 
     let payload = vec![b'q'; 64];

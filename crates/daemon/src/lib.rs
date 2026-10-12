@@ -22799,6 +22799,12 @@ mod tests {
                     matches!(outcome, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
                     "{method}: {outcome:?}"
                 );
+                if field == "v" || field == "unexpected" {
+                    assert!(
+                        matches!(outcome, PreparedOutcome::Error { ref message, .. } if message.contains("unknown fields")),
+                        "{method} {field}: {outcome:?}"
+                    );
+                }
             }
         }
         assert_eq!(state.starts.load(Ordering::SeqCst), 0);

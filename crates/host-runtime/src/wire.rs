@@ -659,7 +659,10 @@ mod tests {
         // of the former layout never reach the ring: their proof domains fail authentication.
         #[rustfmt::skip]
         let legacy: [u8; 21] = [0, 0, 0, 0, 4, 0, 0b0000_0010, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-        assert!(decode_header(&legacy).is_err());
+        assert_eq!(
+            decode_header(&legacy),
+            Err(DecodeError::ZeroEpochOnRoutedChannel { channel: 2 })
+        );
         // A byte 4 above 11 is no frame type.
         let mut b = [0u8; HEADER_LEN];
         b[4] = 12;
