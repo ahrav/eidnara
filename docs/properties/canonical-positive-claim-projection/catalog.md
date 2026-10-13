@@ -598,7 +598,12 @@ every claim with `canonical.causality` `unknown`, records a
 `DirectObservation` for one decision, and shows that decision's entries report
 `direct_observation` while every fused position and score stays bit-equal; the
 OpenCode and Pi `eidnara_search` tools render the class as `provenance=` and
-keep the route's order (`route-search.test.ts`).
+keep the route's order (`route-search.test.ts`). Through real hosts,
+`packages/e2e-tests/tests/payload-fused-search.test.ts` writes a memory
+through each of the OpenCode and Pi plugins against a built payload and finds
+it ranked first by OpenCode's and Pi's `eidnara_search` tool output with
+`provenance=unknown`; a `DirectObservation` delivered through a real host is
+not exercised, because no production writer records one.
 Guarantee: The causal class of a claim never changes its candidate state, and
 no field of a candidate carries a score, boost, corroboration count, or
 suppression flag derived from it.
