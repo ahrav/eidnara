@@ -1282,7 +1282,8 @@ fn layerings_that_resolve_alike_compact_to_one_base_and_keep_equal_payloads_dist
             *vector = shared.clone();
         }
     }
-    let layerings: [(Vec<(&str, Vec<f32>)>, Vec<(&str, Vec<f32>)>); 2] = [
+    type Rows<'a> = Vec<(&'a str, Vec<f32>)>;
+    let layerings: [(Rows<'_>, Rows<'_>); 2] = [
         // The base holds `delta`'s final row and the delta updates `beta`.
         (
             resolved
