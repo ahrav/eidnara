@@ -7,11 +7,10 @@ mod support;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
-use daemon::vector_admission::{DISK_LIMIT, Ledger, ResourceClass};
+use daemon::vector_admission::{DISK_LIMIT, Ledger};
 use daemon::vector_composition::publish;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE, SIDECAR_FILE, Staging,
@@ -238,10 +237,6 @@ fn seed(fixture: &Fixture, workload: Workload) -> Option<u64> {
     Some(occupant_inode(&fixture.generation_dir(&digest)))
 }
 
-fn occupant_inode(dir: &Path) -> u64 {
-    fs::metadata(dir).unwrap().ino()
-}
-
 /// Stages `workload` into `staging`'s store under `observer` and returns the digest it stages to with the outcome.
 fn run(
     fixture: &Fixture,
@@ -417,15 +412,7 @@ fn assert_cut_recovers(
 
     // The complete control on the same store stages the same digest and selects it.
     let protected = BTreeSet::new();
-    let staging = Staging {
-        store: &store,
-        transaction: &tx,
-        gate: &fixture.gate,
-        admission: &fixture.admission,
-        identity: &fixture.identity,
-        ledger: &fixture.ledger,
-        protected: &protected,
-    };
+    let staging = fixture.staging_on(&store, &tx, &protected);
     let (_, outcome) = run(fixture, &staging, workload, &mut |_| Ok(()));
     assert_eq!(outcome, Outcome::Staged(digest.to_owned()), "{cut:?}");
     if workload != Workload::Nested {
@@ -638,7 +625,7 @@ fn published_at(workload: Workload, cut: &StageEvent) -> bool {
     }
 }
 
-/// Restages the layer a cut at `cut` published under `root` through the vector stager on a fresh handle, with the disk pool limited to exactly the store's bytes so a second copy could not be reserved. The stager confirms the generation in place: the trace is the generations-directory sync alone, the digest names the same directory, the store's bytes are unchanged, the ledger holds nothing, and the confirmed layer verifies and selects.
+/// Restages the layer a cut at `cut` published under `root` through the vector stager on a fresh handle, with the disk pool limited to exactly the store's bytes so a second copy could not be reserved. The stager confirms the generation in place: the trace is the generations-directory sync alone, the digest names the same directory, the store's bytes are unchanged, prune reclaims only abandoned temps, and the confirmed layer verifies and selects.
 fn assert_confirmed_in_place(fixture: &mut Fixture, root: &Path, cut: &StageEvent, digest: &str) {
     let store = GenerationStore::open(Some(root)).unwrap();
     let dir = store.root().join(GENERATIONS_DIR_NAME).join(digest);
@@ -647,15 +634,7 @@ fn assert_confirmed_in_place(fixture: &mut Fixture, root: &Path, cut: &StageEven
     fixture.set_limit(DISK_LIMIT, bytes);
     let tx = LifecycleTransactionLock::acquire_exclusive(Some(root)).unwrap();
     let protected = BTreeSet::new();
-    let staging = Staging {
-        store: &store,
-        transaction: &tx,
-        gate: &fixture.gate,
-        admission: &fixture.admission,
-        identity: &fixture.identity,
-        ledger: &fixture.ledger,
-        protected: &protected,
-    };
+    let staging = fixture.staging_on(&store, &tx, &protected);
     for attempt in 0..2 {
         let mut trace = Vec::new();
         let staged = stage_observed(&vector_build(fixture), &staging, &mut |event| {
@@ -673,10 +652,24 @@ fn assert_confirmed_in_place(fixture: &mut Fixture, root: &Path, cut: &StageEven
         );
         assert_eq!(occupant_inode(&dir), inode, "{cut:?}: one publication");
         assert_eq!(Ledger::store_bytes(&store).unwrap(), bytes, "{cut:?}");
-        let census = fixture.ledger.census();
-        assert_eq!(census.disk, 0, "{cut:?}: the confirmation charges nothing");
-        assert_eq!(census.held.get(&ResourceClass::Staging), None, "{cut:?}");
     }
+    // A crash after the exchange abandons the temp holding the displaced occupant; prune reclaims it and keeps the confirmed generation.
+    let temps = reopen(root, digest)
+        .entries
+        .iter()
+        .filter(|name| is_temp(name))
+        .count();
+    let report = store.prune(&BTreeSet::from([digest.to_owned()])).unwrap();
+    assert_eq!(
+        (report.removed_temps, report.removed_generations),
+        (temps, 0),
+        "{cut:?}"
+    );
+    assert_eq!(
+        reopen(root, digest).entries,
+        BTreeSet::from([digest.to_owned()]),
+        "{cut:?}"
+    );
     assert!(verify(&store, digest, &fixture.expected(), u64::MAX).is_ok());
     store.select_search(digest, &tx, &mut |_| Ok(())).unwrap();
     assert_eq!(

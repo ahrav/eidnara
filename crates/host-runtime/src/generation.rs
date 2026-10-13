@@ -1142,11 +1142,7 @@ impl GenerationStore {
         protected: &BTreeSet<String>,
         observer: &mut StageObserver<'_>,
     ) -> Result<String, GenerationError> {
-        // A quarantined profile blocks mutation because its references are uncertain.
-        if self.read_current()? == CurrentProfile::Quarantined {
-            return Err(GenerationError::UnsupportedStateSchema);
-        }
-        self.verify_named_identity()?;
+        self.ensure_mutable()?;
         // The preflight records each source's absolute path and inode snapshot; the copy reopens by that path and rejects a changed snapshot, so only one descriptor is open at a time.
         // One working directory is captured for the whole batch so a concurrent `chdir` cannot
         // resolve two relative sources against different directories.
@@ -1187,34 +1183,57 @@ impl GenerationStore {
         Ok(digest)
     }
 
-    /// The caller uses `confirm_staged` to confirm `digest` after a staging attempt with an uncertain outcome, such as a failure after the rename or a crash, and must hold `transaction.lock`. For a valid generation, `confirm_staged` syncs the generations directory, reports [`StageEvent::BeforeGenerationsSync`] and [`StageEvent::AfterGenerationsSync`] to `observer` around the sync, and returns `true`. Repeated confirmations validate and sync the existing generation. A missing generation or a validation failure returns `false`, except that `UnsupportedStateSchema` propagates as an error.
+    /// The caller uses `confirm_staged` to confirm `digest` after a staging attempt with an uncertain outcome, such as a failure after the rename or a crash, under its exclusive `transaction`. For a valid generation, `confirm_staged` syncs the generations directory, reports [`StageEvent::BeforeGenerationsSync`] and [`StageEvent::AfterGenerationsSync`] to `observer` around the sync, and returns `true`. Repeated confirmations validate and sync the existing generation. A missing generation or a validation failure returns `false` with no event, except that `UnsupportedStateSchema` propagates as an error.
     ///
-    /// The `fsync` confirms the directory entry within the process-crash envelope. After an earlier failed `fsync`, device durability remains uncertain.
+    /// The `fsync` makes the directory entry durable against an operating-system crash. After an earlier failed `fsync` on this store's descriptor, device durability remains uncertain.
     ///
     /// # Errors
     ///
-    /// `UnsupportedStateSchema` for a quarantined deployment profile or an occupant of an unknown manifest schema, a replaced store, or the generations-directory sync failure.
+    /// A shared `transaction`; `UnsupportedStateSchema` for a quarantined deployment profile or an occupant of an unknown manifest schema; a replaced store; or the generations-directory sync failure.
     pub fn confirm_staged(
         &self,
         digest: &str,
+        transaction: &LifecycleTransactionLock,
         observer: &mut StageObserver<'_>,
     ) -> Result<bool, GenerationError> {
+        if !transaction.is_exclusive() {
+            return Err(invalid(
+                "staging confirmation requires the exclusive lifecycle transaction",
+            ));
+        }
+        self.ensure_mutable()?;
+        if !self.holds_valid(digest)? {
+            return Ok(false);
+        }
+        self.sync_generations(observer)?;
+        self.verify_named_identity()?;
+        Ok(true)
+    }
+
+    /// A quarantined profile blocks mutation because its references are uncertain, and a replaced store holds only detached writes.
+    fn ensure_mutable(&self) -> Result<(), GenerationError> {
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
-        self.verify_named_identity()?;
+        self.verify_named_identity()
+    }
+
+    /// Whether the store names a generation `digest` that validates. An occupant of an unknown manifest schema is an error, because only its quarantine preserves it.
+    fn holds_valid(&self, digest: &str) -> Result<bool, GenerationError> {
         match self.validate(digest) {
-            Ok(_) => {}
+            Ok(_) => Ok(true),
             Err(GenerationError::UnsupportedStateSchema) => {
-                return Err(GenerationError::UnsupportedStateSchema);
+                Err(GenerationError::UnsupportedStateSchema)
             }
-            Err(_) => return Ok(false),
+            Err(_) => Ok(false),
         }
+    }
+
+    /// Syncs the generations directory, reporting [`StageEvent::BeforeGenerationsSync`] and [`StageEvent::AfterGenerationsSync`] around it.
+    fn sync_generations(&self, observer: &mut StageObserver<'_>) -> Result<(), GenerationError> {
         observe(observer, StageEvent::BeforeGenerationsSync)?;
         fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
-        observe(observer, StageEvent::AfterGenerationsSync)?;
-        self.verify_named_identity()?;
-        Ok(true)
+        observe(observer, StageEvent::AfterGenerationsSync)
     }
 
     /// The named `lifecycle` and `generations` directories must still resolve to the retained
@@ -1337,35 +1356,24 @@ impl GenerationStore {
         protected: &BTreeSet<String>,
         observer: &mut StageObserver<'_>,
     ) -> Result<(), GenerationError> {
-        let sync_generations = |observer: &mut StageObserver<'_>| {
-            observe(observer, StageEvent::BeforeGenerationsSync)?;
-            fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
-            observe(observer, StageEvent::AfterGenerationsSync)
-        };
         observe(observer, StageEvent::BeforeRename)?;
         let result = rename_no_replace(&self.generations_fd, temp_name, digest)
             .map_err(|e| classify_errno(e, "generation rename failed"))?;
         if result {
             observe(observer, StageEvent::AfterRename)?;
-            sync_generations(observer)?;
+            self.sync_generations(observer)?;
             // A same-UID writer can alter a staged file between its copy and this rename.
             self.validate(digest)?;
             return Ok(());
         }
-        match self.validate(digest) {
-            // A valid target occupant wins; cleanup attempts to remove the temp. A prior run may
-            // have crashed between its rename and fsync, so the occupant's dirent is made durable
-            // before the profile names it.
-            Ok(_) => {
-                let _ = remove_tree(&self.generations_fd, temp_name);
-                sync_generations(observer)?;
-                return Ok(());
-            }
-            // An unsupported manifest schema is quarantined because exchange would delete bytes that `prune` preserves.
-            Err(GenerationError::UnsupportedStateSchema) => {
-                return Err(GenerationError::UnsupportedStateSchema);
-            }
-            Err(_) => {}
+        // A valid target occupant wins; cleanup attempts to remove the temp. A prior run may
+        // have crashed between its rename and fsync, so the occupant's dirent is made durable
+        // before the profile names it. An unsupported manifest schema is quarantined because
+        // exchange would delete bytes that `prune` preserves.
+        if self.holds_valid(digest)? {
+            let _ = remove_tree(&self.generations_fd, temp_name);
+            self.sync_generations(observer)?;
+            return Ok(());
         }
         if protected.contains(digest) {
             return Err(invalid("corrupt digest target is protected"));
@@ -1393,7 +1401,7 @@ impl GenerationStore {
         observe(observer, StageEvent::BeforeExchange)?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
         observe(observer, StageEvent::AfterExchange)?;
-        sync_generations(observer)?;
+        self.sync_generations(observer)?;
         self.validate(digest)?;
         let _ = remove_tree(&self.generations_fd, temp_name);
         Ok(())
@@ -3691,6 +3699,88 @@ mod tests {
                 "{label}: quarantined bytes must be preserved exactly"
             );
         }
+    }
+
+    #[test]
+    fn confirm_staged_confirms_only_a_valid_occupant_under_the_exclusive_transaction() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let confirm = |transaction: &LifecycleTransactionLock, digest: &str| {
+            let mut events = Vec::new();
+            let result = store.confirm_staged(digest, transaction, &mut |event| {
+                events.push(event);
+                Ok(())
+            });
+            (result, events)
+        };
+        // The exclusive acquisition creates the coordination root the shared probe needs.
+        drop(LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap());
+        let shared = LifecycleTransactionLock::acquire_shared(Some(root.path()))
+            .expect("probe")
+            .expect("shared lock");
+        let (result, events) = confirm(&shared, &digest);
+        assert!(
+            matches!(result, Err(GenerationError::NativePayloadInvalid { .. })),
+            "{result:?}"
+        );
+        assert!(events.is_empty(), "a shared transaction confirms nothing");
+        drop(shared);
+        let exclusive = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+
+        let (result, events) = confirm(&exclusive, &digest);
+        assert!(matches!(result, Ok(true)), "{result:?}");
+        assert_eq!(
+            events,
+            [
+                StageEvent::BeforeGenerationsSync,
+                StageEvent::AfterGenerationsSync
+            ]
+        );
+
+        let missing = "0".repeat(64);
+        let (result, events) = confirm(&exclusive, &missing);
+        assert!(matches!(result, Ok(false)), "{result:?}");
+        assert!(events.is_empty(), "a missing generation is not synced");
+
+        let gen_dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let bin = gen_dir.join("bin/eidnara-host");
+        let mut bytes = std::fs::read(&bin).expect("read");
+        bytes[0] ^= 1;
+        std::fs::write(&bin, &bytes).expect("corrupt");
+        let (result, events) = confirm(&exclusive, &digest);
+        assert!(matches!(result, Ok(false)), "{result:?}");
+        assert!(events.is_empty(), "a corrupt occupant is left to repair");
+
+        let manifest = gen_dir.join(GENERATION_MANIFEST_NAME);
+        let occupant = br#"{"schema":2,"unknown_future_field":true}"#.to_vec();
+        std::fs::write(&manifest, &occupant).expect("quarantine the occupant");
+        let (result, events) = confirm(&exclusive, &digest);
+        assert!(
+            matches!(result, Err(GenerationError::UnsupportedStateSchema)),
+            "{result:?}"
+        );
+        assert!(events.is_empty());
+        assert_eq!(std::fs::read(&manifest).expect("occupant"), occupant);
+
+        let other = tempfile::tempdir().expect("other root");
+        let other_src = tempfile::tempdir().expect("other src");
+        let other_store = store_at(other.path());
+        let valid = stage_default(&other_store, other_src.path());
+        let profile = other_store.root().join(CURRENT_PROFILE_NAME);
+        std::fs::write(&profile, br#"{"schema":9,"future":"state"}"#).expect("profile");
+        let other_tx = LifecycleTransactionLock::acquire_exclusive(Some(other.path())).unwrap();
+        let mut events = Vec::new();
+        let result = other_store.confirm_staged(&valid, &other_tx, &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        assert!(
+            matches!(result, Err(GenerationError::UnsupportedStateSchema)),
+            "a quarantined profile blocks confirmation: {result:?}"
+        );
+        assert!(events.is_empty());
     }
 
     fn age_past_stale_threshold(path: &Path) {

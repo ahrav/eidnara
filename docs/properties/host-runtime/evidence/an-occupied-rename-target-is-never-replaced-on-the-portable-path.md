@@ -42,7 +42,7 @@ match renameat(dir, from, dir, to) {
 }
 ```
 
-The function returns the raw errno; the caller in `generation.rs:1351-1352` maps it
+The function returns the raw errno; the caller in `generation.rs:1320-1321` maps it
 through `classify_errno`. The flagged path returns on `Ok`, `EXIST`, `NOTEMPTY`,
 and every errno other than `INVAL`, `NOSYS`, and `OPNOTSUPP`, so on a current
 Linux kernel with ext4, tmpfs, or overlayfs it never falls through. The
@@ -50,7 +50,7 @@ Linux kernel with ext4, tmpfs, or overlayfs it never falls through. The
 so there the portable path is the only path.
 
 **The two paths differ on empty directories, and the caller says which behaviour is
-required.** `promote_temp`'s doc comment, `generation.rs:1334`:
+required.** `promote_temp`'s doc comment, `generation.rs:1352`:
 
 > `renameat` can replace an empty target directory, bypassing the protected-target
 > check.
@@ -94,12 +94,12 @@ directory, for example by a partial removal after a crash. A restage of that dig
 runs on macOS. `rename_no_replace` calls `statat`, which is the moment the target
 must be observed as occupied. If the target is observed as occupied, the function
 returns `Ok(false)` and `promote_temp` proceeds to its validate-and-protect logic at
-`generation.rs:1360-1397`, which refuses the mutation. Correct.
+`generation.rs:1329-1366`, which refuses the mutation. Correct.
 
 If the directory is created in the window between `store_fs.rs:69` and `:74`,
 `statat` returns `NOENT`, the plain `renameat` at `:74` replaces the now-empty
 directory, and the function returns `Ok(true)`. `promote_temp` then takes the early
-return at `generation.rs:1353-1359`, fsyncs, validates the digest, and reports
+return at `generation.rs:1322-1328`, fsyncs, validates the digest, and reports
 success. The protection check at `:1344-1346` never runs, which is precisely the
 sequencing the comment at `:1303` says must not happen: "bypassing the
 protected-target check".
@@ -134,11 +134,11 @@ The occupancy assertion, which passes today and should exist anyway:
 1. Plant an **empty** directory at the digest name, call `promote_temp` through
    `stage_and_promote`, and assert the mutation is refused when the digest is
    protected. This distinguishes the two paths' behaviour on the exact case
-   `generation.rs:1334` names. `an_empty_protected_digest_target_is_never_replaced`
-   (`generation.rs:3535-3557`) is this assertion, on the Linux flagged path only.
+   `generation.rs:1352` names. `an_empty_protected_digest_target_is_never_replaced`
+   (`generation.rs:3542-3564`) is this assertion, on the Linux flagged path only.
 2. Repeat with a **nonempty** corrupt directory. The existing
    `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-   (`generation.rs:2986`) covers the nonempty case indirectly; the empty case has no
+   (`generation.rs:2993`) covers the nonempty case indirectly; the empty case has no
    coverage on the portable path.
 
 Reaching the portable path deterministically needs one of:

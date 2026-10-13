@@ -684,8 +684,11 @@ impl Staging<'_> {
             )
             .map_err(VectorRefusal::Admission)?;
         let digest = manifest.digest();
-        // The store confirms an existing valid generation in place, so a retry after an uncertain outcome reuses the same publication.
-        if self.store.confirm_staged(&digest, observer)? {
+        // The store confirms an existing valid generation in place, so a retry after an uncertain outcome reuses the same publication. Confirmation adds no bytes, so the disk pool is consulted only for a copy.
+        if self
+            .store
+            .confirm_staged(&digest, self.transaction, observer)?
+        {
             return Ok(digest);
         }
         // The store's walk counts `manifest.json`, so the reservation covers it or an exact-bound staging would leave the store over the limit.
@@ -707,7 +710,7 @@ impl Staging<'_> {
             .stage_observed(&sources, meta, self.protected, observer)?;
         // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
         debug_assert_eq!(staged, digest);
-        Ok(digest)
+        Ok(staged)
     }
 }
 

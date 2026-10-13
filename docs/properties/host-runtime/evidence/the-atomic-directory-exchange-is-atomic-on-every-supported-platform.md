@@ -28,7 +28,7 @@ pub(crate) fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> rustix::io::R
 }
 ```
 
-Both arms return the raw errno. The caller in `generation.rs:1928-1931` maps it
+Both arms return the raw errno. The caller in `generation.rs:1935-1938` maps it
 through `classify_errno` (`:111-116`): `ENOSPC` and `EDQUOT` become
 `InsufficientStorage`, every other errno becomes
 `invalid("atomic digest-target exchange failed")`, so the stub's `EOPNOTSUPP`
@@ -41,7 +41,7 @@ error sets, and filesystem support, reached through one line of Rust and covered
 one cfg predicate.
 
 **The call site is a repair, followed immediately by a deletion.**
-`generation.rs:1350-1404`, inside `promote_temp`:
+`generation.rs:1362-1411`, inside `promote_temp`:
 
 - `:1319-1328` try the no-replace rename; on success, fsync, validate, and return.
 - `:1329-1343` the target is occupied: a valid occupant wins and the temp is
@@ -103,7 +103,7 @@ the protection check passes, and `exchange_dirs` runs.
 On macOS, if `renameatx_np(RENAME_SWAP)` behaves differently on APFS from
 `RENAME_EXCHANGE` on ext4, for example by not being atomic across a crash, by
 failing on a directory rather than a file, or by returning a different errno that
-the `classify_errno` call at `generation.rs:1930` flattens into one message, then
+the `classify_errno` call at `generation.rs:1937` flattens into one message, then
 either the
 mutation is abandoned with a message that names the wrong cause, or the swap
 partially applies and `:1372` deletes a retained generation.
@@ -131,7 +131,7 @@ reachable here.
 
 ## What a test must construct
 
-The fixture already exists. `generation.rs:2986`
+The fixture already exists. `generation.rs:2993`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives
 `promote_temp` into the exchange branch: `:2970-2976` covers the protected corrupt
 target being refused and `:2978-2993` covers the unprotected case exchanging
@@ -165,7 +165,7 @@ portfolio evaluation asked a human to separate.
   `macos` token), the source repository's former `ci.yml` workflow:126-184` in
   full (the matrix, both platform branches, and the omission comment at
   `:171-174`; source-catalog coordinates), `src/generation.rs` and
-  `src/lifecycle.rs` cfg inventory (`generation.rs:2421` and `lifecycle.rs:1798`,
+  `src/lifecycle.rs` cfg inventory (`generation.rs:2428` and `lifecycle.rs:1798`,
   `:1920`, `:1942`, `:1981` are the only `target_os` gates in either file; the
   production gates moved to `store_fs.rs:58`, `:112`, and `:117`).
 - Findings: the evidence points both ways and cannot be resolved from the code.

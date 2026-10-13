@@ -12,10 +12,10 @@ use daemon::vector_admission::{
     Census, DELTA_LIMIT, DISK_LIMIT, Ledger, Pool, RESIDENT_LIMIT, Refusal, ResourceClass,
 };
 use daemon::vector_composition::{CompositionRefusal, Progress, publish};
-use daemon::vector_generation::{ROWS_FILE, VectorRefusal, build, stage};
+use daemon::vector_generation::{ROWS_FILE, VectorRefusal, build, stage, stage_observed};
 use host_runtime::generation::PruneReport;
 use support::projection_gate::{identity, passing_evaluator};
-use support::vector_store::{Fixture, export};
+use support::vector_store::{Fixture, export, occupant_inode};
 
 const DIMENSION: u32 = 8;
 
@@ -259,23 +259,35 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
         compaction,
         Err(Refusal::Denied(Denial::LimitExceeded { .. }))
     ));
-    // Restaging a manifest the store already holds confirms the valid occupant in place: the store is already at the bound, the retry reserves nothing, and the total is unchanged.
+    // Restaging a manifest the store already holds confirms the valid occupant in place. It adds no bytes, so it succeeds with the disk pool at the store's total and even below it, where a second copy could not be reserved, and the store keeps the one directory.
     let settled = Ledger::store_bytes(&fixture.store).unwrap();
-    fixture.set_limit(DISK_LIMIT, settled);
     let before = occupant_inode(&fixture.generation_dir(&digest));
-    assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
+    for limit in [settled, settled - 1] {
+        fixture.set_limit(DISK_LIMIT, limit);
+        assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
+        assert_eq!(Ledger::store_bytes(&fixture.store).unwrap(), settled);
+        assert_eq!(
+            occupant_inode(&fixture.generation_dir(&digest)),
+            before,
+            "the confirmed generation is the one publication of its bytes"
+        );
+    }
+    // The staged-bytes admission precedes the confirmation: a denied retry fires no store event and leaves the store as it was.
+    fixture.set_limit(DISK_LIMIT, u64::MAX);
+    let inventory: u64 = manifest.files.iter().map(|f| f.size).sum();
+    fixture.set_limit("capture_disk_bytes", inventory - 1);
+    let mut events = Vec::new();
+    let denied = stage_observed(&built, &fixture.staging(), &mut |event| {
+        events.push(event);
+        Ok(())
+    });
+    assert!(
+        matches!(denied, Err(VectorRefusal::Admission(_))),
+        "{denied:?}"
+    );
+    assert!(events.is_empty(), "a denied admission confirms nothing");
     assert_eq!(Ledger::store_bytes(&fixture.store).unwrap(), settled);
-    assert_eq!(
-        occupant_inode(&fixture.generation_dir(&digest)),
-        before,
-        "the confirmed generation is the one publication of its bytes"
-    );
-    assert_eq!(held(&fixture.ledger, ResourceClass::Staging), 0);
-    assert_eq!(
-        fixture.ledger.census().disk,
-        0,
-        "the confirmation charges nothing"
-    );
+    fixture.set_limit("capture_disk_bytes", u64::MAX);
 
     // A readable manifest over a corrupt payload triggers an exchange repair, so staging reserves `staged_bytes` before replacing the occupant.
     fixture.corrupt(&digest, ROWS_FILE);
@@ -541,8 +553,4 @@ fn a_prune_readback_above_the_ledgers_pinned_bytes_is_unaccounted() {
         some.unaccounted(),
         "readers pin bytes the ledger was never told about"
     );
-}
-
-fn occupant_inode(dir: &std::path::Path) -> u64 {
-    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(dir).unwrap())
 }

@@ -63,7 +63,7 @@ a payload verdict.
 The atomic exchange is the first. On Linux and macOS
 `exchange_dirs` (`crates/host-runtime/src/store_fs.rs:112-115`) returns the raw
 `renameat_with(..., RenameFlags::EXCHANGE)` errno, and the caller in
-`generation.rs:1928-1931` maps it through `classify_errno` (`:111-116`). That
+`generation.rs:1935-1938` maps it through `classify_errno` (`:111-116`). That
 classifier sends `ENOSPC` and `EDQUOT` to `InsufficientStorage` and every other
 errno to `invalid("atomic digest-target exchange failed")`, so `EINVAL`,
 `ENOSYS`, and `EOPNOTSUPP` from a filesystem without `RENAME_EXCHANGE` or
@@ -76,7 +76,7 @@ The portable rename fallback is the second. `rename_no_replace` (`store_fs.rs:53
 handles missing `renameat2` flags gracefully: `EINVAL`, `ENOSYS`, and
 `EOPNOTSUPP` fall through to an occupancy check (`:69-73`). But the fallback's
 own `renameat` at `:74` returns every errno other than `EEXIST` and `ENOTEMPTY`
-raw (`:77`), and the caller at `generation.rs:1351-1352` maps it through
+raw (`:77`), and the caller at `generation.rs:1320-1321` maps it through
 `classify_errno(e, "generation rename failed")`, which is where a cross-device
 `EXDEV` or a read-only-mount `EPERM` lands as `NativePayloadInvalid`; the
 preceding `statat` failure at `store_fs.rs:72` takes the same path.
@@ -95,7 +95,7 @@ higher-precedence one.
 ## Timing windows and dependencies
 
 No timing angle. The enabling state is structural: the exchange at
-`generation.rs:1399` is reached only when `rename_no_replace` reported the digest
+`generation.rs:1406` is reached only when `rename_no_replace` reported the digest
 name occupied (`:1320-1322`), validation of that occupant failed (`:1329`, falling
 to `:1342`), and the digest is not protected (`:1344`). So the fault needs a
 corrupt unprotected occupant at the

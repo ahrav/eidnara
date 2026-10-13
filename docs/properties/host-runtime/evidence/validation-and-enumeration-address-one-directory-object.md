@@ -36,7 +36,7 @@ Inside `generation.rs`, no third instance of that shape exists. Every
 directory-relative operation in production code resolves against a pinned
 descriptor - `root_fd`, `generations_fd`, `temp_fd`, or a `dir`/`parent`
 argument. The only non-descriptor filesystem call in production code is
-`open_source_file` (`generation.rs:1834-1842`), which opens a pathname from `CWD`
+`open_source_file` (`generation.rs:1841-1849`), which opens a pathname from `CWD`
 with `O_NOFOLLOW`, and its subject is a staging
 *source*, not a store object; `preflight_source` (`:1793`) uses it for capacity
 sizing, and `copy_source_into` re-opens the same source by pathname at `:1841`
@@ -67,7 +67,7 @@ opens it a third
 time (`:1665`, then `store_fs.rs:239`): the classification descriptor and the
 removal
 descriptor are distinct opens. In `promote_temp`, `validate(digest)` at
-`generation.rs:1360`
+`generation.rs:1329`
 and again at `:1371` each open the digest name fresh (`:944`), and the
 `ValidatedGeneration` from `:1371` is discarded. In `walk_generation_tree`,
 `statat` decides an entry's type (`:1985`) and `open_child_dir` then opens it

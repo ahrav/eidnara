@@ -4,7 +4,7 @@
 //! - A file-size limit (`RLIMIT_FSIZE`) in a re-executed child with `SIGXFSZ` ignored. The write that crosses the limit returns a short count and the next one `EFBIG`, so the copy loop's short-write handling and the write-failure path run on real syscall results. This runs everywhere.
 //! - A size- and inode-limited `tmpfs` mounted in an unprivileged user and mount namespace. Data and inode exhaustion return a real `ENOSPC` from `write`, `openat`, or `mkdirat`. The test is ignored because it needs `unshare -Urm`; CI runs it in its own step.
 //!
-//! Neither mechanism exercises a failed `fsync`, write-back error, quota (`EDQUOT`), or power loss: `tmpfs` syncs nothing and this kernel lacks `tmpfs` quotas. Those cells stay unmet here.
+//! Neither mechanism exercises a failed `fsync`, write-back error, quota (`EDQUOT`), or power loss: `tmpfs` syncs nothing, and the development host's kernel is built without `CONFIG_TMPFS_QUOTA`. Those cells stay unmet here.
 
 mod support;
 
@@ -132,13 +132,9 @@ fn assert_recovers(
     fixture: &Fixture,
     built: &BuiltVectors,
     trace: &[StageEvent],
-    cut: &StageEvent,
+    cut: Option<&StageEvent>,
 ) {
-    assert_eq!(
-        trace.last(),
-        Some(cut),
-        "the failure came from the cut step"
-    );
+    assert_eq!(trace.last(), cut, "the failure came from the cut step");
     let root = fixture.root.path();
     let reopen = || {
         let store = GenerationStore::open(Some(root)).unwrap();
@@ -183,6 +179,9 @@ fn assert_recovers(
         .unwrap();
 }
 
+/// The store's copy chunk.
+const COPY_CHUNK: u64 = 128 * 1024;
+
 /// One cell of the file-size-limit matrix: the file whose write crosses the limit, and the limit.
 struct SizeCell {
     file: &'static str,
@@ -206,6 +205,8 @@ fn size_cells(sizes: &[(&'static str, u64)]) -> Vec<SizeCell> {
                 limit < size,
                 "{file}: a limit of {limit} cannot cut a {size}-byte write after {earlier} bytes"
             );
+            // The store copies in chunks of 128 KiB, so a nonzero limit below a file of at most one chunk falls inside the write that crosses it, and that write is short.
+            assert!(limit > 0 && size <= COPY_CHUNK, "{file}: {size} bytes");
             SizeCell { file, limit }
         })
         .collect();
@@ -241,7 +242,7 @@ fn run_size_cell(index: usize, witness: &Path) {
         cell.file
     );
     assert!(!trace.contains(&after_write(cell.file)), "{}", cell.file);
-    assert_recovers(&fixture, &built, &trace, &before_write(cell.file));
+    assert_recovers(&fixture, &built, &trace, Some(&before_write(cell.file)));
     fs::write(witness, format!("{:?}", before_write(cell.file))).unwrap();
 }
 
@@ -288,62 +289,63 @@ fn a_file_size_limit_cuts_a_copy_with_a_short_write_and_efbig_and_the_store_reco
     }
 }
 
-/// What the observer exhausts before a step runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Exhaust {
-    /// Every free data block, so the step's first write fails.
-    Blocks,
-    /// All but enough blocks for half of the file, so the write is short before it fails.
-    BlocksPartway,
-    /// Every free inode, so the step's file creation fails.
-    Inodes,
-}
-
-/// One cell of the exhaustion matrix: what is exhausted, and before which step. `None` exhausts inodes before staging starts, so the staging temp's `mkdirat` fails.
+/// One cell of the exhaustion matrix.
 #[derive(Debug, Clone, Copy)]
-struct SpaceCell {
-    exhaust: Exhaust,
-    file: Option<&'static str>,
+enum SpaceCell {
+    /// Every free inode before staging starts, so the staging temp's `mkdirat` fails.
+    TempCreate,
+    /// Every free data block before writing `file`, so its first write fails.
+    Blocks(&'static str),
+    /// Every free inode before writing `file`, so its creation fails.
+    Inodes(&'static str),
+    /// All but `keep` free data blocks before writing `file`.
+    Partway { file: &'static str, keep: u64 },
 }
 
-/// The frozen exhaustion matrix: data blocks and inodes before every staged file and the manifest, a write cut partway through `rows.f32`, and inodes before the staging temp is created.
-fn space_cells() -> Vec<SpaceCell> {
-    let mut cells = Vec::new();
-    for file in staged_files() {
-        for exhaust in [Exhaust::Blocks, Exhaust::Inodes] {
-            cells.push(SpaceCell {
-                exhaust,
-                file: Some(file),
-            });
+impl SpaceCell {
+    /// The file whose write the cell cuts; the temp cell cuts before any write.
+    fn file(self) -> Option<&'static str> {
+        match self {
+            Self::TempCreate => None,
+            Self::Blocks(file) | Self::Inodes(file) | Self::Partway { file, .. } => Some(file),
         }
     }
-    cells.push(SpaceCell {
-        exhaust: Exhaust::BlocksPartway,
-        file: Some(ROWS_FILE),
+}
+
+/// Pages of `size` bytes.
+fn pages(size: u64, page: u64) -> u64 {
+    size.div_ceil(page)
+}
+
+fn size_of(sizes: &[(&'static str, u64)], file: &str) -> u64 {
+    sizes.iter().find(|(name, _)| *name == file).unwrap().1
+}
+
+/// The frozen exhaustion matrix: data blocks and inodes before every staged file and the manifest, a write left half the blocks `rows.f32` needs, and inodes before the staging temp is created.
+fn space_cells(sizes: &[(&'static str, u64)], page: u64) -> Vec<SpaceCell> {
+    let mut cells: Vec<SpaceCell> = staged_files()
+        .into_iter()
+        .flat_map(|file| [SpaceCell::Blocks(file), SpaceCell::Inodes(file)])
+        .collect();
+    let rows = pages(size_of(sizes, ROWS_FILE), page);
+    assert!(rows >= 4, "the rows span several pages");
+    cells.push(SpaceCell::Partway {
+        file: ROWS_FILE,
+        keep: rows / 2,
     });
-    cells.push(SpaceCell {
-        exhaust: Exhaust::Inodes,
-        file: None,
-    });
+    cells.push(SpaceCell::TempCreate);
     assert_eq!(cells.len(), 16, "the exhaustion matrix is frozen");
     cells
 }
 
-/// Fills the filesystem holding `dir` as `exhaust` says, leaving `keep` free blocks, inside a directory the caller removes to release the space.
-fn exhaust(dir: &Path, exhaust: Exhaust, keep: u64) -> tempfile::TempDir {
+/// Fills the filesystem holding `dir` as `cell` says, inside a directory the caller drops to release the space.
+fn exhaust(dir: &Path, cell: SpaceCell) -> tempfile::TempDir {
     let fill = tempfile::Builder::new()
         .prefix("fill-")
         .tempdir_in(dir)
         .unwrap();
-    match exhaust {
-        Exhaust::Blocks | Exhaust::BlocksPartway => {
-            let stat = rustix::fs::statvfs(dir).unwrap();
-            let free = stat.f_bavail.saturating_sub(keep) * stat.f_frsize;
-            let file = fs::File::create(fill.path().join("blocks")).unwrap();
-            rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, free).unwrap();
-            assert_eq!(rustix::fs::statvfs(dir).unwrap().f_bavail, keep);
-        }
-        Exhaust::Inodes => {
+    let keep = match cell {
+        SpaceCell::TempCreate | SpaceCell::Inodes(_) => {
             let mut count = 0usize;
             loop {
                 match fs::File::create(fill.path().join(format!("inode-{count}"))) {
@@ -353,67 +355,76 @@ fn exhaust(dir: &Path, exhaust: Exhaust, keep: u64) -> tempfile::TempDir {
                 }
             }
             assert_eq!(rustix::fs::statvfs(dir).unwrap().f_ffree, 0);
+            return fill;
         }
-    }
+        SpaceCell::Blocks(_) => 0,
+        SpaceCell::Partway { keep, .. } => keep,
+    };
+    let stat = rustix::fs::statvfs(dir).unwrap();
+    let free = stat.f_bavail.saturating_sub(keep) * stat.f_frsize;
+    let file = fs::File::create(fill.path().join("blocks")).unwrap();
+    rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, free).unwrap();
+    assert_eq!(rustix::fs::statvfs(dir).unwrap().f_bavail, keep);
     fill
+}
+
+/// Stages a fresh wide layer, exhausting the `tmpfs` as `cell` says at its step, and returns the fixture, the build, the outcome, and the observed trace.
+fn stage_exhausted(
+    cell: SpaceCell,
+) -> (
+    Fixture,
+    BuiltVectors,
+    Result<String, VectorRefusal>,
+    Vec<StageEvent>,
+) {
+    let (fixture, built) = wide_fixture();
+    let root = fixture.root.path().to_owned();
+    let mut held = None;
+    if cell.file().is_none() {
+        held = Some(exhaust(&root, cell));
+        // The store's free-space check counts data blocks, so it passes and the inode shortage reaches `mkdirat`.
+        let stat = rustix::fs::statvfs(&root).unwrap();
+        assert!(stat.f_bavail * stat.f_frsize > 256 << 20, "{cell:?}");
+    }
+    let cut = cell.file().map(before_write);
+    let mut trace = Vec::new();
+    let staged = stage_observed(&built, &fixture.staging(), &mut |event| {
+        if Some(&event) == cut.as_ref() {
+            held = Some(exhaust(&root, cell));
+        }
+        trace.push(event);
+        Ok(())
+    });
+    drop(held.expect("the cell fired"));
+    (fixture, built, staged, trace)
 }
 
 /// Runs every exhaustion cell inside the namespace's `tmpfs`, where `TMPDIR` points.
 fn run_space_cells() {
-    for cell in space_cells() {
-        let (fixture, built) = wide_fixture();
-        let sizes = sizes(&built);
-        let root = fixture.root.path().to_owned();
-        let page = rustix::fs::statvfs(&root).unwrap().f_frsize;
-        let mut trace = Vec::new();
-        let mut held = None;
-        if cell.file.is_none() {
-            held = Some(exhaust(&root, cell.exhaust, 0));
-        }
-        let cut = cell.file.map(before_write);
-        let staged = stage_observed(&built, &fixture.staging(), &mut |event| {
-            if Some(&event) == cut.as_ref() {
-                let keep = match cell.exhaust {
-                    Exhaust::BlocksPartway => {
-                        let size = sizes
-                            .iter()
-                            .find(|(name, _)| Some(*name) == cell.file)
-                            .unwrap()
-                            .1;
-                        assert!(size >= 4 * page, "{cell:?}: the file spans several pages");
-                        size / 2 / page
-                    }
-                    Exhaust::Blocks | Exhaust::Inodes => 0,
-                };
-                held = Some(exhaust(&root, cell.exhaust, keep));
-            }
-            trace.push(event);
-            Ok(())
-        });
-        drop(held.expect("the cell fired"));
+    let (probe, built) = wide_fixture();
+    let page = rustix::fs::statvfs(probe.root.path()).unwrap().f_frsize;
+    let sizes = sizes(&built);
+    drop(probe);
+    for cell in space_cells(&sizes, page) {
+        let (fixture, built, staged, trace) = stage_exhausted(cell);
         assert_eq!(
             staged,
             Err(VectorRefusal::InsufficientStorage),
             "{cell:?}: the kernel's ENOSPC is storage exhaustion"
         );
-        match cell.file {
-            Some(file) => {
-                assert!(!trace.contains(&after_write(file)), "{cell:?}");
-                assert_recovers(&fixture, &built, &trace, &before_write(file));
-            }
-            None => {
-                assert!(trace.is_empty(), "{cell:?}: the temp was never created");
-                let store = GenerationStore::open(Some(&root)).unwrap();
-                assert_eq!(
-                    fs::read_dir(store.root().join(GENERATIONS_DIR_NAME))
-                        .unwrap()
-                        .count(),
-                    0
-                );
-                assert_eq!(stage(&built, &fixture.staging()).unwrap(), built.digest());
-            }
+        if let Some(file) = cell.file() {
+            assert!(!trace.contains(&after_write(file)), "{cell:?}");
         }
+        let cut = cell.file().map(before_write);
+        assert_recovers(&fixture, &built, &trace, cut.as_ref());
     }
+    // The partway cell's control: with every block `rows.f32` needs left free, the same exhaustion lets that copy finish and stops a later write, so the partway refusal comes from the half of the file that had no room.
+    let (_, _, staged, trace) = stage_exhausted(SpaceCell::Partway {
+        file: ROWS_FILE,
+        keep: pages(size_of(&sizes, ROWS_FILE), page),
+    });
+    assert_eq!(staged, Err(VectorRefusal::InsufficientStorage));
+    assert!(trace.contains(&after_write(ROWS_FILE)), "{trace:?}");
 }
 
 const SPACE_CHILD: &str = "EIDNARA_KERNEL_SPACE_CHILD";
