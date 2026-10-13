@@ -1301,7 +1301,7 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
 }
 
-/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's code window, and the query encoded under that layer's scales.
+/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's mapped codes, and the query encoded under that layer's scales.
 #[test]
 fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     let mut fixture = Fixture::new();
@@ -1316,12 +1316,12 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     let layers = view.layers().len();
     assert_eq!(layers, 3);
     let dimension = 8u64;
-    let windows: u64 = view
+    let mapped: u64 = view
         .layers()
         .iter()
         .map(|layer| layer.occurrence_ids().len() as u64)
         .sum();
-    let expected = (BLOCK_ROWS as u64 * layers as u64 + windows + layers as u64) * dimension;
+    let expected = (BLOCK_ROWS as u64 * layers as u64 + mapped + layers as u64) * dimension;
     let at_selection = std::cell::Cell::new(None);
     let (outcome, _) = run(
         &fixture,
@@ -1337,12 +1337,12 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     assert_eq!(
         at_selection.get(),
         Some(expected),
-        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the window, and the encoded query per layer"
+        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the mapped codes, and the encoded query per layer"
     );
     assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
 }
 
-/// A cancellation delivered at the walk's final `AfterPage` ends the scan before any code window is read for scoring.
+/// A cancellation delivered at the walk's final `AfterPage` ends the scan before any mapped code is read for scoring.
 #[test]
 fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
     let mut fixture = Fixture::new();

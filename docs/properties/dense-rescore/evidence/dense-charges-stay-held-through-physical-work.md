@@ -13,11 +13,13 @@ until blocking work exits and is joined.
   takes no clone.
 - `rank_compressed` holds its `Scratch` and `RowBuffers` reservations for the
   whole call; the view's tables and pins live while any `Arc` does. `Scratch`
-  is sized by `scan_scratch_bytes` (`crates/daemon/src/vector_reader.rs:303`)
+  is sized by `scan_scratch_bytes` (`crates/daemon/src/vector_reader.rs`)
   as the scan's retained payload buffers: per layer one decoded block, the
-  query encoded under the layer's scales, and the layer's code window. The
+  query encoded under the layer's scales, and the layer's mapped code bytes
+  (`crates/daemon/src/vector_mapped.rs`), whose pages become resident as the
+  scan reads them. The
   per-layer descriptor vectors `rank_compressed` builds
-  (`vector_reader.rs:865-875`) and the scan's control structures are bounded
+  (`vector_reader.rs:790-803`) and the scan's control structures are bounded
   by `max_layers` and `max_entries` and stay outside the charge.
 - `SharedBudget::bridge` awaits the unit after cancellation instead of
   dropping it.

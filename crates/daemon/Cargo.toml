@@ -32,6 +32,7 @@ path = "src/bin/eidnara-host.rs"
 
 [dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
+memmap2 = { workspace = true }
 cache-stability = { workspace = true }
 context-core = { workspace = true }
 memory-store = { workspace = true }
