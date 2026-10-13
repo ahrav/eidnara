@@ -501,6 +501,39 @@ async fn view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_an
     fixture.daemon.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let (_token, budget) = request_budget(10_000);
+    let healthy = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    composition
+        .view
+        .fail_original_reads_for_test(Some(std::io::ErrorKind::Other));
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("read_failed"));
+    assert_eq!(
+        outcome.statuses[..2],
+        healthy.statuses[..2],
+        "the other lanes keep their healthy status"
+    );
+    assert_eq!(outcome.body["degraded"], true);
+    assert!(!composition.view.is_quarantined());
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+
+    composition.view.fail_original_reads_for_test(None);
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Complete,
+        "the same view serves once reads succeed"
+    );
+    fixture.daemon.shutdown().await;
+}
+
 #[test]
 fn the_pool_the_limits_give_is_checked_before_a_view_is_installed() {
     let dense = DenseLimits {

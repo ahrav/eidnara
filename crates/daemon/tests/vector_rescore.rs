@@ -591,6 +591,76 @@ fn a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute() {
 }
 
 #[test]
+fn an_ordinary_read_failure_of_an_accepted_row_is_io_and_leaves_the_view_usable() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let rank = || {
+        run(
+            &fixture,
+            &projection,
+            &view,
+            &axis(0),
+            capacity(5, 5),
+            &ROOMY,
+            &EvalBudget::unbounded(),
+            || {},
+        )
+    };
+    let (healthy, _) = rank();
+    let healthy = healthy.unwrap();
+
+    // An error other than a file ending early is a failed read: the request refuses with the accepted row named after attempting only that row, and the view stays usable.
+    for kind in [
+        std::io::ErrorKind::Other,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        view.fail_original_reads_for_test(Some(kind));
+        let (outcome, reads) = rank();
+        match outcome {
+            Err(CompressedRefusal::Io {
+                member,
+                occurrence_id: refused,
+                ..
+            }) => {
+                assert_eq!(member, base.digest, "{kind:?}");
+                assert_eq!(refused, occurrence_id("alpha"), "{kind:?}");
+            }
+            other => panic!("{kind:?}: {other:?}"),
+        }
+        assert_eq!(reads.len(), 1, "{kind:?}: the first accepted row only");
+        assert!(!view.is_quarantined(), "{kind:?}");
+    }
+
+    view.fail_original_reads_for_test(None);
+    let (recovered, _) = rank();
+    let recovered = recovered.unwrap();
+    assert_eq!(
+        recovered.rescored, healthy.rescored,
+        "the same view ranks again once reads succeed"
+    );
+
+    // The same seam reporting a file that ends early is a missing row, which quarantines.
+    view.fail_original_reads_for_test(Some(std::io::ErrorKind::UnexpectedEof));
+    let (outcome, _) = rank();
+    assert!(
+        matches!(
+            outcome,
+            Err(CompressedRefusal::Corrupt {
+                fault: RowFault::Missing(_),
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(view.is_quarantined());
+}
+
+#[test]
 fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);
@@ -1345,4 +1415,304 @@ fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
     );
     assert!(!view.is_quarantined(), "the cancelled scan read no codes");
     assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+}
+
+/// The base's `gamma` and `beta` rows are the query's best rows, so any selection that admitted them would rank them first. The delta supersedes `gamma` with a poor row and tombstones `beta`: the pool holds exactly the resolved winners, the stale rows outrank every member under the base's own codes, and neither stale row gets an original-f32 read.
+#[test]
+fn stale_and_tombstoned_rows_that_would_score_highest_never_enter_the_pool() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let mut corpus = corpus();
+    for (object, vector) in &mut corpus {
+        if matches!(*object, "gamma" | "beta") {
+            *vector = unit([0.99, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+    }
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    let poor = axis(3);
+    let delta = fixture.layer_from(&export(&[("gamma", poor.clone())], &["beta"], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let query = axis(0);
+
+    let (ranking, reads) = rank_simple(&fixture, &projection, &view, &query, 4, 4);
+    let winners: BTreeMap<String, (usize, usize)> = [
+        winner(&view, 0, "alpha"),
+        winner(&view, 1, "gamma"),
+        winner(&view, 0, "delta"),
+        winner(&view, 0, "epsilon"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        pool_keys(&ranking),
+        expected_pool(&view, &query, &winners, 4)
+    );
+    // Under the base's own scales, each stale row outranks every pool member, so its absence is not a cut.
+    let base_layer = &view.layers()[0];
+    let q = scalar::encode(&view.layout(), &base_layer.scales, &query)
+        .unwrap()
+        .codes;
+    let best_member = ranking
+        .pool
+        .ranking
+        .ranked
+        .iter()
+        .map(|row| row.score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    for stale in ["gamma", "beta"] {
+        let (_, (_, row)) = winner(&view, 0, stale);
+        let score = weighted(&base_layer.scales, &q, &base_layer.codes(row).unwrap());
+        assert!(
+            score > best_member,
+            "{stale} would lead the pool if admitted"
+        );
+        assert!(
+            !ranking
+                .pool
+                .winners
+                .iter()
+                .any(|winner| (winner.layer, winner.row) == (0, row)),
+            "{stale}'s base row is no pool entry"
+        );
+        assert!(!reads.contains(&(base_layer.digest.clone(), row)));
+    }
+    let mut vectors: BTreeMap<String, Vec<f32>> = map(&corpus).into_iter().collect();
+    vectors.insert(occurrence_id("gamma"), poor);
+    vectors.remove(&occurrence_id("beta"));
+    assert_eq!(
+        rescored(&ranking),
+        top_of_pool(&query, &ranking, &vectors, 4)
+    );
+}
+
+/// Three occurrences carry one payload and lead the query. A pool of two cuts inside the tie and keeps the two smallest identifiers; a ranking of one keeps the smallest; equal payloads stay distinct entries.
+#[test]
+fn a_tie_across_the_pool_and_ranking_cuts_keeps_identifier_order() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let mut corpus = corpus();
+    let lead = unit([0.98, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let tied = ["alpha", "beta", "gamma"];
+    for (object, vector) in &mut corpus {
+        if tied.contains(object) {
+            *vector = lead.clone();
+        }
+    }
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let mut ids: Vec<String> = tied.iter().map(|object| occurrence_id(object)).collect();
+    ids.sort();
+
+    let (ranking, reads) = rank_simple(&fixture, &projection, &view, &axis(0), 1, 2);
+    let pool: Vec<String> = pool_keys(&ranking).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        pool,
+        ids[..2],
+        "the pool cut keeps the two smallest identifiers"
+    );
+    assert_eq!(reads.len(), 2);
+    let scores: BTreeSet<u64> = pool_keys(&ranking)
+        .into_iter()
+        .map(|(_, bits)| bits)
+        .collect();
+    assert_eq!(scores.len(), 1, "the kept entries tie exactly");
+    assert_eq!(
+        rescored(&ranking)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        ids[..1],
+        "the ranking cut keeps the smallest identifier"
+    );
+
+    let (wide, _) = rank_simple(&fixture, &projection, &view, &axis(0), 3, 3);
+    assert_eq!(
+        rescored(&wide)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        ids,
+        "each equal payload keeps its own occurrence"
+    );
+}
+
+/// With no earlier verified composition, a member that fails verification leaves recovery and acquisition unavailable, and its bytes never serve. A rebuilt layer published under a new composition then serves, and every read names the rebuilt member.
+#[test]
+fn a_corrupt_composition_with_no_prior_state_serves_nothing_until_rebuilt() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let corpus = corpus();
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    fixture.corrupt(&base.digest, ROWS_FILE);
+
+    assert!(matches!(
+        fixture.recover(),
+        Err(daemon::vector_composition::Unavailable::NoCompatibleTarget { .. })
+    ));
+    assert!(matches!(
+        acquire_view(&mut fixture, &mut |_| {}),
+        Err(daemon::vector_reader::AcquireRefusal::Unavailable(
+            daemon::vector_composition::Unavailable::NoCompatibleTarget { .. }
+        ))
+    ));
+
+    let mut rebuilt = corpus.clone();
+    rebuilt[0].1 = axis(6);
+    let fresh = fixture.layer_from(&export(&rebuilt, &[], 20));
+    assert_ne!(fresh.digest, base.digest);
+    fixture
+        .publish(&fixture.compose(2, &fresh, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(view.members(), vec![fresh.digest.clone()]);
+    let query = axis(0);
+    let (ranking, reads) = rank_simple(&fixture, &projection, &view, &query, 2, 3);
+    assert!(reads.iter().all(|(member, _)| *member == fresh.digest));
+    let mut expected = reference(&query, &map(&rebuilt));
+    expected.truncate(2);
+    assert_eq!(rescored(&ranking), expected);
+}
+
+const RESTART_CHILD: &str = "EIDNARA_RESCORE_RESTART_CHILD";
+const RESTART_WITNESS: &str = "EIDNARA_RESCORE_RESTART_WITNESS";
+
+/// A child process publishes one composition, publishes its replacement, cuts the replacement's rows to the header, and exits without running destructors, leaving its store. This process reopens the store with a fresh gate and ledger: recovery refuses the cut member and takes the earlier verified composition, its rows serve under the projection's current eligibility, and the cut member is never read.
+#[test]
+fn recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set() {
+    if std::env::var_os(RESTART_CHILD).is_some() {
+        let mut fixture = Fixture::new();
+        let corpus = corpus();
+        let old_base = fixture.layer_from(&export(&corpus, &[], 10));
+        let old = fixture
+            .publish(&fixture.compose(1, &old_base, &[]).unwrap())
+            .unwrap();
+        let (_, new_base) = publish_replacement(&fixture, &corpus, 2);
+        let rows = fixture.generation_dir(&new_base.digest).join(ROWS_FILE);
+        let bytes = std::fs::read(&rows).unwrap();
+        std::fs::write(&rows, &bytes[..ARTIFACT_HEADER_BYTES]).unwrap();
+        fixture.root.keep();
+        let witness = std::env::var_os(RESTART_WITNESS).unwrap();
+        std::fs::write(
+            witness,
+            format!(
+                "{}\n{}\n{}\n{}",
+                fixture.root.path().display(),
+                old,
+                old_base.digest,
+                new_base.digest
+            ),
+        )
+        .unwrap();
+        // The process ends without running destructors, as a daemon that dies holds its locks and handles until the kernel reclaims them.
+        std::process::exit(0);
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let witness = scratch.path().join("witness");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set",
+            "--nocapture",
+        ])
+        .env(RESTART_CHILD, "1")
+        .env(RESTART_WITNESS, &witness)
+        .env("TMPDIR", scratch.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let witnessed = std::fs::read_to_string(&witness).unwrap();
+    let [root, old, old_base, new_base] = witnessed.lines().collect::<Vec<_>>()[..] else {
+        panic!("malformed witness {witnessed:?}");
+    };
+
+    let mut fixture = Fixture::reopen(std::path::Path::new(root));
+    let projection = projection(&fixture, &OBJECTS);
+    assert!(
+        matches!(
+            fixture.store.read_vector_current().unwrap(),
+            host_runtime::generation::CurrentProfile::Current(ref selected) if selected != old
+        ),
+        "the child left its replacement selected"
+    );
+    let (recovered, selector) = fixture.recover().unwrap();
+    assert_eq!(recovered, old);
+    assert!(matches!(selector, SelectorState::Stale(_)));
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(view.digest(), old);
+    assert_eq!(view.members(), vec![old_base.to_owned()]);
+
+    projection.retire("alpha");
+    let query = axis(0);
+    let (ranking, reads) = rank_simple(&fixture, &projection, &view, &query, 2, 3);
+    assert!(!reads.is_empty());
+    assert_ne!(old_base, new_base);
+    assert!(reads.iter().all(|(member, _)| member == old_base));
+    let mut eligible = map(&corpus());
+    eligible.retain(|(id, _)| *id != occurrence_id("alpha"));
+    let mut expected = reference(&query, &eligible);
+    expected.truncate(2);
+    assert_eq!(rescored(&ranking), expected);
+}
+
+/// Equal payloads in two layers: the smallest tied identifier sits in a delta and the larger ones in the base, so layer and row order disagree with identifier order. The pool admits every tied row, and the ranking cut keeps the smallest identifiers, whatever layer holds them.
+#[test]
+fn a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let lead = unit([0.98, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let tied = ["alpha", "beta", "gamma"];
+    let mut ids: Vec<(String, &str)> = tied
+        .iter()
+        .map(|object| (occurrence_id(object), *object))
+        .collect();
+    ids.sort();
+    let smallest = ids[0].1;
+    let mut corpus = corpus();
+    for (object, vector) in &mut corpus {
+        if tied.contains(object) && *object != smallest {
+            *vector = lead.clone();
+        }
+    }
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    let delta = fixture.layer_from(&export(&[(smallest, lead.clone())], &[], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(
+        winner(&view, 1, smallest).1.0,
+        1,
+        "the smallest tied identifier wins from the delta"
+    );
+    let ordered: Vec<String> = ids.iter().map(|(id, _)| id.clone()).collect();
+    for k in 1..=3 {
+        let (ranking, _) = rank_simple(&fixture, &projection, &view, &axis(0), k, 5);
+        let pool: BTreeSet<String> = pool_keys(&ranking).into_iter().map(|(id, _)| id).collect();
+        assert!(
+            ordered.iter().all(|id| pool.contains(id)),
+            "the pool admits every tied row"
+        );
+        assert_eq!(
+            rescored(&ranking)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            ordered[..k],
+            "k {k}: the cut follows identifier order"
+        );
+    }
 }

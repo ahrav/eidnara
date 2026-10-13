@@ -378,7 +378,7 @@ Type: safety
 Reachability: test-only - `select_candidates_observed`
 (`crates/retrieval/src/dense/candidates.rs:273`) is called from
 `crates/retrieval/tests/dense_candidates.rs` and from `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:888`); `select_candidates`
+(`crates/daemon/src/vector_reader.rs:902`); `select_candidates`
 (`candidates.rs:263`) has no caller in the workspace. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
 `set_dense_vectors` (`crates/daemon/src/query_route.rs:1878`) installs a
@@ -495,7 +495,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:814`) is called by
+(`crates/daemon/src/vector_reader.rs:828`) is called by
 `CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`), which the
 route builds only after `set_dense_vectors` (`query_route.rs:1878`) installs a
 composition; no production caller installs one at this HEAD.
@@ -503,7 +503,10 @@ Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
 `a_promotion_and_prune_after_selection_leave_the_rescore_on_the_pinned_files`,
-and `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`.
+`the_ranking_is_the_same_however_the_rows_are_spread_across_layers`, and
+`stale_and_tombstoned_rows_that_would_score_highest_never_enter_the_pool`,
+whose superseded and masked base rows outrank every pool member under the
+base's own codes and still appear as no pool entry and no original-f32 read.
 Physical order here means how rows spread across a composition's layers; the
 order of rows within one layer file is fixed by the format, which writes and
 verifies identifiers in strictly increasing byte order.
@@ -536,8 +539,13 @@ Reachability: test-only - as above; `rescore_pool`
 (`crates/retrieval/src/dense/candidates.rs:410`) is pure.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
-`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
-`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`;
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
+`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`, and
+`a_tie_across_the_pool_and_ranking_cuts_keeps_identifier_order`, which cuts
+the pool and the ranking inside a three-way tie of equal payloads in one
+layer, and `a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row`,
+which puts the smallest tied identifier in a delta so layer and row order
+disagree with identifier order and cuts the ranking at each `k` up to three;
 `crates/retrieval/tests/dense_candidates.rs`
 `the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier`
 and
@@ -566,10 +574,15 @@ Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
+`an_ordinary_read_failure_of_an_accepted_row_is_io_and_leaves_the_view_usable`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
-`cancellation_after_an_empty_selection_is_a_budget_refusal`, and
-`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`;
+`cancellation_after_an_empty_selection_is_a_budget_refusal`,
+`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`,
+`a_corrupt_composition_with_no_prior_state_serves_nothing_until_rebuilt`, and
+`recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`;
+`crates/daemon/tests/query_route_compressed.rs`
+`a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
 `only_missing_or_malformed_rows_count_as_walk_corruption` in
@@ -587,18 +600,43 @@ Check: `always` - a rows file cut to its header after selection refuses with
 row buffers; NaN rows and doubled, finite rows refuse with `Rejected` naming
 the member and the pool's best entry; an emptied codes file refuses the scan
 and quarantines the view, while a cancelled scan does not; the read
-classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
+classifier maps only `UnexpectedEof` to `Missing`; an accepted-row read
+that reports another error refuses the ranking as `Io` naming the member and
+the pool's best entry after one attempted read and leaves the view
+unquarantined, and the same view ranks the same result once reads succeed;
+the route degrades the dense lane as `read_failed` while the other lanes keep
+their healthy status, releases the charges, and serves the lane again once
+reads succeed; the same
+seam reporting `UnexpectedEof` refuses as `Missing` and quarantines; a
+cancelled budget refuses
 with no read and no quarantine, and so does one cancelled over a pool with no
 entry to read; a
 re-acquisition re-verifies, recovery takes the prior verified composition, and
-its ranking excludes an occurrence retired in the kernel meanwhile. `always`
+its ranking excludes an occurrence retired in the kernel meanwhile, both in the
+same process and in a new process over a store a child left after cutting its
+replacement's rows and exiting without destructors; with no prior verified
+composition, recovery and acquisition refuse `NoCompatibleTarget` until a
+rebuilt layer is published, and every later read names the rebuilt member. `always`
 because a corrupt generation must never yield a result.
-Fault/timing angle: Corruption between selection and the original reads.
+Fault/timing angle: Corruption between selection and the original reads;
+an ordinary read error on an accepted row; corruption found by
+re-verification on acquisition, in the same process and after a restart.
 Required faults and enabling state: A truncated and a NaN-filled rows file
-inside `RescoreEvent::AfterSelection`; a prior composition to recover to.
+inside `RescoreEvent::AfterSelection`, with a prior composition to recover
+to; an accepted-row read driven to an error other than a short read through
+`PinnedVectors::fail_original_reads_for_test`, then a read that succeeds on
+the same view, in the rescore and under the route; a composition whose only
+member is corrupt with no prior verified composition, then a rebuilt layer
+published under a new composition; a store a child process left after
+publishing a composition and its replacement, cutting the replacement's
+rows to the header, and exiting without destructors, reopened by a fresh
+process with its own gate and ledger.
 Confidence: medium - [evidence](evidence/dense-missing-original-quarantines-without-substitute.md).
 The quarantine flag lives on the shared view; persistence across a restart is
-the verification a new acquisition runs.
+the verification a new acquisition runs, which
+`recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`
+exercises across a real process boundary. That is process-restart evidence,
+not power-loss evidence.
 Existing check: `crates/daemon/tests/vector_reader.rs` truncated-row
 refusal for the f32 layered ranking.
 Impact: A substitute row returns scores for bytes the generation never held.
@@ -606,13 +644,11 @@ Open questions:
 - Parent Q4: persistent quarantine is re-verification on acquisition, which
   refuses a member whose files no longer hash; a transient fault that leaves
   the files intact is served again after re-acquisition (needs human input).
-- The I/O classification is checked at the classifier and the
-  code-corruption predicate; no test makes a real file return a read error
-  other than a short read, so the rescore's `Io` arm and the scan's
-  `ReadFailed` arm are reached only by reading.
-- Process-restart evidence here is a fresh acquisition in the same process,
-  which reads only durable state; it is not a separate process and not
-  power-loss evidence.
+- The rescore's `Io` arm is reached through
+  `PinnedVectors::fail_original_reads_for_test`, which hands an error kind to
+  the production classifier in place of the positioned read; no test makes a
+  real file return such an error, and the scan's `ReadFailed` arm is reached
+  only by reading.
 
 ### dense-stage-evidence-keeps-coverage-and-recall-apart
 
@@ -694,7 +730,7 @@ Open questions:
   check between the final page and scoring
   (`crates/retrieval/src/dense/oracle.rs:591`), its batch checks, and the
   checks around each original read's observer
-  (`vector_reader.rs:909`, `:918`) (needs human input).
+  (`vector_reader.rs:923`, `:932`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.

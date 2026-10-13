@@ -92,8 +92,27 @@ pub fn export(seed: u8, checkpoint: i64) -> LiveRows {
     }
 }
 
+/// The directory a fixture's store lives in: a temporary directory it owns and removes, or one another process left behind.
+pub struct Root {
+    path: PathBuf,
+    dir: Option<tempfile::TempDir>,
+}
+
+impl Root {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Leaves the directory in place when the fixture drops, so another process can reopen the store.
+    pub fn keep(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = dir.keep();
+        }
+    }
+}
+
 pub struct Fixture {
-    pub root: tempfile::TempDir,
+    pub root: Root,
     pub store: GenerationStore,
     /// The exclusive lifecycle transaction the fixture stages and publishes under; `release_transaction` gives it up so a reader's shared protection can be taken.
     pub tx: Option<LifecycleTransactionLock>,
@@ -132,7 +151,28 @@ impl Fixture {
 
     /// A lifecycle store whose gate, ledger, and layers all carry `identity` and `generation`, so its compositions serve a projection built under them.
     pub fn for_projection(identity: ProjectionIdentity, generation: VectorGeneration) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root {
+            path: dir.path().to_owned(),
+            dir: Some(dir),
+        };
+        Self::at(root, identity, generation)
+    }
+
+    /// The fixture's identity over a store another process left at `root`, with a fresh gate, admission, and ledger as a restarted daemon builds them; the caller removes `root`.
+    pub fn reopen(root: &std::path::Path) -> Self {
+        let identity = identity(KERNEL, DIMENSION);
+        Self::at(
+            Root {
+                path: root.to_owned(),
+                dir: None,
+            },
+            identity,
+            generation(),
+        )
+    }
+
+    fn at(root: Root, identity: ProjectionIdentity, generation: VectorGeneration) -> Self {
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
         let gate = Arc::new(HookGate::closed());
