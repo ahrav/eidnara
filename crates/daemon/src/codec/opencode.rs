@@ -160,8 +160,6 @@ fn decode_rows<'a, E>(
         let role = string_field(info, "role")
             .or_else(|| string_field(raw_message, "role"))
             .unwrap_or_else(|| "user".to_string());
-        let origin = opencode_origin(info).or_else(|| opencode_origin(raw_message));
-        let created_at_ms = created_at(info, &mut read_time)?;
         let parts = raw_message
             .get("parts")
             .and_then(Value::as_array)
@@ -240,37 +238,38 @@ fn decode_rows<'a, E>(
             }
         }
 
-        let synthetic = is_synthetic_message(parts);
         let (content, block_metas) = blocks.finish();
-        let recorded_ordinal = retain_sidecar.then_some(ordinal);
-        let mut ck = WireMessage::from_parts(
-            role.clone(),
-            content,
-            origin,
-            ProviderExtras::new(),
-            HarnessMeta {
-                harness_id: Some(mid.clone()),
-                ordinal: recorded_ordinal,
-                synthetic,
-                summary: info.get("summary") == Some(&Value::Bool(true)),
-                errored: info.get("error").is_some_and(|error| !error.is_null()),
-                finish: string_field(info, "finish"),
-                created_at_ms,
-            },
-        );
-        let decoded_blocks = match decode {
-            Decode::Window => Vec::new(),
-            Decode::Sidecar => std::mem::take(ck.content_mut()),
-            #[cfg(test)]
-            Decode::MessagesAndSidecar => ck.content().to_vec(),
-        };
-        if decode != Decode::Sidecar {
+        let decoded_blocks = if decode == Decode::Sidecar {
+            content
+        } else {
+            let decoded_blocks = if retain_sidecar {
+                content.clone()
+            } else {
+                Vec::new()
+            };
+            let recorded_ordinal = retain_sidecar.then_some(ordinal);
+            let ck = WireMessage::from_parts(
+                role.clone(),
+                content,
+                opencode_origin(info).or_else(|| opencode_origin(raw_message)),
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.clone()),
+                    ordinal: recorded_ordinal,
+                    synthetic: is_synthetic_message(parts),
+                    summary: info.get("summary") == Some(&Value::Bool(true)),
+                    errored: info.get("error").is_some_and(|error| !error.is_null()),
+                    finish: string_field(info, "finish"),
+                    created_at_ms: created_at(info, &mut read_time)?,
+                },
+            );
             decoded.push(IngressMessage {
                 mid: mid.clone(),
                 ordinal: recorded_ordinal.unwrap_or_default(),
                 ck,
             });
-        }
+            decoded_blocks
+        };
         if let Some(block_metas) = block_metas {
             sidecar.remember_message(
                 mid.clone(),

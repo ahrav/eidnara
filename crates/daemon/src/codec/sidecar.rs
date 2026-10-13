@@ -66,10 +66,15 @@ impl DecodeSidecar {
 
     /// Inserts or replaces message metadata while preserving first-seen order.
     pub fn remember_message(&mut self, mid: String, meta: HarnessMessageMeta) {
-        if !self.messages.contains_key(&mid) {
-            self.order.push(mid.clone());
+        match self.messages.entry(mid) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                self.order.push(entry.key().clone());
+                entry.insert(Arc::new(meta));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(Arc::new(meta));
+            }
         }
-        self.messages.insert(mid, Arc::new(meta));
     }
 
     pub fn message_by_mid(&self, mid: &str) -> Option<&HarnessMessageMeta> {
