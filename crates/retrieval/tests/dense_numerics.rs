@@ -152,26 +152,29 @@ const PINNED_QUANTIZED: [(u64, &str); 8] = [
     (0xbfeb_b870_de4c_78f4, "max"),
 ];
 
-/// Whether `score` reproduces the oracle on the quantized fixture: every score's bits equal the reference's, and every `k` cut that `TopK` keeps under `score` equals the reference full sort's prefix. The production scorer and the negative controls go through this one check.
+/// Checks `score` against the oracle on the quantized fixture: every score's bits must equal the reference's, and every `k` cut `TopK` keeps under `score` must equal the reference full sort's prefix. The production scorer and the negative controls go through this one check; the error names the first row or cut that disagrees.
 fn agrees_with_oracle(
-    query: &QuantizedQuery<'_>,
+    codes: &[i8],
     scales: &Scales,
     score: &dyn Fn(&[i8]) -> f64,
-) -> bool {
+) -> Result<(), String> {
     let rows = fixture_codes();
-    let reference = |codes: &[i8]| reference_quantized(scales.as_slice(), query.codes(), codes);
-    if rows
+    let reference = |row: &[i8]| reference_quantized(scales.as_slice(), codes, row);
+    if let Some((id, _)) = rows
         .iter()
-        .any(|(_, codes)| score(codes).to_bits() != reference(codes).to_bits())
+        .find(|(_, row)| score(row).to_bits() != reference(row).to_bits())
     {
-        return false;
+        return Err(format!("{id}: score bits"));
     }
     let expected = reference_order(
         rows.iter()
-            .map(|(id, codes)| (reference(codes), (*id).to_owned()))
+            .map(|(id, row)| (reference(row), (*id).to_owned()))
             .collect(),
     );
-    (1..=rows.len()).all(|k| order_by(score, &rows, k) == expected[..k])
+    match (1..=rows.len()).find(|&k| order_by(score, &rows, k) != expected[..k]) {
+        Some(k) => Err(format!("k {k}: order")),
+        None => Ok(()),
+    }
 }
 
 fn production_quantized_order(
@@ -692,35 +695,32 @@ fn the_fixture_rejects_unweighted_and_f32_first_quantized_scoring() {
                 .collect(),
         )
     };
-    assert!(agrees_with_oracle(&query, &scales, &|codes| query.score(codes)));
-    assert!(
-        !agrees_with_oracle(&query, &scales, &|codes| unweighted(query.codes(), codes)),
+    let codes = query.codes();
+    assert_eq!(
+        agrees_with_oracle(codes, &scales, &|row| query.score(row)),
+        Ok(())
+    );
+    assert_eq!(
+        agrees_with_oracle(codes, &scales, &|row| unweighted(codes, row)),
+        Err("fine: score bits".to_owned()),
         "the oracle check rejects the unweighted dot"
     );
-    assert!(
-        !agrees_with_oracle(&query, &scales, &|codes| f32_first_quantized(
+    assert_eq!(
+        agrees_with_oracle(codes, &scales, &|row| f32_first_quantized(
             scales.as_slice(),
-            query.codes(),
-            codes
+            codes,
+            row
         )),
+        Err("fine: score bits".to_owned()),
         "the oracle check rejects f32-first multiplication"
     );
-    let weighted = order_of(&|codes| reference_quantized(scales.as_slice(), query.codes(), codes));
-    let raw = order_of(&|codes| unweighted(query.codes(), codes));
+    let weighted = order_of(&|row| reference_quantized(scales.as_slice(), codes, row));
+    let raw = order_of(&|row| unweighted(codes, row));
     let position = |order: &[(u64, String)], id: &str| order.iter().position(|(_, row)| row == id);
     assert!(position(&weighted, "coarse") < position(&weighted, "fine"));
     assert!(
         position(&raw, "coarse") > position(&raw, "fine"),
         "the unweighted dot reverses them"
-    );
-    let mut bits_differ = false;
-    for (_, codes) in &rows {
-        let f32_first = f32_first_quantized(scales.as_slice(), query.codes(), codes);
-        bits_differ |= f32_first.to_bits() != query.score(codes).to_bits();
-    }
-    assert!(
-        bits_differ,
-        "f32-first multiplication changes a score's bits"
     );
 }
 

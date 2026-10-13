@@ -545,7 +545,7 @@ fn the_pool_the_limits_give_is_checked_before_a_view_is_installed() {
     ));
 }
 
-/// A malformed alpha or an over-cap pool refuses installation, and a producer carrying it degrades the lane before any scan window, original read, or ledger charge.
+/// A malformed alpha or an over-cap pool refuses installation, and a producer carrying it returns the `capacity` reason from its first check, before `rank_compressed` reserves scratch or opens a scan window.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_capacity_installs_nothing_and_ranks_without_a_scan() {
     let fixture = Fixture::build().await;
@@ -553,7 +553,13 @@ async fn a_refused_capacity_installs_nothing_and_ranks_without_a_scan() {
     let handler = Handler::new();
     handler.set_query_route_limits(Some(with_dense(2))).unwrap();
     let (_token, budget) = request_budget(10_000);
-    for alpha in [f64::NAN, 0.5, 64.0] {
+    // With `k = 2` and a cap of 64, an alpha of 64 asks for a pool of 128.
+    let cases = [
+        (f64::NAN, "alpha"),
+        (0.5, "alpha"),
+        (64.0, "over cap"),
+    ];
+    for (alpha, class) in cases {
         let mut limits = compressed_limits();
         limits.candidates.alpha = alpha;
         let events = Arc::new(Mutex::new(0_usize));
@@ -566,10 +572,15 @@ async fn a_refused_capacity_installs_nothing_and_ranks_without_a_scan() {
         )
         .with_observer_for_test(Arc::new(move |_| *counted.lock().unwrap() += 1));
         let refused = handler.set_dense_vectors(Some(vectors.clone()));
-        assert!(
-            matches!(refused, Err(LimitsRefusal::DenseCapacity(_))),
-            "alpha {alpha}: {refused:?}"
-        );
+        let classified = match refused {
+            Err(LimitsRefusal::DenseCapacity(CapacityRefusal::Alpha { .. })) => "alpha",
+            Err(LimitsRefusal::DenseCapacity(CapacityRefusal::OverCap {
+                candidates: 128,
+                cap: 64,
+            })) => "over cap",
+            other => panic!("alpha {alpha}: {other:?}"),
+        };
+        assert_eq!(classified, class, "alpha {alpha}");
         let outcome = run(&fixture, 2, vectors, &budget).unwrap();
         assert_eq!(
             outcome.statuses[2],
@@ -577,9 +588,9 @@ async fn a_refused_capacity_installs_nothing_and_ranks_without_a_scan() {
             "alpha {alpha}"
         );
         assert_eq!(*events.lock().unwrap(), 0, "alpha {alpha}: no scan window");
-        assert_eq!(composition.charged(ResourceClass::Scratch), 0);
-        assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
     }
+    // Route limits without a dense lane install only while no vectors are installed, so the refusals left the handler empty.
+    handler.set_query_route_limits(Some(limits())).unwrap();
     fixture.daemon.shutdown().await;
 }
 

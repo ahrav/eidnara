@@ -90,5 +90,9 @@ fn the_pool_a_capacity_sizes_is_one_allocation_proportional_to_r() {
     let small = pool_bytes(4, 1.0);
     assert!(small > 0);
     assert_eq!(pool_bytes(64, 4.0), small * 64, "R = 256 is 64 times R = 4");
-    assert_eq!(pool_bytes(10, 1.1), small * 3, "R = ceil(1.1 * 10) = 12");
+    assert_eq!(
+        pool_bytes(10, 1.1),
+        small * 3,
+        "the f64 nearest 1.1 exceeds 1.1, so the exact ceiling of its product with 10 is 12"
+    );
 }

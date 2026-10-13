@@ -225,10 +225,13 @@ calls for each refusal class, a zero `K`, and an accepted capacity, and
 is one allocation scaling with `R`. At the route,
 `crates/daemon/tests/query_route_compressed.rs`
 `a_refused_capacity_installs_nothing_and_ranks_without_a_scan` refuses
-installation for a NaN alpha, an alpha below one, and an over-cap pool, and a
-producer carrying each degrades the lane as `capacity` with no scan window,
-original read, or ledger charge. A zero `K` cannot reach the route, whose
-`DenseLimits.k` is a `NonZeroUsize`.
+installation for a NaN alpha, an alpha below one, and an over-cap pool with
+their refusal classes, and a producer carrying each degrades the lane as
+`capacity` with no observed scan window. Only the producer's first check
+(`crates/daemon/src/query_route.rs:704-707`) returns `capacity`, ahead of
+`rank_compressed`'s reservations; the ledger census after the request cannot
+show a reservation that was released. A zero `K` cannot reach the route,
+whose `DenseLimits.k` is a `NonZeroUsize`.
 Guarantee: `R = ceil(alpha * K)` is computed exactly; alpha that is not finite
 or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.
