@@ -37,8 +37,8 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
   has a byte field.
 - `:359` `retrieve` is the lane entry; the daemon's `lexical_read`
-  (`crates/daemon/src/query_route.rs:1076`) calls `scan` (`:1099`) and
-  `admit_lexical` (`query_route.rs:1243`) calls `admit` (`:1259`).
+  (`crates/daemon/src/query_route.rs:1088`) calls `scan` (`:1111`) and
+  `admit_lexical` (`query_route.rs:1255`) calls `admit` (`:1271`).
 
 Schema, `crates/retrieval/baseline.sql`:
 
@@ -110,7 +110,7 @@ before the fault and an equality assertion on the full result afterward.
 ### Q: Does the route read payload bytes anywhere before packing?
 
 - Sources examined: `crates/daemon/src/query_route.rs:1`, `:69` through
-  `:71`, `:1707` through `:1721`; `crates/retrieval/src/claims.rs:441`
+  `:71`, `:1724` through `:1738`; `crates/retrieval/src/claims.rs:441`
   `read_selected_claims`; `crates/kernel/src/claim_facts.rs:43` and `:427`.
 - Findings: the route's module doc states no payload read. Claim validation
   passes `max_causal_payload_bytes` of 1 MiB into `read_selected_claims`,

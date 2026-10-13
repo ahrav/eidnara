@@ -379,8 +379,16 @@ pub(crate) fn hash_copy_from(
     hasher: sha2::Sha256,
     total: u64,
 ) -> io::Result<(u64, String)> {
-    let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
+    let mut buffer = vec![0u8; hash_buffer_len(cap, total)];
     hash_copy_with(source, destination, cap, hasher, total, &mut buffer)
+}
+
+/// The extra byte lets the copy detect data beyond `cap` when the remaining allowance is smaller than [`HASH_BUFFER_BYTES`].
+fn hash_buffer_len(cap: u64, total: u64) -> usize {
+    let remaining = cap.saturating_sub(total).saturating_add(1);
+    usize::try_from(remaining).map_or(HASH_BUFFER_BYTES, |remaining| {
+        remaining.min(HASH_BUFFER_BYTES)
+    })
 }
 
 /// Chunk size, and the number of chunks in flight, for [`hash_pipelined`].
@@ -510,5 +518,72 @@ mod tests {
         let (reader, _writer) = rustix::pipe::pipe().expect("pipe");
         files.insert(CONCURRENT_SYNCS + 1, reader);
         assert_eq!(fsync_all(&files), Err(rustix::io::Errno::INVAL));
+    }
+
+    #[test]
+    fn hash_copy_sizes_its_buffer_to_the_cap_and_still_detects_a_source_past_it() {
+        assert_eq!(hash_buffer_len(0, 0), 1);
+        assert_eq!(hash_buffer_len(5, 0), 6);
+        assert_eq!(hash_buffer_len(5, 2), 4);
+        assert_eq!(hash_buffer_len(5, 9), 1);
+        assert_eq!(hash_buffer_len(u64::MAX, 0), HASH_BUFFER_BYTES);
+        assert_eq!(
+            hash_buffer_len(HASH_BUFFER_BYTES as u64 * 4, 0),
+            HASH_BUFFER_BYTES
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dir_fd = openat(
+            rustix::fs::CWD,
+            dir.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open dir");
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(HASH_BUFFER_BYTES + 7).collect();
+        write_new_file_unsynced(&dir_fd, "large", &bytes, 0o600).expect("write large");
+        write_new_file_unsynced(&dir_fd, "small", b"bytes", 0o600).expect("write small");
+        write_new_file_unsynced(&dir_fd, "empty", b"", 0o600).expect("write empty");
+        let open = |name: &str| {
+            openat(
+                &dir_fd,
+                name,
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("open file")
+        };
+        let expected = |bytes: &[u8]| hex(&sha2::Sha256::digest(bytes));
+
+        let (total, sha256) = hash_copy(&open("small"), None, 5).expect("small within cap");
+        assert_eq!((total, sha256), (5, expected(b"bytes")));
+        let (total, sha256) = hash_copy(&open("empty"), None, 0).expect("empty within cap");
+        assert_eq!((total, sha256), (0, expected(b"")));
+        let (total, sha256) =
+            hash_copy(&open("large"), None, bytes.len() as u64).expect("large within cap");
+        assert_eq!((total, sha256), (bytes.len() as u64, expected(&bytes)));
+
+        for (name, cap) in [
+            ("small", 4),
+            ("empty", 0),
+            ("large", HASH_BUFFER_BYTES as u64),
+        ] {
+            let fd = open(name);
+            if name == "empty" {
+                write_all_fd(
+                    &openat(
+                        &dir_fd,
+                        name,
+                        OFlags::WRONLY | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .expect("reopen for write"),
+                    b"!",
+                )
+                .expect("grow empty");
+            }
+            let error = hash_copy(&fd, None, cap).expect_err("source past its cap");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+        }
     }
 }

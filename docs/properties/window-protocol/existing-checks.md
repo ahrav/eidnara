@@ -19,7 +19,11 @@ each name was found again at `f2442b2f`. A test deleted by #833 is cited at
 `crates/daemon/src/transform.rs`, and shifts its lines after 1694 (+2 through
 1958, +3 from 1960 through 5215, +8 through 5250, +33 through 14951, +146
 after; line 1959 becomes 1961-1962); every `transform.rs` row below that
-names no other tree was found again at `f0501b3d` and cites that tree.
+names no other tree was found again at `f0501b3d` and cites that tree. #989
+renamed `crates/daemon/src/transform/revision_3.rs` to
+`crates/daemon/src/transform/window_admission.rs`; every row citing that file
+is at the #989 head, with the #881 or #833 test name kept where #989 or an
+earlier PR renamed the test.
 
 ## Daemon and store
 
@@ -87,30 +91,30 @@ names no other tree was found again at `f0501b3d` and cites that tree.
 | `state_sync_refuses_duplicate_sequences_in_one_batch` | `crates/memory-store/src/lib.rs:22726` | WP-P07 | #873 | unaudited |
 | `every_pass_read_is_bounded_independent_of_history_size` | `crates/daemon/src/transform_read_bound.rs:627` (at `3ebfc3b9`) | WP-P07, WP-P15 | #874 (at `704568ec`: `:537`); bytes bound `3ebfc3b9` | unaudited |
 | Statement-work ledger tests (four, `crates/storage`) | `crates/storage/src/lib.rs` (hook at `:306`) | WP-P07 | #873 (`test -p storage` 107); `statement_work_counts_the_bytes_of_every_returned_value` (`:6401`, `3ebfc3b9`) | unaudited; #873's names not listed in the description |
-| `a_missing_or_non_3_revision_is_refused_with_expected_and_received_and_no_state_change` | `crates/daemon/src/transform/window_admission.rs:158` | WP-P24 | #881 | unaudited |
-| `boundary_presence_head_sequence_and_duplicates_are_invalid_params` | `crates/daemon/src/transform/window_admission.rs:193` | WP-P01, WP-P24 | #881 | unaudited |
-| `a_boundary_that_does_not_decode_is_bad_request` | `crates/daemon/src/transform/window_admission.rs:231` | WP-P24 | #881 | unaudited |
-| `paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request` | `crates/daemon/src/transform/window_admission.rs:287` | WP-P01, WP-P24 | #881 | unaudited |
-| `each_resolution_outcome_runs_through_the_handler_with_its_effects` | `crates/daemon/src/transform/window_admission.rs:323` | WP-P02, WP-P03, WP-E03 (pass-through arm) | #881 | unaudited |
-| `a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment` | `crates/daemon/src/transform/window_admission.rs:824` | WP-E03 (context; not the #833 reset) | #881 | unaudited |
-| `a_cas_conflict_after_the_unanchored_revert_removal_converges` | `crates/daemon/src/transform/window_admission.rs:844` | WP-E03 (context) | #881 | unaudited |
-| `a_panic_plus_reopen_after_the_unanchored_revert_removal_converges` | `crates/daemon/src/transform/window_admission.rs:859` | WP-E03 (context) | #881 | unaudited |
-| `a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary` | `crates/daemon/src/transform/window_admission.rs:876` | WP-P02 | #881 | unaudited |
-| `a_reset_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot` | `crates/daemon/src/transform/window_admission.rs:917` | WP-P02 | #881 | unaudited |
-| `stale_slice_input_keeps_address_the_submitted_native_window` | `crates/daemon/src/transform/window_admission.rs:988` | WP-P05, WP-P19, WP-E05 | #881 | unaudited |
-| `a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request` | `crates/daemon/src/transform/window_admission.rs:1147` | WP-E02, WP-E12 | #881 | unaudited |
-| `a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass` | `crates/daemon/src/transform/window_admission.rs:1163` | WP-E02, WP-E12 | #881 | unaudited |
+| `a_body_carrying_v_or_tail_delta_is_served_like_the_body_without_them` | `crates/daemon/src/transform/window_admission.rs:156` | WP-P24 | #989 (replaces #881's `a_missing_or_non_3_revision_is_refused_with_expected_and_received_and_no_state_change`, deleted with the version field) | unaudited |
+| `boundary_presence_head_sequence_and_duplicates_are_invalid_params` | `crates/daemon/src/transform/window_admission.rs:183` | WP-P01, WP-P24 | #881 | unaudited |
+| `a_boundary_that_does_not_decode_is_bad_request` | `crates/daemon/src/transform/window_admission.rs:222` | WP-P24 | #881 | unaudited |
+| `paged_boundary_is_a_final_page_scalar_checked_on_the_assembled_request` | `crates/daemon/src/transform/window_admission.rs:281` | WP-P01, WP-P24 | #881 as `paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request`; renamed by #989 | unaudited |
+| `each_resolution_outcome_runs_through_the_handler_with_its_effects` | `crates/daemon/src/transform/window_admission.rs:316` | WP-P02, WP-P03, WP-E03 (pass-through arm) | #881 | unaudited |
+| `a_revert_through_no_anchor_outside_the_pending_rewrite_arm_removes_every_segment` | `crates/daemon/src/transform/window_admission.rs:857` | WP-E03 (context; not the #833 reset) | #881 | unaudited |
+| `a_cas_conflict_after_the_unanchored_revert_removal_converges` | `crates/daemon/src/transform/window_admission.rs:877` | WP-E03 (context) | #881 | unaudited |
+| `a_panic_plus_reopen_after_the_unanchored_revert_removal_converges` | `crates/daemon/src/transform/window_admission.rs:892` | WP-E03 (context) | #881 | unaudited |
+| `a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary` | `crates/daemon/src/transform/window_admission.rs:909` | WP-P02 | #881 | unaudited |
+| `a_reset_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot` | `crates/daemon/src/transform/window_admission.rs:950` | WP-P02 | #881 | unaudited |
+| `stale_slice_input_keeps_address_the_submitted_native_window` | `crates/daemon/src/transform/window_admission.rs:1020` | WP-P05, WP-P19, WP-E05 | #881 | unaudited |
+| `a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request` | `crates/daemon/src/transform/window_admission.rs:1178` | WP-E02, WP-E12 | #881 | unaudited |
+| `a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass` | `crates/daemon/src/transform/window_admission.rs:1195` | WP-E02, WP-E12 | #881 | unaudited |
 | `a_pending_reconcile_renders_the_newest_row_the_truncate_left` | `crates/daemon/src/window_coverage/tests.rs:254` | WP-P02, WP-E02 | #881 | unaudited |
 | `a_null_anchor_hit_above_the_rendered_row_is_not_cut_at` | `crates/daemon/src/window_coverage/tests.rs:580` | WP-P02 | #881 | unaudited |
 | `a_legacy_meta_row_with_the_retired_divergence_counter_loads` | `crates/memory-store/src/lib.rs:25989` | WP-P25 (decode compatibility only) | #881 | unaudited |
 | `transform_replays_the_recorded_goldens` | `crates/daemon/src/transform/recorded_goldens.rs:394` (fixture `crates/daemon/tests/fixtures/transform-recorded-goldens.json`, 9 traces) | WP-P02, WP-P03, WP-P05 (acceptance differential; after a revert before the first anchor it compares against a fresh session's step instead of the revision 2 golden, and after a pass revision 2 refused as covered drift the golden has no output to compare until such a reset, `recorded_goldens.rs:385-392`; it is not strict equivalence with the recording daemon) | #881 | unaudited |
-| `a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_first_pass` | `crates/daemon/src/transform/window_admission.rs:447` | WP-E03 (D10 reset contrast), WP-P03 | #833 | unaudited |
-| `a_cas_conflict_on_the_no_survivor_reset_resolves_again_and_resets_once` | `crates/daemon/src/transform/window_admission.rs:498` | WP-E03 | #833 | unaudited |
-| `a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window` | `crates/daemon/src/transform/window_admission.rs:567` | WP-P06 (revert prunes only at its HARD), WP-E02 | #833 | unaudited |
-| `a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict` | `crates/daemon/src/transform/window_admission.rs:610` | WP-E03 (retry bound) | #833 | unaudited |
-| `a_committed_reset_leaves_the_whole_retry_budget_to_the_pass` | `crates/daemon/src/transform/window_admission.rs:635` | WP-E03 (retry bound) | #833 | unaudited |
-| `a_second_no_survivor_resolution_in_one_pass_fails_with_a_cas_conflict` | `crates/daemon/src/transform/window_admission.rs:657` | WP-E03 (one reset per pass) | #833 | unaudited |
-| `a_same_pass_reset_reuses_no_previous_output` | `crates/daemon/src/transform/window_admission.rs:701` | WP-E12, WP-E05 | #833 | unaudited |
+| `a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_first_pass` | `crates/daemon/src/transform/window_admission.rs:444` | WP-E03 (D10 reset contrast), WP-P03 | #833 | unaudited |
+| `a_cas_conflict_on_the_no_survivor_reset_resolves_again_and_resets_once` | `crates/daemon/src/transform/window_admission.rs:495` | WP-E03 | #833 | unaudited |
+| `a_revert_under_pressure_defers_then_folds_and_keeps_the_identity_history` | `crates/daemon/src/transform/window_admission.rs:565` | WP-P06 (revert prunes only at its HARD), WP-E02 | #833 as `a_revert_under_pressure_defers_then_folds_and_prunes_to_the_window` | unaudited |
+| `a_no_survivor_reset_that_always_loses_its_cas_surfaces_the_conflict` | `crates/daemon/src/transform/window_admission.rs:643` | WP-E03 (retry bound) | #833 | unaudited |
+| `a_committed_reset_leaves_the_whole_retry_budget_to_the_pass` | `crates/daemon/src/transform/window_admission.rs:668` | WP-E03 (retry bound) | #833 | unaudited |
+| `a_second_no_survivor_resolution_in_one_pass_fails_with_a_cas_conflict` | `crates/daemon/src/transform/window_admission.rs:690` | WP-E03 (one reset per pass) | #833 | unaudited |
+| `a_same_pass_reset_reuses_no_previous_output` | `crates/daemon/src/transform/window_admission.rs:734` | WP-E12, WP-E05 | #833 | unaudited |
 | `a_prune_that_commits_first_fences_the_publication_out` | `crates/daemon/src/transform.rs:19854` | WP-P06, WP-P16, WP-E04 | #833 | unaudited |
 | `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run` | `crates/daemon/src/transform.rs:19887` | WP-P06, WP-P16 | #833 | unaudited |
 | `serialized_output_cache_take_under_a_new_epoch_returns_nothing` | `crates/daemon/src/transform.rs:28109` | WP-E12 | #833 | unaudited |

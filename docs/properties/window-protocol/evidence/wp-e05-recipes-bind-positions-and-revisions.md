@@ -43,7 +43,7 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   + i; it ran in the #883 (head `d7712d75`) and #884 (head `f8734c12`) `bun
   run check:repo` gates. #881's
   `stale_slice_input_keeps_address_the_submitted_native_window`
-  (`crates/daemon/src/transform/window_admission.rs:988`) asserts every input keep
+  (`crates/daemon/src/transform/window_admission.rs:1020`) asserts every input keep
   starts inside the submitted window after a stale cut.
 
 Gate results of the runs cited here, as recorded in the PR descriptions:

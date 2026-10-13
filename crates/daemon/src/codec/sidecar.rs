@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::served_json::CanonicalScratch;
+
 use crate::wire::{
     BlockKind, IngressMessage, MediaBlock, OpaqueBlock, OutputKind, ProviderExtras,
     ResultBlockKind, WireBlock,
@@ -95,6 +97,11 @@ pub struct HarnessMessageMeta {
     pub stable_key: Option<String>,
     #[serde(default)]
     pub blocks: Vec<BlockMeta>,
+    /// Indices of tool parts whose call id an earlier part already emitted and whose status
+    /// carries only the call. The encoder drops these parts, so each served call id names one
+    /// tool part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_native_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +149,12 @@ impl MatchedBlockMetas<'_> {
     pub(crate) fn retains_every_decoded_part(&self) -> bool {
         self.decoded_native_indices
             .is_subset(&self.retained_native_indices)
+    }
+
+    /// Adds `native_indices` to the decoded set that [`Self::remove_unretained_native_parts`]
+    /// and [`Self::retains_every_decoded_part`] check.
+    pub(crate) fn fold_native_parts(&mut self, native_indices: &[usize]) {
+        self.decoded_native_indices.extend(native_indices);
     }
 
     /// Removes native parts whose decoded blocks were removed.
@@ -234,6 +247,15 @@ impl AlignmentScore {
 /// digest is the hex SHA-256 of the block's canonical bytes; a block that cannot
 /// serialize hashes the JSON text `null`.
 pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
+    decoded_block_fingerprint_in(&mut CanonicalScratch::default(), block)
+}
+
+/// [`decoded_block_fingerprint`] encoded through `scratch`, so a run of blocks reuses one set of
+/// serialization buffers.
+pub(crate) fn decoded_block_fingerprint_in(
+    scratch: &mut CanonicalScratch,
+    block: &WireBlock,
+) -> String {
     #[cfg(test)]
     tests::count_content_read();
     let canonical = if block.provider_extras.contains_key(BLOCK_IDENTITY_NAMESPACE) {
@@ -243,10 +265,11 @@ pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
     } else {
         Cow::Borrowed(block)
     };
-    let bytes = crate::served_json::canonical_block_bytes(&canonical)
-        .map(String::into_bytes)
-        .unwrap_or_else(|_| serde_json::to_vec(&Value::Null).unwrap_or_default());
-    let digest = Sha256::digest(bytes);
+    let digest = match crate::served_json::canonical_block_in(scratch, &canonical) {
+        Ok(text) => Sha256::digest(text),
+        Err(_) => Sha256::digest(b"null"),
+    };
+    scratch.release_oversized();
     hex_prefix(&digest, digest.len())
 }
 
@@ -890,6 +913,47 @@ mod tests {
                     "{block:?} vs {other:?}"
                 );
             }
+        }
+    }
+
+    /// One scratch carried across a decode's blocks fingerprints each block as the SHA-256 of the
+    /// canonical producer's bytes, whatever the blocks before it held: reordered and already ordered
+    /// documents, a stamped block, and a block larger than the scratch keeps.
+    #[test]
+    fn a_reused_scratch_fingerprints_the_canonical_producer_bytes() {
+        let call = |input: Value| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                input,
+                provider_executed: false,
+            })
+        };
+        let opaque = WireBlock::bare(BlockKind::Opaque(OpaqueBlock {
+            source: serde_json::json!({ "type": "harness", "harness": "opencode" }),
+            kind: "step-finish".into(),
+            raw: serde_json::json!({ "type": "step-finish", "tokens": { "input": 2, "cache": { "read": 1 } } }),
+            arc: None,
+        }));
+        let mut stamped = call(serde_json::json!({ "z": [1, { "y": 2, "x": 3 }], "a": "\n" }));
+        stamp_block_identity(&mut stamped, 1, 2, "fingerprint");
+        let blocks = [
+            text_block("small"),
+            call(serde_json::json!({ "z": 1, "a": { "c": 2, "b": 3 } })),
+            opaque,
+            stamped,
+            text_block(&"x".repeat(3 << 20)),
+            text_block("small again"),
+            call(serde_json::json!({})),
+        ];
+        let mut scratch = CanonicalScratch::default();
+        for block in &blocks {
+            let mut unstamped = block.clone();
+            unstamped.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
+            let bytes = crate::served_json::canonical_block_bytes(&unstamped).unwrap();
+            let expected = hex_prefix(&Sha256::digest(bytes), 32);
+            assert_eq!(decoded_block_fingerprint_in(&mut scratch, block), expected);
+            assert_eq!(decoded_block_fingerprint(block), expected);
         }
     }
 

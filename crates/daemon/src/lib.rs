@@ -64,6 +64,7 @@ pub mod memory_tool;
 pub mod message_cleanup;
 pub mod metered_decode;
 pub mod packing;
+mod parallel_map;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;
@@ -3435,10 +3436,20 @@ struct PassStart {
 /// is the publication floor read after the first transform and after each rerun that a
 /// history_summarizer step follows, which the settle's final check compares against; the trigger
 /// timings accumulate across the history_summarizer preparations.
+/// What the summarizer step reads from a transformed pass.
+#[derive(Clone, Copy)]
+struct PassSummarizerInputs<'a> {
+    served: &'a TransformRequest,
+    projection: &'a crate::wire::FlatProjection,
+    eidnara_folds: bool,
+}
+
 struct TransformedPass {
     result: TransformWithProjection,
     emergency_pre_floor: Option<u64>,
     trigger_timings: HistorySummarizerTriggerTimings,
+    /// The response already carries its native messages, encoded beside the summarizer step.
+    native_attached: bool,
 }
 
 /// The handler-side timing brackets taken before the pass's store work begins. `clock` opens
@@ -9043,8 +9054,43 @@ impl HandlerCore {
             PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics::disabled(
                 "subagent_session",
             ))
-        } else {
+        } else if emergency {
             self.prepare_history_summarizer(&env, &mut pass)
+        } else {
+            // A pass that cannot rerun keeps the response it built, so its native encode, which
+            // reads only that response and the served request, runs beside the summarizer step.
+            let TransformedPass {
+                result,
+                trigger_timings,
+                native_attached,
+                ..
+            } = &mut pass;
+            let served = result.served_request.as_deref().unwrap_or(&env.parsed);
+            let summarizer = PassSummarizerInputs {
+                served,
+                projection: &result.projection,
+                eidnara_folds: result.fold_authority.eidnara_folds,
+            };
+            let response = &mut result.response;
+            let reasoning_watermark = result.reasoning_watermark;
+            let tag_numbers = &result.tag_numbers;
+            let mutation_exempt_mid = result.mutation_exempt_mid.as_deref();
+            let lineage_anchor_mid = result.lineage_anchor_mid.as_deref();
+            let (action, ()) = parallel_map::join(
+                || self.prepare_history_summarizer_with(&env, summarizer, trigger_timings),
+                || {
+                    attach_native_messages_with_tags(
+                        response,
+                        served,
+                        reasoning_watermark,
+                        tag_numbers,
+                        mutation_exempt_mid,
+                        lineage_anchor_mid,
+                    );
+                },
+            );
+            *native_attached = true;
+            action
         };
         let diagnostics = match action {
             PreparedHistorySummarizerAction::Complete(diagnostics) => diagnostics,
@@ -9434,6 +9480,7 @@ impl HandlerCore {
         pass.result = self
             .run_transform(env, PassState::Reload, derived.as_ref())
             .map_err(|error| Self::reject_transform(env, error))?;
+        pass.native_attached = false;
         drop(derived);
         // The first run decided this pass's hint for its tail and persisted
         // it; the rerun finds that decision already made. The pass's decision
@@ -9546,6 +9593,7 @@ impl HandlerCore {
             result,
             emergency_pre_floor,
             trigger_timings: HistorySummarizerTriggerTimings::default(),
+            native_attached: false,
         })
     }
 
@@ -9554,22 +9602,36 @@ impl HandlerCore {
         env: &PassEnv,
         pass: &mut TransformedPass,
     ) -> PreparedHistorySummarizerAction {
+        let summarizer = PassSummarizerInputs {
+            served: pass.result.served_request.as_deref().unwrap_or(&env.parsed),
+            projection: &pass.result.projection,
+            eidnara_folds: pass.result.fold_authority.eidnara_folds,
+        };
+        self.prepare_history_summarizer_with(env, summarizer, &mut pass.trigger_timings)
+    }
+
+    fn prepare_history_summarizer_with(
+        &self,
+        env: &PassEnv,
+        summarizer: PassSummarizerInputs<'_>,
+        timings: &mut HistorySummarizerTriggerTimings,
+    ) -> PreparedHistorySummarizerAction {
         // Under native folds the harness folds; no fold work runs and no no-fire is recorded.
-        if !pass.result.fold_authority.eidnara_folds {
+        if !summarizer.eidnara_folds {
             return PreparedHistorySummarizerAction::Complete(
                 HistorySummarizerDiagnostics::disabled(NATIVE_AUTHORITY),
             );
         }
         self.prepare_history_summarizer_fire(
             Arc::clone(&env.store),
-            pass.result.served_request.as_deref().unwrap_or(&env.parsed),
+            summarizer.served,
             &env.binding,
             &env.project_path,
-            &pass.result.projection,
+            summarizer.projection,
             HistorySummarizerPrepareContext {
                 now: env.pass_now,
                 snapshot_generation: env.snapshot_generation,
-                timings: &mut pass.trigger_timings,
+                timings,
                 project_memory: env.project_memory.as_ref(),
             },
         )
@@ -9606,6 +9668,7 @@ impl HandlerCore {
         let TransformedPass {
             mut result,
             trigger_timings,
+            native_attached,
             ..
         } = pass;
         // Everything after the pass reads the window it served.
@@ -9642,14 +9705,16 @@ impl HandlerCore {
             let previous = retained.and_then(|entry| {
                 entry.into_previous(revert_epoch, parsed.previous_output_revision.as_ref())
             });
-            attach_native_messages_with_tags(
-                &mut response,
-                parsed,
-                reasoning_watermark,
-                &tag_numbers,
-                mutation_exempt_mid.as_deref(),
-                lineage_anchor_mid.as_deref(),
-            );
+            if !native_attached {
+                attach_native_messages_with_tags(
+                    &mut response,
+                    parsed,
+                    reasoning_watermark,
+                    &tag_numbers,
+                    mutation_exempt_mid.as_deref(),
+                    lineage_anchor_mid.as_deref(),
+                );
+            }
             let values = response.native_messages.take().unwrap_or_default();
             if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
                 outcome.attached = native_carries_user_hint(

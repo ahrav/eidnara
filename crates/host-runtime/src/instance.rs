@@ -57,10 +57,6 @@ pub enum InstanceError {
     AlreadyRunning,
     /// The supplied payload-manifest digest must contain 64 lowercase hexadecimal characters.
     InvalidPayloadDigest,
-    /// Unknown-schema lifecycle-state bytes are never interpreted, migrated, overwritten, or removed.
-    UnsupportedStateSchema {
-        path: PathBuf,
-    },
     /// `NamespaceDrift` requires the holder to abort its named-namespace result when a retained descriptor no longer matches the identity resolved by its name.
     NamespaceDrift {
         path: PathBuf,
@@ -92,11 +88,6 @@ impl fmt::Display for InstanceError {
                 f,
                 "payload-manifest digest must be {} lowercase hex characters",
                 crate::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN
-            ),
-            Self::UnsupportedStateSchema { path } => write!(
-                f,
-                "refusing to touch an unknown lifecycle state schema at {}",
-                path.display()
             ),
             Self::NamespaceDrift { path } => write!(
                 f,
@@ -252,12 +243,6 @@ impl InstanceGuard {
         let dir_path = runtime_dir_path(data_dir_override)?;
         let dir = secure_runtime_dir(&dir_path)?;
         lock_instance(&dir, &dir_path)?;
-        // An unknown lifecycle schema at the record name blocks startup to prevent overwrite.
-        if crate::lifecycle::quarantined_record_present(&dir, &dir_path)? {
-            return Err(InstanceError::UnsupportedStateSchema {
-                path: dir_path.join(crate::lifecycle::LIFECYCLE_RECORD_NAME),
-            });
-        }
         // Startup removes stale predecessor files left by incarnations that crashed before publication.
         sweep_stale_temps(&dir, &dir_path);
 

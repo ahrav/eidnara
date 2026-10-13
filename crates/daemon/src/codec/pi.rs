@@ -260,6 +260,7 @@ fn decode_rows(rows: &[Arc<Value>], stamp: bool) -> Result<DecodedHarnessMessage
                 raw: Arc::clone(row),
                 stable_key: None,
                 blocks: block_metas,
+                folded_native_indices: Vec::new(),
             },
         );
     }

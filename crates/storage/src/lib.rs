@@ -398,9 +398,9 @@ mod sqlite_backend {
         }
 
         /// `with_conn` permits read-only queries and connection-local configuration.
-        /// `PRAGMA query_only` makes database writes fail with `SQLITE_READONLY`,
-        /// which keeps every durable write on the fenced path
-        /// ([`Self::with_conn_fenced`]). The callback receives a [`GuardedConn`] rather
+        /// The callback's [`GuardedConn`] refuses every statement SQLite classifies as a
+        /// write with `SQLITE_READONLY` before it runs, which keeps every durable write on the
+        /// fenced path ([`Self::with_conn_fenced`]). The callback receives a [`GuardedConn`] rather
         /// than the connection, so it cannot replace the guard, set pragmas, run
         /// statement batches, or control transactions. Statements that reach the database
         /// are additionally checked: pragma writes, transaction control, savepoints,
@@ -470,9 +470,9 @@ mod sqlite_backend {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             // `scope` is declared after `tx` so its mode leaves before `tx` issues `ROLLBACK` during unwinding.
-            let scope = CallbackScope::read_only(&tx, &self.gate)?;
+            let scope = CallbackScope::install(&tx, &self.gate)?;
             let interrupt = InterruptScope::install(&tx, stop)?;
-            let out = f(&GuardedConn::new(&tx, &self.gate)).map_err(store_error);
+            let out = f(&GuardedConn::reading(&tx, &self.gate)).map_err(store_error);
             // The scope release and the rollback that finishes the read must not be interrupted.
             let cleared = interrupt.clear();
             let restored = scope.release();
@@ -622,11 +622,11 @@ mod sqlite_backend {
             if let Err(error) = precheck_fence(&tx, self.epoch) {
                 return Ok((out, HandoffOutcome::NotRun(error)));
             }
-            let scope = match CallbackScope::read_only(&tx, &self.gate) {
+            let scope = match CallbackScope::install(&tx, &self.gate) {
                 Ok(scope) => scope,
                 Err(error) => return Ok((out, HandoffOutcome::NotRun(error))),
             };
-            let handed = handoff(&GuardedConn::new(&tx, &self.gate), &out);
+            let handed = handoff(&GuardedConn::reading(&tx, &self.gate), &out);
             let release = scope.release();
             // Nothing was written under the read-only scope; the rollback only drops the lock.
             let release = with_cleanup_failure(release, tx.rollback().map_err(backend_error));
@@ -660,7 +660,7 @@ mod sqlite_backend {
 
             claim_fence(&tx, self.epoch)?;
 
-            let scope = CallbackScope::writable(&tx, &self.gate)?;
+            let scope = CallbackScope::install(&tx, &self.gate)?;
             let out = f(&GuardedConn::new(&tx, &self.gate));
             // The callback error outranks a release error: losing the reason the
             // write failed is worse than losing the scope-release failure.
@@ -875,6 +875,8 @@ mod sqlite_backend {
     /// control, pragma writes, statement batches, and transaction control.
     pub struct GuardedConn<'a> {
         conn: &'a Connection,
+        /// A read callback's handle refuses every statement that would write a database.
+        read_only: bool,
         #[cfg(any(test, feature = "test-support"))]
         gate: &'a AuthorityGate,
     }
@@ -1145,12 +1147,11 @@ mod sqlite_backend {
                 .create_scalar_function(name, argument_count, flags, function)
         }
 
-        /// Statements cached inside a fenced callback survive to the next fenced callback,
-        /// because a mode switch expires nothing. A read callback's `query_only` toggle is a
-        /// flag pragma, which expires every statement on the connection, and a foreign
-        /// main-schema change stales each cached statement's schema cookie so it is
-        /// re-prepared on its next run. Size the cache for the distinct statements of the
-        /// longest run of fenced callbacks.
+        /// Statements cached inside a guarded callback survive to the next guarded callback,
+        /// read or fenced, because a mode switch expires nothing; a foreign main-schema
+        /// change stales each cached statement's schema cookie so it is re-prepared on its
+        /// next run. Size the cache for the distinct statements of the longest run of guarded
+        /// callbacks.
         ///
         /// Only a guarded callback may populate the cache: [`MaintenanceConn`] exposes no
         /// cached preparation, the store's own statements are uncached, and the cache is
@@ -1162,13 +1163,45 @@ mod sqlite_backend {
 
     impl<'a> GuardedConn<'a> {
         fn new(conn: &'a Connection, gate: &'a AuthorityGate) -> Self {
+            Self::with_access(conn, gate, false)
+        }
+
+        /// The handle of a read callback: every statement it prepares, runs, or takes from the
+        /// cache must be one SQLite classifies as read-only.
+        fn reading(conn: &'a Connection, gate: &'a AuthorityGate) -> Self {
+            Self::with_access(conn, gate, true)
+        }
+
+        fn with_access(conn: &'a Connection, gate: &'a AuthorityGate, read_only: bool) -> Self {
             #[cfg(not(any(test, feature = "test-support")))]
             let _ = gate;
             Self {
                 conn,
+                read_only,
                 #[cfg(any(test, feature = "test-support"))]
                 gate,
             }
+        }
+
+        /// `sqlite3_stmt_readonly` is false for any statement that opens a write transaction
+        /// on the main, temp, or an attached database, so a read callback's write is refused
+        /// with `SQLITE_READONLY` before its first step. SQLite also marks `PRAGMA
+        /// journal_mode`, `PRAGMA wal_checkpoint`, and `VACUUM` as not read-only although
+        /// they write no row; the authorizer governs every pragma and `VACUUM` cannot run
+        /// inside the callback's transaction, so statements led by those keywords keep the
+        /// outcome they have on a read-only connection.
+        fn require_read_only(
+            &self,
+            sql: &str,
+            statement: &rusqlite::Statement<'_>,
+        ) -> rusqlite::Result<()> {
+            if self.read_only && !statement.readonly() && !leads_with_pragma_or_vacuum(sql) {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
+                    Some("attempt to write a readonly database".to_string()),
+                ));
+            }
+            Ok(())
         }
 
         /// Leaves a progress handler installed past the read, which a negative control uses to show that the untouched-later-read oracle detects a leaked hook.
@@ -1181,41 +1214,48 @@ mod sqlite_backend {
 
         /// # Errors
         ///
-        /// Returns the SQLite error from preparing or running `sql`, or from `f`.
+        /// Returns the SQLite error from preparing or running `sql`, or from `f`; a write in
+        /// a read callback is `SQLITE_READONLY`.
         pub fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
         where
             P: rusqlite::Params,
             F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
         {
-            self.conn.query_row(sql, params, f)
+            self.prepare(sql)?.query_row(params, f)
         }
 
         /// # Errors
         ///
-        /// Returns the SQLite error from preparing or running `sql`.
+        /// Returns the SQLite error from preparing or running `sql`; a write in a read
+        /// callback is `SQLITE_READONLY`.
         pub fn execute<P: rusqlite::Params>(
             &self,
             sql: &str,
             params: P,
         ) -> rusqlite::Result<usize> {
-            self.conn.execute(sql, params)
+            self.prepare(sql)?.execute(params)
         }
 
         /// # Errors
         ///
-        /// Returns the SQLite error from preparing `sql`.
+        /// Returns the SQLite error from preparing `sql`; a write in a read callback is
+        /// `SQLITE_READONLY`.
         pub fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'a>> {
-            self.conn.prepare(sql)
+            let statement = self.conn.prepare(sql)?;
+            self.require_read_only(sql, &statement)?;
+            Ok(statement)
         }
 
-        /// A cached write meets `query_only` in a read callback, and a cached pragma
-        /// write meets the authorizer, as uncached statements do.
+        /// A cached write is refused in a read callback, and a cached pragma write meets
+        /// the authorizer, as uncached statements do.
         ///
         /// # Errors
         ///
-        /// Returns the SQLite error from preparing `sql`.
+        /// Returns the SQLite error from preparing `sql`; a write in a read callback is
+        /// `SQLITE_READONLY`.
         pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<CachedStatement<'a>> {
             let inner = self.conn.prepare_cached(sql)?;
+            self.require_read_only(sql, &inner)?;
             Ok(CachedStatement {
                 #[cfg(any(test, feature = "test-support"))]
                 probe: self.gate.record_statement_handout(sql, &inner),
@@ -1240,6 +1280,18 @@ mod sqlite_backend {
         }
     }
 
+    /// Whether `sql`'s first word, after leading whitespace, is `PRAGMA` or `VACUUM` in any
+    /// case. A comment or anything else before it leaves the statement under the read-only
+    /// check.
+    fn leads_with_pragma_or_vacuum(sql: &str) -> bool {
+        let word = sql
+            .trim_start()
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .next()
+            .unwrap_or("");
+        word.eq_ignore_ascii_case("pragma") || word.eq_ignore_ascii_case("vacuum")
+    }
+
     enum ConnectionMode {
         /// The rest state: store-issued statements and [`SqliteStore::with_conn_unfenced`]
         /// callbacks. Statements prepared here never enter the statement cache.
@@ -1247,8 +1299,8 @@ mod sqlite_backend {
         /// A [`SqliteStore::with_conn`] or [`SqliteStore::with_conn_fenced`] callback:
         /// `deny_scope_escapes` applies with the main-schema names of the snapshot taken at
         /// callback entry. The two callback kinds share one prepare-time policy, so a
-        /// statement one of them cached may run in the other; `query_only` separates them
-        /// at step time.
+        /// statement one of them cached may run in the other; a read callback's
+        /// [`GuardedConn`] refuses a cached write when it hands the statement out.
         Guarded(Arc<SchemaSnapshot>),
         /// The baseline DDL applied to a pristine file: `deny_baseline_escapes` applies.
         Baseline,
@@ -1554,9 +1606,6 @@ mod sqlite_backend {
         /// `None` once left, so `Drop` never repeats a release whose failure
         /// [`Self::release`] already reported.
         active: Option<(&'c Connection, ModeHold<'c>)>,
-        /// The `query_only` value to restore: `Some(prior)` when the scope switched it on
-        /// for a read, `None` when the scope left it alone.
-        query_only_before: Option<bool>,
         /// The snapshot the callback runs under; its infrastructure objects are compared
         /// again at release when the schema version moved.
         snapshot: Arc<SchemaSnapshot>,
@@ -1631,30 +1680,10 @@ mod sqlite_backend {
     }
 
     impl<'c> CallbackScope<'c> {
-        /// Denies writes as well as the escapes, for a callback that must not mutate.
-        fn read_only(conn: &'c Connection, gate: &'c AuthorityGate) -> Result<Self, StoreError> {
-            let prior: bool = conn
-                .query_row("PRAGMA query_only", [], |row| row.get(0))
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
-            conn.pragma_update(None, "query_only", "ON")
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
-            // A failure between the pragma and the finished scope would leave the shared
-            // connection read-only with no guard to restore it.
-            Self::install(conn, gate, Some(prior)).inspect_err(|_| {
-                let _ = Self::restore(conn, Some(prior));
-            })
-        }
-
-        /// Denies the escapes only, for a callback inside a fence-checked transaction.
-        fn writable(conn: &'c Connection, gate: &'c AuthorityGate) -> Result<Self, StoreError> {
-            Self::install(conn, gate, None)
-        }
-
-        fn install(
-            conn: &'c Connection,
-            gate: &'c AuthorityGate,
-            query_only_before: Option<bool>,
-        ) -> Result<Self, StoreError> {
+        /// Denies the escapes for the callback's duration. A read callback's writes are
+        /// refused by its [`GuardedConn`], which leaves the connection's flags, and so its
+        /// prepared statements, untouched.
+        fn install(conn: &'c Connection, gate: &'c AuthorityGate) -> Result<Self, StoreError> {
             let snapshot = gate.schema_snapshot(conn)?;
             // The authorizer denies a callback from creating a shadow, but maintenance
             // through `with_conn_unfenced` may already have left one on this connection,
@@ -1672,31 +1701,23 @@ mod sqlite_backend {
                     conn,
                     gate.enter(ConnectionMode::Guarded(Arc::clone(&snapshot))),
                 )),
-                query_only_before,
                 snapshot,
             })
         }
 
-        /// Reports a failed release to the caller, which `Drop` cannot do. The infrastructure
-        /// refusal is the primary error; a failed `query_only` restore is appended to it.
+        /// Reports a failed release to the caller, which `Drop` cannot do.
         fn release(mut self) -> Result<(), StoreError> {
             let Some((conn, _)) = self.active.as_ref() else {
                 return Ok(());
             };
             let unchanged = Self::require_infrastructure_unchanged(conn, &self.snapshot);
-            with_cleanup_failure(unchanged, self.leave())
+            self.leave();
+            unchanged
         }
 
-        /// Leaves the guarded mode, then restores `query_only`, in that order: the guarded
-        /// policy denies the restoring pragma write.
-        fn leave(&mut self) -> Result<(), StoreError> {
-            match self.active.take() {
-                Some((conn, hold)) => {
-                    drop(hold);
-                    Self::restore(conn, self.query_only_before)
-                }
-                None => Ok(()),
-            }
+        /// Leaves the guarded mode.
+        fn leave(&mut self) {
+            self.active.take();
         }
 
         /// `AuthAction::AlterTable` reports the source name, so a rename cannot be judged
@@ -1721,23 +1742,11 @@ mod sqlite_backend {
             }
             Ok(())
         }
-
-        /// Puts `query_only` back to the value the scope found, so a connection that
-        /// maintenance left read-only stays read-only.
-        fn restore(conn: &Connection, query_only_before: Option<bool>) -> Result<(), StoreError> {
-            match query_only_before {
-                Some(prior) => conn.pragma_update(None, "query_only", prior).map_err(|e| {
-                    StoreError::Backend(format!("failed to release the callback scope: {e}"))
-                }),
-                None => Ok(()),
-            }
-        }
     }
 
     impl Drop for CallbackScope<'_> {
         fn drop(&mut self) {
-            // Drop ignores cleanup errors because it cannot return them.
-            let _ = self.leave();
+            self.leave();
         }
     }
 
@@ -1872,8 +1881,8 @@ mod sqlite_backend {
         }
     }
 
-    /// `PRAGMA query_only` does not stop these: they take no value yet checkpoint, vacuum,
-    /// reorganize, or release memory on the shared connection.
+    /// A read callback's write refusal leaves pragmas to the authorizer, and these take no
+    /// value yet checkpoint, vacuum, reorganize, or release memory on the shared connection.
     fn is_side_effecting_pragma(name: &str) -> bool {
         pragma_in(
             name,
@@ -6185,7 +6194,7 @@ mod tests {
             })
             .expect("cached read");
         assert_eq!(n, 2);
-        // A cached write statement is still a write; `query_only` refuses it.
+        // A cached write statement is still a write; the read scope refuses it at handout.
         let r = store.with_conn(|c| {
             c.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
                 .execute(["c", "3"])
@@ -6635,12 +6644,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The read path's `query_only` toggle is a flag pragma; SQLite expires every prepared
-    /// statement on the connection for each flag pragma, so a read callback re-prepares
-    /// what it cached and stales what fenced callbacks cached. Removing the toggle is the
-    /// open question of the connection-open unit; this pins the behavior it would change.
+    /// A read callback leaves the connection's flags alone, so no callback, read or fenced,
+    /// expires a statement another one cached.
     #[test]
-    fn a_read_callback_still_expires_cached_statements_through_query_only() {
+    fn guarded_callbacks_keep_each_others_cached_statements_prepared() {
         let (root, d) = tmp();
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
         const COUNT: &str = "SELECT COUNT(*) FROM kv";
@@ -6653,28 +6660,18 @@ mod tests {
             store.with_conn(count_reprepares).expect("read"),
             store.with_conn(count_reprepares).expect("read"),
             store.with_conn_fenced(count_reprepares).expect("fenced"),
+            store.with_conn(count_reprepares).expect("read"),
             store.with_conn_fenced(count_reprepares).expect("fenced"),
         ];
-        assert_eq!(observed[0], 0, "first use of the statement");
-        assert!(
-            observed[1] >= 1,
-            "the read toggle expired it, got {observed:?}"
-        );
-        assert!(
-            observed[2] > observed[1],
-            "the read release expired it, got {observed:?}"
-        );
         assert_eq!(
-            observed[3], observed[2],
-            "two fenced calls in a row re-prepare nothing, got {observed:?}"
+            observed, [0; 5],
+            "alternating read and fenced callbacks re-prepare nothing"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `query_only` is the read path's only write barrier and applies to every database on
-    /// the connection, so temp writes are refused in a read callback and allowed in a
-    /// fenced one. Removing the toggle would change this; the connection-open unit owns
-    /// that question.
+    /// A read callback refuses every write, to the main or the temp database, cached or
+    /// fresh, before it runs; a fenced callback may write the temp database.
     #[test]
     fn a_read_callback_cannot_write_the_temp_database_but_a_fenced_callback_can() {
         let (root, d) = tmp();
@@ -6692,12 +6689,61 @@ mod tests {
             matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
             "a temp write must be refused in a read callback, got {refused:?}"
         );
+        let refused = store.with_conn(|c| {
+            c.prepare("INSERT INTO scratch VALUES (2)")
+                .and_then(|mut statement| statement.execute([]))
+        });
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "a prepared temp write must be refused in a read callback, got {refused:?}"
+        );
+        let refused = store.with_conn(|c| {
+            c.query_row(
+                "INSERT INTO kv (k, v) VALUES ('r', '1') RETURNING k",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        });
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "a returning write must be refused in a read callback, got {refused:?}"
+        );
         store
             .with_conn_fenced(|tx| {
                 tx.execute("INSERT INTO scratch VALUES (1)", [])?;
                 tx.execute("DROP TABLE temp.scratch", []).map(|_| ())
             })
             .expect("a fenced callback may write the temp database");
+        let rows: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(rows, 0, "no refused write reached the store");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The handoff after a fenced commit reads under the read callback's write refusal.
+    #[test]
+    fn a_fenced_handoff_cannot_write() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let (_, outcome) = store
+            .with_conn_fenced_then_handoff(
+                |tx| tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", []),
+                |c, _| c.execute("INSERT INTO kv (k, v) VALUES ('b', '2')", []),
+            )
+            .expect("the fenced write commits");
+        let HandoffOutcome::Handed { handed, release } = outcome else {
+            panic!("the handoff ran");
+        };
+        release.expect("the handoff scope released");
+        assert!(
+            matches!(&handed, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::ReadOnly),
+            "the handoff's write must be refused, got {handed:?}"
+        );
+        let rows: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(rows, 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6719,7 +6765,7 @@ mod tests {
         let query_only: bool = store
             .with_conn_unfenced(|c| c.query_row("PRAGMA query_only", [], |r| r.get(0)))
             .expect("read the pragma");
-        assert!(!query_only, "the panicking read restored query_only");
+        assert!(!query_only, "the panicking read left query_only off");
         store
             .with_conn_unfenced(|c| c.pragma_update(None, "synchronous", "OFF"))
             .expect("maintenance is unrestricted again after a panicking read");

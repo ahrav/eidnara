@@ -9,7 +9,7 @@ use daemon::query_route::{
     LimitsRefusal, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
 };
 use daemon::request_budget::{Exhaustion, RequestBudget};
-use daemon::vector_admission::ResourceClass;
+use daemon::vector_admission::{RESIDENT_LIMIT, ResourceClass};
 use daemon::vector_generation::ROWS_FILE;
 use daemon::vector_reader::{PinnedVectors, RescoreEvent};
 use daemon::{Handler, HandlerCore};
@@ -99,6 +99,7 @@ impl Composition {
         DenseVectors::new(
             Arc::clone(&self.view),
             self.store.admission.clone(),
+            self.store.activation(),
             compressed_limits(),
         )
     }
@@ -180,6 +181,7 @@ async fn the_compressed_producer_serves_the_dense_lane_with_exact_original_score
     let vectors = DenseVectors::new(
         Arc::clone(&composition.view),
         composition.store.admission.clone(),
+        composition.store.activation(),
         wide,
     );
     let outcome = run(&fixture, 2, vectors, &budget).unwrap();
@@ -345,6 +347,7 @@ async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
         let vectors = DenseVectors::new(
             Arc::clone(&composition.view),
             composition.store.admission.clone(),
+            composition.store.activation(),
             limits,
         );
         let (_token, budget) = request_budget(10_000);
@@ -368,6 +371,7 @@ async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
         DenseVectors::new(
             Arc::clone(&composition.view),
             composition.store.admission.clone(),
+            composition.store.activation(),
             rows,
         )
         .with_observer_for_test(Arc::new(move |event| {
@@ -401,6 +405,7 @@ async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
     let vectors = DenseVectors::new(
         Arc::clone(&composition.view),
         composition.store.admission.clone(),
+        composition.store.activation(),
         compressed_limits(),
     );
     let (_token, budget) = request_budget(10_000);
@@ -444,7 +449,12 @@ async fn a_view_of_another_kernel_incarnation_degrades_the_lane() {
         .publish(&store.compose(1, &base, &[]).unwrap())
         .unwrap();
     let view = acquire_view(&mut store, &mut |_| {}).unwrap();
-    let vectors = DenseVectors::new(view, store.admission.clone(), compressed_limits());
+    let vectors = DenseVectors::new(
+        view,
+        store.admission.clone(),
+        store.activation(),
+        compressed_limits(),
+    );
     let (_token, budget) = request_budget(10_000);
     let outcome = run(&fixture, 2, vectors, &budget).unwrap();
     assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("identity"));
@@ -461,6 +471,7 @@ async fn view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_an
     let vectors = DenseVectors::new(
         Arc::clone(&composition.view),
         composition.store.admission.clone(),
+        composition.store.activation(),
         tight,
     );
     let (_token, budget) = request_budget(10_000);
@@ -554,6 +565,7 @@ async fn vectors_install_only_under_declared_dense_limits() {
         handler.set_dense_vectors(Some(DenseVectors::new(
             Arc::clone(&composition.view),
             composition.store.admission.clone(),
+            composition.store.activation(),
             wide
         ))),
         Err(LimitsRefusal::Dense { .. })
@@ -655,5 +667,83 @@ async fn retired_vectors_tear_down_with_the_route_locks_free() {
         Some(true),
         "the route locks are free while the retired vectors drop"
     );
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant() {
+    let fixture = Fixture::build().await;
+    let mut composition = Composition::of(&fixture);
+    let handler = Handler::new();
+    handler.set_query_route_limits(Some(with_dense(2))).unwrap();
+    let installed = composition.vectors();
+    handler.set_dense_vectors(Some(installed.clone())).unwrap();
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, installed.clone(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+
+    // A reinstalled evaluator withdraws the activation the installed vectors carry: the next request's lane degrades with a typed reason before any scan window, and the same vectors no longer install.
+    let withdrawn = composition.store.activation();
+    composition.store.set_limit(RESIDENT_LIMIT, u64::MAX);
+    assert!(withdrawn.is_revoked());
+    let outcome = run(&fixture, 2, installed.clone(), &budget).unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Unavailable("activation_revoked")
+    );
+    assert_eq!(outcome.body["degraded"], true);
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    handler.set_dense_vectors(None).unwrap();
+    assert_eq!(
+        handler.set_dense_vectors(Some(installed)),
+        Err(LimitsRefusal::ActivationRevoked)
+    );
+
+    // The renewed hook admission paired with the withdrawn activation still refuses: the activation alone decides, before any physical work.
+    let events = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&events);
+    let stale = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        withdrawn,
+        compressed_limits(),
+    )
+    .with_observer_for_test(Arc::new(move |_| *counted.lock().unwrap() += 1));
+    let outcome = run(&fixture, 2, stale, &budget).unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Unavailable("activation_revoked")
+    );
+    assert_eq!(*events.lock().unwrap(), 0);
+
+    // Only a fresh activation from the gate installs again.
+    let renewed = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        composition.store.activation(),
+        compressed_limits(),
+    );
+    handler.set_dense_vectors(Some(renewed)).unwrap();
+    handler.set_dense_vectors(None).unwrap();
+
+    // A gate closed at `AfterSelection` lets the rescore run, then discards the ranking.
+    let gate = Arc::clone(&composition.store.gate);
+    let reads = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&reads);
+    let closing = composition.observed(move |event| match event {
+        RescoreEvent::AfterSelection => gate.close(),
+        RescoreEvent::ReadOriginal { .. } => *counted.lock().unwrap() += 1,
+        _ => {}
+    });
+    let outcome = run(&fixture, 2, closing, &budget).unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Unavailable("activation_revoked")
+    );
+    assert!(
+        *reads.lock().unwrap() > 0,
+        "no row was rescored after the close"
+    );
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
     fixture.daemon.shutdown().await;
 }

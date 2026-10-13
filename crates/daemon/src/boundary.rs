@@ -8,8 +8,8 @@
 //! Identical inputs produce identical boundary and trigger decisions.
 
 use crate::chunk_text::{
-    clean_user_text, clean_user_text_cow, compact_role, compact_text_for_summary, extract_key_arg,
-    format_block_line, is_system_directive, merge_commit_hashes, normalize_text,
+    CompactedText, clean_user_text, clean_user_text_cow, compact_role, compact_text_for_summary,
+    extract_key_arg, format_block_line, is_system_directive, merge_commit_hashes, normalize_text,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -725,18 +725,16 @@ fn chunked_message_estimate_with_estimator(
         .max()
         .unwrap_or(ordered.len() as u64);
     let mut builder = ChunkBuilder::new(budget_stop, token_estimator);
-
-    for message in &ordered {
-        if eligible_end_ordinal.is_some_and(|end| message.message_ordinal >= end) {
-            break;
-        }
-        if message.message_ordinal < start_ordinal {
-            continue;
-        }
-        if !builder.push_message(message) {
-            break;
-        }
-    }
+    let eligible = ordered
+        .into_iter()
+        .take_while(|message| eligible_end_ordinal.is_none_or(|end| message.message_ordinal < end))
+        .filter(|message| message.message_ordinal >= start_ordinal)
+        .collect::<Vec<_>>();
+    crate::parallel_map::map_until(
+        eligible,
+        |(), message| (message.message_ordinal, chunk_message_part(message)),
+        |(ordinal, part)| builder.push_message(ordinal, part),
+    );
     builder.finish(total_message_count, eligible_end_ordinal)
 }
 
@@ -1624,75 +1622,32 @@ impl<'a> ChunkBuilder<'a> {
         }
     }
 
-    fn push_message(&mut self, message: &BoundaryMsg) -> bool {
-        let meta = message.message_ordinal;
-        if message.role == Role::User && !has_meaningful_user_text(&message.blocks) {
-            let tc_summaries = extract_tool_call_summaries(&message.blocks);
-            if tc_summaries.is_empty() {
+    fn push_message(&mut self, message_ordinal: u64, part: ChunkMessagePart) -> bool {
+        let meta = message_ordinal;
+        let (role, text, commit_hashes, msg_has_narrative) = match part {
+            ChunkMessagePart::Noise => {
                 self.pending_noise_meta.push(meta);
                 return true;
             }
-            let tc_text = tc_summaries.join(" / ");
-            if let Some(current) = self
-                .current_block
-                .as_mut()
-                .filter(|block| block.role == "A")
-            {
-                current.end_ordinal = message.message_ordinal;
-                current.parts.push(tc_text);
-                current.meta.append(&mut self.pending_noise_meta);
-                current.meta.push(meta);
-                return true;
-            }
-            if !self.flush_current_block() {
-                return false;
-            }
-            let start = self
-                .pending_noise_meta
-                .first()
-                .copied()
-                .unwrap_or(message.message_ordinal);
-            let mut meta_list = std::mem::take(&mut self.pending_noise_meta);
-            meta_list.push(meta);
-            self.current_block = Some(ChunkBlock {
-                role: "A".to_string(),
-                start_ordinal: start,
-                end_ordinal: message.message_ordinal,
-                parts: vec![tc_text],
-                meta: meta_list,
-                commit_hashes: Vec::new(),
-                is_tool_only: true,
-            });
-            return true;
-        }
-
-        let role = compact_role(message.role.as_str());
-        let text_parts = text_parts(message);
-        let msg_has_narrative = !text_parts.is_empty();
-        let tool_summaries = if msg_has_narrative {
-            Vec::new()
-        } else {
-            extract_tool_call_summaries(&message.blocks)
+            ChunkMessagePart::ToolCalls(tc_text) => ("A".to_string(), tc_text, Vec::new(), false),
+            ChunkMessagePart::Text {
+                role,
+                compacted,
+                has_narrative,
+            } => (role, compacted.text, compacted.commit_hashes, has_narrative),
         };
-        let mut all_parts = text_parts;
-        all_parts.extend(tool_summaries);
-        let compacted = compact_text_for_summary(all_parts.join(" / "), message.role.as_str());
-        let text = compacted.text;
-        if text.is_empty() {
-            self.pending_noise_meta.push(meta);
-            return true;
-        }
         if let Some(current) = self
             .current_block
             .as_mut()
             .filter(|block| block.role == role)
         {
-            current.end_ordinal = message.message_ordinal;
+            current.end_ordinal = message_ordinal;
             current.parts.push(text);
             current.meta.append(&mut self.pending_noise_meta);
             current.meta.push(meta);
-            current.commit_hashes =
-                merge_commit_hashes(&current.commit_hashes, &compacted.commit_hashes);
+            if !commit_hashes.is_empty() {
+                current.commit_hashes = merge_commit_hashes(&current.commit_hashes, &commit_hashes);
+            }
             if msg_has_narrative {
                 current.is_tool_only = false;
             }
@@ -1706,16 +1661,16 @@ impl<'a> ChunkBuilder<'a> {
             .pending_noise_meta
             .first()
             .copied()
-            .unwrap_or(message.message_ordinal);
+            .unwrap_or(message_ordinal);
         let mut meta_list = std::mem::take(&mut self.pending_noise_meta);
         meta_list.push(meta);
         self.current_block = Some(ChunkBlock {
             role,
             start_ordinal: start,
-            end_ordinal: message.message_ordinal,
+            end_ordinal: message_ordinal,
             parts: vec![text],
             meta: meta_list,
-            commit_hashes: compacted.commit_hashes,
+            commit_hashes,
             is_tool_only: !msg_has_narrative,
         });
         true
@@ -1776,6 +1731,49 @@ impl<'a> ChunkBuilder<'a> {
             message_count: self.messages_processed,
             commit_cluster_count: self.commit_cluster_count,
         }
+    }
+}
+
+/// What one message contributes to a chunk block, computed from that message alone.
+enum ChunkMessagePart {
+    /// No text: the ordinal joins the meta of the next block that takes text.
+    Noise,
+    /// A user message without meaningful text, summarized by its tool calls under role `A`.
+    ToolCalls(String),
+    /// The message's compacted text under its compact role.
+    Text {
+        role: String,
+        compacted: CompactedText,
+        has_narrative: bool,
+    },
+}
+
+fn chunk_message_part(message: &BoundaryMsg) -> ChunkMessagePart {
+    if message.role == Role::User && !has_meaningful_user_text(&message.blocks) {
+        let tc_summaries = extract_tool_call_summaries(&message.blocks);
+        if tc_summaries.is_empty() {
+            return ChunkMessagePart::Noise;
+        }
+        return ChunkMessagePart::ToolCalls(tc_summaries.join(" / "));
+    }
+    let role = compact_role(message.role.as_str());
+    let text_parts = text_parts(message);
+    let has_narrative = !text_parts.is_empty();
+    let tool_summaries = if has_narrative {
+        Vec::new()
+    } else {
+        extract_tool_call_summaries(&message.blocks)
+    };
+    let mut all_parts = text_parts;
+    all_parts.extend(tool_summaries);
+    let compacted = compact_text_for_summary(all_parts.join(" / "), message.role.as_str());
+    if compacted.text.is_empty() {
+        return ChunkMessagePart::Noise;
+    }
+    ChunkMessagePart::Text {
+        role,
+        compacted,
+        has_narrative,
     }
 }
 
@@ -2963,5 +2961,56 @@ mod tests {
         let b = resolve_protected_tail_boundary(&[unreduced], &ctx);
         assert_eq!(a.true_raw_eligible_tokens, b.true_raw_eligible_tokens);
         assert_eq!(a.protected_start_ordinal, b.protected_start_ordinal);
+    }
+
+    fn sequential_chunk_estimate(messages: &[BoundaryMsg], budget_stop: f64) -> ChunkEstimate {
+        let mut ordered = messages.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|message| message.message_ordinal);
+        let total = ordered.last().map_or(0, |message| message.message_ordinal);
+        let mut token_estimator = estimate_tokens;
+        let mut builder = ChunkBuilder::new(budget_stop, &mut token_estimator);
+        for message in ordered {
+            if !builder.push_message(message.message_ordinal, chunk_message_part(message)) {
+                break;
+            }
+        }
+        builder.finish(total, None)
+    }
+
+    #[test]
+    fn a_budget_stop_in_any_batch_estimates_as_a_message_by_message_scan() {
+        let messages = (1..=699u64)
+            .map(|ordinal| match ordinal % 7 {
+                0 => text_msg(ordinal, Role::User, ""),
+                1 | 2 => text_msg(
+                    ordinal,
+                    Role::User,
+                    &format!("question {ordinal} about the parser"),
+                ),
+                _ => text_msg(
+                    ordinal,
+                    Role::Assistant,
+                    &format!("answer {ordinal}: fixed commit abc{ordinal:04}def in the lexer"),
+                ),
+            })
+            .collect::<Vec<_>>();
+        let full: f64 = sequential_chunk_estimate(&messages, f64::MAX)
+            .block_tokens
+            .iter()
+            .sum();
+        for fraction in [0.0, 0.001, 0.01, 0.05, 0.2, 0.5, 0.9, 1.0, 2.0] {
+            let budget_stop = (full * fraction).max(1.0);
+            let estimate = chunked_message_estimate(&messages, 1, None, budget_stop);
+            assert_eq!(
+                estimate.has_more,
+                fraction < 1.0,
+                "budget_stop {budget_stop}"
+            );
+            assert_eq!(
+                estimate,
+                sequential_chunk_estimate(&messages, budget_stop),
+                "budget_stop {budget_stop}"
+            );
+        }
     }
 }

@@ -380,36 +380,24 @@ async fn coordination_locks_are_owner_only_and_survive_teardown() {
     }
 }
 
-/// A lifecycle record of unknown shape at the record name blocks startup without
-/// A record of unknown shape leaves quarantined bytes uninterpreted, unmigrated, and unchanged.
 #[tokio::test]
-async fn startup_refuses_to_overwrite_an_unknown_lifecycle_schema() {
+async fn startup_replaces_a_record_outside_the_lifecycle_record_shape() {
     let data_root = tempfile::tempdir().expect("temp root");
     let run_dir = data_root.path().join("eidnara").join("run");
     std::fs::create_dir_all(&run_dir).expect("runtime dir");
     let record = run_dir.join(host_runtime::LIFECYCLE_RECORD_NAME);
-    let future_bytes = br#"{"schema":9,"phase":"carried-forward"}"#.to_vec();
-    std::fs::write(&record, &future_bytes).expect("plant future record");
+    let foreign_bytes = br#"{"schema":9,"phase":"carried-forward"}"#.to_vec();
+    std::fs::write(&record, &foreign_bytes).expect("plant foreign record");
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).expect("mode");
 
-    let refused = TestHost::try_start_with(TestHandler::new(), {
+    let host = TestHost::try_start_with(TestHandler::new(), {
         let path = data_root.path().to_path_buf();
         move |config| config.data_dir = Some(path)
     })
-    .await;
-    assert!(
-        matches!(
-            refused,
-            Err(host_runtime::HostError::Instance(
-                host_runtime::InstanceError::UnsupportedStateSchema { .. }
-            ))
-        ),
-        "startup over an unknown schema must fail closed on the quarantine gate, \
-         not on some unrelated instance error"
-    );
-    assert_eq!(
-        std::fs::read(&record).expect("reread"),
-        future_bytes,
-        "the quarantined bytes must be preserved byte-for-byte"
-    );
+    .await
+    .expect("startup replaces a corrupt record");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).expect("reread")).expect("parse");
+    assert_eq!(json["phase"], "running", "the host wrote its own record");
+    host.shutdown_gracefully().await;
 }

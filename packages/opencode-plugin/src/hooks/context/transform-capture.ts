@@ -223,7 +223,11 @@ class ReferenceableWalk {
     /** Upper bound on the canonical JSON length of the walked values, in two-byte units for strings. */
     wireBytes = 0;
     private field?: (value: SnapshotField) => void;
-    private readonly ancestors = new Set<object>();
+    /**
+     * The containers on the path to the current one, outermost first. The depth cap bounds the
+     * stack, so a linear cycle scan stays within `MAX_REFERENCEABLE_DEPTH` comparisons.
+     */
+    private readonly ancestors: object[] = [];
     /**
      * Built-in prototype state the walk checks once: own descriptor reads run no source code, so
      * the state holds for the rest of a synchronous walk.
@@ -337,10 +341,14 @@ class ReferenceableWalk {
         }
     }
 
+    /** The three attribute scalars of one descriptor, charged together. */
     private attributes(slot: PropertyDescriptor): void {
-        this.scalar(slot.enumerable === true);
-        this.scalar(slot.writable === true);
-        this.scalar(slot.configurable === true);
+        this.spend(3 * TAPE_SLOT_BYTES);
+        const field = this.field;
+        if (!field) return;
+        field(slot.enumerable === true);
+        field(slot.writable === true);
+        field(slot.configurable === true);
     }
 
     /**
@@ -397,8 +405,11 @@ class ReferenceableWalk {
             !(this.arrayChain ??= Object.getPrototypeOf(Array.prototype) === Object.prototype)
         )
             throw new SourceRejected("prototype", path);
-        if (this.ancestors.size > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
-        if (this.ancestors.has(value)) throw new SourceRejected("cycle", path);
+        const ancestors = this.ancestors;
+        const depth = ancestors.length;
+        if (depth > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
+        for (let index = 0; index < depth; index += 1)
+            if (ancestors[index] === value) throw new SourceRejected("cycle", path);
         // The holder chain is the value, then `Array.prototype` for an array, then `Object.prototype` unless the prototype is null.
         this.rejectToJson(value, path);
         if (array && !this.arrayPrototypeToJsonChecked) {
@@ -427,17 +438,20 @@ class ReferenceableWalk {
             this.scalar(length);
             this.attributes(lengthSlot);
         }
-        this.ancestors.add(value);
+        ancestors.push(value);
         let count = 0;
         try {
-            for (const key of symbols) {
+            for (let index = 0; index < symbols.length; index += 1) {
+                const key = symbols[index] as symbol;
                 const slot = this.data(value, key, path);
                 this.emit(EXTRA_KEY, 0);
                 this.emit(key, 0);
                 this.attributes(slot);
                 this.walk(slot.value, path);
             }
-            for (const key of Object.getOwnPropertyNames(value)) {
+            const names = Object.getOwnPropertyNames(value);
+            for (let index = 0; index < names.length; index += 1) {
+                const key = names[index] as string;
                 if (array && key === "length") continue;
                 if (array && ARRAY_METHODS.has(key))
                     throw new SourceRejected("extra_property", path);
@@ -470,7 +484,7 @@ class ReferenceableWalk {
             this.scalar(count);
             return count;
         } finally {
-            this.ancestors.delete(value);
+            ancestors.length = depth;
         }
     }
 }
@@ -667,7 +681,8 @@ export function historyDigestsEqual(left: HistoryDigest, right: HistoryDigest): 
 
 /**
  * Walks the members of a digested prefix under the prefix's recorded spend, so a changed prefix
- * costs no more than the original. Each walk is standalone; only its spend and hash are kept.
+ * costs no more than the original. Each walk is standalone; only its spend and hash are kept,
+ * and, when the caller asks, the member's tape.
  */
 class PrefixVerifier {
     private readonly walker: ReferenceableWalk;
@@ -677,11 +692,27 @@ class PrefixVerifier {
         this.walker = new ReferenceableWalk(expected.bytes, false);
     }
 
-    /** Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. */
-    walk(value: unknown, index: number): void {
+    /**
+     * Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. With `tape`,
+     * returns the member's snapshot as an ordinary capture records it.
+     */
+    walk(value: unknown, index: number, tape?: true): MessageContentSnapshot | undefined {
         const before = this.walker.bytes;
-        this.walker.stream(() => this.walker.walk(value, `/${index}`), this.hasher.push);
-        this.hasher.end(this.walker.bytes - before);
+        // Private tapes have no inherited setters. Returned tapes regain the ordinary array API.
+        const fields: SnapshotField[] | undefined = tape && Object.setPrototypeOf([], null);
+        const push = this.hasher.push;
+        this.walker.stream(
+            () => this.walker.walk(value, `/${index}`),
+            fields
+                ? (field) => {
+                      fields[fields.length] = field;
+                      push(field);
+                  }
+                : push,
+        );
+        const bytes = this.walker.bytes - before;
+        this.hasher.end(bytes);
+        return fields && { fields: Object.setPrototypeOf(fields, Array.prototype), bytes };
     }
 
     matches(): boolean {
@@ -695,11 +726,16 @@ class PrefixVerifier {
 
 export interface CapturedMessages {
     members: readonly unknown[];
-    /** Members covered by `verified` have no tape; their recheck walks the digest. */
+    /**
+     * Members covered by `verified` have a tape only when `verifiedTaped`; without one, their
+     * recheck walks the digest.
+     */
     snapshots: readonly (MessageContentSnapshot | undefined)[];
     rootSnapshot: MessageContentSnapshot;
     /** The prior digest the leading members matched, when the capture was given one. */
     verified?: HistoryDigest;
+    /** The verified members kept their tapes, charged to the capture's lease. */
+    verifiedTaped?: boolean;
 }
 
 export interface CapturedHistory extends CapturedMessages {
@@ -745,29 +781,44 @@ export function captureReserved(
 }
 
 /**
- * With a `prefix`, capture charges only the root and members after the prefix; it verifies
- * leading members instead of retaining them. A mismatch, or no member after the prefix, returns
- * `undefined`.
+ * With a `prefix`, capture charges the root and members after the prefix and verifies leading
+ * members against the digest. With `tapePrefix`, for a capture whose rechecks compare content,
+ * and headroom in the lease for the prefix's recorded spend, the verified members also keep their
+ * tapes for this pass and that spend is reserved, so a recheck compares tapes. A mismatch, or no
+ * member after the prefix, returns `undefined`.
  */
 export function captureHistory(messages: unknown, lease: CaptureLease): CapturedHistory;
 export function captureHistory(
     messages: unknown,
     lease: CaptureLease,
     prefix: HistoryDigest,
+    options?: { tapePrefix?: boolean },
 ): CapturedHistory | undefined;
 export function captureHistory(
     messages: unknown,
     lease: CaptureLease,
     prefix?: HistoryDigest,
+    options?: { tapePrefix?: boolean },
 ): CapturedHistory | undefined {
     const verifier = prefix && new PrefixVerifier(prefix);
+    const tapePrefix =
+        prefix !== undefined &&
+        options?.tapePrefix === true &&
+        prefix.bytes <= lease.remainingBytes;
     const taped: TapedMember[] = [];
     let captured: CapturedMessages;
     try {
-        captured = walkCapture(messages, lease, { taped, verifier });
+        captured = walkCapture(messages, lease, { taped, verifier, tapePrefix });
     } catch (error) {
         if (error === PREFIX_CHANGED) return undefined;
         throw error;
+    }
+    // The walk and this reservation form one synchronous section, as in `captureReserved`.
+    const verifiedTaped = tapePrefix && lease.reserve(prefix.bytes);
+    if (prefix && !verifiedTaped) {
+        const snapshots = captured.snapshots as (MessageContentSnapshot | undefined)[];
+        for (let index = 0; index < prefix.count; index += 1)
+            defineSlot(snapshots, index, undefined);
     }
     const hasher = verifier?.continueHashing() ?? new TapeHasher();
     for (let index = 0; index < taped.length - 1; index += 1)
@@ -782,6 +833,7 @@ export function captureHistory(
     return {
         ...captured,
         verified: prefix,
+        ...(verifiedTaped ? { verifiedTaped } : {}),
         history: hasher.digest(),
         terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
         boundary,
@@ -792,7 +844,7 @@ export function captureHistory(
 function walkCapture(
     messages: unknown,
     lease: CaptureLease,
-    digest: { taped: TapedMember[]; verifier?: PrefixVerifier },
+    digest: { taped: TapedMember[]; verifier?: PrefixVerifier; tapePrefix?: boolean },
 ): CapturedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
@@ -806,24 +858,26 @@ function walkCapture(
 function walkMembers(
     walker: ReferenceableWalk,
     messages: unknown,
-    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
+    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier; tapePrefix?: boolean },
     reuse?: ReadonlyMap<unknown, MessageContentSnapshot | undefined>,
 ): CapturedMessages {
     const verifier = digest?.verifier;
     const verifiedCount = verifier?.expected.count ?? 0;
+    const tapePrefix = digest?.tapePrefix === true ? true : undefined;
     const members: unknown[] = [];
     const snapshots: (MessageContentSnapshot | undefined)[] = [];
     const rootSnapshot = walker.recordOrCompare(() => {
         const count = walker.members(messages, (slot, index) => {
             if (verifier && index < verifiedCount) {
+                let snapshot: MessageContentSnapshot | undefined;
                 try {
-                    verifier.walk(slot.value, index);
+                    snapshot = verifier.walk(slot.value, index, tapePrefix);
                 } catch (error) {
                     if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
                         throw PREFIX_CHANGED;
                     throw error;
                 }
-                defineSlot(snapshots, index, undefined);
+                defineSlot(snapshots, index, snapshot);
             } else {
                 if (index === verifiedCount && verifier && !verifier.matches())
                     throw PREFIX_CHANGED;
@@ -851,6 +905,8 @@ function walkMembers(
 /**
  * Membership requires own data descriptors. Content edits to members at or past `compared` can
  * pass when those members lie outside the verified prefix and retain their identity and position.
+ * Verified members are always compared: against their tapes when the capture kept them, otherwise
+ * against the digest.
  */
 export function capturedMessagesUnchanged(
     live: unknown,
@@ -859,7 +915,11 @@ export function capturedMessagesUnchanged(
 ): boolean {
     try {
         const walker = new ReferenceableWalk(TRANSFORM_CAPTURE_MAX_BYTES, false);
-        const verifier = captured.verified && new PrefixVerifier(captured.verified);
+        const verifiedCount = captured.verified?.count ?? 0;
+        const verifier =
+            captured.verified && captured.verifiedTaped !== true
+                ? new PrefixVerifier(captured.verified)
+                : undefined;
         walker.recordOrCompare(() => {
             const count = walker.members(live, (slot, index) => {
                 if (
@@ -867,11 +927,11 @@ export function capturedMessagesUnchanged(
                     !Object.is(slot.value, captured.members[index])
                 )
                     throw CONTENT_CHANGED;
-                if (verifier && index < verifier.expected.count) {
+                if (verifier && index < verifiedCount) {
                     verifier.walk(slot.value, index);
                     return;
                 }
-                if (index >= compared) return;
+                if (index >= compared && index >= verifiedCount) return;
                 // Bounds precede indexing so a short record cannot read an inherited slot.
                 const snapshot =
                     index < captured.snapshots.length ? captured.snapshots[index] : undefined;

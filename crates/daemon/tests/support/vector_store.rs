@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use super::projection_gate::{identity, passing_evaluator};
 use daemon::projection_gates::{
-    Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
+    ActivationGrant, Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity,
+    ProjectionHook,
 };
 use daemon::vector_admission::Ledger;
 use daemon::vector_composition::{
@@ -18,7 +19,8 @@ use daemon::vector_composition::{
 };
 use daemon::vector_generation::{ExpectedVectors, Staging, VerifiedVectors, build, stage, verify};
 use host_runtime::generation::{
-    GENERATIONS_DIR_NAME, GenerationStore, MEMBERS_FILE_NAME, SourceSpec, StageMeta, WireMembers,
+    CurrentProfile, GENERATIONS_DIR_NAME, GenerationStore, MEMBERS_FILE_NAME, SourceSpec,
+    StageMeta, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::ProjectionIdentity;
@@ -182,6 +184,11 @@ impl Fixture {
             Some(LifecycleTransactionLock::acquire_exclusive(Some(self.root.path())).unwrap());
     }
 
+    /// The gate's compressed activation under the passing evaluator; [`Self::set_limit`] reinstalls the evaluator and withdraws it.
+    pub fn activation(&self) -> ActivationGrant {
+        self.gate.admit_compressed_activation().unwrap()
+    }
+
     pub fn expected(&self) -> ExpectedVectors<'_> {
         ExpectedVectors {
             generation: &self.generation,
@@ -252,10 +259,23 @@ impl Fixture {
         })
     }
 
+    /// The digest the vector selector names now: the predecessor a writer composing from the current selection hands to `publish`.
+    pub fn predecessor(&self) -> Option<String> {
+        match self.store.read_vector_current().unwrap() {
+            CurrentProfile::Current(digest) => Some(digest),
+            CurrentProfile::Absent | CurrentProfile::Quarantined => None,
+        }
+    }
+
     pub fn publish(&self, composition: &Composition) -> Result<String, CompositionRefusal> {
-        publish(composition, &self.staging(), &self.work_dir(), &mut |_| {
-            Ok(())
-        })
+        publish(
+            composition,
+            self.predecessor().as_deref(),
+            &self.staging(),
+            Some(&self.activation()),
+            &self.work_dir(),
+            &mut |_| Ok(()),
+        )
         .map_err(|failure| failure.refusal)
     }
 
