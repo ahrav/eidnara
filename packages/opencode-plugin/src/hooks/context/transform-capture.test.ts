@@ -1160,8 +1160,12 @@ describe("taped verified prefix", () => {
         expect(owner.chargedBytes).toBe(partial + digest.bytes);
         expect(lease.chargedBytes).toBe(partial + digest.bytes);
         expect(lease.reserve(1)).toBe(false);
-        // The capture rechecks its verified members against the digest from here on.
+        // The capture rechecks its verified members against the digest from here on, under the
+        // spend its own walk takes beside the digest's.
         expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        expect(capturedMessagesUnchanged(live, { ...captured, bytes: captured.bytes - 1 })).toBe(
+            false,
+        );
         (live[1]?.parts as Array<{ text: string }>)[0].text = "edited";
         expect(capturedMessagesUnchanged(live, captured)).toBe(false);
         lease.release();
@@ -1190,6 +1194,53 @@ describe("taped verified prefix", () => {
         other.release();
         lease.release();
         expect(owner.chargedBytes).toBe(0);
+    });
+
+    it("reclaims holds in the order they were taken, and only as many as a reservation needs", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = new TransformCaptureAdmission({
+            maxPasses: 3,
+            maxBytes: 2 * (partial + digest.bytes),
+        });
+        const first = leaseOf(owner, "first");
+        const firstCapture = tapedCapture(live, digest, first);
+        const second = leaseOf(owner, "second");
+        const secondCapture = tapedCapture(replayWindow().live, digest, second);
+        expect(firstCapture?.verifiedTaped).toBe(true);
+        expect(secondCapture?.verifiedTaped).toBe(true);
+        expect(owner.chargedBytes).toBe(2 * (partial + digest.bytes));
+        const third = leaseOf(owner, "third");
+        expect(third.reserve(1)).toBe(true);
+        expect(firstCapture?.verifiedTaped).toBeUndefined();
+        expect(secondCapture?.verifiedTaped).toBe(true);
+        first.release();
+        second.release();
+        third.release();
+        expect(owner.chargedBytes).toBe(0);
+    });
+
+    it("returns a live hold on release or refund without reclaiming its tapes", () => {
+        for (const end of ["release", "refund"] as const) {
+            const { live, digest } = replayWindow();
+            const maxBytes = partialCharge(live, digest) + digest.bytes;
+            const owner = ownerOf(maxBytes);
+            const lease = leaseOf(owner);
+            const captured = tapedCapture(live, digest, lease);
+            if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+            lease[end]();
+            expect(owner.chargedBytes).toBe(0);
+            expect(owner.remainingBytes).toBe(maxBytes);
+            expect(captured.verifiedTaped).toBe(true);
+            const next = end === "refund" ? lease : leaseOf(owner, "next");
+            expect(next.reserve(maxBytes)).toBe(true);
+            expect(owner.chargedBytes).toBe(maxBytes);
+            expect(next.reserve(1)).toBe(false);
+            expect(captured.verifiedTaped).toBe(true);
+            next.release();
+            lease.release();
+            expect(owner.chargedBytes).toBe(0);
+        }
     });
 
     it("declines a stale smaller prefix bound and reserves nothing for the prefix", () => {
