@@ -872,3 +872,94 @@ async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
         .expect("the request released the daemon");
     daemon.shutdown().await;
 }
+
+const DEADLINE_MS: u64 = 1_500;
+
+/// The request's one deadline is set at admission, and waiting for a blocking slot does not renew it: a unit released only after its deadline passed answers the deadline terminal and opens no scan window, while the same budget suffices for a unit that does not wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_deadline() {
+    let (daemon, ids) = served_daemon().await;
+    let incarnation = daemon
+        .store()
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+        .unwrap();
+    let (store, view) = composition(&incarnation, &ids);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(route_limits()))
+        .unwrap();
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::new(FixedEmbedder)));
+    let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&events);
+    daemon
+        .handler()
+        .set_dense_vectors(Some(
+            DenseVectors::new(
+                Arc::clone(&view),
+                store.admission.clone(),
+                store.activation(),
+                compressed_limits(),
+            )
+            .with_observer_for_test(Arc::new(move |_| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        ))
+        .unwrap();
+    let project = daemon.project().to_owned();
+    let daemon = Arc::new(daemon);
+    let mut body: Value = serde_json::from_slice(&request(&project)).unwrap();
+    body["remaining_ms"] = json!(DEADLINE_MS);
+
+    // The control: the same budget is enough for a unit that does not wait, so a late answer below comes from the wait.
+    let daemon::dispatch::PreparedOutcome::Response(control) =
+        watchdog(daemon.outcome(body.clone())).await
+    else {
+        panic!("the unqueued request answers");
+    };
+    let control = control.json_for_test().unwrap().clone();
+    assert_eq!(control["kind"], "fused", "{control}");
+    assert!(events.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    events.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pending = {
+        let daemon = Arc::clone(&daemon);
+        let gate = Arc::clone(&gate);
+        let submitted = Arc::clone(&submitted);
+        tokio::spawn(async move { daemon.outcome_gated(body, gate, submitted).await })
+    };
+    let started = Instant::now();
+    while submitted.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the unit is submitted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2 * DEADLINE_MS)).await;
+    gate.add_permits(1);
+    let daemon::dispatch::PreparedOutcome::Response(output) = watchdog(pending).await.unwrap()
+    else {
+        panic!("the late unit answers");
+    };
+    let answer = output.json_for_test().unwrap().clone();
+    assert_eq!(answer["kind"], "terminal", "{answer}");
+    assert_eq!(answer["terminal"], "deadline", "{answer}");
+    assert_eq!(
+        events.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no scan window opened after the deadline"
+    );
+    let census = store.ledger.census();
+    assert!(!census.held.contains_key(&ResourceClass::Scratch));
+    assert!(!census.held.contains_key(&ResourceClass::RowBuffers));
+    daemon.handler().set_dense_vectors(None).unwrap();
+    drop(view);
+    let daemon = Arc::try_unwrap(daemon)
+        .ok()
+        .expect("the request released the daemon");
+    daemon.shutdown().await;
+}

@@ -699,7 +699,16 @@ and `a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline`;
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
 through a real host, client, and `RequestCtx`; `vector_rescore.rs`
 `cancellation_at_an_original_read_ends_the_request_before_the_row_is_read` and
-`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`.
+`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`;
+`dense_request_lifetime.rs`
+`a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_deadline`,
+where a unit held at the blocking gate for twice its 1.5 s deadline answers
+the `deadline` terminal with no scan window while the same budget completes
+for an unqueued unit, so the queue wait does not renew the deadline; and
+`crates/retrieval/tests/dense_candidates.rs`
+`a_cancelled_budget_stops_the_walk_within_one_check_interval`, where a
+cancellation at the second row of a forty-row page stops the walk at row
+index 16, the next `BUDGET_STRIDE` check.
 Guarantee: The request's one `EvalBudget`, derived with its absolute
 deadline before the dense unit is submitted, stops the compressed scan, the
 canonical eligibility batches, and the original reads; a cancellation at any
@@ -747,7 +756,13 @@ and `a_request_that_ranks_no_dense_lane_holds_no_view` and
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`;
 `vector_rescore.rs` `the_scan_scratch_charges_the_encoded_query_of_every_layer`
-for the payload buffers `Scratch` covers.
+for the payload buffers `Scratch` covers; `query_route_compressed.rs`
+`draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes`,
+where, with the resident limit set to what one draining request holds, a
+scratch reservation of the drainer's size is refused while it drains and fits
+once it finishes, and a request under the same limit then completes. The
+next admission there is a direct ledger reservation, because the fixture's
+projection connection serves one request at a time.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
 setters' locks before the unit is submitted (`query_route.rs:1992`), so the
@@ -791,15 +806,29 @@ Type: safety
 Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
-`a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`.
+`a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`
+and `a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete`,
+with `a_leaked_progress_handler_fails_a_plain_read_that_the_next_guarded_request_masks`
+as its negative control.
 Guarantee: The projection's connection carries one request's stop predicate
 only for that request's read; after request A ends cancelled, request B on the
 same connection completes even when A's token is cancelled again during B's
 original reads, and after request C completes uncancelled, request D
-completes when C's token is first cancelled during D's original reads.
+completes when C's token is first cancelled during D's original reads; a
+request whose dense lane ends `read_failed`, and one that unwinds from a panic
+inside the scan, each leave the connection without their handler once their
+token is cancelled, and the next request on it completes.
 Check: `always` - A ends `Cancelled`; B and D end with a complete dense lane
-and an unexhausted budget; C's answer stands. `always` because a reused
-connection must never carry an earlier caller's cancellation.
+and an unexhausted budget; C's answer stands; after the failed and the unwound
+request and the cancellation of their tokens, a plain read of a 20,000-row
+recursive scan completes before the next request, and the next request
+answers a complete dense lane of two hits with an unexhausted budget and no
+scratch or row-buffer charge left. The plain read runs first because a guarded
+read replaces the connection's progress handler when it starts
+(`crates/storage/src/lib.rs:474`), which masks a leaked one; the negative
+control shows a leaked handler fails the plain read while the next guarded
+request still completes. `always` because a reused connection must never
+carry an earlier caller's cancellation.
 Fault/timing angle: A late cancellation of A inside B's ranking.
 Required faults and enabling state: Two sequential requests on one
 `SearchProjection`.
@@ -846,6 +875,16 @@ Impact: An oversized pool allocates or judges past what the kernel accepts.
 Open questions:
 - Parent Q6 approval of the production values; #825 D23 and D27 name `k` 64
   and a pool of 256 (needs human input).
+- Installation leaves the entry bound to request time. `check_pair`
+  (`query_route.rs:753`) calls `CompressedLimits::capacity`
+  (`query_route.rs:618`), which checks `k`, the alpha policy, `candidates`, and
+  `scan_page_rows`; `max_entries` is first compared with the view's rows inside
+  the request's scan. A composition whose entry bound is below its rows
+  installs, and every request then reserves `Scratch` and `RowBuffers`
+  (`vector_reader.rs:876`, `:878`) and degrades as `layers`, as
+  `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan` shows. This
+  conflicts with the Check rationale that a limit every request would refuse
+  must never reach a request (needs human input).
 
 ### dense-failures-keep-their-classification-at-the-route
 
@@ -855,21 +894,33 @@ Status: active
 Exercised: yes - `query_route_compressed.rs`
 `view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_and_quarantines`,
 `each_view_and_scan_bound_degrades_the_lane_with_its_own_reason`,
-`a_view_of_another_kernel_incarnation_degrades_the_lane`, and
-`the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
+`a_view_of_another_kernel_incarnation_degrades_the_lane`,
+`a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`,
+`a_kernel_failure_during_candidate_judgement_degrades_the_dense_lane_as_kernel`,
+`an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`,
+and `the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
 Guarantee: A served compressed ranking reaches fusion with each hit's exact
 original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
-`quarantined`; cancellation and deadlines end the request with their own
+`quarantined`; a canonical registry missing only while the dense candidates
+are judged degrades the dense lane as `kernel` with an unexhausted budget, no
+quarantine, and no charge left, one missing at the route's final
+revalidation ends the request as `Unavailable("eligibility")`, and the next
+request serves after each; cancellation and deadlines end the request with
+their own
 terminals (`compressed_refusal`, `query_route.rs:770`; `lane_status`,
 `query_route.rs:582`).
 Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
 degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
 `heap_over_bound`, a one-byte batch as `batch_bytes`, a full ledger as
-`reservation`, and a view of another kernel incarnation as `identity`; the
-corruption and the quarantine reasons are those strings. `always` because no
+`reservation`, and a view of another kernel incarnation as `identity`; an
+entry bound of one degrades as `layers` with no row visited and no scratch or
+row-buffer charge left, although the route reserves both
+(`vector_reader.rs:876`, `:878`) before the scan applies the bound
+(`vector_reader.rs:900`), and the bound equal to the view's rows completes;
+the corruption and the quarantine reasons are those strings. `always` because no
 failure may pass as a successful dense completion.
 Fault/timing angle: Corruption between selection and the reads.
 Required faults and enabling state: A one-byte read bound; a rows file cut

@@ -858,6 +858,69 @@ fn a_budget_ended_after_an_admitted_batch_discards_the_pool() {
     assert_discarded(&pool);
 }
 
+/// The walk reads the budget every sixteenth row of a page rather than every row, so a budget cancelled at the second visited row of a forty-row page stops the walk at row index 16, the next check: fifteen more rows are visited, the walk never reaches the page's end, and the pool is discarded.
+#[test]
+fn a_cancelled_budget_stops_the_walk_within_one_check_interval() {
+    let (fixture, _, _) = hidden_prefix();
+    let coded = [coded_rows(&fixture)];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    assert_eq!(coded[0].layer.ids.len(), 40);
+    let generation = generation();
+    let query = axis(0);
+    let budget = EvalBudget::unbounded();
+    let request = CandidateQuery {
+        generation: &generation,
+        metric: Metric::InnerProduct,
+        unit_norm_tolerance: TOLERANCE,
+        query: &query,
+        authority: fixture.authority(),
+        capacity: capacity(4),
+        bounds: roomy(40),
+        layers: &layers,
+        codes: &codes,
+        max_entries: NonZeroUsize::new(64).unwrap(),
+    };
+    // Mirrors `BUDGET_STRIDE` in `crates/retrieval/src/dense/oracle.rs`; the hook fires before the check, so the checked row is visited too.
+    const STRIDE: usize = 16;
+    const CANCEL_AT: usize = 2;
+    let mut visited = 0;
+    let mut after_cancel = 0;
+    let pool = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(select_candidates_observed(
+                conn,
+                &fixture.kernel,
+                &request,
+                &budget,
+                |window| {
+                    if matches!(window, Window::Visited(_)) {
+                        visited += 1;
+                        if budget.is_exhausted() {
+                            after_cancel += 1;
+                        }
+                        if visited == CANCEL_AT {
+                            budget.cancel();
+                        }
+                    }
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (visited, after_cancel),
+        (STRIDE + 1, STRIDE + 1 - CANCEL_AT),
+        "the walk stopped at row index {STRIDE}, the first check after the cancel"
+    );
+    assert_eq!(
+        pool.ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert_discarded(&pool);
+}
+
 /// The resolver's entry bound counts the layer's rows before any page is read, so a layer one entry over it refuses with nothing visited, and the exact bound selects.
 #[test]
 fn the_entry_bound_refuses_before_any_row_is_visited() {

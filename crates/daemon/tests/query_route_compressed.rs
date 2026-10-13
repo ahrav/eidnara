@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use daemon::query_route::{
     CompressedLimits, CompressedProducer, DenseLane, DenseLimits, DenseVectors, LaneStatus,
-    LimitsRefusal, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
+    LimitsRefusal, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
 };
 use daemon::request_budget::{Exhaustion, RequestBudget};
-use daemon::vector_admission::{RESIDENT_LIMIT, ResourceClass};
+use daemon::search_projection::SearchProjectionError;
+use daemon::vector_admission::{Census, RESIDENT_LIMIT, ResourceClass};
 use daemon::vector_generation::ROWS_FILE;
 use daemon::vector_reader::{PinnedVectors, RescoreEvent};
 use daemon::{Handler, HandlerCore};
@@ -20,6 +21,7 @@ use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::{CandidatePolicy, CapacityRefusal, ScanBounds, StorageBounds, Window};
 use retrieval::eligibility::Authority;
 use retrieval::fusion::{Lane, RawScore};
+use storage::StoreError;
 use support::query_route::{
     Fixture, GENERATION, QUERY, dense_limits, dense_reference, generation, limits,
     projection_identity, query_vector, request_budget, vector_for,
@@ -125,6 +127,17 @@ fn run(
     vectors: DenseVectors,
     budget: &RequestBudget,
 ) -> Result<QueryOutcome, QueryFailure> {
+    run_phased(fixture, k, vectors, budget, |_| {})
+}
+
+/// [`run`] with `before_phase` called as the route enters each phase.
+fn run_phased(
+    fixture: &Fixture,
+    k: usize,
+    vectors: DenseVectors,
+    budget: &RequestBudget,
+    before_phase: impl FnMut(Phase),
+) -> Result<QueryOutcome, QueryFailure> {
     let producer = CompressedProducer {
         limits: dense_limits(k),
         vectors,
@@ -145,7 +158,7 @@ fn run(
             generation_id: GENERATION,
             producer: &producer,
         },
-        |_| {},
+        before_phase,
     )
 }
 
@@ -339,6 +352,191 @@ async fn a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connec
     fixture.daemon.shutdown().await;
 }
 
+/// Twenty thousand recursive rows run well past the 1,000-step polling interval, so a leaked progress handler polls during the scan.
+const POLLED_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000) SELECT count(*) FROM c";
+
+/// A plain read runs under any progress handler an earlier read left on the projection connection.
+fn plain_scan(fixture: &Fixture) -> Result<i64, SearchProjectionError> {
+    fixture
+        .projection
+        .read(|conn| Ok(conn.query_row(POLLED_SCAN, [], |row| row.get(0))?))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    // The plain read runs before the next request because that request's guarded read would replace a handler the earlier request left behind.
+    let next_completes = |earlier: &tokio_util::sync::CancellationToken| {
+        earlier.cancel();
+        assert_eq!(plain_scan(&fixture).unwrap(), 20_000);
+        let (_token, budget) = request_budget(10_000);
+        let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+        assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+        assert_eq!(dense_positions(&outcome).len(), 2);
+        assert!(!budget.shared().is_exhausted());
+        assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+        assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    };
+
+    // A read failure inside the request's guarded read ends its dense lane with an error.
+    composition
+        .view
+        .fail_original_reads_for_test(Some(std::io::ErrorKind::Other));
+    let (token, budget) = request_budget(10_000);
+    let failed = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(failed.statuses[2], LaneStatus::Unavailable("read_failed"));
+    composition.view.fail_original_reads_for_test(None);
+    next_completes(&token);
+
+    // A panic inside the scan unwinds out of the request's guarded read.
+    let (token, budget) = request_budget(10_000);
+    let vectors = composition.observed(|event| {
+        if matches!(event, RescoreEvent::Scan(Window::Visited(_))) {
+            panic!("injected unwind inside the dense scan");
+        }
+    });
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(&fixture, 2, vectors, &budget)
+    }));
+    let payload = unwound
+        .err()
+        .expect("the injected panic unwinds out of the request");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"injected unwind inside the dense scan")
+    );
+    next_completes(&token);
+    fixture.daemon.shutdown().await;
+}
+
+/// The leaked progress handler interrupts statements on the projection connection when polled after `token` is cancelled.
+fn leak_progress_handler(fixture: &Fixture, token: &tokio_util::sync::CancellationToken) {
+    let token = token.clone();
+    fixture
+        .projection
+        .read(|conn| {
+            conn.leak_progress_handler_for_test(move || token.is_cancelled());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leaked_progress_handler_fails_a_plain_read_that_the_next_guarded_request_masks() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let token = tokio_util::sync::CancellationToken::new();
+    leak_progress_handler(&fixture, &token);
+    token.cancel();
+    let leaked = plain_scan(&fixture);
+    assert!(
+        matches!(
+            leaked,
+            Err(SearchProjectionError::Store(StoreError::Deadline))
+        ),
+        "{leaked:?}"
+    );
+    // The guarded read replaces the connection's progress handler, masking the leak detected by the plain read.
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+    fixture.daemon.shutdown().await;
+}
+
+/// The kernel database under `root`, found by name.
+fn kernel_database(root: &std::path::Path) -> std::path::PathBuf {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name == "kernel.sqlite") {
+                return path;
+            }
+        }
+    }
+    panic!("no kernel database under {}", root.display());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kernel_failure_during_candidate_judgement_degrades_the_dense_lane_as_kernel() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let database = kernel_database(fixture.daemon.data_home());
+    let rename = move |from: &str, to: &str| {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    // The registry the kernel judges dense candidates against is missing from the scan's first window until the route admits the exact hits, so only the dense judgement sees the fault.
+    let hidden = Arc::new(Mutex::new(false));
+    let vectors = {
+        let hidden = Arc::clone(&hidden);
+        let rename = rename.clone();
+        composition.observed(move |event| {
+            let mut hidden = hidden.lock().unwrap();
+            if !*hidden && matches!(event, RescoreEvent::Scan(Window::Visited(_))) {
+                rename("object_registry", "object_registry_hidden");
+                *hidden = true;
+            }
+        })
+    };
+    let restored = Arc::new(Mutex::new(false));
+    let (_token, budget) = request_budget(10_000);
+    let outcome = {
+        let hidden = Arc::clone(&hidden);
+        let restored = Arc::clone(&restored);
+        let rename = rename.clone();
+        run_phased(&fixture, 2, vectors, &budget, move |phase| {
+            if phase == Phase::Admission && *hidden.lock().unwrap() {
+                rename("object_registry_hidden", "object_registry");
+                *restored.lock().unwrap() = true;
+            }
+        })
+    };
+    assert!(*hidden.lock().unwrap(), "the fault was injected");
+    assert!(
+        *restored.lock().unwrap(),
+        "the registry returned before admission"
+    );
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("kernel"));
+    assert_eq!(outcome.body["degraded"], true);
+    assert_eq!(outcome.body["lanes"]["dense"]["status"], "unavailable");
+    assert!(
+        !budget.shared().is_exhausted(),
+        "a kernel failure is not a budget stop"
+    );
+    assert!(!composition.view.is_quarantined());
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+
+    // A registry still missing at the route's final revalidation fails the whole request with its typed reason.
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run_phased(&fixture, 2, composition.vectors(), &budget, |phase| {
+        if phase == Phase::Revalidation {
+            rename("object_registry", "object_registry_hidden");
+        }
+    });
+    rename("object_registry_hidden", "object_registry");
+    assert!(
+        matches!(outcome, Err(QueryFailure::Unavailable("eligibility"))),
+        "{:?}",
+        outcome.as_ref().map(|outcome| &outcome.statuses)
+    );
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+    fixture.daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
     let fixture = Fixture::build().await;
@@ -399,9 +597,7 @@ async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
         LaneStatus::Unavailable("batch_bytes")
     );
     let tables = composition.store.ledger.census().resident;
-    composition
-        .store
-        .set_limit(daemon::vector_admission::RESIDENT_LIMIT, tables);
+    composition.store.set_limit(RESIDENT_LIMIT, tables);
     let vectors = DenseVectors::new(
         Arc::clone(&composition.view),
         composition.store.admission.clone(),
@@ -823,5 +1019,126 @@ async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant(
         "no row was rescored after the close"
     );
     assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    fixture.daemon.shutdown().await;
+}
+
+/// Holds one request at its first original read, runs `during` while its scratch and row buffers are charged, and returns the request's lane status with what `during` returned.
+fn while_draining<T>(
+    fixture: &Fixture,
+    composition: &Composition,
+    during: impl FnOnce(&Census) -> T,
+) -> (LaneStatus, T) {
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(Some(released));
+    let held = composition.observed(move |event| {
+        if matches!(event, RescoreEvent::ReadOriginal { .. })
+            && let Some(released) = released.lock().unwrap().take()
+        {
+            entered_tx.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(20)).unwrap();
+        }
+    });
+    std::thread::scope(|scope| {
+        let drain = scope.spawn(|| {
+            let (_token, budget) = request_budget(10_000);
+            run(fixture, 2, held, &budget).unwrap().statuses[2].clone()
+        });
+        entered.recv_timeout(Duration::from_secs(20)).unwrap();
+        let observed = during(&composition.store.ledger.census());
+        release.send(()).unwrap();
+        (drain.join().unwrap(), observed)
+    })
+}
+
+/// A request draining at an original read holds its scratch and row buffers. With the resident limit set to exactly what the ledger holds while one request drains, a scratch reservation the size of the drainer's is refused while it drains and fits once it finishes, so draining work counts against the next admission; a request under the same limit then completes. The next admission is a direct ledger reservation because the fixture's projection connection serves one request at a time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes() {
+    let fixture = Fixture::build().await;
+    let mut composition = Composition::of(&fixture);
+    let (status, probe) = while_draining(&fixture, &composition, Census::clone);
+    assert_eq!(status, LaneStatus::Complete);
+    let scratch = probe.held[&ResourceClass::Scratch];
+    assert!(scratch > 0);
+    assert!(probe.held[&ResourceClass::RowBuffers] > 0);
+    composition.store.set_limit(RESIDENT_LIMIT, probe.resident);
+    let reserve = || {
+        composition
+            .store
+            .ledger
+            .reserve(
+                &composition.store.admission,
+                ResourceClass::Scratch,
+                scratch,
+            )
+            .map(|_| ())
+    };
+
+    let (status, (resident, refused)) = while_draining(&fixture, &composition, |census| {
+        (census.resident, reserve())
+    });
+    assert_eq!(
+        status,
+        LaneStatus::Complete,
+        "the drain itself fits the limit"
+    );
+    assert_eq!(resident, probe.resident, "one drain fills the limit");
+    assert!(
+        matches!(refused, Err(daemon::vector_admission::Refusal::Denied(_))),
+        "the draining request's charges count against the next reservation: {refused:?}"
+    );
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    assert_eq!(
+        reserve(),
+        Ok(()),
+        "the same reservation fits once the drain finished"
+    );
+    let (_token, budget) = request_budget(10_000);
+    let recovered = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(
+        recovered.statuses[2],
+        LaneStatus::Complete,
+        "the finished drain left the limit's headroom free"
+    );
+    fixture.daemon.shutdown().await;
+}
+
+/// An entry bound below the view's rows refuses the scan before any row is visited, and the lane degrades as `layers`; the bound equal to the view's rows completes, so the entry count is the only variable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_bound_below_the_view_degrades_the_lane_before_a_scan() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let mut limits = compressed_limits();
+    limits.max_entries = NonZeroUsize::new(1).unwrap();
+    let events = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&events);
+    let vectors = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        composition.store.activation(),
+        limits,
+    )
+    .with_observer_for_test(Arc::new(move |event| {
+        if matches!(event, RescoreEvent::Scan(Window::Visited(_))) {
+            *counted.lock().unwrap() += 1;
+        }
+    }));
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, vectors, &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("layers"));
+    assert_eq!(*events.lock().unwrap(), 0, "no row was visited");
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    let mut exact = compressed_limits();
+    exact.max_entries = NonZeroUsize::new(composition.rows.len()).unwrap();
+    let vectors = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        composition.store.activation(),
+        exact,
+    );
+    let outcome = run(&fixture, 2, vectors, &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
     fixture.daemon.shutdown().await;
 }
