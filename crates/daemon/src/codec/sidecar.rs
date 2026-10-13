@@ -6,7 +6,7 @@
 //! `MAX_ALIGNMENT_CELLS`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -119,11 +119,11 @@ pub struct BlockMeta {
     pub item_id: Option<String>,
 }
 
-/// Order-preserving block-to-metadata alignment and native-part retention sets.
+/// `MatchedBlockMetas` pairs blocks with metadata in order and tracks native parts eligible
+/// for removal.
 pub(crate) struct MatchedBlockMetas<'a> {
     pub(crate) by_block: Vec<Option<&'a BlockMeta>>,
-    retained_native_indices: BTreeSet<usize>,
-    decoded_native_indices: BTreeSet<usize>,
+    unretained_native_parts: Vec<bool>,
     decoded: &'a [WireBlock],
 }
 
@@ -148,8 +148,11 @@ impl MatchedBlockMetas<'_> {
             .into_iter()
             .enumerate()
             .filter_map(|(native_index, part)| {
-                let decoded_block_was_removed = self.decoded_native_indices.contains(&native_index)
-                    && !self.retained_native_indices.contains(&native_index);
+                let decoded_block_was_removed = self
+                    .unretained_native_parts
+                    .get(native_index)
+                    .copied()
+                    .unwrap_or(false);
                 (!decoded_block_was_removed).then_some(part)
             })
             .collect()
@@ -192,7 +195,7 @@ impl<'a> MatchedBlockMetas<'a> {
                 for (block, meta) in run_blocks.zip(run_metas) {
                     self.by_block[block] = Some(&metas[meta]);
                     if let Some(native_index) = metas[meta].native_index {
-                        self.retained_native_indices.insert(native_index);
+                        self.unretained_native_parts[native_index] = false;
                     }
                 }
             }
@@ -372,16 +375,25 @@ pub(crate) fn match_block_metas<'a>(
         optimal_block_metas(blocks, metas, &mut matches, decoded)
     };
 
-    let retained_native_indices = by_block
+    let native_parts = metas
+        .iter()
+        .filter_map(|meta| meta.native_index)
+        .max()
+        .map_or(0, |last| last + 1);
+    let mut unretained_native_parts = vec![false; native_parts];
+    for native_index in metas.iter().filter_map(|meta| meta.native_index) {
+        unretained_native_parts[native_index] = true;
+    }
+    for native_index in by_block
         .iter()
         .filter_map(|meta| meta.and_then(|meta| meta.native_index))
-        .collect();
-    let decoded_native_indices = metas.iter().filter_map(|meta| meta.native_index).collect();
+    {
+        unretained_native_parts[native_index] = false;
+    }
 
     MatchedBlockMetas {
         by_block,
-        retained_native_indices,
-        decoded_native_indices,
+        unretained_native_parts,
         decoded,
     }
 }
@@ -450,40 +462,43 @@ fn optimal_block_metas<'a>(
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &[WireBlock],
 ) -> Vec<Option<&'a BlockMeta>> {
-    let mut candidates = vec![vec![false; metas.len()]; blocks.len()];
+    let (rows, columns) = (blocks.len(), metas.len());
+    let mut candidates = vec![false; rows * columns];
     for (block_index, block) in blocks.iter().enumerate() {
         for (meta_index, meta) in metas.iter().enumerate() {
             let kind_matches = matches(block, meta);
-            candidates[block_index][meta_index] =
+            candidates[block_index * columns + meta_index] =
                 alignment_candidate(block, block_index, meta, kind_matches, decoded);
         }
     }
 
     // The LCS-style walk preserves native order and avoids same-kind adjacency matching.
-    let mut scores = vec![vec![0usize; metas.len() + 1]; blocks.len() + 1];
-    for block_index in (0..blocks.len()).rev() {
-        for meta_index in (0..metas.len()).rev() {
-            let mut best =
-                scores[block_index + 1][meta_index].max(scores[block_index][meta_index + 1]);
-            if candidates[block_index][meta_index] {
-                best = best.max(scores[block_index + 1][meta_index + 1] + 1);
+    let width = columns + 1;
+    let mut scores = vec![0usize; (rows + 1) * width];
+    for block_index in (0..rows).rev() {
+        for meta_index in (0..columns).rev() {
+            let cell = block_index * width + meta_index;
+            let mut best = scores[cell + width].max(scores[cell + 1]);
+            if candidates[block_index * columns + meta_index] {
+                best = best.max(scores[cell + width + 1] + 1);
             }
-            scores[block_index][meta_index] = best;
+            scores[cell] = best;
         }
     }
 
-    let mut by_block = vec![None; blocks.len()];
+    let mut by_block = vec![None; rows];
     let (mut block_index, mut meta_index) = (0, 0);
-    while block_index < blocks.len() && meta_index < metas.len() {
-        if candidates[block_index][meta_index]
-            && scores[block_index + 1][meta_index + 1] + 1 == scores[block_index][meta_index]
+    while block_index < rows && meta_index < columns {
+        let cell = block_index * width + meta_index;
+        if candidates[block_index * columns + meta_index]
+            && scores[cell + width + 1] + 1 == scores[cell]
         {
             by_block[block_index] = Some(&metas[meta_index]);
             block_index += 1;
             meta_index += 1;
             continue;
         }
-        if scores[block_index + 1][meta_index] >= scores[block_index][meta_index + 1] {
+        if scores[cell + width] >= scores[cell + 1] {
             block_index += 1;
         } else {
             meta_index += 1;
@@ -836,7 +851,7 @@ mod tests {
                 "block {index} must pair with its positional meta"
             );
         }
-        assert_eq!(matched.retained_native_indices.len(), count);
+        assert_eq!(matched.unretained_native_parts, vec![false; count]);
     }
 
     /// Every SHA-256 the codecs take runs in [`stable_hash_prefix`] or the test-only
