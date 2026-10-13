@@ -473,10 +473,49 @@ pub(crate) fn measure_serialize<T: serde::Serialize + ?Sized>(
 ///
 /// Serialization stops when encoded output exceeds `MAX_WIRE_BODY_BYTES`.
 pub(crate) fn measure_json(value: &Value) -> Result<usize, PreparedOutputError> {
+    let len = compact_len(value);
+    if len <= MAX_WIRE_BODY_BYTES {
+        return Ok(len);
+    }
     let mut writer = CountingWriter::default();
     let result = serde_json::to_writer(&mut writer, value).map_err(PreparedOutputError::Serialize);
     let writer = finish_count(writer, result)?;
     Ok(writer.len)
+}
+
+fn compact_len(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => measure_serialize(number).unwrap_or(usize::MAX),
+        Value::String(text) => escaped_len(text),
+        Value::Array(items) => delimited(items.len(), items.iter().map(compact_len)),
+        Value::Object(fields) => {
+            let field_len =
+                |(key, value): (&String, &Value)| escaped_len(key) + 1 + compact_len(value);
+            delimited(fields.len(), fields.iter().map(field_len))
+        }
+    }
+}
+
+/// `lengths` with two brackets around them and one comma between adjacent items.
+fn delimited(count: usize, lengths: impl Iterator<Item = usize>) -> usize {
+    lengths.fold(1 + count.max(1), usize::saturating_add)
+}
+
+/// serde_json escapes `"`, `\\`, `\b`, `\t`, `\n`, `\f`, and `\r` in two bytes and other control
+/// bytes in six; a byte-wide tally per 64-byte chunk vectorizes.
+fn escaped_len(text: &str) -> usize {
+    let escape = |&b: &u8| u8::from(matches!(b, 0..0x20 | b'"' | b'\\'));
+    let six_byte = |&&b: &&u8| b < 0x20 && !matches!(b, 0x08 | b'\t' | b'\n' | 0x0c | b'\r');
+    let mut len = text.len() + 2;
+    for chunk in text.as_bytes().chunks(64) {
+        len += match chunk.iter().map(escape).sum::<u8>() {
+            0 => 0,
+            escaped => usize::from(escaped) + 4 * chunk.iter().filter(six_byte).count(),
+        };
+    }
+    len
 }
 
 fn finish_count(
@@ -646,6 +685,65 @@ impl<W: Write> Write for BoundedWriter<'_, W> {
 mod tests {
     use super::*;
     use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
+    use proptest::prelude::*;
+
+    fn json_value() -> impl Strategy<Value = Value> {
+        let text = prop_oneof![
+            any::<String>(),
+            proptest::collection::vec(
+                prop_oneof![
+                    (0u8..0x20).prop_map(char::from),
+                    Just('"'),
+                    Just('\\'),
+                    Just('\u{7f}'),
+                    Just('\u{2028}'),
+                    any::<char>(),
+                ],
+                0..200,
+            )
+            .prop_map(String::from_iter),
+        ];
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<u64>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            any::<f64>().prop_map(Value::from),
+            text.clone().prop_map(Value::String),
+        ];
+        leaf.prop_recursive(4, 64, 6, move |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+                proptest::collection::btree_map(text.clone(), inner, 0..6)
+                    .prop_map(|fields| Value::Object(fields.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn measured_json_is_its_serialized_length(value in json_value()) {
+            let serialized = serde_json::to_vec(&value).unwrap();
+            prop_assert_eq!(measure_json(&value).unwrap(), serialized.len());
+        }
+    }
+
+    #[test]
+    fn a_json_value_over_the_limit_is_refused_at_the_serializer_length() {
+        let value = Value::String("\u{1}".repeat(MAX_WIRE_BODY_BYTES / 6 + 1));
+        let mut counter = CountingWriter::default();
+        let result =
+            serde_json::to_writer(&mut counter, &value).map_err(PreparedOutputError::Serialize);
+        let expected = finish_count(counter, result).map(|counter| counter.len);
+        assert!(matches!(
+            expected,
+            Err(PreparedOutputError::BodyTooLarge { .. })
+        ));
+        assert_eq!(
+            format!("{:?}", measure_json(&value)),
+            format!("{expected:?}")
+        );
+    }
 
     /// A served message whose tool input nests `levels` arrays inside the block's own containers.
     fn served_with_nested_input(levels: usize) -> PreparedSegment {
