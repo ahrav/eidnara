@@ -99,6 +99,7 @@ pub mod request_budget;
 pub mod vector_admission;
 pub mod vector_compaction;
 pub mod vector_composition;
+pub mod vector_current;
 pub mod vector_generation;
 mod vector_mapped;
 pub mod vector_reader;
