@@ -26,6 +26,24 @@ on:
           tier of one arm for pi-pass, whose measured arm needs about 9000
         type: string
         default: "1200"
+      scale_tiers:
+        description: >-
+          Comma-separated scale tiers to run; empty runs the driver's full tier
+          set
+        type: string
+        default: ""
+      scale_samples:
+        description: >-
+          Passes per tier for both arms, with one Pi session; empty keeps the
+          driver's full sampling
+        type: string
+        default: ""
+      scale_steady:
+        description: >-
+          With scale_samples, completed steady Pi passes that end a session
+          early; zero runs every sample
+        type: string
+        default: "0"
       qualification:
         description: >-
           Run the retained-history and outage qualification campaign, with its
@@ -1052,6 +1070,9 @@ jobs:
       EIDNARA_SCALE_BUDGET_SECONDS: ${{ inputs.scale_budget_seconds }}
       SCALE_DRIVER: ${{ inputs.scale_driver }}
       SCALE_BASE: ${{ inputs.scale_base }}
+      SCALE_TIERS: ${{ inputs.scale_tiers }}
+      SCALE_SAMPLES: ${{ inputs.scale_samples }}
+      SCALE_STEADY: ${{ inputs.scale_steady }}
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1111,6 +1132,23 @@ jobs:
               base_flags=(--sessions 1 --samples 330) ;;
             *) echo "unknown scale driver: $SCALE_DRIVER" >&2; exit 1 ;;
           esac
+          # A baseline dispatch narrows the tiers and the sampling for both arms.
+          if [ -n "$SCALE_TIERS" ]; then
+            if [ "$SCALE_DRIVER" = pi-pass ]; then tier_runs=("$SCALE_TIERS")
+            else IFS=, read -r -a tier_runs <<< "$SCALE_TIERS"; fi
+          fi
+          if [ -n "$SCALE_SAMPLES" ]; then
+            if [ "$SCALE_DRIVER" = pi-pass ]; then
+              measured_flags=(--sessions 1 --samples "$SCALE_SAMPLES" --steady "${SCALE_STEADY:-0}")
+              # The base arm never transforms, so it reaches no steady pass and runs every sample.
+              base_flags=(--sessions 1 --samples "$SCALE_SAMPLES")
+            else
+              measured_flags=(--samples "$SCALE_SAMPLES")
+              base_flags=("${measured_flags[@]}")
+            fi
+          elif [ "${SCALE_STEADY:-0}" != 0 ]; then
+            echo "scale_steady requires scale_samples" >&2; exit 1
+          fi
           out="$RUNNER_TEMP/scale"
           runner="$PWD/target/release/examples/eval_runner"
           arms=(measured)

@@ -105,13 +105,36 @@ impl UnitRunner for DetachedRunner {
 }
 
 /// What a request brings to the routing arms: the daemon's shared state, the route, the
-/// body's probe, the meter that charged the decode, and the runner for the pass's units.
+/// body's probe, the meter that charged the decode, the runner for the pass's units, and the
+/// instants that open the daemon's stage ledger.
 pub(crate) struct PassEntry<'a> {
     pub(crate) core: &'a Arc<HandlerCore>,
     pub(crate) route: host_runtime::RouteHandle,
     pub(crate) probe: Option<&'a RequestEntryProbe>,
     pub(crate) meter: &'a ResidentMeter<'a>,
     pub(crate) runner: &'a dyn UnitRunner,
+    pub(crate) clock: PassClock,
+}
+
+/// The two instants the daemon's stage ledger starts from: `received_at` when the handler took
+/// the body, and `admitted_at` once the byte cap, the admission charge, and the lane probe have
+/// run. The `admit` stage is the span between them; `lane_gate_and_decode` starts at
+/// `admitted_at`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PassClock {
+    pub(crate) received_at: std::time::Instant,
+    pub(crate) admitted_at: std::time::Instant,
+}
+
+impl PassClock {
+    /// A clock for an entry that has no admission step of its own: both instants are now.
+    pub(crate) fn now() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            received_at: now,
+            admitted_at: now,
+        }
+    }
 }
 
 /// What a unit hands back to the handler.

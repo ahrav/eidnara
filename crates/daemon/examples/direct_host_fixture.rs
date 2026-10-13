@@ -1598,6 +1598,11 @@ mod unix {
     }
 }
 
+/// The fixture allocates as `eidnara-host` does, so its passes measure the shipped allocator.
+#[cfg(unix)]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(unix)]
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

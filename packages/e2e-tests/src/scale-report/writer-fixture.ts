@@ -1,6 +1,6 @@
-import type { PassRow } from "./rows";
+import { NO_LEDGER, type PassRow } from "./rows";
 
-/** Rows covering every outcome, a null service time, and both harnesses. */
+/** Rows covering every outcome, a null service time, both harnesses, a full stage ledger, and a daemon ledger alone. */
 export const WRITER_FIXTURE_ROWS: PassRow[] = [
     {
         harness: "opencode",
@@ -14,6 +14,7 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         service_us: 18_900,
         rss_bytes: 212_336_640,
         ipc_bytes: 1_572_864,
+        ...NO_LEDGER,
     },
     {
         harness: "opencode",
@@ -27,6 +28,7 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         service_us: null,
         rss_bytes: 905_969_664,
         ipc_bytes: 1_605_632,
+        ...NO_LEDGER,
     },
     {
         harness: "pi",
@@ -40,6 +42,7 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         service_us: null,
         rss_bytes: 301_989_888,
         ipc_bytes: 0,
+        ...NO_LEDGER,
     },
     {
         harness: "pi",
@@ -53,6 +56,7 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         service_us: 50_123,
         rss_bytes: 1_073_741_824,
         ipc_bytes: 1_638_400,
+        ...NO_LEDGER,
     },
     {
         harness: "opencode",
@@ -66,6 +70,7 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         service_us: 2_017,
         rss_bytes: 250_609_664,
         ipc_bytes: 1_590_112,
+        ...NO_LEDGER,
     },
     {
         harness: "pi",
@@ -79,5 +84,57 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         service_us: null,
         rss_bytes: 180_355_072,
         ipc_bytes: 1_548_288,
+        ...NO_LEDGER,
+    },
+    {
+        harness: "opencode",
+        tier: "10k",
+        session: "opencode-10k-0",
+        turn: 1,
+        boundary_state: "replay",
+        outcome: "completed",
+        refusal: null,
+        response_us: 31_000,
+        service_us: 9_800,
+        rss_bytes: 212_340_736,
+        ipc_bytes: 1_572_864,
+        prefix_guard_us: 2_100,
+        prepare_us: 400,
+        wire_build_us: 3_300,
+        serialize_us: 1_900,
+        transport_and_encode_us: 4_200,
+        apply_us: 2_600,
+        other_us: 1_500,
+        admit_us: 300,
+        lane_gate_and_decode_us: 4_100,
+        derivation_us: null,
+        transform_core_us: 6_900,
+        native_attach_us: 2_800,
+        daemon_residual_us: 900,
+        daemon_total_us: 15_000,
+        window_messages: 301,
+        window_blocks: 301,
+    },
+    {
+        harness: "pi",
+        tier: "10k",
+        session: "pi-10k-0",
+        turn: 41,
+        boundary_state: "steady",
+        outcome: "completed",
+        refusal: null,
+        response_us: 18_000,
+        service_us: 7_100,
+        rss_bytes: 180_359_168,
+        ipc_bytes: 1_048_576,
+        ...NO_LEDGER,
+        admit_us: 200,
+        lane_gate_and_decode_us: 2_900,
+        transform_core_us: 5_400,
+        native_attach_us: 1_700,
+        daemon_residual_us: 800,
+        daemon_total_us: 11_000,
+        window_messages: 119,
+        window_blocks: 158,
     },
 ];

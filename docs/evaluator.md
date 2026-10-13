@@ -1213,24 +1213,68 @@ it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
 otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
 and pass^k case in the golden.
 
-## Scale report `eval-scale-report/v1`
+## Scale report `eval-scale-report/v2`
 
 `scale.rs` holds the report the scale budgets of #825 are measured with. A
 `PassRow` is one transform pass: `harness` (`opencode` or `pi`), `tier`
 (`10k`, the control, `s3_100k`, or `s4_1m`), `session`, `turn`,
 `boundary_state` (`cold`, `warming`, `steady`, `replay`, `after_restart`), `outcome`
 (`completed`, `censored`, `refused`), `refusal` (`declined`, `daemon_error`,
-`transport_error`, present exactly on a refused pass), `response_us` (the
-plugin's pass from handing its input to the client until the transformed array
-is published, which a driver may bound from above by timing the whole hook; a
-censored pass carries its censoring point), `service_us` (the daemon's own
-`total`), `rss_bytes` (the measured plugin process), and `ipc_bytes`. `steady` passes follow the
+`transport_error`, present exactly on a refused pass), `response_us` (the full
+plugin hook, from the harness handing the plugin its array to the plugin
+returning the array it serves; a censored pass carries its censoring point),
+`service_us` (the daemon's own `total`, an overlapping diagnostic), `rss_bytes`
+(the measured plugin process), `ipc_bytes`, and the stage ledger below. `steady` passes follow the
 contract's steady state: after the first HARD, once the window reached its fold
 size and the boundary moved three times, confirmed by a drift check. `replay`
 passes resend the previous pass's window at the same declared boundary with no
 fold in between, the fresh-host-array pass #824 measured. Every field is present
 on the wire, and `parse_pass_row` refuses a row that does not round-trip byte
 for byte, naming an absent optional field.
+
+### Stage ledger
+
+A row carries two additive ledgers in whole microseconds. The plugin ledger is
+`prefix_guard_us` (capture and every recheck of the host window), `prepare_us`
+(the harness's pass inputs), `wire_build_us` (the transform body), `serialize_us`
+(the page series serialized to text), `transport_and_encode_us`, `apply_us`
+(recipe application and publication), and `other_us` (every other moment of
+the hook outside the transport round trip, adapter work and note delivery
+included). With `daemon_total_us` they sum to `response_us` exactly:
+`transport_and_encode_us` is the residual of the hook after every other plugin
+stage and the daemon total, the transport round trip less the daemon's own
+span, so it holds the transport and the daemon's response encode. The
+daemon ledger is `admit_us` (from the handler taking the body through the byte
+cap, admission charge, and lane probe), `lane_gate_and_decode_us` (the typed
+decode, request checks, session lane wait, and unit permit), `derivation_us`
+(reserved for daemon-derived CK, `null` while the plugin sends CK),
+`transform_core_us`, `native_attach_us`, and `daemon_residual_us`; they sum to
+`daemon_total_us`, which the transform response carries as `timings.ledger`
+measured just before the response encode; a pass the daemon serves
+untransformed, such as a child session's, carries no ledger.
+`lane_gate_and_decode_us` holds the session lane wait and the unit-permit wait
+beside the decode, near zero in a closed-loop single-session run and a
+confounded figure under concurrency. On a pass that does not rerun for an
+Emergency95 fold, the native encode runs beside the summarizer step, so its time
+falls in `transform_core_us` and `native_attach_us` holds the native output
+store and the recipe inputs; an Emergency95 pass encodes inside
+`native_attach_us`. On a paged pass every daemon stage
+measures the final page's request, and the earlier pages' daemon time falls in
+`transport_and_encode_us`. `window_messages` and `window_blocks` count the CK
+messages and blocks the daemon served, the cohort a latency belongs to.
+`request_observed_to_handler`, `handler_total`, and `total` keep their meanings
+as overlapping diagnostics outside both ledgers, and `response_encode` stays a
+log-only diagnostic.
+
+A `null` stage is unavailable, never zero. Each ledger group is all present or
+all unavailable, except `derivation_us` inside a present daemon group; a plugin
+group needs a present daemon total to reconcile. A pass whose final response
+carried no ledger, such as a refused or censored pass, has every stage
+unavailable and keeps its outcome. The writer always emits every field, and
+`parse_pass_row` refuses a partial group, a negative, fractional, or unsafe
+value, and an unknown field; a row written before the ledger carries none of
+its fields and parses with every stage unavailable. The report build refuses a
+row whose ledgers do not sum (`LedgerMismatch`).
 
 `ScaleReport::build` derives every summary from the rows, the driver and
 artifact identities (commit, Bun version, daemon build), the host manifest (CPU
@@ -1246,7 +1290,15 @@ span, which passes when that growth is at most a tenth of the RSS at
 steady-state entry. Per tier it pools each state's passes of every session for
 that state's percentiles, so a tier percentile is never a mean of session
 percentiles, and states refused passes of every state as `RefusalRate` through
-the `Counter` bound: zero refusals is a rule-of-three `bound`.
+the `Counter` bound: zero refusals is a rule-of-three `bound`. Each state
+summary also keeps, per stage, the nearest-rank p50 and p90 of the completed
+passes that carry that stage; an unavailable stage is left out of its
+summary, and the outcome counts keep every pass. Stage medians describe their
+stage and never add into a total median. Each tier names the served-window
+cohorts of its completed passes (`windows`: each distinct `window_messages` and
+`window_blocks` with its pass count), and the report carries the driver's
+qualified workload as `cohort.window`, the host messages each pass carries past
+its boundary.
 
 A non-control tier carries a ratio claim only with at least three sessions in
 the tier and in the 10k control and at least `P99_MIN_RUNS` uncensored steady
@@ -1265,8 +1317,9 @@ report from its rows: an underpowered ratio claim, a zero refusal count stated
 other than as a rule-of-three bound, and pooled percentiles that differ from
 the pooled rows each have their own refusal, and any other summary drift is
 `SummaryMismatch`. `result_digest` covers identities, open-loop counts, the
-seed, and each row's place and outcome, and excludes every latency, RSS, and
-byte measurement and every summary derived from them.
+cohort, the seed, and each row's place, outcome, and served window, and
+excludes every latency, stage, RSS, and byte measurement and every summary
+derived from them, so a change of durations alone leaves it unchanged.
 
 `packages/e2e-tests/src/scale-report/rows.ts` is the TypeScript row writer; its
 fixed fixture's output is committed as `testdata/scale/writer-rows.jsonl`,
@@ -1348,6 +1401,10 @@ point before it, so a session whose evictions stop fails once its open interval
 outlasts the completed ones; fewer than two points fails too, and the longest
 run of turns between evictions is recorded. The base arm records no flatness;
 its `max_session_evictions` shows any compaction Pi ran on its own.
+Both drivers fill a row's stage ledger from the plugin's own pass ledger,
+which the transform session client hands every listener registered through
+`observePassLedgers` when a pass finishes, and from the daemon ledger that pass's
+final response carried (`src/scale-report/ledger.ts`).
 `rss_bytes` is sampled after the eviction wait, at the trough of the array's
 sawtooth. A call on a pass the plugin declined after an eviction records whether
 Pi's first message carries the m0 text of a pass published earlier in the
@@ -1357,6 +1414,46 @@ of a session with no eviction, and `baseline.json` counts both per tier. The
 driver records each session's flatness verdict (`passes`) and gates nothing on
 it; the gate, and the comparison across `s3_100k` and `s4_1m`, are the report's
 reading of the two tiers' rows.
+
+### Transform-pass baseline and verdict procedure
+
+The transform-pass latency work of #988 measures one cohort: the 10k session
+with the qualified 300-message window (`--window 300`, the drivers' default),
+whose rows record the window each pass actually served; #988 qualifies the
+cohort at 301 served messages for OpenCode and 119 for a Pi steady pass. Its baseline runs on the reference host
+through a dispatch of the `scale-report` job with `scale_tiers=10k` and
+`scale_budget_seconds=900`: `scale_driver=opencode-pass` with
+`scale_samples=80`, and `scale_driver=pi-pass` with one session of up to
+`scale_samples=700` calls that ends at `scale_steady=80` completed steady
+passes, since a Pi session reaches steady state only after its window folds and
+its boundary moves three times. Locally the same rows come from release
+binaries:
+
+```text
+cargo +1.98 build --release -p daemon --example direct_host_fixture --features direct-host-fixture --locked
+cargo +1.98 build --release -p daemon --example eval_runner --features eval-runner --locked
+EIDNARA_SCALE_BUDGET_SECONDS=900 bun packages/e2e-tests/scripts/scale-opencode-pass.ts --tiers 10k --samples 80 --plugin-root packages/opencode-plugin --fixture-bin target/release/examples/direct_host_fixture --eval-runner-bin target/release/examples/eval_runner --out-dir <dir>
+EIDNARA_SCALE_BUDGET_SECONDS=900 bun packages/e2e-tests/scripts/scale-pi-pass.ts --tiers 10k --sessions 1 --samples 700 --steady 80 --plugin-root packages/pi-plugin --fixture-bin target/release/examples/direct_host_fixture --eval-runner-bin target/release/examples/eval_runner --out-dir <dir>
+target/release/examples/eval_runner scale-report --rows <dir>/rows.jsonl --manifest <dir>/manifest.json --out <dir>/report.json
+```
+
+Rows, manifests, and reports are run artifacts and are never committed. A
+baseline run produces no verdict. A later verdict compares matched cohorts:
+one host, one build per arm, the same tier, window, session count, and boundary
+states, and the same denominators. It uses a fixed horizon of three complete
+paired ABBA blocks of the baseline (A) and candidate (B) artifacts on one host,
+plus at least three A/A blocks of the baseline artifact alone, with no peeking.
+The compared statistic is the nearest-rank p50 of `response_us` over the
+completed passes of the compared boundary state and window cohort: `replay` for
+OpenCode and `steady` for Pi. A block runs four arms in order, A1 B1 B2 A2, each
+under the same flags and sample count; its ratio is the geometric mean of
+B1/A1 and B2/A2. An A/A block runs the baseline artifact four times in the same
+order and shape, and its ratio is computed the same way with the second and
+third runs in the B positions. With every ratio taken as a natural log, the
+candidate wins only when every block's log ratio is below zero and the
+smallest improvement, the least absolute log ratio among the blocks, exceeds
+the largest absolute A/A log ratio. Stage percentiles explain a verdict; they
+are never summed into one.
 
 ## Paired worlds
 

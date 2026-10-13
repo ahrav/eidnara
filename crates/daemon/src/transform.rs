@@ -225,12 +225,12 @@ impl ServedMessage {
     /// Reuse a projected block's retained hash only when its complete identity matches.
     ///
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
-    /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
+    /// Overlaid, reduced, and rewritten blocks hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
         // The canonicalizer may hand back its growth buffer with spare capacity;
         // converting to the exact-size `Arc` first keeps that slack from outliving
-        // the block-receipt serialization below.
-        let canonical = crate::served_json::canonical_message(&message)
+        // the block receipts below.
+        let (canonical, block_ranges) = crate::served_json::canonical_message_with_blocks(&message)
             .expect("CK wire message values must always serialize");
         let nesting_depth = canonical.nesting_depth;
         let canonical_bytes: Arc<[u8]> = Arc::from(canonical.bytes);
@@ -265,11 +265,19 @@ impl ServedMessage {
                 if let Some(fp) = reused {
                     return fp;
                 }
+                if let Some(range) = block_ranges
+                    .as_ref()
+                    .and_then(|ranges| ranges.get(served_index))
+                {
+                    let serialized = &canonical_bytes[range.clone()];
+                    return (wire::fingerprint_bytes(serialized), serialized.len());
+                }
                 let serialized = crate::served_json::canonical_block_bytes(block)
                     .expect("CK wire blocks must always have a JSON representation");
                 (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
+        drop(block_ranges);
         let message = Arc::new(message);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
         let retained_bytes =
@@ -1228,6 +1236,77 @@ pub struct TransformTimings {
     pub projection_blocks: usize,
     #[serde(default)]
     pub tail_messages_emitted: usize,
+    /// The daemon's additive stage ledger of a completed pass; absent on every other answer.
+    /// Its stages are disjoint and contiguous, so they sum to its `total_us` exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<DaemonStageLedger>,
+}
+
+/// One completed pass as disjoint daemon stages, in whole microseconds, plus the window it served.
+///
+/// `admit` runs from the handler taking the body to the end of the byte cap, admission charge,
+/// and lane probe; `lane_gate_and_decode` from there through the typed decode, the request
+/// checks, the session lane wait, and the unit permit; `transform_core` from there to the
+/// native-attach step; `native_attach` is that step; `residual` is the rest of the pass up to
+/// the instant the ledger is taken, which precedes the response encode. On the paged lane every
+/// stage measures the final page's request. `derive_ck` is reserved for daemon-derived CK and is
+/// `None` while the plugin sends CK.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonStageLedger {
+    pub admit_us: u64,
+    pub lane_gate_and_decode_us: u64,
+    pub derivation_us: Option<u64>,
+    pub transform_core_us: u64,
+    pub native_attach_us: u64,
+    pub residual_us: u64,
+    pub total_us: u64,
+    /// CK messages and content blocks in the window the pass served.
+    pub window_messages: u64,
+    pub window_blocks: u64,
+}
+
+/// The instants a [`DaemonStageLedger`] is measured between, in pass order.
+pub struct LedgerInstants {
+    pub received_at: Instant,
+    pub admitted_at: Instant,
+    pub core_started_at: Instant,
+    pub native_attach_started_at: Instant,
+    pub native_attach_ended_at: Instant,
+}
+
+impl DaemonStageLedger {
+    /// Measures the ledger now. Each stage is the whole-microsecond span between consecutive
+    /// instants, so the stages and `residual_us` sum to `total_us`.
+    pub fn measure(at: LedgerInstants, served: &TransformRequest) -> Self {
+        let ended_at = Instant::now();
+        let micros = |from: Instant, to: Instant| -> u64 {
+            u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX)
+        };
+        let admit_us = micros(at.received_at, at.admitted_at);
+        let lane_gate_and_decode_us = micros(at.admitted_at, at.core_started_at);
+        let transform_core_us = micros(at.core_started_at, at.native_attach_started_at);
+        let native_attach_us = micros(at.native_attach_started_at, at.native_attach_ended_at);
+        let total_us = micros(at.received_at, ended_at);
+        let staged = admit_us
+            .saturating_add(lane_gate_and_decode_us)
+            .saturating_add(transform_core_us)
+            .saturating_add(native_attach_us);
+        Self {
+            admit_us,
+            lane_gate_and_decode_us,
+            derivation_us: None,
+            transform_core_us,
+            native_attach_us,
+            residual_us: total_us.saturating_sub(staged),
+            total_us: total_us.max(staged),
+            window_messages: served.messages.len() as u64,
+            window_blocks: served
+                .messages
+                .iter()
+                .map(|message| message.ck.content().len() as u64)
+                .sum(),
+        }
+    }
 }
 
 /// Record this pass's token-cache counter deltas into `timings`.
@@ -10639,8 +10718,8 @@ fn apply_surface_strips(
                     && image_block_is_large(&block.wire))
                     || (request_accepts_empty_content(req)
                         && core.frozen_units.iter().any(|unit| {
-                            unit.key == format!("{RED_KEY_PREFIX}{}", block.id())
-                                && unit.kind == "image"
+                            unit.kind == "image"
+                                && unit.key.strip_prefix(RED_KEY_PREFIX) == Some(block.id())
                         })))
                 || (request_accepts_empty_content(req) && is_structural_noise(&block.wire));
         if should_strip {
@@ -11600,6 +11679,13 @@ fn build_output(
     })
 }
 
+/// A served message in output order: built, or rendered and waiting for its canonical bytes and
+/// fingerprints, which the output computes for every rendered message together.
+enum ServedSlot<'a> {
+    Ready(ServedMessage),
+    Rendered(WireMessage, Option<&'a [&'a FlatBlock]>),
+}
+
 // Provider and durable-watermark arguments stay explicit: they differ across replay paths.
 #[allow(clippy::too_many_arguments)]
 fn build_output_with_tags(
@@ -11617,7 +11703,7 @@ fn build_output_with_tags(
 ) -> Result<BuiltOutput, TransformError> {
     let build_output_started_at = Instant::now();
     let mut build_timings = BuildOutputTimings::default();
-    let mut out = Vec::with_capacity(4 + req.messages.len());
+    let mut out: Vec<ServedSlot<'_>> = Vec::with_capacity(4 + req.messages.len());
     let frozen_unit_index_started_at = Instant::now();
     let frozen_units = if use_frozen_unit_index {
         FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units))
@@ -11631,14 +11717,14 @@ fn build_output_with_tags(
 
     if !req.is_subagent {
         if let Some(unit) = frozen_units.by_key("m0") {
-            out.push(ServedMessage::from_message(synthetic_m0_message(
-                unit.frozen_payload.clone(),
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
+                synthetic_m0_message(unit.frozen_payload.clone()),
             )));
         }
         if let Some(unit) = frozen_units.by_key("m1") {
-            out.push(ServedMessage::from_message(
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
                 WireMessage::synthetic_user_text(unit.frozen_payload.clone()),
-            ));
+            )));
         }
     }
 
@@ -11695,7 +11781,9 @@ fn build_output_with_tags(
     {
         for message in [&pair.assistant_msg, &pair.tool_msg] {
             prev_assistant = message.role == "assistant";
-            out.push(ServedMessage::from_message(message.clone()));
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
+                message.clone(),
+            )));
         }
     }
 
@@ -11884,10 +11972,13 @@ fn build_output_with_tags(
                     &mut rendered,
                 );
             }
-            ServedMessage::from_message_reusing(rendered, (!blocks.is_empty()).then_some(blocks))
+            rendered
         };
         prev_assistant = served.role == "assistant";
-        out.push(served);
+        out.push(ServedSlot::Rendered(
+            served,
+            (!blocks.is_empty()).then_some(blocks),
+        ));
 
         if synthetic_todo_enabled
             && !inserted_synthetic_todo
@@ -11898,12 +11989,21 @@ fn build_output_with_tags(
         {
             for message in [&pair.assistant_msg, &pair.tool_msg] {
                 prev_assistant = message.role == "assistant";
-                out.push(ServedMessage::from_message(message.clone()));
+                out.push(ServedSlot::Ready(ServedMessage::from_message(
+                    message.clone(),
+                )));
             }
             inserted_synthetic_todo = true;
         }
     }
 
+    // Each served message's canonical bytes and block fingerprints depend on that message alone.
+    let mut out = crate::parallel_map::map_with(out, |(), slot| match slot {
+        ServedSlot::Ready(served) => served,
+        ServedSlot::Rendered(message, blocks) => {
+            ServedMessage::from_message_reusing(message, blocks)
+        }
+    });
     build_timings.tail_loop = elapsed_ms(tail_loop_started_at);
     if synthetic_todo_enabled
         && let Some(pair) = &meta.synthetic_todo
@@ -12089,11 +12189,11 @@ pub(crate) fn clear_served_native_reasoning(
 
 // Ingress/tag ownership prevents the codec's latest-assistant shortcut from restoring old reasoning.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_with_tags(
+pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<WireMessage>>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
-    served_messages: &[WireMessage],
+    served_messages: &[M],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     _mid_turn: bool,
@@ -12108,7 +12208,8 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
 
     let served_ids = served_messages
         .iter()
-        .filter(|message| !message.meta.synthetic && message.role == "assistant")
+        .map(std::borrow::Borrow::borrow)
+        .filter(|message: &&WireMessage| !message.meta.synthetic && message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
     if served_ids.is_empty() {

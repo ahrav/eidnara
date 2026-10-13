@@ -76,6 +76,13 @@ pub use lifecycle::{
     coordination_dir_path, is_canonical_payload_digest, lifecycle_dir_path, probe_lifecycle,
 };
 pub use runtime::{HostError, run, run_with_publish_hook};
+
+/// Runs `callback` with panic diagnostics redacted on the current thread, as every handler
+/// callback runs. A worker thread a handler spawns enters it, so the worker's panics stay
+/// redacted too.
+pub fn redact_panics<T>(callback: impl FnOnce() -> T) -> T {
+    panic_boundary::redact_sync(callback)
+}
 /// The version-2 body cap. Published so a consumer preparing an output can
 /// gate on the same value frame admission enforces, rather than restating it.
 pub use wire::MAX_FRAME_BODY_LEN;

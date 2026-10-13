@@ -11,6 +11,7 @@ import {
     hostManifest,
     seedCoverage,
 } from "../src/scale-report/driver-common";
+import { type ObservedPassLedger, rowLedger } from "../src/scale-report/ledger";
 import { classifyPass } from "../src/scale-report/pass-outcome";
 import { PassRowWriter, type ScaleTier, TIER_MESSAGES } from "../src/scale-report/rows";
 
@@ -66,6 +67,9 @@ interface PluginUnderTest {
         disconnect(): void;
     };
     BoundedSessionMap: new (capacity: number) => unknown;
+    observePassLedgers: (
+        listener: (ledger: ObservedPassLedger & { sessionId: string }) => void,
+    ) => () => void;
 }
 
 async function loadPlugin(): Promise<PluginUnderTest> {
@@ -73,15 +77,18 @@ async function loadPlugin(): Promise<PluginUnderTest> {
     const adapter = existsSync(join(context, "opencode-transform-adapter.ts"))
         ? join(context, "opencode-transform-adapter.ts")
         : join(context, "rust-mode-transform.ts");
-    const [transform, transport, maps] = await Promise.all([
+    const [transform, transport, maps, client] = await Promise.all([
         import(adapter),
         import(join(context, "module-transport.ts")),
         import(join(pluginRoot, "src/shared/bounded-session-map.ts")),
+        import(join(context, "transform-session-client.ts")),
     ]);
     return {
         createRustModeTransform: transform.createRustModeTransform,
         createHostModuleClient: transport.createHostModuleClient,
         BoundedSessionMap: maps.BoundedSessionMap,
+        // A plugin from before the stage ledger observes nothing, so its rows carry none.
+        observePassLedgers: client.observePassLedgers ?? (() => () => undefined),
     };
 }
 
@@ -125,6 +132,7 @@ interface PassObservation {
     totalMs?: number;
     exchanged: unknown[];
     error?: unknown;
+    ledger?: ObservedPassLedger;
 }
 
 const plugin = await loadPlugin();
@@ -144,6 +152,9 @@ async function measureTier(tier: ScaleTier): Promise<number> {
     const stack = await HermeticHostStack.start({ dataDir, fixtureBin, startTimeoutMs: 120_000 });
     const client = plugin.createHostModuleClient(stack.connectionFile);
     let pass: PassObservation = { exchanged: [] };
+    const unobserve = plugin.observePassLedgers((ledger) => {
+        if (ledger.sessionId === sessionId) pass.ledger = ledger;
+    });
     const measured = {
         call: async (args: Record<string, unknown>) => {
             pass.exchanged.push(args.body);
@@ -224,11 +235,13 @@ async function measureTier(tier: ScaleTier): Promise<number> {
                 service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
                 rss_bytes: process.memoryUsage.rss(),
                 ipc_bytes: exchangedBytes(pass.exchanged),
+                ...rowLedger(responseUs, pass.ledger),
             });
             previousBoundary = boundary;
             completed += 1;
         }
     } finally {
+        unobserve();
         client.disconnect();
         await stack.stop();
     }
@@ -263,6 +276,7 @@ writeFileSync(
             },
             host: hostManifest(),
             open_loop: null,
+            cohort: { window: windowSize },
             seed: bootstrapSeed,
         },
         null,

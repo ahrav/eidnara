@@ -64,6 +64,7 @@ pub mod memory_tool;
 pub mod message_cleanup;
 pub mod metered_decode;
 pub mod packing;
+mod parallel_map;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;
@@ -3435,17 +3436,30 @@ struct PassStart {
 /// is the publication floor read after the first transform and after each rerun that a
 /// history_summarizer step follows, which the settle's final check compares against; the trigger
 /// timings accumulate across the history_summarizer preparations.
+/// What the summarizer step reads from a transformed pass.
+#[derive(Clone, Copy)]
+struct PassSummarizerInputs<'a> {
+    served: &'a TransformRequest,
+    projection: &'a crate::wire::FlatProjection,
+    eidnara_folds: bool,
+}
+
 struct TransformedPass {
     result: TransformWithProjection,
     emergency_pre_floor: Option<u64>,
     trigger_timings: HistorySummarizerTriggerTimings,
+    /// The response already carries its native messages, encoded beside the summarizer step.
+    native_attached: bool,
 }
 
-/// The handler-side timing brackets taken before the pass's store work begins.
+/// The handler-side timing brackets taken before the pass's store work begins. `clock` opens
+/// the daemon's stage ledger and `core_started_at` ends its `lane_gate_and_decode` stage.
 struct EntryTimings {
     handler_started_at: Instant,
     request_observed_to_handler: f64,
     pass_state_load_ms: f64,
+    clock: transform_unit::PassClock,
+    core_started_at: Instant,
 }
 
 /// The handler-side timing brackets taken before the transform, reported with the response.
@@ -3562,6 +3576,7 @@ impl Handler {
             probe: None,
             meter: &meter,
             runner: &runner,
+            clock: transform_unit::PassClock::now(),
         };
         self.dispatch_value_with_inbound_bytes(&entry, request, None)
             .await
@@ -3625,6 +3640,7 @@ impl Handler {
             probe: probe.as_ref(),
             meter: &meter,
             runner,
+            clock: transform_unit::PassClock::now(),
         };
         let (_, outcome) = self.dispatch_body(&entry, &body).await;
         outcome
@@ -8909,6 +8925,7 @@ impl HandlerCore {
             Err(outcome) => return outcome,
         };
         ticket.accept();
+        let core_started_at = Instant::now();
         // The reply does not wait on the checkpoint's store writes; the memo
         // learns a fragment only once the store accepted it, so a checkpoint
         // that never runs replays on the next sync. A drain answers `pending`
@@ -8945,6 +8962,8 @@ impl HandlerCore {
                 handler_started_at,
                 request_observed_to_handler,
                 pass_state_load_ms,
+                clock: entry.clock,
+                core_started_at,
             },
             held: PassHold {
                 _charges: entry.meter.take_charges(),
@@ -9039,8 +9058,43 @@ impl HandlerCore {
             PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics::disabled(
                 "subagent_session",
             ))
-        } else {
+        } else if emergency {
             self.prepare_history_summarizer(&env, &mut pass)
+        } else {
+            // A pass that cannot rerun keeps the response it built, so its native encode, which
+            // reads only that response and the served request, runs beside the summarizer step.
+            let TransformedPass {
+                result,
+                trigger_timings,
+                native_attached,
+                ..
+            } = &mut pass;
+            let served = result.served_request.as_deref().unwrap_or(&env.parsed);
+            let summarizer = PassSummarizerInputs {
+                served,
+                projection: &result.projection,
+                eidnara_folds: result.fold_authority.eidnara_folds,
+            };
+            let response = &mut result.response;
+            let reasoning_watermark = result.reasoning_watermark;
+            let tag_numbers = &result.tag_numbers;
+            let mutation_exempt_mid = result.mutation_exempt_mid.as_deref();
+            let lineage_anchor_mid = result.lineage_anchor_mid.as_deref();
+            let (action, ()) = parallel_map::join(
+                || self.prepare_history_summarizer_with(&env, summarizer, trigger_timings),
+                || {
+                    attach_native_messages_with_tags(
+                        response,
+                        served,
+                        reasoning_watermark,
+                        tag_numbers,
+                        mutation_exempt_mid,
+                        lineage_anchor_mid,
+                    );
+                },
+            );
+            *native_attached = true;
+            action
         };
         let diagnostics = match action {
             PreparedHistorySummarizerAction::Complete(diagnostics) => diagnostics,
@@ -9430,6 +9484,7 @@ impl HandlerCore {
         pass.result = self
             .run_transform(env, PassState::Reload, derived.as_ref())
             .map_err(|error| Self::reject_transform(env, error))?;
+        pass.native_attached = false;
         drop(derived);
         // The first run decided this pass's hint for its tail and persisted
         // it; the rerun finds that decision already made. The pass's decision
@@ -9542,6 +9597,7 @@ impl HandlerCore {
             result,
             emergency_pre_floor,
             trigger_timings: HistorySummarizerTriggerTimings::default(),
+            native_attached: false,
         })
     }
 
@@ -9550,22 +9606,36 @@ impl HandlerCore {
         env: &PassEnv,
         pass: &mut TransformedPass,
     ) -> PreparedHistorySummarizerAction {
+        let summarizer = PassSummarizerInputs {
+            served: pass.result.served_request.as_deref().unwrap_or(&env.parsed),
+            projection: &pass.result.projection,
+            eidnara_folds: pass.result.fold_authority.eidnara_folds,
+        };
+        self.prepare_history_summarizer_with(env, summarizer, &mut pass.trigger_timings)
+    }
+
+    fn prepare_history_summarizer_with(
+        &self,
+        env: &PassEnv,
+        summarizer: PassSummarizerInputs<'_>,
+        timings: &mut HistorySummarizerTriggerTimings,
+    ) -> PreparedHistorySummarizerAction {
         // Under native folds the harness folds; no fold work runs and no no-fire is recorded.
-        if !pass.result.fold_authority.eidnara_folds {
+        if !summarizer.eidnara_folds {
             return PreparedHistorySummarizerAction::Complete(
                 HistorySummarizerDiagnostics::disabled(NATIVE_AUTHORITY),
             );
         }
         self.prepare_history_summarizer_fire(
             Arc::clone(&env.store),
-            pass.result.served_request.as_deref().unwrap_or(&env.parsed),
+            summarizer.served,
             &env.binding,
             &env.project_path,
-            &pass.result.projection,
+            summarizer.projection,
             HistorySummarizerPrepareContext {
                 now: env.pass_now,
                 snapshot_generation: env.snapshot_generation,
-                timings: &mut pass.trigger_timings,
+                timings,
                 project_memory: env.project_memory.as_ref(),
             },
         )
@@ -9602,6 +9672,7 @@ impl HandlerCore {
         let TransformedPass {
             mut result,
             trigger_timings,
+            native_attached,
             ..
         } = pass;
         // Everything after the pass reads the window it served.
@@ -9638,14 +9709,16 @@ impl HandlerCore {
             let previous = retained.and_then(|entry| {
                 entry.into_previous(revert_epoch, parsed.previous_output_revision.as_ref())
             });
-            attach_native_messages_with_tags(
-                &mut response,
-                parsed,
-                reasoning_watermark,
-                &tag_numbers,
-                mutation_exempt_mid.as_deref(),
-                lineage_anchor_mid.as_deref(),
-            );
+            if !native_attached {
+                attach_native_messages_with_tags(
+                    &mut response,
+                    parsed,
+                    reasoning_watermark,
+                    &tag_numbers,
+                    mutation_exempt_mid.as_deref(),
+                    lineage_anchor_mid.as_deref(),
+                );
+            }
             let values = response.native_messages.take().unwrap_or_default();
             if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
                 outcome.attached = native_carries_user_hint(
@@ -9703,7 +9776,11 @@ impl HandlerCore {
                 },
             )
         };
-        let native_attach_ms = native_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
+        let native_attach_ended_at = Instant::now();
+        let native_attach_ms = native_attach_ended_at
+            .duration_since(native_attach_started_at)
+            .as_secs_f64()
+            * 1_000.0;
         let trace_complete_started_at = Instant::now();
         let _ = store.trace_pass_completed(&parsed.session_id, now_ms());
         let trace_complete_ms = trace_complete_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -9753,6 +9830,16 @@ impl HandlerCore {
             response_timings.native_cache_refused_store = stored.refused;
             response_timings.native_cache_evicted = stored.evicted;
             response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
+            response_timings.ledger = Some(transform::DaemonStageLedger::measure(
+                transform::LedgerInstants {
+                    received_at: timings.entry.clock.received_at,
+                    admitted_at: timings.entry.clock.admitted_at,
+                    core_started_at: timings.entry.core_started_at,
+                    native_attach_started_at,
+                    native_attach_ended_at,
+                },
+                parsed,
+            ));
         }
         respond_transform(parsed, response, Some(recipe))
     }
@@ -12993,6 +13080,7 @@ impl CompositeComponent for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
+        let received_at = Instant::now();
         let body = ctx.body.as_slice();
         let cap_probe = match enforce_request_byte_cap(body) {
             Ok(probe) => probe,
@@ -13012,6 +13100,10 @@ impl CompositeComponent for Handler {
             probe: probe.as_ref(),
             meter: &meter,
             runner: &ctx,
+            clock: transform_unit::PassClock {
+                received_at,
+                admitted_at: Instant::now(),
+            },
         };
         let (_, outcome) = self.dispatch_body(&entry, body).await;
         settle_prepared(&ctx, outcome).await
@@ -14184,11 +14276,11 @@ fn attach_native_messages_with_tags(
             let served_messages = response
                 .messages()
                 .iter()
-                .map(|message| message.deref().clone())
+                .map(Deref::deref)
                 .collect::<Vec<_>>();
-            let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
+            let mut native_messages = codec::opencode::encode_opencode_against_window(
                 &served_messages,
-                &codec::opencode::decode_opencode_shared(native_input).sidecar,
+                native_input,
                 Some(&request.session_id),
                 &mutation_exempt_mids,
             );
@@ -20856,6 +20948,7 @@ mod tests {
                 probe: probe.as_ref(),
                 meter: &meter,
                 runner: &runner,
+                clock: transform_unit::PassClock::now(),
             };
             let (lane, through_body) = direct.dispatch_body(&entry, &body).await;
             let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
@@ -20921,6 +21014,7 @@ mod tests {
                     probe: probe.as_ref(),
                     meter: &direct_meter,
                     runner: &runner,
+                    clock: transform_unit::PassClock::now(),
                 };
                 let (_, through_body) = direct.dispatch_body(&entry, &body).await;
                 let tree_pool = TestPool::with_capacity(capacity);
@@ -21422,6 +21516,7 @@ mod tests {
                     probe: probe.as_ref(),
                     meter: &meter,
                     runner: &runner,
+                    clock: transform_unit::PassClock::now(),
                 };
                 let (_, outcome) = handler.dispatch_body(&entry, body).await;
                 comparable_outcome(outcome)
@@ -21748,6 +21843,7 @@ mod tests {
                 probe: probe.as_ref(),
                 meter: &meter,
                 runner: &runner,
+                clock: transform_unit::PassClock::now(),
             };
             let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
             assert_eq!(
@@ -21820,6 +21916,7 @@ mod tests {
                 probe: probe.as_ref(),
                 meter: &meter,
                 runner: &runner,
+                clock: transform_unit::PassClock::now(),
             };
             let (_, outcome) = handler.dispatch_body(&entry, &body).await;
             assert_eq!(comparable_outcome(outcome), comparable_outcome(expected));
@@ -21839,6 +21936,7 @@ mod tests {
             probe: probe.as_ref(),
             meter: &meter,
             runner: &runner,
+            clock: transform_unit::PassClock::now(),
         };
         let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
         assert_eq!(lane, BodyLane::Direct);
@@ -25278,6 +25376,7 @@ mod tests {
             probe: None,
             meter: &meter,
             runner: &runner,
+            clock: transform_unit::PassClock::now(),
         };
         let outcome = handler
             .handle_transform_typed(&entry, parsed, None, decode_started_at, &ticket)
@@ -25295,6 +25394,85 @@ mod tests {
             "request_observed_to_handler was {span} ms; the decode span of 10 s must not be \
              counted in it"
         );
+    }
+
+    /// A completed pass carries the daemon's stage ledger: the stages are the spans between the
+    /// entry clock and the pass's own instants, they sum to the ledger total, and the window
+    /// counts are the served CK messages and blocks. A pass that ends before the core carries none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_completed_pass_carries_a_reconciled_daemon_stage_ledger() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let two_blocks = IngressMessage {
+            mid: "m2".to_string(),
+            ordinal: 2,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![
+                    WireBlock::bare(BlockKind::Text {
+                        text: "there".to_string(),
+                    }),
+                    WireBlock::bare(BlockKind::Text {
+                        text: "again".to_string(),
+                    }),
+                ],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        };
+        let parsed: TransformRequest =
+            serde_json::from_value(request(vec![ck("m1", 1, "hello"), two_blocks])).unwrap();
+        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let pool = TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let received_at = Instant::now() - Duration::from_millis(40);
+        let admitted_at = received_at + Duration::from_millis(15);
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: None,
+            meter: &meter,
+            runner: &runner,
+            clock: transform_unit::PassClock {
+                received_at,
+                admitted_at,
+            },
+        };
+        let outcome = handler
+            .handle_transform_typed(&entry, parsed, None, admitted_at, &ticket)
+            .await;
+        ticket.finish(false);
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("unexpected handler outcome: {outcome:?}");
+        };
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        let ledger: transform::DaemonStageLedger =
+            serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
+        assert_eq!(ledger.admit_us, 15_000);
+        assert!(ledger.lane_gate_and_decode_us >= 25_000, "{ledger:?}");
+        assert_eq!(ledger.derivation_us, None);
+        assert_eq!(
+            ledger.admit_us
+                + ledger.lane_gate_and_decode_us
+                + ledger.transform_core_us
+                + ledger.native_attach_us
+                + ledger.residual_us,
+            ledger.total_us
+        );
+        assert!(ledger.total_us >= 40_000, "{ledger:?}");
+        // The core instant follows the entry instants, so the pass's own work lands in its stage.
+        assert!(ledger.transform_core_us > 0, "{ledger:?}");
+        assert_eq!((ledger.window_messages, ledger.window_blocks), (2, 3));
+        // The overlapping diagnostics keep their own brackets beside the ledger.
+        assert!(response["timings"]["handler_total"].is_number());
+
+        let mut unknown = request(vec![ck("m1", 1, "hello")]);
+        unknown["boundary"] = json!({ "mid": "m1", "sequence": 99 });
+        let answered = call_transform_request(&handler, unknown).await;
+        assert_eq!(answered["status"], "boundary_unknown", "{answered}");
+        assert!(answered["timings"].get("ledger").is_none(), "{answered}");
     }
 
     #[tokio::test(flavor = "current_thread")]

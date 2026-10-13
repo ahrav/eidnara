@@ -13,6 +13,7 @@ import {
     hostManifest,
     seedCoverage,
 } from "../src/scale-report/driver-common";
+import { type ObservedPassLedger, rowLedger } from "../src/scale-report/ledger";
 import { classifyPass } from "../src/scale-report/pass-outcome";
 import { retryPosition, writePiTier } from "../src/scale-report/pi-tier";
 import {
@@ -88,13 +89,14 @@ interface ExtensionApi {
 async function loadRuntime() {
     const resolveFrom = (specifier: string) => Bun.resolveSync(specifier, pluginRoot);
     const shared = join(pluginRoot, "../opencode-plugin/src");
-    const [pi, ai, plugin, transport] = await Promise.all([
+    const [pi, ai, plugin, transport, client] = await Promise.all([
         import(resolveFrom("@earendil-works/pi-coding-agent")),
         import(resolveFrom("@earendil-works/pi-ai/compat")),
         import(join(pluginRoot, "src/index.ts")),
         import(join(shared, "hooks/context/module-transport.ts")),
+        import(join(shared, "hooks/context/transform-session-client.ts")),
     ]);
-    return { pi, ai, plugin, transport };
+    return { pi, ai, plugin, transport, client };
 }
 
 const runtime = await loadRuntime();
@@ -127,6 +129,7 @@ interface PassObservation {
     totalMs?: number;
     exchanged: unknown[];
     error?: unknown;
+    ledger?: ObservedPassLedger;
 }
 
 let marks: CallMarks = {};
@@ -359,6 +362,13 @@ async function measureSession(
     session.subscribe((event: { type: string; result?: unknown }) => {
         if (event.type === "compaction_end" && event.result) evictions += 1;
     });
+    // A plugin from before the stage ledger observes nothing, so its rows carry none.
+    const unobserve: () => void =
+        runtime.client.observePassLedgers?.(
+            (ledger: ObservedPassLedger & { sessionId: string }) => {
+                if (ledger.sessionId === sessionId) pass.ledger = ledger;
+            },
+        ) ?? (() => undefined);
     try {
         for (let turn = 0; turn < samples; turn += 1) {
             if (performance.now() >= deadline) break;
@@ -415,6 +425,7 @@ async function measureSession(
                         ? "replay"
                         : "warming";
             const { outcome, refusal } = classifyPass({ ok: published, error: pass.error });
+            const responseUs = us(marks.beforePlugin, marks.afterPlugin) ?? 0;
             if (state === "steady" && outcome === "completed") steadyPasses += 1;
             if (published) boundary = acknowledged;
             call.boundary_state = state;
@@ -427,10 +438,11 @@ async function measureSession(
                 boundary_state: state,
                 outcome,
                 refusal,
-                response_us: us(marks.beforePlugin, marks.afterPlugin) ?? 0,
+                response_us: responseUs,
                 service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
                 rss_bytes: rss,
                 ipc_bytes: exchangedBytes(pass.exchanged),
+                ...rowLedger(responseUs, pass.ledger),
             });
         }
         if (transformArm) {
@@ -454,6 +466,7 @@ async function measureSession(
             writeFileSync(outagesPath, `${JSON.stringify(outage)}\n`, { flag: "a" });
         }
     } finally {
+        unobserve();
         await runner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => undefined);
         session.dispose();
         faux.unregister();
@@ -637,6 +650,7 @@ writeFileSync(
             },
             host: hostManifest(),
             open_loop: null,
+            cohort: { window: windowSize },
             seed: baseSeed,
         },
         null,
