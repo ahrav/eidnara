@@ -14,6 +14,20 @@ R-sized state; zero K does no work.
   and a binary exponent, multiplies in `u128`, and shifts with rounding up.
 - `CandidateCapacity` has private fields, so a pool size exists only after
   every check passed.
+- `crates/retrieval/tests/dense_capacity_allocations.rs` records the
+  allocator around `CandidateCapacity::new`: every refusal class, a zero `K`,
+  and an accepted capacity make zero allocator calls. The `TopK` pool a
+  checked capacity sizes is one allocation whose requested bytes scale with
+  `R` (64 times as many for `R = 256` as for `R = 4`).
+- `crates/daemon/tests/query_route_compressed.rs`
+  `a_refused_capacity_installs_nothing_and_ranks_without_a_scan`: a NaN
+  alpha, an alpha of `0.5`, and an over-cap pool refuse installation with
+  `DenseCapacity` (`Alpha`, or `OverCap` of 128 against 64), and a producer
+  carrying each returns the `capacity` lane reason with no observed scan
+  window. `CompressedProducer::rank` returns that reason from its first check
+  (`crates/daemon/src/query_route.rs:704-707`), before `rank_compressed`
+  reserves `Scratch` and `RowBuffers`. The route's `DenseLimits.k` is a
+  `NonZeroUsize`, so a zero `K` stops at the type.
 
 ## Failure scenario
 
