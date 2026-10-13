@@ -6,7 +6,9 @@
 > SHA-256. A message whose served content equals its native message as a JSON
 > value, float-zero signs aside, is the retained OpenCode envelope or Pi row,
 > native signs included, as on the base; every other message renders the served
-> numbers (`value_equal_envelope_keeps_native_float_zero_signs`,
+> numbers in the parts the renderer rewrites, while a reasoning block paired
+> with its native part keeps that part's bytes, signature included, on both
+> codecs, as on the base (`value_equal_envelope_keeps_native_float_zero_signs`,
 > `native_attach_takes_no_block_digest_in_either_alignment_regime`). The codecs
 > digest only message and synthetic-tool identities through
 > `stable_hash_prefix`. An unchanged OpenCode message encodes to its retained
