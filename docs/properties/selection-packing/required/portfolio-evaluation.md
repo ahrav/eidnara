@@ -55,7 +55,7 @@ a wildcard pass that questioned the framing itself.
 
 1. **No record that every required request yields exactly one materialized
    item or a refusal.** `prepare_required` zips `requests`, `selected`, and
-   `report.occurrences` (`crates/daemon/src/packing.rs:326`). A short kernel
+   `report.occurrences` (`crates/daemon/src/packing/mod.rs:406-408`). A short kernel
    batch can no longer drop trailing required items silently:
    `crates/retrieval/src/eligibility.rs:238` refuses a batch whose verdict
    count differs from its candidate count as `InvalidInput` in every build.

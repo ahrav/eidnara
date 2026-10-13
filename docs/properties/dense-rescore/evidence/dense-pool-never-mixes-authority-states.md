@@ -14,14 +14,16 @@ mix authority stamps, including decisions that excluded possible winners.
   differ ends judgment, and the candidate scan then clears the pool
   (`candidates.rs`).
 - A kernel error from judgment propagates as a refusal.
-- `report` (`crates/retrieval/src/eligibility.rs:234`) refuses a batch whose
+- `report` (`crates/retrieval/src/eligibility.rs:238`) refuses a batch whose
   verdict count differs from its candidate count as `InvalidInput` in every
   build, so `zip` never drops a candidate while the report still reads as a
   judgment of every one.
-- `a_deadline_inside_judgment_after_admissions_discards_the_pool` ends the
-  budget at the first `AfterJudgment` of a scan whose first two-row batch
-  admitted both rows. The next batch is never judged, the completion is
-  `BudgetExhausted`, and the pool is discarded with its stamps.
+- `a_budget_ended_after_an_admitted_batch_discards_the_pool` ends the budget
+  at the second `AfterJudgment`, after the first two-row batch admitted both
+  rows (a no-cancel control admits rows from more than one batch). The second
+  batch's admission check stops, the completion is `BudgetExhausted`, and the
+  pool is discarded with its stamps. The kernel's `Deadline` arm in
+  `judge_page` stays untested.
 
 ## Failure scenario
 

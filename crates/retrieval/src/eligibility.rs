@@ -191,7 +191,7 @@ impl EligibilityReport {
 ///
 /// # Errors
 ///
-/// Returns the kernel's [`KernelError::InvalidInput`] when the batch exceeds [`kernel::MAX_ELIGIBILITY_CANDIDATES`] or a candidate is malformed; the caller pages rather than joining verdicts from two snapshots. Other kernel errors are the kernel's.
+/// Returns the kernel's [`KernelError::InvalidInput`] when the batch exceeds [`kernel::MAX_ELIGIBILITY_CANDIDATES`] or a candidate is malformed; the caller pages rather than joining verdicts from two snapshots. Also returns [`KernelError::InvalidInput`] when the kernel answers with a verdict count other than the candidate count; that batch is refused outright, and paging does not repair it. Other kernel errors are the kernel's.
 pub fn judge_occurrences(
     kernel: &KernelStore,
     project: &ProjectScope,
@@ -339,6 +339,7 @@ pub fn tally_exclusion(tally: &mut Vec<(EligibilityVerdict, usize)>, verdict: El
 mod tests {
     use super::{LIVE_CANDIDATES_BY_CLASS_SQL, aligned};
     use kernel::KernelError;
+    use rusqlite::{Connection, StatementStatus, params};
 
     #[test]
     fn a_batch_must_carry_one_verdict_per_candidate() {
@@ -347,8 +348,6 @@ mod tests {
         assert_eq!(aligned(3, 2), Err(KernelError::InvalidInput));
         assert_eq!(aligned(2, 3), Err(KernelError::InvalidInput));
     }
-
-    use rusqlite::{Connection, StatementStatus, params};
 
     /// A class-scoped read must search `idx_occurrences_source` by class and remain bounded as an unrelated class grows.
     #[test]

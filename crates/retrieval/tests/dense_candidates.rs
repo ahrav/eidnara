@@ -791,57 +791,66 @@ fn an_ended_budget_returns_no_candidate() {
     assert_discarded(&pool);
 }
 
-/// A deadline that ends inside judgment, after the first batch admitted rows, leaves the next batch unjudged: the kernel refuses that batch at the deadline, no candidate of it is admitted, and the rows already admitted are discarded with the pool rather than returned as a complete or partial ranking.
+/// A budget that ends after one judgment batch admitted its rows discards the pool at the next batch's admission check: the rows already admitted leave with it, and no partial or complete ranking is returned. The kernel's own deadline refusal between batches has no seam here, because no hook sits between one batch's admissions and the next batch's kernel call.
 #[test]
-fn a_deadline_inside_judgment_after_admissions_discards_the_pool() {
+fn a_budget_ended_after_an_admitted_batch_discards_the_pool() {
     let fixture = Fixture::all_admitted();
     let coded = [full_base(&fixture)];
     let layers = [coded[0].layer.layer()];
     let codes = [coded[0].codes()];
     let generation = generation();
     let query = axis(0);
-    let budget = EvalBudget::unbounded();
-    let request = CandidateQuery {
-        generation: &generation,
-        metric: Metric::InnerProduct,
-        unit_norm_tolerance: TOLERANCE,
-        query: &query,
-        authority: fixture.authority(),
-        capacity: capacity(8),
-        bounds: roomy(2),
-        layers: &layers,
-        codes: &codes,
-        max_entries: NonZeroUsize::new(64).unwrap(),
-    };
-    let mut judged = 0;
-    let pool = fixture
-        .store
-        .with_conn(|conn| {
-            Ok(select_candidates_observed(
-                conn,
-                &fixture.kernel,
-                &request,
-                &budget,
-                |window| {
-                    if window == Window::AfterJudgment {
-                        judged += 1;
-                        if judged == 1 {
-                            budget.cancel();
+    let run = |cancel_at: Option<usize>| {
+        let budget = EvalBudget::unbounded();
+        let request = CandidateQuery {
+            generation: &generation,
+            metric: Metric::InnerProduct,
+            unit_norm_tolerance: TOLERANCE,
+            query: &query,
+            authority: fixture.authority(),
+            capacity: capacity(8),
+            bounds: roomy(2),
+            layers: &layers,
+            codes: &codes,
+            max_entries: NonZeroUsize::new(64).unwrap(),
+        };
+        let mut judged = 0;
+        fixture
+            .store
+            .with_conn(|conn| {
+                Ok(select_candidates_observed(
+                    conn,
+                    &fixture.kernel,
+                    &request,
+                    &budget,
+                    |window| {
+                        if window == Window::AfterJudgment {
+                            judged += 1;
+                            if Some(judged) == cancel_at {
+                                budget.cancel();
+                            }
                         }
-                    }
-                },
-            ))
-        })
-        .unwrap()
-        .unwrap();
-    assert_eq!(judged, 1, "the batch after the deadline was never judged");
-    // Every row is admitted, so the first batch's judged rows entered the pool before the deadline.
+                    },
+                ))
+            })
+            .unwrap()
+            .unwrap()
+    };
+    // The control: every row is admitted, so each two-row batch fills two slots of the pool of eight.
+    let control = run(None);
+    assert_eq!(control.ranking.completion, Completion::Complete);
+    assert!(
+        control.ranking.ranked.len() > 2,
+        "more than one batch admitted rows"
+    );
+    assert!(control.ranking.consumed.excluded.is_empty());
+
+    let pool = run(Some(2));
     assert_eq!(
         (pool.ranking.consumed.batches, pool.ranking.consumed.judged),
-        (1, 2),
-        "one two-row batch was judged"
+        (2, 4),
+        "the first batch was admitted and the second judged before the budget ended"
     );
-    assert!(pool.ranking.consumed.excluded.is_empty());
     assert_eq!(
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
@@ -849,7 +858,7 @@ fn a_deadline_inside_judgment_after_admissions_discards_the_pool() {
     assert_discarded(&pool);
 }
 
-/// The resolver's entry bound counts every layer's rows and tombstones before any page is read, so a composition one entry over it refuses with nothing visited, and the exact bound selects.
+/// The resolver's entry bound counts the layer's rows before any page is read, so a layer one entry over it refuses with nothing visited, and the exact bound selects.
 #[test]
 fn the_entry_bound_refuses_before_any_row_is_visited() {
     let fixture = Fixture::all_admitted();

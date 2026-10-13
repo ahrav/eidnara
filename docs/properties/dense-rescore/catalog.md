@@ -388,7 +388,7 @@ Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_kernel_change_between_batches_discards_the_pool`,
 `a_change_to_an_excluded_row_discards_the_pool_too`,
 `a_corrupt_identity_field_refuses_the_scan_with_no_candidate`, and
-`a_deadline_inside_judgment_after_admissions_discards_the_pool`;
+`a_budget_ended_after_an_admitted_batch_discards_the_pool`;
 `crates/retrieval/src/eligibility.rs` `a_batch_must_carry_one_verdict_per_candidate`
 for the verdict-count check.
 Guarantee: Every batch of one scan, including batches whose verdicts only
@@ -418,12 +418,14 @@ policy excludes.
 Open questions:
 - Parent Q3 approval of snapshot plus incarnation as the usable authority
   identity, and of discard without restart (needs human input).
-- A deadline that ends after the first batch admitted rows leaves the next
-  batch unjudged and discards the pool
-  (`a_deadline_inside_judgment_after_admissions_discards_the_pool`). A
-  non-deadline kernel fault at that point propagates through the same path by
-  reading; no test injects one, because the kernel has no read-side fault
-  seam.
+- A budget that ends after one batch admitted its rows discards the pool at
+  the next batch's admission check
+  (`a_budget_ended_after_an_admitted_batch_discards_the_pool`, with a
+  no-cancel control that admits rows from more than one batch). The kernel's
+  own `Deadline` refusal in `judge_page`, and any other kernel fault between
+  batches, propagate as a refusal by reading; no test reaches them, because no
+  hook sits between one batch's admissions and the next batch's kernel call
+  and the kernel has no read-side fault seam.
 
 ### dense-scan-bounds-end-with-no-candidate
 
