@@ -7,10 +7,10 @@ mod support;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
+use daemon::vector_admission::{DISK_LIMIT, Ledger};
 use daemon::vector_composition::publish;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE, SIDECAR_FILE, Staging,
@@ -35,18 +35,26 @@ enum Workload {
     Nested,
     /// The vector layer restaged over a corrupt occupant of its digest name: the rename finds the name taken and the store exchanges the occupant out.
     Repair,
-    /// The vector layer restaged over a valid occupant of its digest name: the store keeps the occupant and drops the temp.
+    /// The vector layer's files restaged through the store over a valid occupant of its digest name: the store keeps the occupant and drops the temp.
     Retry,
+    /// The vector layer restaged through the vector stager over a valid occupant of its digest name: the stager confirms the occupant in place and copies nothing.
+    Confirm,
 }
 
 const NESTED_DIR: &str = "nested";
 const NESTED_FILE: &str = "nested/payload.bin";
 
-/// The fresh vector trace has 22 events: 12 file-copy, two manifest-write, two grouped file-sync, two root, two rename, and two generations-directory events. The retry trace has 21 events, with `BeforeRename` as its rename event. The repair trace has 23 events, with `BeforeExchange` and `AfterExchange` after `BeforeRename`. The nested workload adds two directory-sync events.
-const CELL_COUNT: usize = 68;
+/// The fresh vector trace has 22 events: 12 file-copy, two manifest-write, two grouped file-sync, two root, two rename, and two generations-directory events. The retry trace has 21 events, with `BeforeRename` as its rename event. The repair trace has 23 events, with `BeforeExchange` and `AfterExchange` after `BeforeRename`. The confirm trace has the two generations-directory events. The nested workload adds two directory-sync events.
+const CELL_COUNT: usize = 70;
 
 /// Every event a vector `workload` fires, in the order staging reports it; `the_cell_table_is_the_complete_event_trace` holds the store to exactly this sequence.
 fn vector_cells(workload: Workload) -> Vec<StageEvent> {
+    if workload == Workload::Confirm {
+        return vec![
+            StageEvent::BeforeGenerationsSync,
+            StageEvent::AfterGenerationsSync,
+        ];
+    }
     let mut files = [
         CODES_FILE,
         ROW_IDS_FILE,
@@ -83,8 +91,15 @@ fn vector_cells(workload: Workload) -> Vec<StageEvent> {
     cells
 }
 
+const VECTOR_WORKLOADS: [Workload; 4] = [
+    Workload::Vector,
+    Workload::Repair,
+    Workload::Retry,
+    Workload::Confirm,
+];
+
 fn cells() -> Vec<(Workload, StageEvent)> {
-    let mut cells: Vec<_> = [Workload::Vector, Workload::Repair, Workload::Retry]
+    let mut cells: Vec<_> = VECTOR_WORKLOADS
         .into_iter()
         .flat_map(|workload| {
             vector_cells(workload)
@@ -148,6 +163,12 @@ fn residue(workload: Workload, cut: &StageEvent, killed: bool) -> Expected {
                 same_occupant: None,
             }
         }
+        Workload::Confirm => Expected {
+            temps: 0,
+            present: true,
+            valid: true,
+            same_occupant: Some(true),
+        },
         Workload::Retry => Expected {
             temps: usize::from(killed && !exchanged),
             present: true,
@@ -202,7 +223,10 @@ fn vector_build(fixture: &Fixture) -> BuiltVectors {
 
 /// Stages the occupant a repair or retry workload restages over, corrupting it for repair, and returns its directory inode.
 fn seed(fixture: &Fixture, workload: Workload) -> Option<u64> {
-    if !matches!(workload, Workload::Repair | Workload::Retry) {
+    if !matches!(
+        workload,
+        Workload::Repair | Workload::Retry | Workload::Confirm
+    ) {
         return None;
     }
     let digest = stage(&vector_build(fixture), &fixture.staging()).unwrap();
@@ -213,10 +237,6 @@ fn seed(fixture: &Fixture, workload: Workload) -> Option<u64> {
     Some(occupant_inode(&fixture.generation_dir(&digest)))
 }
 
-fn occupant_inode(dir: &Path) -> u64 {
-    fs::metadata(dir).unwrap().ino()
-}
-
 /// Stages `workload` into `staging`'s store under `observer` and returns the digest it stages to with the outcome.
 fn run(
     fixture: &Fixture,
@@ -225,7 +245,7 @@ fn run(
     observer: Observer<'_>,
 ) -> (String, Outcome) {
     match workload {
-        Workload::Vector | Workload::Repair | Workload::Retry => {
+        Workload::Vector | Workload::Repair | Workload::Confirm => {
             let built = vector_build(fixture);
             let outcome = match stage_observed(&built, staging, observer) {
                 Ok(digest) => Outcome::Staged(digest),
@@ -234,6 +254,28 @@ fn run(
                 Err(other) => panic!("unexpected refusal: {other:?}"),
             };
             (built.digest(), outcome)
+        }
+        Workload::Retry => {
+            let built = vector_build(fixture);
+            let manifest = built.sidecar.stage_manifest();
+            let sources: Vec<SourceSpec> = manifest
+                .files
+                .iter()
+                .map(|file| SourceSpec {
+                    rel_path: file.path.clone(),
+                    source: built.dir.join(&file.path),
+                    executable: false,
+                    expected_size: Some(file.size),
+                    expected_sha256: Some(file.sha256.clone()),
+                })
+                .collect();
+            let staged = staging.store.stage_observed(
+                &sources,
+                &built.sidecar.stage_meta(),
+                staging.protected,
+                observer,
+            );
+            (built.digest(), store_outcome(staged))
         }
         Workload::Nested => {
             let dir = fixture.work_dir();
@@ -251,14 +293,17 @@ fn run(
                 &BTreeSet::new(),
                 observer,
             );
-            let outcome = match staged {
-                Ok(digest) => Outcome::Staged(digest),
-                Err(GenerationError::InsufficientStorage) => Outcome::Exhausted,
-                Err(GenerationError::NativePayloadInvalid { .. }) => Outcome::Fault,
-                Err(other) => panic!("unexpected store error: {other:?}"),
-            };
-            (nested_digest(), outcome)
+            (nested_digest(), store_outcome(staged))
         }
+    }
+}
+
+fn store_outcome(staged: Result<String, GenerationError>) -> Outcome {
+    match staged {
+        Ok(digest) => Outcome::Staged(digest),
+        Err(GenerationError::InsufficientStorage) => Outcome::Exhausted,
+        Err(GenerationError::NativePayloadInvalid { .. }) => Outcome::Fault,
+        Err(other) => panic!("unexpected store error: {other:?}"),
     }
 }
 
@@ -367,15 +412,7 @@ fn assert_cut_recovers(
 
     // The complete control on the same store stages the same digest and selects it.
     let protected = BTreeSet::new();
-    let staging = Staging {
-        store: &store,
-        transaction: &tx,
-        gate: &fixture.gate,
-        admission: &fixture.admission,
-        identity: &fixture.identity,
-        ledger: &fixture.ledger,
-        protected: &protected,
-    };
+    let staging = fixture.staging_on(&store, &tx, &protected);
     let (_, outcome) = run(fixture, &staging, workload, &mut |_| Ok(()));
     assert_eq!(outcome, Outcome::Staged(digest.to_owned()), "{cut:?}");
     if workload != Workload::Nested {
@@ -426,7 +463,7 @@ fn hook_cut(workload: Workload, cut: &StageEvent, errno: Errno) {
 
 #[test]
 fn the_cell_table_is_the_complete_event_trace() {
-    for workload in [Workload::Vector, Workload::Repair, Workload::Retry] {
+    for workload in VECTOR_WORKLOADS {
         let fixture = Fixture::new();
         seed(&fixture, workload);
         let mut trace = Vec::new();
@@ -563,7 +600,9 @@ fn a_process_killed_at_every_stage_event_leaves_residue_the_next_process_refuses
         };
         let digest = match workload {
             Workload::Nested => nested_digest(),
-            Workload::Vector | Workload::Repair | Workload::Retry => vector_build(&parent).digest(),
+            Workload::Vector | Workload::Repair | Workload::Retry | Workload::Confirm => {
+                vector_build(&parent).digest()
+            }
         };
         let expected = residue(workload, &cut, true);
         assert_cut_recovers(
@@ -575,6 +614,131 @@ fn a_process_killed_at_every_stage_event_leaves_residue_the_next_process_refuses
             occupant,
         );
     }
+}
+
+/// The cells at which the rename or the exchange has already published the digest name, so an error or a crash there leaves a complete generation whose outcome the caller does not know.
+fn published_at(workload: Workload, cut: &StageEvent) -> bool {
+    match workload {
+        Workload::Vector => !precedes_rename(cut),
+        Workload::Repair => exchanged(cut),
+        Workload::Nested | Workload::Retry | Workload::Confirm => false,
+    }
+}
+
+/// Restages the layer a cut at `cut` published under `root` through the vector stager on a fresh handle, with the disk pool limited to exactly the store's bytes so a second copy could not be reserved. The stager confirms the generation in place: the trace is the generations-directory sync alone, the digest names the same directory, the store's bytes are unchanged, prune reclaims only abandoned temps, and the confirmed layer verifies and selects.
+fn assert_confirmed_in_place(fixture: &mut Fixture, root: &Path, cut: &StageEvent, digest: &str) {
+    let store = GenerationStore::open(Some(root)).unwrap();
+    let dir = store.root().join(GENERATIONS_DIR_NAME).join(digest);
+    let inode = occupant_inode(&dir);
+    let bytes = Ledger::store_bytes(&store).unwrap();
+    fixture.set_limit(DISK_LIMIT, bytes);
+    let tx = LifecycleTransactionLock::acquire_exclusive(Some(root)).unwrap();
+    let protected = BTreeSet::new();
+    let staging = fixture.staging_on(&store, &tx, &protected);
+    for attempt in 0..2 {
+        let mut trace = Vec::new();
+        let staged = stage_observed(&vector_build(fixture), &staging, &mut |event| {
+            trace.push(event);
+            Ok(())
+        });
+        assert_eq!(staged.as_deref(), Ok(digest), "{cut:?} retry {attempt}");
+        assert_eq!(
+            trace,
+            [
+                StageEvent::BeforeGenerationsSync,
+                StageEvent::AfterGenerationsSync
+            ],
+            "{cut:?} retry {attempt}: the generation is confirmed, not copied"
+        );
+        assert_eq!(occupant_inode(&dir), inode, "{cut:?}: one publication");
+        assert_eq!(Ledger::store_bytes(&store).unwrap(), bytes, "{cut:?}");
+    }
+    // A crash after the exchange abandons the temp holding the displaced occupant; prune reclaims it and keeps the confirmed generation.
+    let temps = reopen(root, digest)
+        .entries
+        .iter()
+        .filter(|name| is_temp(name))
+        .count();
+    let report = store.prune(&BTreeSet::from([digest.to_owned()])).unwrap();
+    assert_eq!(
+        (report.removed_temps, report.removed_generations),
+        (temps, 0),
+        "{cut:?}"
+    );
+    assert_eq!(
+        reopen(root, digest).entries,
+        BTreeSet::from([digest.to_owned()]),
+        "{cut:?}"
+    );
+    assert!(verify(&store, digest, &fixture.expected(), u64::MAX).is_ok());
+    store.select_search(digest, &tx, &mut |_| Ok(())).unwrap();
+    assert_eq!(
+        GenerationStore::open(Some(root))
+            .unwrap()
+            .read_search_current()
+            .unwrap(),
+        CurrentProfile::Current(digest.to_owned()),
+        "{cut:?}"
+    );
+}
+
+/// A hook error after the rename or the exchange reports a failure for a staging that did publish. The caller reconciles by restaging: the stager finds the digest validated, confirms it, and publishes and charges nothing a second time.
+#[test]
+fn a_hook_error_after_publication_is_reconciled_by_confirming_the_generation_in_place() {
+    let mut fired = 0;
+    for (workload, cut) in cells() {
+        if !published_at(workload, &cut) {
+            continue;
+        }
+        for errno in [Errno::IO, Errno::NOSPC] {
+            let mut fixture = Fixture::new();
+            seed(&fixture, workload);
+            let (digest, outcome) = run(&fixture, &fixture.staging(), workload, &mut |event| {
+                if event == cut { Err(errno) } else { Ok(()) }
+            });
+            assert_ne!(outcome, Outcome::Staged(digest.clone()), "{cut:?}");
+            fixture.release_transaction();
+            let root = fixture.root.path().to_owned();
+            assert_confirmed_in_place(&mut fixture, &root, &cut, &digest);
+            fired += 1;
+        }
+    }
+    // Three vector cells and three repair cells, each with two errnos.
+    assert_eq!(fired, 12, "every post-publication cell was cut");
+}
+
+/// A process killed after the rename or the exchange never learns its outcome; the next process restages and confirms the published generation in place.
+#[test]
+fn a_process_killed_after_publication_is_reconciled_by_confirming_the_generation_in_place() {
+    let mut parent = Fixture::new();
+    let scratch = tempfile::tempdir_in(parent.root.path()).unwrap();
+    let mut fired = 0;
+    for (index, (workload, cut)) in cells().into_iter().enumerate() {
+        if !published_at(workload, &cut) {
+            continue;
+        }
+        let witness = scratch.path().join(format!("witness-{index}"));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_process_killed_at_every_stage_event_leaves_residue_the_next_process_refuses_and_reclaims",
+                "--nocapture",
+            ])
+            .env(KILL_CELL, index.to_string())
+            .env(KILL_WITNESS, &witness)
+            .env("TMPDIR", scratch.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(libc::SIGKILL), "{cut:?}");
+        let witnessed = fs::read_to_string(&witness).unwrap();
+        let mut lines = witnessed.lines();
+        let root = PathBuf::from(lines.next().unwrap());
+        assert_eq!(lines.next(), Some(format!("{cut:?}").as_str()));
+        let digest = vector_build(&parent).digest();
+        assert_confirmed_in_place(&mut parent, &root, &cut, &digest);
+        fired += 1;
+    }
+    assert_eq!(fired, 6, "every post-publication cell was cut");
 }
 
 /// Stages a deployment generation and makes it the deployment selection through `current-profile.json`.
@@ -662,7 +826,8 @@ fn vector_stage_select_prune_discard_and_exchange_repair_leave_the_deployment_se
     unchanged("exchange repair");
 
     // A cut staging leaves the deployment selector alone as well.
-    let cut = stage_observed(&vector_build(&fixture), &fixture.staging(), &mut |event| {
+    let fresh = build(&fixture.expected(), &export(2, 50), &fixture.work_dir()).unwrap();
+    let cut = stage_observed(&fresh, &fixture.staging(), &mut |event| {
         if event == StageEvent::BeforeRename {
             Err(Errno::IO)
         } else {

@@ -105,9 +105,9 @@ Nothing to inject. Either an equality assertion over the two constants, or -
 since the two caps gate different decisions - separate assertions that an
 over-cap record quarantines and an over-cap manifest quarantines on every read
 path rather than only in `prune`. Both generation-side halves are exercised:
-`undecodable_generations_survive_prune_after_a_successor` (`generation.rs:2253`)
+`undecodable_generations_survive_prune_after_a_successor` (`generation.rs:2282`)
 plants an oversized manifest and `unknown_schemas_are_quarantined_and_block_mutation`
-(`:2572`) writes an oversized profile (`:2628-2633`). No test asserts the two
+(`:2601`) writes an oversized profile (`:2658-2659`). No test asserts the two
 constants agree.
 
 ## Investigation log

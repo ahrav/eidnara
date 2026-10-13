@@ -63,7 +63,7 @@ a payload verdict.
 The atomic exchange is the first. On Linux and macOS
 `exchange_dirs` (`crates/host-runtime/src/store_fs.rs:112-115`) returns the raw
 `renameat_with(..., RenameFlags::EXCHANGE)` errno, and the caller in
-`generation.rs:1897-1900` maps it through `classify_errno` (`:111-116`). That
+`generation.rs:1931-1934` maps it through `classify_errno` (`:111-116`). That
 classifier sends `ENOSPC` and `EDQUOT` to `InsufficientStorage` and every other
 errno to `invalid("atomic digest-target exchange failed")`, so `EINVAL`,
 `ENOSYS`, and `EOPNOTSUPP` from a filesystem without `RENAME_EXCHANGE` or
@@ -95,9 +95,9 @@ higher-precedence one.
 ## Timing windows and dependencies
 
 No timing angle. The enabling state is structural: the exchange at
-`generation.rs:1368` is reached only when `rename_no_replace` reported the digest
-name occupied (`:1320-1322`), validation of that occupant failed (`:1329`, falling
-to `:1342`), and the digest is not protected (`:1344`). So the fault needs a
+`generation.rs:1402` is reached only when `rename_no_replace` reported the digest
+name occupied (`:1360-1362`), validation of that occupant failed (`:1373`, falling
+to `:1378`), and the digest is not protected (`:1378`). So the fault needs a
 corrupt unprotected occupant at the
 digest name, on a filesystem lacking atomic exchange. Groups with
 `current-profile-never-names-an-unvalidatable-generation`, which owns the same

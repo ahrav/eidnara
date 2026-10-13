@@ -37,9 +37,9 @@ The struct's own doc comments at `:226` and `:231-232` state the contract:
 path, making the encoding deterministic", and "`GenerationManifest`'s SHA-256
 names the generation."
 
-The existing golden is `generation.rs:2077-2092`,
+The existing golden is `generation.rs:2111-2121`,
 `a_generation_staged_before_the_source_digest_field_still_decodes`. Its fixture is
-the literal at `:2081`:
+the literal at `:2112`:
 
 ```
 {"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}
@@ -122,9 +122,9 @@ is to revert the reorder, not to update the golden.
 
 ### Q: Does the existing golden catch anything, or is it purely blind?
 
-- Sources examined: `generation.rs:2077-2092` in full, `:219-224`, `:235-247`,
-  `:244` (the skip attribute), `:234` and `:218` (`deny_unknown_fields` on both
-  structs), `decode_with_schema` at `:277-290`.
+- Sources examined: `generation.rs:2111-2121` in full, `:219-224`, `:235-243`,
+  `:240` (the skip attribute), `:234` and `:218` (`deny_unknown_fields` on both
+  structs), `decode_with_schema` at `:273-286`.
 - Findings: it catches two real classes. First, reordering the four leading
   scalars or moving `files` among them changes the fixture's own bytes, so the
   assertion at `:2091` fails. Second, adding a *required* field breaks the decode:

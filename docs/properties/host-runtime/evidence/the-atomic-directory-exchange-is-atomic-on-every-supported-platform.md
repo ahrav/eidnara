@@ -28,7 +28,7 @@ pub(crate) fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> rustix::io::R
 }
 ```
 
-Both arms return the raw errno. The caller in `generation.rs:1897-1900` maps it
+Both arms return the raw errno. The caller in `generation.rs:1931-1934` maps it
 through `classify_errno` (`:111-116`): `ENOSPC` and `EDQUOT` become
 `InsufficientStorage`, every other errno becomes
 `invalid("atomic digest-target exchange failed")`, so the stub's `EOPNOTSUPP`
@@ -41,20 +41,20 @@ error sets, and filesystem support, reached through one line of Rust and covered
 one cfg predicate.
 
 **The call site is a repair, followed immediately by a deletion.**
-`generation.rs:1319-1373`, inside `promote_temp`:
+`generation.rs:1359-1407`, inside `promote_temp`:
 
-- `:1319-1328` try the no-replace rename; on success, fsync, validate, and return.
-- `:1329-1343` the target is occupied: a valid occupant wins and the temp is
+- `:1359-1368` try the no-replace rename; on success, fsync, validate, and return.
+- `:1369-1377` the target is occupied: a valid occupant wins and the temp is
   discarded; `UnsupportedStateSchema` abandons the mutation.
-- `:1344-1366` a protected, owner-selected, composition-named, or pinned corrupt
+- `:1378-1400` a protected, owner-selected, composition-named, or pinned corrupt
   target abandons the mutation.
-- `:1368` `exchange_dirs(&self.generations_fd, temp_name, digest)?`
-- `:1370` fsync the generations directory.
-- `:1371-1372` revalidate the promoted target, then `remove_tree` the displaced
+- `:1402` `exchange_dirs(&self.generations_fd, temp_name, digest)?`
+- `:1404` fsync the generations directory.
+- `:1405-1406` revalidate the promoted target, then `remove_tree` the displaced
   orphan now at the temp name.
 
 So a non-atomic or partially-applied exchange means `remove_tree` deletes the wrong
-directory. `promote_temp`'s contract at `:1301-1306` depends on the swap being
+directory. `promote_temp`'s contract at `:1345-1351` depends on the swap being
 all-or-nothing.
 
 **macOS executes no test in this scope.** At HEAD this holds trivially:
@@ -103,10 +103,10 @@ the protection check passes, and `exchange_dirs` runs.
 On macOS, if `renameatx_np(RENAME_SWAP)` behaves differently on APFS from
 `RENAME_EXCHANGE` on ext4, for example by not being atomic across a crash, by
 failing on a directory rather than a file, or by returning a different errno that
-the `classify_errno` call at `generation.rs:1899` flattens into one message, then
+the `classify_errno` call at `generation.rs:1933` flattens into one message, then
 either the
 mutation is abandoned with a message that names the wrong cause, or the swap
-partially applies and `:1372` deletes a retained generation.
+partially applies and `:1406` deletes a retained generation.
 
 The classifier matters here on its own: apart from `ENOSPC` and `EDQUOT`, every
 error from either syscall
@@ -117,8 +117,8 @@ error is returned, not what it says, but the diagnosis loss is worth noting.
 
 ## Timing windows and dependencies
 
-The exchange must be atomic with respect to a crash, because `:1368-1372` is
-exchange, fsync, revalidate, delete. A crash between `:1368` and `:1372` leaves the
+The exchange must be atomic with respect to a crash, because `:1402-1406` is
+exchange, fsync, revalidate, delete. A crash between `:1402` and `:1406` leaves the
 corrupt orphan at the temp name, which the catalog's
 `current-profile-never-names-an-unvalidatable-generation` covers as an orphan a
 later prune removes. A non-atomic exchange breaks that reasoning, because the
@@ -131,10 +131,10 @@ reachable here.
 
 ## What a test must construct
 
-The fixture already exists. `generation.rs:2955`
+The fixture already exists. `generation.rs:2984`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives
-`promote_temp` into the exchange branch: `:2970-2976` covers the protected corrupt
-target being refused and `:2978-2993` covers the unprotected case exchanging
+`promote_temp` into the exchange branch: `:2999-3005` covers the protected corrupt
+target being refused and `:3007-3022` covers the unprotected case exchanging
 atomically and the orphan temp being removed.
 
 What is missing is executing it on macOS. Concretely:
@@ -165,7 +165,7 @@ portfolio evaluation asked a human to separate.
   `macos` token), the source repository's former `ci.yml` workflow:126-184` in
   full (the matrix, both platform branches, and the omission comment at
   `:171-174`; source-catalog coordinates), `src/generation.rs` and
-  `src/lifecycle.rs` cfg inventory (`generation.rs:2390` and `lifecycle.rs:1798`,
+  `src/lifecycle.rs` cfg inventory (`generation.rs:2419` and `lifecycle.rs:1798`,
   `:1920`, `:1942`, `:1981` are the only `target_os` gates in either file; the
   production gates moved to `store_fs.rs:58`, `:112`, and `:117`).
 - Findings: the evidence points both ways and cannot be resolved from the code.

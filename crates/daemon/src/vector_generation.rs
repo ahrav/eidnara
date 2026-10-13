@@ -653,7 +653,7 @@ pub struct Staging<'a> {
 }
 
 impl Staging<'_> {
-    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it plus the `manifest.json` the store writes beside it in the ledger's disk pool on top of what the store already holds, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts. A manifest the store already holds is reserved the same way, because the store copies the inventory into a staging temp before it finds the occupant and publishes nothing twice.
+    /// The staging operation charges the manifest's full inventory against the staged-bytes limit. If the store holds a valid generation under the manifest's digest, the operation confirms it through [`GenerationStore::confirm_staged`] and returns that digest. Otherwise, it reserves disk-pool capacity for the inventory and `manifest.json` in addition to the store's existing contents, then stages the files returned by `resolve` for each manifest path. Admission and reservation must succeed before staging begins.
     ///
     /// # Errors
     ///
@@ -683,6 +683,14 @@ impl Staging<'_> {
                 &[(STAGE_DISK_LIMIT, bytes)],
             )
             .map_err(VectorRefusal::Admission)?;
+        let digest = manifest.digest();
+        // The store confirms an existing valid generation in place, so a retry after an uncertain outcome reuses the same publication. Confirmation adds no bytes, so the disk pool is consulted only for a copy.
+        if self
+            .store
+            .confirm_staged(&digest, self.transaction, observer)?
+        {
+            return Ok(digest);
+        }
         // The store's walk counts `manifest.json`, so the reservation covers it or an exact-bound staging would leave the store over the limit.
         let on_disk = bytes
             .checked_add(manifest.canonical_bytes().len() as u64)
@@ -697,12 +705,12 @@ impl Staging<'_> {
             .map_err(VectorRefusal::Reservation)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
-        let digest = self
+        let staged = self
             .store
             .stage_observed(&sources, meta, self.protected, observer)?;
         // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
-        debug_assert_eq!(digest, manifest.digest());
-        Ok(digest)
+        debug_assert_eq!(staged, digest);
+        Ok(staged)
     }
 }
 

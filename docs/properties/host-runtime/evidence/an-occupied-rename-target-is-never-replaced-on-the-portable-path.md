@@ -50,7 +50,7 @@ Linux kernel with ext4, tmpfs, or overlayfs it never falls through. The
 so there the portable path is the only path.
 
 **The two paths differ on empty directories, and the caller says which behaviour is
-required.** `promote_temp`'s doc comment, `generation.rs:1303`:
+required.** `promote_temp`'s doc comment, `generation.rs:1348`:
 
 > `renameat` can replace an empty target directory, bypassing the protected-target
 > check.
@@ -134,11 +134,11 @@ The occupancy assertion, which passes today and should exist anyway:
 1. Plant an **empty** directory at the digest name, call `promote_temp` through
    `stage_and_promote`, and assert the mutation is refused when the digest is
    protected. This distinguishes the two paths' behaviour on the exact case
-   `generation.rs:1303` names. `an_empty_protected_digest_target_is_never_replaced`
-   (`generation.rs:3504-3526`) is this assertion, on the Linux flagged path only.
+   `generation.rs:1348` names. `an_empty_protected_digest_target_is_never_replaced`
+   (`generation.rs:3533-3555`) is this assertion, on the Linux flagged path only.
 2. Repeat with a **nonempty** corrupt directory. The existing
    `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-   (`generation.rs:2955`) covers the nonempty case indirectly; the empty case has no
+   (`generation.rs:2984`) covers the nonempty case indirectly; the empty case has no
    coverage on the portable path.
 
 Reaching the portable path deterministically needs one of:

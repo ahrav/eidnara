@@ -209,14 +209,24 @@ impl Fixture {
     }
 
     pub fn staging(&self) -> Staging<'_> {
+        self.staging_on(&self.store, self.transaction(), &self.protected)
+    }
+
+    /// A stager over `store` under `transaction`, with this fixture's gate, admission, identity, and ledger, for a store reopened on a fresh handle.
+    pub fn staging_on<'a>(
+        &'a self,
+        store: &'a GenerationStore,
+        transaction: &'a LifecycleTransactionLock,
+        protected: &'a BTreeSet<String>,
+    ) -> Staging<'a> {
         Staging {
-            store: &self.store,
-            transaction: self.transaction(),
+            store,
+            transaction,
             gate: &self.gate,
             admission: &self.admission,
             identity: &self.identity,
             ledger: &self.ledger,
-            protected: &self.protected,
+            protected,
         }
     }
 
@@ -396,4 +406,9 @@ impl Fixture {
             .stage(&sources, &template.stage_meta(), &BTreeSet::new())
             .unwrap()
     }
+}
+
+/// The inode of the directory at `dir`, which changes only when another directory takes its name.
+pub fn occupant_inode(dir: &std::path::Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&fs::metadata(dir).unwrap())
 }

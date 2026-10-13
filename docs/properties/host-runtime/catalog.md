@@ -1200,8 +1200,11 @@ to `default-production` in the wave that lands it.
 Status: active
 Exercised: partial - success, post-hoc tampering, and hook-injected `EIO`,
 `ENOSPC`, and `EDQUOT` plus a `SIGKILL` child at every `StageEvent` of `stage`
-(`crates/daemon/tests/vector_staging_cuts.rs:476-578`); the window between
-promotion and the `current-profile.json` rename in `stage_and_promote` has no cut.
+(`crates/daemon/tests/vector_staging_cuts.rs:513-617`), and the kernel's `ENOSPC`
+from a `tmpfs` exhausted before each staged write plus a short write and `EFBIG`
+under `RLIMIT_FSIZE` (`crates/daemon/tests/vector_staging_kernel_faults.rs:253-485`);
+the window between promotion and the `current-profile.json` rename in
+`stage_and_promote` has no cut.
 Guarantee: After any outcome of staging and promotion, including a crash at any
 point, the current profile is absent, quarantined, or names a digest that
 validates.
@@ -2313,7 +2316,7 @@ daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
 that lands it.
 Status: active
 Exercised: partial - one byte-exact golden vector exists
-(`generation.rs:2077-2092`) but its fixture omits the optional field and
+(`generation.rs:2111-2121`) but its fixture omits the optional field and
 carries an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
@@ -2343,9 +2346,9 @@ Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-p
 Both structs, both encoding functions, and the existing fixture were read at
 HEAD, and the three blind spots were each confirmed by reasoning from the
 fixture's literal contents.
-Existing check: `generation.rs:2077-2092`
+Existing check: `generation.rs:2111-2121`
 `a_generation_staged_before_the_source_digest_field_still_decodes` asserts
-`decoded.canonical_bytes() == predecessor` against the literal at `:2081`. It
+`decoded.canonical_bytes() == predecessor` against the literal at `:2112`. It
 is the only byte-exact manifest vector in the crate and it does pin the
 relative order of the four leading scalars and `files`, and it does catch the
 addition of a required field, because `deny_unknown_fields` plus a missing
@@ -2403,7 +2406,7 @@ Both equality checks were read at HEAD, and the fail-closed conclusion was
 derived from them rather than assumed; the prompt's "silently change every
 retained generation's digest" is corrected in the evidence file.
 Existing check: partial and narrow. The predecessor fixture at
-`generation.rs:2077-2092` is the only cross-version manifest test, and it
+`generation.rs:2111-2121` is the only cross-version manifest test, and it
 covers one specific evolution, a field added at the end and omitted when
 absent. Nothing covers a field that moves.
 Impact: the first start after an upgrade reports `native_payload_invalid` for
@@ -2428,7 +2431,7 @@ that lands it.
 Status: active
 Exercised: partial - the Linux arm is covered by one test through `promote_temp`
 (`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`,
-`generation.rs:2955`, re-located at HEAD); the macOS arm and the non-Linux
+`generation.rs:2984`, re-located at HEAD); the macOS arm and the non-Linux
 non-macOS stub have never executed under observation; after PR #131 (merge `5d638e3e8`) `ci.yml` has no macOS job,
 so no CI executor for that arm exists.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
@@ -2444,21 +2447,21 @@ observable state in which either name is absent. Also assert the non-Linux
 non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when
 the digest target is occupied by a corrupt unprotected generation
-(`generation.rs:1329-1373`), so a run that never meets that condition owes
+(`generation.rs:1369-1407`), so a run that never meets that condition owes
 nothing and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
 `store_fs.rs:112-115` gives Linux and macOS a shared arm calling
 `rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, which `rustix` issues as
 `renameat2(RENAME_EXCHANGE)` on Linux and `renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
 with independent semantics, error sets, and filesystem support, reached through
-one line of Rust. The call site at `generation.rs:1368` sits between an exchange and a
-revalidate-then-delete (`:1371-1372`), so a non-atomic or partially-applied
-exchange deletes the wrong directory. `promote_temp`'s contract at `:1301-1306`
+one line of Rust. The call site at `generation.rs:1402` sits between an exchange and a
+revalidate-then-delete (`:1405-1406`), so a non-atomic or partially-applied
+exchange deletes the wrong directory. `promote_temp`'s contract at `:1345-1351`
 depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing
 test `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-(`generation.rs:2955`) already builds that fixture, so the fault is available;
+(`generation.rs:2984`) already builds that fixture, so the fault is available;
 the missing element is executing it on macOS. On the stub platforms the check
 is a compile-and-call assertion.
 Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
@@ -2467,7 +2470,7 @@ with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
 since deleted that job with every other macOS job, so the claim that no macOS
 lifecycle or generation test executes now holds trivially: `ci.yml` at HEAD
 contains only `ubuntu-latest` jobs.
-Existing check: partial, Linux only. `generation.rs:2955` (re-located at HEAD)
+Existing check: partial, Linux only. `generation.rs:2984` (re-located at HEAD)
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
 branch. The macOS CI job this entry previously described was removed by
 PR #131 (merge `5d638e3e8`); no `generation` or `lifecycle` test body runs on
@@ -2511,7 +2514,7 @@ window: with a failpoint between the `statat` that reports `NOENT`
 as an empty directory and as a file, while the call is parked, and assert the
 rename does not replace it; pre-planting the target alone tests occupancy before
 the window and cannot fail on the race the guarantee forbids. `always` because the caller's contract at
-`generation.rs:1303` is unconditional, so an occupied target that gets
+`generation.rs:1348` is unconditional, so an occupied target that gets
 replaced is a violation rather than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one
 platform and load-bearing on another. `store_fs.rs:53-79`: the Linux
@@ -2520,13 +2523,13 @@ than `INVAL`, `NOSYS`, and `OPNOTSUPP`, so on a current
 kernel with ext4, tmpfs, or overlayfs the fallback never runs. On macOS that
 block is absent by cfg, so `statat` at `:69-73` followed by `renameat` at
 `:74-78` is the only path. POSIX `rename` replaces an existing *empty*
-directory, which `promote_temp`'s comment at `generation.rs:1303` calls out by name as
+directory, which `promote_temp`'s comment at `generation.rs:1348` calls out by name as
 the thing that must not happen, so the flagged path and the fallback do not
 implement the same guarantee. The fallback's justification at `store_fs.rs:49-52` is a
 prose claim that `transaction.lock` (`lifecycle.rs:37`, `:444-445`) excludes
 concurrent creation. That is a claim about actors inside the trust model only,
 and the same file defends against out-of-model directory replacement elsewhere:
-the `ValidatedGeneration` comments at `generation.rs:330` and `:582` name exactly that attack, and the catalog's
+the `ValidatedGeneration` comments at `generation.rs:326` and `:578` name exactly that attack, and the catalog's
 `validation-and-enumeration-address-one-directory-object` records two shipped
 defects from the class.
 Required faults and enabling state: a directory appearing at the target between
