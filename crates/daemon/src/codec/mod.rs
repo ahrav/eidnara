@@ -6,12 +6,9 @@ pub mod sidecar;
 
 mod json;
 
+pub use opencode::MessageV2Json;
 #[cfg(test)]
-pub(crate) use opencode::decode_opencode;
-pub use opencode::{
-    MessageV2Json, encode_opencode, encode_opencode_with_session,
-    encode_opencode_with_session_exemptions,
-};
+pub(crate) use opencode::{decode_opencode, encode_opencode, encode_opencode_with_session};
 pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
 
 /// The bytes a native window's CK derivation may allocate, its derived CK included, charged

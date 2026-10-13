@@ -292,6 +292,7 @@ fn decode_rows<'a, E>(
     })
 }
 
+#[cfg(test)]
 /// Encodes CK messages and reuses retained native envelopes when available.
 ///
 /// `mutation_exempt_mid` selects one retained message for exact raw replay.
@@ -308,6 +309,7 @@ pub fn encode_opencode(
     })
 }
 
+#[cfg(test)]
 /// Encodes CK messages with a session ID for new synthetic user messages.
 ///
 /// `session_id` applies only to newly created synthetic user messages.
@@ -326,6 +328,7 @@ pub fn encode_opencode_with_session(
     })
 }
 
+#[cfg(test)]
 pub fn encode_opencode_with_session_exemptions(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
@@ -342,6 +345,7 @@ pub fn encode_opencode_with_session_exemptions(
     ))
 }
 
+#[cfg(test)]
 /// The encoded messages as owned values; a replayed envelope is copied out of its sidecar.
 fn owned(encoded: Vec<Arc<MessageV2Json>>) -> Vec<MessageV2Json> {
     encoded.into_iter().map(Arc::unwrap_or_clone).collect()
