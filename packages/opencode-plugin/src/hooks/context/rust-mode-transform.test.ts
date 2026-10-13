@@ -3836,6 +3836,41 @@ describe("capture verified against the retained prefix", () => {
         }
     });
 
+    it("rejects a hook planted in a verified prefix message while the pass awaits the daemon, without running it", async () => {
+        const sessionId = `rust-delta-capture-mid-pass-hook-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const history = rowMessages(sessionId, rows);
+        let reads = 0;
+        const { client, bodies } = recordingClient((request, index) => {
+            if (index === 1)
+                Object.defineProperty((history[1] as { info: object }).info, "id", {
+                    enumerable: true,
+                    get: () => {
+                        reads += 1;
+                        return "hooked";
+                    },
+                });
+            return recipeResponse(request, [folded(sessionId)]);
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: [...history] });
+            const output = { messages: [...history] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(bodies[1]?.previous_output_revision).toBeDefined();
+            expect(verifiedCounts(debugSpy, sessionId)).toEqual([0, 3]);
+            expect(output.messages).toEqual(history);
+            expect(sessionLogs(debugSpy, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: source_changed (publish)`,
+            );
+            expect(reads).toBe(0);
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
     it("still rejects a hostile message appended after a verified prefix", async () => {
         const sessionId = `rust-delta-capture-hostile-${Date.now()}`;
         const rows = rawRows(4);

@@ -1405,7 +1405,11 @@ export function createTransformSessionClient(
             let messageWireBytes: number[] = [];
             if (previous && prefix) {
                 messageWireBytes = inspect(prefix.count);
-                verified = captureHistory(window, lease, prefix);
+                // A public window keeps the verified members' tapes, so its rechecks compare
+                // them instead of hashing the prefix again; a private window rechecks identity.
+                verified = captureHistory(window, lease, prefix, {
+                    tapePrefix: source.privateWindow !== true,
+                });
                 for (let index = 0; verified && index < prefix.count; index += 1)
                     messageWireBytes[index] = previous.wireBytes[index] ?? 0;
             }

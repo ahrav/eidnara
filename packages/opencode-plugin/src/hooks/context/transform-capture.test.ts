@@ -68,10 +68,12 @@ function messageMatchesContentSnapshot(
     message: unknown,
     snapshot: MessageContentSnapshot,
 ): boolean {
+    // The snapshot comes from another message, so the recheck runs under the full walk budget.
     return capturedMessagesUnchanged([message], {
         ...captureMessages([null]),
         members: [message],
         snapshots: [snapshot],
+        bytes: Number.MAX_SAFE_INTEGER,
     });
 }
 
@@ -999,10 +1001,216 @@ describe("digest-verified prefix capture", () => {
         const source = [message("m1"), message("m2")];
         const snapshotOnly = captureMessages(source);
         const withHistory = captureHistory(source);
-        expect(Object.keys(snapshotOnly).sort()).toEqual(["members", "rootSnapshot", "snapshots"]);
+        expect(Object.keys(snapshotOnly).sort()).toEqual([
+            "bytes",
+            "members",
+            "rootSnapshot",
+            "snapshots",
+        ]);
+        expect(snapshotOnly.bytes).toBe(withHistory.bytes);
         expect(snapshotOnly.snapshots).toEqual(withHistory.snapshots);
         expect(snapshotOnly.rootSnapshot).toEqual(withHistory.rootSnapshot);
         expect(capturedMessagesUnchanged(source, snapshotOnly)).toBe(true);
+    });
+});
+
+describe("taped verified prefix", () => {
+    /** The window a replay pass captures: the earlier pass's members, then one new message. */
+    function replayWindow(): { live: Record<string, unknown>[]; digest: HistoryDigest } {
+        const earlier = [message("m1"), message("m2", "x".repeat(2048)), message("m3")];
+        const digest = captureHistory(earlier).history;
+        captureLease?.release();
+        captureLease = undefined;
+        return { live: [...earlier, message("m4")], digest };
+    }
+
+    function ownerOf(maxBytes?: number): TransformCaptureAdmission {
+        return new TransformCaptureAdmission(
+            maxBytes === undefined ? undefined : { maxPasses: 2, maxBytes },
+        );
+    }
+
+    function leaseOf(owner: TransformCaptureAdmission, session = "s"): CaptureLease {
+        const admitted = owner.admit(session);
+        if (!("lease" in admitted)) throw new Error("unexpected refusal");
+        return admitted.lease;
+    }
+
+    /** Charges the partial inspection, then captures with the prefix tapes. */
+    function tapedCapture(
+        live: unknown,
+        digest: HistoryDigest,
+        lease: CaptureLease,
+    ): CapturedHistory | undefined {
+        const inspection = inspectReferenceableMessages(live, undefined, digest.count);
+        if (!inspection.ok || !lease.reserve(inspection.estimatedBytes))
+            throw new Error("root inspection refused");
+        return captureHistoryWithLease(live, lease, digest, { tapePrefix: true });
+    }
+
+    function partialCharge(live: unknown, digest: HistoryDigest): number {
+        const inspection = inspectReferenceableMessages(live, undefined, digest.count);
+        if (!inspection.ok) throw new Error("valid source rejected");
+        return inspection.estimatedBytes;
+    }
+
+    it("keeps the verified tapes at the prefix's recorded spend, which a fresh capture charges too", () => {
+        const { live, digest } = replayWindow();
+        const freshOwner = ownerOf();
+        const freshLease = leaseOf(freshOwner);
+        const inspection = inspectReferenceableMessages(live);
+        if (!inspection.ok || !freshLease.reserve(inspection.estimatedBytes))
+            throw new Error("full inspection refused");
+        const fresh = captureHistoryWithLease(live, freshLease);
+
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const taped = tapedCapture(live, digest, lease);
+        if (!taped) throw new Error("prefix did not verify");
+        expect(taped.verifiedTaped).toBe(true);
+        expect(owner.chargedBytes).toBe(freshOwner.chargedBytes);
+        expect(taped.bytes).toBe(fresh.bytes);
+        expect(taped.snapshots).toEqual(fresh.snapshots);
+        expect(taped.history).toEqual(fresh.history);
+        expect(capturedMessagesUnchanged(live, taped)).toBe(true);
+        // The tapes record the content, so an edit inside the prefix is caught without the digest.
+        (live[1]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(capturedMessagesUnchanged(live, taped)).toBe(false);
+        // A partial comparison still compares every verified member.
+        expect(capturedMessagesUnchanged(live, taped, 0)).toBe(false);
+        freshLease.release();
+        lease.release();
+    });
+
+    it("accepts the exact headroom for the tapes and keeps the digest recheck one byte short", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+
+        const exactOwner = ownerOf(partial + digest.bytes);
+        const exact = leaseOf(exactOwner);
+        expect(tapedCapture(live, digest, exact)?.verifiedTaped).toBe(true);
+        expect(exactOwner.chargedBytes).toBe(partial + digest.bytes);
+        exact.release();
+
+        const shortOwner = ownerOf(partial + digest.bytes - 1);
+        const short = leaseOf(shortOwner);
+        const untaped = tapedCapture(live, digest, short);
+        if (!untaped) throw new Error("prefix did not verify");
+        expect(untaped.verifiedTaped).toBeUndefined();
+        expect(untaped.snapshots.slice(0, digest.count)).toEqual([undefined, undefined, undefined]);
+        expect(shortOwner.chargedBytes).toBe(partial);
+        expect(capturedMessagesUnchanged(live, untaped)).toBe(true);
+        (live[0]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(capturedMessagesUnchanged(live, untaped)).toBe(false);
+        short.release();
+    });
+
+    it("leaves the tapes out when another pass holds the shared headroom", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const other = leaseOf(owner, "other");
+        expect(other.reserve(1)).toBe(true);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        expect(captured?.verifiedTaped).toBeUndefined();
+        expect(owner.chargedBytes).toBe(partial + 1);
+        expect(captured && capturedMessagesUnchanged(live, captured)).toBe(true);
+        other.release();
+        lease.release();
+    });
+
+    it("declines a stale smaller prefix bound and reserves nothing for the prefix", () => {
+        const { live, digest } = replayWindow();
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const stale = { ...digest, bytes: digest.bytes - 1 };
+        expect(tapedCapture(live, stale, lease)).toBeUndefined();
+        expect(owner.chargedBytes).toBe(partialCharge(live, stale));
+        lease.release();
+    });
+
+    it("rechecks under the capture's spend, so growth returns false within the bound", () => {
+        const { live, digest } = replayWindow();
+        const lease = leaseOf(ownerOf());
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured) throw new Error("prefix did not verify");
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        expect(capturedMessagesUnchanged(live, { ...captured, bytes: captured.bytes - 1 })).toBe(
+            false,
+        );
+        const part = (live[1]?.parts as Array<Record<string, unknown>>)[0] as Record<
+            string,
+            unknown
+        >;
+        part.nested = { grown: "y".repeat(1024 * 1024) };
+        expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+        delete part.nested;
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        lease.release();
+    });
+
+    it("tapes symbol-keyed metadata at the fresh spend and catches a swapped key", () => {
+        const key = Symbol("meta");
+        const earlier = [Object.assign(message("m1"), { [key]: "x".repeat(64) }), message("m2")];
+        const digest = captureHistory(earlier).history;
+        captureLease?.release();
+        captureLease = undefined;
+        const live = [...earlier, message("m3")];
+        const freshLease = leaseOf(ownerOf());
+        const inspection = inspectReferenceableMessages(live);
+        if (!inspection.ok || !freshLease.reserve(inspection.estimatedBytes))
+            throw new Error("full inspection refused");
+        const fresh = captureHistoryWithLease(live, freshLease);
+        const lease = leaseOf(ownerOf());
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured) throw new Error("prefix did not verify");
+        expect(captured.bytes).toBe(fresh.bytes);
+        expect(captured.snapshots).toEqual(fresh.snapshots);
+        const member = live[0] as Record<PropertyKey, unknown>;
+        const value = member[key];
+        delete member[key];
+        member[Symbol("meta")] = value;
+        expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+        freshLease.release();
+        lease.release();
+    });
+
+    it("fails a taped recheck without running a hook planted in a prefix member after capture", () => {
+        const plants: Array<(member: Record<string, unknown>, trap: () => never) => void> = [
+            (member, trap) => {
+                member.info = new Proxy({}, { get: trap, getOwnPropertyDescriptor: trap });
+            },
+            (member) => {
+                const revocable = Proxy.revocable({}, {});
+                revocable.revoke();
+                member.parts = revocable.proxy;
+            },
+            (member, trap) => {
+                Object.defineProperty(member.info as object, "id", {
+                    get: trap,
+                    enumerable: true,
+                });
+            },
+            (member, trap) => {
+                const key = "then";
+                Object.setPrototypeOf(
+                    member.info as object,
+                    Object.defineProperty({}, key, { get: trap }),
+                );
+            },
+        ];
+        for (const plant of plants) {
+            const { live, digest } = replayWindow();
+            const lease = leaseOf(ownerOf());
+            const captured = tapedCapture(live, digest, lease);
+            if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+            const counter = trapCounter();
+            plant(live[1] as Record<string, unknown>, counter.trap);
+            expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+            expect(counter.count).toBe(0);
+            lease.release();
+        }
     });
 });
 
