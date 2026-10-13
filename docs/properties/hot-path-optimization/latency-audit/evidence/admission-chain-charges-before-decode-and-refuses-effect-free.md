@@ -423,8 +423,12 @@ fails a typed prefix early, refuses the tree decode's shortfall as
 `queue_full`, and checks that no route is bound, no store row or module session
 exists, and the pool holds every byte again; and
 `crates/daemon/tests/parse_charge_covers_typed_decode.rs`, whose failed-prefix
-test now sees the admission restart the duplicate-key body and its held-pool
-test refuse the typed decode at its first value.
+test now sees the admission restart the duplicate-key body and whose held-pool
+test runs an escaped and an unescaped 4 MiB text body against a drained reserve
+that records the refused shortfall: the escaped body is refused at the
+admission's unescape charge, a shortfall over 4 MiB, and the unescaped body
+passes admission and is refused at the typed decode's first value, a shortfall
+under 64 KiB, with under 64 KiB allocated either way.
 
 ## Entry scan re-evidence, 2026-10-13 (#994)
 
@@ -445,7 +449,9 @@ is still charged before the reference probe unescapes it.
 
 A body the scan declines late, such as one over the facade cap that breaks the
 grammar at its last byte, pays one more linear pass than before, bounded by the
-32 MiB transform cap; the scan holds no charge and allocates nothing.
+32 MiB transform cap: `scan_entry` declines a longer body from its length, so a
+body the cap refuses outright takes only the reference probe's pass. The scan
+holds no charge and allocates nothing.
 
 Executed on the #994 branch: `entry_scan_answers_as_the_reference_reads_or_not_at_all`,
 which compares nests of mixed objects and arrays at depths 63 through 256;

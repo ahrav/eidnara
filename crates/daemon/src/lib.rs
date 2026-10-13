@@ -16531,9 +16531,12 @@ fn lane_probe_with(
 
 /// The one pass that answers the byte cap's probe, the admission scans, and the lane probe for
 /// a body the reference reads would each parse: one over the facade cap, or one that spells
-/// `transform`. `None` sends each read to its reference.
+/// `transform`. `None` sends each read to its reference. A body over the transform cap is
+/// refused by its length whatever its class, so it takes only the reference probe's pass.
 fn scan_entry(body: &[u8]) -> Option<ingress_scan::BodyScan<'_>> {
-    if body.len() <= MAX_FACADE_FRAME_BYTES && !spells_transform(body) {
+    if body.len() > MAX_TRANSFORM_FRAME_BYTES
+        || (body.len() <= MAX_FACADE_FRAME_BYTES && !spells_transform(body))
+    {
         return None;
     }
     ingress_scan::scan(body)
@@ -20585,8 +20588,10 @@ mod tests {
             (over_deep.as_bytes(), true),
             (long_method.as_bytes(), true),
             (&exact, true),
-            (&over, true),
-            (&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES), true),
+            // Over the transform cap the length alone refuses the body, so the scan declines it
+            // and the reference probe is its one pass.
+            (&over, false),
+            (&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES), false),
         ];
         for (index, (body, answers)) in bodies.into_iter().enumerate() {
             let scan = scan_entry(body);
