@@ -40,8 +40,8 @@ use retrieval::claims::{
     read_selected_claims, validate_for_surface,
 };
 use retrieval::exact::{
-    Authority, CompletenessCertificate, Completion, EXTRACTION_VERSION, ExactQuery, RequestIntent,
-    Resolution, ResolveBounds, ResolveRequest, resolve,
+    Authority, CompletenessCertificate, Completion, Disqualification, EXTRACTION_VERSION,
+    ExactQuery, RequestIntent, Resolution, ResolveBounds, ResolveRequest, resolve,
 };
 use retrieval::{PersistBounds, ProjectionError, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
@@ -1817,14 +1817,7 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             .map(Expected::occurrence_id)
             .collect()
     };
-    for (object, seed) in [
-        ("rule-v2", Some(successor)),
-        ("quiet", Some(quiet)),
-        ("aging", Some(aging)),
-        ("rule", None),
-        ("anti", None),
-        ("absent", None),
-    ] {
+    for (object, seed) in [("rule-v2", successor), ("quiet", quiet), ("aging", aging)] {
         let incremental = resolve_exact(&projection, &corpus, object);
         let fresh = resolve_exact(&rebuilt, &corpus, object);
         assert_eq!(
@@ -1832,22 +1825,46 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             exact_outcome(&fresh),
             "{object}"
         );
-        let (proven, retained) = exact_outcome(&fresh);
-        match seed {
-            Some(seed) => {
-                assert_eq!(fresh.completion, Completion::Complete, "{object}");
-                assert!(proven, "{object} is egress-eligible");
-                assert_eq!(retained, predicted(seed), "{object}");
-            }
-            None => {
-                assert!(!proven, "{object} never proves");
-                assert!(retained.is_empty(), "{object} retains nothing");
-            }
-        }
+        assert_eq!(
+            exact_outcome(&fresh),
+            (Completion::Complete, None, true, predicted(seed)),
+            "{object} is egress-eligible"
+        );
     }
-    // An egress proof for the quarantined and stale objects grants no surface state: claim classification still hides and stales them.
-    assert_eq!(classified(&projection, &corpus.kernel), caught_up);
-    assert_eq!(classified(&rebuilt, &corpus.kernel), caught_up);
+    // Corrected and retired objects keep tombstoned rows only on the incremental projection; neither projection proves or retains them.
+    for object in ["rule", "anti"] {
+        let (completion, disqualified, proven, retained) =
+            exact_outcome(&resolve_exact(&projection, &corpus, object));
+        assert_eq!(completion, Completion::Complete, "{object}");
+        assert!(
+            matches!(disqualified, Some(Disqualification::Tombstoned(_))),
+            "{object}: {disqualified:?}"
+        );
+        assert!(!proven && retained.is_empty(), "{object}");
+        let rebuilt_outcome = exact_outcome(&resolve_exact(&rebuilt, &corpus, object));
+        assert_eq!(
+            rebuilt_outcome,
+            (Completion::NoMatch, None, false, BTreeSet::new()),
+            "{object}"
+        );
+    }
+    for target in [&projection, &rebuilt] {
+        assert_eq!(
+            exact_outcome(&resolve_exact(target, &corpus, "absent")),
+            (Completion::NoMatch, None, false, BTreeSet::new())
+        );
+        // The quarantined and stale objects hold egress proofs, yet surface validation still denies them by claim state.
+        let (_, explicit) = validate(target, &corpus, Surface::ExplicitSearch);
+        let verdicts = verdicts_by_object(&explicit);
+        assert_eq!(
+            verdicts["quiet"],
+            UseVerdict::Denied(UseDenial::State(CandidateState::Hidden))
+        );
+        assert_eq!(
+            verdicts["aging"],
+            UseVerdict::Denied(UseDenial::State(CandidateState::Stale))
+        );
+    }
 }
 
 /// Resolves the whole-request exact query for `object` on `projection`, certified at its own checkpoint, under the corpus project.
@@ -1888,9 +1905,13 @@ fn resolve_exact(projection: &SearchProjection, corpus: &Corpus, object: &str) -
         .unwrap()
 }
 
-/// Whether the attempt proved, and the occurrences it retained after kernel judgement.
-fn exact_outcome(resolution: &Resolution) -> (bool, BTreeSet<String>) {
+/// The attempt's completion and first disqualification, whether it proved, and the occurrences it retained after kernel judgement.
+fn exact_outcome(
+    resolution: &Resolution,
+) -> (Completion, Option<Disqualification>, bool, BTreeSet<String>) {
     (
+        resolution.completion,
+        resolution.disqualified,
         resolution.proof.is_some(),
         resolution
             .retained

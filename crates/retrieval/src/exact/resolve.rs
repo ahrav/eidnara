@@ -260,8 +260,8 @@ pub fn resolve(
     resolve_inner(conn, kernel, request, budget, &|| ())
 }
 
-/// `before_judgement` runs after each page is read and before its kernel
-/// batch, allowing tests to expire the budget inside that batch.
+/// `before_judgement` runs before each enumeration kernel batch, after its
+/// page is read, allowing tests to expire the budget inside that batch.
 #[cfg(feature = "test-support")]
 pub fn resolve_with_hook_for_test(
     conn: &GuardedConn<'_>,

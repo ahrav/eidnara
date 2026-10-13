@@ -1460,7 +1460,7 @@ fn a_certificate_minted_before_an_equal_tip_restore_is_refused() {
 
 /// `validate_for_use` rejects a proof when the budget expires during its kernel batch.
 #[test]
-fn final_use_refuses_a_budget_that_expires_inside_the_kernel_batch() {
+fn final_use_refuses_a_budget_that_expires_after_its_kernel_batch() {
     let fixture = Fixture::new();
     fixture.decide("objects", &[ok("obj-1")]);
     fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
@@ -1561,6 +1561,10 @@ fn a_budget_expiring_inside_an_enumeration_kernel_batch_stops_with_progress_and_
     );
     assert_eq!(second.retained.len(), 1, "the first page's verdict is kept");
     assert_eq!(second.consumed.validated, 1);
+    assert_eq!(
+        second.consumed.pages, 2,
+        "the kernel batch stopped, not a later page read"
+    );
     assert!(second.proof.is_none());
 
     let first = run(Some(1)).unwrap();
@@ -1571,6 +1575,7 @@ fn a_budget_expiring_inside_an_enumeration_kernel_batch_stops_with_progress_and_
     );
     assert!(first.retained.is_empty());
     assert_eq!(first.consumed.validated, 0);
+    assert_eq!(first.consumed.pages, 1);
     assert!(first.proof.is_none());
 }
 
