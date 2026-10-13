@@ -301,9 +301,10 @@ pub fn encode_opencode(
     sidecar: &DecodeSidecar,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
+    let messages = messages.iter().collect::<Vec<_>>();
     owned(match mutation_exempt_mid {
-        Some(mid) => encode_opencode_impl(messages, sidecar, None, None, false, &[mid]),
-        None => encode_opencode_impl(messages, sidecar, None, None, false, &[]),
+        Some(mid) => encode_opencode_impl(&messages, sidecar, None, None, false, &[mid]),
+        None => encode_opencode_impl(&messages, sidecar, None, None, false, &[]),
     })
 }
 
@@ -318,9 +319,10 @@ pub fn encode_opencode_with_session(
     session_id: Option<&str>,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
+    let messages = messages.iter().collect::<Vec<_>>();
     owned(match mutation_exempt_mid {
-        Some(mid) => encode_opencode_impl(messages, sidecar, None, session_id, true, &[mid]),
-        None => encode_opencode_impl(messages, sidecar, None, session_id, true, &[]),
+        Some(mid) => encode_opencode_impl(&messages, sidecar, None, session_id, true, &[mid]),
+        None => encode_opencode_impl(&messages, sidecar, None, session_id, true, &[]),
     })
 }
 
@@ -331,7 +333,7 @@ pub fn encode_opencode_with_session_exemptions(
     mutation_exempt_mids: &[&str],
 ) -> Vec<MessageV2Json> {
     owned(encode_opencode_impl(
-        messages,
+        &messages.iter().collect::<Vec<_>>(),
         sidecar,
         None,
         session_id,
@@ -353,7 +355,7 @@ fn owned(encoded: Vec<Arc<MessageV2Json>>) -> Vec<MessageV2Json> {
 /// the alignment and every replay match the fingerprinted encode's. A message that encodes to
 /// its retained envelope is that envelope, shared with `native`.
 pub(crate) fn encode_opencode_window(
-    messages: &[WireMessage],
+    messages: &[&WireMessage],
     native: &[Arc<Value>],
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
@@ -378,7 +380,7 @@ pub(crate) fn encode_opencode_window(
 /// `decoded`, when present, holds the messages `sidecar` was decoded with in decode order, and
 /// each meta's content is read from the message at its ordinal; otherwise from its fingerprint.
 fn encode_opencode_impl(
-    messages: &[WireMessage],
+    messages: &[&WireMessage],
     sidecar: &DecodeSidecar,
     decoded: Option<&[IngressMessage]>,
     session_id: Option<&str>,
@@ -388,9 +390,9 @@ fn encode_opencode_impl(
     let mut encoded = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
-        if let Some(next) = messages.get(index + 1) {
-            if let Some(part) = render_synthetic_todo_pair(&messages[index], next) {
-                let info = synthetic_message_info(&messages[index], session_id);
+        if let Some(&next) = messages.get(index + 1) {
+            if let Some(part) = render_synthetic_todo_pair(messages[index], next) {
+                let info = synthetic_message_info(messages[index], session_id);
                 encoded.push(Arc::new(json!({
                     "info": info,
                     "parts": [part],
@@ -398,20 +400,20 @@ fn encode_opencode_impl(
                 index += 2;
                 continue;
             }
-            let call_is_fresh = meta_for_ck(sidecar, &messages[index], index).is_none();
+            let call_is_fresh = meta_for_ck(sidecar, messages[index], index).is_none();
             let result_is_fresh = meta_for_ck(sidecar, next, index + 1).is_none();
             if call_is_fresh
                 && result_is_fresh
-                && let Some(part) = render_adjacent_tool_pair(&messages[index], next)
+                && let Some(part) = render_adjacent_tool_pair(messages[index], next)
             {
-                let mut message = encode_new_message(&messages[index], session_id);
+                let mut message = encode_new_message(messages[index], session_id);
                 set_value(&mut message, "parts", Value::Array(vec![part]));
                 encoded.push(Arc::new(message));
                 index += 2;
                 continue;
             }
         }
-        let msg = &messages[index];
+        let msg = messages[index];
         // Decoded messages retain their harness IDs for metadata rebinding.
         // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
         // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
@@ -1589,7 +1591,7 @@ pub(crate) mod tests {
                         std::panic::catch_unwind(|| {
                             if by_window {
                                 owned(encode_opencode_window(
-                                    messages,
+                                    &messages.iter().collect::<Vec<_>>(),
                                     &window,
                                     Some("s"),
                                     exemptions,

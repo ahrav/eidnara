@@ -14263,7 +14263,7 @@ fn attach_native_messages_with_tags(
             let served_messages = response
                 .messages()
                 .iter()
-                .map(|message| message.deref().clone())
+                .map(Deref::deref)
                 .collect::<Vec<_>>();
             let mut native_messages = codec::opencode::encode_opencode_window(
                 &served_messages,
