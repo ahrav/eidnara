@@ -554,11 +554,7 @@ async fn a_refused_capacity_installs_nothing_and_ranks_without_a_scan() {
     handler.set_query_route_limits(Some(with_dense(2))).unwrap();
     let (_token, budget) = request_budget(10_000);
     // With `k = 2` and a cap of 64, an alpha of 64 asks for a pool of 128.
-    let cases = [
-        (f64::NAN, "alpha"),
-        (0.5, "alpha"),
-        (64.0, "over cap"),
-    ];
+    let cases = [(f64::NAN, "alpha"), (0.5, "alpha"), (64.0, "over cap")];
     for (alpha, class) in cases {
         let mut limits = compressed_limits();
         limits.candidates.alpha = alpha;
