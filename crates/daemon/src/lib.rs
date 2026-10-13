@@ -14283,7 +14283,7 @@ fn attach_native_messages_with_tags(
                     tag_numbers,
                 );
             }
-            native_messages.into_iter().map(Arc::new).collect()
+            native_messages
         }
     };
     response.native_messages = Some(native_messages);

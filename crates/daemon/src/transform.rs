@@ -12148,16 +12148,24 @@ pub(crate) fn clear_served_native_reasoning(
     watermark: u64,
     mid_turn: bool,
 ) -> usize {
-    clear_served_native_reasoning_with_tags(
+    let mut shared = native_messages
+        .iter_mut()
+        .map(|message| Arc::new(std::mem::take(message)))
+        .collect::<Vec<_>>();
+    let cleared = clear_served_native_reasoning_with_tags(
         profile,
         provider_accepts_empty_content,
-        native_messages,
+        &mut shared,
         served_messages,
         ingress_messages,
         watermark,
         mid_turn,
         &BTreeMap::new(),
-    )
+    );
+    for (message, shared) in native_messages.iter_mut().zip(shared) {
+        *message = Arc::unwrap_or_clone(shared);
+    }
+    cleared
 }
 
 // Ingress/tag ownership prevents the codec's latest-assistant shortcut from restoring old reasoning.
@@ -12165,7 +12173,7 @@ pub(crate) fn clear_served_native_reasoning(
 pub(crate) fn clear_served_native_reasoning_with_tags(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
+    native_messages: &mut [Arc<Value>],
     served_messages: &[WireMessage],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
@@ -12202,6 +12210,13 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
         }
     }
 
+    let clears = |part: &Value| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
+            && (part.get("thinking").is_some() || part.get("text").is_some())
+            && !is_empty_reasoning_sentinel(part)
+    };
     let mut cleared = 0;
     for raw_message in native_messages {
         let info = raw_message.get("info").unwrap_or(raw_message);
@@ -12225,21 +12240,21 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
             continue;
         }
 
-        let Some(parts) = raw_message.get_mut("parts").and_then(Value::as_array_mut) else {
+        // A message shared with its native input is copied only when a part clears.
+        if !raw_message
+            .get("parts")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| parts.iter().any(clears))
+        {
+            continue;
+        }
+        let Some(parts) = Arc::make_mut(raw_message)
+            .get_mut("parts")
+            .and_then(Value::as_array_mut)
+        else {
             continue;
         };
-        for part in parts {
-            let Some(part_type) = part.get("type").and_then(Value::as_str) else {
-                continue;
-            };
-            if !matches!(part_type, "reasoning" | "thinking")
-                || (part.get("thinking").is_none() && part.get("text").is_none())
-            {
-                continue;
-            }
-            if is_empty_reasoning_sentinel(part) {
-                continue;
-            }
+        for part in parts.iter_mut().filter(|part| clears(part)) {
             *part = empty_reasoning_sentinel(part);
             cleared += 1;
         }

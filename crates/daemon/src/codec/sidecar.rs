@@ -137,6 +137,13 @@ impl MatchedBlockMetas<'_> {
         )
     }
 
+    /// Whether every native part a decoded block came from is paired with a block, so
+    /// [`Self::remove_unretained_native_parts`] keeps every part.
+    pub(crate) fn retains_every_decoded_part(&self) -> bool {
+        self.decoded_native_indices
+            .is_subset(&self.retained_native_indices)
+    }
+
     /// Removes native parts whose decoded blocks were removed.
     ///
     /// Parts with no decoded metadata remain because the sidecar cannot prove they

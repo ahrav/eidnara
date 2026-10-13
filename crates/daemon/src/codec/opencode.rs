@@ -21,8 +21,9 @@ use crate::wire::{
 
 use super::sidecar::{
     BlockMeta, DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary, HarnessMessageMeta,
-    MetaContent, decoded_block_fingerprint, is_synthetic_part, json_holds_float_zero,
-    match_block_metas_by, meta_for_ck, stable_hash_prefix, stamp_block_identity,
+    MatchedBlockMetas, MetaContent, decoded_block_fingerprint, is_synthetic_part,
+    json_holds_float_zero, match_block_metas_by, meta_for_ck, stable_hash_prefix,
+    stamp_block_identity,
 };
 
 pub type MessageV2Json = Value;
@@ -300,10 +301,10 @@ pub fn encode_opencode(
     sidecar: &DecodeSidecar,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
-    match mutation_exempt_mid {
+    owned(match mutation_exempt_mid {
         Some(mid) => encode_opencode_impl(messages, sidecar, None, None, false, &[mid]),
         None => encode_opencode_impl(messages, sidecar, None, None, false, &[]),
-    }
+    })
 }
 
 /// Encodes CK messages with a session ID for new synthetic user messages.
@@ -317,10 +318,10 @@ pub fn encode_opencode_with_session(
     session_id: Option<&str>,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
-    match mutation_exempt_mid {
+    owned(match mutation_exempt_mid {
         Some(mid) => encode_opencode_impl(messages, sidecar, None, session_id, true, &[mid]),
         None => encode_opencode_impl(messages, sidecar, None, session_id, true, &[]),
-    }
+    })
 }
 
 pub fn encode_opencode_with_session_exemptions(
@@ -329,14 +330,19 @@ pub fn encode_opencode_with_session_exemptions(
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
 ) -> Vec<MessageV2Json> {
-    encode_opencode_impl(
+    owned(encode_opencode_impl(
         messages,
         sidecar,
         None,
         session_id,
         true,
         mutation_exempt_mids,
-    )
+    ))
+}
+
+/// The encoded messages as owned values; a replayed envelope is copied out of its sidecar.
+fn owned(encoded: Vec<Arc<MessageV2Json>>) -> Vec<MessageV2Json> {
+    encoded.into_iter().map(Arc::unwrap_or_clone).collect()
 }
 
 /// Encodes CK messages served from the native window `native`, reusing each retained envelope
@@ -344,13 +350,14 @@ pub fn encode_opencode_with_session_exemptions(
 ///
 /// The window is decoded once with no fingerprint and no stamp, and each served block is
 /// compared with the block its meta decoded. Equal decoded content is equal fingerprints, so
-/// the alignment and every replay match the fingerprinted encode's.
+/// the alignment and every replay match the fingerprinted encode's. A message that encodes to
+/// its retained envelope is that envelope, shared with `native`.
 pub(crate) fn encode_opencode_window(
     messages: &[WireMessage],
     native: &[Arc<Value>],
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
-) -> Vec<MessageV2Json> {
+) -> Vec<Arc<MessageV2Json>> {
     let rows = native
         .iter()
         .enumerate()
@@ -377,17 +384,17 @@ fn encode_opencode_impl(
     session_id: Option<&str>,
     preserve_compaction: bool,
     mutation_exempt_mids: &[&str],
-) -> Vec<MessageV2Json> {
+) -> Vec<Arc<MessageV2Json>> {
     let mut encoded = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
         if let Some(next) = messages.get(index + 1) {
             if let Some(part) = render_synthetic_todo_pair(&messages[index], next) {
                 let info = synthetic_message_info(&messages[index], session_id);
-                encoded.push(json!({
+                encoded.push(Arc::new(json!({
                     "info": info,
                     "parts": [part],
-                }));
+                })));
                 index += 2;
                 continue;
             }
@@ -399,7 +406,7 @@ fn encode_opencode_impl(
             {
                 let mut message = encode_new_message(&messages[index], session_id);
                 set_value(&mut message, "parts", Value::Array(vec![part]));
-                encoded.push(message);
+                encoded.push(Arc::new(message));
                 index += 2;
                 continue;
             }
@@ -411,16 +418,16 @@ fn encode_opencode_impl(
         let meta = meta_for_ck(sidecar, msg, index);
         encoded.push(match meta {
             Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
-                meta.raw.as_ref().clone()
+                Arc::clone(&meta.raw)
             }
             Some(meta) => {
                 encode_with_meta(msg, meta, meta_content(decoded, meta), preserve_compaction)
             }
-            None => encode_new_message(msg, session_id),
+            None => Arc::new(encode_new_message(msg, session_id)),
         });
         index += 1;
     }
-    assert_unique_tool_use_ids(&encoded);
+    assert_unique_tool_use_ids(encoded.iter().map(Arc::as_ref));
     encoded
 }
 
@@ -720,6 +727,71 @@ fn encode_with_meta(
     meta: &HarnessMessageMeta,
     content: MetaContent<'_>,
     preserve_compaction: bool,
+) -> Arc<Value> {
+    let mut matched_metas =
+        match_block_metas_by(msg.content(), &meta.blocks, block_matches_meta, content);
+    matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
+    if replays_retained_envelope(msg, meta, &matched_metas, preserve_compaction) {
+        return Arc::clone(&meta.raw);
+    }
+    Arc::new(rebuild_with_meta(
+        msg,
+        meta,
+        &matched_metas,
+        preserve_compaction,
+    ))
+}
+
+/// Whether [`rebuild_with_meta`] gives `meta.raw` unchanged: the envelope names its id and the
+/// served role, every served block is paired with an unchanged native part, every decoded part
+/// stays, and no compaction part leaves.
+fn replays_retained_envelope(
+    msg: &WireMessage,
+    meta: &HarnessMessageMeta,
+    matched_metas: &MatchedBlockMetas<'_>,
+    preserve_compaction: bool,
+) -> bool {
+    let Some(envelope) = meta.raw.as_object() else {
+        return false;
+    };
+    let Some(parts) = envelope.get("parts").and_then(Value::as_array) else {
+        return false;
+    };
+    let names_id_and_role = envelope
+        .get("info")
+        .and_then(Value::as_object)
+        .is_some_and(|info| {
+            info.contains_key("id")
+                && info.get("role").and_then(Value::as_str) == Some(msg.role.as_str())
+        });
+    let keeps_compaction = preserve_compaction
+        || !parts
+            .iter()
+            .any(|part| part.get("type").and_then(Value::as_str) == Some("compaction"));
+    names_id_and_role
+        && keeps_compaction
+        && matched_metas.retains_every_decoded_part()
+        && matched_metas
+            .by_block
+            .iter()
+            .enumerate()
+            .all(|(block_index, block_meta)| {
+                block_meta.is_some_and(|block_meta| {
+                    block_meta
+                        .native_index
+                        .is_some_and(|native_index| native_index < parts.len())
+                        && matched_metas.block_is_unchanged(msg.content(), block_index, block_meta)
+                })
+            })
+}
+
+/// `meta.raw` with each native part updated from the served block paired with it, unpaired
+/// served blocks rendered as new parts, and parts whose decoded blocks were removed dropped.
+fn rebuild_with_meta(
+    msg: &WireMessage,
+    meta: &HarnessMessageMeta,
+    matched_metas: &MatchedBlockMetas<'_>,
+    preserve_compaction: bool,
 ) -> Value {
     let mut raw = meta.raw.as_ref().clone();
     let mut parts = raw
@@ -727,9 +799,6 @@ fn encode_with_meta(
         .and_then(Value::as_array_mut)
         .map(std::mem::take)
         .unwrap_or_default();
-    let mut matched_metas =
-        match_block_metas_by(msg.content(), &meta.blocks, block_matches_meta, content);
-    matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
 
     let mut block_index = 0;
     while block_index < msg.content().len() {
@@ -1416,6 +1485,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_replayed_envelope_is_the_envelope_the_rebuild_gives() {
+        let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let mut replayed = 0;
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let window = native_window(case);
+            let stamped = decode_opencode_shared(&window);
+            let plugin: Vec<WireMessage> = derive_opencode_window(&window)
+                .unwrap()
+                .into_iter()
+                .map(|message| message.ck)
+                .collect();
+            let variant = |edit: &dyn Fn(&mut WireMessage)| -> Vec<WireMessage> {
+                let mut messages = plugin.clone();
+                messages.iter_mut().for_each(edit);
+                messages
+            };
+            let variants = [
+                plugin.clone(),
+                variant(&|message| message.role = "user".to_string()),
+                variant(&|message| drop(message.content_mut().pop())),
+                variant(&|message| {
+                    if let Some(block) = message.content_mut().first_mut()
+                        && let BlockKind::Text { text } = block.kind_mut()
+                    {
+                        text.push_str(" edited");
+                    }
+                }),
+            ];
+            for messages in &variants {
+                for (index, msg) in messages.iter().enumerate() {
+                    let Some(meta) = meta_for_ck(&stamped.sidecar, msg, index) else {
+                        continue;
+                    };
+                    let mut matched = match_block_metas_by(
+                        msg.content(),
+                        &meta.blocks,
+                        block_matches_meta,
+                        MetaContent::Fingerprint,
+                    );
+                    matched.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
+                    for preserve_compaction in [true, false] {
+                        if replays_retained_envelope(msg, meta, &matched, preserve_compaction) {
+                            replayed += 1;
+                            assert_eq!(
+                                rebuild_with_meta(msg, meta, &matched, preserve_compaction),
+                                *meta.raw,
+                                "{name} message {index}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(replayed > 0);
+    }
+
+    #[test]
     fn the_window_encode_matches_the_fingerprinted_encode() {
         let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
         for case in fixture["cases"].as_array().unwrap() {
@@ -1461,7 +1588,12 @@ pub(crate) mod tests {
                     let encode = |by_window: bool| {
                         std::panic::catch_unwind(|| {
                             if by_window {
-                                encode_opencode_window(messages, &window, Some("s"), exemptions)
+                                owned(encode_opencode_window(
+                                    messages,
+                                    &window,
+                                    Some("s"),
+                                    exemptions,
+                                ))
                             } else {
                                 encode_opencode_with_session_exemptions(
                                     messages,
