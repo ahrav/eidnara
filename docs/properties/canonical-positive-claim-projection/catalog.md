@@ -219,10 +219,7 @@ kernel's claim facts through `retrieval::claims::judge_selected_for_surface`
 `KernelStore::judge_surface_eligibility_with_selected_claims`
 (`claims.rs:516`); `read_selected_claims` (`claims.rs:441`) reads only the
 projection rows.
-Status: active - not held at this HEAD: claim publication runs in production
-with no projection-gate admission and no approved RP2.9 limits. Claim
-validation runs only under the generic `EmbeddingBootstrap` admission, which
-approves no claim-specific limits or evidence.
+Status: active
 Exercised: not yet - no test asserts that claim projection or delivery stops
 without an admitted claim hook, because no such hook exists.
 Guarantee: No production path enables claim projection or delivery without the
@@ -231,7 +228,10 @@ Check: `unreachable` - a production route that publishes claim source
 descriptors, reads claim facts, or records claim causality without an admitted
 `projection_gates` hook must not exist. The claim slice above is such a route.
 The query route admits `EmbeddingBootstrap` before it reads claim facts; it has
-no claim-specific hook.
+no claim-specific hook. The check fails at this HEAD: claim publication runs in
+production with no projection-gate admission and no approved RP2.9 limits, and
+claim validation runs only under the generic `EmbeddingBootstrap` admission,
+which approves no claim-specific limits or evidence.
 Fault/timing angle: none.
 Required faults and enabling state: the default-production claim slice above;
 for the query route, an installed search admission that admits
