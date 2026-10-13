@@ -718,7 +718,7 @@ fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_
 }
 
 #[test]
-fn a_code_window_across_a_cut_serves_the_rows_before_it_and_refuses_the_first_missing_row() {
+fn a_code_file_cut_before_the_scan_serves_the_rows_before_it_and_refuses_the_first_missing_row() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
@@ -726,7 +726,7 @@ fn a_code_window_across_a_cut_serves_the_rows_before_it_and_refuses_the_first_mi
         .publish(&fixture.compose(1, &base, &[]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    // Two of the five rows of codes remain, so the layer's first window cannot be read whole.
+    // Two of the five rows of codes remain when the scan maps the file, so only those two are mapped.
     let codes = fixture
         .generation_dir(&base.digest)
         .join(daemon::vector_generation::CODES_FILE);

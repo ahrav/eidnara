@@ -240,6 +240,8 @@ impl RowAccess for PinnedLayer {
 /// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident and pinned bytes reserved until the view is dropped. Acquire a view once and share it; acquisition hashes every member, holding its pins but not the lifecycle lock while it does.
 pub struct PinnedVectors {
     digest: String,
+    /// What acquisition observed the selector naming when it handed this view out.
+    selector: SelectorState,
     layout: RowLayout,
     /// The base first, then the deltas in application order.
     layers: Vec<PinnedLayer>,
@@ -297,6 +299,25 @@ impl PinnedVectors {
             .original_read_failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
+    }
+
+    /// Whether the store's selector still says what it said when this view was handed out, read under the lifecycle's shared lock; a view whose selector moved is due to be replaced.
+    ///
+    /// # Errors
+    ///
+    /// No shared protection within the bounded wait, or a store refusal.
+    pub fn selector_holds(&self, root: Option<&Path>) -> Result<bool, AcquireRefusal> {
+        let store = GenerationStore::open(root)?;
+        let current = {
+            let _protection = protect(root)?;
+            store.read_vector_current()?
+        };
+        Ok(self.selector.still_holds(&current, &self.digest))
+    }
+
+    /// Whether every layer carries the identity `expected` names.
+    pub fn matches(&self, expected: &ExpectedVectors<'_>) -> bool {
+        check_view(self, expected).is_ok()
     }
 
     pub fn is_quarantined(&self) -> bool {
@@ -522,6 +543,7 @@ fn hand_off(
         });
     }
     Ok(Arc::new(PinnedVectors {
+        selector,
         digest,
         layout: RowLayout {
             dimension: composition.vector_dimension,
@@ -935,5 +957,25 @@ mod tests {
         }
         let eio = std::io::Error::from_raw_os_error(5);
         assert!(matches!(read_fault(3, &eio), RowFault::Unavailable(_)));
+    }
+
+    /// A failed read leaves the view usable; missing or malformed rows or codes quarantine it.
+    #[test]
+    fn only_missing_or_malformed_rows_count_as_walk_corruption() {
+        let oracle = LayeredRefusal::Oracle;
+        let id = || "occurrence".to_owned();
+        assert!(!walk_corruption(&oracle(OracleRefusal::ReadFailed {
+            occurrence_id: id(),
+            detail: "eio".to_owned()
+        })));
+        assert!(!walk_corruption(&oracle(OracleRefusal::BudgetExhausted)));
+        assert!(walk_corruption(&oracle(OracleRefusal::Unreadable {
+            occurrence_id: id(),
+            detail: "short".to_owned()
+        })));
+        assert!(walk_corruption(&oracle(OracleRefusal::StoredRow {
+            occurrence_id: id(),
+            rejection: RowRejection::ZeroNorm
+        })));
     }
 }

@@ -17,9 +17,13 @@ until blocking work exits and is joined.
   as the scan's retained payload buffers: per layer one decoded block, the
   query encoded under the layer's scales, and the layer's mapped code bytes
   (`crates/daemon/src/vector_mapped.rs`), whose pages become resident as the
-  scan reads them. The
+  scan reads them; whole code files are charged on every scan, which a
+  production resident limit must admit. A code file truncated while a scan
+  holds its mapping, or a device error behind a mapped page, raises `SIGBUS`
+  and ends the host process, under the cooperative-file threat model the
+  reader states. The
   per-layer descriptor vectors `rank_compressed` builds
-  (`vector_reader.rs:790-803`) and the scan's control structures are bounded
+  (`vector_reader.rs:812-825`) and the scan's control structures are bounded
   by `max_layers` and `max_entries` and stay outside the charge.
 - `SharedBudget::bridge` awaits the unit after cancellation instead of
   dropping it.

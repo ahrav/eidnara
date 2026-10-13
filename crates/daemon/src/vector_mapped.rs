@@ -1,17 +1,21 @@
 //! Read-only mappings of a pinned layer's int8 code file for one candidate scan.
 //!
-//! The scan maps the rows the file holds when the scan starts and reads every row it scores directly from that mapping. A file shorter than its layer declares maps only its whole rows, and a row past them reads as missing, the classification a short positioned read gives.
+//! The scan maps the rows the file holds when the scan starts and reads every row it scores directly from that mapping. A file shorter than its layer declares when the scan maps it maps only its whole rows, and a row past them reads as missing, the classification a short positioned read gives.
+//!
+//! The mapping rests on the cooperative-file threat model `vector_reader` states: same-user files stay unchanged after verification. A file truncated while a scan holds its mapping, or a device error behind a mapped page, raises `SIGBUS` when the scan touches the page and ends the host process, where a positioned read would have returned an error the scan classifies.
 
 use std::fs::File;
+use std::marker::PhantomData;
 
-use memmap2::{Advice, Mmap, MmapOptions};
+use memmap2::{Mmap, MmapOptions};
 use retrieval::dense::{CodeAccess, RowFault};
 
-/// One layer's codes for one candidate scan: `declared` rows of `width` bytes each from offset 0 of the layer's code file, mapped read-only for as long as the scan holds this value.
-pub(crate) struct MappedCodes {
+/// One layer's codes for one candidate scan: `declared` rows of `width` bytes each from offset 0 of the layer's code file, mapped read-only for as long as the scan holds this value. The value borrows the file, so the pinned layer that owns the file outlives the mapping.
+pub(crate) struct MappedCodes<'a> {
     mapping: Mapping,
     width: usize,
     declared: usize,
+    _file: PhantomData<&'a File>,
 }
 
 enum Mapping {
@@ -21,11 +25,11 @@ enum Mapping {
     Failed(String),
 }
 
-impl MappedCodes {
+impl<'a> MappedCodes<'a> {
     /// Maps the first `declared` rows of `codes`, or the whole rows it holds when it is shorter.
     ///
     /// `codes` must be a verified generation member that the caller keeps pinned, so its bytes stay as verified for as long as the mapping lives.
-    pub(crate) fn map(codes: &File, width: usize, declared: usize) -> Self {
+    pub(crate) fn map(codes: &'a File, width: usize, declared: usize) -> Self {
         let length = match codes.metadata() {
             Ok(metadata) => metadata.len(),
             Err(error) => return Self::failed(width, declared, &error),
@@ -46,24 +50,22 @@ impl MappedCodes {
                 },
                 width,
                 declared,
+                _file: PhantomData,
             };
         }
-        // SAFETY: `codes` is a published generation member: the store writes it once while staging, renames it into place, verifies its hash on acquisition, and removes it only under the lifecycle's exclusive lock, which a pinned member excludes. The caller holds that pin for the life of this value, so the mapped bytes are never written while they are borrowed. The mapping is read-only and covers only bytes the file held when it was measured, and nothing derives a mutable reference from it.
+        // SAFETY: `codes` is a published generation member that the caller keeps pinned for the life of this value, which borrows it. The store writes a member once while staging, renames it into place, verifies its hash on acquisition, and removes it only under the lifecycle's exclusive lock, which a pinned member excludes; removal unlinks, and an unlinked file keeps its mapped pages. So the store leaves the mapped bytes as verified while they are borrowed. A same-user process outside the store could still write or truncate the file, because the locks are advisory; the cooperative-file threat model in `vector_reader` assumes it does not, and the module documentation states the effect if it does. The mapping is read-only, covers only bytes the file held when it was measured, and every borrow of it is shared.
         #[allow(unsafe_code)]
         let mapped = unsafe { MmapOptions::new().len(mapped).map(codes) };
         match mapped {
-            Ok(bytes) => {
-                // The scan reads rows in increasing order; the hint only shapes readahead, and a refused hint leaves the mapping as correct as before.
-                let _hint = bytes.advise(Advice::Sequential);
-                Self {
-                    mapping: Mapping::Rows {
-                        bytes: Some(bytes),
-                        rows: held_rows,
-                    },
-                    width,
-                    declared,
-                }
-            }
+            Ok(bytes) => Self {
+                mapping: Mapping::Rows {
+                    bytes: Some(bytes),
+                    rows: held_rows,
+                },
+                width,
+                declared,
+                _file: PhantomData,
+            },
             Err(error) => Self::failed(width, declared, &error),
         }
     }
@@ -73,16 +75,17 @@ impl MappedCodes {
             mapping: Mapping::Failed(error.to_string()),
             width,
             declared,
+            _file: PhantomData,
         }
     }
 
-    /// Bytes this scan maps; the scan's scratch reservation charges them, since mapped pages become resident as the scan reads them.
+    /// Bytes a scan maps from a whole layer of `declared` rows; the scan's scratch reservation charges them, since mapped pages become resident as the scan reads them, and a shorter file maps fewer.
     pub(crate) fn mapped_bytes(width: usize, declared: usize) -> u64 {
         (width as u64).saturating_mul(declared as u64)
     }
 }
 
-impl CodeAccess for MappedCodes {
+impl CodeAccess for MappedCodes<'_> {
     fn row_count(&self) -> usize {
         self.declared
     }
@@ -154,7 +157,7 @@ mod tests {
         ));
     }
 
-    /// A file shorter than its layer declares serves its whole rows and reads every later row as missing, as a short positioned read does; bytes past the declared rows are never mapped.
+    /// A file shorter than its layer declares serves its whole rows and reads every later row as missing, as a short positioned read does; a longer file serves its declared rows and refuses the row after them.
     #[test]
     fn a_short_code_file_maps_its_whole_rows_and_reads_the_rest_as_missing() {
         let codes = all_codes();
@@ -197,19 +200,21 @@ mod tests {
         ));
     }
 
-    /// A descriptor that cannot be mapped reports every row as a failed read, which leaves the view usable rather than quarantining it.
+    /// A descriptor that cannot be mapped reports every row as a failed read, which leaves the view usable rather than quarantining it. A write-only descriptor measures its length but refuses a read mapping.
     #[test]
     fn a_descriptor_that_cannot_be_mapped_reads_every_row_as_failed() {
         let dir = tempfile::tempdir().unwrap();
-        let file = File::open(dir.path()).unwrap();
-        let declared = usize::try_from(file.metadata().unwrap().len()).unwrap();
-        assert!(declared > 0, "a directory reports a nonzero size");
-        let mapped = MappedCodes::map(&file, 1, declared);
+        let path = dir.path().join("codes");
+        std::fs::write(&path, all_codes()).unwrap();
+        let file = File::options().write(true).open(&path).unwrap();
+        let mapped = MappedCodes::map(&file, WIDTH, DECLARED);
         let mut into = Vec::new();
-        let outcome = mapped.codes_into(0, &mut into);
-        assert!(
-            matches!(outcome, Err(RowFault::Unavailable(_))),
-            "{outcome:?}"
-        );
+        for row in 0..DECLARED {
+            let outcome = mapped.codes_into(row, &mut into);
+            assert!(
+                matches!(outcome, Err(RowFault::Unavailable(_))),
+                "row {row}: {outcome:?}"
+            );
+        }
     }
 }
