@@ -22,6 +22,11 @@ impl AnalysisIdentity {
         CURRENT.clone()
     }
 
+    /// The current identity's digest, borrowed from the process-wide value.
+    pub(crate) fn current_str() -> &'static str {
+        CURRENT.as_str()
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

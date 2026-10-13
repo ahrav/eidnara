@@ -1569,3 +1569,68 @@ fn a_page_refuses_a_projection_built_under_another_schema_or_analysis_identity()
             .unwrap();
     }
 }
+
+#[test]
+fn a_page_refuses_another_kernel_before_a_missing_checkpoint_and_both_before_another_schema() {
+    let query = ExactQuery::CanonicalObject(b"obj-1");
+    let other_kernel = LookupContext {
+        kernel_incarnation_id: "kernel-2",
+        ..context(2)
+    };
+    let identity_mismatch = LookupRefusal::Projection(ProjectionError::IdentityMismatch);
+    // (reads under another kernel, has a checkpoint, identity damage, refusal)
+    let cases = [
+        (true, false, None, identity_mismatch.clone()),
+        (
+            false,
+            false,
+            Some("schema_version=schema_version+1"),
+            LookupRefusal::NoCheckpoint,
+        ),
+        (
+            false,
+            false,
+            Some("schema_version=4294967296"),
+            LookupRefusal::NoCheckpoint,
+        ),
+        (
+            true,
+            true,
+            Some("analysis_identity='another-analysis'"),
+            identity_mismatch,
+        ),
+        (
+            false,
+            true,
+            Some("schema_version=4294967296"),
+            LookupRefusal::SchemaMismatch,
+        ),
+    ];
+    for (foreign, checkpointed, damage, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        setup(&store);
+        if checkpointed {
+            apply(&store, &corpus(), mutation(0, 3), vec![], 10).unwrap();
+        }
+        if let Some(damage) = damage {
+            store
+                .with_conn_fenced(|conn| {
+                    conn.execute(&format!("UPDATE projection_identity SET {damage}"), [])?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let reader = if foreign { other_kernel } else { context(2) };
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &reader, &query, None).unwrap_err(),
+                    expected,
+                    "another kernel {foreign}, checkpoint {checkpointed}, {damage:?}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}

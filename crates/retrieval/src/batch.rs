@@ -325,15 +325,6 @@ pub fn read_checkpoint(
     kernel_incarnation_id: &str,
 ) -> Result<Option<ProjectionCheckpoint>, ProjectionError> {
     let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
-    read_checkpoint_under(conn, &installed, kernel_incarnation_id)
-}
-
-/// The caller must read `installed` in the same transaction as the checkpoint query.
-pub(crate) fn read_checkpoint_under(
-    conn: &impl QueryRow,
-    installed: &crate::ProjectionIdentity,
-    kernel_incarnation_id: &str,
-) -> Result<Option<ProjectionCheckpoint>, ProjectionError> {
     if installed.kernel_incarnation_id != kernel_incarnation_id {
         return Err(ProjectionError::IdentityMismatch);
     }

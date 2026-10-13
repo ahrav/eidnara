@@ -197,9 +197,36 @@ fn push_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+fn lower_hex(digest: &[u8]) -> String {
+    let mut hex = String::with_capacity(2 * digest.len());
+    for &byte in digest {
+        hex.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+/// Whether `hex` is the lowercase hex spelling of `digest`.
+fn spells(hex: &str, digest: &[u8]) -> bool {
+    let (pairs, rest) = hex.as_bytes().as_chunks::<2>();
+    pairs.len() == digest.len()
+        && rest.is_empty()
+        && pairs.iter().zip(digest).all(|(pair, &byte)| {
+            pair[0] == HEX_DIGITS[usize::from(byte >> 4)]
+                && pair[1] == HEX_DIGITS[usize::from(byte & 0x0f)]
+        })
+}
+
 /// Lowercase SHA-256 hex of the exact input bytes.
 pub fn identity_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    lower_hex(&Sha256::digest(bytes))
+}
+
+/// Whether `hex` equals [`identity_digest`] of `bytes`, compared without building the string.
+pub fn is_identity_digest(hex: &str, bytes: &[u8]) -> bool {
+    spells(hex, &Sha256::digest(bytes))
 }
 
 /// The digest of exact payload bytes is the payload identifier.
@@ -266,15 +293,25 @@ fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<Span>) -> Vec<u8>
     for text in tail {
         push_str(&mut out, text);
     }
-    match span {
-        None => out.push(0),
-        Some(span) => {
-            out.push(1);
-            out.extend_from_slice(&span.start.to_be_bytes());
-            out.extend_from_slice(&span.end.to_be_bytes());
-        }
-    }
+    let (span_bytes, span_len) = span_encoding(span);
+    out.extend_from_slice(&span_bytes[..span_len]);
     out
+}
+
+/// Bytes `push_str` writes before a string: its length as a big-endian `u32`.
+const LENGTH_PREFIX_BYTES: usize = size_of::<u32>();
+
+/// The span bytes `finish` writes last and how many of them it uses: a
+/// presence flag, then the start and end offsets as big-endian `u64`s.
+fn span_encoding(span: Option<Span>) -> ([u8; 17], usize) {
+    let mut bytes = [0; 17];
+    let Some(span) = span else {
+        return (bytes, 1);
+    };
+    bytes[0] = 1;
+    bytes[1..9].copy_from_slice(&span.start.to_be_bytes());
+    bytes[9..].copy_from_slice(&span.end.to_be_bytes());
+    (bytes, bytes.len())
 }
 
 /// The buffer supplies span bounds and UTF-8 boundaries, not identity bytes.
@@ -295,22 +332,32 @@ fn identity_prefix<'t>(
     representation: &str,
     span: Option<Span>,
 ) -> Option<&'t [u8]> {
-    let mut head = vec![OCCURRENCE_ENCODING_VERSION, ROLE_OCCURRENCE];
-    push_str(&mut head, class_code);
-    // `finish` with an empty prefix yields version + role + tail + span;
-    // stripping the two leading bytes leaves the exact tail encoding.
+    // The head is version, role, and class; the tail is what `finish` writes
+    // after the prefix: the revision, the representation, and the span.
     let revision_text = revision.to_string();
-    let tail = &finish(
-        &[],
-        ROLE_OCCURRENCE,
-        &[&revision_text, representation],
-        span,
-    )[2..];
-    let prefix_end = tuple.len().checked_sub(tail.len())?;
-    if prefix_end < head.len() || !tuple.starts_with(&head) || &tuple[prefix_end..] != tail {
+    let (span_bytes, span_len) = span_encoding(span);
+    let tail_len = 2 * LENGTH_PREFIX_BYTES + revision_text.len() + representation.len() + span_len;
+    let prefix_end = tuple.len().checked_sub(tail_len)?;
+    if prefix_end < 2 + LENGTH_PREFIX_BYTES + class_code.len() {
         return None;
     }
-    Some(&tuple[2..prefix_end])
+    strip_str(
+        tuple.strip_prefix(&[OCCURRENCE_ENCODING_VERSION, ROLE_OCCURRENCE])?,
+        class_code,
+    )?;
+    let rest = strip_str(
+        strip_str(&tuple[prefix_end..], &revision_text)?,
+        representation,
+    )?;
+    (rest == &span_bytes[..span_len]).then(|| &tuple[2..prefix_end])
+}
+
+/// The bytes after `text` as `push_str` encodes it, when `bytes` starts with that encoding.
+fn strip_str<'b>(bytes: &'b [u8], text: &str) -> Option<&'b [u8]> {
+    let len = u32::try_from(text.len()).expect("identity strings are bounded well below u32");
+    bytes
+        .strip_prefix(&len.to_be_bytes())?
+        .strip_prefix(text.as_bytes())
 }
 
 /// Returns the lineage identifier implied by `tuple`, or `None` when the
@@ -330,6 +377,23 @@ pub fn derived_lineage_id(
         &[representation],
         span,
     )))
+}
+
+/// Whether `lineage_id` equals [`derived_lineage_id`] for these fields, compared without building the string.
+pub fn is_derived_lineage_id(
+    lineage_id: &str,
+    tuple: &[u8],
+    class_code: &str,
+    revision: i64,
+    representation: &str,
+    span: Option<Span>,
+) -> bool {
+    identity_prefix(tuple, class_code, revision, representation, span).is_some_and(|prefix| {
+        is_identity_digest(
+            lineage_id,
+            &finish(prefix, ROLE_LINEAGE, &[representation], span),
+        )
+    })
 }
 
 /// Returns the SHA-256 of the lineage encoding for `tuple`'s source and representation with no span, or `None` when derived fields do not match `tuple`.
@@ -542,6 +606,199 @@ mod tests {
 
     fn identity_digest_hex(digest: &[u8; 32]) -> String {
         digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn digest_checks_accept_exactly_the_lowercase_spelling() {
+        for bytes in [&b""[..], b"a", &[0xff; 300]] {
+            let hex = identity_digest(bytes);
+            assert_eq!(hex, format!("{:x}", Sha256::digest(bytes)));
+            assert!(is_identity_digest(&hex, bytes));
+            assert!(!is_identity_digest(&hex.to_ascii_uppercase(), bytes));
+            assert!(!is_identity_digest(&hex[1..], bytes));
+            assert!(!is_identity_digest(&format!("{hex}0"), bytes));
+            for index in 0..hex.len() {
+                let mut altered = hex.clone().into_bytes();
+                altered[index] = if altered[index] == b'0' { b'1' } else { b'0' };
+                let altered = String::from_utf8(altered).unwrap();
+                assert!(!is_identity_digest(&altered, bytes), "{index}");
+            }
+        }
+    }
+
+    /// `identity_prefix` as it re-encoded the head and tail to compare them.
+    fn identity_prefix_by_reencoding<'t>(
+        tuple: &'t [u8],
+        class_code: &str,
+        revision: i64,
+        representation: &str,
+        span: Option<Span>,
+    ) -> Option<&'t [u8]> {
+        let mut head = vec![OCCURRENCE_ENCODING_VERSION, ROLE_OCCURRENCE];
+        push_str(&mut head, class_code);
+        let revision_text = revision.to_string();
+        let tail = &finish(
+            &[],
+            ROLE_OCCURRENCE,
+            &[&revision_text, representation],
+            span,
+        )[2..];
+        let prefix_end = tuple.len().checked_sub(tail.len())?;
+        if prefix_end < head.len() || !tuple.starts_with(&head) || &tuple[prefix_end..] != tail {
+            return None;
+        }
+        Some(&tuple[2..prefix_end])
+    }
+
+    #[test]
+    fn the_identity_prefix_agrees_with_re_encoding_the_head_and_tail() {
+        let spans = [
+            None,
+            Some(Span { start: 0, end: 0 }),
+            Some(Span { start: 2, end: 7 }),
+            Some(Span {
+                start: u64::MAX - 1,
+                end: u64::MAX,
+            }),
+        ];
+        let oid = "c".repeat(40);
+        let sources = [
+            (
+                OccurrenceClass::CanonicalClaims,
+                vec![("object_id", "obj:\u{e9}")],
+                "decision_summary",
+            ),
+            (
+                OccurrenceClass::PromotedMemory,
+                vec![("decision_object_id", "o")],
+                "summary",
+            ),
+            (
+                OccurrenceClass::GitCommits,
+                vec![
+                    ("repository_id", "repo"),
+                    ("object_format", "sha1"),
+                    ("oid", oid.as_str()),
+                ],
+                "commit_message",
+            ),
+        ];
+        let mut matched = 0;
+        for (class, identity, encoded_representation) in &sources {
+            for (revision, span) in [
+                ("0", None),
+                ("12", Some(Span { start: 2, end: 7 })),
+                ("9223372036854775807", None),
+            ] {
+                let tuple = encode_preserving_span(&Occurrence {
+                    class: class.code(),
+                    identity,
+                    revision,
+                    representation: encoded_representation,
+                    span,
+                })
+                .unwrap()
+                .tuple;
+                let mut longer = tuple.clone();
+                longer.push(0);
+                for candidate in [&tuple[..], &tuple[..tuple.len() - 1], &longer, &tuple[..3]] {
+                    for class_code in [class.code(), "messages", "git_commit", ""] {
+                        for revision in [-12, 0, 12, 120, i64::MAX] {
+                            for representation in ["", "summar", encoded_representation, "\u{e9}"] {
+                                for span in spans {
+                                    let new = identity_prefix(
+                                        candidate,
+                                        class_code,
+                                        revision,
+                                        representation,
+                                        span,
+                                    );
+                                    let old = identity_prefix_by_reencoding(
+                                        candidate,
+                                        class_code,
+                                        revision,
+                                        representation,
+                                        span,
+                                    );
+                                    assert_eq!(new, old);
+                                    matched += usize::from(new.is_some());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            matched, 9,
+            "each encoded source matches exactly its own fields"
+        );
+    }
+
+    #[test]
+    fn lineage_checks_agree_with_the_derived_lineage() {
+        for span in [None, Some(Span { start: 2, end: 7 })] {
+            let encoded = encode_preserving_span(&Occurrence {
+                class: OccurrenceClass::CanonicalClaims.code(),
+                identity: &[("object_id", "obj:a")],
+                revision: "12",
+                representation: "decision_summary",
+                span,
+            })
+            .unwrap();
+            let derived = |revision, representation, span| {
+                let id = derived_lineage_id(
+                    &encoded.tuple,
+                    "canonical_claims",
+                    revision,
+                    representation,
+                    span,
+                );
+                let checked = is_derived_lineage_id(
+                    &encoded.lineage_id,
+                    &encoded.tuple,
+                    "canonical_claims",
+                    revision,
+                    representation,
+                    span,
+                );
+                assert_eq!(checked, id.as_deref() == Some(encoded.lineage_id.as_str()));
+                id
+            };
+            assert_eq!(
+                derived(12, "decision_summary", span).as_deref(),
+                Some(encoded.lineage_id.as_str())
+            );
+            let moved = Some(Span { start: 2, end: 8 });
+            for (revision, representation, span) in [
+                (11, "decision_summary", span),
+                (120, "decision_summary", span),
+                (12, "rationale", span),
+                (12, "decision_summar", span),
+                (
+                    12,
+                    "decision_summary",
+                    if span.is_some() { None } else { moved },
+                ),
+                (
+                    12,
+                    "decision_summary",
+                    if span.is_some() { moved } else { None },
+                ),
+            ] {
+                if (revision, representation, span) != (12, "decision_summary", encoded.span) {
+                    assert_eq!(derived(revision, representation, span), None);
+                }
+            }
+            assert!(!is_derived_lineage_id(
+                &encoded.lineage_id,
+                &encoded.tuple[..encoded.tuple.len() - 1],
+                "canonical_claims",
+                12,
+                "decision_summary",
+                span
+            ));
+        }
     }
 
     #[test]

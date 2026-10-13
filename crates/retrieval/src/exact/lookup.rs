@@ -2,12 +2,13 @@ use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{
-    OccurrenceClass, Span, derived_lineage_id, identity_digest, occurrence_identity_matches,
+    OccurrenceClass, Span, is_derived_lineage_id, is_identity_digest, occurrence_identity_matches,
 };
 use rusqlite::params;
+use rusqlite::types::ValueRef;
 use storage::GuardedConn;
 
-use crate::batch::{ProjectionCheckpoint, read_checkpoint_under};
+use crate::batch::ProjectionCheckpoint;
 use crate::exact::association::{
     CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, derived_target, sha_namespace,
 };
@@ -215,27 +216,31 @@ impl From<rusqlite::Error> for LookupRefusal {
     }
 }
 
-const PAGE_COLUMNS: &str =
-    "a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,
-     o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,
-     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,
-     t.invalidated_commit_seq,t.reason,o.tuple";
-
-const PAGE_FROM: &str = "FROM exact_associations a
-     JOIN occurrences o ON o.occurrence_id=a.occurrence_id
-     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=a.occurrence_id
-     WHERE a.family=?1 AND a.namespace=?2 AND a.key<?4";
-
+/// Both page statements, built at compile time from the column list, the joins, and the lower bound on `(key, occurrence_id)`.
 /// The unary `+` on the limit keeps the plan independent of the bound value, so rebinding it for the next page reuses the prepared statement.
-fn page_sql(has_cursor: bool) -> String {
-    let lower = if has_cursor {
-        "(a.key,a.occurrence_id)>(?3,?6)"
-    } else {
-        "a.key>=?3"
+macro_rules! page_sql {
+    ($lower:literal) => {
+        concat!(
+            "SELECT a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,\
+             o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,\
+             o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,\
+             t.invalidated_commit_seq,t.reason,o.tuple \
+             FROM exact_associations a \
+             JOIN occurrences o ON o.occurrence_id=a.occurrence_id \
+             LEFT JOIN occurrence_tombstones t ON t.occurrence_id=a.occurrence_id \
+             WHERE a.family=?1 AND a.namespace=?2 AND a.key<?4 AND ",
+            $lower,
+            " ORDER BY a.key,a.occurrence_id LIMIT +?5"
+        )
     };
-    format!(
-        "SELECT {PAGE_COLUMNS} {PAGE_FROM} AND {lower} ORDER BY a.key,a.occurrence_id LIMIT +?5"
-    )
+}
+
+fn page_sql(has_cursor: bool) -> &'static str {
+    if has_cursor {
+        page_sql!("(a.key,a.occurrence_id)>(?3,?6)")
+    } else {
+        page_sql!("a.key>=?3")
+    }
 }
 
 /// Checks cancellation between SQLite steps and before returning a page.
@@ -263,14 +268,7 @@ pub fn page(
             .map_err(|_| LookupRefusal::BudgetExhausted)
     };
     check_budget()?;
-    let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
-    let checkpoint = read_checkpoint_under(conn, &installed, context.kernel_incarnation_id)?
-        .ok_or(LookupRefusal::NoCheckpoint)?;
-    if installed.schema_version != crate::SCHEMA_VERSION
-        || installed.analysis_identity != crate::lexical::AnalysisIdentity::current().as_str()
-    {
-        return Err(LookupRefusal::SchemaMismatch);
-    }
+    let checkpoint = read_state(conn, context.kernel_incarnation_id)?;
     let range = query.range();
     if let Some(cursor) = cursor {
         if cursor.range != range || cursor.kernel_incarnation_id != context.kernel_incarnation_id {
@@ -284,7 +282,7 @@ pub fn page(
         }
     }
     let limit = i64::try_from(context.page_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
-    let mut statement = conn.prepare_cached(&page_sql(cursor.is_some()))?;
+    let mut statement = conn.prepare_cached(page_sql(cursor.is_some()))?;
     let family = range.family.keyword();
     let mut rows = match cursor {
         Some(cursor) => statement.query(params![
@@ -304,8 +302,8 @@ pub fn page(
         distinct_keys: 0,
     };
     let cursor_key = cursor.map(|cursor| cursor.last_key.as_slice());
+    check_budget()?;
     loop {
-        check_budget()?;
         let row = rows.next()?;
         check_budget()?;
         let Some(row) = row else { break };
@@ -360,6 +358,45 @@ pub fn page(
     Ok(page)
 }
 
+/// The identity columns a page checks and the checkpoint, read by one cached statement from the transaction's snapshot.
+const STATE_SQL: &str = "SELECT i.kernel_incarnation_id,i.schema_version,i.analysis_identity,
+        c.snapshot_commit_seq,c.checkpoint_commit_seq,c.hold_id
+     FROM projection_identity i LEFT JOIN projection_checkpoint c ON c.singleton=1
+     WHERE i.singleton=1";
+
+/// Refuses a missing identity or another kernel incarnation, then a missing checkpoint, then another schema or analysis identity.
+fn read_state(
+    conn: &GuardedConn<'_>,
+    kernel_incarnation_id: &str,
+) -> Result<ProjectionCheckpoint, LookupRefusal> {
+    let mut statement = conn.prepare_cached(STATE_SQL)?;
+    let mut rows = statement.query([])?;
+    let row = rows.next()?.ok_or(ProjectionError::IdentityMismatch)?;
+    let text = |index| {
+        row.get_ref(index)?
+            .as_str()
+            .map_err(|_| LookupRefusal::from(ProjectionError::CorruptRow))
+    };
+    if text(0)? != kernel_incarnation_id {
+        return Err(ProjectionError::IdentityMismatch.into());
+    }
+    let (Some(snapshot_commit_seq), Some(checkpoint_commit_seq)) = (row.get(3)?, row.get(4)?)
+    else {
+        return Err(LookupRefusal::NoCheckpoint);
+    };
+    let schema_version: i64 = row.get(1)?;
+    if schema_version != i64::from(crate::SCHEMA_VERSION)
+        || text(2)? != crate::lexical::AnalysisIdentity::current_str()
+    {
+        return Err(LookupRefusal::SchemaMismatch);
+    }
+    Ok(ProjectionCheckpoint {
+        snapshot_commit_seq,
+        checkpoint_commit_seq,
+        hold_id: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+    })
+}
+
 /// Whether any commit of `repository_id` is indexed under `format`.
 fn sha_indexed(
     conn: &GuardedConn<'_>,
@@ -388,18 +425,20 @@ impl AssociationRow {
         if created_commit_seq != occurrence_created_commit_seq {
             return Err(corrupt().into());
         }
-        let tombstone = decode_tombstone(
-            row.get(16)?,
-            row.get::<_, Option<String>>(17)?.as_deref(),
-            occurrence_created_commit_seq,
-        )?;
-        let class: String = row.get(6)?;
-        let class = OccurrenceClass::from_code(&class).ok_or_else(corrupt)?;
+        // Columns the row only checks are borrowed from the statement.
+        let borrowed = |index| row.get_ref(index).map_err(LookupRefusal::from);
+        let reason = match borrowed(17)? {
+            ValueRef::Null => None,
+            reason => Some(reason.as_str().map_err(|_| corrupt())?),
+        };
+        let tombstone = decode_tombstone(row.get(16)?, reason, occurrence_created_commit_seq)?;
+        let class = borrowed(6)?.as_str().map_err(|_| corrupt())?;
+        let class = OccurrenceClass::from_code(class).ok_or_else(corrupt)?;
         let occurrence_id: String = row.get(2)?;
         let lineage_id: String = row.get(5)?;
         let revision: i64 = row.get(7)?;
         let representation: String = row.get(8)?;
-        let tuple: Vec<u8> = row.get(18)?;
+        let tuple = borrowed(18)?.as_blob().map_err(|_| corrupt())?;
         let key: Vec<u8> = row.get(0)?;
         let key_text = std::str::from_utf8(&key).map_err(|_| corrupt())?;
         let identity: &[(&str, &str)] = match (range.family, class) {
@@ -415,16 +454,16 @@ impl AssociationRow {
             }
             _ => return Err(corrupt().into()),
         };
-        let lineage = derived_lineage_id(
-            &tuple,
-            class.code(),
-            revision,
-            &representation,
-            span.map(|(start, end)| Span { start, end }),
-        );
-        if !occurrence_identity_matches(&tuple, class, identity)
-            || identity_digest(&tuple) != occurrence_id
-            || lineage.as_deref() != Some(&*lineage_id)
+        if !occurrence_identity_matches(tuple, class, identity)
+            || !is_identity_digest(&occurrence_id, tuple)
+            || !is_derived_lineage_id(
+                &lineage_id,
+                tuple,
+                class.code(),
+                revision,
+                &representation,
+                span.map(|(start, end)| Span { start, end }),
+            )
         {
             return Err(corrupt().into());
         }
@@ -510,7 +549,7 @@ mod tests {
                 hi.clone(),
                 Value::Integer(9),
             ];
-            let first_plan = plan(&conn, &page_sql(false), &first);
+            let first_plan = plan(&conn, page_sql(false), &first);
             assert!(
                 first_plan.iter().any(|d| d.contains(
                     "SEARCH a USING PRIMARY KEY (family=? AND namespace=? AND key>? AND key<?)"
@@ -526,7 +565,7 @@ mod tests {
                 Value::Integer(9),
                 Value::Text(format!("occ-{:08}", count - 1)),
             ];
-            let resume_plan = plan(&conn, &page_sql(true), &resume);
+            let resume_plan = plan(&conn, page_sql(true), &resume);
             assert!(
                 resume_plan.iter().any(|d| d.contains(
                     "SEARCH a USING PRIMARY KEY (family=? AND namespace=? AND (key,occurrence_id)>(?,?) AND key<?)"
@@ -536,7 +575,7 @@ mod tests {
             for plan in [&first_plan, &resume_plan] {
                 assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
             }
-            let mut statement = conn.prepare(&page_sql(false)).unwrap();
+            let mut statement = conn.prepare(page_sql(false)).unwrap();
             let keys = statement
                 .query_map(rusqlite::params_from_iter(first.iter()), |row| {
                     row.get::<_, Vec<u8>>(0)
@@ -548,7 +587,7 @@ mod tests {
             assert_eq!(statement.get_status(StatementStatus::Sort), 0);
             first_steps.push(statement.get_status(StatementStatus::VmStep));
 
-            let mut statement = conn.prepare(&page_sql(true)).unwrap();
+            let mut statement = conn.prepare(page_sql(true)).unwrap();
             let keys = statement
                 .query_map(rusqlite::params_from_iter(resume.iter()), |row| {
                     row.get::<_, Vec<u8>>(0)
@@ -586,7 +625,7 @@ mod tests {
                 if has_cursor {
                     params.push(Value::Text("occ-00000001".into()));
                 }
-                let mut statement = conn.prepare_cached(&page_sql(has_cursor)).unwrap();
+                let mut statement = conn.prepare_cached(page_sql(has_cursor)).unwrap();
                 {
                     let mut rows = statement
                         .query(rusqlite::params_from_iter(params.iter()))
