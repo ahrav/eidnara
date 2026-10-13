@@ -315,6 +315,26 @@ describe("referenceable JSON domain guard", () => {
         expect(bare.messageWireBytes[1]).toBe(full.messageWireBytes[1]);
     });
 
+    it("charges each marker, symbol key, and extra key one slot plus its description", () => {
+        const cases: [string, unknown[], number][] = [
+            ["empty object", [{}], 461],
+            ["null-prototype object", [Object.create(null)], 461],
+            ["empty array", [[]], 489],
+            ["symbol key", [{ [Symbol("key")]: 1 }], 541],
+            ["array extra key", [Object.assign([1], { extra: 2 })], 614],
+        ];
+        for (const [name, source, bytes] of cases) {
+            const inspection = inspectReferenceableMessages(source, undefined, 0, false);
+            expect([name, inspection.ok && inspection.estimatedBytes]).toEqual([name, bytes]);
+            const admitted = new TransformCaptureAdmission().admit(name);
+            if (!("lease" in admitted)) throw new Error("unexpected refusal");
+            const reserved = captureReserved(source, admitted.lease);
+            expect([name, reserved?.bytes, reserved?.capture.bytes]).toEqual([name, bytes, bytes]);
+            expect(reserved && capturedMessagesUnchanged(source, reserved.capture)).toBe(true);
+            admitted.lease.release();
+        }
+    });
+
     it("rejects an accessor without invoking it", () => {
         const counter = trapCounter();
         const hooked = message("m1");
@@ -395,6 +415,28 @@ describe("referenceable JSON domain guard", () => {
         const result = inspectReferenceableMessages([{ ...message("m4"), deep }]);
         expect(result.ok).toBe(false);
         if (!result.ok) expect(result.rejection.reason).toBe("depth");
+    });
+
+    it("keeps the ancestor path exact at the depth limit and after leaving a subtree", () => {
+        // The root array and the member count toward the depth limit.
+        const nested = (levels: number): unknown => {
+            let deep: unknown = "leaf";
+            for (let level = 0; level < levels; level += 1) deep = [deep];
+            return deep;
+        };
+        expect(inspectReferenceableMessages([{ deep: nested(255) }]).ok).toBe(true);
+        const past = inspectReferenceableMessages([{ deep: nested(256) }]);
+        expect(past.ok ? undefined : past.rejection.reason).toBe("depth");
+        const shared = { leaf: [1] };
+        const siblings = { left: { inner: shared }, right: { inner: shared }, last: shared };
+        expect(inspectReferenceableMessages([siblings, shared]).ok).toBe(true);
+        const inner: Record<string, unknown> = {};
+        const outer = { inner };
+        inner.back = outer;
+        expect(inspectReferenceableMessages([{ outer }])).toEqual({
+            ok: false,
+            rejection: { reason: "cycle", path: "/0/outer/inner/back" },
+        });
     });
 
     it("reads own data properties without touching accessors or proxies", () => {

@@ -19,6 +19,14 @@ const END_ARRAY = Symbol("end_array");
 const OBJECT = Symbol("object");
 const END_OBJECT = Symbol("end_object");
 const EXTRA_KEY = Symbol("extra_key");
+/** A marker's slot charge, which also covers its description like any symbol's. */
+const markerCharge = (marker: symbol): number =>
+    TAPE_SLOT_BYTES + (marker.description?.length ?? 0) * 2;
+const ARRAY_CHARGE = markerCharge(ARRAY);
+const END_ARRAY_CHARGE = markerCharge(END_ARRAY);
+const OBJECT_CHARGE = markerCharge(OBJECT);
+const END_OBJECT_CHARGE = markerCharge(END_OBJECT);
+const EXTRA_KEY_CHARGE = markerCharge(EXTRA_KEY);
 const ARRAY_METHODS = new Set(Object.getOwnPropertyNames(Array.prototype));
 ARRAY_METHODS.delete("length");
 ARRAY_METHODS.add("then");
@@ -223,7 +231,11 @@ class ReferenceableWalk {
     /** Upper bound on the canonical JSON length of the walked values, in two-byte units for strings. */
     wireBytes = 0;
     private field?: (value: SnapshotField) => void;
-    private readonly ancestors = new Set<object>();
+    /**
+     * The objects on the walked path, root first; the null prototype keeps every indexed write an
+     * own property.
+     */
+    private readonly ancestors: object[] = Object.setPrototypeOf([], null);
     /**
      * Built-in prototype state the walk checks once: own descriptor reads run no source code, so
      * the state holds for the rest of a synchronous walk.
@@ -256,6 +268,13 @@ class ReferenceableWalk {
                 TAPE_SLOT_BYTES +
                     (typeof value === "symbol" ? (value.description?.length ?? 0) * 2 : 0),
             );
+        if (wireBytes !== 0) this.wire(wireBytes);
+        this.field?.(value);
+    }
+
+    /** Records a tape marker at its fixed charge. */
+    private marker(value: symbol, charge: number, wireBytes: number): void {
+        this.spend(charge);
         if (wireBytes !== 0) this.wire(wireBytes);
         this.field?.(value);
     }
@@ -321,13 +340,16 @@ class ReferenceableWalk {
         const fields: SnapshotField[] = expected?.fields ?? Object.setPrototypeOf([], null);
         let index = 0;
         const outer = this.field;
-        this.field = (value) => {
-            if (expected) {
-                if (index >= fields.length || !Object.is(value, fields[index]))
-                    throw CONTENT_CHANGED;
-            } else fields[index] = value;
-            index += 1;
-        };
+        this.field = expected
+            ? (value) => {
+                  if (index >= fields.length || !Object.is(value, fields[index]))
+                      throw CONTENT_CHANGED;
+                  index += 1;
+              }
+            : (value) => {
+                  fields[index] = value;
+                  index += 1;
+              };
         try {
             operation();
             if (expected && index !== fields.length) throw CONTENT_CHANGED;
@@ -397,8 +419,10 @@ class ReferenceableWalk {
             !(this.arrayChain ??= Object.getPrototypeOf(Array.prototype) === Object.prototype)
         )
             throw new SourceRejected("prototype", path);
-        if (this.ancestors.size > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
-        if (this.ancestors.has(value)) throw new SourceRejected("cycle", path);
+        const depth = this.ancestors.length;
+        if (depth > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
+        for (let index = 0; index < depth; index += 1)
+            if (this.ancestors[index] === value) throw new SourceRejected("cycle", path);
         // The holder chain is the value, then `Array.prototype` for an array, then `Object.prototype` unless the prototype is null.
         this.rejectToJson(value, path);
         if (array && !this.arrayPrototypeToJsonChecked) {
@@ -411,33 +435,39 @@ class ReferenceableWalk {
         }
         const lengthSlot = array ? this.data(value, "length", path) : undefined;
         const length: number = lengthSlot?.value ?? 0;
-        const symbols = Object.getOwnPropertySymbols(value);
+        // Own keys list every string key before the first symbol, so the symbols are a suffix.
+        const keys = Reflect.ownKeys(value);
+        let names = keys.length;
+        while (names > 0 && typeof keys[names - 1] === "symbol") names -= 1;
         if (array) {
             // The declared length is charged before any element read so a huge sparse length fails early.
             this.spend(length);
-            for (let index = 0; index < symbols.length; index += 1)
-                if (ARRAY_SYMBOLS.includes(symbols[index] as symbol))
+            for (let index = names; index < keys.length; index += 1)
+                if (ARRAY_SYMBOLS.includes(keys[index] as symbol))
                     throw new SourceRejected("extra_property", path);
         }
         // Opening and closing brackets; each element or key pays its own separator.
-        this.emit(array ? ARRAY : OBJECT, 1);
+        if (array) this.marker(ARRAY, ARRAY_CHARGE, 1);
+        else this.marker(OBJECT, OBJECT_CHARGE, 1);
         // A null prototype changes what an absent optional field reads as, so the tape records it.
         if (!array) this.scalar(prototype === null);
         if (lengthSlot) {
             this.scalar(length);
             this.attributes(lengthSlot);
         }
-        this.ancestors.add(value);
+        this.ancestors[depth] = value;
         let count = 0;
         try {
-            for (const key of symbols) {
+            for (let at = names; at < keys.length; at += 1) {
+                const key = keys[at] as symbol;
                 const slot = this.data(value, key, path);
-                this.emit(EXTRA_KEY, 0);
+                this.marker(EXTRA_KEY, EXTRA_KEY_CHARGE, 0);
                 this.emit(key, 0);
                 this.attributes(slot);
                 this.walk(slot.value, path);
             }
-            for (const key of Object.getOwnPropertyNames(value)) {
+            for (let at = 0; at < names; at += 1) {
+                const key = keys[at] as string;
                 if (array && key === "length") continue;
                 if (array && ARRAY_METHODS.has(key))
                     throw new SourceRejected("extra_property", path);
@@ -447,7 +477,7 @@ class ReferenceableWalk {
                     const index = Number(key);
                     if (Number.isInteger(index) && index >= 0 && String(index) === key)
                         this.data(value, String(count), path, count);
-                    this.emit(EXTRA_KEY, 0);
+                    this.marker(EXTRA_KEY, EXTRA_KEY_CHARGE, 0);
                     this.emit(key, 0);
                     this.attributes(slot);
                     this.walk(slot.value, path, key);
@@ -466,11 +496,12 @@ class ReferenceableWalk {
                 count += 1;
             }
             if (array && count !== length) this.data(value, String(count), path, count);
-            this.emit(array ? END_ARRAY : END_OBJECT, 1);
+            if (array) this.marker(END_ARRAY, END_ARRAY_CHARGE, 1);
+            else this.marker(END_OBJECT, END_OBJECT_CHARGE, 1);
             this.scalar(count);
             return count;
         } finally {
-            this.ancestors.delete(value);
+            this.ancestors.length = depth;
         }
     }
 }
