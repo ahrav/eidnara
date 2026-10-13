@@ -716,7 +716,10 @@ export interface CapturedMessages {
     rootSnapshot: MessageContentSnapshot;
     /** The prior digest the leading members matched, when the capture was given one. */
     verified?: HistoryDigest;
-    /** The verified members keep the tapes their verification walked, charged at `verified.bytes`. */
+    /**
+     * The verified members keep the tapes their verification walked, charged at `verified.bytes`
+     * as a hold a short reservation may reclaim, which clears this flag and the tapes.
+     */
     verifiedTaped?: true;
     /**
      * The walk's spend on the root and every member, `verified.bytes` included; a recheck of
@@ -771,10 +774,10 @@ export function captureReserved(
  * With a `prefix`, capture charges only the root and members after the prefix; it verifies
  * leading members instead of retaining them. A mismatch, or no member after the prefix, returns
  * `undefined`. With `tapePrefix` and headroom for the prefix's recorded spend, the verification
- * also records each leading member's tape; once the digest matches, the capture reserves that
- * spend in the same synchronous section, the exact amount a fresh walk of the unchanged members
- * spends, and keeps the tapes. Without that headroom the capture keeps no tapes, and rechecks
- * walk the digest.
+ * also records each leading member's tape; once the digest matches, the capture holds that spend
+ * in the same synchronous section, the exact amount a fresh walk of the unchanged members spends,
+ * and keeps the tapes. The hold is reclaimable, so the tapes never cost a later reservation its
+ * headroom. Without free headroom the capture keeps no tapes, and rechecks walk the digest.
  */
 export function captureHistory(messages: unknown, lease: CaptureLease): CapturedHistory;
 export function captureHistory(
@@ -789,7 +792,7 @@ export function captureHistory(
     prefix?: HistoryDigest,
     options?: { tapePrefix?: boolean },
 ): CapturedHistory | undefined {
-    // The walk reserves nothing, so the headroom read here is the headroom the reservation meets.
+    // The walk reserves nothing, so the headroom read here is the headroom the hold meets.
     const record =
         prefix !== undefined &&
         options?.tapePrefix === true &&
@@ -803,17 +806,6 @@ export function captureHistory(
         if (error === PREFIX_CHANGED) return undefined;
         throw error;
     }
-    const tapes = verifier?.tapes;
-    if (tapes && lease.reserve(verifier.expected.bytes)) {
-        const snapshots: (MessageContentSnapshot | undefined)[] = [];
-        for (let index = 0; index < captured.snapshots.length; index += 1)
-            defineSlot(
-                snapshots,
-                index,
-                index < tapes.length ? tapes[index] : captured.snapshots[index],
-            );
-        captured = { ...captured, snapshots, verifiedTaped: true };
-    }
     const hasher = verifier?.continueHashing() ?? new TapeHasher();
     for (let index = 0; index < taped.length - 1; index += 1)
         hasher.add(taped[index] as TapedMember);
@@ -824,13 +816,33 @@ export function captureHistory(
         return alone.digest();
     };
     const boundary = single(taped[0]);
-    return {
+    const history: CapturedHistory = {
         ...captured,
         verified: prefix,
         history: hasher.digest(),
         terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
         boundary,
     };
+    const tapes = verifier?.tapes;
+    if (!tapes) return history;
+    const snapshots: (MessageContentSnapshot | undefined)[] = [];
+    for (let index = 0; index < captured.snapshots.length; index += 1)
+        defineSlot(
+            snapshots,
+            index,
+            index < tapes.length ? tapes[index] : captured.snapshots[index],
+        );
+    // A reservation the headroom cannot otherwise meet takes the tapes back; the capture then
+    // rechecks its verified members against the digest.
+    const held = lease.reserveReclaimable(verifier.expected.bytes, () => {
+        history.snapshots = captured.snapshots;
+        history.verifiedTaped = undefined;
+    });
+    if (held) {
+        history.snapshots = snapshots;
+        history.verifiedTaped = true;
+    }
+    return history;
 }
 
 /** `digest.verifier` validates leading members; a mismatch throws `PREFIX_CHANGED`. */
@@ -958,19 +970,38 @@ export function capturedMessagesUnchanged(
 export interface CaptureLease {
     readonly signal: AbortSignal;
     readonly chargedBytes: number;
-    /** Owner-wide headroom shared by every lease, not this lease's own remainder; zero once released. */
+    /**
+     * Owner-wide headroom shared by every lease, reclaimable holds included, not this lease's
+     * own remainder; zero once released.
+     */
     readonly remainingBytes: number;
+    /** Reserves `bytes`, reclaiming other holds first when free headroom is short. */
     reserve(bytes: number): boolean;
+    /**
+     * Reserves `bytes` from free headroom as a hold any later reservation of any lease may
+     * reclaim; a reclaim calls `reclaim` synchronously, then returns the bytes. One hold per lease.
+     */
+    reserveReclaimable(bytes: number, reclaim: () => void): boolean;
     /** Returns every byte this lease holds to the owner and keeps the lease live; the caller must hold no charged capture at the call. */
     refund(): void;
     requestCancel(reason: string): void;
     release(): void;
 }
 
+interface ReclaimableHold {
+    readonly bytes: number;
+    readonly reclaim: () => void;
+    /** Takes the hold's bytes off its lease's charge. */
+    readonly returnBytes: () => void;
+}
+
 /** TransformCaptureAdmission permits one live lease per session. */
 export class TransformCaptureAdmission {
     private readonly leases = new Map<string, CaptureLease>();
     private chargedBytesTotal = 0;
+    /** Optional charges, such as a capture's verified tapes, that a short reservation takes back. */
+    private readonly holds = new Map<CaptureLease, ReclaimableHold>();
+    private heldBytes = 0;
     constructor(
         private readonly limits = {
             maxPasses: TRANSFORM_CAPTURE_MAX_PASSES,
@@ -984,8 +1015,31 @@ export class TransformCaptureAdmission {
     get chargedBytes(): number {
         return this.chargedBytesTotal;
     }
+    /** Headroom any reservation can reach: free bytes plus every reclaimable hold. */
     get remainingBytes(): number {
+        return this.freeBytes + this.heldBytes;
+    }
+    private get freeBytes(): number {
         return this.limits.maxBytes - this.chargedBytesTotal;
+    }
+
+    /** Returns `holder`'s hold to free headroom, running its reclaim when `reclaim` is set. */
+    private dropHold(holder: CaptureLease, reclaim: boolean): void {
+        const hold = this.holds.get(holder);
+        if (!hold) return;
+        this.holds.delete(holder);
+        this.heldBytes -= hold.bytes;
+        this.chargedBytesTotal -= hold.bytes;
+        hold.returnBytes();
+        if (reclaim) hold.reclaim();
+    }
+
+    /** Reclaims holds in the order they were taken until `needed` bytes are free. */
+    private reclaimFor(needed: number): void {
+        for (const holder of [...this.holds.keys()]) {
+            if (this.freeBytes >= needed) return;
+            this.dropHold(holder, true);
+        }
     }
 
     admit(
@@ -1019,11 +1073,34 @@ export class TransformCaptureAdmission {
                     additional > owner.remainingBytes
                 )
                     return false;
+                if (additional > owner.freeBytes) owner.reclaimFor(additional);
                 owner.chargedBytesTotal += additional;
                 bytes += additional;
                 return true;
             },
+            reserveReclaimable(additional, reclaim) {
+                if (
+                    released ||
+                    owner.holds.has(lease) ||
+                    !Number.isSafeInteger(additional) ||
+                    additional < 0 ||
+                    additional > owner.freeBytes
+                )
+                    return false;
+                owner.chargedBytesTotal += additional;
+                bytes += additional;
+                owner.heldBytes += additional;
+                owner.holds.set(lease, {
+                    bytes: additional,
+                    reclaim,
+                    returnBytes: () => {
+                        bytes -= additional;
+                    },
+                });
+                return true;
+            },
             refund() {
+                owner.dropHold(lease, false);
                 owner.chargedBytesTotal -= bytes;
                 bytes = 0;
             },
@@ -1033,6 +1110,7 @@ export class TransformCaptureAdmission {
             release() {
                 if (released) return;
                 released = true;
+                owner.dropHold(lease, false);
                 owner.chargedBytesTotal -= bytes;
                 bytes = 0;
                 owner.leases.delete(sessionId);

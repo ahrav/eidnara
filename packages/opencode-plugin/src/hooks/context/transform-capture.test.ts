@@ -1142,6 +1142,56 @@ describe("taped verified prefix", () => {
         lease.release();
     });
 
+    it("gives the tapes' hold back to a later reservation of the same pass", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        expect(owner.remainingBytes).toBe(digest.bytes);
+        expect(lease.reserve(digest.bytes)).toBe(true);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(captured.snapshots.slice(0, digest.count)).toStrictEqual([
+            undefined,
+            undefined,
+            undefined,
+        ]);
+        expect(owner.chargedBytes).toBe(partial + digest.bytes);
+        expect(lease.chargedBytes).toBe(partial + digest.bytes);
+        expect(lease.reserve(1)).toBe(false);
+        // The capture rechecks its verified members against the digest from here on.
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        (live[1]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+        lease.release();
+        expect(owner.chargedBytes).toBe(0);
+    });
+
+    it("gives the tapes' hold to another pass's reservation, and a hold never takes another", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(2 * partial + digest.bytes);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        const other = leaseOf(owner, "other");
+        // A second pass finds no free headroom for its own tapes and keeps the first pass's.
+        const second = tapedCapture(replayWindow().live, digest, other);
+        expect(second?.verifiedTaped).toBeUndefined();
+        expect(captured.verifiedTaped).toBe(true);
+        expect(owner.chargedBytes).toBe(2 * partial + digest.bytes);
+        // A reservation reclaims the hold.
+        expect(other.reserve(digest.bytes)).toBe(true);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(lease.chargedBytes).toBe(partial);
+        expect(owner.chargedBytes).toBe(2 * partial + digest.bytes);
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        other.release();
+        lease.release();
+        expect(owner.chargedBytes).toBe(0);
+    });
+
     it("declines a stale smaller prefix bound and reserves nothing for the prefix", () => {
         const { live, digest } = replayWindow();
         const owner = ownerOf();
