@@ -999,7 +999,7 @@ fn assert_untouched(
     assert_eq!(fixture.ledger.census(), *census, "{case}");
 }
 
-/// A view whose members carry another value of any identity field the sidecar binds refuses compaction, naming that field, before any reservation: with the resident limit at one byte the refusal is still the identity, not the reservation. A member whose rows were cut after the view pinned it refuses with the row it could not read and releases every reservation. Each refusal writes nothing.
+/// A view whose members carry another value of any identity field the sidecar binds refuses compaction as that field, both with the resident limit at one byte and with the disk limit at one byte, so the identity check precedes the reservation from either pool. A member whose rows were cut after the view pinned it refuses with the row it could not read. Each refusal leaves the work directory empty, the generation set unchanged, and the census as it was.
 #[test]
 fn every_identity_field_and_a_member_cut_after_pinning_refuse_and_write_nothing() {
     let mut fixture = Fixture::new();
@@ -1009,10 +1009,7 @@ fn every_identity_field_and_a_member_cut_after_pinning_refuse_and_write_nothing(
         .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    // A reservation taken before the identity check would be refused at this limit, so an identity refusal shows the check came first.
-    fixture.set_limit(RESIDENT_LIMIT, 1);
     let before = fixture.generations();
-    let census = fixture.ledger.census();
     let other_checkpoint = ProjectionCheckpoint {
         snapshot_commit_seq: 1,
         checkpoint_commit_seq: 2,
@@ -1040,60 +1037,65 @@ fn every_identity_field_and_a_member_cut_after_pinning_refuse_and_write_nothing(
             (field, generation)
         })
         .collect();
-    let expected = fixture.expected();
-    let mut field_cases: Vec<(&str, ExpectedVectors<'_>)> = generations
-        .iter()
-        .map(|(field, generation)| {
-            (
-                *field,
-                ExpectedVectors {
-                    generation,
-                    ..expected
-                },
-            )
-        })
-        .collect();
-    field_cases.push((
-        "unit_norm_tolerance",
-        ExpectedVectors {
-            unit_norm_tolerance: expected.unit_norm_tolerance * 2.0,
-            ..expected
-        },
-    ));
-    field_cases.push((
-        "kernel_incarnation_id",
-        ExpectedVectors {
-            kernel_incarnation_id: "another-incarnation",
-            ..expected
-        },
-    ));
-    field_cases.push((
-        "checkpoint",
-        ExpectedVectors {
-            checkpoint: Some(&other_checkpoint),
-            ..expected
-        },
-    ));
-    assert_eq!(
-        field_cases.len(),
-        8,
-        "every field the sidecar can be built to disagree on"
-    );
-    for (field, expected) in &field_cases {
-        let dir = fixture.work_dir();
-        let refusal =
-            compact(&view, expected, &fixture.staging(), max_entries(), &dir).unwrap_err();
-        assert_eq!(
-            refusal,
-            CompactionRefusal::Identity {
-                digest: view.members()[0].clone(),
-                field
+    // Starving each pool in turn makes a reservation taken before the identity check fail the identity assertion.
+    for starved in [RESIDENT_LIMIT, DISK_LIMIT] {
+        fixture.set_limit(starved, 1);
+        let census = fixture.ledger.census();
+        let expected = fixture.expected();
+        let mut field_cases: Vec<(&str, ExpectedVectors<'_>)> = generations
+            .iter()
+            .map(|(field, generation)| {
+                (
+                    *field,
+                    ExpectedVectors {
+                        generation,
+                        ..expected
+                    },
+                )
+            })
+            .collect();
+        field_cases.push((
+            "unit_norm_tolerance",
+            ExpectedVectors {
+                unit_norm_tolerance: expected.unit_norm_tolerance * 2.0,
+                ..expected
             },
-            "{field}"
+        ));
+        field_cases.push((
+            "kernel_incarnation_id",
+            ExpectedVectors {
+                kernel_incarnation_id: "another-incarnation",
+                ..expected
+            },
+        ));
+        field_cases.push((
+            "checkpoint",
+            ExpectedVectors {
+                checkpoint: Some(&other_checkpoint),
+                ..expected
+            },
+        ));
+        assert_eq!(
+            field_cases.len(),
+            8,
+            "every field the sidecar can be built to disagree on"
         );
-        assert_untouched(&fixture, &dir, &before, &census, field);
+        for (field, expected) in &field_cases {
+            let case = format!("{starved}: {field}");
+            let dir = fixture.work_dir();
+            let refusal =
+                compact(&view, expected, &fixture.staging(), max_entries(), &dir).unwrap_err();
+            assert_eq!(
+                refusal,
+                CompactionRefusal::Identity {
+                    digest: view.members()[0].clone(),
+                    field
+                },
+                "{case}"
+            );
+            assert_untouched(&fixture, &dir, &before, &census, &case);
+        }
     }
-    drop(field_cases);
 
     // The rows are cut to their header after the view verified and pinned them.
     fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
