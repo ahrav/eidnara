@@ -3,7 +3,7 @@
 //! Decoding records each native message's envelope, block metadata, and decoded blocks.
 //! Encoding aligns surviving blocks to that metadata by canonical content with an
 //! order-preserving maximum-match walk, or a forward greedy walk above
-//! [`MAX_ALIGNMENT_CELLS`].
+//! `MAX_ALIGNMENT_CELLS`.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
