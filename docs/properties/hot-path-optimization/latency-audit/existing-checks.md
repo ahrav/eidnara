@@ -552,10 +552,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-scan-grammar]: ../../../../crates/daemon/src/lib.rs#L20947
 [t-scan-corpora]: ../../../../crates/daemon/src/lib.rs#L20985
 [t-scan-swar]: ../../../../crates/daemon/src/ingress_scan.rs#L364
-[t-witness]: ../../../../crates/daemon/src/lib.rs#L20029
-[t-token]: ../../../../crates/daemon/src/lib.rs#L20064
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L20303
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L20457
+[t-witness]: ../../../../crates/daemon/src/lib.rs#L21036
+[t-token]: ../../../../crates/daemon/src/lib.rs#L21071
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L21307
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L21472
 [t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L108
 [t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L184
 [t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L316
