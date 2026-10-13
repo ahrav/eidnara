@@ -10,16 +10,17 @@ use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, BackupRequest, CommitIntent,
     DecisionPayload, DecisionSpec, Dimension, DomainSpec, EligibilityVerdict, EventKind,
-    KernelStore, ProjectScope, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope, ScopeSpec, ScopeTermSpec, Sensitivity,
+    SourceClass, TaintClass,
 };
 use retrieval::batch::{
     BatchBounds, Invalidation, MutationIdentity, ProjectionBatch, apply_batch, read_checkpoint,
 };
 use retrieval::exact::{
     Authority, CertificateRefusal, CompletenessCertificate, Completion, Disqualification,
-    ExactProof, ExactQuery, HexPrefix, IncompleteReason, LookupRefusal, ObjectFormat,
-    ProofInvalidation, RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest,
-    ShaPrefixQuery, resolve, resolve_with_hook_for_test, validate_for_use,
+    ExactProof, ExactQuery, HexPrefix, IncompleteReason, LookupContext, LookupRefusal,
+    ObjectFormat, ProofInvalidation, RequestIntent, Resolution, ResolveBounds, ResolveRefusal,
+    ResolveRequest, ShaPrefixQuery, page, resolve, resolve_with_hook_for_test, validate_for_use,
     validate_for_use_with_hook_for_test,
 };
 use retrieval::{
@@ -28,7 +29,7 @@ use retrieval::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
 
 const DOMAIN: &str = "domain";
@@ -355,6 +356,11 @@ impl Fixture {
     }
 
     fn project(&self, rows: &[Row], invalidations: Vec<Invalidation>) {
+        self.project_citing(rows, invalidations, DIGEST);
+    }
+
+    /// Projects `rows` as derived from the artifact whose digest is `digest`.
+    fn project_citing(&self, rows: &[Row], invalidations: Vec<Invalidation>, digest: &str) {
         let through = self.tip();
         let identities: Vec<Vec<(String, String)>> = rows.iter().map(Row::identity).collect();
         let revisions: Vec<String> = rows.iter().map(|row| row.revision().to_string()).collect();
@@ -385,7 +391,7 @@ impl Fixture {
                 sensitivity: Sensitivity::Normal,
                 source_object_id: row.object(),
                 source_evidence_id: "evidence",
-                source_artifact_digest: DIGEST,
+                source_artifact_digest: digest,
                 created_commit_seq: through,
             })
             .collect();
@@ -1786,5 +1792,497 @@ fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_p
     assert!(
         cancelled_midway,
         "cancellation must have landed mid-attempt"
+    );
+}
+
+/// Projects `count` claim rows under the one exact key `bulk`, each naming an object the kernel never decided, so every row is judged and none proves.
+fn project_bulk(fixture: &Fixture, count: usize) {
+    // Each row carries its own revision, so the shared key yields distinct occurrences.
+    let objects: Vec<&'static str> = (0..count)
+        .map(|n| &*Box::leak(format!("bulk-{n:05}").into_boxed_str()))
+        .collect();
+    let rows: Vec<Row> = objects
+        .iter()
+        .enumerate()
+        .map(|(index, object)| Row::Claim {
+            key: "bulk",
+            object,
+            revision: index as i64 + 1,
+            representation: "decision_summary",
+            payload: object,
+        })
+        .collect();
+    for chunk in rows.chunks(200) {
+        fixture.project(chunk, vec![]);
+    }
+}
+
+const BULK_ROWS: usize = 3000;
+
+fn bulk_bounds() -> ResolveBounds {
+    ResolveBounds {
+        page_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        max_rows: NonZeroUsize::new(4 * MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        max_pages: NonZeroUsize::new(8).unwrap(),
+        ..bounds()
+    }
+}
+
+impl Fixture {
+    /// Resolves `bulk` under `budget` on a read whose progress handler polls `stop`.
+    fn resolve_interruptible(
+        &self,
+        certificate: &CompletenessCertificate,
+        budget: &EvalBudget,
+        stop: impl FnMut() -> bool + Send + 'static,
+    ) -> Result<Resolution, ResolveRefusal> {
+        let request = ResolveRequest {
+            query: object_query("bulk"),
+            intent: RequestIntent::WholeRequest,
+            certificate,
+            authority: Authority {
+                project: &self.project,
+                destination: ArtifactDestination::Local,
+                inventory_epoch: EPOCH,
+            },
+            bounds: bulk_bounds(),
+        };
+        self.store
+            .with_conn_interruptible(Instant::now() + Duration::from_secs(60), stop, |conn| {
+                Ok(resolve(conn, &self.kernel, &request, budget))
+            })
+            .unwrap()
+    }
+}
+
+/// A progress-handler stop that counts its polls and, from poll `fire_at`, cancels `budget` and interrupts the statement it is polled from.
+fn cancelling_stop(
+    budget: &EvalBudget,
+    fire_at: usize,
+) -> (Arc<AtomicUsize>, impl FnMut() -> bool + Send + 'static) {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&polls);
+    let budget = budget.clone();
+    let stop = move || {
+        if counted.fetch_add(1, Ordering::Relaxed) + 1 >= fire_at {
+            budget.cancel();
+        }
+        budget.is_exhausted()
+    };
+    (polls, stop)
+}
+
+#[test]
+fn an_interrupt_inside_an_exact_page_statement_stops_resolution_as_budget_exhaustion() {
+    let fixture = Fixture::new();
+    project_bulk(&fixture, BULK_ROWS);
+    let certificate = fixture.certificate();
+
+    // Healthy control: the same interruptible path completes and the handler polls inside each page statement.
+    let budget = EvalBudget::unbounded();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&polls);
+    let control = fixture
+        .resolve_interruptible(&certificate, &budget, move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+            false
+        })
+        .unwrap();
+    assert_eq!(control.completion, Completion::Complete);
+    assert_eq!(control.consumed.rows, BULK_ROWS);
+    assert_eq!(control.consumed.pages, 3);
+    assert_eq!(control.consumed.validated, BULK_ROWS);
+    assert!(control.proof.is_none(), "undecided objects never prove");
+    let total = polls.load(Ordering::Relaxed);
+    assert!(
+        total >= 6,
+        "the handler polls inside the page statements: {total}"
+    );
+
+    // A page read alone surfaces the interrupt as an engine interruption, not as a budget check.
+    let budget = EvalBudget::unbounded();
+    let (fired, stop) = cancelling_stop(&budget, 2);
+    let refused = fixture
+        .store
+        .with_conn_interruptible(Instant::now() + Duration::from_secs(60), stop, |conn| {
+            Ok(page(
+                conn,
+                &LookupContext {
+                    kernel_incarnation_id: &fixture.incarnation,
+                    page_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+                    budget: &budget,
+                },
+                &object_query("bulk"),
+                None,
+            ))
+        })
+        .unwrap();
+    assert!(fired.load(Ordering::Relaxed) >= 2, "the stop fired");
+    assert_eq!(
+        refused.unwrap_err(),
+        LookupRefusal::Projection(ProjectionError::Interrupted)
+    );
+
+    // The first poll is the connection acquisition, which refuses before any SQL; interrupting at every later poll position stops the attempt as a global or local budget stop, keeping completed pages only.
+    let mut global = false;
+    let mut local = false;
+    for fire_at in 2..=total {
+        let budget = EvalBudget::unbounded();
+        let (polled, stop) = cancelling_stop(&budget, fire_at);
+        let outcome = fixture.resolve_interruptible(&certificate, &budget, stop);
+        assert!(
+            polled.load(Ordering::Relaxed) >= fire_at.min(total),
+            "{fire_at}: the stop was polled up to its firing point"
+        );
+        match outcome {
+            Err(ResolveRefusal::BudgetExhausted) => global = true,
+            Ok(resolution) => {
+                assert_eq!(
+                    resolution.completion,
+                    Completion::Incomplete(IncompleteReason::BudgetExhausted),
+                    "{fire_at}"
+                );
+                assert!(resolution.proof.is_none(), "{fire_at}");
+                assert!(resolution.consumed.pages >= 1, "{fire_at}");
+                assert_eq!(
+                    resolution.consumed.validated, resolution.consumed.rows,
+                    "{fire_at}: accounting covers judged pages only"
+                );
+                assert_eq!(
+                    resolution.consumed.rows,
+                    resolution.consumed.pages * MAX_ELIGIBILITY_CANDIDATES,
+                    "{fire_at}: an interrupted page is dropped unjudged"
+                );
+                local = true;
+            }
+            Err(other) => {
+                panic!("{fire_at}: an interrupt must stop as budget exhaustion: {other:?}")
+            }
+        }
+    }
+    assert!(
+        global && local,
+        "the sweep reaches both the global and the local stop"
+    );
+
+    // The connection is reusable: the interrupted requests leave no handler behind, and a late cancellation of an earlier request's budget cannot stop a later one.
+    let earlier = EvalBudget::unbounded();
+    let (_, stop) = cancelling_stop(&earlier, 2);
+    fixture
+        .resolve_interruptible(&certificate, &earlier, stop)
+        .unwrap_err();
+    earlier.cancel();
+    let later = EvalBudget::unbounded();
+    let plain = fixture
+        .resolve_with(
+            ResolveRequest {
+                query: object_query("bulk"),
+                intent: RequestIntent::WholeRequest,
+                certificate: &certificate,
+                authority: Authority {
+                    project: &fixture.project,
+                    destination: ArtifactDestination::Local,
+                    inventory_epoch: EPOCH,
+                },
+                bounds: bulk_bounds(),
+            },
+            &later,
+        )
+        .unwrap();
+    assert_eq!(plain.completion, Completion::Complete);
+    let after = fixture
+        .resolve_interruptible(&certificate, &later, || false)
+        .unwrap();
+    assert_eq!(after.completion, Completion::Complete);
+}
+
+#[test]
+fn a_deadline_reached_inside_an_exact_page_statement_interrupts_it() {
+    let fixture = Fixture::new();
+    project_bulk(&fixture, BULK_ROWS);
+    let certificate = fixture.certificate();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let stop = {
+        let budget = budget.clone();
+        let polls = Arc::clone(&polls);
+        // From the second poll the handler waits out the deadline, so the budget ends while a page statement is executing.
+        move || {
+            if polls.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            }
+            budget.is_exhausted()
+        }
+    };
+    let outcome = fixture.resolve_interruptible(&certificate, &budget, stop);
+    assert!(
+        polls.load(Ordering::Relaxed) >= 2,
+        "the deadline crossed inside SQL"
+    );
+    assert!(Instant::now() >= deadline);
+    match outcome {
+        Err(ResolveRefusal::BudgetExhausted) => {}
+        Ok(resolution) => {
+            assert_eq!(
+                resolution.completion,
+                Completion::Incomplete(IncompleteReason::BudgetExhausted)
+            );
+            assert!(resolution.proof.is_none());
+        }
+        Err(other) => panic!("a deadline inside SQL must stop as budget exhaustion: {other:?}"),
+    }
+}
+
+#[test]
+fn an_engine_failure_while_the_budget_ends_stays_an_engine_failure() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(
+        &[
+            claim("obj-1", 1, "decision_summary"),
+            claim("obj-1", 1, "rationale"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let ended = Arc::new(AtomicBool::new(false));
+    let end = Arc::clone(&ended);
+    // The view's function ends the budget and fails the same SQLite step with an ordinary engine error.
+    fixture
+        .store
+        .with_conn_unfenced(|conn| {
+            conn.create_scalar_function(
+                "fail_lookup",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                move |_| -> rusqlite::Result<i64> {
+                    end.store(true, Ordering::Relaxed);
+                    Err(rusqlite::Error::UserFunctionError("injected engine failure".into()))
+                },
+            )?;
+            conn.execute_batch(
+                "ALTER TABLE exact_associations RENAME TO original_associations;
+                 CREATE VIEW exact_associations AS SELECT family,namespace,key,occurrence_id,
+                     target_id,extraction_version,fail_lookup(created_commit_seq) AS created_commit_seq
+                 FROM original_associations;",
+            )
+        })
+        .unwrap();
+    for interruptible in [false, true] {
+        ended.store(false, Ordering::Relaxed);
+        let budget = EvalBudget::new(None, Arc::clone(&ended));
+        let request = ResolveRequest {
+            query: object_query("obj-1"),
+            intent: RequestIntent::WholeRequest,
+            certificate: &certificate,
+            authority: Authority {
+                project: &fixture.project,
+                destination: ArtifactDestination::Local,
+                inventory_epoch: EPOCH,
+            },
+            bounds: bounds(),
+        };
+        let outcome = if interruptible {
+            let stopping = budget.clone();
+            fixture
+                .store
+                .with_conn_interruptible(
+                    Instant::now() + Duration::from_secs(60),
+                    move || stopping.is_exhausted(),
+                    |conn| Ok(resolve(conn, &fixture.kernel, &request, &budget)),
+                )
+                .unwrap()
+        } else {
+            fixture.resolve_with(request, &budget)
+        };
+        assert!(budget.is_exhausted(), "the failing step ended the budget");
+        assert!(
+            matches!(
+                outcome,
+                Err(ResolveRefusal::Lookup(LookupRefusal::Projection(
+                    ProjectionError::Sqlite(_)
+                )))
+            ),
+            "interruptible={interruptible}: {outcome:?}"
+        );
+    }
+}
+
+/// An artifact ingest that a replay with a stricter `sensitivity` reclassifies in place.
+fn classified_artifact(sensitivity: Sensitivity) -> kernel::ArtifactIngestRequest {
+    kernel::ArtifactIngestRequest {
+        intent: intent("artifact"),
+        payload: b"observed bytes".to_vec(),
+        evidence_id: "evidence-artifact".to_string(),
+        object_id: "evidence-object-artifact".to_string(),
+        object_kind: "evidence".to_string(),
+        domain_id: DOMAIN.to_string(),
+        source_kind: "repository".to_string(),
+        source_id: "src/artifact".to_string(),
+        source_revision: 1,
+        media_type: "text/plain".to_string(),
+        retention_class: "canonical".to_string(),
+        retain_until: None,
+        asserted_sensitivity: sensitivity,
+        provider_egress: kernel::ProviderEgress::RemoteAllowed,
+        provenance: Some(kernel::RepositoryProvenance {
+            repository_id: "repo".to_string(),
+            revision: "abc123".to_string(),
+        }),
+    }
+}
+
+#[test]
+fn a_classification_change_defeats_the_attempt_and_the_proof_whether_or_not_the_tip_moves() {
+    let classified = || {
+        let fixture = Fixture::new();
+        fixture.decide("objects", &[ok("obj-1")]);
+        let digest = fixture
+            .kernel
+            .ingest_artifact(classified_artifact(Sensitivity::Normal))
+            .unwrap()
+            .digest;
+        fixture.project_citing(
+            &[
+                claim("obj-1", 1, "decision_summary"),
+                claim("obj-1", 1, "rationale"),
+            ],
+            vec![],
+            &digest,
+        );
+        fixture
+    };
+    let tighten = |fixture: &Fixture| {
+        let tip = fixture.tip();
+        fixture
+            .kernel
+            .ingest_artifact(classified_artifact(Sensitivity::Sensitive))
+            .unwrap();
+        // The replay commits, so a reclassification never leaves the tip unchanged.
+        assert!(fixture.tip() > tip, "the reclassification moves the tip");
+    };
+
+    let fixture = classified();
+    let certificate = fixture.certificate();
+    let request = ResolveRequest {
+        query: object_query("obj-1"),
+        intent: RequestIntent::WholeRequest,
+        certificate: &certificate,
+        authority: Authority {
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+            inventory_epoch: EPOCH,
+        },
+        bounds: ResolveBounds {
+            page_rows: NonZeroUsize::new(1).unwrap(),
+            ..bounds()
+        },
+    };
+    let run = |hook: &dyn Fn()| {
+        fixture
+            .store
+            .with_conn(|conn| {
+                Ok(resolve_with_hook_for_test(
+                    conn,
+                    &fixture.kernel,
+                    &request,
+                    &EvalBudget::unbounded(),
+                    hook,
+                ))
+            })
+            .unwrap()
+            .unwrap()
+    };
+    assert!(run(&|| ()).proof.is_some(), "the unchanged control proves");
+
+    // A classification window open across the second batch leaves that snapshot without a reusable generation.
+    let window = std::cell::RefCell::new(None);
+    let batches = std::cell::Cell::new(0);
+    let hold = || {
+        batches.set(batches.get() + 1);
+        if batches.get() == 2 {
+            *window.borrow_mut() = Some(fixture.kernel.hold_classification_change_for_test());
+        }
+    };
+    let unknown = run(&hold);
+    assert!(window.borrow().is_some());
+    assert_eq!(
+        unknown.disqualified,
+        Some(Disqualification::ClassificationUnknown)
+    );
+    assert!(unknown.proof.is_none());
+    drop(window.into_inner());
+    assert!(
+        run(&|| ()).proof.is_some(),
+        "closing the window restores the proof"
+    );
+
+    // Between enumeration batches, the moved tip disqualifies the attempt.
+    let batches = std::cell::Cell::new(0);
+    let hook = || {
+        batches.set(batches.get() + 1);
+        if batches.get() == 2 {
+            tighten(&fixture);
+        }
+    };
+    let resolution = run(&hook);
+    assert_eq!(batches.get(), 2);
+    assert_eq!(resolution.completion, Completion::Complete);
+    assert_eq!(
+        resolution.disqualified,
+        Some(Disqualification::SnapshotChanged)
+    );
+    assert!(resolution.proof.is_none());
+
+    // After a proof is minted, final use sees the moved tip.
+    let fixture = classified();
+    let certificate = fixture.certificate();
+    let proof = fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            bounds(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .proof
+        .expect("a healthy singleton proves");
+    assert_eq!(fixture.validate(&proof, &EvalBudget::unbounded()), Ok(()));
+    tighten(&fixture);
+    assert!(
+        matches!(
+            fixture.validate(&proof, &EvalBudget::unbounded()),
+            Err(ProofInvalidation::CanonicalChanged { .. })
+        ),
+        "the proof names the tip before the reclassification"
+    );
+
+    // A proof judged while a classification window is open fails final use at the same tip.
+    let fixture = classified();
+    let certificate = fixture.certificate();
+    let proof = fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            bounds(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .proof
+        .expect("a healthy singleton proves");
+    let window = fixture.kernel.hold_classification_change_for_test();
+    assert_eq!(
+        fixture.validate(&proof, &EvalBudget::unbounded()),
+        Err(ProofInvalidation::SnapshotChanged)
+    );
+    drop(window);
+    assert_eq!(
+        fixture.validate(&proof, &EvalBudget::unbounded()),
+        Err(ProofInvalidation::SnapshotChanged),
+        "the closed window leaves a new generation the proof never judged"
     );
 }

@@ -147,7 +147,14 @@ runs under the request's `EvalBudget`. A deadline or cancellation that an
 enumeration batch observes stops the attempt as
 `Incomplete(BudgetExhausted)`, keeping the verdicts of earlier pages and
 forming no proof. At final use it invalidates the proof as
-`BudgetExhausted`. An exact proof records egress eligibility only. Surface
+`BudgetExhausted`. Under `SqliteStore::with_conn_interruptible`, the
+request's stop also interrupts a running exact page statement. `resolve`
+classifies that SQLite interruption by error code as the same budget stop:
+`Err(BudgetExhausted)` before any completed page, and
+`Incomplete(BudgetExhausted)` with the judged pages kept after one. The
+interrupted page is dropped unjudged. Every other engine error stays
+`Projection(Sqlite)` whatever the budget. An exact proof records egress
+eligibility only. Surface
 permission and claim state come from claim classification at use, so a
 quarantined or stale claim object can hold an exact proof and still be hidden
 or stale on every surface.

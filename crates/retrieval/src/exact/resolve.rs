@@ -244,6 +244,15 @@ struct Attempt<'a> {
     resolution: Resolution,
 }
 
+/// Whether `refusal` is SQLite interrupting a projection statement, which the storage progress handler does only when the request's stop fired.
+fn is_interrupt(refusal: &ResolveRefusal) -> bool {
+    matches!(
+        refusal,
+        ResolveRefusal::Lookup(LookupRefusal::Projection(ProjectionError::Interrupted))
+            | ResolveRefusal::Projection(ProjectionError::Interrupted)
+    )
+}
+
 fn budget_refusal(error: KernelError) -> ResolveRefusal {
     match error {
         KernelError::Deadline => ResolveRefusal::BudgetExhausted,
@@ -292,7 +301,13 @@ fn resolve_inner(
         return Err(ResolveRefusal::RetainedOverBound);
     }
     let certificate = request.certificate;
-    admit_certificate(conn, request)?;
+    admit_certificate(conn, request).map_err(|refusal| {
+        if is_interrupt(&refusal) {
+            ResolveRefusal::BudgetExhausted
+        } else {
+            refusal
+        }
+    })?;
     let installed = kernel
         .database_incarnation_id_within_budget(budget)
         .map_err(budget_refusal)?;
@@ -381,10 +396,12 @@ impl Attempt<'_> {
         self.stopped.get_or_insert(reason);
     }
 
+    /// Stops the attempt as budget exhaustion when `refusal` is the budget ending, whether a budget check, a kernel deadline, or SQLite interrupting a page statement. Consumed counts cover completed pages only; a page whose statement was interrupted is dropped unjudged.
     fn late_failure(&mut self, refusal: ResolveRefusal) -> Result<(), ResolveRefusal> {
         match &refusal {
             ResolveRefusal::Lookup(LookupRefusal::BudgetExhausted)
             | ResolveRefusal::Kernel(KernelError::Deadline) => {}
+            interrupt if is_interrupt(interrupt) => {}
             _ => return Err(refusal),
         }
         if self.resolution.consumed.pages == 0 {
@@ -607,7 +624,11 @@ fn validate_for_use_inner(
     if authority.inventory_epoch != certificate.inventory_epoch {
         return Ok(Err(ProofInvalidation::InventoryEpochChanged));
     }
-    let checkpoint = read_checkpoint(conn, &certificate.canonical_incarnation_id)?;
+    let checkpoint = match read_checkpoint(conn, &certificate.canonical_incarnation_id) {
+        Ok(checkpoint) => checkpoint,
+        Err(ProjectionError::Interrupted) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
+        Err(error) => return Err(error.into()),
+    };
     if checkpoint.as_ref() != Some(&certificate.projection) {
         return Ok(Err(ProofInvalidation::ProjectionChanged));
     }
