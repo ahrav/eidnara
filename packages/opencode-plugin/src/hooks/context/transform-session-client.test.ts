@@ -373,6 +373,64 @@ describe("transform session client over plain data", () => {
         }
     });
 
+    it("declines a taped window edited during the daemon await at a nonzero boundary, without running a hook", async () => {
+        const edits: Array<[string, (host: PlainHost, trap: () => never) => void]> = [
+            [
+                "content",
+                (host) => {
+                    (host.values[3] as { text: string }).text = "edited in place";
+                },
+            ],
+            [
+                "accessor",
+                (host, trap) => {
+                    Object.defineProperty(host.values[4] as object, "text", {
+                        enumerable: true,
+                        get: trap,
+                    });
+                },
+            ],
+        ];
+        for (const [name, edit] of edits) {
+            const host = plainHost(6);
+            let reads = 0;
+            const trap = (): never => {
+                reads += 1;
+                throw new Error("a recheck ran host code");
+            };
+            const fold = foldReply({ mid: "m3", sequence: 1 });
+            const transport = fakeTransport({
+                "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
+                transform: [
+                    fold,
+                    (body) => {
+                        edit(host, trap);
+                        return fold(body);
+                    },
+                ],
+            });
+            const client = createTransformSessionClient({ moduleClient: transport.client });
+            const admission = new TransformCaptureAdmission();
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                expect((await pass(client, admission, host)).kind).toBe("applied");
+                host.values.push({ id: "m7", text: "message 7" });
+                expect(await pass(client, admission, host)).toMatchObject({ kind: "declined" });
+                expect(host.published, name).toHaveLength(1);
+                const lines = debugSpy.mock.calls.map(([, line]) => String(line));
+                const capture = lines.filter((line) => /phase=capture /.test(line)).at(-1);
+                expect(capture, name).toMatch(/boundary_index=2 verified=[1-9]\d* taped=true$/);
+                expect(
+                    lines.some((line) => line.includes("source_changed")),
+                    name,
+                ).toBe(true);
+                expect(reads, name).toBe(0);
+            } finally {
+                debugSpy.mockRestore();
+            }
+        }
+    });
+
     it("declines a private window whose slot now holds another value", async () => {
         const host = plainHost(4);
         const outcome = await passEditedDuringPrepare(host, true, () => {
