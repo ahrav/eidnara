@@ -48,7 +48,7 @@ function daemonLedger(
     if (!value) return undefined;
     const fields = Object.fromEntries(DAEMON_FIELDS.map((field) => [field, count(value[field])]));
     if (DAEMON_FIELDS.some((field) => fields[field] === undefined)) return undefined;
-    if (value.derive_ck_us !== null && value.derive_ck_us !== undefined) return undefined;
+    if (value.derivation_us !== null && value.derivation_us !== undefined) return undefined;
     return fields as Record<(typeof DAEMON_FIELDS)[number], number>;
 }
 
@@ -64,7 +64,7 @@ export function rowLedger(responseUs: number, observed: ObservedPassLedger | und
         ...NO_LEDGER,
         admit_us: daemon.admit_us,
         lane_gate_and_decode_us: daemon.lane_gate_and_decode_us,
-        derive_ck_us: null,
+        derivation_us: null,
         transform_core_us: daemon.transform_core_us,
         native_attach_us: daemon.native_attach_us,
         daemon_residual_us: daemon.residual_us,

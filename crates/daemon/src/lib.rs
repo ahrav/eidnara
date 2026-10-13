@@ -25452,7 +25452,7 @@ mod tests {
             serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
         assert_eq!(ledger.admit_us, 15_000);
         assert!(ledger.lane_gate_and_decode_us >= 25_000, "{ledger:?}");
-        assert_eq!(ledger.derive_ck_us, None);
+        assert_eq!(ledger.derivation_us, None);
         assert_eq!(
             ledger.admit_us
                 + ledger.lane_gate_and_decode_us

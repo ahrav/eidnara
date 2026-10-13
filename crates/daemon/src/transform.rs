@@ -1255,7 +1255,7 @@ pub struct TransformTimings {
 pub struct DaemonStageLedger {
     pub admit_us: u64,
     pub lane_gate_and_decode_us: u64,
-    pub derive_ck_us: Option<u64>,
+    pub derivation_us: Option<u64>,
     pub transform_core_us: u64,
     pub native_attach_us: u64,
     pub residual_us: u64,
@@ -1294,7 +1294,7 @@ impl DaemonStageLedger {
         Self {
             admit_us,
             lane_gate_and_decode_us,
-            derive_ck_us: None,
+            derivation_us: None,
             transform_core_us,
             native_attach_us,
             residual_us: total_us.saturating_sub(staged),

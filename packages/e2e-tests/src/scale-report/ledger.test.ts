@@ -7,7 +7,7 @@ import { WRITER_FIXTURE_ROWS } from "./writer-fixture";
 const daemonLedger = {
     admit_us: 300,
     lane_gate_and_decode_us: 4_100,
-    derive_ck_us: null,
+    derivation_us: null,
     transform_core_us: 6_900,
     native_attach_us: 2_800,
     residual_us: 900,

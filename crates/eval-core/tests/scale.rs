@@ -32,7 +32,7 @@ fn row(tier: ScaleTier, session: &str, turn: u32, response_us: u64) -> PassRow {
         other_us: None,
         admit_us: None,
         lane_gate_and_decode_us: None,
-        derive_ck_us: None,
+        derivation_us: None,
         transform_core_us: None,
         native_attach_us: None,
         daemon_residual_us: None,
@@ -670,7 +670,7 @@ fn a_ledger_row_reconciles_both_ledgers_and_refuses_a_partial_or_unbalanced_one(
             pass.window_messages = None;
             pass.window_blocks = None;
         },
-        |pass| pass.derive_ck_us = Some(1),
+        |pass| pass.derivation_us = Some(1),
     ];
     for edit in edits {
         let mut broken = rows.clone();
@@ -737,7 +737,7 @@ fn stage_percentiles_come_from_completed_rows_that_carry_the_stage() {
         !steady
             .stages
             .iter()
-            .any(|stage| stage.stage == "derive_ck_us")
+            .any(|stage| stage.stage == "derivation_us")
     );
     let names: Vec<&str> = steady
         .stages
