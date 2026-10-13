@@ -69,6 +69,48 @@ where
     parts.into_iter().flatten().flatten().collect()
 }
 
+/// Mapping stops after the batch in flight finishes when `consume` returns `false`.
+pub(crate) fn map_until<T, S, R, F, C>(items: Vec<T>, map: F, mut consume: C)
+where
+    T: Send,
+    S: Default,
+    R: Send,
+    F: Fn(&mut S, T) -> R + Sync,
+    C: FnMut(R) -> bool,
+{
+    let Some(pool) = pool() else {
+        let mut state = S::default();
+        for item in items {
+            if !consume(map(&mut state, item)) {
+                return;
+            }
+        }
+        return;
+    };
+    let mut batch = MIN_ITEMS_PER_WORKER * pool.current_num_threads();
+    let mut items = items.into_iter();
+    let mut current = map_with(items.by_ref().take(batch).collect(), &map);
+    while !current.is_empty() {
+        batch = batch.saturating_mul(2);
+        let upcoming = items.by_ref().take(batch).collect::<Vec<T>>();
+        let mut mapped = Vec::new();
+        let map = &map;
+        let consumed_all = pool.in_place_scope(|scope| {
+            if !upcoming.is_empty() {
+                let mapped = &mut mapped;
+                scope.spawn(move |_| {
+                    *mapped = host_runtime::redact_panics(|| map_with(upcoming, map));
+                });
+            }
+            current.into_iter().all(&mut consume)
+        });
+        if !consumed_all {
+            return;
+        }
+        current = mapped;
+    }
+}
+
 /// `a` on the calling thread and `b` on a pool worker, both returned once both finish; without a
 /// pool, `a` then `b` on the calling thread. A panic in either, redacted on the worker as a
 /// handler's is, resumes on the calling thread after both have stopped.
@@ -118,6 +160,47 @@ mod tests {
             seen.windows(2).all(|pair| pair[0] + 1 == pair[1])
         });
         assert!(out.into_iter().all(|contiguous| contiguous));
+    }
+
+    fn mapped_until(len: usize, stop: usize) -> (Vec<usize>, usize) {
+        let mapped = std::sync::atomic::AtomicUsize::new(0);
+        let mut consumed = Vec::new();
+        map_until::<_, (), _, _, _>(
+            (0..len).collect(),
+            |(), item| {
+                mapped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                item * 3
+            },
+            |output| {
+                consumed.push(output);
+                consumed.len() < stop
+            },
+        );
+        (consumed, mapped.into_inner())
+    }
+
+    #[test]
+    fn map_until_hands_over_outputs_in_order_until_the_consumer_stops() {
+        for len in [0, 1, 47, 48, 95, 96, 97, 301, 1000] {
+            for stop in [1, 2, 47, 48, 96, 97, 300, usize::MAX] {
+                let (consumed, _) = mapped_until(len, stop);
+                let expected = (0..len.min(stop)).map(|item| item * 3).collect::<Vec<_>>();
+                assert_eq!(consumed, expected, "len {len} stop {stop}");
+            }
+        }
+    }
+
+    #[test]
+    fn map_until_maps_little_past_an_early_stop() {
+        let first_batch = MIN_ITEMS_PER_WORKER * MAX_WORKERS;
+        for stop in [1, 10, 96, 97, 200, 500] {
+            let (consumed, mapped) = mapped_until(10_000, stop);
+            assert_eq!(consumed.len(), stop);
+            assert!(
+                mapped <= 4 * stop + 3 * first_batch,
+                "stop {stop} mapped {mapped} of 10000, over four times the consumed plus three opening batches"
+            );
+        }
     }
 
     #[test]

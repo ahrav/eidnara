@@ -730,17 +730,11 @@ fn chunked_message_estimate_with_estimator(
         .take_while(|message| eligible_end_ordinal.is_none_or(|end| message.message_ordinal < end))
         .filter(|message| message.message_ordinal >= start_ordinal)
         .collect::<Vec<_>>();
-    // Each message's part depends on that message alone; the builder merges them in order.
-    let ordinals = eligible
-        .iter()
-        .map(|message| message.message_ordinal)
-        .collect::<Vec<_>>();
-    let parts = crate::parallel_map::map_with(eligible, |(), message| chunk_message_part(message));
-    for (ordinal, part) in ordinals.into_iter().zip(parts) {
-        if !builder.push_message(ordinal, part) {
-            break;
-        }
-    }
+    crate::parallel_map::map_until(
+        eligible,
+        |(), message| (message.message_ordinal, chunk_message_part(message)),
+        |(ordinal, part)| builder.push_message(ordinal, part),
+    );
     builder.finish(total_message_count, eligible_end_ordinal)
 }
 
@@ -2967,5 +2961,56 @@ mod tests {
         let b = resolve_protected_tail_boundary(&[unreduced], &ctx);
         assert_eq!(a.true_raw_eligible_tokens, b.true_raw_eligible_tokens);
         assert_eq!(a.protected_start_ordinal, b.protected_start_ordinal);
+    }
+
+    fn sequential_chunk_estimate(messages: &[BoundaryMsg], budget_stop: f64) -> ChunkEstimate {
+        let mut ordered = messages.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|message| message.message_ordinal);
+        let total = ordered.last().map_or(0, |message| message.message_ordinal);
+        let mut token_estimator = estimate_tokens;
+        let mut builder = ChunkBuilder::new(budget_stop, &mut token_estimator);
+        for message in ordered {
+            if !builder.push_message(message.message_ordinal, chunk_message_part(message)) {
+                break;
+            }
+        }
+        builder.finish(total, None)
+    }
+
+    #[test]
+    fn a_budget_stop_in_any_batch_estimates_as_a_message_by_message_scan() {
+        let messages = (1..=699u64)
+            .map(|ordinal| match ordinal % 7 {
+                0 => text_msg(ordinal, Role::User, ""),
+                1 | 2 => text_msg(
+                    ordinal,
+                    Role::User,
+                    &format!("question {ordinal} about the parser"),
+                ),
+                _ => text_msg(
+                    ordinal,
+                    Role::Assistant,
+                    &format!("answer {ordinal}: fixed commit abc{ordinal:04}def in the lexer"),
+                ),
+            })
+            .collect::<Vec<_>>();
+        let full: f64 = sequential_chunk_estimate(&messages, f64::MAX)
+            .block_tokens
+            .iter()
+            .sum();
+        for fraction in [0.0, 0.001, 0.01, 0.05, 0.2, 0.5, 0.9, 1.0, 2.0] {
+            let budget_stop = (full * fraction).max(1.0);
+            let estimate = chunked_message_estimate(&messages, 1, None, budget_stop);
+            assert_eq!(
+                estimate.has_more,
+                fraction < 1.0,
+                "budget_stop {budget_stop}"
+            );
+            assert_eq!(
+                estimate,
+                sequential_chunk_estimate(&messages, budget_stop),
+                "budget_stop {budget_stop}"
+            );
+        }
     }
 }
