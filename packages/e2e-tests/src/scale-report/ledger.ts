@@ -48,16 +48,22 @@ function daemonLedger(
     if (!value) return undefined;
     const fields = Object.fromEntries(DAEMON_FIELDS.map((field) => [field, count(value[field])]));
     if (DAEMON_FIELDS.some((field) => fields[field] === undefined)) return undefined;
-    // A native profile's pass derives its CK; a CK profile's carries `null`.
-    const deriveCk =
-        value.derivation_us === null || value.derivation_us === undefined
-            ? null
-            : count(value.derivation_us);
-    if (deriveCk === undefined) return undefined;
-    return {
-        ...(fields as Record<(typeof DAEMON_FIELDS)[number], number>),
-        derivation_us: deriveCk,
-    };
+    const counts = fields as Record<(typeof DAEMON_FIELDS)[number], number>;
+    let derivation: number | null | undefined;
+    if (!("derivation_us" in value)) {
+        const remainder =
+            counts.total_us -
+            counts.admit_us -
+            counts.lane_gate_and_decode_us -
+            counts.transform_core_us -
+            counts.native_attach_us -
+            counts.residual_us;
+        derivation = remainder < 0 ? undefined : remainder === 0 ? null : remainder;
+    } else {
+        derivation = value.derivation_us === null ? null : count(value.derivation_us);
+    }
+    if (derivation === undefined) return undefined;
+    return { ...counts, derivation_us: derivation };
 }
 
 /**
