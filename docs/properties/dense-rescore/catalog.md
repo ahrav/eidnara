@@ -503,7 +503,10 @@ Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
 `a_promotion_and_prune_after_selection_leave_the_rescore_on_the_pinned_files`,
-and `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`.
+`the_ranking_is_the_same_however_the_rows_are_spread_across_layers`, and
+`stale_and_tombstoned_rows_that_would_score_highest_never_enter_the_pool`,
+whose superseded and masked base rows outrank every pool member under the
+base's own codes and still appear as no pool entry and no read.
 Physical order here means how rows spread across a composition's layers; the
 order of rows within one layer file is fixed by the format, which writes and
 verifies identifiers in strictly increasing byte order.
@@ -536,8 +539,10 @@ Reachability: test-only - as above; `rescore_pool`
 (`crates/retrieval/src/dense/candidates.rs:410`) is pure.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
-`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
-`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`;
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
+`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`, and
+`a_tie_across_the_pool_and_ranking_cuts_keeps_identifier_order`, which cuts
+the pool and the ranking inside a three-way tie of equal payloads;
 `crates/retrieval/tests/dense_candidates.rs`
 `the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier`
 and
@@ -569,7 +574,9 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
 `cancellation_after_an_empty_selection_is_a_budget_refusal`, and
-`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`;
+`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`,
+`a_quarantined_composition_with_no_prior_state_serves_nothing_until_rebuilt`,
+and `recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
 `only_missing_or_malformed_rows_count_as_walk_corruption` in
@@ -610,8 +617,11 @@ Open questions:
   code-corruption predicate; no test makes a real file return a read error
   other than a short read, so the rescore's `Io` arm and the scan's
   `ReadFailed` arm are reached only by reading.
-- Process-restart evidence here is a fresh acquisition in the same process,
-  which reads only durable state; it is not a separate process and not
+- Process-restart evidence is
+  `recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`:
+  a child process publishes, cuts the replacement's rows, and exits, and a
+  fresh gate and ledger over the left store recover the prior composition and
+  serve it under current eligibility. This is process-restart evidence, not
   power-loss evidence.
 
 ### dense-stage-evidence-keeps-coverage-and-recall-apart
