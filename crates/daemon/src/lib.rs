@@ -16529,6 +16529,9 @@ fn tree_decode_parses(body: &[u8]) -> bool {
 /// decode the same way; `Err` is the walk's refused charge, taken before the value that
 /// needed it was built, so a held pool stops the walk at its first value.
 fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refusal> {
+    if !may_name_raw_value_token(body) {
+        return Ok(true);
+    }
     let walked = match decode_metered::<SkippedValue>(body, meter) {
         Ok(SkippedValue) => true,
         Err(DecodeFailure::Invalid(_)) => false,
@@ -16536,6 +16539,15 @@ fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refu
     };
     meter.restart();
     Ok(walked)
+}
+
+/// Conservatively identifies a body that may spell [`RAW_VALUE_TOKEN`]: the scan accepts the
+/// literal token bytes or a `\u00` prefix followed by a digit from `2` through `7`, including
+/// partial escape sequences. Matching bodies undergo the metered gate walk.
+fn may_name_raw_value_token(body: &[u8]) -> bool {
+    memchr::memmem::find(body, RAW_VALUE_TOKEN.as_bytes()).is_some()
+        || memchr::memmem::find_iter(body, b"\\u00")
+            .any(|at| matches!(body.get(at + 4), Some(b'2'..=b'7')))
 }
 
 /// The admission steps `dispatch_body` runs for an unpaged transform body before its typed
@@ -20795,6 +20807,53 @@ mod tests {
 
     fn direct_decode(body: &[u8]) -> Result<TransformRequest, String> {
         serde_json::from_slice::<TransformRequest>(body).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn the_gate_admits_without_its_walk_only_what_the_tree_decodes_alike() {
+        let reserve = metered_decode::unbounded_reserve();
+        let mut admitted = 0;
+        for (name, body) in &transform_decode_corpus() {
+            if may_name_raw_value_token(body) {
+                continue;
+            }
+            assert!(
+                !name.contains("raw-value token"),
+                "{name}: a token body walks"
+            );
+            let meter = ResidentMeter::new(&reserve);
+            let Ok(direct) = decode_metered::<TransformRequest>(body, &meter) else {
+                continue;
+            };
+            admitted += 1;
+            let tree = tree_decode(body).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                serde_json::to_value(&direct).unwrap(),
+                serde_json::to_value(&tree).unwrap(),
+                "{name}"
+            );
+        }
+        assert!(
+            admitted > 10,
+            "{admitted} corpus bodies decode on the direct lane"
+        );
+        for spelling in [
+            RAW_VALUE_TOKEN.to_string(),
+            RAW_VALUE_TOKEN.replacen('$', "\\u0024", 1),
+            RAW_VALUE_TOKEN.replacen('R', "\\u0052", 1),
+            RAW_VALUE_TOKEN.replacen('e', "\\u0065", 1),
+            RAW_VALUE_TOKEN.replacen(':', "\\u003A", 1),
+            RAW_VALUE_TOKEN.replacen('_', "\\u005f", 1),
+        ] {
+            let body = format!(r#"{{"kind":"transform","x":{{"{spelling}":1}}}}"#);
+            let key: Value = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
+            assert_eq!(key, RAW_VALUE_TOKEN, "{spelling}");
+            assert!(may_name_raw_value_token(body.as_bytes()), "{spelling}");
+        }
+        for text in [r#""\u001b[0m\n\t\"""#, r#""\ud83d\ude00""#, r#""plain""#] {
+            let body = format!(r#"{{"kind":"transform","x":{text}}}"#);
+            assert!(!may_name_raw_value_token(body.as_bytes()), "{text}");
+        }
     }
 
     /// Where both decodes accept a body they decode it to the same request. The two
