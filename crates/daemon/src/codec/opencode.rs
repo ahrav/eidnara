@@ -341,8 +341,9 @@ pub(crate) fn encode_opencode_with_session_exemptions(
     ))
 }
 
-/// Encodes as [`encode_opencode_with_session_exemptions`] does, sharing each envelope the
-/// encode leaves unchanged: a message that replays its retained envelope is that `Arc`.
+/// Encodes CK messages onto their retained native envelopes, replaying each mutation-exempt
+/// message's envelope whole. A message whose envelope the encode leaves unchanged is that
+/// envelope's `Arc`, so the output shares it with the input window.
 pub(crate) fn encode_opencode_shared(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
@@ -819,7 +820,8 @@ fn render_with_meta(
 /// Whether encoding `msg` over `meta` would leave its envelope as retained: every served block
 /// paired, in order, with the meta at its own position and equal to its decoded block, every
 /// meta paired, compaction parts kept, a `parts` array, and an `info` that already holds the
-/// message's id and role.
+/// message's id and role. Acceptance implies [`render_with_meta`] returns the retained `Arc`;
+/// `the_unchanged_envelope_shortcut_agrees_with_the_full_render` holds the two together.
 fn envelope_is_unchanged(
     msg: &WireMessage,
     meta: &HarnessMessageMeta,
@@ -839,6 +841,7 @@ fn envelope_is_unchanged(
         && (0..blocks.len()).all(|index| {
             matched_metas.by_block[index].is_some_and(|paired| {
                 std::ptr::eq(paired, &meta.blocks[index])
+                    && paired.native_index.is_some()
                     && matched_metas.block_is_unchanged(blocks, index, paired)
             })
         })
@@ -2026,6 +2029,18 @@ pub(crate) mod tests {
             .map(Arc::new)
             .collect(),
         );
+        let edges = decode_opencode_shared(windows.last().unwrap());
+        for message in &edges.messages {
+            let meta = edges.sidecar.message_by_mid(&message.mid).unwrap();
+            let matched = align_with_meta(&message.ck, meta);
+            // A compaction part leaves the envelope only when compaction parts are dropped.
+            let preserve_compaction = message.mid != "compacted";
+            assert!(
+                !envelope_is_unchanged(&message.ck, meta, &matched, preserve_compaction),
+                "{}",
+                message.mid
+            );
+        }
         let (mut accepted, mut declined) = (0, 0);
         for window in &windows {
             let decoded = decode_opencode_shared(window);
@@ -2080,10 +2095,12 @@ pub(crate) mod tests {
     #[test]
     fn a_caller_supplied_codec_namespace_changes_no_encoded_byte() {
         let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let mut visited = 0;
         for case in parity["cases"].as_array().unwrap() {
             if !IDENTIFIED_WINDOWS.contains(&case["name"].as_str().unwrap()) {
                 continue;
             }
+            visited += 1;
             let window = native_window(case);
             let decoded = decode_opencode_shared(&window);
             let mut bare: Vec<WireMessage> = decoded
@@ -2124,6 +2141,7 @@ pub(crate) mod tests {
             };
             assert_eq!(encode(&forged), encode(&bare), "{}", case["name"]);
         }
+        assert_eq!(visited, IDENTIFIED_WINDOWS.len());
     }
 
     #[test]

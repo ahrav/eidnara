@@ -26740,20 +26740,30 @@ mod tests {
             pointer_operations(&output, &input),
             [("keep Input".to_string(), 0, input.len() as u64)]
         );
-        // The retained output charges every value it holds in full, shared with the input or not.
-        let candidate = NativeOutputCandidate::new(
-            "ses",
-            0,
-            PreviousNativeOutput {
-                revision: Revision::parse("r1").unwrap(),
-                values: output.clone(),
-            },
-        );
+        // The retained output charges every value it holds in full: sharing the input's values
+        // charges what holding private copies of them charges.
+        let charge = |values: Vec<Arc<Value>>| {
+            NativeOutputCandidate::new(
+                "ses",
+                0,
+                PreviousNativeOutput {
+                    revision: Revision::parse("r1").unwrap(),
+                    values,
+                },
+            )
+            .entry
+            .retained_bytes
+        };
+        let private = output
+            .iter()
+            .map(|value| Arc::new(Value::clone(value)))
+            .collect();
+        assert_eq!(charge(output.clone()), charge(private));
         let held: usize = output
             .iter()
             .map(|value| crate::retained_size::value_retained_bytes(value))
             .sum();
-        assert!(candidate.entry.retained_bytes > held);
+        assert!(charge(output.clone()) > held);
 
         let mut changed = served.clone();
         let BlockKind::Text { text } = changed[3].content_mut()[1].kind_mut() else {
@@ -26822,7 +26832,9 @@ mod tests {
 
     /// Native attach takes no SHA-256 digest of served or native blocks: an identified window
     /// with nested signed zeros attaches in both alignment regimes with no codec digest at all,
-    /// while an id-less message's identity takes exactly one.
+    /// while an id-less message's identity takes exactly one. Signed zeros stay distinct at
+    /// block alignment, so a flipped call beside an edit renders the served numbers; a message
+    /// equal to its native one as a JSON value is its retained envelope, native signs included.
     #[test]
     fn native_attach_takes_no_block_digest_in_either_alignment_regime() {
         let bytes = |value: &Value| serde_json::to_string(value).unwrap();

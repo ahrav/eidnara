@@ -485,8 +485,9 @@ fn rewrite_single_block(
 }
 
 /// Rewrites a user, custom, or assistant row whose served blocks pair one-to-one with its native
-/// parts, when every part is of a kind [`part_decodes_to`] compares exactly and no block equals the decoded content of a part other than its own. Then the alignment
-/// matches each block that equals its own part and nothing else, and pairs each run of differing
+/// parts, when every part is of a kind [`part_decodes_to`] compares exactly and no block equals
+/// the decoded content of a part other than its own. Then the alignment matches each block that
+/// equals its own part and nothing else, and pairs each run of differing
 /// blocks between matches with the parts at the same positions when every pair's kinds match,
 /// so this rewrite keeps, rewrites, or replaces each part as [`encode_with_meta`] would. Answers
 /// `None` for every other shape. The caller has established that some block differs.
@@ -1171,6 +1172,9 @@ fn encode_with_meta(
     block_metas: &[BlockMeta],
     decoded: &[WireBlock],
 ) -> Option<Arc<Value>> {
+    // A row whose blocks equal its decoded blocks as values is the retained row, signs of float
+    // zeros included, as an OpenCode envelope equal to its retained one is; the alignment below
+    // keeps signed zeros apart for every row that differs.
     if replays_retained_row(msg, block_metas, decoded) {
         return Some(Arc::clone(raw));
     }
@@ -1933,7 +1937,21 @@ mod tests {
             panic!("the second assistant's second block is its text");
         };
         *text = "§1§ answer 1".to_string();
+        // The third assistant's call flips its zero signs beside an edited text, so its row
+        // differs from the native one and the call renders the served numbers.
+        let BlockKind::Text { text } = edited[4].content_mut()[1].kind_mut() else {
+            panic!("the third assistant's second block is its text");
+        };
+        *text = "§2§ answer 2".to_string();
+        let BlockKind::ToolCall { input, .. } = edited[4].content_mut()[2].kind_mut() else {
+            panic!("the third assistant's third block is its call");
+        };
+        *input = json!({ "offset": 0.0, "nested": [-0.0, 1] });
         let encoded = encode_pi_rows(&edited, &retained_rows_of(&decoded), &[]);
+        assert_eq!(
+            serde_json::to_string(&encoded[4]["message"]["content"][2]["arguments"]).unwrap(),
+            r#"{"nested":[-0.0,1],"offset":0.0}"#
+        );
         assert!(!Arc::ptr_eq(&encoded[2], &source[2]));
         assert_eq!(
             serde_json::to_string(&encoded[2]["message"]["content"][2]).unwrap(),

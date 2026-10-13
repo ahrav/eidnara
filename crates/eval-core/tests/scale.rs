@@ -808,8 +808,8 @@ fn a_row_from_before_the_ledger_parses_with_every_stage_unavailable() {
     assert!(parse_pass_row(&unknown).is_err());
 }
 
-/// A manifest names its window mix; one written before the mix label parses as text only and
-/// serializes back without the field.
+/// A manifest names its window mix; one written before the mix label parses with no mix label
+/// and serializes back without the field.
 #[test]
 fn a_cohort_manifest_labels_its_window_mix() {
     let text: eval_core::CohortManifest = serde_json::from_str(r#"{"window":300}"#).unwrap();

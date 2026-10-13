@@ -1156,6 +1156,10 @@ jobs:
           elif [ "${SCALE_STEADY:-0}" != 0 ]; then
             echo "scale_steady requires scale_samples" >&2; exit 1
           fi
+          case "$SCALE_MIX" in
+            ""|text_only|tool_heavy) ;;
+            *) echo "unknown scale_mix: $SCALE_MIX" >&2; exit 1 ;;
+          esac
           # Both arms run the measured checkout's driver, so both carry the same mix.
           if [ "$SCALE_DRIVER" = opencode-pass ]; then
             measured_flags+=(--mix "${SCALE_MIX:-text_only}")
