@@ -10,7 +10,7 @@ use kernel::{
 use storage::GuardedConn;
 
 use crate::batch::{ProjectionCheckpoint, read_checkpoint};
-use crate::eligibility::{Disposition, OccurrenceCandidate, judge_occurrences};
+use crate::eligibility::{Disposition, OccurrenceCandidate, judge_occurrences_within_budget};
 use crate::exact::association::EXTRACTION_VERSION;
 use crate::exact::lookup::{
     AssociationRow, Cursor, ExactQuery, LookupContext, LookupRefusal, page,
@@ -236,6 +236,7 @@ struct Attempt<'a> {
     request: &'a ResolveRequest<'a>,
     kernel: &'a KernelStore,
     budget: &'a EvalBudget,
+    before_judgement: &'a dyn Fn(),
     initial: CommitReadTarget,
     snapshot: Option<EgressSnapshot>,
     stopped: Option<IncompleteReason>,
@@ -255,6 +256,29 @@ pub fn resolve(
     kernel: &KernelStore,
     request: &ResolveRequest<'_>,
     budget: &EvalBudget,
+) -> Result<Resolution, ResolveRefusal> {
+    resolve_inner(conn, kernel, request, budget, &|| ())
+}
+
+/// `before_judgement` runs after each page is read and before its kernel
+/// batch, allowing tests to expire the budget inside that batch.
+#[cfg(feature = "test-support")]
+pub fn resolve_with_hook_for_test(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &ResolveRequest<'_>,
+    budget: &EvalBudget,
+    before_judgement: &dyn Fn(),
+) -> Result<Resolution, ResolveRefusal> {
+    resolve_inner(conn, kernel, request, budget, before_judgement)
+}
+
+fn resolve_inner(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &ResolveRequest<'_>,
+    budget: &EvalBudget,
+    before_judgement: &dyn Fn(),
 ) -> Result<Resolution, ResolveRefusal> {
     budget
         .check()
@@ -285,6 +309,7 @@ pub fn resolve(
         request,
         kernel,
         budget,
+        before_judgement,
         initial,
         snapshot: None,
         stopped: None,
@@ -427,11 +452,13 @@ impl Attempt<'_> {
             return Ok(());
         }
         let candidates: Vec<OccurrenceCandidate> = live.iter().map(candidate).collect();
-        let report = judge_occurrences(
+        (self.before_judgement)();
+        let report = judge_occurrences_within_budget(
             self.kernel,
             self.request.authority.project,
             self.request.authority.destination,
             &candidates,
+            self.budget,
         )?;
         self.resolution.consumed.validated += candidates.len();
         if report.incarnation != self.initial.incarnation {
@@ -606,11 +633,12 @@ fn validate_for_use_inner(
         }));
     }
     let candidates: Vec<OccurrenceCandidate> = proof.occurrences.iter().map(candidate).collect();
-    let report = match judge_occurrences(
+    let report = match judge_occurrences_within_budget(
         kernel,
         authority.project,
         authority.destination,
         &candidates,
+        budget,
     ) {
         Ok(report) => report,
         Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
