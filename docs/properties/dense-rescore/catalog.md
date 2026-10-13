@@ -618,9 +618,19 @@ replacement's rows and exiting without destructors; with no prior verified
 composition, recovery and acquisition refuse `NoCompatibleTarget` until a
 rebuilt layer is published, and every later read names the rebuilt member. `always`
 because a corrupt generation must never yield a result.
-Fault/timing angle: Corruption between selection and the original reads.
+Fault/timing angle: Corruption between selection and the original reads;
+an ordinary read error on an accepted row; corruption found by
+re-verification on acquisition, in the same process and after a restart.
 Required faults and enabling state: A truncated and a NaN-filled rows file
-inside `RescoreEvent::AfterSelection`; a prior composition to recover to.
+inside `RescoreEvent::AfterSelection`, with a prior composition to recover
+to; an accepted-row read driven to an error other than a short read through
+`PinnedVectors::fail_original_reads_for_test`, then a read that succeeds on
+the same view, in the rescore and under the route; a composition whose only
+member is corrupt with no prior verified composition, then a rebuilt layer
+published under a new composition; a store a child process left after
+publishing a composition and its replacement, cutting the replacement's
+rows to the header, and exiting without destructors, reopened by a fresh
+process with its own gate and ledger.
 Confidence: medium - [evidence](evidence/dense-missing-original-quarantines-without-substitute.md).
 The quarantine flag lives on the shared view; persistence across a restart is
 the verification a new acquisition runs, which
