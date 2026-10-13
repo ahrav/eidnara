@@ -259,22 +259,23 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
         compaction,
         Err(Refusal::Denied(Denial::LimitExceeded { .. }))
     ));
-    // Restaging a manifest the store already holds still copies the inventory into a staging temp before the store finds its occupant, so the copy needs room in the pool even though the store publishes nothing twice and its total is unchanged afterwards.
+    // Restaging a manifest the store already holds confirms the valid occupant in place: the store is already at the bound, the retry reserves nothing, and the total is unchanged.
     let settled = Ledger::store_bytes(&fixture.store).unwrap();
-    fixture.set_limit(DISK_LIMIT, settled + staged_bytes - 1);
-    assert_eq!(
-        stage(&built, &fixture.staging()).unwrap_err(),
-        VectorRefusal::Reservation(exceeded(
-            DISK_LIMIT,
-            settled + staged_bytes,
-            settled + staged_bytes - 1
-        )),
-        "the retry's copy is charged like a first staging"
-    );
-    fixture.set_limit(DISK_LIMIT, settled + staged_bytes);
+    fixture.set_limit(DISK_LIMIT, settled);
+    let before = occupant_inode(&fixture.generation_dir(&digest));
     assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
     assert_eq!(Ledger::store_bytes(&fixture.store).unwrap(), settled);
+    assert_eq!(
+        occupant_inode(&fixture.generation_dir(&digest)),
+        before,
+        "the confirmed generation is the one publication of its bytes"
+    );
     assert_eq!(held(&fixture.ledger, ResourceClass::Staging), 0);
+    assert_eq!(
+        fixture.ledger.census().disk,
+        0,
+        "the confirmation charges nothing"
+    );
 
     // A readable manifest over a corrupt payload triggers an exchange repair, so staging reserves `staged_bytes` before replacing the occupant.
     fixture.corrupt(&digest, ROWS_FILE);
@@ -540,4 +541,8 @@ fn a_prune_readback_above_the_ledgers_pinned_bytes_is_unaccounted() {
         some.unaccounted(),
         "readers pin bytes the ledger was never told about"
     );
+}
+
+fn occupant_inode(dir: &std::path::Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(dir).unwrap())
 }

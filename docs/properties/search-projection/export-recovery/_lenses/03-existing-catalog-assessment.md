@@ -27,7 +27,7 @@ not relabeled independent, and disposition is not independent re-review.
   for generic filesystem selection validity. The search-specific delta must
   compare complete coverage and compatibility, which a valid payload digest
   does not establish. Its interruption fixture constructs stale temporary
-  files (`crates/host-runtime/src/generation.rs:1899-1926`); it does not kill a
+  files (`crates/host-runtime/src/generation.rs:1930-1957`); it does not kill a
   process or simulate lost writes.
 
 ## Coverage balance

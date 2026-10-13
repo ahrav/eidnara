@@ -664,6 +664,13 @@ jobs:
           cargo +1.98 nextest run --profile ci --workspace --all-targets
           --all-features --locked --partition slice:${{ matrix.shard }}/2
 
+      - name: Kernel storage-exhaustion staging cells
+        if: matrix.shard == 2
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          cargo +1.98 nextest run --profile ci -p daemon --all-features \
+            --locked --test vector_staging_kernel_faults --run-ignored only
+
       - name: Doctests
         if: matrix.shard == 1
         # nextest does not run doctests.

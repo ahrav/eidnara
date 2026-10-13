@@ -37,7 +37,7 @@ The struct's own doc comments at `:226` and `:231-232` state the contract:
 path, making the encoding deterministic", and "`GenerationManifest`'s SHA-256
 names the generation."
 
-The existing golden is `generation.rs:2077-2092`,
+The existing golden is `generation.rs:2108-2123`,
 `a_generation_staged_before_the_source_digest_field_still_decodes`. Its fixture is
 the literal at `:2081`:
 
@@ -122,7 +122,7 @@ is to revert the reorder, not to update the golden.
 
 ### Q: Does the existing golden catch anything, or is it purely blind?
 
-- Sources examined: `generation.rs:2077-2092` in full, `:219-224`, `:235-247`,
+- Sources examined: `generation.rs:2108-2123` in full, `:219-224`, `:235-247`,
   `:244` (the skip attribute), `:234` and `:218` (`deny_unknown_fields` on both
   structs), `decode_with_schema` at `:277-290`.
 - Findings: it catches two real classes. First, reordering the four leading

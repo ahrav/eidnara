@@ -62,7 +62,7 @@ branch head that adds them.
 
 | Location and check | Asserted behavior | Status | Limitation for this part |
 | --- | --- | --- | --- |
-| `crates/daemon/src/vector_generation.rs:1315`, `resident_bytes_saturate_on_declared_sizes_that_overflow` | `resident_bytes` saturates at `u64::MAX` on overflowing declared sizes. | unaudited | Saturation only; the value for an ordinary manifest is not asserted. |
+| `crates/daemon/src/vector_generation.rs:1320`, `resident_bytes_saturate_on_declared_sizes_that_overflow` | `resident_bytes` saturates at `u64::MAX` on overflowing declared sizes. | unaudited | Saturation only; the value for an ordinary manifest is not asserted. |
 | `crates/daemon/tests/vector_reader.rs:71`, resident census equality | The ledger's `LayerTables` charge equals `resident_bytes` summed over the composition. | unaudited | Both sides call `vector_generation::resident_bytes`, so the check pins consistency, not that the charge covers the bytes a decoded `Scales` holds. |
 | `crates/retrieval/tests/dense_resolve_allocations.rs:98`, `retained_memory_follows_winners_and_hidden_rows_add_only_scratch` (#616) | At 10,000 winners, live bytes at close equal the winner list's capacity, match across base-only, all-superseded, and half-masked shapes, add at most four allocator calls for two or three times the entries, and keep peak bytes per entry within twice the base-only figure. | unaudited | Relative bounds on one host shape; allocator rounding is not counted, and no absolute cap is asserted. |
 | `crates/retrieval/tests/dense_resolve_allocations.rs:145`, `retained_memory_grows_with_the_winner_count` (#616) | Retained bytes per winner stay between one and two `Winner`s at 10,000 and 40,000 winners. | unaudited | Two sizes only. |

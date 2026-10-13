@@ -72,20 +72,20 @@ a wildcard pass that questioned the framing itself.
 
 1. **The resident charge for decoded scales has no value-level check.** The
    U1 change makes `vector_generation::resident_bytes`
-   (`crates/daemon/src/vector_generation.rs:792`) charge the scales file three
+   (`crates/daemon/src/vector_generation.rs:797`) charge the scales file three
    times over, four bytes of scale plus eight bytes of squared weight per
    coordinate (`Scales { scales: Vec<f32>, weights: Vec<f64> }`,
    `crates/retrieval/src/dense/scalar.rs:65-69`). The only checks are the
-   overflow saturation (`vector_generation.rs:1315`) and a census equality
+   overflow saturation (`vector_generation.rs:1320`) and a census equality
    that calls the same function on both sides (`existing-checks.md`, resource
    accounting). Queue a record `dense-resident-charge-covers-decoded-scales`
-   (default-production through the ledger at `vector_generation.rs:790` and
+   (default-production through the ledger at `vector_generation.rs:795` and
    `crates/daemon/src/vector_reader.rs:466`, reserved at `:474`; `always`):
    for a manifest whose
    scales file is `n` bytes, `resident_bytes` equals the other resident sizes
    plus `3n`, and `3n / 4` equals `n / 4` coordinates times
    `size_of::<f32>() + size_of::<f64>()`. A unit test beside
-   `vector_generation.rs:1315` is enough. It belongs in this part because U1
+   `vector_generation.rs:1320` is enough. It belongs in this part because U1
    authored the charge.
 2. **The term table's documented size has no record.** `QuantizedQuery::term_table`
    documents a `2048 * dimension` byte table built from `256 * dimension`

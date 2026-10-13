@@ -29,7 +29,7 @@ durable before the parent entry naming them.
 
 Promotion (`:1307-1374`) is the first rename. `rename_no_replace`
 (`store_fs.rs:53-79`) must not replace, because POSIX `renameat` succeeds onto an
-existing empty directory (`generation.rs:1303`); on success `generations_fd` is
+existing empty directory (`generation.rs:1334`); on success `generations_fd` is
 fsynced (`:1324`) and the digest is validated (`:1326`) before returning. Only
 then does `replace_profile` (`:1379-1381`, through `replace_profile_at` at
 `:1469-1506`) write the profile temp unsynced (`:1487`, through
@@ -89,7 +89,7 @@ exhaustion on a delayed-allocation filesystem to reach the
 `fsync_preserving_storage` classification (`:202-207`, through `classify_errno` at
 `:104-109`), and a process kill between
 the promoting rename and the profile rename. The staging half is covered through
-`stage_observed`: `crates/daemon/tests/vector_staging_cuts.rs:476-490` injects
+`stage_observed`: `crates/daemon/tests/vector_staging_cuts.rs:526-540` injects
 `EIO`, `ENOSPC`, and `EDQUOT` at every `StageEvent`, `:508-578` sends a child
 `SIGKILL` at every event and checks what the next process finds and reclaims, and
 `:663-676` checks the deployment selector's bytes across a cut. Those cells are
@@ -111,7 +111,7 @@ inertness of residue, not crash recovery.
 
 ### Q: Should the exchange-then-revalidate window be crash-tested? Whether any reader can observe the intermediate was not established.
 
-- Sources examined: `generation.rs:1307-1374` (`promote_temp`), `:1379-1381` and
+- Sources examined: `generation.rs:1338-1405` (`promote_temp`), `:1379-1381` and
   `:1469-1506` (`replace_profile` and `replace_profile_at`), `:912` and
   `:1052-1096` (`validate` and `validate_in_dir`), `store_fs.rs:112-120`
   (`exchange_dirs`), `:53-79` (`rename_no_replace`); every `GenerationStore`

@@ -1187,6 +1187,36 @@ impl GenerationStore {
         Ok(digest)
     }
 
+    /// The caller uses `confirm_staged` to confirm `digest` after a staging attempt with an uncertain outcome, such as a failure after the rename or a crash, and must hold `transaction.lock`. For a valid generation, `confirm_staged` syncs the generations directory, reports [`StageEvent::BeforeGenerationsSync`] and [`StageEvent::AfterGenerationsSync`] to `observer` around the sync, and returns `true`. Repeated confirmations validate and sync the existing generation. A missing generation or a validation failure returns `false`, except that `UnsupportedStateSchema` propagates as an error.
+    ///
+    /// The `fsync` confirms the directory entry within the process-crash envelope. After an earlier failed `fsync`, device durability remains uncertain.
+    ///
+    /// # Errors
+    ///
+    /// `UnsupportedStateSchema` for a quarantined deployment profile or an occupant of an unknown manifest schema, a replaced store, or the generations-directory sync failure.
+    pub fn confirm_staged(
+        &self,
+        digest: &str,
+        observer: &mut StageObserver<'_>,
+    ) -> Result<bool, GenerationError> {
+        if self.read_current()? == CurrentProfile::Quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        self.verify_named_identity()?;
+        match self.validate(digest) {
+            Ok(_) => {}
+            Err(GenerationError::UnsupportedStateSchema) => {
+                return Err(GenerationError::UnsupportedStateSchema);
+            }
+            Err(_) => return Ok(false),
+        }
+        observe(observer, StageEvent::BeforeGenerationsSync)?;
+        fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+        observe(observer, StageEvent::AfterGenerationsSync)?;
+        self.verify_named_identity()?;
+        Ok(true)
+    }
+
     /// The named `lifecycle` and `generations` directories must still resolve to the retained
     /// descriptors; a store renamed and replaced after `open` holds only detached writes.
     fn verify_named_identity(&self) -> Result<(), GenerationError> {
