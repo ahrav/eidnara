@@ -17,7 +17,7 @@ until blocking work exits and is joined.
   as the scan's retained payload buffers: per layer one decoded block, the
   query encoded under the layer's scales, and the layer's code window. The
   per-layer descriptor vectors `rank_compressed` builds
-  (`vector_reader.rs:865-875`) and the scan's control structures are bounded
+  (`vector_reader.rs:879-889`) and the scan's control structures are bounded
   by `max_layers` and `max_entries` and stay outside the charge.
 - `SharedBudget::bridge` awaits the unit after cancellation instead of
   dropping it.
