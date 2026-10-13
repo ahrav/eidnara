@@ -78,9 +78,17 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: partial - the kernel reader is compared with the writer's reported
-admission and with the serving route at one snapshot; comparison of projected
-rows against this reader at a fenced export snapshot belongs to the
-materialization ticket.
+admission and with the serving route at one snapshot.
+`crates/daemon/tests/claim_sources.rs`
+`the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes`
+compares the claim rows exported under a hold at S with the seeds' ledger
+(class, identity field, object, revision, representation, text, domain, and
+scope), shows every row was created at or before S, re-exports S
+byte-identically after a correction, a retirement, a quarantine, and a new
+decision are committed and materialized, and shows a released hold refuses
+the export. The classifier's revisioned facts (maturity, disposition, taint,
+visibility, supporting authority, causality) are compared with S by the
+kernel reader tests only, not through the projected rows.
 Guarantee: Every revisioned field `claim_facts_as_of` returns for a claim at
 snapshot S (registry, decision, own and lineage admission rows, occurrences,
 causality) equals the stored canonical row at S, and a later commit does not
@@ -111,8 +119,9 @@ Impact: a projection built from drifting facts serves approval or maturity the
 kernel never granted; a cache or fenced comparison that treats `served` as
 fixed at S misses a later tightening.
 Open questions:
-- The fenced export comparison at S is the materialization ticket's oracle; this
-  record covers the reader only.
+- A field-by-field comparison of the classifier's facts for projected rows at
+  S with an independent ledger of the canonical tables is not yet written; the
+  export test covers the projected identity fields.
 
 ### canonical-provenance-survives-approved-write-read-path
 
@@ -168,10 +177,16 @@ Open questions: None.
 ### claim-enablement-requires-approved-evidence
 
 Type: safety
-Reachability: test-only
+Reachability: default-production - the search lifecycle owner runs
+`ClaimMaterializer` (`crates/daemon/src/search_lifecycle_owner.rs:570`), and
+the query route validates claims through `validate_claims`
+(`crates/daemon/src/query_route.rs:1707`), which reads the kernel's claim
+facts. The owner's maintenance is admitted under
+`ProjectionHook::EmbeddingBootstrap` (`search_lifecycle_owner.rs:773`); no
+claim-specific hook exists.
 Status: active
-Exercised: not yet - no enablement gate exists in the kernel; the reader and
-writer are library calls with no production caller.
+Exercised: not yet - no test asserts that claim projection or delivery stops
+when that admission is refused.
 Guarantee: No production path enables claim projection or delivery without the
 approved RP2.9 limits and evidence the specification requires.
 Check: `unreachable` - a production route that calls `claim_facts_as_of` or

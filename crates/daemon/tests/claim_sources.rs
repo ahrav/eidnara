@@ -3672,3 +3672,116 @@ fn a_selected_judgement_reads_permitted_objects_and_only_their_selected_occurren
     assert_eq!(required.claims.len(), 1);
     assert_eq!(required.claims[0].occurrences.len(), 1);
 }
+
+/// The ledger rows a snapshot export names, with each descriptor's scope as the registry held it when the export ran.
+fn exported_ledger(corpus: &Corpus, rows: &[SourceRow]) -> BTreeSet<Expected> {
+    let ids: Vec<String> = rows.iter().map(|row| row.object_id.clone()).collect();
+    let states = corpus.kernel.object_states(&ids).unwrap().1;
+    rows.iter()
+        .zip(states)
+        .filter(|(row, _)| row.invalidated_commit_seq.is_none())
+        .map(|(row, state)| {
+            let (field, object_id) = row.detail.identity[0].clone();
+            Expected {
+                class: OccurrenceClass::from_code(&row.detail.class)
+                    .unwrap()
+                    .code(),
+                field: match field.as_str() {
+                    "object_id" => "object_id",
+                    "decision_object_id" => "decision_object_id",
+                    other => panic!("unexpected identity field {other}"),
+                },
+                object_id,
+                revision: row.revision,
+                representation: match row.detail.representation.as_str() {
+                    "decision_summary" => "decision_summary",
+                    "rationale" => "rationale",
+                    "summary" => "summary",
+                    other => panic!("unexpected representation {other}"),
+                },
+                text: row.text.clone().unwrap(),
+                domain_id: row.domain_id.clone(),
+                scope_id: state.unwrap().scope_id,
+            }
+        })
+        .collect()
+}
+
+/// A1: at one protected snapshot S, the exported claim rows equal the ledger the seeds predict, field by field, and every row was created at or before S. Writes committed after S, a correction, a retirement, a quarantine, and a new decision, all materialized, leave the export at S byte-identical. Once the hold is released, S can no longer be read, and the export refuses rather than returning a partial page.
+#[test]
+fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    let anti = Seed::scoped("anti", MEMORY, "PROJECT_RULES", 1, "Shelve it.", "");
+    let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
+    for seed in [rule, anti, quiet] {
+        corpus.decide(seed);
+    }
+    corpus.materialize();
+    let hold = corpus.capture();
+    let at_s = corpus.export_window(&hold, ExportWindow::Snapshot);
+    let expected: BTreeSet<Expected> = [rule, anti, quiet]
+        .iter()
+        .flat_map(|seed| seed.ledger().0)
+        .collect();
+    assert_eq!(exported_ledger(&corpus, &at_s), expected);
+    let snapshot = hold.snapshot;
+    assert!(
+        at_s.iter().all(|row| row.created_commit_seq <= snapshot),
+        "every row exported at S was created at or before S"
+    );
+
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus.retire("anti");
+    corpus
+        .kernel
+        .commit(intent("quarantine:quiet"), |envelope| {
+            let mut request = admission("quiet");
+            request.event.kind = EventKind::Quarantine;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.decide(Seed::scoped(
+        "late",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        "Arrived later.",
+        "",
+    ));
+    corpus.materialize();
+    assert!(corpus.kernel.tip().unwrap() > snapshot);
+    assert_eq!(
+        corpus.export_window(&hold, ExportWindow::Snapshot),
+        at_s,
+        "the export at S is unchanged by writes after S"
+    );
+
+    corpus
+        .kernel
+        .release_source_hold(&corpus.binding(), &hold.hold_id, hold.captured_at)
+        .unwrap();
+    let refused = corpus.kernel.export_source_page(
+        &corpus.binding(),
+        &hold.hold_id,
+        hold.captured_at,
+        ExportWindow::Snapshot,
+        None,
+        page_bounds(),
+    );
+    assert!(
+        refused.is_err(),
+        "a released hold reads nothing: {refused:?}"
+    );
+}
