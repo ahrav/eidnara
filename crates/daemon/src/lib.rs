@@ -14260,11 +14260,11 @@ fn attach_native_messages_with_tags(
             let served_messages = response
                 .messages()
                 .iter()
-                .map(|message| message.deref().clone())
+                .map(Deref::deref)
                 .collect::<Vec<_>>();
-            let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
+            let mut native_messages = codec::opencode::encode_opencode_window(
                 &served_messages,
-                &codec::opencode::decode_opencode_shared(native_input).sidecar,
+                native_input,
                 Some(&request.session_id),
                 &mutation_exempt_mids,
             );
@@ -14280,7 +14280,7 @@ fn attach_native_messages_with_tags(
                     tag_numbers,
                 );
             }
-            native_messages.into_iter().map(Arc::new).collect()
+            native_messages
         }
     };
     response.native_messages = Some(native_messages);

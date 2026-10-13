@@ -109,7 +109,6 @@ pub struct BlockMeta {
     pub item_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_fingerprint: Option<String>,
-    pub raw: Value,
 }
 
 /// Order-preserving block-to-metadata alignment and native-part retention sets.
@@ -118,10 +117,12 @@ pub(crate) struct MatchedBlockMetas<'a> {
     retained_native_indices: BTreeSet<usize>,
     decoded_native_indices: BTreeSet<usize>,
     block_fingerprints: Vec<OnceCell<String>>,
+    content: MetaContent<'a>,
 }
 
 impl MatchedBlockMetas<'_> {
-    /// `blocks` must be the slice used to build this alignment.
+    /// Whether `blocks[block_index]` equals `meta`'s pre-mutation content, read from the basis
+    /// the alignment was built with. `blocks` must be the slice used to build this alignment.
     pub(crate) fn block_is_unchanged(
         &self,
         blocks: &[WireBlock],
@@ -129,10 +130,18 @@ impl MatchedBlockMetas<'_> {
         meta: &BlockMeta,
     ) -> bool {
         debug_assert_eq!(blocks.len(), self.block_fingerprints.len());
-        meta.content_fingerprint.as_deref().is_some_and(|expected| {
-            memoized_fingerprint(&self.block_fingerprints[block_index], &blocks[block_index])
-                == expected
-        })
+        self.content.matches_memoized(
+            &blocks[block_index],
+            &self.block_fingerprints[block_index],
+            meta,
+        )
+    }
+
+    /// Whether every native part a decoded block came from is paired with a block, so
+    /// [`Self::remove_unretained_native_parts`] keeps every part.
+    pub(crate) fn retains_every_decoded_part(&self) -> bool {
+        self.decoded_native_indices
+            .is_subset(&self.retained_native_indices)
     }
 
     /// Removes native parts whose decoded blocks were removed.
@@ -454,13 +463,8 @@ fn alignment_candidate(
 /// with thousands of blocks on both sides exceeds it and takes the linear-memory greedy path.
 const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
 
-/// Aligns blocks with metadata without reordering either sequence.
-///
-/// Exact stamped origins score above fingerprint-only or positional matches. Dynamic
-/// programming maximizes origin matches first and total matches second. Each block and
-/// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)` up to
-/// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
-/// first unpaired candidate at `O(blocks + metas)` memory, trading optimality for a bound.
+/// Aligns like [`match_block_metas_by`], reading each meta's content from its fingerprint.
+#[cfg(test)]
 pub(crate) fn match_block_metas<'a>(
     blocks: &[WireBlock],
     metas: &'a [BlockMeta],
@@ -469,12 +473,19 @@ pub(crate) fn match_block_metas<'a>(
     match_block_metas_by(blocks, metas, matches, MetaContent::Fingerprint)
 }
 
-/// Aligns like [`match_block_metas`], reading each meta's content from `content`.
+/// Aligns blocks with metadata without reordering either sequence, reading each meta's
+/// content from `content`.
+///
+/// Exact stamped origins score above fingerprint-only or positional matches. Dynamic
+/// programming maximizes origin matches first and total matches second. Each block and
+/// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)` up to
+/// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
+/// first unpaired candidate at `O(blocks + metas)` memory, trading optimality for a bound.
 pub(crate) fn match_block_metas_by<'a>(
     blocks: &[WireBlock],
     metas: &'a [BlockMeta],
     mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
-    content: MetaContent<'_>,
+    content: MetaContent<'a>,
 ) -> MatchedBlockMetas<'a> {
     let block_fingerprints = vec![OnceCell::new(); blocks.len()];
     let cells = blocks.len().saturating_mul(metas.len());
@@ -495,6 +506,7 @@ pub(crate) fn match_block_metas_by<'a>(
         retained_native_indices,
         decoded_native_indices,
         block_fingerprints,
+        content,
     }
 }
 
@@ -782,7 +794,6 @@ mod tests {
             native_id: None,
             item_id: None,
             content_fingerprint: None,
-            raw: Value::Null,
         }
     }
 
