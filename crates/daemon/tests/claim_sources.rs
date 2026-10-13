@@ -4405,3 +4405,84 @@ fn cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_
         assert_eq!(acknowledged(), Some(target), "{cut}");
     }
 }
+
+#[test]
+fn a_corrupt_projection_or_a_foreign_identity_stops_claim_catch_up_without_acknowledging() {
+    let occurrences = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    let rows = |root: &Path| projection_rows(root);
+
+    // A consumer naming another kernel incarnation is refused before any window is read.
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, projection, hold, consumer) = corrected_claim_corpus(dir.path());
+    let before = rows(dir.path());
+    let foreign = CatchUpConsumer {
+        kernel_incarnation_id: "another-kernel".to_string(),
+        ..consumer.clone()
+    };
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&foreign, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        report.end,
+        EpisodeEnd::Blocked(Blocked::ProjectionIdentity),
+        "{report:?}"
+    );
+    assert_eq!(rows(dir.path()), before);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(hold.snapshot)
+    );
+    assert!(
+        projection.quarantine().is_none(),
+        "an identity refusal is not corruption"
+    );
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap();
+    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+
+    // The original claim's occurrences vanish from the projection, so the correction's retirements name rows the checkpoint says exist.
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, projection, hold, consumer) = corrected_claim_corpus(dir.path());
+    let corruptor = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
+    corruptor.busy_timeout(Duration::from_secs(5)).unwrap();
+    corruptor
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let deleted = corruptor.execute("DELETE FROM occurrences", []).unwrap();
+    assert_eq!(deleted, occurrences(ORIGINAL).len());
+    drop(corruptor);
+    let before = rows(dir.path());
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let daemon::search_catchup::CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        quarantine.kind,
+        daemon::search_catchup::QuarantineKind::Integrity
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(hold.snapshot),
+        "a quarantined projection is never acknowledged"
+    );
+    assert_eq!(rows(dir.path()), before);
+    let again = driver
+        .run_episode(&consumer, &catch_up_bounds(), 4, &mut |_| {
+            panic!("a quarantined projection runs no work")
+        })
+        .unwrap_err();
+    assert!(matches!(
+        again,
+        daemon::search_catchup::CatchUpError::Quarantined(repeated) if repeated == quarantine
+    ));
+}

@@ -343,8 +343,13 @@ fails with `CorruptCanonicalRow`. Through the projection,
 `an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defaulting`
 rewrites a projected claim's admission maturity to a value no build reads, and
 `classify_live_claims` refuses the batch rather than returning the claim as
-Current. Checkpoint quarantine through catch-up is not yet exercised with a
-claim corpus.
+Current. Through catch-up,
+`a_corrupt_projection_or_a_foreign_identity_stops_claim_catch_up_without_acknowledging`
+deletes the projected occurrences of a claim whose correction awaits
+catch-up: the episode quarantines the projection as `Integrity`, leaves the
+rows and the acknowledgement at S, and a later episode runs no work; a
+consumer naming another kernel incarnation blocks as `ProjectionIdentity`
+without quarantine, and the real consumer then reaches the target.
 Guarantee: A required claim field that does not decode is an explicit error,
 never a default that implies approval, and never a silently skipped claim.
 Check: `always` - `Err(MalformedRequiredField)` when any required enum or
