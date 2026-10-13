@@ -963,3 +963,86 @@ async fn a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_dead
         .expect("the request released the daemon");
     daemon.shutdown().await;
 }
+
+/// A daemon shutdown that starts while a request's dense unit is held at an original read releases none of the unit's charges or pins: the scratch, row buffers, and view stay held until the unit itself finishes, and the ledger is empty only after it returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends() {
+    let (daemon, ids) = served_daemon().await;
+    let incarnation = daemon
+        .store()
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+        .unwrap();
+    let (store, view) = composition(&incarnation, &ids);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(route_limits()))
+        .unwrap();
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::new(FixedEmbedder)));
+    let vectors = DenseVectors::new(
+        Arc::clone(&view),
+        store.admission.clone(),
+        store.activation(),
+        compressed_limits(),
+    );
+    let (held, hold) = hold_at(vectors, Arc::clone(&store.ledger), |event| {
+        matches!(event, RescoreEvent::ReadOriginal { .. })
+    });
+    daemon.handler().set_dense_vectors(Some(held)).unwrap();
+    let project = daemon.project().to_owned();
+    let daemon = Arc::new(daemon);
+    let pending = {
+        let daemon = Arc::clone(&daemon);
+        let body: Value = serde_json::from_slice(&request(&project)).unwrap();
+        tokio::spawn(async move { daemon.outcome(body).await })
+    };
+    let Hold {
+        entered,
+        release,
+        census,
+        ..
+    } = hold;
+    watchdog(tokio::task::spawn_blocking(move || {
+        entered.recv_timeout(Duration::from_secs(20)).unwrap()
+    }))
+    .await
+    .unwrap();
+    daemon.handler().set_dense_vectors(None).unwrap();
+    drop(view);
+
+    let shutdown = {
+        let daemon = Arc::clone(&daemon);
+        tokio::spawn(async move { CompositeComponent::shutdown(daemon.handler()).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let while_held = store.ledger.census();
+    assert!(
+        while_held.held[&ResourceClass::Scratch] > 0,
+        "the held unit keeps its scratch through the shutdown"
+    );
+    assert!(while_held.held[&ResourceClass::RowBuffers] > 0);
+    assert!(
+        while_held.pinned > 0,
+        "the unit's clone of the view still pins it"
+    );
+
+    release.send(()).unwrap();
+    let started = Instant::now();
+    while census.lock().unwrap().is_none() || store.ledger.census().pinned > 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the unit's exit releases the view"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (at_release, _) = census.lock().unwrap().take().unwrap();
+    assert!(
+        at_release.held[&ResourceClass::Scratch] > 0,
+        "the charges were still held when the unit was released"
+    );
+    watchdog(shutdown).await.unwrap().unwrap();
+    let _ = watchdog(pending).await.unwrap();
+    assert!(store.ledger.census().held.is_empty());
+    assert_eq!(store.ledger.census().pinned, 0);
+}
