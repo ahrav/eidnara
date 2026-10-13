@@ -440,6 +440,8 @@ fn lookup_refusal(refusal: &LookupRefusal) -> LaneRefusal {
         LookupRefusal::StaleCursor { .. } => LaneRefusal::Reason("stale_cursor"),
         LookupRefusal::ForeignCursor => LaneRefusal::Reason("foreign_cursor"),
         LookupRefusal::ExtractionMismatch { .. } => LaneRefusal::Reason("extraction_version"),
+        LookupRefusal::SchemaMismatch => LaneRefusal::Reason("schema_version"),
+        LookupRefusal::ObjectFormatMismatch { .. } => LaneRefusal::Reason("object_format"),
         LookupRefusal::Projection(error) => LaneRefusal::Reason(projection_reason(error)),
     }
 }
@@ -906,6 +908,7 @@ fn selector_bounds(limits: &QueryRouteLimits) -> SelectorBounds {
     SelectorBounds {
         max_input_bytes: limits.query_bytes,
         max_value_bytes: limits.query_bytes,
+        max_selectors: limits.probes,
     }
 }
 

@@ -45,6 +45,8 @@ pub struct SelectorBounds {
     /// The limit applies to the encoded token; JSON and percent decoding never
     /// lengthen a value, so the decoded bytes stay within it.
     pub max_value_bytes: NonZeroUsize,
+    /// Selectors one request may name across every family; the classifier refuses the request before it collects one more.
+    pub max_selectors: NonZeroUsize,
 }
 
 pub const MAX_SHA_HEX: usize = 64;
@@ -159,6 +161,8 @@ pub enum SelectorRefusal {
     MalformedPercentEscape { offset: usize },
     #[error("path selector at {offset} is not repository-relative: {reason:?}")]
     InvalidPath { offset: usize, reason: PathRefusal },
+    #[error("the request names more than {bound} selectors")]
+    TooManySelectors { bound: usize },
 }
 
 /// Trimming removes only ASCII space, tab, CR, and LF at both ends.
@@ -194,12 +198,16 @@ pub fn classify(request: &str, bounds: SelectorBounds) -> Result<Intent, Selecto
             return Ok(Intent::Direct(selector));
         }
     }
-    Ok(Intent::Hybrid(mentions(trimmed, start, bounds)))
+    Ok(Intent::Hybrid(mentions(trimmed, start, bounds)?))
 }
 
 const ASCII_TRIM: [char; 4] = [' ', '\t', '\r', '\n'];
 
-fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention> {
+fn mentions(
+    trimmed: &str,
+    start: usize,
+    bounds: SelectorBounds,
+) -> Result<Vec<Mention>, SelectorRefusal> {
     let mut found = Vec::new();
     let mut at = 0;
     let mut run = BareRun::default();
@@ -224,6 +232,11 @@ fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention>
             bounds,
         ) {
             Ok(selector) => {
+                if found.len() == bounds.max_selectors.get() {
+                    return Err(SelectorRefusal::TooManySelectors {
+                        bound: bounds.max_selectors.get(),
+                    });
+                }
                 found.push(Mention {
                     selector,
                     span: start + at..start + token.end,
@@ -233,7 +246,7 @@ fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention>
             Err(_) => at += 1,
         }
     }
-    found
+    Ok(found)
 }
 
 /// A selector head starts the text or follows whitespace or ASCII punctuation
@@ -410,6 +423,7 @@ mod tests {
         SelectorBounds {
             max_input_bytes: NonZeroUsize::new(256).unwrap(),
             max_value_bytes: NonZeroUsize::new(128).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         }
     }
 
@@ -784,6 +798,7 @@ mod tests {
         let tight = SelectorBounds {
             max_input_bytes: NonZeroUsize::new(10).unwrap(),
             max_value_bytes: NonZeroUsize::new(4).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         };
         assert!(matches!(
             classify("id:abcdefghij", tight),
@@ -803,6 +818,7 @@ mod tests {
         let loose = SelectorBounds {
             max_input_bytes: NonZeroUsize::new(64).unwrap(),
             max_value_bytes: NonZeroUsize::new(8).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         };
         assert!(
             matches!(
@@ -838,6 +854,7 @@ mod tests {
         let bounds = SelectorBounds {
             max_input_bytes: NonZeroUsize::new(1 << 20).unwrap(),
             max_value_bytes: NonZeroUsize::new(64).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         };
         let mut steps = Vec::new();
         for heads in [1_024usize, 4_096] {
@@ -857,6 +874,26 @@ mod tests {
         assert_eq!(
             mentions[0].selector.value,
             SelectorValue::Text("abc".into())
+        );
+    }
+    #[test]
+    fn the_selector_bound_refuses_a_request_before_it_collects_one_more() {
+        let bounded = SelectorBounds {
+            max_selectors: NonZeroUsize::new(2).unwrap(),
+            ..bounds()
+        };
+        let Intent::Hybrid(mentions) = classify("see id:a and id:b", bounded).unwrap() else {
+            panic!("two mentions are hybrid");
+        };
+        assert_eq!(mentions.len(), 2, "the bound itself is admitted");
+        assert_eq!(
+            classify("see id:a and sha:abc and path:src/x.rs", bounded),
+            Err(SelectorRefusal::TooManySelectors { bound: 2 }),
+            "the bound counts every family"
+        );
+        assert!(
+            matches!(classify("id:a", bounded), Ok(Intent::Direct(_))),
+            "a direct selector names one"
         );
     }
 }

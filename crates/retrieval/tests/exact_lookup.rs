@@ -712,14 +712,38 @@ fn sha_prefix_enumeration_is_repository_and_algorithm_scoped_and_counts_complete
             enumerate("repo-c", ObjectFormat::Sha256, "abc10", page_rows).1,
             1
         );
+        // A repository indexed under the other object format refuses rather than reporting no match.
+        for (repository, format, indexed) in [
+            ("repo-a", ObjectFormat::Sha256, "sha1"),
+            ("repo-c", ObjectFormat::Sha1, "sha256"),
+        ] {
+            let prefix = hex("abc");
+            let query = ShaPrefixQuery::bind(repository, format, &prefix).unwrap();
+            let refused = store
+                .with_conn(|conn| {
+                    Ok(page(
+                        conn,
+                        &context(page_rows),
+                        &ExactQuery::Sha(query.clone()),
+                        None,
+                    ))
+                })
+                .unwrap();
+            assert_eq!(
+                refused.unwrap_err(),
+                LookupRefusal::ObjectFormatMismatch {
+                    queried: format.code(),
+                    indexed,
+                },
+                "{repository}"
+            );
+        }
+        // A prefix that matches nothing under the repository's own format is an empty answer.
         assert_eq!(
-            enumerate("repo-a", ObjectFormat::Sha256, "abc", page_rows).1,
+            enumerate("repo-a", ObjectFormat::Sha1, "dead", page_rows).1,
             0
         );
-        assert_eq!(
-            enumerate("repo-c", ObjectFormat::Sha1, "abc", page_rows).1,
-            0
-        );
+        // A repository with no indexed commits in either format still cannot tell absence apart from missing inventory; the lookup reports an empty page.
         assert_eq!(
             enumerate("repo-none", ObjectFormat::Sha1, "abc", page_rows).1,
             0
@@ -1478,4 +1502,45 @@ fn message_cleanup_reclaims_association_rows_with_their_occurrence() {
             Ok(())
         })
         .unwrap();
+}
+
+/// A projection whose identity records another schema version or analysis identity was built by other rules, so its pages refuse rather than serving associations this build did not derive.
+#[test]
+fn a_page_refuses_a_projection_built_under_another_schema_or_analysis_identity() {
+    let sources = corpus();
+    for (column, value) in [
+        ("schema_version", "schema_version+1"),
+        ("analysis_identity", "'another-analysis'"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        setup(&store);
+        apply(&store, &sources, mutation(0, 3), vec![], 10).unwrap();
+        let query = ExactQuery::CanonicalObject(b"obj-1");
+        store
+            .with_conn(|conn| {
+                assert!(page(conn, &context(2), &query, None).is_ok(), "{column}");
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    &format!("UPDATE projection_identity SET {column}={value}"),
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &context(2), &query, None).unwrap_err(),
+                    LookupRefusal::SchemaMismatch,
+                    "{column}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 }

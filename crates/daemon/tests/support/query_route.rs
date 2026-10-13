@@ -434,6 +434,7 @@ impl Fixture {
             SelectorBounds {
                 max_input_bytes: limits.query_bytes,
                 max_value_bytes: limits.query_bytes,
+                max_selectors: limits.probes,
             },
         )
         .unwrap();

@@ -189,6 +189,15 @@ pub enum LookupRefusal {
     ForeignCursor,
     #[error("a stored association carries extraction version {stored}, not {expected}")]
     ExtractionMismatch { stored: u32, expected: u32 },
+    /// The projection was built by another schema or analysis identity, so its associations follow other rules and the projection is rebuilt.
+    #[error("the projection was built under another schema or analysis identity")]
+    SchemaMismatch,
+    /// The repository's commits are indexed under the other object format, so a range under this one can say nothing about absence.
+    #[error("the repository's commits are indexed under {indexed}, not {queried}")]
+    ObjectFormatMismatch {
+        queried: &'static str,
+        indexed: &'static str,
+    },
     #[error(transparent)]
     Projection(#[from] ProjectionError),
 }
@@ -242,6 +251,12 @@ pub fn page(
     check_budget()?;
     let checkpoint =
         read_checkpoint(conn, context.kernel_incarnation_id)?.ok_or(LookupRefusal::NoCheckpoint)?;
+    let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
+    if installed.schema_version != crate::SCHEMA_VERSION
+        || installed.analysis_identity != crate::lexical::AnalysisIdentity::current().as_str()
+    {
+        return Err(LookupRefusal::SchemaMismatch);
+    }
     let range = query.range();
     if let Some(cursor) = cursor {
         if cursor.range != range || cursor.kernel_incarnation_id != context.kernel_incarnation_id {
@@ -310,7 +325,39 @@ pub fn page(
         page.rows.push(decoded);
     }
     check_budget()?;
+    if let ExactQuery::Sha(sha) = query
+        && cursor.is_none()
+        && page.rows.is_empty()
+        && let Some(indexed) = other_format_indexed(conn, sha)?
+    {
+        return Err(LookupRefusal::ObjectFormatMismatch {
+            queried: sha.object_format.code(),
+            indexed: indexed.code(),
+        });
+    }
     Ok(page)
+}
+
+/// The other object format, when the repository has commits indexed under it; an empty first page under a mismatched format is then no evidence of absence.
+fn other_format_indexed(
+    conn: &GuardedConn<'_>,
+    query: &ShaPrefixQuery<'_>,
+) -> Result<Option<ObjectFormat>, LookupRefusal> {
+    let Some(other) = ObjectFormat::ALL
+        .into_iter()
+        .find(|format| *format != query.object_format)
+    else {
+        return Ok(None);
+    };
+    let indexed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM exact_associations WHERE family=?1 AND namespace=?2)",
+        params![
+            Family::Sha.keyword(),
+            sha_namespace(other.code(), query.repository_id)
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(indexed.then_some(other))
 }
 
 impl AssociationRow {
