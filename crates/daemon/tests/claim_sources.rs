@@ -3938,3 +3938,115 @@ fn a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repa
     assert_eq!(live, predicted);
     assert_eq!(acknowledged(), Some(report.acknowledged_through));
 }
+
+#[test]
+fn claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
+    for seed in [rule, quiet] {
+        corpus.decide(seed);
+    }
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (_projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let projected: BTreeSet<String> = live_rows(dir.path()).into_iter().map(|row| row.1).collect();
+    let ids = vec!["rule".to_string(), "quiet".to_string()];
+    let facts_at = |seq: i64| {
+        corpus
+            .kernel
+            .claim_facts_as_of(&ids, seq, candidate_bounds().facts)
+            .unwrap()
+    };
+    let at_s = facts_at(hold.snapshot);
+    assert_eq!(at_s.known_as_of, hold.snapshot);
+    assert!(at_s.missing.is_empty());
+
+    // Every revisioned field the classifier reads for a projected row equals what the seeds alone predict at S.
+    let mut covered = BTreeSet::new();
+    for (facts, seed) in at_s.claims.iter().zip([rule, quiet]) {
+        let object = &facts.object;
+        assert_eq!(object.object_id, seed.object);
+        assert_eq!(object.domain_id, seed.domain);
+        assert_eq!(object.source_revision, seed.revision);
+        assert_eq!(object.invalidated_commit_seq, None);
+        assert_eq!(object.superseded_by, None);
+        assert!(object.created_commit_seq <= hold.snapshot);
+        assert_eq!(facts.decision.decision_kind, seed.kind);
+        let admission = facts.own_admission.as_ref().expect("admitted");
+        assert!(admission.commit_seq <= hold.snapshot);
+        assert_eq!(admission.disposition, kernel::Disposition::Active);
+        assert_eq!(
+            (admission.source_class, admission.taint_class),
+            CLASSES,
+            "{}",
+            seed.object
+        );
+        assert_eq!(
+            facts.causality,
+            CausalClass::Unknown(kernel::UnknownReason::NoRecord)
+        );
+        let occurrences: BTreeSet<String> = facts
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.occurrence_id.clone())
+            .collect();
+        let predicted: BTreeSet<String> = seed
+            .ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect();
+        assert_eq!(occurrences, predicted, "{}", seed.object);
+        assert!(
+            facts
+                .occurrences
+                .iter()
+                .all(|occurrence| occurrence.descriptor_commit_seq <= hold.snapshot)
+        );
+        covered.extend(occurrences);
+    }
+    assert_eq!(
+        covered, projected,
+        "the facts name exactly the rows projected at S"
+    );
+
+    // Later writes touch both lineages: a correction and a quarantine.
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus
+        .kernel
+        .commit(intent("quarantine:quiet"), |envelope| {
+            let mut request = admission("quiet");
+            request.event.kind = EventKind::Quarantine;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.materialize();
+    let tip = corpus.kernel.tip().unwrap();
+    assert!(tip > hold.snapshot);
+
+    let reread = facts_at(hold.snapshot);
+    assert_eq!(reread.known_as_of, hold.snapshot);
+    assert_eq!(reread.tip, tip);
+    assert_eq!(
+        reread.claims, at_s.claims,
+        "S reads the same facts after later writes"
+    );
+    let now = facts_at(tip);
+    assert!(now.claims[0].object.invalidated_commit_seq.is_some());
+    assert_eq!(
+        now.claims[1].own_admission.as_ref().unwrap().disposition,
+        kernel::Disposition::Quarantined
+    );
+}

@@ -88,7 +88,13 @@ byte-identically after a correction, a retirement, a quarantine, and a new
 decision are committed and materialized, and shows a released hold refuses
 the export. The classifier's revisioned facts (maturity, disposition, taint,
 visibility, supporting authority, causality) are compared with S by the
-kernel reader tests only, not through the projected rows.
+kernel reader tests, and
+`claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes`
+reads them at S for the rows a projection bootstrapped at S holds: registry,
+decision kind, own admission commit, disposition, classes, causality, and the
+occurrence set match the seeds' ledger, the occurrences name exactly the
+projected rows, and the same read after a correction and a quarantine returns
+equal claims while the tip read shows both changes.
 Guarantee: Every revisioned field `claim_facts_as_of` returns for a claim at
 snapshot S (registry, decision, own and lineage admission rows, occurrences,
 causality) equals the stored canonical row at S, and a later commit does not
@@ -114,14 +120,14 @@ Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot` in
 `crates/kernel/tests/kernel_claim_facts.rs` writes through the public API and
 compares field by field, and `served_facts_follow_the_cited_evidence_class_read_today`
 rereads S after tightening.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs` - `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`, `served_facts_follow_the_cited_evidence_class_read_today`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs` - `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`, `served_facts_follow_the_cited_evidence_class_read_today`; `crates/daemon/tests/claim_sources.rs` - `claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes`; status unaudited.
 Impact: a projection built from drifting facts serves approval or maturity the
 kernel never granted; a cache or fenced comparison that treats `served` as
 fixed at S misses a later tightening.
 Open questions:
-- A field-by-field comparison of the classifier's facts for projected rows at
-  S with an independent ledger of the canonical tables is not yet written; the
-  export test covers the projected identity fields.
+- The projected-row comparison predicts the facts from the seeds, not from a
+  direct query of the canonical tables at S; the kernel reader test makes that
+  table comparison.
 
 ### canonical-provenance-survives-approved-write-read-path
 
