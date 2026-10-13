@@ -27,8 +27,8 @@ use kernel::{
     SourcePageBounds, SourceRow, Surface, TaintClass,
 };
 use retrieval::batch::{
-    BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
-    row_identities,
+    BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, read_checkpoint,
+    register_generation, row_identities,
 };
 use retrieval::claims::{
     CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateBounds, ClaimCandidateError,
@@ -3872,6 +3872,15 @@ fn a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repa
     let before = projection_rows(dir.path());
     let acknowledged = || corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
     assert_eq!(acknowledged(), Some(hold.snapshot));
+    let kernel_incarnation_id = corpus.kernel_incarnation_id();
+    let projected_through = || {
+        projection
+            .read(|conn| read_checkpoint(conn, &kernel_incarnation_id))
+            .unwrap()
+            .expect("the bootstrap installed a checkpoint")
+            .checkpoint_commit_seq
+    };
+    assert_eq!(projected_through(), hold.snapshot);
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
     let mut refused = |name: &str, bounds: &EpisodeBounds| -> Blocked {
         let report = driver
@@ -3885,6 +3894,10 @@ fn a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repa
         assert!(
             acknowledged().is_some_and(|through| through < claim_commit),
             "{name}: the acknowledgement never covers the refused commit"
+        );
+        assert!(
+            projected_through() < claim_commit,
+            "{name}: the projection checkpoint never covers the refused commit"
         );
         match report.end {
             EpisodeEnd::Blocked(blocked) => blocked,
@@ -3937,6 +3950,7 @@ fn a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repa
         .collect();
     assert_eq!(live, predicted);
     assert_eq!(acknowledged(), Some(report.acknowledged_through));
+    assert_eq!(projected_through(), report.acknowledged_through);
 }
 
 #[test]
@@ -3965,6 +3979,7 @@ fn claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_write
     assert!(at_s.missing.is_empty());
 
     // Every revisioned field the classifier reads for a projected row equals what the seeds alone predict at S.
+    assert_eq!(at_s.claims.len(), 2);
     let mut covered = BTreeSet::new();
     for (facts, seed) in at_s.claims.iter().zip([rule, quiet]) {
         let object = &facts.object;
@@ -3975,6 +3990,8 @@ fn claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_write
         assert_eq!(object.superseded_by, None);
         assert!(object.created_commit_seq <= hold.snapshot);
         assert_eq!(facts.decision.decision_kind, seed.kind);
+        assert_eq!(facts.decision.scope_id.as_deref(), Some(SCOPE));
+        assert_eq!(facts.lineage_admission, None);
         let admission = facts.own_admission.as_ref().expect("admitted");
         assert!(admission.commit_seq <= hold.snapshot);
         assert_eq!(admission.disposition, kernel::Disposition::Active);

@@ -90,11 +90,14 @@ the export. The classifier's revisioned facts (maturity, disposition, taint,
 visibility, supporting authority, causality) are compared with S by the
 kernel reader tests, and
 `claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes`
-reads them at S for the rows a projection bootstrapped at S holds: registry,
-decision kind, own admission commit, disposition, classes, causality, and the
-occurrence set match the seeds' ledger, the occurrences name exactly the
-projected rows, and the same read after a correction and a quarantine returns
-equal claims while the tip read shows both changes.
+reads them at S for the rows a projection bootstrapped at S holds: the
+registry object, revision, domain, decision kind, scope, own-admission
+disposition and classes, causality, and occurrence set match the seeds'
+ledger, every admission and descriptor commit is at or before S, the
+occurrences name exactly the projected rows, and the same read after a
+correction and a quarantine returns equal claims while the tip read shows
+both changes. Maturity, visibility, sensitivity, and supporting authority are
+compared field by field only in the kernel reader test.
 Guarantee: Every revisioned field `claim_facts_as_of` returns for a claim at
 snapshot S (registry, decision, own and lineage admission rows, occurrences,
 causality) equals the stored canonical row at S, and a later commit does not
@@ -163,9 +166,13 @@ Exercised: partial - the reader refuses a request over `max_claims` before any
 row is read; a second record for one subject and an over-bound parent list
 poison the commit so nothing of it lands. On the projection side, a claim
 commit that exceeds the catch-up payload allowance, or whose descriptor
-ordinals are no longer contiguous, is refused whole: rows, tombstones, pending
-jobs, and the search consumer's acknowledgement stay where they were, and the
-repaired commit then applies to exactly the successor's ledger. The claim
+ordinals are no longer contiguous, is refused whole before any projection
+write: rows, tombstones, and pending jobs are unchanged, and neither the
+search consumer's acknowledgement nor the projection checkpoint covers the
+refused commit; the repaired commit then applies to exactly the successor's
+ledger. Malformed required fields and conflicting facts inside a readable
+claim commit are refused by the kernel reader tests, not yet through
+catch-up. The claim
 materializer's `PublicationRefused` exclusion is a different consumer's
 decision: it publishes no descriptor for a revision the artifact store always
 refuses, so the search catch-up has no commit to refuse and its checkpoint
