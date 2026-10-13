@@ -230,7 +230,7 @@ impl<'r> ResidentMeter<'r> {
     }
 
     /// Resets the decode accounting to the footprint and longest escaped length that
-    /// [`Self::reserve_unescape_scratch_of`] recorded, keeping the bytes already held, so a
+    /// [`Self::reserve_unescape_scratch`] recorded, keeping the bytes already held, so a
     /// second decode of the same body counts the up-front unescape charge once. A meter whose
     /// charges were taken keeps its permanent refusal.
     pub fn restart(&self) {
