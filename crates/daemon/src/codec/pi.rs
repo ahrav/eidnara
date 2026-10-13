@@ -1186,17 +1186,6 @@ fn encode_with_meta(
         None,
     );
     matched_metas.pair_in_place_edits(msg.content(), block_metas, block_matches_meta);
-    let unchanged = msg.content().len() == block_metas.len()
-        && msg
-            .content()
-            .iter()
-            .zip(&matched_metas.by_block)
-            .all(|(block, matched)| {
-                matched.is_some_and(|meta| decoded_matches(decoded, None, block, meta))
-            });
-    if unchanged {
-        return Some(Arc::clone(raw));
-    }
     if msg.content().is_empty() {
         return None;
     }
