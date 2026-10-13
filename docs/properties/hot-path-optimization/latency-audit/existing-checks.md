@@ -86,8 +86,13 @@ documents timer placement only and leaves W2 invalidated.
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [`request_byte_cap_widens_for_transform_class_only`][t-cap] | `enforce_request_byte_cap` class set, `kind` beside `method`, non-string fallback, unparseable refusal, structured and 2 MiB `method`, a 2 MiB over-deep transform-class body admitted, a body of exactly 32 MiB admitted and one byte more refused. | unaudited |
+| [`request_byte_cap_widens_for_transform_class_only`][t-cap] | `enforce_request_byte_cap` class set, `kind` beside `method`, non-string fallback, unparseable refusal, structured and 2 MiB `method`, a 2 MiB over-deep transform-class body admitted, a body of exactly 32 MiB admitted and one byte more refused. Each of those bodies also goes through the entry scan: the scan answers for the nine with a plain route under the transform cap, declines the numeric, structured, and unparseable ones and the two over the transform cap, and the cap result through it equals the reference's. | unaudited |
 | [`entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does`][t-probe] | The probe resolves `method` then `kind` as dispatch does, counts every page key with `null`, keeps the last repeated key, splits an overlong `method` between cap widening and route, refuses non-object and malformed bodies, probes an over-deep body that `tree_decode_parses` refuses, and keeps an escaped discriminator off the direct lane while `lane_probe` skips a body with no literal `transform`. | unaudited |
+| [`entry_scan_answers_as_the_reference_reads_or_not_at_all`][t-scan-named] | The entry scan answers for compact and spaced transform bodies, nested values, repeated route keys, a page field, route names of 64 and 65 bytes in ASCII and two-byte letters, array nests of 256 and 257 levels, and nests that make every third level an object at depths 63 through 256, each with the reference probe, floor, and longest escaped string; it leaves newline whitespace, 0x01 and 0x1f control bytes, escaped keys and route values, numeric and array route values, numbers with a leading zero, an empty fraction or exponent, a bare sign, or a leading `+` or `.` (each also refused by `probe_request`), bad escapes, trailing commas and bytes, non-object, truncated, 257-level mixed and 258-level array, wrong-closer, and invalid-UTF-8-key bodies to the reference reads. | unaudited |
+| [`entry_scan_matches_the_reference_reads`][t-scan-prop] | On 2048 serialized bodies, each with up to two bytes inserted, removed, or replaced from an alphabet that includes 0x01, 0x1f, and 0xff, a scan that answers reproduces `probe_request`, `footprint_floor`, and `longest_escaped_string`. | unaudited |
+| [`entry_scan_answers_every_body_in_its_grammar`][t-scan-grammar] | Every generated body inside the scan's grammar, top-level keys and route values without escapes over arbitrary nested values, with leaf or object values under skipped keys, compact or spaced, is answered with the reference probe, floor, and longest escaped string. | unaudited |
+| [`the_entry_scan_reproduces_the_reference_entry_on_the_corpora`][t-scan-corpora] | For every frozen and supplementary corpus body, the lane probe and admission (outcome, footprint, held bytes at five capacities) through the scan equal the reference entry's, and the scan answers for more than twenty bodies. | unaudited |
+| [`quote_or_backslash_finds_the_first_match_across_the_word_prefix`][t-scan-swar] | The scan's word-at-a-time string search agrees with a byte search for every length to 48, target offset, and start, over filler bytes one off a target or holding a high bit. | unaudited |
 | [`tree_parse_witness_refuses_what_the_tree_refuses`][t-witness] | `tree_decode_parses` agrees with a `Value` parse on scalar, array, string, out-of-range, lone-surrogate, trailing, malformed, and empty bodies; refuses an object holding the raw-value token as any key wherever it sits, including the shapes the tree accepts, and shows the tree's `from_value` re-read refusing the token after another key. | unaudited |
 | [`raw_value_token_matches_serde_json`][t-token] | The pinned `RAW_VALUE_TOKEN` literal is the key a `Value` parse reads as a boxed raw document: a document string decodes to that document, a non-string or a following key is refused, a later position is an ordinary key. | unaudited |
 | [`direct_and_tree_transform_decodes_agree_on_the_corpus`][t-decode-diff] | `tree_decode_parses` implies the tree parses the body; both decodes give one request where both accept (nineteen bodies pinned); only repeated keys are tree-only; only derive-lenient shapes under an ignored field or the discriminator and retained values holding the token after another key, six of them raw-value-token shapes, are direct-only, each refused by `tree_decode_parses`; a two-page assembly decodes to the one-slice request. | unaudited |
@@ -95,8 +100,9 @@ documents timer placement only and leaves W2 invalidated.
 | [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The metered footprint covers the tree decode's heap peak, the direct decode peaks at or below it, and the direct lane's own metered count covers its peak with the values under an ignored field. | unaudited |
 | [`parse_charge_covers_escaped_text_direct_decode_peak`][t-peak-escaped] | The metered footprint covers the direct decode's peak on a 4 MiB and a 64 KiB text block holding one escape, and on the 4 MiB block without one. | unaudited |
 | [`byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`][t-cap-alloc] | A 900 KiB body whose one key holds an escape passes the byte cap allocating less than half its size. | unaudited |
-| [`a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string`][t-held] | Against a reserve that grants nothing, the metered walk that gates the direct lane is refused as transient at its first value and allocates under 64 KiB for a body holding a 4 MiB escaped text block. | unaudited |
+| [`a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string`][t-held] | Against a reserve that grants nothing and records the refused shortfall, a body holding a 4 MiB escaped text block is refused as transient at the admission's unescape charge (a shortfall over 4 MiB) and its unescaped twin at the typed decode's first value (under 64 KiB); each allocates under 64 KiB. | unaudited |
 | [`a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped`][t-prefix] | With 64 KiB of pool, a body holding a 4 MiB escaped text block is refused as transient by the up-front unescape-buffer charge and allocates under 64 KiB. | unaudited |
+| [`a_restarted_tree_decode_keeps_the_admission_unescape_charge`][t-restart-scratch] | A duplicate `mid` fails the typed decode ahead of a 4096-newline string; the restarted tree decode counts the tree lane's footprint, raw-length unescape charge included, and both entries answer alike one byte under it (the capacity-excess `invalid_params`) and at it (served). | unaudited |
 | [`a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key`][t-probe-pool] | Against a reserve that grants nothing, the handler entry refuses a sub-cap body holding a 900 KiB escaped key as transient before the lane probe reads it, allocating under 64 KiB. | unaudited |
 | [`request_observed_to_handler_ends_before_the_typed_decode`][t-observed] | A typed decode begun ten seconds before the handler is not counted in `request_observed_to_handler`. | unaudited |
 | [`decode_footprint_counts_values_and_retained_string_copies`][t-footprint] | Separators inside strings are not values; a 1 MiB text block is charged three times; a scalar-dense body's footprint is far above its wire size and string bytes are not charged as values; a cut body counts its decoded part. | unaudited |
@@ -535,22 +541,28 @@ categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L19886
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L20559
 [t-dispatch]: ../../../../crates/daemon/src/lib.rs#L29700
 [t-shape]: ../../../../crates/daemon/src/lib.rs#L35534
 [t-shape2]: ../../../../crates/daemon/src/lib.rs#L35554
 [t-envelope]: ../../../../crates/daemon/src/transform.rs#L16470
-[t-probe]: ../../../../crates/daemon/src/lib.rs#L19966
-[t-witness]: ../../../../crates/daemon/src/lib.rs#L20029
-[t-token]: ../../../../crates/daemon/src/lib.rs#L20064
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L20303
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L20457
-[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103
-[t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L179
-[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L311
-[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L285
-[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L238
-[t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L202
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L20692
+[t-scan-named]: ../../../../crates/daemon/src/lib.rs#L20787
+[t-scan-prop]: ../../../../crates/daemon/src/lib.rs#L20987
+[t-scan-grammar]: ../../../../crates/daemon/src/lib.rs#L21020
+[t-scan-corpora]: ../../../../crates/daemon/src/lib.rs#L21058
+[t-scan-swar]: ../../../../crates/daemon/src/ingress_scan.rs#L364
+[t-witness]: ../../../../crates/daemon/src/lib.rs#L21109
+[t-token]: ../../../../crates/daemon/src/lib.rs#L21144
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L21380
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L21545
+[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L108
+[t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L184
+[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L353
+[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L327
+[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L262
+[t-restart-scratch]: ../../../../crates/daemon/src/lib.rs#L21830
+[t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L207
 [t-observed]: ../../../../crates/daemon/src/lib.rs#L22466
 [t-footprint]: ../../../../crates/daemon/src/lib.rs#L20617
 [t-meter]: ../../../../crates/daemon/src/lib.rs#L20657

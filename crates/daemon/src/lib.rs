@@ -39,6 +39,7 @@ pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
+mod ingress_scan;
 
 /// Re-exports the publication path's presented-line renderer and
 /// summarizer-output validator for scripted-summary tests.
@@ -158,8 +159,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::derived_state::DerivedState;
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment, RecipeSegment};
 use crate::edit_recipe::{Keyed, Revision, RevisionAllocator};
+#[cfg(test)]
+use crate::metered_decode::RAW_VALUE_TOKEN;
 use crate::metered_decode::{
-    DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
+    DecodeFailure, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
 };
 use host_runtime::{BlockingWorkFailed, CancelSignal};
 
@@ -13079,18 +13082,19 @@ impl CompositeComponent for Handler {
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
         let received_at = Instant::now();
         let body = ctx.body.as_slice();
-        let cap_probe = match enforce_request_byte_cap(body) {
+        let scan = scan_entry(body);
+        let cap_probe = match enforce_request_byte_cap_with(body, scan.as_ref()) {
             Ok(probe) => probe,
             Err(outcome) => return settle_prepared(&ctx, outcome).await,
         };
         // The decode charges the scratch pool as it builds values; the meter holds the charges
-        // until the response has settled. The admission charge comes before the lane probe,
-        // which unescapes a sub-cap body's keys and discriminators as it reads them.
+        // until the response has settled. The admission charge comes before the reference lane
+        // probe, which unescapes a sub-cap body's keys and discriminators as it reads them.
         let meter = ResidentMeter::new(&ctx);
-        if let Err(outcome) = admit_body(body, &meter) {
+        if let Err(outcome) = admit_body_with(body, &meter, scan.as_ref()) {
             return settle_prepared(&ctx, outcome).await;
         }
-        let probe = cap_probe.or_else(|| lane_probe(body));
+        let probe = cap_probe.or_else(|| lane_probe_with(body, scan.as_ref()));
         let entry = PassEntry {
             core: &self.core,
             route: ctx.route,
@@ -13926,9 +13930,9 @@ impl HandlerCore {
     /// is charged against `meter`, and a refused charge ends the request in the lane that saw
     /// it, before any dispatch runs, so a refusal has no dispatch-side effect; both lanes count
     /// the same footprint for the same bytes, so they refuse the same bodies. An unpaged
-    /// transform body decodes typed straight from its bytes when [`tree_decode_parses`]
-    /// accepts it. Every other body, and a transform body the typed decode cannot decode,
-    /// decodes through the `Value` tree, so a decode error is always the one the tree decode
+    /// transform body decodes typed straight from its bytes, once. Every other body, and a
+    /// transform body the typed decode cannot decode, decodes through the `Value` tree on the
+    /// bytes the typed prefix holds, so a decode error is always the one the tree decode
     /// produces and the two lanes cannot disagree on it.
     async fn dispatch_body(
         &self,
@@ -13944,21 +13948,14 @@ impl HandlerCore {
             .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
         {
             let decode_started_at = Instant::now();
-            match direct_lane_gate(body, meter) {
-                Ok(true) => match decode_metered::<TransformRequest>(body, meter) {
-                    Ok(parsed) => {
-                        let outcome = self
-                            .handle_transform_direct(entry, parsed, decode_started_at)
-                            .await;
-                        return (BodyLane::Direct, outcome);
-                    }
-                    Err(DecodeFailure::Refused(refusal)) => {
-                        return (BodyLane::Direct, resident_refusal(refusal));
-                    }
-                    // The tree decode reuses the bytes the failed decode holds.
-                    Err(DecodeFailure::Invalid(_)) => meter.restart(),
-                },
-                Ok(false) => {}
+            match direct_typed_decode(body, meter) {
+                Ok(Some(parsed)) => {
+                    let outcome = self
+                        .handle_transform_direct(entry, parsed, decode_started_at)
+                        .await;
+                    return (BodyLane::Direct, outcome);
+                }
+                Ok(None) => {}
                 Err(refusal) => return (BodyLane::Direct, resident_refusal(refusal)),
             }
         }
@@ -16577,50 +16574,71 @@ fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
 
 /// The probe that selects the lane for an admitted body. Only a discriminator the body
 /// spells literally selects the direct lane, so a body whose bytes never spell `transform`
-/// cannot reach it; the walk is skipped for such a body and a facade body pays only its
-/// `Value` parse, as before the direct lane.
+/// cannot reach it, and a facade body pays only its `Value` parse.
 fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
-    memchr::memmem::find(body, b"transform")
-        .is_some()
-        .then(|| probe_request(body))?
+    spells_transform(body).then(|| probe_request(body))?
 }
 
-/// The direct lane requires `true` so a body the tree refuses never decodes typed; the
-/// dispatch runs it through [`direct_lane_gate`], the tests call it bare.
+fn spells_transform(body: &[u8]) -> bool {
+    memchr::memmem::find(body, b"transform").is_some()
+}
+
+/// Reads the lane probe from the entry scan when one answered, and through [`lane_probe`]
+/// otherwise. [`scan_entry`] answers only for a body over the facade cap, whose probe the byte
+/// cap already returned, or one that [`spells_transform`], so the scan's probe is the one
+/// `lane_probe` would read.
+fn lane_probe_with(
+    body: &[u8],
+    scan: Option<&ingress_scan::BodyScan<'_>>,
+) -> Option<RequestEntryProbe> {
+    match scan {
+        Some(scan) => Some(RequestEntryProbe::scanned(scan)),
+        None => lane_probe(body),
+    }
+}
+
+/// The one pass that answers the byte cap's probe, the admission scans, and the lane probe for
+/// a body the reference reads would each parse: one over the facade cap, or one that spells
+/// `transform`. `None` sends each read to its reference. A body over the transform cap is
+/// refused by its length whatever its class, so it takes only the reference probe's pass.
+fn scan_entry(body: &[u8]) -> Option<ingress_scan::BodyScan<'_>> {
+    if body.len() > MAX_TRANSFORM_FRAME_BYTES
+        || (body.len() <= MAX_FACADE_FRAME_BYTES && !spells_transform(body))
+    {
+        return None;
+    }
+    ingress_scan::scan(body)
+}
+
+/// Whether the tree's parse rules accept `body`, the oracle the lane tests hold the direct
+/// lane's typed decode to.
 #[cfg(test)]
 fn tree_decode_parses(body: &[u8]) -> bool {
-    serde_json::from_slice::<SkippedValue>(body).is_ok()
+    serde_json::from_slice::<TreeParseWitness>(body).is_ok()
 }
 
-/// The tree-parse walk charged against `meter`: `Ok(true)` admits the body to the typed
-/// decode, which starts over on the bytes the walk holds; `Ok(false)` sends it to the tree
-/// decode the same way; `Err` is the walk's refused charge, taken before the value that
-/// needed it was built, so a held pool stops the walk at its first value.
-fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refusal> {
-    if !may_name_raw_value_token(body) {
-        return Ok(true);
+/// The direct lane's one typed tokenization of an unpaged transform body, charged against
+/// `meter`: `Ok(Some)` is the request, `Ok(None)` a body the typed decode cannot decode, which
+/// starts the tree decode over on the bytes the typed prefix holds, and `Err` the refused
+/// charge, taken before the value that needed it was built.
+fn direct_typed_decode(
+    body: &[u8],
+    meter: &ResidentMeter<'_>,
+) -> Result<Option<TransformRequest>, Refusal> {
+    match metered_decode::decode_metered_typed_direct::<TransformRequest>(body, meter) {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(DecodeFailure::Refused(refusal)) => Err(refusal),
+        Err(DecodeFailure::Invalid(_)) => {
+            meter.restart();
+            Ok(None)
+        }
     }
-    let walked = match decode_metered::<SkippedValue>(body, meter) {
-        Ok(SkippedValue) => true,
-        Err(DecodeFailure::Invalid(_)) => false,
-        Err(DecodeFailure::Refused(refusal)) => return Err(refusal),
-    };
-    meter.restart();
-    Ok(walked)
 }
 
-/// Conservatively identifies a body that may spell [`RAW_VALUE_TOKEN`]: the scan accepts the
-/// literal token bytes or a `\u00` prefix followed by a digit from `2` through `7`, including
-/// partial escape sequences. Matching bodies undergo the metered gate walk.
-fn may_name_raw_value_token(body: &[u8]) -> bool {
-    memchr::memmem::find(body, RAW_VALUE_TOKEN.as_bytes()).is_some()
-        || memchr::memmem::find_iter(body, b"\\u00")
-            .any(|at| matches!(body.get(at + 4), Some(b'2'..=b'7')))
-}
-
-/// The admission steps `dispatch_body` runs for an unpaged transform body before its typed
-/// decode, against `reserve`, for the allocation tests: `Ok(walked)` is the gate's verdict
-/// and `Err` the refusal the request would end with.
+/// The admission steps and the typed decode `dispatch_body` runs for an unpaged transform
+/// body, against `reserve`, for the allocation tests: `Ok(true)` for a body the direct lane
+/// serves, `Ok(false)` for one that restarts into the tree decode, and `Err` the refusal the
+/// request would end with.
 #[cfg(feature = "test-support")]
 pub fn direct_lane_admission_for_test(
     body: &[u8],
@@ -16628,7 +16646,9 @@ pub fn direct_lane_admission_for_test(
 ) -> Result<bool, PreparedOutcome> {
     let meter = ResidentMeter::new(reserve);
     admit_body(body, &meter)?;
-    direct_lane_gate(body, &meter).map_err(resident_refusal)
+    direct_typed_decode(body, &meter)
+        .map(|parsed| parsed.is_some())
+        .map_err(resident_refusal)
 }
 
 /// Which decode a body went through.
@@ -16719,55 +16739,57 @@ impl<'de> Deserialize<'de> for ProbeKey {
 /// An object holding [`RAW_VALUE_TOKEN`] as any key is refused: the tree lane reads it as a
 /// boxed raw document when the token is the first key it sees, and a retained `Value`
 /// re-read from the sorted tree sees it first wherever the body placed it.
-struct SkippedValue;
+#[cfg(test)]
+struct TreeParseWitness;
 
-impl<'de> Deserialize<'de> for SkippedValue {
+#[cfg(test)]
+impl<'de> Deserialize<'de> for TreeParseWitness {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::{MapAccess, SeqAccess, Visitor};
 
         struct SkipVisitor;
 
         impl<'de> Visitor<'de> for SkipVisitor {
-            type Value = SkippedValue;
+            type Value = TreeParseWitness;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("any JSON value")
             }
 
             fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                while seq.next_element::<SkippedValue>()?.is_some() {}
-                Ok(SkippedValue)
+                while seq.next_element::<TreeParseWitness>()?.is_some() {}
+                Ok(TreeParseWitness)
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                while map.next_key::<SkippedKey>()?.is_some() {
-                    map.next_value::<SkippedValue>()?;
+                while map.next_key::<TreeParseWitnessKey>()?.is_some() {
+                    map.next_value::<TreeParseWitness>()?;
                 }
-                Ok(SkippedValue)
+                Ok(TreeParseWitness)
             }
         }
 
@@ -16776,16 +16798,18 @@ impl<'de> Deserialize<'de> for SkippedValue {
 }
 
 /// A key of a skipped object; [`RAW_VALUE_TOKEN`] in any position is an error.
-struct SkippedKey;
+#[cfg(test)]
+struct TreeParseWitnessKey;
 
-impl<'de> Deserialize<'de> for SkippedKey {
+#[cfg(test)]
+impl<'de> Deserialize<'de> for TreeParseWitnessKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Visitor;
 
         struct KeyVisitor;
 
         impl Visitor<'_> for KeyVisitor {
-            type Value = SkippedKey;
+            type Value = TreeParseWitnessKey;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("an object key other than the raw-value token")
@@ -16795,7 +16819,7 @@ impl<'de> Deserialize<'de> for SkippedKey {
                 if value == RAW_VALUE_TOKEN {
                     return Err(E::custom("raw-value token names an object key"));
                 }
-                Ok(SkippedKey)
+                Ok(TreeParseWitnessKey)
             }
         }
 
@@ -16804,6 +16828,15 @@ impl<'de> Deserialize<'de> for SkippedKey {
 }
 
 impl RequestEntryProbe {
+    /// The probe `probe_request` reads from a body the entry scan accounted for.
+    fn scanned(scan: &ingress_scan::BodyScan<'_>) -> Self {
+        Self {
+            method: RouteName::scanned(scan.method),
+            kind: RouteName::scanned(scan.kind),
+            page_fields: scan.page_fields,
+        }
+    }
+
     /// The discriminator dispatch resolves: `method` when it is a string, else `kind`.
     fn route(&self) -> &RouteName {
         match self.method {
@@ -16851,6 +16884,14 @@ enum RouteName {
 
 impl RouteName {
     const MAX_ROUTE_NAME_BYTES: usize = 64;
+
+    fn scanned(route: ingress_scan::ScannedRoute<'_>) -> Self {
+        match route {
+            ingress_scan::ScannedRoute::Absent => RouteName::Absent,
+            ingress_scan::ScannedRoute::Named(name) => RouteName::Named(name.to_owned()),
+            ingress_scan::ScannedRoute::Overlong => RouteName::Overlong,
+        }
+    }
 
     fn short(&self) -> Option<&str> {
         match self {
@@ -16935,17 +16976,41 @@ impl<'de> Deserialize<'de> for RouteName {
 /// unescape buffer for its longest escaped string is charged next, so the pool refuses
 /// before serde_json grows that buffer for the lane probe or either decode.
 fn admit_body(body: &[u8], meter: &ResidentMeter<'_>) -> Result<(), PreparedOutcome> {
+    admit_body_with(body, meter, None)
+}
+
+/// Runs [`admit_body`]'s steps on the value count and the longest escaped string the entry
+/// scan measured, when one answered.
+fn admit_body_with(
+    body: &[u8],
+    meter: &ResidentMeter<'_>,
+    scan: Option<&ingress_scan::BodyScan<'_>>,
+) -> Result<(), PreparedOutcome> {
     if let Some(refusal) = meter.refusal() {
         return Err(resident_refusal(refusal));
     }
     if !meter.admit_once() {
         return Ok(());
     }
-    if footprint_floor_exceeds(body, meter.capacity()) {
-        return Err(request_too_large_error());
-    }
+    let capacity = meter.capacity();
+    let longest_escaped = match scan {
+        // The scan counts one value per start byte, so its count never exceeds the length bound
+        // `footprint_floor_exceeds` checks first.
+        Some(scan) => {
+            if metered_decode::floor_of_values(scan.values) > capacity {
+                return Err(request_too_large_error());
+            }
+            scan.longest_escaped
+        }
+        None => {
+            if footprint_floor_exceeds(body, capacity) {
+                return Err(request_too_large_error());
+            }
+            metered_decode::longest_escaped_string(body)
+        }
+    };
     meter
-        .reserve_unescape_scratch(body)
+        .reserve_unescape_scratch_of(longest_escaped)
         .map_err(resident_refusal)
 }
 
@@ -16962,7 +17027,7 @@ fn resident_refusal(refusal: Refusal) -> PreparedOutcome {
 /// Whether the byte cap admits `body`; the step of `Handler::handle` before the metered decode.
 #[cfg(feature = "test-support")]
 pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
-    enforce_request_byte_cap(body).is_ok()
+    enforce_request_byte_cap_with(body, scan_entry(body).as_ref()).is_ok()
 }
 
 /// Derives a native profile's CK from `native` as a transform pass does, for the allocation
@@ -16990,10 +17055,13 @@ pub fn handle_entry_for_test(
     body: &[u8],
     reserve: &dyn metered_decode::ResidentReserve,
 ) -> Result<bool, PreparedOutcome> {
-    let cap_probe = enforce_request_byte_cap(body)?;
+    let scan = scan_entry(body);
+    let cap_probe = enforce_request_byte_cap_with(body, scan.as_ref())?;
     let meter = ResidentMeter::new(reserve);
-    admit_body(body, &meter)?;
-    Ok(cap_probe.or_else(|| lane_probe(body)).is_some())
+    admit_body_with(body, &meter, scan.as_ref())?;
+    Ok(cap_probe
+        .or_else(|| lane_probe_with(body, scan.as_ref()))
+        .is_some())
 }
 
 /// A unit produced no outcome: its thread panicked (the payload reached stderr only as the
@@ -17038,17 +17106,30 @@ fn transform_admission_error() -> PreparedOutcome {
     }
 }
 
-/// A body larger than `MAX_FACADE_FRAME_BYTES` without a transform-class probe is refused.
-/// The probe read for the class is returned so dispatch does not read it again. A body at
-/// or under that cap is admitted by its length alone: the cap runs before the resident
-/// reservation, and the probe's unescape buffer for a long escaped key would otherwise be
-/// the first body-proportional allocation outside admission control.
+/// The byte cap on the reference probe alone, which the tests hold the scanned cap to.
+#[cfg(test)]
 fn enforce_request_byte_cap(body: &[u8]) -> Result<Option<RequestEntryProbe>, PreparedOutcome> {
+    enforce_request_byte_cap_with(body, None)
+}
+
+/// A body larger than `MAX_FACADE_FRAME_BYTES` without a transform-class probe is refused.
+/// The probe read for the class is returned so dispatch does not read it again; it is the entry
+/// scan's when one answered, and `probe_request`'s otherwise. A body at or under that cap is
+/// admitted by its length alone: the cap runs before the resident reservation, and the
+/// reference probe's unescape buffer for a long escaped key would otherwise be the first
+/// body-proportional allocation outside admission control.
+fn enforce_request_byte_cap_with(
+    body: &[u8],
+    scan: Option<&ingress_scan::BodyScan<'_>>,
+) -> Result<Option<RequestEntryProbe>, PreparedOutcome> {
     let body_len = body.len();
     if body_len <= MAX_FACADE_FRAME_BYTES {
         return Ok(None);
     }
-    let probe = probe_request(body);
+    let probe = match scan {
+        Some(scan) => Some(RequestEntryProbe::scanned(scan)),
+        None => probe_request(body),
+    };
     let transform_class = probe
         .as_ref()
         .is_some_and(RequestEntryProbe::is_transform_class);
@@ -18485,7 +18566,8 @@ mod tests {
 
     use super::*;
     use crate::metered_decode::{
-        RETAINED_STRING_COPIES, ResidentReserve, footprint_floor, footprint_of, shortfall_count,
+        RETAINED_STRING_COPIES, ResidentReserve, floor_of_values, footprint_floor, footprint_of,
+        longest_escaped_string, shortfall_count,
     };
     use std::collections::{HashMap, VecDeque};
 
@@ -20551,6 +20633,59 @@ mod tests {
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
         );
+        // Over the facade cap, the probe the entry scan reads decides the cap as the reference
+        // probe does, on every body the scan answers for.
+        let shape = |capped: Result<Option<RequestEntryProbe>, PreparedOutcome>| {
+            capped
+                .map(|probe| probe.as_ref().map(probe_shape))
+                .map_err(comparable_outcome)
+        };
+        let bodies: [(&[u8], bool); 14] = [
+            (&pad("transform", "kind", two_mib), true),
+            (&pad("state_sync", "method", two_mib), true),
+            (&pad("kernel.artifact.ingest.page", "method", two_mib), true),
+            (
+                &pad("kernel.artifact.ingest.begin", "method", two_mib),
+                true,
+            ),
+            (widened.as_bytes(), true),
+            (fallback.as_bytes(), false),
+            (&pad("eidnara_memory", "method", two_mib), true),
+            (&vec![b'x'; two_mib], false),
+            (structured.as_bytes(), false),
+            (over_deep.as_bytes(), true),
+            (long_method.as_bytes(), true),
+            (&exact, true),
+            // Over the transform cap the length alone refuses the body, so the scan declines it
+            // and the reference probe is its one pass.
+            (&over, false),
+            (&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES), false),
+        ];
+        for (index, (body, answers)) in bodies.into_iter().enumerate() {
+            let scan = scan_entry(body);
+            assert_eq!(scan.is_some(), answers, "body {index}");
+            assert_eq!(
+                shape(enforce_request_byte_cap_with(body, scan.as_ref())),
+                shape(enforce_request_byte_cap(body)),
+                "body {index}"
+            );
+            // The scanned admission refuses and charges as the reference does on either side of
+            // the floor.
+            let floor = footprint_floor(body);
+            for capacity in [floor, floor.saturating_sub(1), 1 << 30] {
+                let admit = |scan| {
+                    let pool = TestPool::with_capacity(capacity);
+                    let meter = ResidentMeter::new(&pool);
+                    let outcome = admit_body_with(body, &meter, scan).map_err(comparable_outcome);
+                    (outcome, meter.needed(), meter.charged())
+                };
+                assert_eq!(
+                    admit(scan.as_ref()),
+                    admit(None),
+                    "body {index} at capacity {capacity}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -20610,8 +20745,362 @@ mod tests {
         assert!(lane_probe(escaped.as_bytes()).is_some());
         assert!(
             lane_probe(br#"{"kind":"tr\u0061nsform"}"#).is_none(),
-            "no literal `transform`, no walk"
+            "no literal `transform`, no direct decode"
         );
+    }
+
+    /// The reference reads of a body, as the entry scan must reproduce them.
+    fn reference_entry_reads(body: &[u8]) -> (Option<String>, usize, usize) {
+        (
+            probe_request(body).as_ref().map(probe_shape),
+            footprint_floor(body),
+            longest_escaped_string(body),
+        )
+    }
+
+    fn scanned_entry_reads(scan: &ingress_scan::BodyScan<'_>) -> (Option<String>, usize, usize) {
+        (
+            Some(probe_shape(&RequestEntryProbe::scanned(scan))),
+            floor_of_values(scan.values),
+            scan.longest_escaped,
+        )
+    }
+
+    fn probe_shape(probe: &RequestEntryProbe) -> String {
+        let route = |name: &RouteName| match name {
+            RouteName::Absent => "absent".to_owned(),
+            RouteName::Named(name) => format!("named {name:?}"),
+            RouteName::Escaped(name) => format!("escaped {name:?}"),
+            RouteName::Overlong => "overlong".to_owned(),
+        };
+        format!(
+            "method {} kind {} pages {}",
+            route(&probe.method),
+            route(&probe.kind),
+            probe.page_fields
+        )
+    }
+
+    /// The scan answers for compact transform bodies and reproduces each reference read; every
+    /// shape outside its grammar is left to the references, which still decide it.
+    #[test]
+    fn entry_scan_answers_as_the_reference_reads_or_not_at_all() {
+        let answered = [
+            r#"{"method":"transform","kind":"transform","session_id":"s","native_messages":[{"a":[1,-2.5e+3,true,false,null,"x\"y\\z\u00e9\n"]}]}"#,
+            r#"{"kind":"transform","boundary":null,"x":{},"y":[],"z":[{}],"w":"é→日本"}"#,
+            r#"{"method":"status","method":"transform"}"#,
+            r#"{"method":null,"kind":"transform","transform_page_id":"p"}"#,
+            r#" { "kind" : "transform" , "n" : [ 0 , 1.0 , -0 , 10E-2 ] } "#,
+            r#"{}"#,
+        ];
+        for body in answered {
+            let scan = ingress_scan::scan(body.as_bytes()).unwrap_or_else(|| panic!("{body}"));
+            assert_eq!(
+                scanned_entry_reads(&scan),
+                reference_entry_reads(body.as_bytes()),
+                "{body}"
+            );
+        }
+        // The route-name bound is in bytes: 64 ASCII or 32 two-byte letters are kept by name,
+        // 65 ASCII or 33 two-byte letters are overlong.
+        for (name, kept) in [
+            ("m".repeat(64), true),
+            ("\u{e9}".repeat(32), true),
+            ("m".repeat(65), false),
+            ("\u{e9}".repeat(33), false),
+        ] {
+            let body = format!(r#"{{"method":"{name}","kind":"transform"}}"#);
+            let scan = ingress_scan::scan(body.as_bytes()).unwrap();
+            let route = if kept {
+                ingress_scan::ScannedRoute::Named(&name)
+            } else {
+                ingress_scan::ScannedRoute::Overlong
+            };
+            assert_eq!(scan.method, route, "{name}");
+            assert_eq!(
+                scanned_entry_reads(&scan),
+                reference_entry_reads(body.as_bytes()),
+                "{name}"
+            );
+        }
+        let nested = |depth: usize| {
+            format!(
+                r#"{{"kind":"transform","x":{}{}}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        // Every third level is an object across the depth stack's whole range, a period no
+        // power of two divides, so a closer of the wrong kind would pass if a depth were misread.
+        let mixed = |depth: usize, swap: Option<usize>| {
+            let mut body = String::from(r#"{"kind":"transform","x":"#);
+            for level in 0..depth {
+                body.push_str(if level % 3 == 0 { r#"{"k":"# } else { "[" });
+            }
+            body.push('0');
+            for level in (0..depth).rev() {
+                let object = level % 3 == 0;
+                body.push(if object != (swap == Some(level)) {
+                    '}'
+                } else {
+                    ']'
+                });
+            }
+            body.push('}');
+            body
+        };
+        for body in [nested(256), nested(257)]
+            .into_iter()
+            .chain([63, 64, 65, 127, 128, 129, 255, 256].map(|depth| mixed(depth, None)))
+        {
+            let scan = ingress_scan::scan(body.as_bytes()).unwrap_or_else(|| panic!("{body}"));
+            assert_eq!(
+                scanned_entry_reads(&scan),
+                reference_entry_reads(body.as_bytes()),
+                "{body}"
+            );
+        }
+        let left_to_references = [
+            "{\"kind\":\"transform\",\n\"x\":1}".to_owned(),
+            "{\"kind\":\"tr\u{1}ansform\"}".to_owned(),
+            "{\"kind\":\"tr\u{1f}ansform\"}".to_owned(),
+            // A control byte inside a string, in the chunked part of the body and at the last
+            // byte of the first chunk.
+            format!(
+                "{{\"kind\":\"transform\",\"x\":\"{}\u{1}\"}}",
+                "a".repeat(80)
+            ),
+            format!(
+                "{{\"kind\":\"transform\",\"x\":\"{}\u{1}{}\"}}",
+                "a".repeat(37),
+                "a".repeat(40)
+            ),
+            mixed(257, None),
+            mixed(100, Some(63)),
+            mixed(100, Some(64)),
+            mixed(200, Some(128)),
+            r#"{"kind":"tr\u0061nsform"}"#.to_owned(),
+            r#"{"\u006bind":"transform"}"#.to_owned(),
+            r#"{"method":1,"kind":"transform"}"#.to_owned(),
+            r#"{"method":[],"kind":"transform"}"#.to_owned(),
+            r#"{"kind":"transform","x":"\x"}"#.to_owned(),
+            r#"{"kind":"transform","x":"\u12G4"}"#.to_owned(),
+            r#"{"kind":"transform",}"#.to_owned(),
+            r#"{"kind":"transform"} x"#.to_owned(),
+            r#"["transform"]"#.to_owned(),
+            r#"{"kind":"transform""#.to_owned(),
+            nested(258),
+        ];
+        for body in &left_to_references {
+            assert!(ingress_scan::scan(body.as_bytes()).is_none(), "{body}");
+        }
+        // Each of these malformed numbers is refused by the reference probe too, so the scan's
+        // decline is the only answer that agrees with it.
+        let numbers = ["01", "1.", "1.e5", "1e", "1e+", "-", "-.5", "+1", ".5"]
+            .map(|number| format!(r#"{{"kind":"transform","x":{number}}}"#));
+        for body in &numbers {
+            assert!(ingress_scan::scan(body.as_bytes()).is_none(), "{body}");
+        }
+        for body in numbers.iter().cloned().chain([
+            mixed(100, Some(63)),
+            mixed(100, Some(64)),
+            mixed(200, Some(128)),
+        ]) {
+            assert!(probe_request(body.as_bytes()).is_none(), "{body}");
+        }
+        let invalid_key = b"{\"k\xffind\":\"transform\"}";
+        assert!(ingress_scan::scan(invalid_key).is_none());
+        assert!(probe_request(invalid_key).is_none());
+    }
+
+    /// A member value under a key the scan skips: a leaf or a whole nested object.
+    fn entry_member_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        prop_oneof![
+            entry_json(),
+            Just(Value::Null),
+            any::<i64>().prop_map(Value::from),
+            any::<f64>()
+                .prop_filter("finite", |value| value.is_finite())
+                .prop_map(Value::from),
+            "[a-z\"\\\\ \u{e9}]{0,8}".prop_map(Value::String),
+        ]
+    }
+
+    fn entry_json() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let text = prop_oneof![
+            proptest::sample::select(vec![
+                "",
+                "transform",
+                "status",
+                "a\"b\\c",
+                "x\ny\t\u{1}",
+                "é→日本",
+                RAW_VALUE_TOKEN,
+            ])
+            .prop_map(str::to_owned),
+            "[a-z\"\\\\/ \n\u{e9}]{0,12}",
+            (1usize..80).prop_map(|len| "m".repeat(len)),
+        ];
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::from),
+            any::<u64>().prop_map(Value::from),
+            any::<f64>()
+                .prop_filter("finite", |value| value.is_finite())
+                .prop_map(Value::from),
+            text.clone().prop_map(Value::String),
+        ];
+        let key = prop_oneof![
+            proptest::sample::select(vec![
+                "method",
+                "kind",
+                "transform_page_id",
+                "transform_page_complete",
+                "native_messages",
+                "é",
+                "a\"b",
+            ])
+            .prop_map(str::to_owned),
+            text,
+        ];
+        let value = leaf.prop_recursive(4, 48, 5, move |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..5).prop_map(Value::Array),
+                proptest::collection::btree_map("[a-z\"\\\\]{0,4}", inner, 0..5)
+                    .prop_map(|map| Value::Object(map.into_iter().collect())),
+            ]
+        });
+        proptest::collection::btree_map(key, value, 0..7)
+            .prop_map(|map| Value::Object(map.into_iter().collect()))
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2048))]
+
+        /// On serialized bodies and on bodies with bytes inserted, removed, or replaced, a scan
+        /// that answers reproduces the reference probe, the footprint floor, and the longest
+        /// escaped string.
+        #[test]
+        fn entry_scan_matches_the_reference_reads(
+            value in entry_json(),
+            edits in proptest::collection::vec(
+                (
+                    proptest::prelude::any::<proptest::sample::Index>(),
+                    0u8..3,
+                    proptest::sample::select(b"\"\\{}[],: \nu0e-.tfn\x01\x1f\xffx".to_vec()),
+                ),
+                0..3,
+            ),
+        ) {
+            use proptest::prelude::*;
+            let mut body = serde_json::to_vec(&value).unwrap();
+            for (at, edit, byte) in edits {
+                let at = at.index(body.len() + 1);
+                match edit {
+                    0 => body.insert(at, byte),
+                    1 if at < body.len() => {
+                        body.remove(at);
+                    }
+                    _ if at < body.len() => body[at] = byte,
+                    _ => {}
+                }
+            }
+            if let Some(scan) = ingress_scan::scan(&body) {
+                prop_assert_eq!(scanned_entry_reads(&scan), reference_entry_reads(&body));
+            }
+        }
+
+        /// A body inside the scan's grammar, top-level keys and route values spelled without
+        /// escapes over arbitrary nested values, is always answered, and answered as the
+        /// reference reads answer it.
+        #[test]
+        fn entry_scan_answers_every_body_in_its_grammar(
+            members in proptest::collection::vec(
+                (
+                    proptest::sample::select(vec![
+                        "method", "kind", "transform_page_id", "transform_page_total",
+                        "native_messages", "\u{e9}", "boundary",
+                    ]),
+                    entry_member_value(),
+                    proptest::sample::select(vec![
+                        "\"transform\"", "\"status\"", "null", "true", "false", "\"\u{e9}\u{65e5}\"",
+                    ]),
+                ),
+                0..7,
+            ),
+            spaced in proptest::bool::ANY,
+        ) {
+            use proptest::prelude::*;
+            let space = if spaced { " " } else { "" };
+            let members: Vec<String> = members
+                .into_iter()
+                .map(|(key, value, route)| {
+                    let value = match key {
+                        "method" | "kind" => route.to_owned(),
+                        _ => serde_json::to_string(&value).unwrap(),
+                    };
+                    format!("{space}\"{key}\"{space}:{space}{value}{space}")
+                })
+                .collect();
+            let body = format!("{space}{{{}}}{space}", members.join(",")).into_bytes();
+            let scan = ingress_scan::scan(&body);
+            prop_assert!(scan.is_some());
+            prop_assert_eq!(scanned_entry_reads(&scan.unwrap()), reference_entry_reads(&body));
+        }
+    }
+
+    /// Through the entry the handler runs, every corpus body reaches the same byte-cap result,
+    /// admission outcome, held footprint, and lane probe whether the scan answers or not.
+    #[test]
+    fn the_entry_scan_reproduces_the_reference_entry_on_the_corpora() {
+        let bodies = transform_decode_corpus().into_iter().chain(
+            native_and_token_corpus()
+                .into_iter()
+                .map(|(name, body, _)| (name, body)),
+        );
+        let mut answered = 0;
+        for (name, body) in bodies {
+            let scan = scan_entry(&body);
+            answered += usize::from(scan.is_some());
+            let cap = |scan| {
+                enforce_request_byte_cap_with(&body, scan)
+                    .map(|probe| probe.as_ref().map(probe_shape))
+                    .map_err(comparable_outcome)
+            };
+            assert_eq!(cap(scan.as_ref()), cap(None), "{name}: byte cap");
+            assert_eq!(
+                lane_probe_with(&body, scan.as_ref())
+                    .as_ref()
+                    .map(probe_shape),
+                lane_probe(&body).as_ref().map(probe_shape),
+                "{name}: lane probe"
+            );
+            let footprint = footprint_of(&body);
+            let floor = footprint_floor(&body);
+            for capacity in [
+                footprint,
+                footprint.saturating_sub(1),
+                floor,
+                floor.saturating_sub(1),
+                1 << 30,
+            ] {
+                let admit = |scan| {
+                    let pool = TestPool::with_capacity(capacity);
+                    let meter = ResidentMeter::new(&pool);
+                    let outcome = admit_body_with(&body, &meter, scan).map_err(comparable_outcome);
+                    (outcome, meter.needed(), meter.charged())
+                };
+                assert_eq!(
+                    admit(scan.as_ref()),
+                    admit(None),
+                    "{name} at capacity {capacity}"
+                );
+            }
+        }
+        assert!(answered > 20, "the scan answered {answered} corpus bodies");
     }
 
     /// The witness refuses exactly what a `Value` parse refuses, plus an object holding the
@@ -20877,62 +21366,16 @@ mod tests {
         serde_json::from_slice::<TransformRequest>(body).map_err(|error| error.to_string())
     }
 
-    #[test]
-    fn the_gate_admits_without_its_walk_only_what_the_tree_decodes_alike() {
-        let reserve = metered_decode::unbounded_reserve();
-        let mut admitted = 0;
-        for (name, body) in &transform_decode_corpus() {
-            if may_name_raw_value_token(body) {
-                continue;
-            }
-            assert!(
-                !name.contains("raw-value token"),
-                "{name}: a token body walks"
-            );
-            let meter = ResidentMeter::new(&reserve);
-            let Ok(direct) = decode_metered::<TransformRequest>(body, &meter) else {
-                continue;
-            };
-            admitted += 1;
-            let tree = tree_decode(body).unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert_eq!(
-                serde_json::to_value(&direct).unwrap(),
-                serde_json::to_value(&tree).unwrap(),
-                "{name}"
-            );
-        }
-        assert!(
-            admitted > 10,
-            "{admitted} corpus bodies decode on the direct lane"
-        );
-        for spelling in [
-            RAW_VALUE_TOKEN.to_string(),
-            RAW_VALUE_TOKEN.replacen('$', "\\u0024", 1),
-            RAW_VALUE_TOKEN.replacen('R', "\\u0052", 1),
-            RAW_VALUE_TOKEN.replacen('e', "\\u0065", 1),
-            RAW_VALUE_TOKEN.replacen(':', "\\u003A", 1),
-            RAW_VALUE_TOKEN.replacen('_', "\\u005f", 1),
-        ] {
-            let body = format!(r#"{{"kind":"transform","x":{{"{spelling}":1}}}}"#);
-            let key: Value = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
-            assert_eq!(key, RAW_VALUE_TOKEN, "{spelling}");
-            assert!(may_name_raw_value_token(body.as_bytes()), "{spelling}");
-        }
-        for text in [r#""\u001b[0m\n\t\"""#, r#""\ud83d\ude00""#, r#""plain""#] {
-            let body = format!(r#"{{"kind":"transform","x":{text}}}"#);
-            assert!(!may_name_raw_value_token(body.as_bytes()), "{text}");
-        }
-    }
-
     /// Where both decodes accept a body they decode it to the same request. The two
     /// decodes differ in acceptance on exactly two shapes, and the handler keeps both off
     /// the direct lane: a repeated key in a derived struct, top-level or nested, which the
     /// derive refuses and the tree keeps last-wins (the direct lane falls back to the tree
     /// decode), and a shape under an ignored field that the derive skips without the tree's
     /// checks (nesting past the depth limit, a number out of range, a lone surrogate, invalid
-    /// UTF-8, an object opened by the raw-value token), which `tree_decode_parses` refuses
-    /// first. A body assembled from pages decodes to the same request as the same body in
-    /// one slice.
+    /// UTF-8, an object opened by the raw-value token). The direct lane's metered typed decode
+    /// refuses each of the latter, so the body restarts into the tree decode;
+    /// `tree_decode_parses` is the oracle for the tree's refusal. A body assembled from pages
+    /// decodes to the same request as the same body in one slice.
     #[test]
     fn direct_and_tree_transform_decodes_agree_on_the_corpus() {
         let corpus = transform_decode_corpus();
@@ -21025,7 +21468,16 @@ mod tests {
                 .unwrap();
             assert!(
                 !tree_decode_parses(body),
-                "{name}: the witness refuses the body before the direct decode can see it"
+                "{name}: the tree refuses the body"
+            );
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            assert!(
+                matches!(
+                    metered_decode::decode_metered_typed_direct::<TransformRequest>(body, &meter),
+                    Err(DecodeFailure::Invalid(_))
+                ),
+                "{name}: the direct lane's typed decode refuses the body, so it restarts"
             );
         }
 
@@ -21148,12 +21600,325 @@ mod tests {
         );
     }
 
+    /// The native-only bodies and the raw-value token shapes the frozen corpus leaves out, each
+    /// with the lane it takes: a native window decodes on the direct lane, and a body that holds
+    /// the token anywhere, or a duplicate key, restarts into the tree lane.
+    fn native_and_token_corpus() -> Vec<(&'static str, Vec<u8>, BodyLane)> {
+        let native = |profile: &str, window: Value| {
+            json!({
+                "kind": "transform",
+                "boundary": null,
+                "base_revision": "test-base",
+                "serializer_profile": profile,
+                "session_id": "ses",
+                "render_config": "cfg0",
+                "native_messages": window,
+            })
+        };
+        let opencode = json!(opencode_native_window(&[
+            ck("m1", 1, "hello"),
+            ck("m2", 2, "there")
+        ]));
+        let pi = json!([{ "id": "1a2b3c4d", "message": { "role": "user", "content": "hi", "timestamp": 1 } }]);
+        let token = RAW_VALUE_TOKEN;
+        let text = |value: &Value| serde_json::to_string(value).unwrap();
+        let with_leading_key = |body: &Value, key: &str, value: &str| {
+            format!("{{\"{key}\":{value},{}", &text(body)[1..]).into_bytes()
+        };
+        let with_trailing_key = |body: &Value, key: &str, value: &str| {
+            let body = text(body);
+            format!("{},\"{key}\":{value}}}", &body[..body.len() - 1]).into_bytes()
+        };
+        let opencode_body = native("opencode-aisdk", opencode.clone());
+        let mut token_first_in_message = opencode.clone();
+        token_first_in_message[0] = json!({ token: "x" });
+        let mut token_later_in_message = opencode.clone();
+        token_later_in_message[0][token] = json!(1);
+        let mut token_value = opencode_body.clone();
+        token_value["render_config"] = json!(token);
+        let duplicate = {
+            let body = text(&opencode_body);
+            body.replacen(
+                "\"render_config\":\"cfg0\"",
+                "\"render_config\":\"cfg1\",\"render_config\":\"cfg0\"",
+                1,
+            )
+            .into_bytes()
+        };
+        let escaped_token_key =
+            with_leading_key(&opencode_body, "$serde_json::private::Raw\\u0056alue", "1");
+        vec![
+            (
+                "escaped raw token as a key",
+                escaped_token_key,
+                BodyLane::Tree,
+            ),
+            (
+                "native opencode window",
+                text(&opencode_body).into_bytes(),
+                BodyLane::Direct,
+            ),
+            (
+                "native pi window",
+                text(&native("pi", pi)).into_bytes(),
+                BodyLane::Direct,
+            ),
+            (
+                "raw token as the leading top-level key",
+                with_leading_key(&opencode_body, token, "1"),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token as a later top-level key",
+                with_trailing_key(&opencode_body, token, "1"),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token first in a native message",
+                text(&native("opencode-aisdk", token_first_in_message)).into_bytes(),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token later in a native message",
+                text(&native("opencode-aisdk", token_later_in_message)).into_bytes(),
+                BodyLane::Tree,
+            ),
+            (
+                "raw token as a string value",
+                text(&token_value).into_bytes(),
+                BodyLane::Tree,
+            ),
+            (
+                "duplicate top-level key on a native window",
+                duplicate,
+                BodyLane::Tree,
+            ),
+        ]
+    }
+
+    /// Each supplementary body answers through the body entry exactly as through the tree
+    /// entry, on the lane the corpus names.
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_and_token_bodies_reach_the_tree_outcome_on_their_lanes() {
+        for (name, body, expected_lane) in native_and_token_corpus() {
+            let (direct, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let (tree, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            let runner = transform_unit::DetachedRunner::default();
+            let probe = lane_probe(&body);
+            let entry = PassEntry {
+                core: &direct.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+                clock: transform_unit::PassClock::now(),
+            };
+            let (lane, through_body) = direct.dispatch_body(&entry, &body).await;
+            let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let tree_meter = ResidentMeter::new(&pool);
+            let entry = PassEntry {
+                core: &tree.core,
+                meter: &tree_meter,
+                ..entry
+            };
+            let through_tree = tree
+                .dispatch_value_with_inbound_bytes(&entry, request, Some(body.len()))
+                .await;
+            let through_body = comparable_outcome(through_body);
+            assert_eq!(through_body, comparable_outcome(through_tree), "{name}");
+            assert_eq!(lane, expected_lane, "{name}");
+            if name.starts_with("native") {
+                assert_eq!(through_body.0, "response", "{name}: {through_body:?}");
+            }
+        }
+    }
+
+    /// A typed prefix that fails before the pool runs short restarts into the tree decode on
+    /// the bytes it holds, and the tree decode's shortfall refuses with the tree's code, binds
+    /// no route, writes nothing, and releases every charge.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_typed_prefix_restarts_into_a_tree_shortfall_with_no_effect() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut messages: Vec<Value> = (1..=200)
+            .map(|ordinal| json!(ck(&format!("m{ordinal}"), ordinal, &"text ".repeat(40))))
+            .collect();
+        messages[0] = json!({ "mid": "first", "mid": "m1", "ck": messages[0]["ck"] });
+        let mut body = request(Vec::new());
+        body["messages"] = json!([]);
+        let body = serde_json::to_string(&body).unwrap().replacen(
+            "\"messages\":[]",
+            &format!(
+                "\"messages\":[{{\"mid\":\"first\",\"mid\":\"m1\",\"ck\":{}}},{}]",
+                serde_json::to_string(&messages[0]["ck"]).unwrap(),
+                messages[1..]
+                    .iter()
+                    .map(|message| serde_json::to_string(message).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            1,
+        );
+        let body = body.into_bytes();
+        let footprint = footprint_of(&body);
+        let typed_prefix = {
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            meter.reserve_unescape_scratch(&body).unwrap();
+            assert!(matches!(
+                metered_decode::decode_metered_typed_direct::<TransformRequest>(&body, &meter),
+                Err(DecodeFailure::Invalid(_))
+            ));
+            meter.needed()
+        };
+        assert!(
+            typed_prefix < footprint / 2,
+            "the duplicate key fails the typed decode early"
+        );
+
+        let pool = TestPool::with_capacity(footprint + 4096);
+        let holder = pool.hold(pool.capacity() - (typed_prefix + footprint) / 2);
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let probe = lane_probe(&body);
+        assert!(
+            probe
+                .as_ref()
+                .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
+        );
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner: &runner,
+            clock: transform_unit::PassClock::now(),
+        };
+        let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
+        assert_eq!(lane, BodyLane::Tree);
+        assert_eq!(
+            comparable_outcome(outcome),
+            comparable_outcome(resident_capacity_error())
+        );
+        drop(meter);
+        drop(holder);
+        assert!(
+            pool.budget.try_charge(pool.capacity()).is_some(),
+            "every charge is released"
+        );
+        assert!(
+            !handler
+                .transform_route_channels
+                .lock()
+                .expect("route channels mutex")
+                .contains_key(&test_route(7)),
+            "a refusal bound the route"
+        );
+        assert!(!handler.module_knows_transform_session("ses", &project));
+        assert!(store.load("ses").unwrap().row_version.is_none());
+    }
+
+    /// A duplicate `mid` fails the typed decode ahead of a long escaped string, and the body
+    /// restarts into the tree decode. The direct entry then counts the tree lane's footprint,
+    /// admission's raw-length unescape charge included, and refuses the body one byte under
+    /// that footprint with the tree lane's code.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_restarted_tree_decode_keeps_the_admission_unescape_charge() {
+        async fn through(
+            body: &[u8],
+            pool: &TestPool,
+            direct: bool,
+        ) -> (BodyLane, (String, String, Option<Value>), usize) {
+            let (handler, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let meter = ResidentMeter::new(pool);
+            let runner = transform_unit::DetachedRunner::default();
+            let probe = if direct { lane_probe(body) } else { None };
+            let entry = PassEntry {
+                core: &handler.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+                clock: transform_unit::PassClock::now(),
+            };
+            let (lane, outcome) = handler.dispatch_body(&entry, body).await;
+            (lane, comparable_outcome(outcome), meter.needed())
+        }
+
+        // Each newline is two raw bytes, so the string's raw length is twice its decoded length.
+        let escaped = json!(ck("m2", 2, &"\n".repeat(4096)));
+        let first = json!(ck("m1", 1, "hello"));
+        let mut body = request(Vec::new());
+        body["messages"] = json!([]);
+        let body = serde_json::to_string(&body)
+            .unwrap()
+            .replacen(
+                "\"messages\":[]",
+                &format!(
+                    "\"messages\":[{{\"mid\":\"first\",\"mid\":\"m1\",\"ck\":{}}},{}]",
+                    serde_json::to_string(&first["ck"]).unwrap(),
+                    serde_json::to_string(&escaped).unwrap()
+                ),
+                1,
+            )
+            .into_bytes();
+        assert!(
+            lane_probe(&body)
+                .as_ref()
+                .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
+        );
+
+        let (lane, served, tree_needed) = through(&body, &TestPool::unbounded(), false).await;
+        assert_eq!((lane, served.0.as_str()), (BodyLane::Tree, "response"));
+        let (lane, _, _) = through(&body, &TestPool::unbounded(), true).await;
+        assert_eq!(
+            lane,
+            BodyLane::Tree,
+            "the duplicate key fails the typed decode"
+        );
+
+        for capacity in [tree_needed - 1, tree_needed] {
+            let (_, through_tree, tree_count) =
+                through(&body, &TestPool::with_capacity(capacity), false).await;
+            let (_, through_direct, direct_count) =
+                through(&body, &TestPool::with_capacity(capacity), true).await;
+            assert_eq!(
+                (&through_direct.0, &through_direct.1),
+                (&through_tree.0, &through_tree.1),
+                "at capacity {capacity}"
+            );
+            assert_eq!(through_direct, through_tree, "at capacity {capacity}");
+            assert_eq!(direct_count, tree_count, "at capacity {capacity}");
+            if capacity < tree_needed {
+                assert_eq!(through_tree, comparable_outcome(request_too_large_error()));
+            } else {
+                assert_eq!(through_tree, served);
+            }
+        }
+    }
+
     /// Both lanes count the same footprint for the same bytes, so a pool that is one byte
     /// short of a body refuses it on either lane with one code, and a pool that just fits
     /// admits it on either lane.
     #[tokio::test(flavor = "current_thread")]
     async fn both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies() {
-        for (name, body) in transform_decode_corpus() {
+        // A supplementary body the tree cannot parse fails before it reaches its footprint, so
+        // only one the tree parses is refused one byte short of it.
+        let frozen = transform_decode_corpus()
+            .into_iter()
+            .map(|(name, body)| (name, body, true));
+        let supplementary = native_and_token_corpus()
+            .into_iter()
+            .map(|(name, body, _)| {
+                let parses = serde_json::from_slice::<Value>(&body).is_ok();
+                (name, body, parses)
+            });
+        for (name, body, reaches_footprint) in frozen.chain(supplementary) {
             let footprint = footprint_of(&body);
             if footprint == 0 {
                 continue;
@@ -21196,7 +21961,7 @@ mod tests {
                     tree_meter.needed(),
                     "{name}: the lanes count one footprint"
                 );
-                if capacity < footprint {
+                if capacity < footprint && reaches_footprint {
                     assert_eq!(
                         through_body,
                         comparable_outcome(request_too_large_error()),

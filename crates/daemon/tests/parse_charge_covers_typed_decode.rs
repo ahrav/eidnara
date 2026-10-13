@@ -239,30 +239,67 @@ impl ResidentReserve for Drained {
     }
 }
 
-#[test]
-fn a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string() {
-    let _serial = measure();
-    // The walk that gates the direct lane is charged like the decodes, so a pool that has no
-    // bytes free refuses it at its first value and serde_json never grows an unescape buffer
-    // for the 4 MiB text block further into the body.
-    let body = text_body(1 << 22, true);
-    assert!(
-        footprint_of(&body) > 1 << 22,
-        "the body's footprint covers its text"
-    );
+/// A drained reserve that records the bytes of the last charge it refused. The meter halves a
+/// refused batch down to the exact shortfall, so that last charge is the shortfall of the step
+/// that was refused.
+#[derive(Default)]
+struct DrainedRecording {
+    last_asked: AtomicUsize,
+}
 
-    let base = reset_peak();
-    let outcome = daemon::direct_lane_admission_for_test(&body, &Drained);
-    let peak = peak_since(base);
-    assert!(
-        peak < 64 * 1024,
-        "the refusal allocated {peak} bytes against a held pool; the 4 MiB text block was \
-         unescaped before any charge (outcome: {outcome:?})"
-    );
-    assert!(
-        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
-        "the held pool refuses the body as transient: {outcome:?}"
-    );
+impl ResidentReserve for DrainedRecording {
+    fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        self.last_asked.store(bytes, Ordering::Relaxed);
+        None
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
+#[test]
+fn a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string() {
+    let _serial = measure();
+    // The admission charges the unescape buffer for the body's longest escaped string ahead of
+    // the typed decode, and the decode charges each value before it is built. A pool with
+    // nothing free refuses an escaped body at that buffer charge and an unescaped body at the
+    // decode's first value; serde_json never grows a buffer for the 4 MiB text block either way.
+    for escaped in [true, false] {
+        let body = text_body(1 << 22, escaped);
+        assert!(
+            footprint_of(&body) > 1 << 22,
+            "the body's footprint covers its text"
+        );
+        let reserve = DrainedRecording::default();
+
+        let base = reset_peak();
+        let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
+        let peak = peak_since(base);
+        assert!(
+            peak < 64 * 1024,
+            "escaped {escaped}: the refusal allocated {peak} bytes against a held pool; the 4 MiB \
+             text block was unescaped before any charge (outcome: {outcome:?})"
+        );
+        assert!(
+            matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+            "escaped {escaped}: the held pool refuses the body as transient: {outcome:?}"
+        );
+        let asked = reserve.last_asked.load(Ordering::Relaxed);
+        if escaped {
+            assert!(
+                asked > 1 << 22,
+                "the escaped body is refused at the admission's unescape charge, a shortfall \
+                 covering the 4 MiB string, but the refused shortfall was {asked} bytes"
+            );
+        } else {
+            assert!(
+                asked < 64 * 1024,
+                "the unescaped body is admitted and refused at the typed decode's first value, \
+                 but the refused shortfall was {asked} bytes"
+            );
+        }
+    }
 }
 
 /// A reserve that grants charges until `limit` bytes are held, then refuses every one.
@@ -400,13 +437,18 @@ fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
         );
         let meter = ResidentMeter::new(&UNMETERED);
         let base = reset_peak();
-        let walked = daemon::direct_lane_admission_for_test(&body, &UNMETERED)
-            .expect("the walk is admitted");
-        assert!(walked, "the tree walk accepts the duplicate key");
+        let direct = daemon::direct_lane_admission_for_test(&body, &UNMETERED)
+            .expect("the body is admitted");
+        assert!(
+            !direct,
+            "the typed decode fails on the duplicate key and restarts"
+        );
         meter
             .reserve_unescape_scratch(&body)
             .expect("the scratch charge is granted");
-        let failure = decode_metered::<TransformRequest>(&body, &meter).unwrap_err();
+        let failure =
+            daemon::metered_decode::decode_metered_typed_direct::<TransformRequest>(&body, &meter)
+                .unwrap_err();
         assert!(
             matches!(failure, daemon::metered_decode::DecodeFailure::Invalid(_)),
             "{failure:?}"
@@ -425,7 +467,7 @@ fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
         let largest_needed = footprint_of(&body).max(typed_needed).max(meter.needed());
         assert!(
             peak <= largest_needed,
-            "escaped {escaped}: the walk, the failed typed prefix, and the tree fallback peaked at \
+            "escaped {escaped}: the admission, the failed typed prefix, and the tree fallback peaked at \
              {peak} bytes but the largest count reached was {largest_needed}"
         );
     }
@@ -510,15 +552,8 @@ fn text_heavy_admission_ceiling_witnesses() {
         // The admission steps refuse a body whose scratch charge exceeds the capacity; the
         // typed decode refuses one whose values do.
         let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
-        let meter = ResidentMeter::new(&reserve);
-        let typed = outcome.is_ok().then(|| {
-            meter
-                .reserve_unescape_scratch(&body)
-                .expect("the scratch charge is granted");
-            decode_metered::<TransformRequest>(&body, &meter).is_ok()
-        });
         assert_eq!(
-            typed == Some(true),
+            outcome.is_ok(),
             admitted,
             "{text_bytes} text bytes (escaped: {escaped}) against {CAPACITY}: {outcome:?}"
         );
@@ -540,10 +575,10 @@ fn text_heavy_admission_ceiling_witnesses() {
                 "{text_bytes} text bytes (escaped: {escaped}) peaked at {peak} bytes against a charge of {}",
                 meter.needed()
             );
-        } else if let Err(outcome) = outcome {
+        } else {
             assert!(matches!(
                 outcome,
-                daemon::dispatch::PreparedOutcome::Error { code, .. } if code == "invalid_params"
+                Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "invalid_params"
             ));
         }
     }

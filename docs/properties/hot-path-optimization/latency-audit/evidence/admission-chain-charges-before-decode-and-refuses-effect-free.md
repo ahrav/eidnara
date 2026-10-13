@@ -400,3 +400,86 @@ depend on the string coefficient. The frozen A2 replay
 (`frozen_corpus_footprints_replay_with_only_string_charge_changes`) records the
 admission differences the lower charge produces; see
 `docs/properties/typed-wire-decode/resources/evidence/frozen-admission-outcomes-and-boundaries-stay-stable.md`.
+
+## Typed ingress gate re-evidence, 2026-10-12 (#994)
+
+At the #994 head the direct lane decodes an unpaged transform body once through
+`decode_metered_typed_direct` (`crates/daemon/src/metered_decode.rs`) in
+`direct_typed_decode` (`crates/daemon/src/lib.rs`), with no tree-parse walk
+before it. The admission order is unchanged: the byte cap, the footprint
+floor, and the up-front unescape charge in `admit_body` precede the decode, and
+every value the decode builds is charged first. A capacity excess answers
+`invalid_params` and a pool shortage `queue_full`; an invalid typed prefix
+restarts the meter on the bytes it holds, so the tree decode spends them first
+and the request holds one footprint.
+
+Executed on the #994 branch: the daemon suite with
+`a_refused_decode_has_no_dispatch_side_effect`,
+`a_doomed_body_is_refused_without_touching_the_pool`,
+`both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies`,
+`frozen_corpus_footprints_replay_with_only_string_charge_changes`, and the new
+`a_failed_typed_prefix_restarts_into_a_tree_shortfall_with_no_effect`, which
+fails a typed prefix early, refuses the tree decode's shortfall as
+`queue_full`, and checks that no route is bound, no store row or module session
+exists, and the pool holds every byte again; and
+`crates/daemon/tests/parse_charge_covers_typed_decode.rs`, whose failed-prefix
+test now sees the admission restart the duplicate-key body and whose held-pool
+test runs an escaped and an unescaped 4 MiB text body against a drained reserve
+that records the refused shortfall: the escaped body is refused at the
+admission's unescape charge, a shortfall over 4 MiB, and the unescaped body
+passes admission and is refused at the typed decode's first value, a shortfall
+under 64 KiB, with under 64 KiB allocated either way.
+
+## Entry scan re-evidence, 2026-10-13 (#994)
+
+At this head `Handler::handle` (`crates/daemon/src/lib.rs`) runs `scan_entry`
+before the byte cap. For a body over the facade cap, or one that spells
+`transform`, `ingress_scan::scan` (`crates/daemon/src/ingress_scan.rs`) reads
+the body once. When it accounts for every byte, it supplies the probe that
+`enforce_request_byte_cap_with` and `lane_probe_with` read, the value count
+that `admit_body_with` compares against the capacity through `floor_of_values`,
+and the longest escaped string that `reserve_unescape_scratch_of` charges. On every body the
+scan answers for, those equal `probe_request`, `footprint_floor`, and
+`longest_escaped_string`, so a byte-doomed body is still refused before either
+decode with the pool never asked, and the unescape charge still precedes the
+decode. The scan copies and unescapes nothing. A body with an escaped
+top-level key or route value, a control byte, or any shape outside the scan's
+grammar takes the reference reads in their prior order, so a long escaped key
+is still charged before the reference probe unescapes it.
+
+A body the scan declines late, such as one over the facade cap that breaks the
+grammar at its last byte, pays one more linear pass than before, bounded by the
+32 MiB transform cap: `scan_entry` declines a longer body from its length, so a
+body the cap refuses outright takes only the reference probe's pass. The scan
+holds no charge and allocates nothing.
+
+Executed on the #994 branch: `entry_scan_answers_as_the_reference_reads_or_not_at_all`,
+which compares nests of mixed objects and arrays at depths 63 through 256;
+the proptests `entry_scan_matches_the_reference_reads`, which compares the
+probe, the floor, and the longest escaped string on 2048 serialized and
+byte-edited bodies, and `entry_scan_answers_every_body_in_its_grammar`;
+`request_byte_cap_widens_for_transform_class_only`, which runs every body over
+the facade cap through the scan and the reference probe and gets one cap result,
+and one admission outcome, footprint, and held bytes on either side of the floor;
+`the_entry_scan_reproduces_the_reference_entry_on_the_corpora`, which compares
+the lane probe and the admission outcome, footprint, and held bytes at five
+capacities for every frozen and supplementary corpus body; and the A1 checks
+named above with `crates/daemon/tests/parse_charge_covers_typed_decode.rs`,
+including `a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key` and
+`byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`.
+
+## Restart unescape-charge re-evidence, 2026-10-13 (#994)
+
+`ResidentMeter::restart` (`crates/daemon/src/metered_decode.rs`) returns the
+footprint and the longest escaped length to the values
+`reserve_unescape_scratch_of` recorded at admission. An invalid typed prefix
+therefore restarts into a tree decode that counts the up-front unescape charge
+at the raw length admission took it at, and the direct entry counts the tree
+lane's footprint for the same bytes.
+
+Executed on the #994 branch:
+`a_restarted_tree_decode_keeps_the_admission_unescape_charge`, where a
+duplicate `mid` fails the typed decode ahead of a string of 4096 escaped
+newlines. One byte under the tree lane's footprint both entries answer the
+capacity-excess `invalid_params` refusal; at the footprint both serve the same
+response, and the two meters count one footprint.

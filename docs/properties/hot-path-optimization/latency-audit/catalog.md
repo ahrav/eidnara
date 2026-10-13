@@ -1,5 +1,31 @@
 # Hot-path latency audit supplement
 
+> Dated note, 2026-10-13, #994: one entry scan, `ingress_scan::scan`, answers
+> the byte cap's probe, the footprint floor, the unescape charge, and the lane
+> probe for a body over the facade cap or one that spells `transform`, when the
+> body is a JSON object with no control byte, top-level keys spelled without
+> escapes, and route values that are plain strings or literals. For such a body
+> each answer equals the reference read's: `probe_request`, `footprint_floor`,
+> and `longest_escaped_string`. Every other body takes those reads in their
+> prior order. The scan copies and unescapes nothing, so it runs before the
+> admission charge; the reference lane probe still runs after it. A1 and A2
+> keep their checks. The A1 clause that orders the admission charge before the
+> entry probe now orders it before the reference probe, and the re-evidence is
+> in the dated sections of both evidence files.
+
+> Dated note, 2026-10-12, #994 (spec #988 milestone U4, Q9): the direct lane has
+> no tree-parse walk. An unpaged transform body the entry probe routes there is
+> tokenized once by a metered typed decode,
+> `metered_decode::decode_metered_typed_direct`, which charges every value before
+> it is built exactly as the walk did and treats a string spelling the
+> raw-value token, as a key or a value, as invalid. An invalid typed decode
+> restarts the meter on the bytes it holds and decodes the body through the
+> `Value` tree, and a refused charge ends the request on the direct lane with
+> the walk's codes. `tree_decode_parses` remains a test oracle. A1 and A2 keep
+> their checks; the clauses that named the walk that gated the direct lane now
+> name that typed decode, and the re-evidence is in the dated sections of
+> both evidence files.
+
 > Dated note, 2026-10-12, #989 (spec #988 amendment A1): the host wire has one
 > unversioned contract, so every clause here that names a protocol version,
 > numbered revision, version-skew refusal, or retired-field refusal is
@@ -185,7 +211,7 @@ the [check inventory](existing-checks.md).
 
 | Records | Class | Evidence and limit |
 | --- | --- | --- |
-| A1-A2 | default-production | Every request runs [`Handler::handle`][handle] and its body branch; an unpaged transform body the tree-parse walk admits enters the typed handler from its bytes, and every other body runs [`dispatch_value_with_inbound_bytes`][dispatch]. Refusal arms and the over-1 MiB probe need constructed input because the plugin [pages at 512 KiB][paging]. |
+| A1-A2 | default-production | Every request runs [`Handler::handle`][handle] and its body branch; an unpaged transform body the typed decode accepts enters the typed handler from its bytes, and every other body runs [`dispatch_value_with_inbound_bytes`][dispatch]. Refusal arms and the over-1 MiB probe need constructed input because the plugin [pages at 512 KiB][paging]. |
 | A3 | test-only | Pool pressure needs concurrent oversize parses; production occurrence is plausible but unverified. |
 | B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes. The projection incremental arm is deleted ([#828](#projection-prefix-reuse-retirement-2026-09-26)) and the native incremental arm is deleted ([#830](#native-incremental-attach-retirement-2026-09-26)). |
 | C1, C2, C4, C5 | default-production | The [handler path][handler] runs for every transform request; the Emergency95 arm needs usage at the emergency threshold. |
@@ -308,9 +334,9 @@ Check: `always` - For every request entering [`Handler::handle`][handle]: the
 [byte cap][bytecap] precedes every decode; a body whose [byte-derived value
 count][floor] alone proves its footprint exceeds `resident_capacity()` is
 refused before either decode with no charge taken; every decode that builds
-values from the body runs through the resident meter, the tree-parse walk that
-gates the direct lane included (the entry probe builds none, and the admission
-charge precedes it), which charges
+values from the body runs through the resident meter, the direct lane's typed
+decode included (the entry scan and the entry probe build none, and the
+admission charge precedes the probe and the decode), which charges
 the host [scratch pool][pools] and
 never the ingress pool with a non-awaiting `try_charge` as the footprint grows,
 before the value that grew it is handed to the decode's visitor, serde_json's

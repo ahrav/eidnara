@@ -155,7 +155,12 @@ pub struct ResidentMeter<'r> {
     refusal: AtomicU8,
     shortfall: Mutex<Option<ShortfallMarker>>,
     longest_escaped: AtomicUsize,
+    reserved_needed: AtomicUsize,
+    reserved_longest_escaped: AtomicUsize,
     admitted: AtomicBool,
+    /// Set while [`decode_metered_typed_direct`] runs: a string spelling [`RAW_VALUE_TOKEN`]
+    /// makes the decode invalid.
+    direct: AtomicBool,
 }
 
 const NO_REFUSAL: u8 = 0;
@@ -174,7 +179,10 @@ impl<'r> ResidentMeter<'r> {
             refusal: AtomicU8::new(NO_REFUSAL),
             shortfall: Mutex::new(None),
             longest_escaped: AtomicUsize::new(0),
+            reserved_needed: AtomicUsize::new(0),
+            reserved_longest_escaped: AtomicUsize::new(0),
             admitted: AtomicBool::new(false),
+            direct: AtomicBool::new(false),
         }
     }
 
@@ -221,15 +229,23 @@ impl<'r> ResidentMeter<'r> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Starts the footprint over for a second decode of the same body while keeping the
-    /// bytes already held, which the second decode uses before charging more.
+    /// Resets the decode accounting to the footprint and longest escaped length that
+    /// [`Self::reserve_unescape_scratch`] recorded, keeping the bytes already held, so a
+    /// second decode of the same body counts the up-front unescape charge once. A meter whose
+    /// charges were taken keeps its permanent refusal.
     pub fn restart(&self) {
         if self.refusal.load(Ordering::Relaxed) == TAKEN {
             return;
         }
-        self.needed.store(0, Ordering::Relaxed);
+        self.needed.store(
+            self.reserved_needed.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         self.refusal.store(NO_REFUSAL, Ordering::Relaxed);
-        self.longest_escaped.store(0, Ordering::Relaxed);
+        self.longest_escaped.store(
+            self.reserved_longest_escaped.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 
     /// Gives every held byte back. A refused decode releases at once rather than at the end
@@ -284,7 +300,21 @@ impl<'r> ResidentMeter<'r> {
     /// A visited string never exceeds the raw length counted here, so the decodes charge
     /// nothing more for the buffer.
     pub fn reserve_unescape_scratch(&self, body: &[u8]) -> Result<(), Refusal> {
-        self.escaped_text(longest_escaped_string(body))
+        self.reserve_unescape_scratch_of(longest_escaped_string(body))
+    }
+
+    /// `longest_escaped` is the raw byte length of the body's longest escaped string.
+    pub(crate) fn reserve_unescape_scratch_of(
+        &self,
+        longest_escaped: usize,
+    ) -> Result<(), Refusal> {
+        self.escaped_text(longest_escaped)?;
+        self.reserved_needed.store(self.needed(), Ordering::Relaxed);
+        self.reserved_longest_escaped.store(
+            self.longest_escaped.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Ok(())
     }
 
     /// Charges `bytes` a request is about to allocate past its decode, with the decode's
@@ -294,6 +324,7 @@ impl<'r> ResidentMeter<'r> {
         self.need(bytes)
     }
 
+    #[inline]
     fn need(&self, bytes: usize) -> Result<(), Refusal> {
         if let Some(refusal) = self.refusal() {
             return Err(refusal);
@@ -310,6 +341,12 @@ impl<'r> ResidentMeter<'r> {
         if needed <= charged {
             return Ok(());
         }
+        self.grow(needed, charged)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&self, needed: usize, charged: usize) -> Result<(), Refusal> {
         let capacity = self.reserve.capacity();
         if needed > capacity {
             return Err(self.refuse(Refusal::Permanent));
@@ -375,13 +412,45 @@ pub enum DecodeFailure {
     Invalid(serde_json::Error),
 }
 
+/// Decodes `body` as `T` as [`decode_metered`] does, for the direct lane: a string anywhere in
+/// the body that spells serde_json's raw-value token makes the decode invalid. A `Value` tree
+/// reads that token as a key by a rule of its own, which a typed decode does not apply; the
+/// visitor sees keys and values alike, so a value spelling it is invalid too. The caller decodes
+/// such a body, like any other the typed decode refuses, through the tree.
+pub fn decode_metered_typed_direct<'de, T: serde::Deserialize<'de>>(
+    body: &'de [u8],
+    meter: &ResidentMeter<'_>,
+) -> Result<T, DecodeFailure> {
+    /// Clears the direct flag however the decode ends, so a later decode on the meter reads the
+    /// token by the tree's rule.
+    struct DirectFlag<'a>(&'a AtomicBool);
+    impl Drop for DirectFlag<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
+    meter.direct.store(true, Ordering::Relaxed);
+    let _clear = DirectFlag(&meter.direct);
+    decode_metered(body, meter)
+}
+
 /// Decodes `body` as `T`, charging `meter` as values are visited. Trailing bytes are an
-/// error, as they are for `serde_json::from_slice`.
+/// error, as they are for `serde_json::from_slice`. The byte-backed deserializer preserves
+/// `serde_json::from_slice` behavior for bodies containing invalid UTF-8.
 pub fn decode_metered<'de, T: serde::Deserialize<'de>>(
     body: &'de [u8],
     meter: &ResidentMeter<'_>,
 ) -> Result<T, DecodeFailure> {
-    let mut inner = serde_json::Deserializer::from_slice(body);
+    match std::str::from_utf8(body) {
+        Ok(text) => decode_metered_from(serde_json::Deserializer::from_str(text), meter),
+        Err(_) => decode_metered_from(serde_json::Deserializer::from_slice(body), meter),
+    }
+}
+
+fn decode_metered_from<'de, R: serde_json::de::Read<'de>, T: serde::Deserialize<'de>>(
+    mut inner: serde_json::Deserializer<R>,
+    meter: &ResidentMeter<'_>,
+) -> Result<T, DecodeFailure> {
     let decoded = T::deserialize(Metered {
         inner: &mut inner,
         meter,
@@ -412,8 +481,8 @@ pub fn footprint_of(body: &[u8]) -> usize {
 
 /// The raw length of the longest string in `body` that holds an escape, from its bytes
 /// alone; zero when no string does. Raw length is at least the decoded length.
-fn longest_escaped_string(body: &[u8]) -> usize {
-    if !body.contains(&b'\\') {
+pub(crate) fn longest_escaped_string(body: &[u8]) -> usize {
+    if memchr::memchr(b'\\', body).is_none() {
         return 0;
     }
     let mut longest = 0;
@@ -482,6 +551,16 @@ pub fn footprint_floor_exceeds(body: &[u8], capacity: usize) -> bool {
     most > capacity && footprint_floor(body) > capacity
 }
 
+/// The footprint floor of a body holding `values` values, object keys included.
+pub(crate) fn floor_of_values(values: usize) -> usize {
+    if values == 0 {
+        return 0;
+    }
+    values
+        .saturating_mul(NODE_BYTES)
+        .saturating_add(VALUE_ENVELOPE_BYTES)
+}
+
 /// Returns a lower bound on the footprint `body` reaches when decoded, from its bytes alone:
 /// one node per value start outside a string, with string bytes left out. A value starts at
 /// an opening quote, `[`, `{`, the first byte of a number, or the first letter of a literal,
@@ -529,12 +608,7 @@ pub(crate) fn footprint_floor(body: &[u8]) -> usize {
             _ => in_number = false,
         }
     }
-    if values == 0 {
-        return 0;
-    }
-    values
-        .saturating_mul(NODE_BYTES)
-        .saturating_add(VALUE_ENVELOPE_BYTES)
+    floor_of_values(values)
 }
 
 /// Skips one value through `deserialize_any`, so every check the deserializer applies to a
@@ -874,6 +948,7 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
 
     /// serde_json takes this path, not `visit_borrowed_str`, for a string it unescaped.
     fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        self.direct_token::<E>(value)?;
         self.count_text::<E>(value.len())?;
         self.meter
             .escaped_text(value.len())
@@ -882,11 +957,13 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
     }
 
     fn visit_borrowed_str<E: serde::de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        self.direct_token::<E>(value)?;
         self.count_text::<E>(value.len())?;
         self.visitor.visit_borrowed_str(value)
     }
 
     fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        self.direct_token::<E>(&value)?;
         self.count_text::<E>(value.len())?;
         self.visitor.visit_string(value)
     }
@@ -960,6 +1037,16 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
 }
 
 impl<'de, 'm, V: Visitor<'de>> MeteredVisitor<'m, V> {
+    /// On the direct lane, the raw-value token ends the decode as invalid, before it is counted.
+    fn direct_token<E: serde::de::Error>(&self, value: &str) -> Result<(), E> {
+        if value == RAW_VALUE_TOKEN && self.meter.direct.load(Ordering::Relaxed) {
+            return Err(E::custom(
+                "the raw-value token decodes through the tree lane",
+            ));
+        }
+        Ok(())
+    }
+
     fn count_text<E: serde::de::Error>(&self, len: usize) -> Result<(), E> {
         self.meter.node().map_err(|_| refused::<E>())?;
         self.meter.text(len).map_err(|_| refused::<E>())
@@ -1238,6 +1325,100 @@ mod tests {
             let (floor, longest) = reference_scans(&body);
             proptest::prop_assert_eq!(footprint_floor(&body), floor);
             proptest::prop_assert_eq!(longest_escaped_string(&body), longest);
+        }
+
+        #[test]
+        fn decode_metered_matches_the_byte_reader(
+            pieces in proptest::collection::vec(
+                proptest::sample::select(decode_pieces()),
+                0..48,
+            ),
+            capacity in proptest::sample::select(vec![
+                usize::MAX,
+                VALUE_ENVELOPE_BYTES + 3 * NODE_BYTES,
+            ]),
+        ) {
+            let body = pieces.concat();
+            let (outcome, needed) = byte_reader_outcome(&body, capacity);
+            proptest::prop_assert_eq!(decode_outcome(&body, capacity), (outcome, needed));
+        }
+    }
+
+    fn decode_pieces() -> Vec<&'static [u8]> {
+        vec![
+            b"\"",
+            b"\\",
+            b"\\n",
+            b"\\u00e9",
+            b"\\ud83d\\ude00",
+            b"\\ud800",
+            b"a",
+            b":",
+            b",",
+            b"[",
+            b"]",
+            b"{",
+            b"}",
+            b"-1.5e3",
+            b"true",
+            b"null",
+            b" ",
+            "\u{e9}".as_bytes(),
+            "\u{1f600}".as_bytes(),
+            b"\xc3",
+            b"\xff",
+        ]
+    }
+
+    fn outcome_of(
+        decoded: Result<Value, DecodeFailure>,
+        meter: &ResidentMeter<'_>,
+    ) -> (String, usize) {
+        let outcome = match decoded {
+            Ok(value) => format!("ok {value}"),
+            Err(DecodeFailure::Refused(refusal)) => format!("refused {refusal:?}"),
+            Err(DecodeFailure::Invalid(error)) => format!("invalid {error}"),
+        };
+        (outcome, meter.needed())
+    }
+
+    fn decode_outcome(body: &[u8], capacity: usize) -> (String, usize) {
+        let reserve = CountOnly { capacity };
+        let meter = ResidentMeter::new(&reserve);
+        outcome_of(decode_metered(body, &meter), &meter)
+    }
+
+    fn byte_reader_outcome(body: &[u8], capacity: usize) -> (String, usize) {
+        let reserve = CountOnly { capacity };
+        let meter = ResidentMeter::new(&reserve);
+        let decoded = decode_metered_from(serde_json::Deserializer::from_slice(body), &meter);
+        outcome_of(decoded, &meter)
+    }
+
+    #[test]
+    fn decode_metered_matches_the_byte_reader_on_named_bodies() {
+        let long = "\u{e9}t\u{e9} ".repeat(4096);
+        let bodies: Vec<Vec<u8>> = vec![
+            br#"{"a":"x\ny","b":[1,-2.5e3,true,null],"c":{"d":"\u00e9\ud83d\ude00"}}"#.to_vec(),
+            format!(r#"{{"k":"{long}","n":["{long}\n"]}}"#).into_bytes(),
+            format!(r#"{{"{RAW_VALUE_TOKEN}":"[1]"}}"#).into_bytes(),
+            br#"{"a":"\ud800"}"#.to_vec(),
+            br#"{"a":1} x"#.to_vec(),
+            b"{\"a\":1,\"b\":\"ok\",\"c\":\"\xff\"}".to_vec(),
+            b"{\"a\":\"\xc3\"}".to_vec(),
+            b"[1,\xff]".to_vec(),
+        ];
+        for body in bodies {
+            let footprint = footprint_of(&body);
+            for capacity in [usize::MAX, footprint / 2, footprint.saturating_sub(1)] {
+                let reached = decode_outcome(&body, capacity);
+                assert_eq!(
+                    reached,
+                    byte_reader_outcome(&body, capacity),
+                    "{}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
         }
     }
 
