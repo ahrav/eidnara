@@ -1,6 +1,7 @@
 //! Tests verify independent claim and promoted-memory inventories, distinct dual-class objects, non-resurrecting correction and retirement tombstones, replay after lost or skipped acknowledgements, and memory-domain-name-independent identities.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,7 +13,9 @@ use daemon::claim_sources::{
     claim_units,
 };
 use daemon::harness_sources::{CANONICAL_ROLE, PublishError, Representation, SourcePublisher};
-use daemon::search_catchup::{Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, SearchCatchUp};
+use daemon::search_catchup::{
+    Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
+};
 use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
@@ -4066,4 +4069,206 @@ fn claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_write
         now.claims[1].own_admission.as_ref().unwrap().disposition,
         kernel::Disposition::Quarantined
     );
+}
+
+// ---- Claim catch-up process crashes ------------------------------------------
+
+const CRASH_ROOT: &str = "EIDNARA_CLAIM_CRASH_ROOT";
+const CRASH_CUT: &str = "EIDNARA_CLAIM_CRASH_CUT";
+const CRASH_BARRIER: &str = "CLAIM-CRASH-BARRIER";
+const CRASH_HOLD: &str = "CLAIM-CRASH-HOLD";
+
+/// A catch-up boundary the child parks at until the parent kills it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimCut {
+    /// The claim window's statements ran inside the open local transaction.
+    Staged,
+    /// The local transaction committed and released; the kernel has not acknowledged.
+    Released,
+    /// The kernel acknowledged the window.
+    Acknowledged,
+}
+
+impl ClaimCut {
+    const ALL: [Self; 3] = [Self::Staged, Self::Released, Self::Acknowledged];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Released => "released",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+
+    fn reached(self, event: &EpisodeEvent) -> bool {
+        matches!(
+            (self, event),
+            (Self::Staged, EpisodeEvent::LocalStaged { .. })
+                | (Self::Released, EpisodeEvent::LocalReleased { .. })
+                | (Self::Acknowledged, EpisodeEvent::Acknowledged { .. })
+        )
+    }
+}
+
+const SUCCESSOR: Seed<'static> = Seed::scoped(
+    "rule-v2",
+    MEMORY,
+    "PROJECT_RULES",
+    2,
+    CONTRACT,
+    "Relied on.",
+);
+const ORIGINAL: Seed<'static> =
+    Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+
+/// The child builds a projection acknowledged at S, corrects the claim so the materializer publishes one claim commit after S, and parks inside catch-up at its cut until the parent kills it.
+#[test]
+#[ignore = "re-executed by the claim crash-cut test with its environment set"]
+fn claim_crash_child_reexecuted_by_the_parent() {
+    let (root, cut) = match (std::env::var(CRASH_ROOT), std::env::var(CRASH_CUT)) {
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => return,
+        (Ok(root), Ok(cut)) => (PathBuf::from(root), cut),
+        (root, cut) => panic!("incomplete child environment: {root:?}, {cut:?}"),
+    };
+    let cut = ClaimCut::ALL
+        .into_iter()
+        .find(|candidate| candidate.name() == cut)
+        .unwrap();
+    let corpus = Corpus::open(&root);
+    corpus.seed();
+    corpus.decide(ORIGINAL);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(&root, &hold);
+    corpus
+        .kernel
+        .acknowledge_through_source_hold(&corpus.binding(), &hold.hold_id, hold.snapshot, 2)
+        .unwrap();
+    corpus.correct("rule", SUCCESSOR);
+    corpus.materialize();
+    let target = corpus.kernel.tip().unwrap();
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{CRASH_HOLD} {} {target}", hold.snapshot).unwrap();
+        stdout.flush().unwrap();
+    }
+    let consumer = CatchUpConsumer {
+        binding: corpus.binding(),
+        hold_id: hold.hold_id.clone(),
+        kernel_incarnation_id: corpus.kernel_incarnation_id(),
+        generation_id: Some(GENERATION.to_string()),
+    };
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let report = driver
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |event| {
+            if cut.reached(&event) {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{CRASH_BARRIER} {}", cut.name()).unwrap();
+                stdout.flush().unwrap();
+                drop(stdout);
+                loop {
+                    std::thread::park();
+                }
+            }
+        })
+        .unwrap();
+    panic!("the child was not killed at its barrier: {report:?}");
+}
+
+/// Runs the child to `cut`, kills and reaps it, and returns S and the target it printed.
+fn run_claim_crash_child(root: &Path, cut: ClaimCut) -> (i64, i64) {
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Reaped(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "claim_crash_child_reexecuted_by_the_parent",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CRASH_ROOT, root)
+            .env(CRASH_CUT, cut.name())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut hold = None;
+        let mut barrier = None;
+        for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok) {
+            if let Some(start) = line.find(CRASH_HOLD) {
+                hold = Some(line[start..].to_string());
+            } else if let Some(start) = line.find(CRASH_BARRIER) {
+                barrier = Some(line[start..].to_string());
+                break;
+            }
+        }
+        let _ = tx.send((hold, barrier));
+    });
+    let (hold, barrier) = rx.recv_timeout(Duration::from_secs(120)).unwrap();
+    assert_eq!(
+        barrier.as_deref(),
+        Some(format!("{CRASH_BARRIER} {}", cut.name()).as_str())
+    );
+    drop(child);
+    let hold = hold.expect("the child printed its hold");
+    let fields: Vec<&str> = hold.split(' ').collect();
+    (fields[1].parse().unwrap(), fields[2].parse().unwrap())
+}
+
+#[test]
+fn claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early() {
+    let occurrences = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    for cut in ClaimCut::ALL {
+        let dir = tempfile::tempdir().unwrap();
+        let (snapshot, target) = run_claim_crash_child(dir.path(), cut);
+        assert!(target > snapshot);
+        let (expected_rows, local, acknowledged) = match cut {
+            ClaimCut::Staged => (occurrences(ORIGINAL), snapshot, snapshot),
+            ClaimCut::Released => (occurrences(SUCCESSOR), target, snapshot),
+            ClaimCut::Acknowledged => (occurrences(SUCCESSOR), target, target),
+        };
+        for reopen in 0..2 {
+            let corpus = Corpus::open(dir.path());
+            let projection = SearchProjection::open(dir.path()).unwrap();
+            let incarnation = corpus.kernel_incarnation_id();
+            let projected = projection
+                .read(|conn| read_checkpoint(conn, &incarnation))
+                .unwrap()
+                .expect("the bootstrap installed a checkpoint")
+                .checkpoint_commit_seq;
+            let kernel_ack = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+            let live: BTreeSet<String> =
+                live_rows(dir.path()).into_iter().map(|row| row.1).collect();
+            assert_eq!(live, expected_rows, "{cut:?} reopen {reopen}: live rows");
+            assert_eq!(
+                projected, local,
+                "{cut:?} reopen {reopen}: local checkpoint"
+            );
+            assert_eq!(
+                kernel_ack,
+                Some(acknowledged),
+                "{cut:?} reopen {reopen}: acknowledgement"
+            );
+            assert!(
+                acknowledged <= projected,
+                "the acknowledgement never exceeds the durable local prefix"
+            );
+        }
+    }
 }

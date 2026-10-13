@@ -625,9 +625,16 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: partial - claim rows travel through the RP2.1 shared catch-up,
-whose existing checks release the local transaction before acknowledgement;
-no claim-specific crash cut was added.
+Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
+`claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
+kills a child process inside catch-up of a claim correction commit at
+`LocalStaged`, `LocalReleased`, and `Acknowledged`, then reopens twice: the
+live rows equal the seed ledger of the original claim after the staged cut and
+of the successor after the later cuts, the local checkpoint is S or the
+target accordingly, and the acknowledgement stays at S until the
+acknowledged cut and never exceeds the local checkpoint. The materializer's
+own kernel commit, release, and acknowledgement are cut only in process
+through `EpisodeFault`; the kill is process-restart evidence, not power loss.
 Guarantee: Claim rows, tombstones, checkpoint, and pending work are committed
 locally and the transaction released before the kernel consumer is
 acknowledged.
@@ -636,7 +643,7 @@ acknowledgement, as the RP2.1 harness asserts.
 Fault/timing angle: the window between local commit and acknowledgement.
 Required faults and enabling state: a process kill between the two.
 Confidence: medium - [evidence](evidence/claim-local-commit-before-ack.md).
-Existing check: `crates/daemon/tests/search_catchup.rs` - `crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_early`, `released_before_every_acknowledgement`; status unaudited.
+Existing check: `crates/daemon/tests/search_catchup.rs` - `crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_early`, `released_before_every_acknowledgement`; `crates/daemon/tests/claim_sources.rs` - `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`; status unaudited.
 Impact: an acknowledgement ahead of durable local progress loses rows on restart.
 Open questions: None.
 
