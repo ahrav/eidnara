@@ -4121,6 +4121,29 @@ const SUCCESSOR: Seed<'static> = Seed::scoped(
 const ORIGINAL: Seed<'static> =
     Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
 
+/// A projection bootstrapped and acknowledged at S over `ORIGINAL`, with `ORIGINAL` corrected to `SUCCESSOR` and materialized after S, so one claim commit awaits catch-up.
+fn corrected_claim_corpus(root: &Path) -> (Corpus, SearchProjection, SourceHold, CatchUpConsumer) {
+    let corpus = Corpus::open(root);
+    corpus.seed();
+    corpus.decide(ORIGINAL);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(root, &hold);
+    corpus
+        .kernel
+        .acknowledge_through_source_hold(&corpus.binding(), &hold.hold_id, hold.snapshot, 2)
+        .unwrap();
+    corpus.correct("rule", SUCCESSOR);
+    corpus.materialize();
+    let consumer = CatchUpConsumer {
+        binding: corpus.binding(),
+        hold_id: hold.hold_id.clone(),
+        kernel_incarnation_id: corpus.kernel_incarnation_id(),
+        generation_id: Some(GENERATION.to_string()),
+    };
+    (corpus, projection, hold, consumer)
+}
+
 /// The child builds a projection acknowledged at S, corrects the claim so the materializer publishes one claim commit after S, and parks inside catch-up at its cut until the parent kills it.
 #[test]
 #[ignore = "re-executed by the claim crash-cut test with its environment set"]
@@ -4134,30 +4157,13 @@ fn claim_crash_child_reexecuted_by_the_parent() {
         .into_iter()
         .find(|candidate| candidate.name() == cut)
         .unwrap();
-    let corpus = Corpus::open(&root);
-    corpus.seed();
-    corpus.decide(ORIGINAL);
-    corpus.materialize();
-    let hold = corpus.capture();
-    let (projection, _) = corpus.bootstrap(&root, &hold);
-    corpus
-        .kernel
-        .acknowledge_through_source_hold(&corpus.binding(), &hold.hold_id, hold.snapshot, 2)
-        .unwrap();
-    corpus.correct("rule", SUCCESSOR);
-    corpus.materialize();
+    let (corpus, projection, hold, consumer) = corrected_claim_corpus(&root);
     let target = corpus.kernel.tip().unwrap();
     {
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "{CRASH_HOLD} {} {target}", hold.snapshot).unwrap();
         stdout.flush().unwrap();
     }
-    let consumer = CatchUpConsumer {
-        binding: corpus.binding(),
-        hold_id: hold.hold_id.clone(),
-        kernel_incarnation_id: corpus.kernel_incarnation_id(),
-        generation_id: Some(GENERATION.to_string()),
-    };
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
     let report = driver
         .run_episode(&consumer, &catch_up_bounds(), 3, &mut |event| {
@@ -4270,5 +4276,65 @@ fn claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_ea
                 "the acknowledgement never exceeds the durable local prefix"
             );
         }
+    }
+}
+
+#[test]
+fn cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger() {
+    let occurrences = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    for cut in ["hold", "staged", "released", "ack"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (corpus, projection, hold, consumer) = corrected_claim_corpus(dir.path());
+        let target = corpus.kernel.tip().unwrap();
+        let live =
+            || -> BTreeSet<String> { live_rows(dir.path()).into_iter().map(|row| row.1).collect() };
+        let acknowledged = || corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+        let budget = EvalBudget::unbounded();
+        let mut driver =
+            SearchCatchUp::new(&corpus.kernel, &projection).with_budget(budget.clone());
+        let mut hit = false;
+        let report = driver
+            .run_episode(&consumer, &catch_up_bounds(), 3, &mut |event| {
+                let phase = match event {
+                    EpisodeEvent::HoldExtensionRequested { .. } => "hold",
+                    EpisodeEvent::LocalStaged { .. } => "staged",
+                    EpisodeEvent::LocalReleased { .. } => "released",
+                    EpisodeEvent::AcknowledgementRequested { .. } => "ack",
+                    EpisodeEvent::Acknowledged { .. } => {
+                        panic!("{cut}: a cancelled window was acknowledged")
+                    }
+                };
+                if phase == cut {
+                    hit = true;
+                    budget.cancel();
+                }
+            })
+            .unwrap();
+        assert!(hit, "{cut}");
+        assert_eq!(report.end, EpisodeEnd::Blocked(Blocked::Cancelled), "{cut}");
+        assert_eq!(acknowledged(), Some(hold.snapshot), "{cut}");
+        assert!(
+            projection.quarantine().is_none(),
+            "{cut}: cancellation never quarantines"
+        );
+        let kept = if matches!(cut, "released" | "ack") {
+            SUCCESSOR
+        } else {
+            ORIGINAL
+        };
+        assert_eq!(live(), occurrences(kept), "{cut}: durable work");
+
+        let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+            .unwrap();
+        assert_eq!(replay.end, EpisodeEnd::ReachedTarget, "{cut}: {replay:?}");
+        assert_eq!(live(), occurrences(SUCCESSOR), "{cut}");
+        assert_eq!(acknowledged(), Some(target), "{cut}");
     }
 }

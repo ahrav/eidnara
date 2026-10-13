@@ -726,9 +726,14 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet at the claim level - the shared catch-up's cancellation
-checks cover the mechanism; request-level cancellation belongs to the delivery
-ticket.
+Exercised: partial -
+`cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`
+cancels catch-up of a claim correction commit at the hold extension, the
+staged and released local transaction, and the acknowledgement request: each
+ends `Cancelled`, the acknowledgement stays at S, nothing is quarantined, the
+live rows equal the original claim's seed ledger before the local commit and
+the successor's after it, and a fresh episode then reaches the target with the
+successor's ledger. Request-level cancellation belongs to the delivery ticket.
 Guarantee: Cancelling a claim episode at any write boundary neither
 acknowledges unapplied work nor loses work already committed locally.
 Check: `always` - after cancellation the local prefix and the kernel checkpoint
@@ -736,7 +741,7 @@ are unchanged from the last completed boundary.
 Fault/timing angle: cancellation at each `EpisodeEvent` boundary.
 Required faults and enabling state: a cancelled episode at every boundary.
 Confidence: medium - [evidence](evidence/claim-cancellation-preserves-durable-work.md).
-Existing check: `crates/daemon/tests/search_catchup.rs` - `cancellation_at_write_boundaries_never_quarantines_or_acknowledges`, `cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix`; status unaudited.
+Existing check: `crates/daemon/tests/search_catchup.rs` - `cancellation_at_write_boundaries_never_quarantines_or_acknowledges`, `cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix`; `crates/daemon/tests/claim_sources.rs` - `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`; status unaudited.
 Impact: a cancelled request drops durable rows or acknowledges work it never applied.
 Open questions: None.
 
