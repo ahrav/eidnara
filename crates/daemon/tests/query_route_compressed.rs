@@ -9,6 +9,7 @@ use daemon::query_route::{
     LimitsRefusal, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
 };
 use daemon::request_budget::{Exhaustion, RequestBudget};
+use daemon::search_projection::SearchProjectionError;
 use daemon::vector_admission::{Census, RESIDENT_LIMIT, ResourceClass};
 use daemon::vector_generation::ROWS_FILE;
 use daemon::vector_reader::{PinnedVectors, RescoreEvent};
@@ -20,6 +21,7 @@ use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::{CandidatePolicy, CapacityRefusal, ScanBounds, StorageBounds, Window};
 use retrieval::eligibility::Authority;
 use retrieval::fusion::{Lane, RawScore};
+use storage::StoreError;
 use support::query_route::{
     Fixture, GENERATION, QUERY, dense_limits, dense_reference, generation, limits,
     projection_identity, query_vector, request_budget, vector_for,
@@ -350,13 +352,24 @@ async fn a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connec
     fixture.daemon.shutdown().await;
 }
 
+/// Twenty thousand recursive rows run well past the 1,000-step polling interval, so a leaked progress handler polls during the scan.
+const POLLED_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000) SELECT count(*) FROM c";
+
+/// A plain read runs under any progress handler an earlier read left on the projection connection.
+fn plain_scan(fixture: &Fixture) -> Result<i64, SearchProjectionError> {
+    fixture
+        .projection
+        .read(|conn| Ok(conn.query_row(POLLED_SCAN, [], |row| row.get(0))?))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete() {
     let fixture = Fixture::build().await;
     let composition = Composition::of(&fixture);
-    // The next request runs on the same projection connection after its predecessor's token is cancelled, so a progress handler left behind would interrupt it.
+    // The plain read runs before the next request because that request's guarded read would replace a handler the earlier request left behind.
     let next_completes = |earlier: &tokio_util::sync::CancellationToken| {
         earlier.cancel();
+        assert_eq!(plain_scan(&fixture).unwrap(), 20_000);
         let (_token, budget) = request_budget(10_000);
         let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
         assert_eq!(outcome.statuses[2], LaneStatus::Complete);
@@ -394,6 +407,40 @@ async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_co
         Some(&"injected unwind inside the dense scan")
     );
     next_completes(&token);
+    fixture.daemon.shutdown().await;
+}
+
+/// The leaked progress handler interrupts statements on the projection connection when polled after `token` is cancelled.
+fn leak_progress_handler(fixture: &Fixture, token: &tokio_util::sync::CancellationToken) {
+    let token = token.clone();
+    fixture
+        .projection
+        .read(|conn| {
+            conn.leak_progress_handler_for_test(move || token.is_cancelled());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leaked_progress_handler_fails_a_plain_read_that_the_next_guarded_request_masks() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let token = tokio_util::sync::CancellationToken::new();
+    leak_progress_handler(&fixture, &token);
+    token.cancel();
+    let leaked = plain_scan(&fixture);
+    assert!(
+        matches!(
+            leaked,
+            Err(SearchProjectionError::Store(StoreError::Deadline))
+        ),
+        "{leaked:?}"
+    );
+    // The guarded read replaces the connection's progress handler, masking the leak detected by the plain read.
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
     fixture.daemon.shutdown().await;
 }
 

@@ -797,20 +797,28 @@ Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
 `a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`
-and `a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete`.
+and `a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete`,
+with `a_leaked_progress_handler_fails_a_plain_read_that_the_next_guarded_request_masks`
+as its negative control.
 Guarantee: The projection's connection carries one request's stop predicate
 only for that request's read; after request A ends cancelled, request B on the
 same connection completes even when A's token is cancelled again during B's
 original reads, and after request C completes uncancelled, request D
 completes when C's token is first cancelled during D's original reads; a
 request whose dense lane ends `read_failed`, and one that unwinds from a panic
-inside the scan, each leave the next request on the connection complete after
-their own token is cancelled before it.
+inside the scan, each leave the connection without their handler once their
+token is cancelled, and the next request on it completes.
 Check: `always` - A ends `Cancelled`; B and D end with a complete dense lane
 and an unexhausted budget; C's answer stands; after the failed and the unwound
-request, the next answers a complete dense lane of two hits with an
-unexhausted budget and no scratch or row-buffer charge left. `always` because a reused
-connection must never carry an earlier caller's cancellation.
+request and the cancellation of their tokens, a plain read of a 20,000-row
+recursive scan completes before the next request, and the next request
+answers a complete dense lane of two hits with an unexhausted budget and no
+scratch or row-buffer charge left. The plain read runs first because a guarded
+read replaces the connection's progress handler when it starts
+(`crates/storage/src/lib.rs:474`), which masks a leaked one; the negative
+control shows a leaked handler fails the plain read while the next guarded
+request still completes. `always` because a reused connection must never
+carry an earlier caller's cancellation.
 Fault/timing angle: A late cancellation of A inside B's ranking.
 Required faults and enabling state: Two sequential requests on one
 `SearchProjection`.
@@ -832,11 +840,7 @@ Exercised: yes - `query_route_compressed.rs`
 `the_pool_the_limits_give_is_checked_before_a_view_is_installed`,
 `vectors_install_only_under_declared_dense_limits`, which also refuses a
 later route-limit change that the installed vectors cannot serve, and
-`vectors_install_only_under_the_tolerance_their_layers_carry`; at request
-time, `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`, where
-an entry bound of one degrades the lane as `layers` with no row visited and
-no scratch or row-buffer charge, and the bound equal to the view's rows
-completes.
+`vectors_install_only_under_the_tolerance_their_layers_carry`.
 Guarantee: A composition installs only under declared dense limits whose
 `unit_norm_tolerance` equals the view's layout bit for bit (`check_pair`,
 `query_route.rs:753`), and only when the pool `CompressedLimits::capacity`
@@ -861,6 +865,16 @@ Impact: An oversized pool allocates or judges past what the kernel accepts.
 Open questions:
 - Parent Q6 approval of the production values; #825 D23 and D27 name `k` 64
   and a pool of 256 (needs human input).
+- Installation leaves the entry bound to request time. `check_pair`
+  (`query_route.rs:753`) calls `CompressedLimits::capacity`
+  (`query_route.rs:618`), which checks `k`, the alpha policy, `candidates`, and
+  `scan_page_rows`; `max_entries` is first compared with the view's rows inside
+  the request's scan. A composition whose entry bound is below its rows
+  installs, and every request then reserves `Scratch` and `RowBuffers`
+  (`vector_reader.rs:876`, `:878`) and degrades as `layers`, as
+  `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan` shows. This
+  conflicts with the Check rationale that a limit every request would refuse
+  must never reach a request (needs human input).
 
 ### dense-failures-keep-their-classification-at-the-route
 
@@ -873,6 +887,7 @@ Exercised: yes - `query_route_compressed.rs`
 `a_view_of_another_kernel_incarnation_degrades_the_lane`,
 `a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`,
 `a_kernel_failure_during_candidate_judgement_degrades_the_dense_lane_as_kernel`,
+`an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`,
 and `the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
 Guarantee: A served compressed ranking reaches fusion with each hit's exact
 original score; a view bound degrades the dense lane as `view_bound` while the
@@ -890,8 +905,12 @@ Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
 degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
 `heap_over_bound`, a one-byte batch as `batch_bytes`, a full ledger as
-`reservation`, and a view of another kernel incarnation as `identity`; the
-corruption and the quarantine reasons are those strings. `always` because no
+`reservation`, and a view of another kernel incarnation as `identity`; an
+entry bound of one degrades as `layers` with no row visited and no scratch or
+row-buffer charge left, although the route reserves both
+(`vector_reader.rs:876`, `:878`) before the scan applies the bound
+(`vector_reader.rs:900`), and the bound equal to the view's rows completes;
+the corruption and the quarantine reasons are those strings. `always` because no
 failure may pass as a successful dense completion.
 Fault/timing angle: Corruption between selection and the reads.
 Required faults and enabling state: A one-byte read bound; a rows file cut

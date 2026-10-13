@@ -1204,11 +1204,11 @@ mod sqlite_backend {
             Ok(())
         }
 
-        /// Leaves a progress handler installed past the read, which a negative control uses to show that the untouched-later-read oracle detects a leaked hook.
-        #[cfg(test)]
-        pub(crate) fn leak_progress_handler_for_test(&self) {
+        /// `stop` stays installed after the read, so negative controls can reproduce a leaked handler.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn leak_progress_handler_for_test(&self, stop: impl FnMut() -> bool + Send + 'static) {
             self.conn
-                .progress_handler(1, Some(|| true))
+                .progress_handler(READ_INTERRUPT_STEPS, Some(stop))
                 .expect("a progress handler installs on an open connection");
         }
 
@@ -5936,11 +5936,12 @@ mod tests {
         let polled = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) SELECT count(*) FROM n";
         let far = || Instant::now() + Duration::from_secs(60);
         let count = |c: &GuardedConn<'_>| c.query_row(polled, [], |row| row.get::<_, i64>(0));
-        // The leaked handler already interrupts the statements that finish this read.
-        let _ = store.with_conn(|c| {
-            c.leak_progress_handler_for_test();
-            Ok(())
-        });
+        store
+            .with_conn(|c| {
+                c.leak_progress_handler_for_test(|| true);
+                Ok(())
+            })
+            .expect("the read that leaks the handler finishes before the handler's first poll");
         let leaked = store.with_conn_within(far(), count);
         assert!(leaked.is_err(), "{leaked:?}");
         drop(store);
