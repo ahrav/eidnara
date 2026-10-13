@@ -425,3 +425,39 @@ exists, and the pool holds every byte again; and
 `crates/daemon/tests/parse_charge_covers_typed_decode.rs`, whose failed-prefix
 test now sees the admission restart the duplicate-key body and its held-pool
 test refuse the typed decode at its first value.
+
+## Entry scan re-evidence, 2026-10-13 (#994)
+
+At this head `Handler::handle` (`crates/daemon/src/lib.rs`) runs `scan_entry`
+before the byte cap. For a body over the facade cap, or one that spells
+`transform`, `ingress_scan::scan` (`crates/daemon/src/ingress_scan.rs`) reads
+the body once. When it accounts for every byte, it supplies the probe that
+`enforce_request_byte_cap_with` and `lane_probe_with` read, the value count
+that `admit_body_with` compares against the capacity through `floor_of_values`,
+and the longest escaped string that `reserve_unescape_scratch_of` charges. On every body the
+scan answers for, those equal `probe_request`, `footprint_floor`, and
+`longest_escaped_string`, so a byte-doomed body is still refused before either
+decode with the pool never asked, and the unescape charge still precedes the
+decode. The scan copies and unescapes nothing. A body with an escaped
+top-level key or route value, a control byte, or any shape outside the scan's
+grammar takes the reference reads in their prior order, so a long escaped key
+is still charged before the reference probe unescapes it.
+
+A body the scan declines late, such as one over the facade cap that breaks the
+grammar at its last byte, pays one more linear pass than before, bounded by the
+32 MiB transform cap; the scan holds no charge and allocates nothing.
+
+Executed on the #994 branch: `entry_scan_answers_as_the_reference_reads_or_not_at_all`,
+which compares nests of mixed objects and arrays at depths 63 through 256;
+the proptests `entry_scan_matches_the_reference_reads`, which compares the
+probe, the floor, and the longest escaped string on 2048 serialized and
+byte-edited bodies, and `entry_scan_answers_every_body_in_its_grammar`;
+`request_byte_cap_widens_for_transform_class_only`, which runs every body over
+the facade cap through the scan and the reference probe and gets one cap result,
+and one admission outcome, footprint, and held bytes on either side of the floor;
+`the_entry_scan_reproduces_the_reference_entry_on_the_corpora`, which compares
+the lane probe and the admission outcome, footprint, and held bytes at five
+capacities for every frozen and supplementary corpus body; and the A1 checks
+named above with `crates/daemon/tests/parse_charge_covers_typed_decode.rs`,
+including `a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key` and
+`byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`.

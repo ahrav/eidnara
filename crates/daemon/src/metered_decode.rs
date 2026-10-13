@@ -288,7 +288,15 @@ impl<'r> ResidentMeter<'r> {
     /// A visited string never exceeds the raw length counted here, so the decodes charge
     /// nothing more for the buffer.
     pub fn reserve_unescape_scratch(&self, body: &[u8]) -> Result<(), Refusal> {
-        self.escaped_text(longest_escaped_string(body))
+        self.reserve_unescape_scratch_of(longest_escaped_string(body))
+    }
+
+    /// `longest_escaped` is the raw byte length of the body's longest escaped string.
+    pub(crate) fn reserve_unescape_scratch_of(
+        &self,
+        longest_escaped: usize,
+    ) -> Result<(), Refusal> {
+        self.escaped_text(longest_escaped)
     }
 
     /// Charges `bytes` a request is about to allocate past its decode, with the decode's
@@ -455,7 +463,7 @@ pub fn footprint_of(body: &[u8]) -> usize {
 
 /// The raw length of the longest string in `body` that holds an escape, from its bytes
 /// alone; zero when no string does. Raw length is at least the decoded length.
-fn longest_escaped_string(body: &[u8]) -> usize {
+pub(crate) fn longest_escaped_string(body: &[u8]) -> usize {
     if memchr::memchr(b'\\', body).is_none() {
         return 0;
     }
@@ -525,6 +533,16 @@ pub fn footprint_floor_exceeds(body: &[u8], capacity: usize) -> bool {
     most > capacity && footprint_floor(body) > capacity
 }
 
+/// The footprint floor of a body holding `values` values, object keys included.
+pub(crate) fn floor_of_values(values: usize) -> usize {
+    if values == 0 {
+        return 0;
+    }
+    values
+        .saturating_mul(NODE_BYTES)
+        .saturating_add(VALUE_ENVELOPE_BYTES)
+}
+
 /// Returns a lower bound on the footprint `body` reaches when decoded, from its bytes alone:
 /// one node per value start outside a string, with string bytes left out. A value starts at
 /// an opening quote, `[`, `{`, the first byte of a number, or the first letter of a literal,
@@ -572,12 +590,7 @@ pub(crate) fn footprint_floor(body: &[u8]) -> usize {
             _ => in_number = false,
         }
     }
-    if values == 0 {
-        return 0;
-    }
-    values
-        .saturating_mul(NODE_BYTES)
-        .saturating_add(VALUE_ENVELOPE_BYTES)
+    floor_of_values(values)
 }
 
 /// Skips one value through `deserialize_any`, so every check the deserializer applies to a

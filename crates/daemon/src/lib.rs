@@ -39,6 +39,7 @@ pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
+mod ingress_scan;
 
 /// Re-exports the publication path's presented-line renderer and
 /// summarizer-output validator for scripted-summary tests.
@@ -13016,18 +13017,19 @@ impl CompositeComponent for Handler {
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
         let received_at = Instant::now();
         let body = ctx.body.as_slice();
-        let cap_probe = match enforce_request_byte_cap(body) {
+        let scan = scan_entry(body);
+        let cap_probe = match enforce_request_byte_cap_with(body, scan.as_ref()) {
             Ok(probe) => probe,
             Err(outcome) => return settle_prepared(&ctx, outcome).await,
         };
         // The decode charges the scratch pool as it builds values; the meter holds the charges
-        // until the response has settled. The admission charge comes before the lane probe,
-        // which unescapes a sub-cap body's keys and discriminators as it reads them.
+        // until the response has settled. The admission charge comes before the reference lane
+        // probe, which unescapes a sub-cap body's keys and discriminators as it reads them.
         let meter = ResidentMeter::new(&ctx);
-        if let Err(outcome) = admit_body(body, &meter) {
+        if let Err(outcome) = admit_body_with(body, &meter, scan.as_ref()) {
             return settle_prepared(&ctx, outcome).await;
         }
-        let probe = cap_probe.or_else(|| lane_probe(body));
+        let probe = cap_probe.or_else(|| lane_probe_with(body, scan.as_ref()));
         let entry = PassEntry {
             core: &self.core,
             route: ctx.route,
@@ -16506,9 +16508,35 @@ fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
 /// spells literally selects the direct lane, so a body whose bytes never spell `transform`
 /// cannot reach it, and a facade body pays only its `Value` parse.
 fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
-    memchr::memmem::find(body, b"transform")
-        .is_some()
-        .then(|| probe_request(body))?
+    spells_transform(body).then(|| probe_request(body))?
+}
+
+fn spells_transform(body: &[u8]) -> bool {
+    memchr::memmem::find(body, b"transform").is_some()
+}
+
+/// Reads the lane probe from the entry scan when one answered, and through [`lane_probe`]
+/// otherwise. [`scan_entry`] answers only for a body over the facade cap, whose probe the byte
+/// cap already returned, or one that [`spells_transform`], so the scan's probe is the one
+/// `lane_probe` would read.
+fn lane_probe_with(
+    body: &[u8],
+    scan: Option<&ingress_scan::BodyScan<'_>>,
+) -> Option<RequestEntryProbe> {
+    match scan {
+        Some(scan) => Some(RequestEntryProbe::scanned(scan)),
+        None => lane_probe(body),
+    }
+}
+
+/// The one pass that answers the byte cap's probe, the admission scans, and the lane probe for
+/// a body the reference reads would each parse: one over the facade cap, or one that spells
+/// `transform`. `None` sends each read to its reference.
+fn scan_entry(body: &[u8]) -> Option<ingress_scan::BodyScan<'_>> {
+    if body.len() <= MAX_FACADE_FRAME_BYTES && !spells_transform(body) {
+        return None;
+    }
+    ingress_scan::scan(body)
 }
 
 /// Whether the tree's parse rules accept `body`, the oracle the lane tests hold the direct
@@ -16729,6 +16757,15 @@ impl<'de> Deserialize<'de> for TreeParseWitnessKey {
 }
 
 impl RequestEntryProbe {
+    /// The probe `probe_request` reads from a body the entry scan accounted for.
+    fn scanned(scan: &ingress_scan::BodyScan<'_>) -> Self {
+        Self {
+            method: RouteName::scanned(scan.method),
+            kind: RouteName::scanned(scan.kind),
+            page_fields: scan.page_fields,
+        }
+    }
+
     /// The discriminator dispatch resolves: `method` when it is a string, else `kind`.
     fn route(&self) -> &RouteName {
         match self.method {
@@ -16776,6 +16813,14 @@ enum RouteName {
 
 impl RouteName {
     const MAX_ROUTE_NAME_BYTES: usize = 64;
+
+    fn scanned(route: ingress_scan::ScannedRoute<'_>) -> Self {
+        match route {
+            ingress_scan::ScannedRoute::Absent => RouteName::Absent,
+            ingress_scan::ScannedRoute::Named(name) => RouteName::Named(name.to_owned()),
+            ingress_scan::ScannedRoute::Overlong => RouteName::Overlong,
+        }
+    }
 
     fn short(&self) -> Option<&str> {
         match self {
@@ -16860,17 +16905,41 @@ impl<'de> Deserialize<'de> for RouteName {
 /// unescape buffer for its longest escaped string is charged next, so the pool refuses
 /// before serde_json grows that buffer for the lane probe or either decode.
 fn admit_body(body: &[u8], meter: &ResidentMeter<'_>) -> Result<(), PreparedOutcome> {
+    admit_body_with(body, meter, None)
+}
+
+/// Runs [`admit_body`]'s steps on the value count and the longest escaped string the entry
+/// scan measured, when one answered.
+fn admit_body_with(
+    body: &[u8],
+    meter: &ResidentMeter<'_>,
+    scan: Option<&ingress_scan::BodyScan<'_>>,
+) -> Result<(), PreparedOutcome> {
     if let Some(refusal) = meter.refusal() {
         return Err(resident_refusal(refusal));
     }
     if !meter.admit_once() {
         return Ok(());
     }
-    if footprint_floor_exceeds(body, meter.capacity()) {
-        return Err(request_too_large_error());
-    }
+    let capacity = meter.capacity();
+    let longest_escaped = match scan {
+        // The scan counts one value per start byte, so its count never exceeds the length bound
+        // `footprint_floor_exceeds` checks first.
+        Some(scan) => {
+            if metered_decode::floor_of_values(scan.values) > capacity {
+                return Err(request_too_large_error());
+            }
+            scan.longest_escaped
+        }
+        None => {
+            if footprint_floor_exceeds(body, capacity) {
+                return Err(request_too_large_error());
+            }
+            metered_decode::longest_escaped_string(body)
+        }
+    };
     meter
-        .reserve_unescape_scratch(body)
+        .reserve_unescape_scratch_of(longest_escaped)
         .map_err(resident_refusal)
 }
 
@@ -16887,7 +16956,7 @@ fn resident_refusal(refusal: Refusal) -> PreparedOutcome {
 /// Whether the byte cap admits `body`; the step of `Handler::handle` before the metered decode.
 #[cfg(feature = "test-support")]
 pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
-    enforce_request_byte_cap(body).is_ok()
+    enforce_request_byte_cap_with(body, scan_entry(body).as_ref()).is_ok()
 }
 
 /// Derives a native profile's CK from `native` as a transform pass does, for the allocation
@@ -16915,10 +16984,13 @@ pub fn handle_entry_for_test(
     body: &[u8],
     reserve: &dyn metered_decode::ResidentReserve,
 ) -> Result<bool, PreparedOutcome> {
-    let cap_probe = enforce_request_byte_cap(body)?;
+    let scan = scan_entry(body);
+    let cap_probe = enforce_request_byte_cap_with(body, scan.as_ref())?;
     let meter = ResidentMeter::new(reserve);
-    admit_body(body, &meter)?;
-    Ok(cap_probe.or_else(|| lane_probe(body)).is_some())
+    admit_body_with(body, &meter, scan.as_ref())?;
+    Ok(cap_probe
+        .or_else(|| lane_probe_with(body, scan.as_ref()))
+        .is_some())
 }
 
 /// A unit produced no outcome: its thread panicked (the payload reached stderr only as the
@@ -16963,17 +17035,30 @@ fn transform_admission_error() -> PreparedOutcome {
     }
 }
 
-/// A body larger than `MAX_FACADE_FRAME_BYTES` without a transform-class probe is refused.
-/// The probe read for the class is returned so dispatch does not read it again. A body at
-/// or under that cap is admitted by its length alone: the cap runs before the resident
-/// reservation, and the probe's unescape buffer for a long escaped key would otherwise be
-/// the first body-proportional allocation outside admission control.
+/// The byte cap on the reference probe alone, which the tests hold the scanned cap to.
+#[cfg(test)]
 fn enforce_request_byte_cap(body: &[u8]) -> Result<Option<RequestEntryProbe>, PreparedOutcome> {
+    enforce_request_byte_cap_with(body, None)
+}
+
+/// A body larger than `MAX_FACADE_FRAME_BYTES` without a transform-class probe is refused.
+/// The probe read for the class is returned so dispatch does not read it again; it is the entry
+/// scan's when one answered, and `probe_request`'s otherwise. A body at or under that cap is
+/// admitted by its length alone: the cap runs before the resident reservation, and the
+/// reference probe's unescape buffer for a long escaped key would otherwise be the first
+/// body-proportional allocation outside admission control.
+fn enforce_request_byte_cap_with(
+    body: &[u8],
+    scan: Option<&ingress_scan::BodyScan<'_>>,
+) -> Result<Option<RequestEntryProbe>, PreparedOutcome> {
     let body_len = body.len();
     if body_len <= MAX_FACADE_FRAME_BYTES {
         return Ok(None);
     }
-    let probe = probe_request(body);
+    let probe = match scan {
+        Some(scan) => Some(RequestEntryProbe::scanned(scan)),
+        None => probe_request(body),
+    };
     let transform_class = probe
         .as_ref()
         .is_some_and(RequestEntryProbe::is_transform_class);
@@ -18410,7 +18495,8 @@ mod tests {
 
     use super::*;
     use crate::metered_decode::{
-        RETAINED_STRING_COPIES, ResidentReserve, footprint_floor, footprint_of, shortfall_count,
+        RETAINED_STRING_COPIES, ResidentReserve, floor_of_values, footprint_floor, footprint_of,
+        longest_escaped_string, shortfall_count,
     };
     use std::collections::{HashMap, VecDeque};
 
@@ -20476,6 +20562,57 @@ mod tests {
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
         );
+        // Over the facade cap, the probe the entry scan reads decides the cap as the reference
+        // probe does, on every body the scan answers for.
+        let shape = |capped: Result<Option<RequestEntryProbe>, PreparedOutcome>| {
+            capped
+                .map(|probe| probe.as_ref().map(probe_shape))
+                .map_err(comparable_outcome)
+        };
+        let bodies: [(&[u8], bool); 14] = [
+            (&pad("transform", "kind", two_mib), true),
+            (&pad("state_sync", "method", two_mib), true),
+            (&pad("kernel.artifact.ingest.page", "method", two_mib), true),
+            (
+                &pad("kernel.artifact.ingest.begin", "method", two_mib),
+                true,
+            ),
+            (widened.as_bytes(), true),
+            (fallback.as_bytes(), false),
+            (&pad("eidnara_memory", "method", two_mib), true),
+            (&vec![b'x'; two_mib], false),
+            (structured.as_bytes(), false),
+            (over_deep.as_bytes(), true),
+            (long_method.as_bytes(), true),
+            (&exact, true),
+            (&over, true),
+            (&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES), true),
+        ];
+        for (index, (body, answers)) in bodies.into_iter().enumerate() {
+            let scan = scan_entry(body);
+            assert_eq!(scan.is_some(), answers, "body {index}");
+            assert_eq!(
+                shape(enforce_request_byte_cap_with(body, scan.as_ref())),
+                shape(enforce_request_byte_cap(body)),
+                "body {index}"
+            );
+            // The scanned admission refuses and charges as the reference does on either side of
+            // the floor.
+            let floor = footprint_floor(body);
+            for capacity in [floor, floor.saturating_sub(1), 1 << 30] {
+                let admit = |scan| {
+                    let pool = TestPool::with_capacity(capacity);
+                    let meter = ResidentMeter::new(&pool);
+                    let outcome = admit_body_with(body, &meter, scan).map_err(comparable_outcome);
+                    (outcome, meter.needed(), meter.charged())
+                };
+                assert_eq!(
+                    admit(scan.as_ref()),
+                    admit(None),
+                    "body {index} at capacity {capacity}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -20537,6 +20674,360 @@ mod tests {
             lane_probe(br#"{"kind":"tr\u0061nsform"}"#).is_none(),
             "no literal `transform`, no direct decode"
         );
+    }
+
+    /// The reference reads of a body, as the entry scan must reproduce them.
+    fn reference_entry_reads(body: &[u8]) -> (Option<String>, usize, usize) {
+        (
+            probe_request(body).as_ref().map(probe_shape),
+            footprint_floor(body),
+            longest_escaped_string(body),
+        )
+    }
+
+    fn scanned_entry_reads(scan: &ingress_scan::BodyScan<'_>) -> (Option<String>, usize, usize) {
+        (
+            Some(probe_shape(&RequestEntryProbe::scanned(scan))),
+            floor_of_values(scan.values),
+            scan.longest_escaped,
+        )
+    }
+
+    fn probe_shape(probe: &RequestEntryProbe) -> String {
+        let route = |name: &RouteName| match name {
+            RouteName::Absent => "absent".to_owned(),
+            RouteName::Named(name) => format!("named {name:?}"),
+            RouteName::Escaped(name) => format!("escaped {name:?}"),
+            RouteName::Overlong => "overlong".to_owned(),
+        };
+        format!(
+            "method {} kind {} pages {}",
+            route(&probe.method),
+            route(&probe.kind),
+            probe.page_fields
+        )
+    }
+
+    /// The scan answers for compact transform bodies and reproduces each reference read; every
+    /// shape outside its grammar is left to the references, which still decide it.
+    #[test]
+    fn entry_scan_answers_as_the_reference_reads_or_not_at_all() {
+        let answered = [
+            r#"{"method":"transform","kind":"transform","session_id":"s","native_messages":[{"a":[1,-2.5e+3,true,false,null,"x\"y\\z\u00e9\n"]}]}"#,
+            r#"{"kind":"transform","boundary":null,"x":{},"y":[],"z":[{}],"w":"é→日本"}"#,
+            r#"{"method":"status","method":"transform"}"#,
+            r#"{"method":null,"kind":"transform","transform_page_id":"p"}"#,
+            r#" { "kind" : "transform" , "n" : [ 0 , 1.0 , -0 , 10E-2 ] } "#,
+            r#"{}"#,
+        ];
+        for body in answered {
+            let scan = ingress_scan::scan(body.as_bytes()).unwrap_or_else(|| panic!("{body}"));
+            assert_eq!(
+                scanned_entry_reads(&scan),
+                reference_entry_reads(body.as_bytes()),
+                "{body}"
+            );
+        }
+        // The route-name bound is in bytes: 64 ASCII or 32 two-byte letters are kept by name,
+        // 65 ASCII or 33 two-byte letters are overlong.
+        for (name, kept) in [
+            ("m".repeat(64), true),
+            ("\u{e9}".repeat(32), true),
+            ("m".repeat(65), false),
+            ("\u{e9}".repeat(33), false),
+        ] {
+            let body = format!(r#"{{"method":"{name}","kind":"transform"}}"#);
+            let scan = ingress_scan::scan(body.as_bytes()).unwrap();
+            let route = if kept {
+                ingress_scan::ScannedRoute::Named(&name)
+            } else {
+                ingress_scan::ScannedRoute::Overlong
+            };
+            assert_eq!(scan.method, route, "{name}");
+            assert_eq!(
+                scanned_entry_reads(&scan),
+                reference_entry_reads(body.as_bytes()),
+                "{name}"
+            );
+        }
+        let nested = |depth: usize| {
+            format!(
+                r#"{{"kind":"transform","x":{}{}}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        // Every third level is an object across the depth stack's whole range, a period no
+        // power of two divides, so a closer of the wrong kind would pass if a depth were misread.
+        let mixed = |depth: usize, swap: Option<usize>| {
+            let mut body = String::from(r#"{"kind":"transform","x":"#);
+            for level in 0..depth {
+                body.push_str(if level % 3 == 0 { r#"{"k":"# } else { "[" });
+            }
+            body.push('0');
+            for level in (0..depth).rev() {
+                let object = level % 3 == 0;
+                body.push(if object != (swap == Some(level)) {
+                    '}'
+                } else {
+                    ']'
+                });
+            }
+            body.push('}');
+            body
+        };
+        for body in [nested(256), nested(257)]
+            .into_iter()
+            .chain([63, 64, 65, 127, 128, 129, 255, 256].map(|depth| mixed(depth, None)))
+        {
+            let scan = ingress_scan::scan(body.as_bytes()).unwrap_or_else(|| panic!("{body}"));
+            assert_eq!(
+                scanned_entry_reads(&scan),
+                reference_entry_reads(body.as_bytes()),
+                "{body}"
+            );
+        }
+        let left_to_references = [
+            "{\"kind\":\"transform\",\n\"x\":1}".to_owned(),
+            "{\"kind\":\"tr\u{1}ansform\"}".to_owned(),
+            "{\"kind\":\"tr\u{1f}ansform\"}".to_owned(),
+            // A control byte inside a string, in the chunked part of the body and at the last
+            // byte of the first chunk.
+            format!(
+                "{{\"kind\":\"transform\",\"x\":\"{}\u{1}\"}}",
+                "a".repeat(80)
+            ),
+            format!(
+                "{{\"kind\":\"transform\",\"x\":\"{}\u{1}{}\"}}",
+                "a".repeat(37),
+                "a".repeat(40)
+            ),
+            mixed(257, None),
+            mixed(100, Some(63)),
+            mixed(100, Some(64)),
+            mixed(200, Some(128)),
+            r#"{"kind":"tr\u0061nsform"}"#.to_owned(),
+            r#"{"\u006bind":"transform"}"#.to_owned(),
+            r#"{"method":1,"kind":"transform"}"#.to_owned(),
+            r#"{"method":[],"kind":"transform"}"#.to_owned(),
+            r#"{"kind":"transform","x":"\x"}"#.to_owned(),
+            r#"{"kind":"transform","x":"\u12G4"}"#.to_owned(),
+            r#"{"kind":"transform",}"#.to_owned(),
+            r#"{"kind":"transform"} x"#.to_owned(),
+            r#"["transform"]"#.to_owned(),
+            r#"{"kind":"transform""#.to_owned(),
+            nested(258),
+        ];
+        for body in &left_to_references {
+            assert!(ingress_scan::scan(body.as_bytes()).is_none(), "{body}");
+        }
+        // Each of these malformed numbers is refused by the reference probe too, so the scan's
+        // decline is the only answer that agrees with it.
+        let numbers = ["01", "1.", "1.e5", "1e", "1e+", "-", "-.5", "+1", ".5"]
+            .map(|number| format!(r#"{{"kind":"transform","x":{number}}}"#));
+        for body in &numbers {
+            assert!(ingress_scan::scan(body.as_bytes()).is_none(), "{body}");
+        }
+        for body in numbers.iter().cloned().chain([
+            mixed(100, Some(63)),
+            mixed(100, Some(64)),
+            mixed(200, Some(128)),
+        ]) {
+            assert!(probe_request(body.as_bytes()).is_none(), "{body}");
+        }
+        let invalid_key = b"{\"k\xffind\":\"transform\"}";
+        assert!(ingress_scan::scan(invalid_key).is_none());
+        assert!(probe_request(invalid_key).is_none());
+    }
+
+    /// A member value under a key the scan skips: a leaf or a whole nested object.
+    fn entry_member_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        prop_oneof![
+            entry_json(),
+            Just(Value::Null),
+            any::<i64>().prop_map(Value::from),
+            any::<f64>()
+                .prop_filter("finite", |value| value.is_finite())
+                .prop_map(Value::from),
+            "[a-z\"\\\\ \u{e9}]{0,8}".prop_map(Value::String),
+        ]
+    }
+
+    fn entry_json() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let text = prop_oneof![
+            proptest::sample::select(vec![
+                "",
+                "transform",
+                "status",
+                "a\"b\\c",
+                "x\ny\t\u{1}",
+                "é→日本",
+                RAW_VALUE_TOKEN,
+            ])
+            .prop_map(str::to_owned),
+            "[a-z\"\\\\/ \n\u{e9}]{0,12}",
+            (1usize..80).prop_map(|len| "m".repeat(len)),
+        ];
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::from),
+            any::<u64>().prop_map(Value::from),
+            any::<f64>()
+                .prop_filter("finite", |value| value.is_finite())
+                .prop_map(Value::from),
+            text.clone().prop_map(Value::String),
+        ];
+        let key = prop_oneof![
+            proptest::sample::select(vec![
+                "method",
+                "kind",
+                "transform_page_id",
+                "transform_page_complete",
+                "native_messages",
+                "é",
+                "a\"b",
+            ])
+            .prop_map(str::to_owned),
+            text,
+        ];
+        let value = leaf.prop_recursive(4, 48, 5, move |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..5).prop_map(Value::Array),
+                proptest::collection::btree_map("[a-z\"\\\\]{0,4}", inner, 0..5)
+                    .prop_map(|map| Value::Object(map.into_iter().collect())),
+            ]
+        });
+        proptest::collection::btree_map(key, value, 0..7)
+            .prop_map(|map| Value::Object(map.into_iter().collect()))
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2048))]
+
+        /// On serialized bodies and on bodies with bytes inserted, removed, or replaced, a scan
+        /// that answers reproduces the reference probe, the footprint floor, and the longest
+        /// escaped string.
+        #[test]
+        fn entry_scan_matches_the_reference_reads(
+            value in entry_json(),
+            edits in proptest::collection::vec(
+                (
+                    proptest::prelude::any::<proptest::sample::Index>(),
+                    0u8..3,
+                    proptest::sample::select(b"\"\\{}[],: \nu0e-.tfn\x01\x1f\xffx".to_vec()),
+                ),
+                0..3,
+            ),
+        ) {
+            use proptest::prelude::*;
+            let mut body = serde_json::to_vec(&value).unwrap();
+            for (at, edit, byte) in edits {
+                let at = at.index(body.len() + 1);
+                match edit {
+                    0 => body.insert(at, byte),
+                    1 if at < body.len() => {
+                        body.remove(at);
+                    }
+                    _ if at < body.len() => body[at] = byte,
+                    _ => {}
+                }
+            }
+            if let Some(scan) = ingress_scan::scan(&body) {
+                prop_assert_eq!(scanned_entry_reads(&scan), reference_entry_reads(&body));
+            }
+        }
+
+        /// A body inside the scan's grammar, top-level keys and route values spelled without
+        /// escapes over arbitrary nested values, is always answered, and answered as the
+        /// reference reads answer it.
+        #[test]
+        fn entry_scan_answers_every_body_in_its_grammar(
+            members in proptest::collection::vec(
+                (
+                    proptest::sample::select(vec![
+                        "method", "kind", "transform_page_id", "transform_page_total",
+                        "native_messages", "\u{e9}", "boundary",
+                    ]),
+                    entry_member_value(),
+                    proptest::sample::select(vec![
+                        "\"transform\"", "\"status\"", "null", "true", "false", "\"\u{e9}\u{65e5}\"",
+                    ]),
+                ),
+                0..7,
+            ),
+            spaced in proptest::bool::ANY,
+        ) {
+            use proptest::prelude::*;
+            let space = if spaced { " " } else { "" };
+            let members: Vec<String> = members
+                .into_iter()
+                .map(|(key, value, route)| {
+                    let value = match key {
+                        "method" | "kind" => route.to_owned(),
+                        _ => serde_json::to_string(&value).unwrap(),
+                    };
+                    format!("{space}\"{key}\"{space}:{space}{value}{space}")
+                })
+                .collect();
+            let body = format!("{space}{{{}}}{space}", members.join(",")).into_bytes();
+            let scan = ingress_scan::scan(&body);
+            prop_assert!(scan.is_some());
+            prop_assert_eq!(scanned_entry_reads(&scan.unwrap()), reference_entry_reads(&body));
+        }
+    }
+
+    /// Through the entry the handler runs, every corpus body reaches the same byte-cap result,
+    /// admission outcome, held footprint, and lane probe whether the scan answers or not.
+    #[test]
+    fn the_entry_scan_reproduces_the_reference_entry_on_the_corpora() {
+        let bodies = transform_decode_corpus().into_iter().chain(
+            native_and_token_corpus()
+                .into_iter()
+                .map(|(name, body, _)| (name, body)),
+        );
+        let mut answered = 0;
+        for (name, body) in bodies {
+            let scan = scan_entry(&body);
+            answered += usize::from(scan.is_some());
+            let cap = |scan| {
+                enforce_request_byte_cap_with(&body, scan)
+                    .map(|probe| probe.as_ref().map(probe_shape))
+                    .map_err(comparable_outcome)
+            };
+            assert_eq!(cap(scan.as_ref()), cap(None), "{name}: byte cap");
+            assert_eq!(
+                lane_probe_with(&body, scan.as_ref())
+                    .as_ref()
+                    .map(probe_shape),
+                lane_probe(&body).as_ref().map(probe_shape),
+                "{name}: lane probe"
+            );
+            let footprint = footprint_of(&body);
+            let floor = footprint_floor(&body);
+            for capacity in [
+                footprint,
+                footprint.saturating_sub(1),
+                floor,
+                floor.saturating_sub(1),
+                1 << 30,
+            ] {
+                let admit = |scan| {
+                    let pool = TestPool::with_capacity(capacity);
+                    let meter = ResidentMeter::new(&pool);
+                    let outcome = admit_body_with(&body, &meter, scan).map_err(comparable_outcome);
+                    (outcome, meter.needed(), meter.charged())
+                };
+                assert_eq!(
+                    admit(scan.as_ref()),
+                    admit(None),
+                    "{name} at capacity {capacity}"
+                );
+            }
+        }
+        assert!(answered > 20, "the scan answered {answered} corpus bodies");
     }
 
     /// The witness refuses exactly what a `Value` parse refuses, plus an object holding the

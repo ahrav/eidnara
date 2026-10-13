@@ -1,5 +1,18 @@
 # Hot-path latency audit supplement
 
+> Dated note, 2026-10-13, #994: one entry scan, `ingress_scan::scan`, answers
+> the byte cap's probe, the footprint floor, the unescape charge, and the lane
+> probe for a body over the facade cap or one that spells `transform`, when the
+> body is a JSON object with no control byte, top-level keys spelled without
+> escapes, and route values that are plain strings or literals. For such a body
+> each answer equals the reference read's: `probe_request`, `footprint_floor`,
+> and `longest_escaped_string`. Every other body takes those reads in their
+> prior order. The scan copies and unescapes nothing, so it runs before the
+> admission charge; the reference lane probe still runs after it. A1 and A2
+> keep their checks. The A1 clause that orders the admission charge before the
+> entry probe now orders it before the reference probe, and the re-evidence is
+> in the dated sections of both evidence files.
+
 > Dated note, 2026-10-12, #994 (spec #988 milestone U4, Q9): the direct lane has
 > no tree-parse walk. An unpaged transform body the entry probe routes there is
 > tokenized once by a metered typed decode,
