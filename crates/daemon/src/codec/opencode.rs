@@ -143,7 +143,10 @@ fn decode_rows<'a, E>(
 ) -> Result<DecodedHarnessMessages, E> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
 
-    let mut decoded = Vec::with_capacity(rows.size_hint().0);
+    let mut decoded = Vec::with_capacity(match decode {
+        Decode::Sidecar => 0,
+        _ => rows.size_hint().0,
+    });
     let mut boundary = None;
     // A call id the window already carries contributes only its result, as the plugin encodes it.
     let mut emitted_calls = HashSet::new();
@@ -1333,6 +1336,46 @@ pub(crate) mod tests {
             .cloned()
             .map(Arc::new)
             .collect()
+    }
+
+    #[test]
+    fn the_attach_sidecar_is_the_full_decode_sidecar() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut windows: Vec<Vec<Arc<Value>>> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(golden["cases"].as_array().unwrap())
+            .map(native_window)
+            .collect();
+        let edges: Vec<Arc<Value>> = [
+            json!({ "info": { "id": "dup", "role": "user" },
+                    "parts": [{ "type": "text", "text": "first" }] }),
+            json!({ "info": { "role": "assistant" },
+                    "parts": [{ "type": "text", "text": "anonymous" }] }),
+            json!({ "info": { "id": "dup", "role": "assistant" },
+                    "parts": [{ "type": "text", "text": "second" }] }),
+            json!({ "info": { "id": "compacted", "role": "user", "time": { "created": 1.5 } },
+                    "parts": [{ "type": "compaction" }, { "type": "text", "text": "y" }] }),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let sidecar = decode_opencode_sidecar(&edges);
+        assert_eq!(sidecar.order.len(), 3);
+        assert_eq!(sidecar.order[0], "dup");
+        assert_eq!(sidecar.message_by_mid("dup").unwrap().role, "assistant");
+        windows.push(edges);
+        for window in &windows {
+            assert_eq!(
+                decode_opencode_sidecar(window),
+                decode_opencode_shared(window).sidecar
+            );
+        }
+        assert!(windows.len() > 2);
     }
 
     /// The corpus windows whose every message is an object carrying `info.id` and whose call

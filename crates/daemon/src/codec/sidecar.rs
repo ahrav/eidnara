@@ -194,8 +194,11 @@ impl<'a> MatchedBlockMetas<'a> {
             if in_place {
                 for (block, meta) in run_blocks.zip(run_metas) {
                     self.by_block[block] = Some(&metas[meta]);
-                    if let Some(native_index) = metas[meta].native_index {
-                        self.unretained_native_parts[native_index] = false;
+                    if let Some(unretained) = metas[meta]
+                        .native_index
+                        .and_then(|native_index| self.unretained_native_parts.get_mut(native_index))
+                    {
+                        *unretained = false;
                     }
                 }
             }
@@ -956,6 +959,55 @@ mod tests {
 
         let deleted_and_edited = [text_block("§1§ b"), text_block("c")];
         assert_eq!(paired(&deleted_and_edited), (vec![None, Some(2)], vec![2]));
+    }
+
+    #[test]
+    fn unretained_native_parts_are_exactly_the_named_parts_no_block_pairs_with() {
+        let decoded = ["a", "b", "c", "d"].map(text_block);
+        let metas = vec![
+            BlockMeta {
+                native_index: Some(1),
+                ..text_meta(0)
+            },
+            BlockMeta {
+                native_index: None,
+                ..text_meta(1)
+            },
+            BlockMeta {
+                native_index: Some(3),
+                ..text_meta(2)
+            },
+            BlockMeta {
+                native_index: Some(3),
+                ..text_meta(3)
+            },
+        ];
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        let kept = |blocks: &[WireBlock]| {
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded);
+            matched.pair_in_place_edits(blocks, &metas, text);
+            matched.remove_unretained_native_parts(vec![0, 1, 2, 3, 4])
+        };
+        assert_eq!(kept(&decoded), [0, 1, 2, 3, 4]);
+        assert_eq!(
+            kept(&[]),
+            [0, 2, 4],
+            "parts no meta names stay, past the last named index too"
+        );
+        assert_eq!(kept(&[text_block("a")]), [0, 1, 2, 4]);
+        assert_eq!(
+            kept(&[text_block("d")]),
+            [0, 2, 3, 4],
+            "either meta naming a shared part retains it"
+        );
+        let edited = ["§0§ a", "§1§ b", "c", "d"].map(text_block);
+        assert_eq!(
+            kept(&edited),
+            [0, 1, 2, 3, 4],
+            "in-place edits retain their parts"
+        );
+        let deleted = ["§1§ b", "c", "d"].map(text_block);
+        assert_eq!(kept(&deleted), [0, 2, 3, 4]);
     }
 
     #[test]
