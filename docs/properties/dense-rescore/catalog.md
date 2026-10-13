@@ -689,7 +689,16 @@ and `a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline`;
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
 through a real host, client, and `RequestCtx`; `vector_rescore.rs`
 `cancellation_at_an_original_read_ends_the_request_before_the_row_is_read` and
-`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`.
+`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`;
+`dense_request_lifetime.rs`
+`a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_deadline`,
+where a unit held at the blocking gate for twice its 1.5 s deadline answers
+the `deadline` terminal with no scan window while the same budget completes
+for an unqueued unit, so the queue wait does not renew the deadline; and
+`crates/retrieval/tests/dense_candidates.rs`
+`a_cancelled_budget_stops_the_walk_within_one_check_interval`, where a
+cancellation at the second row of a forty-row page stops the walk at row
+index 16, the next `BUDGET_STRIDE` check.
 Guarantee: The request's one `EvalBudget`, derived with its absolute
 deadline before the dense unit is submitted, stops the compressed scan, the
 canonical eligibility batches, and the original reads; a cancellation at any
@@ -737,7 +746,13 @@ and `a_request_that_ranks_no_dense_lane_holds_no_view` and
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`;
 `vector_rescore.rs` `the_scan_scratch_charges_the_encoded_query_of_every_layer`
-for the payload buffers `Scratch` covers.
+for the payload buffers `Scratch` covers; `query_route_compressed.rs`
+`draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes`,
+where, with the resident limit set to what one draining request holds, a
+scratch reservation of the drainer's size is refused while it drains and fits
+once it finishes, and a request under the same limit then completes. The
+next admission there is a direct ledger reservation, because the fixture's
+projection connection serves one request at a time.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
 setters' locks before the unit is submitted (`query_route.rs:1992`), so the
@@ -811,7 +826,11 @@ Exercised: yes - `query_route_compressed.rs`
 `the_pool_the_limits_give_is_checked_before_a_view_is_installed`,
 `vectors_install_only_under_declared_dense_limits`, which also refuses a
 later route-limit change that the installed vectors cannot serve, and
-`vectors_install_only_under_the_tolerance_their_layers_carry`.
+`vectors_install_only_under_the_tolerance_their_layers_carry`; at request
+time, `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`, where
+an entry bound of one degrades the lane as `layers` with no row visited and
+no scratch or row-buffer charge, and the bound equal to the view's rows
+completes.
 Guarantee: A composition installs only under declared dense limits whose
 `unit_norm_tolerance` equals the view's layout bit for bit (`check_pair`,
 `query_route.rs:753`), and only when the pool `CompressedLimits::capacity`

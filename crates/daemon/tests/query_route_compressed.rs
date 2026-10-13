@@ -399,9 +399,7 @@ async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
         LaneStatus::Unavailable("batch_bytes")
     );
     let tables = composition.store.ledger.census().resident;
-    composition
-        .store
-        .set_limit(daemon::vector_admission::RESIDENT_LIMIT, tables);
+    composition.store.set_limit(RESIDENT_LIMIT, tables);
     let vectors = DenseVectors::new(
         Arc::clone(&composition.view),
         composition.store.admission.clone(),
@@ -855,7 +853,7 @@ fn while_draining<T>(
     })
 }
 
-/// A request draining at an original read holds its scratch and row buffers. With the resident limit set to exactly what the ledger holds while one request drains, a scratch reservation the size of the drainer's is refused, so draining work counts against the next admission. Once the drain finishes, its charges are gone and a request under the same limit completes.
+/// A request draining at an original read holds its scratch and row buffers. With the resident limit set to exactly what the ledger holds while one request drains, a scratch reservation the size of the drainer's is refused while it drains and fits once it finishes, so draining work counts against the next admission; a request under the same limit then completes. The next admission is a direct ledger reservation because the fixture's projection connection serves one request at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes() {
     let fixture = Fixture::build().await;
@@ -865,12 +863,8 @@ async fn draining_work_keeps_its_charges_against_the_next_admission_until_it_fin
     let scratch = probe.held[&ResourceClass::Scratch];
     assert!(scratch > 0);
     assert!(probe.held[&ResourceClass::RowBuffers] > 0);
-    composition
-        .store
-        .set_limit(daemon::vector_admission::RESIDENT_LIMIT, probe.resident);
-
-    let (status, refused) = while_draining(&fixture, &composition, |census| {
-        assert_eq!(census.resident, probe.resident, "one drain fills the limit");
+    composition.store.set_limit(RESIDENT_LIMIT, probe.resident);
+    let reserve = || {
         composition
             .store
             .ledger
@@ -880,18 +874,28 @@ async fn draining_work_keeps_its_charges_against_the_next_admission_until_it_fin
                 scratch,
             )
             .map(|_| ())
+    };
+
+    let (status, (resident, refused)) = while_draining(&fixture, &composition, |census| {
+        (census.resident, reserve())
     });
     assert_eq!(
         status,
         LaneStatus::Complete,
         "the drain itself fits the limit"
     );
+    assert_eq!(resident, probe.resident, "one drain fills the limit");
     assert!(
         matches!(refused, Err(daemon::vector_admission::Refusal::Denied(_))),
         "the draining request's charges count against the next reservation: {refused:?}"
     );
     assert_eq!(composition.charged(ResourceClass::Scratch), 0);
     assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    assert_eq!(
+        reserve(),
+        Ok(()),
+        "the same reservation fits once the drain finished"
+    );
     let (_token, budget) = request_budget(10_000);
     let recovered = run(&fixture, 2, composition.vectors(), &budget).unwrap();
     assert_eq!(
@@ -902,7 +906,7 @@ async fn draining_work_keeps_its_charges_against_the_next_admission_until_it_fin
     fixture.daemon.shutdown().await;
 }
 
-/// An entry bound below the view's rows refuses the scan before any row is visited, and the lane degrades as `layers`.
+/// An entry bound below the view's rows refuses the scan before any row is visited, and the lane degrades as `layers`; the bound equal to the view's rows completes, so the entry count is the only variable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_entry_bound_below_the_view_degrades_the_lane_before_a_scan() {
     let fixture = Fixture::build().await;
@@ -927,5 +931,16 @@ async fn an_entry_bound_below_the_view_degrades_the_lane_before_a_scan() {
     assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("layers"));
     assert_eq!(*events.lock().unwrap(), 0, "no row was visited");
     assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    let mut exact = compressed_limits();
+    exact.max_entries = NonZeroUsize::new(composition.rows.len()).unwrap();
+    let vectors = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        composition.store.activation(),
+        exact,
+    );
+    let outcome = run(&fixture, 2, vectors, &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
     fixture.daemon.shutdown().await;
 }

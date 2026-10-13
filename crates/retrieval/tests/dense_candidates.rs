@@ -881,6 +881,9 @@ fn a_cancelled_budget_stops_the_walk_within_one_check_interval() {
         codes: &codes,
         max_entries: NonZeroUsize::new(64).unwrap(),
     };
+    // Mirrors `BUDGET_STRIDE` in `crates/retrieval/src/dense/oracle.rs`; the hook fires before the check, so the checked row is visited too.
+    const STRIDE: usize = 16;
+    const CANCEL_AT: usize = 2;
     let mut visited = 0;
     let mut after_cancel = 0;
     let pool = fixture
@@ -897,7 +900,7 @@ fn a_cancelled_budget_stops_the_walk_within_one_check_interval() {
                         if budget.is_exhausted() {
                             after_cancel += 1;
                         }
-                        if visited == 2 {
+                        if visited == CANCEL_AT {
                             budget.cancel();
                         }
                     }
@@ -908,8 +911,8 @@ fn a_cancelled_budget_stops_the_walk_within_one_check_interval() {
         .unwrap();
     assert_eq!(
         (visited, after_cancel),
-        (17, 15),
-        "the walk stopped at row index 16, the first check after the cancel"
+        (STRIDE + 1, STRIDE + 1 - CANCEL_AT),
+        "the walk stopped at row index {STRIDE}, the first check after the cancel"
     );
     assert_eq!(
         pool.ranking.completion,
