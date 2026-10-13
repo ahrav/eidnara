@@ -1,5 +1,7 @@
 //! The identity digests a fixed-order, length-delimited manifest of every mechanical component the indexed terms depend on, so a change to any of them changes the digest even when a particular fixture still analyzes to the same terms.
 
+use std::sync::LazyLock;
+
 use sha2::{Digest, Sha256};
 
 use super::{ANALYSIS_CONTRACT_EPOCH, DETAIL, ORIGINAL_COLUMN, PARTS_COLUMN, TOKENIZER};
@@ -7,9 +9,17 @@ use super::{ANALYSIS_CONTRACT_EPOCH, DETAIL, ORIGINAL_COLUMN, PARTS_COLUMN, TOKE
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnalysisIdentity(String);
 
+/// Every input of the preimage is fixed for the process, so the digest is computed once.
+static CURRENT: LazyLock<AnalysisIdentity> = LazyLock::new(|| {
+    AnalysisIdentity(format!(
+        "{:x}",
+        Sha256::digest(AnalysisIdentity::preimage())
+    ))
+});
+
 impl AnalysisIdentity {
     pub fn current() -> Self {
-        Self(format!("{:x}", Sha256::digest(Self::preimage())))
+        CURRENT.clone()
     }
 
     pub fn as_str(&self) -> &str {

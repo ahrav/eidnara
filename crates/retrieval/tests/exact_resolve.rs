@@ -1640,7 +1640,8 @@ fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_p
                         )
                         .unwrap();
                     commits += 1;
-                    if cancel && commits == 3 {
+                    // Cancel after the first commit to target an in-progress enumeration.
+                    if cancel && commits == 1 {
                         writer_interrupt.store(true, Ordering::Relaxed);
                     }
                 }

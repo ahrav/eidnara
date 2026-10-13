@@ -7,7 +7,7 @@ use kernel::source_identity::{
 use rusqlite::params;
 use storage::GuardedConn;
 
-use crate::batch::{ProjectionCheckpoint, read_checkpoint};
+use crate::batch::{ProjectionCheckpoint, read_checkpoint_under};
 use crate::exact::association::{
     CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, derived_target, sha_namespace,
 };
@@ -226,13 +226,16 @@ const PAGE_FROM: &str = "FROM exact_associations a
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=a.occurrence_id
      WHERE a.family=?1 AND a.namespace=?2 AND a.key<?4";
 
+/// The unary `+` on the limit keeps the plan independent of the bound value, so rebinding it for the next page reuses the prepared statement.
 fn page_sql(has_cursor: bool) -> String {
     let lower = if has_cursor {
         "(a.key,a.occurrence_id)>(?3,?6)"
     } else {
         "a.key>=?3"
     };
-    format!("SELECT {PAGE_COLUMNS} {PAGE_FROM} AND {lower} ORDER BY a.key,a.occurrence_id LIMIT ?5")
+    format!(
+        "SELECT {PAGE_COLUMNS} {PAGE_FROM} AND {lower} ORDER BY a.key,a.occurrence_id LIMIT +?5"
+    )
 }
 
 /// Checks cancellation between SQLite steps and before returning a page.
@@ -260,9 +263,9 @@ pub fn page(
             .map_err(|_| LookupRefusal::BudgetExhausted)
     };
     check_budget()?;
-    let checkpoint =
-        read_checkpoint(conn, context.kernel_incarnation_id)?.ok_or(LookupRefusal::NoCheckpoint)?;
     let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
+    let checkpoint = read_checkpoint_under(conn, &installed, context.kernel_incarnation_id)?
+        .ok_or(LookupRefusal::NoCheckpoint)?;
     if installed.schema_version != crate::SCHEMA_VERSION
         || installed.analysis_identity != crate::lexical::AnalysisIdentity::current().as_str()
     {
@@ -363,14 +366,17 @@ fn sha_indexed(
     repository_id: &str,
     format: ObjectFormat,
 ) -> Result<bool, LookupRefusal> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM exact_associations WHERE family=?1 AND namespace=?2)",
-        params![
-            Family::Sha.keyword(),
-            sha_namespace(format.code(), repository_id)
-        ],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM exact_associations WHERE family=?1 AND namespace=?2)",
+        )?
+        .query_row(
+            params![
+                Family::Sha.keyword(),
+                sha_namespace(format.code(), repository_id)
+            ],
+            |row| row.get(0),
+        )?)
 }
 
 impl AssociationRow {
@@ -562,6 +568,38 @@ mod tests {
             resume_steps[1] <= resume_steps[0] * 2,
             "a cursor page must not rescan the range: {resume_steps:?}"
         );
+    }
+
+    #[test]
+    fn each_page_query_serves_every_page_from_one_preparation() {
+        use rusqlite::types::Value;
+        let conn = seeded(16);
+        for has_cursor in [false, true] {
+            for (key, limit) in [("ab", 2), ("ab0", 9), ("ab00", 65)] {
+                let mut params = vec![
+                    Value::Text("sha".into()),
+                    Value::Text("sha1:repo".into()),
+                    Value::Blob(key.as_bytes().to_vec()),
+                    Value::Blob(b"abg".to_vec()),
+                    Value::Integer(limit),
+                ];
+                if has_cursor {
+                    params.push(Value::Text("occ-00000001".into()));
+                }
+                let mut statement = conn.prepare_cached(&page_sql(has_cursor)).unwrap();
+                {
+                    let mut rows = statement
+                        .query(rusqlite::params_from_iter(params.iter()))
+                        .unwrap();
+                    assert!(rows.next().unwrap().is_some());
+                }
+                assert_eq!(
+                    statement.get_status(StatementStatus::RePrepare),
+                    0,
+                    "cursor {has_cursor}, limit {limit}"
+                );
+            }
+        }
     }
 
     #[test]
