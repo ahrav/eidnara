@@ -159,6 +159,8 @@ jobs:
               - 'packages/opencode-plugin/src/shared/__fixtures__/fold-authority-status.json'
               # The daemon's window-cap parity test embeds the plugin's size fixture.
               - 'packages/opencode-plugin/src/hooks/context/__fixtures__/window-cap.json'
+              # `crates/daemon/src/codec/opencode.rs` embeds the codec parity corpus.
+              - 'packages/opencode-plugin/src/hooks/context/__fixtures__/opencode-codec-parity.json'
               - 'docs/properties/search-projection/*/fault-map.md'
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
@@ -661,6 +663,15 @@ jobs:
         run: >
           cargo +1.98 nextest run --profile ci --workspace --all-targets
           --all-features --locked --partition slice:${{ matrix.shard }}/2
+
+      - name: Kernel storage-exhaustion staging cells
+        if: matrix.shard == 2
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare -Urm true
+          cargo +1.98 nextest run --profile ci --workspace --all-targets \
+            --all-features --locked --run-ignored only \
+            -E 'binary(vector_staging_kernel_faults)'
 
       - name: Doctests
         if: matrix.shard == 1

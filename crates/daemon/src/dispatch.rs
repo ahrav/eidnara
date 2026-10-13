@@ -473,10 +473,50 @@ pub(crate) fn measure_serialize<T: serde::Serialize + ?Sized>(
 ///
 /// Serialization stops when encoded output exceeds `MAX_WIRE_BODY_BYTES`.
 pub(crate) fn measure_json(value: &Value) -> Result<usize, PreparedOutputError> {
+    if let Some(len) = compact_json_len(value).filter(|len| *len <= MAX_WIRE_BODY_BYTES) {
+        return Ok(len);
+    }
     let mut writer = CountingWriter::default();
     let result = serde_json::to_writer(&mut writer, value).map_err(PreparedOutputError::Serialize);
     let writer = finish_count(writer, result)?;
     Ok(writer.len)
+}
+
+/// Returns the byte length of `serde_json::to_vec(value)` when the count fits in `usize`.
+fn compact_json_len(value: &Value) -> Option<usize> {
+    match value {
+        Value::Null => Some(4),
+        Value::Bool(true) => Some(4),
+        Value::Bool(false) => Some(5),
+        Value::Number(number) => Some(compact_number_len(number)),
+        Value::String(text) => Some(crate::json_string::json_string_len(text)),
+        Value::Array(items) => items
+            .iter()
+            .try_fold(items.len().saturating_sub(1) + 2, |len, item| {
+                len.checked_add(compact_json_len(item)?)
+            }),
+        Value::Object(fields) => {
+            fields
+                .iter()
+                .try_fold(fields.len().saturating_sub(1) + 2, |len, (key, item)| {
+                    len.checked_add(crate::json_string::json_string_len(key) + 1)?
+                        .checked_add(compact_json_len(item)?)
+                })
+        }
+    }
+}
+
+fn compact_number_len(number: &serde_json::Number) -> usize {
+    let digits = |value: u64| value.checked_ilog10().map_or(1, |log| log as usize + 1);
+    if let Some(value) = number.as_u64() {
+        digits(value)
+    } else if let Some(value) = number.as_i64() {
+        1 + digits(value.unsigned_abs())
+    } else {
+        let mut writer = CountingWriter::default();
+        let _ = serde_json::to_writer(&mut writer, number);
+        writer.len
+    }
 }
 
 fn finish_count(
@@ -646,6 +686,80 @@ impl<W: Write> Write for BoundedWriter<'_, W> {
 mod tests {
     use super::*;
     use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
+
+    #[test]
+    fn a_json_value_over_the_limit_is_refused_at_the_serializer_length() {
+        let value = Value::String("\u{1}".repeat(MAX_WIRE_BODY_BYTES / 6 + 1));
+        let mut counter = CountingWriter::default();
+        let result =
+            serde_json::to_writer(&mut counter, &value).map_err(PreparedOutputError::Serialize);
+        let expected = finish_count(counter, result).map(|counter| counter.len);
+        assert!(matches!(
+            expected,
+            Err(PreparedOutputError::BodyTooLarge { .. })
+        ));
+        assert_eq!(
+            format!("{:?}", measure_json(&value)),
+            format!("{expected:?}")
+        );
+    }
+
+    fn json_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<u64>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            any::<f64>().prop_map(Value::from),
+            Just(Value::from(-0.0)),
+            "(\\PC|[\\x00-\\x1f\"\\\\\u{7f}\u{2028}])*".prop_map(Value::from),
+        ];
+        leaf.prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                proptest::collection::btree_map("(\\PC|[\\x00-\\x1f\"\\\\])*", inner, 0..8)
+                    .prop_map(|fields| Value::Object(fields.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest::proptest! {
+        /// The tree count is the serializer's count for every value under the cap.
+        #[test]
+        fn measured_json_length_is_the_serialized_length(value in json_value()) {
+            proptest::prop_assert_eq!(compact_json_len(&value), Some(serde_json::to_vec(&value).unwrap().len()));
+            proptest::prop_assert_eq!(measure_json(&value).unwrap(), serde_json::to_vec(&value).unwrap().len());
+        }
+    }
+
+    #[test]
+    fn measured_json_length_counts_integer_extremes_and_float_spellings() {
+        use serde_json::json;
+        for value in [
+            json!(0),
+            json!(9),
+            json!(10),
+            json!(u64::MAX),
+            json!(i64::MIN),
+            json!(-1),
+            json!(1.0),
+            json!(-0.0),
+            json!(1e300),
+            json!(5e-324),
+            json!(0.1),
+            json!([]),
+            json!({}),
+            json!([[], {}, null, true, false]),
+            json!({"k\n": "v\u{1}"}),
+        ] {
+            assert_eq!(
+                measure_json(&value).unwrap(),
+                serde_json::to_vec(&value).unwrap().len(),
+                "{value}"
+            );
+        }
+    }
 
     /// A served message whose tool input nests `levels` arrays inside the block's own containers.
     fn served_with_nested_input(levels: usize) -> PreparedSegment {

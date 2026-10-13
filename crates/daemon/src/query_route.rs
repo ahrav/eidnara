@@ -52,7 +52,7 @@ use storage::{GuardedConn, StoreError};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, measure_json};
 use crate::kernel_routes::RouteScope;
-use crate::projection_gates::Admission;
+use crate::projection_gates::{ActivationGrant, Admission};
 use crate::request_budget::{
     BlockingFailure, BudgetRefusal, Exhaustion, RequestBudget, SharedBudget,
 };
@@ -98,6 +98,8 @@ pub enum LimitsRefusal {
     DenseCapacity(CapacityRefusal),
     #[error("compressed dense vectors need declared dense limits")]
     DenseUndeclared,
+    #[error("the compressed activation grant was withdrawn before installation")]
+    ActivationRevoked,
 }
 
 /// An absent dense limit set leaves the dense lane undeclared; RP2.9 approves the values before it is declared.
@@ -632,11 +634,12 @@ impl CompressedLimits {
     }
 }
 
-/// A verified composition the dense lane ranks through, the grant its ledger charges are taken under, and the producer's bounds.
+/// A verified composition the dense lane ranks through, the grant its ledger charges are taken under, the activation grant that admits compressed use, and the producer's bounds.
 #[derive(Clone)]
 pub struct DenseVectors {
     view: Arc<PinnedVectors>,
     grant: Admission,
+    activation: ActivationGrant,
     limits: CompressedLimits,
     #[cfg(any(test, feature = "test-support"))]
     observe: Option<DenseObserver>,
@@ -647,10 +650,17 @@ pub struct DenseVectors {
 pub type DenseObserver = Arc<dyn Fn(RescoreEvent<'_>) + Send + Sync>;
 
 impl DenseVectors {
-    pub fn new(view: Arc<PinnedVectors>, grant: Admission, limits: CompressedLimits) -> Self {
+    /// `activation` comes from [`crate::projection_gates::HookGate::admit_compressed_activation`]; installation refuses it once withdrawn, and a request whose ranking starts or finishes after the withdrawal degrades the lane as `activation_revoked`.
+    pub fn new(
+        view: Arc<PinnedVectors>,
+        grant: Admission,
+        activation: ActivationGrant,
+        limits: CompressedLimits,
+    ) -> Self {
         Self {
             view,
             grant,
+            activation,
             limits,
             #[cfg(any(test, feature = "test-support"))]
             observe: None,
@@ -713,6 +723,7 @@ impl DenseProducer for CompressedProducer {
             max_layers: vectors.limits.max_layers,
             max_pinned_bytes: vectors.limits.max_pinned_bytes,
             max_read_bytes: vectors.limits.max_read_bytes,
+            activation: &vectors.activation,
         };
         let mut observe = |event: RescoreEvent<'_>| vectors.observe(event);
         let ranking = rank_compressed(
@@ -759,6 +770,7 @@ fn check_pair(
 fn compressed_refusal(refusal: CompressedRefusal) -> DenseRefusal {
     match refusal {
         CompressedRefusal::Budget => DenseRefusal::Budget,
+        CompressedRefusal::ActivationRevoked => DenseRefusal::Unavailable("activation_revoked"),
         CompressedRefusal::Query(_)
         | CompressedRefusal::Candidates(CandidateRefusal::Query { .. }) => DenseRefusal::QueryShape,
         CompressedRefusal::Candidates(CandidateRefusal::Layered(LayeredRefusal::Oracle(
@@ -1767,7 +1779,8 @@ fn validate_claims(
             .rows
             .into_iter()
             .zip(judgement.verdicts)
-            .filter_map(|(row, verdict)| {
+            .zip(judgement.causality)
+            .filter_map(|((row, verdict), causality)| {
                 let UseVerdict::Permitted(visibility) = verdict else {
                     return None;
                 };
@@ -1777,6 +1790,10 @@ fn validate_claims(
                         object_id: row.object_id,
                         revision: row.revision,
                         visibility,
+                        causality: causality.unwrap_or_else(|| {
+                            debug_assert!(false, "a permitted claim has facts");
+                            "unknown"
+                        }),
                     },
                 ))
             }),
@@ -1790,6 +1807,8 @@ struct CanonicalReference {
     revision: i64,
     /// `labeled` obliges the presentation to carry the claim's label.
     visibility: SurfaceVisibility,
+    /// The claim's causal class at the validation snapshot; it informs presentation and never ranking.
+    causality: &'static str,
 }
 
 fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Value {
@@ -1817,6 +1836,7 @@ fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Val
             "decision_object_id": reference.object_id,
             "source_revision": reference.revision,
             "visibility": reference.visibility.as_str(),
+            "causality": reference.causality,
         });
     }
     value
@@ -1874,6 +1894,9 @@ impl HandlerCore {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(vectors) = &vectors {
+                if vectors.activation.is_revoked() {
+                    return Err(LimitsRefusal::ActivationRevoked);
+                }
                 check_pair(route.as_deref(), vectors)?;
             }
             std::mem::replace(&mut *installed, vectors)

@@ -28,7 +28,16 @@ A's token cancelled during B's ranking.
 
 ### Q: Is the leak detectable?
 
-- Sources examined: `crates/storage/src/lib.rs` negative control.
-- Findings: a leaked handler interrupts the next read there.
+- Sources examined: `crates/storage/src/lib.rs` negative control;
+  `crates/storage/src/lib.rs:474`, where every guarded read installs its own
+  progress handler; `crates/daemon/tests/query_route_compressed.rs`
+  `a_leaked_progress_handler_fails_a_plain_read_that_the_next_guarded_request_masks`.
+- Findings: a leaked handler interrupts the next read there. At the route, the
+  next request's guarded read replaces a leaked handler when it starts, so that
+  request completes over the leak. A plain read run before it is interrupted
+  by the leak, so the route witness runs one after each abnormal request. With
+  the unwind cleanup in `InterruptScope`'s `Drop` removed, the route witness
+  fails at that plain read.
 - Missing evidence: none.
-- Conclusion: resolved with answer - yes.
+- Conclusion: resolved with answer - yes, by a plain read that precedes the
+  next guarded read.

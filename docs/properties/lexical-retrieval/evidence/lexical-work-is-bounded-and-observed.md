@@ -59,9 +59,9 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
   `dead_rows` (`:1069`), and stop at `max_accepted` (`:1022`); `judge_batch`
   (`:972`) increments `batches` and `judged` (`:994`, `:995`).
 - The daemon installs the production bounds through
-  `QueryRouteLimits::production` (`crates/daemon/src/query_route.rs:135`:
+  `QueryRouteLimits::production` (`crates/daemon/src/query_route.rs:137`:
   16 probes, 4096 scan rows, 128 accepted, 10,000 qualifying, 15,000 rank
-  budget, 128 validation batch) and `lexical_retrieval_bounds` (`:170`).
+  budget, 128 validation batch) and `lexical_retrieval_bounds` (`:172`).
   The owner approved 10,000 and 15,000 in place of D26b's 20,000 and 30,000
   during #896 so the bm25 pass fits the lexical lane's 50 ms budget.
 
@@ -160,8 +160,8 @@ row loop ends work at the original deadline, covered by
 
 ### Q: Does the daemon report `Consumed` past the retrieval crate?
 
-- Sources examined: `admit_lexical` (`crates/daemon/src/query_route.rs:1243`)
-  and its completion match (`:1267`); a grep of `crates/daemon/src` for
+- Sources examined: `admit_lexical` (`crates/daemon/src/query_route.rs:1255`)
+  and its completion match (`:1280`); a grep of `crates/daemon/src` for
   `consumed`.
 - Findings: the route reads `completion`, `reasons`, and `contributions` and
   maps bound reasons to the wire lane status; nothing in the daemon reads

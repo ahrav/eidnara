@@ -549,6 +549,8 @@ fn text_heavy_admission_ceiling_witnesses() {
         (CAPACITY / 3 + margin, false, true),
     ] {
         let body = text_body(text_bytes, escaped);
+        // The admission steps refuse a body whose scratch charge exceeds the capacity; the
+        // typed decode refuses one whose values do.
         let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
         assert_eq!(
             outcome.is_ok(),

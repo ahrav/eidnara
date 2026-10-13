@@ -1339,6 +1339,11 @@ fn retrieval_reads_no_payload_bytes() {
             .is_err()
     );
 
+    let reprepared = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(reprepared.contributions, before.contributions);
+    assert!(reprepared.consumed.sql_steps > before.consumed.sql_steps);
     let after = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();

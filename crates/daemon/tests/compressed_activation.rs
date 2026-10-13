@@ -205,14 +205,11 @@ fn the_gate_admits_compressed_activation_only_under_an_installed_evaluator_and_w
     );
     gate.install(passing());
     let grant = gate.admit_compressed_activation().unwrap();
-    assert!(!grant.invalidated.is_cancelled());
+    assert!(!grant.is_revoked());
     let mut disabled = passing();
     disabled.manifest.compressed_activation = false;
     gate.install(disabled);
-    assert!(
-        grant.invalidated.is_cancelled(),
-        "a new manifest withdraws the grant"
-    );
+    assert!(grant.is_revoked(), "a new manifest withdraws the grant");
     assert_eq!(
         gate.admit_compressed_activation().unwrap_err(),
         Denial::CompressionDisabled
@@ -228,11 +225,11 @@ fn the_gate_admits_compressed_activation_only_under_an_installed_evaluator_and_w
     gate.install(passing());
     let grant = gate.admit_compressed_activation().unwrap();
     assert_eq!(gate.renew_for_test(passing()), Renewal::Kept);
-    assert!(!grant.invalidated.is_cancelled());
+    assert!(!grant.is_revoked());
     let mut revoked = passing();
     compression(&mut revoked).revoked = true;
     assert_eq!(gate.renew_for_test(revoked), Renewal::Invalidated);
-    assert!(grant.invalidated.is_cancelled());
+    assert!(grant.is_revoked());
     assert_eq!(
         gate.admit_compressed_activation().unwrap_err(),
         Denial::Revoked
@@ -259,7 +256,7 @@ fn the_gate_admits_compressed_activation_only_under_an_installed_evaluator_and_w
         Renewal::Invalidated,
         "an activation admitted under one binding does not survive a refresh to another"
     );
-    assert!(grant.invalidated.is_cancelled());
+    assert!(grant.is_revoked());
     assert!(gate.admit_compressed_activation().is_ok());
 }
 

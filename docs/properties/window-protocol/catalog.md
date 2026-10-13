@@ -11,7 +11,9 @@
 > `transform/window_admission.rs`, `transform/revision_goldens.rs` is
 > `transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
 > `transform-recorded-goldens.json`; `serve_native` remains until #993. Line
-> anchors into files #989 changed are as of their earlier recorded head.
+> anchors into `transform/window_admission.rs` are at the #989 head; line
+> anchors into the other files #989 changed are as of their earlier recorded
+> head.
 
 This part catalogs the window protocol of the transform, revision 3, as
 specified by [#824](https://github.com/ahrav/eidnara/issues/824) and landed by
@@ -273,9 +275,9 @@ Existing check: `crates/daemon/src/transform.rs:19455`
 (marker: `assert!(revert.reconcile_pending)` before the HARD);
 `crates/memory-store/src/lib.rs:26148`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`; #881
-`crates/daemon/src/transform/window_admission.rs:1147`
+`crates/daemon/src/transform/window_admission.rs:1178`
 `a_cas_conflict_after_the_revert_truncate_folds_in_the_same_request` and
-`:1163` `a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass`.
+`:1195` `a_panic_plus_reopen_after_the_revert_truncate_folds_on_the_next_pass`.
 Impact: High. A wrong cut deletes surviving summaries or retains reverted
 ones.
 Open questions: None. Interrupted recut convergence is an acceptance criterion
@@ -322,7 +324,7 @@ request; #833 adds that the arming commit leaves `block_identity_by_mid`
 unchanged); `:19950`
 `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`; `:20017`
 `pending_rewrite_persists_across_store_restart`. Reset contrast (#833):
-`crates/daemon/src/transform/window_admission.rs:447`
+`crates/daemon/src/transform/window_admission.rs:444`
 `a_revert_before_the_first_anchor_resets_and_serves_the_window_as_a_first_pass`
 (marker: resolution `Revert { keep_through_seq: None }` and
 `removed_sequence_range` "1..=2" asserted before the pass; then HARD,
@@ -706,10 +708,10 @@ Existing check: `crates/daemon/src/lib.rs:25333`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`;
 `crates/daemon/src/transform.rs:27963`
 `serialized_output_cache_take_under_a_new_epoch_returns_nothing` (#833);
-`crates/daemon/src/transform/window_admission.rs:701`
+`crates/daemon/src/transform/window_admission.rs:734`
 `a_same_pass_reset_reuses_no_previous_output` (#833; marker: the repeat
 before the reset has nonempty previous keeps); #881
-`crates/daemon/src/transform/window_admission.rs:1147` and `:1163` (interrupted
+`crates/daemon/src/transform/window_admission.rs:1178` and `:1195` (interrupted
 revert, one bump).
 Impact: High. Stale output can resurrect reverted context; extra bumps cause
 repeated invalidation.
@@ -760,10 +762,11 @@ appended messages on a capture_bytes decline"
 sending a smaller window. The trusted-producer assumption is contract C7.
 Existing check: `crates/daemon/src/window_coverage/tests.rs:217`
 `impossible_declarations_are_invalid_params` (#875);
-`crates/daemon/src/transform/window_admission.rs:193`
-`boundary_presence_head_sequence_and_duplicates_are_invalid_params` and `:287`
-`paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request`
-(#881);
+`crates/daemon/src/transform/window_admission.rs:183`
+`boundary_presence_head_sequence_and_duplicates_are_invalid_params` and `:281`
+`paged_boundary_is_a_final_page_scalar_checked_on_the_assembled_request`
+(#881 as `paged_revision_and_boundary_are_final_page_scalars_checked_on_the_assembled_request`;
+renamed by #989);
 `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:182` "sends
 the declared window in both representations and publishes the recipe at
 boundaryIndex + i", `:228` "rejects a duplicate id inside the window and ignores
@@ -820,10 +823,10 @@ Existing check: `crates/daemon/src/window_coverage/tests.rs:99`
 `a_publish_between_the_core_read_and_the_declared_read_is_invisible`; `:317`
 `a_removal_between_the_core_read_and_the_intersection_is_invisible`; `:217`
 `impossible_declarations_are_invalid_params`; #881
-`crates/daemon/src/transform/window_admission.rs:323`
-`each_resolution_outcome_runs_through_the_handler_with_its_effects`; `:876`
+`crates/daemon/src/transform/window_admission.rs:316`
+`each_resolution_outcome_runs_through_the_handler_with_its_effects`; `:909`
 `a_publish_during_a_null_boundary_pass_keeps_the_cut_at_the_rendered_boundary`;
-`:917`
+`:950`
 `a_reset_that_moves_the_cut_leaves_the_served_window_in_the_ready_snapshot`;
 `crates/daemon/src/window_coverage/tests.rs:254`
 `a_pending_reconcile_renders_the_newest_row_the_truncate_left`; `:580`
@@ -866,7 +869,7 @@ Existing check: `crates/daemon/src/window_coverage/tests.rs:436`
 `resolved_ordinals_equal_the_independent_model`; `:412`
 `synthetic_borrowing_matches_the_plugin_rule_case_for_case`; #881 asserts
 served `messages` and `operations` contain no `"ordinal"`
-(`crates/daemon/src/transform/window_admission.rs:323`).
+(`crates/daemon/src/transform/window_admission.rs:316`).
 Impact: High. Wrong ordinals misclassify coverage and tool policy.
 Open questions: None. D11 fixes the synthetic rule.
 
@@ -947,7 +950,7 @@ The #875 witness was read at `f2442b2f`. #881 deleted #827's
 is built against the submitted window.
 Existing check: `crates/daemon/src/window_coverage/tests.rs:513`
 `a_stale_cut_keep_reconstructs_the_served_array_from_the_unsliced_input`
-(#875, cut 4); `crates/daemon/src/transform/window_admission.rs:988`
+(#875, cut 4); `crates/daemon/src/transform/window_admission.rs:1020`
 `stale_slice_input_keeps_address_the_submitted_native_window` (#881); plugin
 publication at `boundaryIndex + i`
 (`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:182`,
@@ -1606,7 +1609,7 @@ Confidence: high -
 `f2442b2f` (`window_coverage/tests.rs:513`); the table test also asserts
 `StaleSlice { cut: 4 }` and `{ cut: 7 }`.
 Existing check: `crates/daemon/src/window_coverage/tests.rs:513`;
-`crates/daemon/src/transform/window_admission.rs:988` (#881).
+`crates/daemon/src/transform/window_admission.rs:1020` (#881).
 Impact: WP-P05 passes vacuously at cut = 0.
 Open questions: None.
 

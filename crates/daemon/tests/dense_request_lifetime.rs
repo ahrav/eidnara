@@ -496,6 +496,7 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
     let vectors = DenseVectors::new(
         Arc::clone(&view),
         store.admission.clone(),
+        store.activation(),
         compressed_limits(),
     );
     daemon
@@ -728,6 +729,7 @@ async fn a_request_that_ranks_no_dense_lane_holds_no_view() {
         .set_dense_vectors(Some(DenseVectors::new(
             Arc::clone(&view),
             store.admission.clone(),
+            store.activation(),
             compressed_limits(),
         )))
         .unwrap();
@@ -808,6 +810,7 @@ async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
         .set_dense_vectors(Some(DenseVectors::new(
             Arc::clone(&view),
             store.admission.clone(),
+            store.activation(),
             compressed_limits(),
         )))
         .unwrap();
@@ -817,7 +820,12 @@ async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
     narrow.candidates.cap = NonZeroUsize::new(2).unwrap();
     let mut single = route_limits();
     single.dense.as_mut().unwrap().k = NonZeroUsize::new(1).unwrap();
-    let replacement = DenseVectors::new(Arc::clone(&view), store.admission.clone(), narrow);
+    let replacement = DenseVectors::new(
+        Arc::clone(&view),
+        store.admission.clone(),
+        store.activation(),
+        narrow,
+    );
     let swap = {
         let daemon = Arc::clone(&daemon);
         Box::new(move || {
@@ -863,4 +871,180 @@ async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
         .ok()
         .expect("the request released the daemon");
     daemon.shutdown().await;
+}
+
+const DEADLINE_MS: u64 = 1_500;
+
+/// The request's one deadline is set at admission, and waiting for a blocking slot does not renew it: a unit released only after its deadline passed answers the deadline terminal and opens no scan window, while the same budget suffices for a unit that does not wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_deadline() {
+    let (daemon, ids) = served_daemon().await;
+    let incarnation = daemon
+        .store()
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+        .unwrap();
+    let (store, view) = composition(&incarnation, &ids);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(route_limits()))
+        .unwrap();
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::new(FixedEmbedder)));
+    let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&events);
+    daemon
+        .handler()
+        .set_dense_vectors(Some(
+            DenseVectors::new(
+                Arc::clone(&view),
+                store.admission.clone(),
+                store.activation(),
+                compressed_limits(),
+            )
+            .with_observer_for_test(Arc::new(move |_| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        ))
+        .unwrap();
+    let project = daemon.project().to_owned();
+    let daemon = Arc::new(daemon);
+    let mut body: Value = serde_json::from_slice(&request(&project)).unwrap();
+    body["remaining_ms"] = json!(DEADLINE_MS);
+
+    // The control: the same budget is enough for a unit that does not wait, so a late answer below comes from the wait.
+    let daemon::dispatch::PreparedOutcome::Response(control) =
+        watchdog(daemon.outcome(body.clone())).await
+    else {
+        panic!("the unqueued request answers");
+    };
+    let control = control.json_for_test().unwrap().clone();
+    assert_eq!(control["kind"], "fused", "{control}");
+    assert!(events.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    events.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pending = {
+        let daemon = Arc::clone(&daemon);
+        let gate = Arc::clone(&gate);
+        let submitted = Arc::clone(&submitted);
+        tokio::spawn(async move { daemon.outcome_gated(body, gate, submitted).await })
+    };
+    let started = Instant::now();
+    while submitted.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the unit is submitted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2 * DEADLINE_MS)).await;
+    gate.add_permits(1);
+    let daemon::dispatch::PreparedOutcome::Response(output) = watchdog(pending).await.unwrap()
+    else {
+        panic!("the late unit answers");
+    };
+    let answer = output.json_for_test().unwrap().clone();
+    assert_eq!(answer["kind"], "terminal", "{answer}");
+    assert_eq!(answer["terminal"], "deadline", "{answer}");
+    assert_eq!(
+        events.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no scan window opened after the deadline"
+    );
+    let census = store.ledger.census();
+    assert!(!census.held.contains_key(&ResourceClass::Scratch));
+    assert!(!census.held.contains_key(&ResourceClass::RowBuffers));
+    daemon.handler().set_dense_vectors(None).unwrap();
+    drop(view);
+    let daemon = Arc::try_unwrap(daemon)
+        .ok()
+        .expect("the request released the daemon");
+    daemon.shutdown().await;
+}
+
+/// A component shutdown that runs while a request's dense unit is held at an original read returns without releasing any of the unit's charges or pins: the scratch, row buffers, and view stay held after the shutdown completes and until the unit itself finishes, and the ledger is empty only after it returns. The unit runs on the test dispatcher's detached blocking runner, so this covers the unit's own ownership of its charges, not a host runner that cancels on shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends() {
+    let (daemon, ids) = served_daemon().await;
+    let incarnation = daemon
+        .store()
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+        .unwrap();
+    let (store, view) = composition(&incarnation, &ids);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(route_limits()))
+        .unwrap();
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::new(FixedEmbedder)));
+    let vectors = DenseVectors::new(
+        Arc::clone(&view),
+        store.admission.clone(),
+        store.activation(),
+        compressed_limits(),
+    );
+    let (held, hold) = hold_at(vectors, Arc::clone(&store.ledger), |event| {
+        matches!(event, RescoreEvent::ReadOriginal { .. })
+    });
+    daemon.handler().set_dense_vectors(Some(held)).unwrap();
+    let project = daemon.project().to_owned();
+    let daemon = Arc::new(daemon);
+    let pending = {
+        let daemon = Arc::clone(&daemon);
+        let body: Value = serde_json::from_slice(&request(&project)).unwrap();
+        tokio::spawn(async move { daemon.outcome(body).await })
+    };
+    let Hold {
+        entered,
+        release,
+        census,
+        ..
+    } = hold;
+    watchdog(tokio::task::spawn_blocking(move || {
+        entered.recv_timeout(Duration::from_secs(20)).unwrap()
+    }))
+    .await
+    .unwrap();
+    daemon.handler().set_dense_vectors(None).unwrap();
+    drop(view);
+
+    watchdog(CompositeComponent::shutdown(daemon.handler()))
+        .await
+        .unwrap();
+    let while_held = store.ledger.census();
+    assert!(
+        while_held.held[&ResourceClass::Scratch] > 0,
+        "the held unit keeps its scratch after the shutdown returned"
+    );
+    assert!(while_held.held[&ResourceClass::RowBuffers] > 0);
+    assert!(
+        while_held.pinned > 0,
+        "the unit's clone of the view still pins it"
+    );
+
+    release.send(()).unwrap();
+    let started = Instant::now();
+    while census.lock().unwrap().is_none() || store.ledger.census().pinned > 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the unit's exit releases the view"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (at_release, _) = census.lock().unwrap().take().unwrap();
+    assert!(
+        at_release.held[&ResourceClass::Scratch] > 0,
+        "the charges were still held when the unit was released"
+    );
+    let daemon::dispatch::PreparedOutcome::Response(output) = watchdog(pending).await.unwrap()
+    else {
+        panic!("the held request answers once its unit returns");
+    };
+    let answer = output.json_for_test().unwrap().clone();
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert!(store.ledger.census().held.is_empty());
+    assert_eq!(store.ledger.census().pinned, 0);
 }

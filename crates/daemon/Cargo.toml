@@ -61,6 +61,11 @@ memchr = { workspace = true }
 # `signal` enables the `eidnara-host serve` SIGTERM handler.
 tokio = { workspace = true, features = ["signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+# The persistent worker pool behind the order-preserving per-block map; already a transitive
+# dependency through host-runtime's embedding tokenizer, so it adds no new supply-chain root.
+rayon = "1.12"
+# The global allocator of `eidnara-host` and the direct-host fixture.
+mimalloc = { version = "0.1", default-features = false }
 sha2 = { workspace = true }
 ring = "0.17"
 getrandom = { workspace = true }
