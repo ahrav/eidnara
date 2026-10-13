@@ -60,7 +60,7 @@ Host wire and application:
 
 End-to-end host matrix that exists:
 
-- `packages/e2e-tests/tests/payload-fused-search.test.ts:98`
+- `packages/e2e-tests/tests/payload-fused-search.test.ts:101`
   `fused search through a built payload` starts a built payload host
   (`PayloadHost`, `src/rust-runner/payload-host.ts:47`) under the OpenCode
   harness (`RustTestHarness`, `src/rust-harness.ts:229`) and a Pi harness,
@@ -125,7 +125,7 @@ is unset.
 
 ### Q: Does any existing host test reach a lexical contribution?
 
-- Sources examined: `payload-fused-search.test.ts:21`, `:47`, `:51`;
+- Sources examined: `payload-fused-search.test.ts:21`, `:47`, `:52`;
   `eidnara-search.test.ts:94`, `:114`; `wire.test.ts:426`;
   `query_route_handler.rs:259`.
 - Findings: the payload suite asserts `lanes=dense` exclusively and builds
