@@ -12184,6 +12184,20 @@ pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<Wir
     {
         return 0;
     }
+    let clears = |part: &Value| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
+            && (part.get("thinking").is_some() || part.get("text").is_some())
+            && !is_empty_reasoning_sentinel(part)
+    };
+    let clearable = |message: &Arc<Value>| {
+        (message.get("parts").and_then(Value::as_array))
+            .is_some_and(|parts| parts.iter().any(clears))
+    };
+    if !native_messages.iter().any(clearable) {
+        return 0;
+    }
 
     let served_ids = served_messages
         .iter()
@@ -12211,6 +12225,9 @@ pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<Wir
 
     let mut cleared = 0;
     for shared_message in native_messages {
+        if !clearable(shared_message) {
+            continue;
+        }
         let raw_message: &Value = shared_message;
         let info = raw_message.get("info").unwrap_or(raw_message);
         let Some(mid) = info
@@ -12230,20 +12247,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<Wir
         };
         let age_number = tag_numbers.get(mid).copied().unwrap_or(ordinal);
         if age_number > watermark || newest_assistant_mid == Some(mid) {
-            continue;
-        }
-
-        let clears = |part: &Value| {
-            part.get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
-                && (part.get("thinking").is_some() || part.get("text").is_some())
-                && !is_empty_reasoning_sentinel(part)
-        };
-        let Some(parts) = raw_message.get("parts").and_then(Value::as_array) else {
-            continue;
-        };
-        if !parts.iter().any(clears) {
             continue;
         }
         // The message may share its value with the request's input, so the clear writes a
