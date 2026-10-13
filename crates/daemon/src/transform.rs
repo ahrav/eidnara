@@ -11679,6 +11679,13 @@ fn build_output(
     })
 }
 
+/// A served message in output order: built, or rendered and waiting for its canonical bytes and
+/// fingerprints, which the output computes for every rendered message together.
+enum ServedSlot<'a> {
+    Ready(ServedMessage),
+    Rendered(WireMessage, Option<&'a [&'a FlatBlock]>),
+}
+
 // Provider and durable-watermark arguments stay explicit: they differ across replay paths.
 #[allow(clippy::too_many_arguments)]
 fn build_output_with_tags(
@@ -11696,7 +11703,7 @@ fn build_output_with_tags(
 ) -> Result<BuiltOutput, TransformError> {
     let build_output_started_at = Instant::now();
     let mut build_timings = BuildOutputTimings::default();
-    let mut out = Vec::with_capacity(4 + req.messages.len());
+    let mut out: Vec<ServedSlot<'_>> = Vec::with_capacity(4 + req.messages.len());
     let frozen_unit_index_started_at = Instant::now();
     let frozen_units = if use_frozen_unit_index {
         FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units))
@@ -11710,14 +11717,14 @@ fn build_output_with_tags(
 
     if !req.is_subagent {
         if let Some(unit) = frozen_units.by_key("m0") {
-            out.push(ServedMessage::from_message(synthetic_m0_message(
-                unit.frozen_payload.clone(),
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
+                synthetic_m0_message(unit.frozen_payload.clone()),
             )));
         }
         if let Some(unit) = frozen_units.by_key("m1") {
-            out.push(ServedMessage::from_message(
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
                 WireMessage::synthetic_user_text(unit.frozen_payload.clone()),
-            ));
+            )));
         }
     }
 
@@ -11774,7 +11781,9 @@ fn build_output_with_tags(
     {
         for message in [&pair.assistant_msg, &pair.tool_msg] {
             prev_assistant = message.role == "assistant";
-            out.push(ServedMessage::from_message(message.clone()));
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
+                message.clone(),
+            )));
         }
     }
 
@@ -11963,10 +11972,13 @@ fn build_output_with_tags(
                     &mut rendered,
                 );
             }
-            ServedMessage::from_message_reusing(rendered, (!blocks.is_empty()).then_some(blocks))
+            rendered
         };
         prev_assistant = served.role == "assistant";
-        out.push(served);
+        out.push(ServedSlot::Rendered(
+            served,
+            (!blocks.is_empty()).then_some(blocks),
+        ));
 
         if synthetic_todo_enabled
             && !inserted_synthetic_todo
@@ -11977,12 +11989,21 @@ fn build_output_with_tags(
         {
             for message in [&pair.assistant_msg, &pair.tool_msg] {
                 prev_assistant = message.role == "assistant";
-                out.push(ServedMessage::from_message(message.clone()));
+                out.push(ServedSlot::Ready(ServedMessage::from_message(
+                    message.clone(),
+                )));
             }
             inserted_synthetic_todo = true;
         }
     }
 
+    // Each served message's canonical bytes and block fingerprints depend on that message alone.
+    let mut out = crate::parallel_map::map_with(out, |(), slot| match slot {
+        ServedSlot::Ready(served) => served,
+        ServedSlot::Rendered(message, blocks) => {
+            ServedMessage::from_message_reusing(message, blocks)
+        }
+    });
     build_timings.tail_loop = elapsed_ms(tail_loop_started_at);
     if synthetic_todo_enabled
         && let Some(pair) = &meta.synthetic_todo
@@ -12168,11 +12189,11 @@ pub(crate) fn clear_served_native_reasoning(
 
 // Ingress/tag ownership prevents the codec's latest-assistant shortcut from restoring old reasoning.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_with_tags(
+pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<WireMessage>>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
-    served_messages: &[WireMessage],
+    served_messages: &[M],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     _mid_turn: bool,
@@ -12187,7 +12208,8 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
 
     let served_ids = served_messages
         .iter()
-        .filter(|message| !message.meta.synthetic && message.role == "assistant")
+        .map(std::borrow::Borrow::borrow)
+        .filter(|message: &&WireMessage| !message.meta.synthetic && message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
     if served_ids.is_empty() {

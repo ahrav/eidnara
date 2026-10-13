@@ -275,7 +275,6 @@ struct FlatProjectionBuilder<'a> {
     blocks: Vec<FlatBlock>,
     identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
     state: ProjectionState<'a>,
-    scratch: crate::served_json::CanonicalScratch,
 }
 
 fn project_messages_from_state<'a>(
@@ -289,6 +288,17 @@ fn project_messages_from_state<'a>(
             .map(|message| message.ck.content().len())
             .sum(),
     );
+    // Each block's canonical bytes and hash depend on the block alone, so they are computed
+    // for every block up front, across workers, and taken in order below.
+    let mut receipts = crate::parallel_map::map_with(
+        ingress
+            .messages
+            .iter()
+            .flat_map(|message| message.ck.content())
+            .collect(),
+        canonical_block_receipt,
+    )
+    .into_iter();
     // Block ids are `mid#index`, so a repeated mid would give two messages'
     // blocks the same identities and let one message's content stand for the
     // other's. Synthetic messages take part: their block ids collide too. Live
@@ -366,7 +376,11 @@ fn project_messages_from_state<'a>(
                 Err(WireError::UnpairedToolResult { .. }) if covered_head => None,
                 arc => arc?,
             };
-            let flat = flatten_block(&mut builder.scratch, &msg, index, arc_id)?;
+            let receipt = receipts
+                .next()
+                .expect("one receipt per projected block")
+                .ok();
+            let flat = flatten_block(receipt, &msg, index, arc_id)?;
             if !flat.synthetic {
                 identities.push(BlockIdentity {
                     kind_tag: flat.kind_tag.clone(),
@@ -501,23 +515,20 @@ pub fn text_from_message(msg: &WireMessage) -> Option<&str> {
     }
 }
 
+/// `receipt` is the block's canonical bytes and their SHA-256, `None` when the block has no
+/// canonical form.
 fn flatten_block(
-    scratch: &mut crate::served_json::CanonicalScratch,
+    receipt: Option<(Arc<str>, [u8; 32])>,
     msg: &Arc<IngressMessage>,
     index: usize,
     arc_id: Option<String>,
 ) -> Result<FlatBlock, WireError> {
     let block = &msg.ck.content()[index];
-    let bytes = crate::served_json::canonical_block_text(scratch, block).map_err(|_| {
-        WireError::UnsupportedBlock {
-            mid: msg.mid.clone(),
-            block_index: index,
-            kind: block.kind().tag().to_string(),
-        }
+    let (bytes, content_hash) = receipt.ok_or_else(|| WireError::UnsupportedBlock {
+        mid: msg.mid.clone(),
+        block_index: index,
+        kind: block.kind().tag().to_string(),
     })?;
-    let mut content_hash = [0u8; 32];
-    content_hash
-        .copy_from_slice(ring::digest::digest(&ring::digest::SHA256, bytes.as_bytes()).as_ref());
     let (name, file_path, provider_executed, tool_call_id, output_kind) = match block.kind() {
         BlockKind::ToolCall {
             id,
@@ -567,6 +578,18 @@ fn flatten_block(
             index,
         },
     })
+}
+
+/// A block's canonical bytes and their SHA-256.
+fn canonical_block_receipt(
+    scratch: &mut crate::served_json::CanonicalScratch,
+    block: &WireBlock,
+) -> serde_json::Result<(Arc<str>, [u8; 32])> {
+    let bytes = crate::served_json::canonical_block_text(scratch, block)?;
+    let mut content_hash = [0u8; 32];
+    content_hash
+        .copy_from_slice(ring::digest::digest(&ring::digest::SHA256, bytes.as_bytes()).as_ref());
+    Ok((bytes, content_hash))
 }
 
 fn tool_arc_id(mid: &str, call_id: &str) -> String {

@@ -1254,7 +1254,11 @@ measured just before the response encode; a pass the daemon serves
 untransformed, such as a child session's, carries no ledger.
 `lane_gate_and_decode_us` holds the session lane wait and the unit-permit wait
 beside the decode, near zero in a closed-loop single-session run and a
-confounded figure under concurrency. On a paged pass every daemon stage
+confounded figure under concurrency. On a pass that does not rerun for an
+Emergency95 fold, the native encode runs beside the summarizer step, so its time
+falls in `transform_core_us` and `native_attach_us` holds the native output
+store and the recipe inputs; an Emergency95 pass encodes inside
+`native_attach_us`. On a paged pass every daemon stage
 measures the final page's request, and the earlier pages' daemon time falls in
 `transport_and_encode_us`. `window_messages` and `window_blocks` count the CK
 messages and blocks the daemon served, the cohort a latency belongs to.

@@ -301,7 +301,7 @@ pub fn encode_opencode_with_session_exemptions(
 /// sidecar. Each retained message's blocks align by their decoded content, which matches a
 /// block exactly when the content fingerprints would, so no block is fingerprinted.
 pub(crate) fn encode_opencode_against_window(
-    messages: &[WireMessage],
+    messages: &[&WireMessage],
     window: &[Arc<Value>],
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
@@ -312,7 +312,7 @@ pub(crate) fn encode_opencode_against_window(
     for message in &decoded.messages {
         blocks_by_mid.insert(message.mid.as_str(), message.ck.content().as_slice());
     }
-    encode_opencode_impl(
+    encode_opencode_refs(
         messages,
         &decoded.sidecar,
         session_id,
@@ -350,46 +350,76 @@ fn encode_opencode_impl(
     mutation_exempt_mids: &[&str],
     retained: RetainedContent<'_>,
 ) -> Vec<MessageV2Json> {
-    let mut encoded = Vec::with_capacity(messages.len());
+    let messages = messages.iter().collect::<Vec<_>>();
+    encode_opencode_refs(
+        &messages,
+        sidecar,
+        session_id,
+        preserve_compaction,
+        mutation_exempt_mids,
+        retained,
+    )
+}
+
+/// One encoded output message: a pair rendered as one tool part, or one message to encode
+/// against its retained metadata, which depends on that message alone.
+enum EncodeUnit<'a> {
+    Rendered(MessageV2Json),
+    Single(&'a WireMessage, usize),
+}
+
+fn encode_opencode_refs(
+    messages: &[&WireMessage],
+    sidecar: &DecodeSidecar,
+    session_id: Option<&str>,
+    preserve_compaction: bool,
+    mutation_exempt_mids: &[&str],
+    retained: RetainedContent<'_>,
+) -> Vec<MessageV2Json> {
+    let mut units = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
-        if let Some(next) = messages.get(index + 1) {
-            if let Some(part) = render_synthetic_todo_pair(&messages[index], next) {
-                let info = synthetic_message_info(&messages[index], session_id);
-                encoded.push(json!({
+        if let Some(next) = messages.get(index + 1).copied() {
+            if let Some(part) = render_synthetic_todo_pair(messages[index], next) {
+                let info = synthetic_message_info(messages[index], session_id);
+                units.push(EncodeUnit::Rendered(json!({
                     "info": info,
                     "parts": [part],
-                }));
+                })));
                 index += 2;
                 continue;
             }
-            let call_is_fresh = meta_for_ck(sidecar, &messages[index], index).is_none();
+            let call_is_fresh = meta_for_ck(sidecar, messages[index], index).is_none();
             let result_is_fresh = meta_for_ck(sidecar, next, index + 1).is_none();
             if call_is_fresh
                 && result_is_fresh
-                && let Some(part) = render_adjacent_tool_pair(&messages[index], next)
+                && let Some(part) = render_adjacent_tool_pair(messages[index], next)
             {
-                let mut message = encode_new_message(&messages[index], session_id);
+                let mut message = encode_new_message(messages[index], session_id);
                 set_value(&mut message, "parts", Value::Array(vec![part]));
-                encoded.push(message);
+                units.push(EncodeUnit::Rendered(message));
                 index += 2;
                 continue;
             }
         }
-        let msg = &messages[index];
-        // Decoded messages retain their harness IDs for metadata rebinding.
-        // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
-        // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
-        let meta = meta_for_ck(sidecar, msg, index);
-        encoded.push(match meta {
-            Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
-                meta.raw.as_ref().clone()
-            }
-            Some(meta) => encode_with_meta(msg, meta, preserve_compaction, retained.of(meta)),
-            None => encode_new_message(msg, session_id),
-        });
+        units.push(EncodeUnit::Single(messages[index], index));
         index += 1;
     }
+    let encoded = crate::parallel_map::map_with(units, |(), unit| match unit {
+        EncodeUnit::Rendered(message) => message,
+        EncodeUnit::Single(msg, index) => {
+            // Decoded messages retain their harness IDs for metadata rebinding.
+            // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
+            // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
+            match meta_for_ck(sidecar, msg, index) {
+                Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
+                    meta.raw.as_ref().clone()
+                }
+                Some(meta) => encode_with_meta(msg, meta, preserve_compaction, retained.of(meta)),
+                None => encode_new_message(msg, session_id),
+            }
+        }
+    });
     assert_unique_tool_use_ids(&encoded);
     encoded
 }
@@ -2248,7 +2278,12 @@ mod tests {
             for served in &variants {
                 for exemptions in [&[][..], &[exempt.as_str()][..]] {
                     assert_eq!(
-                        encode_opencode_against_window(served, &shared, Some("ses"), exemptions),
+                        encode_opencode_against_window(
+                            &served.iter().collect::<Vec<_>>(),
+                            &shared,
+                            Some("ses"),
+                            exemptions,
+                        ),
                         encode_opencode_with_session_exemptions(
                             served,
                             &fingerprinted.sidecar,

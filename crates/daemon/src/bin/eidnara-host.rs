@@ -9,6 +9,11 @@
 
 #![deny(unsafe_code)]
 
+/// A transform pass allocates and frees its window's strings across the unit thread and the
+/// per-block map's workers; mimalloc keeps those frees on per-thread pages.
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[path = "eidnara_host/serve.rs"]
 mod serve;
 #[path = "eidnara_host/spawn.rs"]
