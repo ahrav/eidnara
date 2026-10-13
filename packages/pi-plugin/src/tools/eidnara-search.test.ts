@@ -111,7 +111,7 @@ describe("createEidnaraSearchTool", () => {
         });
         const text = textOf(await tool.execute({ query: "class suffix convention" }));
         expect(text).toContain(`id=${OBJECT_B}`);
-        expect(text).toContain("match=fused lanes=dense");
+        expect(text).toContain("match=fused lanes=dense provenance=unknown");
         expect(text).toContain("Handlers end in Handler.");
         expect(text).not.toContain("legacy snapshot");
         expect(tool.transport.methods()).toEqual(["retrieval.query", "kernel.read"]);

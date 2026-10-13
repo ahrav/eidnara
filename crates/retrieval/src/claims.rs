@@ -21,10 +21,10 @@ use kernel::source_identity::{
     OccurrenceClass, Span, derived_lineage_id, identity_digest, occurrence_identity_matches,
 };
 use kernel::{
-    ArtifactDestination, CausalClass, ClaimFactBounds, ClaimFacts, ClaimFactsError,
-    CommitReadIncarnation, Disposition, EgressSnapshot, EligibilityCandidate, EligibilityVerdict,
-    KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, MAX_ELIGIBILITY_OBJECT_ID_BYTES,
-    ProjectScope, SelectedOccurrence, ServedStanding, Surface, SurfaceVisibility,
+    ArtifactDestination, ClaimFactBounds, ClaimFacts, ClaimFactsError, CommitReadIncarnation,
+    Disposition, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
+    SelectedOccurrence, ServedStanding, Surface, SurfaceVisibility,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -464,8 +464,8 @@ pub fn read_selected_claims(
 pub struct SelectedJudgement {
     /// `verdicts[i]` judges `selected.rows[i]`.
     pub verdicts: Vec<UseVerdict>,
-    /// `causality[i]` is the causal class the judgement snapshot records for `selected.rows[i]`'s claim, or `None` when the kernel returned no facts for it.
-    pub causality: Vec<Option<CausalClass>>,
+    /// `causality[i]` is the code of the causal class the judgement snapshot records for a permitted `selected.rows[i]`, as [`CausalClass::code`] gives it, and `None` for a denied row.
+    pub causality: Vec<Option<&'static str>>,
     pub snapshot: EgressSnapshot,
     pub incarnation: CommitReadIncarnation,
 }
@@ -538,9 +538,11 @@ pub fn judge_selected_for_surface(
         .collect();
     let mut verdicts = judged.batch.verdicts.iter();
     let mut validated = Vec::with_capacity(rows.len());
+    let mut causality = Vec::with_capacity(rows.len());
     for row in rows {
         check_budget()?;
-        let state = classify(row, facts.get(row.object_id.as_str()).copied());
+        let row_facts = facts.get(row.object_id.as_str()).copied();
+        let state = classify(row, row_facts);
         let verdict = if submits(row) {
             match verdicts.next() {
                 Some(judged) if judged.permits() => match state {
@@ -558,16 +560,14 @@ pub fn judge_selected_for_surface(
         } else {
             UseVerdict::Denied(UseDenial::State(state))
         };
+        // A permitted row classified `Current`, which only a row with facts does.
+        causality.push(
+            matches!(verdict, UseVerdict::Permitted(_))
+                .then(|| row_facts.map(|facts| facts.causality.code()))
+                .flatten(),
+        );
         validated.push(verdict);
     }
-    let causality = rows
-        .iter()
-        .map(|row| {
-            facts
-                .get(row.object_id.as_str())
-                .map(|facts| facts.causality.clone())
-        })
-        .collect();
     Ok(SelectedJudgement {
         verdicts: validated,
         causality,

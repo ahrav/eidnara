@@ -335,6 +335,22 @@ describe("eidnara_search through the fused route", () => {
             },
             { kind: "fused", entries: "not-a-list" },
             { kind: "terminal", terminal: "made_up" },
+            fused([{ object: id(1), causality: "trusted" }]),
+            {
+                ...fused([]),
+                entries: [
+                    {
+                        occurrence_id: "occ-0",
+                        position: 1,
+                        lanes: { dense: { position: 1, raw: 0.5 } },
+                        canonical: {
+                            decision_object_id: id(1),
+                            source_revision: 1,
+                            visibility: "visible",
+                        },
+                    },
+                ],
+            },
         ];
         for (const reply of refusals) {
             const { kernel, transport, run } = harness();
@@ -452,14 +468,6 @@ describe("eidnara_search through the fused route", () => {
         );
         expect(first).toBeGreaterThan(-1);
         expect(second).toBeGreaterThan(first);
-    });
-
-    it("refuses a ranked claim whose causal class is not a declared value", async () => {
-        const { kernel, run } = harness();
-        kernel.seedDecision({ object_id: id(1), decision_kind: "NAMING", summary: "Rule." });
-        kernel.routeReply = () => fused([{ object: id(1), causality: "trusted" }]);
-        const execution = await run({ query: "rule" });
-        expect(execution.text).not.toContain("Rule.");
     });
 
     it("treats one decision ranked under two causal classes as changed after ranking", async () => {

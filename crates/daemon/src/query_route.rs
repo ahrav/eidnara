@@ -14,8 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, CausalClass, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot,
-    KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
+    ArtifactDestination, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
@@ -1790,7 +1790,10 @@ fn validate_claims(
                         object_id: row.object_id,
                         revision: row.revision,
                         visibility,
-                        causality: causality_code(causality.as_ref()),
+                        causality: causality.unwrap_or_else(|| {
+                            debug_assert!(false, "a permitted claim has facts");
+                            "unknown"
+                        }),
                     },
                 ))
             }),
@@ -1806,15 +1809,6 @@ struct CanonicalReference {
     visibility: SurfaceVisibility,
     /// The claim's causal class at the validation snapshot; it informs presentation and never ranking.
     causality: &'static str,
-}
-
-/// The wire code of a claim's causal class; a permitted claim always has facts, and a claim without them reads as `unknown`.
-fn causality_code(causality: Option<&CausalClass>) -> &'static str {
-    match causality {
-        Some(CausalClass::DirectObservation { .. }) => "direct_observation",
-        Some(CausalClass::DerivedReinjection { .. }) => "derived_reinjection",
-        Some(CausalClass::Unknown(_)) | None => "unknown",
-    }
 }
 
 fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Value {

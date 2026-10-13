@@ -26,11 +26,10 @@ export function renderAntiMemoryWarning(result: AntiMemorySearchResult): string 
     });
 }
 
-function lanesOf(result: KernelMemorySearchResult): string {
+/** The route's annotations of a `fused` result: the lanes that ranked it, then its claim's causal class. */
+function routeFieldsOf(result: KernelMemorySearchResult): string {
     const lanes = result.lanes && result.lanes.length > 0 ? ` lanes=${result.lanes.join(",")}` : "";
-    const provenance = result.provenance
-        ? ` provenance=${boundDynamicField(result.provenance)}`
-        : "";
+    const provenance = result.provenance ? ` provenance=${result.provenance}` : "";
     return `${lanes}${provenance}`;
 }
 
@@ -43,11 +42,11 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
         const rationale = result.rationale
             ? `\nRationale: ${boundDynamicField(result.rationale)}`
             : "";
-        return `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${lanesOf(result)}${policy}\n${renderAntiMemoryWarning(result)}${rationale}`;
+        return `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${routeFieldsOf(result)}${policy}\n${renderAntiMemoryWarning(result)}${rationale}`;
     }
     const source = result.sourceName ? ` source=${boundDynamicField(result.sourceName)}` : "";
     const policy = result.policyLabel ? ` trust=[${boundDynamicField(result.policyLabel)}]` : "";
-    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${lanesOf(result)}${policy}\n${boundDynamicField(result.content)}`;
+    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}\n${boundDynamicField(result.content)}`;
 }
 
 const SECTION_SEPARATOR = "\n\n";

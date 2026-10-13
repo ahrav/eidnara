@@ -996,7 +996,7 @@ async fn served_claims_report_their_causal_class_without_changing_the_ranking() 
     let before = fixture
         .run(&limits(), budget.shared(), QUERY, |_| {})
         .unwrap();
-    let ranked = |body: &serde_json::Value| -> Vec<(String, u64, String)> {
+    let ranked = |body: &serde_json::Value| -> Vec<(String, u64, u64, String)> {
         body["entries"]
             .as_array()
             .unwrap()
@@ -1004,6 +1004,7 @@ async fn served_claims_report_their_causal_class_without_changing_the_ranking() 
             .map(|entry| {
                 (
                     entry["occurrence_id"].as_str().unwrap().to_owned(),
+                    entry["position"].as_u64().unwrap(),
                     entry["score"].as_f64().unwrap().to_bits(),
                     entry["canonical"]["decision_object_id"]
                         .as_str()

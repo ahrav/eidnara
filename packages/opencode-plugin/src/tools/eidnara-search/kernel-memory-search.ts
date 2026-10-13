@@ -15,6 +15,7 @@ import {
     MAX_READ_OBJECT_IDS,
     type MemoryState,
     type ReadRow,
+    type RouteCausality,
     type Surface,
     unavailable,
 } from "../../shared/kernel-client";
@@ -40,7 +41,7 @@ export interface MemorySearchResult {
     sourceName?: string;
     policyLabel?: string;
     /** The causal class the daemon's route validated a `fused` result's claim under: `direct_observation`, `derived_reinjection`, or `unknown`. */
-    provenance?: string;
+    provenance?: RouteCausality;
     /** Exact SHA-256 digest of the served revision's content bytes. */
     contentDigest?: string;
 }
@@ -63,7 +64,7 @@ export interface AntiMemorySearchResult {
     lanes?: readonly string[];
     policyLabel?: string;
     /** The causal class the daemon's route validated a `fused` result's claim under. */
-    provenance?: string;
+    provenance?: RouteCausality;
 }
 
 export type KernelMemorySearchResult = MemorySearchResult | AntiMemorySearchResult;

@@ -494,6 +494,7 @@ export interface RouteCanonicalReference {
     causality: RouteCausality;
 }
 
+/** The closed set of causal-class codes; the daemon emits a new code only in the change that adds it here, while the plugins ship with the daemon in one payload. */
 export const ROUTE_CAUSALITIES = ["direct_observation", "derived_reinjection", "unknown"] as const;
 export type RouteCausality = (typeof ROUTE_CAUSALITIES)[number];
 
