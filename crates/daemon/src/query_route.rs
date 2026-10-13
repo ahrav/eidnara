@@ -1779,7 +1779,8 @@ fn validate_claims(
             .rows
             .into_iter()
             .zip(judgement.verdicts)
-            .filter_map(|(row, verdict)| {
+            .zip(judgement.causality)
+            .filter_map(|((row, verdict), causality)| {
                 let UseVerdict::Permitted(visibility) = verdict else {
                     return None;
                 };
@@ -1789,6 +1790,10 @@ fn validate_claims(
                         object_id: row.object_id,
                         revision: row.revision,
                         visibility,
+                        causality: causality.unwrap_or_else(|| {
+                            debug_assert!(false, "a permitted claim has facts");
+                            "unknown"
+                        }),
                     },
                 ))
             }),
@@ -1802,6 +1807,8 @@ struct CanonicalReference {
     revision: i64,
     /// `labeled` obliges the presentation to carry the claim's label.
     visibility: SurfaceVisibility,
+    /// The claim's causal class at the validation snapshot; it informs presentation and never ranking.
+    causality: &'static str,
 }
 
 fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Value {
@@ -1829,6 +1836,7 @@ fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Val
             "decision_object_id": reference.object_id,
             "source_revision": reference.revision,
             "visibility": reference.visibility.as_str(),
+            "causality": reference.causality,
         });
     }
     value

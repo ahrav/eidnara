@@ -33,34 +33,34 @@ Daemon side:
 Host wire and application:
 
 - `ROUTE_LANES` (`packages/opencode-plugin/src/shared/kernel-client/wire.ts:484`)
-  names `exact`, `lexical`, `dense`. `RouteEntry` (`:495`) carries
-  `occurrence_id`, `position`, the contributing `lanes` (`:500`), and a
-  `canonical` reference. The fused payload carries one `LaneStatus` per lane
-  (`:509`, `:515`).
+  names `exact`, `lexical`, `dense`. `RouteEntry` (`:501`) carries
+  `occurrence_id`, `position`, the contributing `lanes` (`:506`), and a
+  `canonical` reference whose `causality` names the claim's causal class. The
+  fused payload carries one `LaneStatus` per lane (`:515`, `:521`).
 - `wire.test.ts:426` parses a lexical status of `incomplete` with reason
   `common_terms` and `also: ["rank_budget"]`; it exercises status parsing,
   not an entry with a lexical lane.
 - `searchThroughRoute`
-  (`packages/opencode-plugin/src/tools/eidnara-search/route-search.ts:74`)
+  (`packages/opencode-plugin/src/tools/eidnara-search/route-search.ts:76`)
   is the application step both hosts share: it sends `retrieval.query`,
   folds entries by `canonical.decision_object_id` while collecting their
-  lanes (`:101`), and reads the selected decisions through
-  `readObjectRowsChunked` on the `explicit_search` surface (`:131`). Payload
+  lanes (`:103`), and reads the selected decisions through
+  `readObjectRowsChunked` on the `explicit_search` surface (`:136`). Payload
   text therefore loads after the route answers, through the daemon's read
-  surface, never from the lexical lane. `lanesOf`
-  (`tools/eidnara-search/render.ts:29`) renders the collected lanes as
-  `lanes=...`.
+  surface, never from the lexical lane. `routeFieldsOf`
+  (`tools/eidnara-search/render.ts:30`) renders the collected lanes as
+  `lanes=...`, followed by `provenance=...`.
 - Pi's tool (`packages/pi-plugin/src/tools/eidnara-search.ts:3`) imports
   `executeEidnaraSearch` from the OpenCode package, which calls
   `searchThroughRoute` (`execute.ts:183`). One application path serves both
   hosts.
-- `packages/pi-plugin/src/tools/eidnara-search.test.ts:113` asserts
-  `match=fused lanes=dense` from a scripted route reply; the reply names the
+- `packages/pi-plugin/src/tools/eidnara-search.test.ts:114` asserts
+  `match=fused lanes=dense provenance=unknown` from a scripted route reply; the reply names the
   lexical lane only as `{ status: "complete" }` (`:94`).
 
 End-to-end host matrix that exists:
 
-- `packages/e2e-tests/tests/payload-fused-search.test.ts:98`
+- `packages/e2e-tests/tests/payload-fused-search.test.ts:101`
   `fused search through a built payload` starts a built payload host
   (`PayloadHost`, `src/rust-runner/payload-host.ts:47`) under the OpenCode
   harness (`RustTestHarness`, `src/rust-harness.ts:229`) and a Pi harness,
@@ -125,8 +125,8 @@ is unset.
 
 ### Q: Does any existing host test reach a lexical contribution?
 
-- Sources examined: `payload-fused-search.test.ts:21`, `:47`, `:51`;
-  `eidnara-search.test.ts:94`, `:113`; `wire.test.ts:426`;
+- Sources examined: `payload-fused-search.test.ts:21`, `:47`, `:52`;
+  `eidnara-search.test.ts:94`, `:114`; `wire.test.ts:426`;
   `query_route_handler.rs:259`.
 - Findings: the payload suite asserts `lanes=dense` exclusively and builds
   disjoint word sets so lexical cannot rank; the Pi unit test scripts a
@@ -138,7 +138,7 @@ is unset.
 
 ### Q: Is "no denied payload" structurally enforced on the host path?
 
-- Sources examined: `route-search.ts:101` through `:139`;
+- Sources examined: `route-search.ts:103` through `:146`;
   `retrieval-reads-no-payload` for the daemon side.
 - Findings: the host reads payloads only for decisions the route named, via
   `readObjectRowsChunked` on `explicit_search`, after the ranking returns.
