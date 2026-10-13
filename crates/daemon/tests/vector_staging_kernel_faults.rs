@@ -18,7 +18,9 @@ use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE, SIDECAR_FILE, TOMBSTONES_FILE,
     VectorRefusal, build, stage, stage_observed, verify,
 };
-use host_runtime::generation::{CurrentProfile, GENERATIONS_DIR_NAME, GenerationStore, StageEvent};
+use host_runtime::generation::{
+    CurrentProfile, FILE_HASH_BUFFER_BYTES, GENERATIONS_DIR_NAME, GenerationStore, StageEvent,
+};
 use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::export::{ExportedRow, LiveRows};
 
@@ -179,9 +181,6 @@ fn assert_recovers(
         .unwrap();
 }
 
-/// The store's copy chunk.
-const COPY_CHUNK: u64 = 128 * 1024;
-
 /// One cell of the file-size-limit matrix: the file whose write crosses the limit, and the limit.
 struct SizeCell {
     file: &'static str,
@@ -205,8 +204,11 @@ fn size_cells(sizes: &[(&'static str, u64)]) -> Vec<SizeCell> {
                 limit < size,
                 "{file}: a limit of {limit} cannot cut a {size}-byte write after {earlier} bytes"
             );
-            // The store copies in chunks of 128 KiB, so a nonzero limit below a file of at most one chunk falls inside the write that crosses it, and that write is short.
-            assert!(limit > 0 && size <= COPY_CHUNK, "{file}: {size} bytes");
+            assert!(limit > 0, "{file}: a zero limit fails the first write");
+            assert!(
+                size <= FILE_HASH_BUFFER_BYTES as u64,
+                "{file}: {size} bytes span more than one copy buffer, so the write that crosses the limit may be full rather than short"
+            );
             SizeCell { file, limit }
         })
         .collect();

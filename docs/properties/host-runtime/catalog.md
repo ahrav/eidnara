@@ -1202,7 +1202,7 @@ Exercised: partial - success, post-hoc tampering, and hook-injected `EIO`,
 `ENOSPC`, and `EDQUOT` plus a `SIGKILL` child at every `StageEvent` of `stage`
 (`crates/daemon/tests/vector_staging_cuts.rs:513-617`), and the kernel's `ENOSPC`
 from a `tmpfs` exhausted before each staged write plus a short write and `EFBIG`
-under `RLIMIT_FSIZE` (`crates/daemon/tests/vector_staging_kernel_faults.rs:251-483`);
+under `RLIMIT_FSIZE` (`crates/daemon/tests/vector_staging_kernel_faults.rs:253-485`);
 the window between promotion and the `current-profile.json` rename in
 `stage_and_promote` has no cut.
 Guarantee: After any outcome of staging and promotion, including a crash at any
