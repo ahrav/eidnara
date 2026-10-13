@@ -12168,11 +12168,11 @@ pub(crate) fn clear_served_native_reasoning(
 
 // Ingress/tag ownership prevents the codec's latest-assistant shortcut from restoring old reasoning.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_with_tags(
+pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<WireMessage>>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Arc<Value>],
-    served_messages: &[WireMessage],
+    served_messages: &[M],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     _mid_turn: bool,
@@ -12187,7 +12187,8 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
 
     let served_ids = served_messages
         .iter()
-        .filter(|message| !message.meta.synthetic && message.role == "assistant")
+        .map(std::borrow::Borrow::borrow)
+        .filter(|message: &&WireMessage| !message.meta.synthetic && message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
     if served_ids.is_empty() {

@@ -6,7 +6,7 @@
 //! single tool-part representation.
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -344,8 +344,8 @@ pub(crate) fn encode_opencode_with_session_exemptions(
 /// Encodes CK messages onto their retained native envelopes, replaying each mutation-exempt
 /// message's envelope whole. A message whose envelope the encode leaves unchanged is that
 /// envelope's `Arc`, so the output shares it with the input window.
-pub(crate) fn encode_opencode_shared(
-    messages: &[WireMessage],
+pub(crate) fn encode_opencode_shared<M: Borrow<WireMessage>>(
+    messages: &[M],
     sidecar: &DecodeSidecar,
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
@@ -353,8 +353,8 @@ pub(crate) fn encode_opencode_shared(
     encode_opencode_impl(messages, sidecar, session_id, true, mutation_exempt_mids)
 }
 
-fn encode_opencode_impl(
-    messages: &[WireMessage],
+fn encode_opencode_impl<M: Borrow<WireMessage>>(
+    messages: &[M],
     sidecar: &DecodeSidecar,
     session_id: Option<&str>,
     preserve_compaction: bool,
@@ -363,9 +363,11 @@ fn encode_opencode_impl(
     let mut encoded = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
-        if let Some(next) = messages.get(index + 1) {
-            if let Some(part) = render_synthetic_todo_pair(&messages[index], next) {
-                let info = synthetic_message_info(&messages[index], session_id);
+        let msg: &WireMessage = messages[index].borrow();
+        let next: Option<&WireMessage> = messages.get(index + 1).map(Borrow::borrow);
+        if let Some(next) = next {
+            if let Some(part) = render_synthetic_todo_pair(msg, next) {
+                let info = synthetic_message_info(msg, session_id);
                 encoded.push(Arc::new(json!({
                     "info": info,
                     "parts": [part],
@@ -373,20 +375,19 @@ fn encode_opencode_impl(
                 index += 2;
                 continue;
             }
-            let call_is_fresh = meta_for_ck(sidecar, &messages[index], index).is_none();
+            let call_is_fresh = meta_for_ck(sidecar, msg, index).is_none();
             let result_is_fresh = meta_for_ck(sidecar, next, index + 1).is_none();
             if call_is_fresh
                 && result_is_fresh
-                && let Some(part) = render_adjacent_tool_pair(&messages[index], next)
+                && let Some(part) = render_adjacent_tool_pair(msg, next)
             {
-                let mut message = encode_new_message(&messages[index], session_id);
+                let mut message = encode_new_message(msg, session_id);
                 set_value(&mut message, "parts", Value::Array(vec![part]));
                 encoded.push(Arc::new(message));
                 index += 2;
                 continue;
             }
         }
-        let msg = &messages[index];
         // Decoded messages retain their harness IDs for metadata rebinding.
         // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
         // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.

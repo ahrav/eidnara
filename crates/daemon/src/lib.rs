@@ -14258,8 +14258,8 @@ fn attach_native_messages_with_tags(
             let served_messages = response
                 .messages()
                 .iter()
-                .map(|message| message.deref().clone())
-                .collect::<Vec<_>>();
+                .map(Deref::deref)
+                .collect::<Vec<&wire::WireMessage>>();
             let mut native_messages = codec::opencode::encode_opencode_shared(
                 &served_messages,
                 &codec::opencode::decode_opencode_sidecar(native_input),
