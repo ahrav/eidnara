@@ -423,7 +423,7 @@ fn decode_tool_part<'a>(
             input,
             provider_executed,
         });
-        blocks.push_with_native_id(call_block, part_index, part, "tool_call", Some(&id));
+        blocks.push_with_native_id(call_block, part_index, "tool_call", Some(&id));
     }
 
     let status = tool_status(part);
@@ -442,7 +442,7 @@ fn decode_tool_part<'a>(
             output,
             provider_executed,
         });
-        blocks.push_with_native_id(result_block, part_index, part, "tool_result", Some(&id));
+        blocks.push_with_native_id(result_block, part_index, "tool_result", Some(&id));
     }
 }
 
@@ -467,7 +467,7 @@ impl Blocks {
         let native_id = ["id", "callID"]
             .into_iter()
             .find_map(|key| raw.get(key).and_then(Value::as_str));
-        self.push_with_native_id(block, part_index, raw, kind, native_id);
+        self.push_with_native_id(block, part_index, kind, native_id);
     }
 
     /// As [`Self::push`], with the meta named by `native_id`.
@@ -475,7 +475,6 @@ impl Blocks {
         &mut self,
         mut block: WireBlock,
         part_index: usize,
-        raw: &Value,
         kind: &str,
         native_id: Option<&str>,
     ) {
@@ -490,7 +489,6 @@ impl Blocks {
                 native_id: native_id.map(str::to_string),
                 item_id: None,
                 content_fingerprint: Some(content_fingerprint),
-                raw: raw.clone(),
             });
         }
         self.content.push(block);
