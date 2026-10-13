@@ -1,8 +1,9 @@
 //! Lossless sidecar metadata for decoding and re-encoding harness messages.
 //!
-//! Decoding stamps native origins and content fingerprints onto wire blocks. Encoding
-//! aligns surviving blocks to native metadata with an order-preserving maximum-score
-//! walk, preferring exact origin matches over fingerprint-only matches.
+//! Decoding records each native message's envelope, block metadata, and decoded blocks.
+//! Encoding aligns surviving blocks to that metadata by canonical content with an
+//! order-preserving maximum-match walk, or a forward greedy walk above
+//! [`MAX_ALIGNMENT_CELLS`].
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,7 +96,8 @@ pub struct HarnessMessageMeta {
     #[serde(default)]
     pub blocks: Vec<BlockMeta>,
     /// The message's decoded blocks in decode order, which each block meta's `block_index`
-    /// indexes; alignment compares served blocks against them.
+    /// indexes; alignment compares served blocks against them. The OpenCode sidecar fills it.
+    /// The Pi codec keeps it empty and hands each encode the blocks it decodes from the row.
     #[serde(default)]
     pub decoded: Vec<WireBlock>,
 }
@@ -216,6 +218,8 @@ fn canonical_text(block: &WireBlock) -> String {
 /// equality is pinned against in tests.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
+    #[cfg(test)]
+    count_digest();
     let digest = Sha256::digest(canonical_text(block).as_bytes());
     hex_prefix(&digest, digest.len())
 }
@@ -259,7 +263,7 @@ pub(crate) fn same_decoded_content(block: &WireBlock, decoded: &WireBlock) -> bo
 }
 
 /// Whether `json` or any value nested in it is a float zero of either sign.
-pub(crate) fn json_holds_float_zero(json: &Value) -> bool {
+fn json_holds_float_zero(json: &Value) -> bool {
     match json {
         Value::Number(number) => number.is_f64() && number.as_f64() == Some(0.0),
         Value::Array(items) => items.iter().any(json_holds_float_zero),
@@ -338,8 +342,9 @@ fn alignment_candidate(
 /// Largest `blocks * metas` product the optimal alignment may allocate matrices for.
 ///
 /// The score matrix costs one word per cell, so this caps it near 8 MiB; a single message
-/// with thousands of blocks on both sides exceeds it and takes the linear-memory greedy path.
-const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
+/// with thousands of blocks on both sides exceeds it and takes the greedy path, whose memory
+/// is linear in the message's canonical bytes.
+pub(crate) const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
 
 /// Aligns blocks with metadata without reordering either sequence, comparing each block with
 /// the decoded block a meta names by canonical content.
@@ -347,7 +352,8 @@ const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
 /// Dynamic programming maximizes the number of matches. Each block and metadata row appears
 /// in at most one pair. Time and memory are `O(blocks * metas)` up to
 /// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
-/// first unpaired candidate at `O(blocks + metas)` memory, trading optimality for a bound.
+/// first unpaired candidate, indexing the metas by their decoded blocks' canonical text, so
+/// its memory is linear in the message's canonical bytes; it trades optimality for that bound.
 pub(crate) fn match_block_metas<'a>(
     blocks: &[WireBlock],
     metas: &'a [BlockMeta],
@@ -493,7 +499,7 @@ fn optimal_block_metas<'a>(
 /// return the full 64-character digest.
 pub fn stable_hash_prefix(value: &Value, chars: usize) -> String {
     #[cfg(test)]
-    IDENTITY_DIGESTS.with(|digests| digests.set(digests.get() + 1));
+    count_digest();
     // The compact bytes stream into the digest, so hashing allocates nothing in proportion to
     // the value, whose escapes can make its encoding several times its retained size.
     let mut hasher = DigestWriter(Sha256::new());
@@ -509,15 +515,21 @@ pub fn stable_hash_prefix(value: &Value, chars: usize) -> String {
 
 #[cfg(test)]
 thread_local! {
-    /// SHA-256 digests [`stable_hash_prefix`] has taken on this thread, the only digest the
-    /// codecs take outside tests: message and synthetic-tool identities.
-    static IDENTITY_DIGESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// SHA-256 digests the codecs have taken on this thread: identities through
+    /// [`stable_hash_prefix`] and test fingerprints through [`decoded_block_fingerprint`],
+    /// the two functions that digest anything.
+    static CODEC_DIGESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The identity digests this thread has taken so far.
 #[cfg(test)]
-pub(crate) fn identity_digests() -> usize {
-    IDENTITY_DIGESTS.with(std::cell::Cell::get)
+fn count_digest() {
+    CODEC_DIGESTS.with(|digests| digests.set(digests.get() + 1));
+}
+
+/// The SHA-256 digests the codecs have taken on this thread so far.
+#[cfg(test)]
+pub(crate) fn codec_digests() -> usize {
+    CODEC_DIGESTS.with(std::cell::Cell::get)
 }
 
 /// Feeds every byte written to it into its digest.
@@ -657,6 +669,10 @@ mod tests {
             call(serde_json::json!([1, 2]), false),
             call(serde_json::json!([2, 1]), false),
         ];
+        // Literal anchors: a float zero and its opposite sign are other content, nested too.
+        assert!(!same_decoded_content(&blocks[8], &blocks[9]));
+        assert!(!same_decoded_content(&blocks[10], &blocks[11]));
+        assert!(same_decoded_content(&blocks[0], &blocks[2]));
         for block in &blocks {
             for other in &blocks {
                 assert_eq!(
@@ -816,6 +832,60 @@ mod tests {
             );
         }
         assert_eq!(matched.retained_native_indices.len(), count);
+    }
+
+    /// Every SHA-256 the codecs take runs in [`stable_hash_prefix`] or the test-only
+    /// [`decoded_block_fingerprint`], the two functions [`codec_digests`] counts, so a digest
+    /// added anywhere else in the codecs fails here before a counting test could miss it.
+    #[test]
+    fn every_codec_digest_runs_in_a_counted_function() {
+        fn production(source: &str) -> &str {
+            source
+                .split_once("#[cfg(test)]\nmod tests {")
+                .or_else(|| source.split_once("#[cfg(test)]\npub(crate) mod tests {"))
+                .map_or(source, |(production, _)| production)
+        }
+        for source in [
+            include_str!("json.rs"),
+            include_str!("mod.rs"),
+            include_str!("opencode.rs"),
+            include_str!("pi.rs"),
+        ] {
+            let source = production(source);
+            for digest in [
+                "Sha256",
+                "sha2",
+                "Digest",
+                "fingerprint(",
+                "block_identity_digest",
+            ] {
+                assert!(!source.contains(digest), "{digest}");
+            }
+        }
+        let sidecar = production(include_str!("sidecar.rs"));
+        let digesting: Vec<&str> = sidecar
+            .split("\n")
+            .filter(|line| line.contains("Sha256::"))
+            .collect();
+        assert_eq!(
+            digesting,
+            [
+                "    let digest = Sha256::digest(canonical_text(block).as_bytes());",
+                "    let mut hasher = DigestWriter(Sha256::new());",
+                "        Err(_) => Sha256::digest([]),",
+            ]
+        );
+        for (function, count_first) in [
+            (
+                "pub(crate) fn decoded_block_fingerprint(",
+                "count_digest();",
+            ),
+            ("pub fn stable_hash_prefix(", "count_digest();"),
+        ] {
+            let body = sidecar.split_once(function).unwrap().1;
+            let counted = body.find(count_first).unwrap();
+            assert!(counted < body.find("Sha256::").unwrap(), "{function}");
+        }
     }
 
     #[test]

@@ -26788,6 +26788,14 @@ mod tests {
         for index in [1, 3] {
             assert!(!Arc::ptr_eq(&output[index], &input[index]), "{index}");
             assert_eq!(output[index]["parts"][0]["text"], "", "{index}");
+            let rest = |message: &Value| {
+                serde_json::to_string(&message["parts"].as_array().unwrap()[1..]).unwrap()
+            };
+            assert_eq!(
+                rest(&output[index]),
+                rest(&input[index]),
+                "only the reasoning clears"
+            );
             assert_eq!(
                 *input[index], native[index],
                 "the input keeps its reasoning"
@@ -26799,39 +26807,70 @@ mod tests {
     }
 
     /// Native attach takes no SHA-256 digest of served or native blocks: an identified window
-    /// with nested signed zeros attaches in both alignment regimes with no digest at all.
+    /// with nested signed zeros attaches in both alignment regimes with no codec digest at all,
+    /// while an id-less message's identity takes exactly one.
     #[test]
     fn native_attach_takes_no_block_digest_in_either_alignment_regime() {
+        let bytes = |value: &Value| serde_json::to_string(value).unwrap();
         let native = identified_opencode_window();
         let (request, mut served) = derived_native_request(&native);
-        let before = codec::sidecar::identity_digests();
+        let before = codec::sidecar::codec_digests();
         let output = encode_native_pass(&request, served.clone(), 0, &BTreeMap::new());
         assert_eq!(output.len(), native.len());
-        let BlockKind::Text { text } = served[3].content_mut()[1].kind_mut() else {
-            panic!("the center's second block is its text");
+        fn text_of(message: &mut WireMessage) -> &mut String {
+            match message.content_mut()[1].kind_mut() {
+                BlockKind::Text { text } => text,
+                _ => panic!("an assistant's second block is its text"),
+            }
+        }
+        *text_of(&mut served[3]) = "§9§ center answer".to_string();
+        // The newest assistant's call input flips its zero signs, and its text changes so its
+        // envelope differs from the native one.
+        *text_of(&mut served[5]) = "§9§ newest answer".to_string();
+        let BlockKind::ToolCall { input, .. } = served[5].content_mut()[2].kind_mut() else {
+            panic!("an assistant's third block is its call");
         };
-        *text = "§9§ center answer".to_string();
+        *input = json!({ "offset": 0.0, "nested": [-0.0] });
         let output = encode_native_pass(&request, served, 0, &BTreeMap::new());
-        assert!(!Arc::ptr_eq(
-            &output[3],
-            &request.native_messages.as_ref().unwrap()[3]
-        ));
-        // The tool block, whose input holds signed zeros, pairs with its own native part.
-        assert_eq!(output[3]["parts"][2], native[3]["parts"][2]);
+        let input = request.native_messages.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(&output[3], &input[3]));
+        // The center's call, whose input holds signed zeros, keeps its own native part byte
+        // for byte; the flipped call replays the served numbers, not the native ones.
+        assert_eq!(bytes(&output[3]["parts"][2]), bytes(&native[3]["parts"][2]));
+        assert_eq!(
+            bytes(&output[5]["parts"][2]["state"]["input"]),
+            r#"{"nested":[-0.0],"offset":0.0}"#
+        );
 
         // One message of 1,100 text parts aligns on the greedy path.
-        let parts: Vec<Value> = (0..1_100)
+        let count = 1_100;
+        assert!(count * count > codec::sidecar::MAX_ALIGNMENT_CELLS);
+        let parts: Vec<Value> = (0..count)
             .map(|index| json!({ "type": "text", "text": format!("part {index}") }))
             .collect();
         let wide = vec![json!({ "info": { "id": "wide", "role": "user" }, "parts": parts })];
         let (request, mut served) = derived_native_request(&wide);
         served[0].content_mut().remove(500);
         let output = encode_native_pass(&request, served, 0, &BTreeMap::new());
-        assert_eq!(output[0]["parts"].as_array().unwrap().len(), 1_099);
+        let parts = output[0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), count - 1);
+        assert_eq!(parts[499]["text"], "part 499");
+        assert_eq!(parts[500]["text"], "part 501");
         assert_eq!(
-            codec::sidecar::identity_digests(),
+            codec::sidecar::codec_digests(),
             before,
             "no digest was taken"
+        );
+
+        let anonymous = [Arc::new(json!({
+            "info": { "role": "user" },
+            "parts": [{ "type": "text", "text": "no id" }]
+        }))];
+        let _ = codec::opencode::decode_opencode_sidecar(&anonymous);
+        assert_eq!(
+            codec::sidecar::codec_digests(),
+            before + 1,
+            "an id-less message's identity is the one digest"
         );
     }
 

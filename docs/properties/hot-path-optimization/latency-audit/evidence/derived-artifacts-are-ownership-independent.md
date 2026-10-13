@@ -145,7 +145,14 @@ ownership. Witnesses in `crates/daemon/src/lib.rs` tests:
 - `native_attach_takes_no_block_digest_in_either_alignment_regime` and
   `pi_decode_and_encode_take_no_block_digest_in_either_alignment_regime`
   (`codec/pi.rs`): tool-heavy windows with nested signed zeros and a
-  1,100-part message on the greedy path attach with no identity digest taken.
+  1,100-part message on the greedy path attach with no codec SHA-256 taken,
+  counted in the two functions that digest, while an id-less message's
+  identity takes exactly one. `every_codec_digest_runs_in_a_counted_function`
+  (`codec/sidecar.rs`) holds every codec digest to those two functions.
+- `the_unchanged_envelope_shortcut_agrees_with_the_full_render`
+  (`codec/opencode.rs`): over the parity corpus, the golden windows, and
+  envelopes without `parts` or `info.id`, every message the unchanged-envelope
+  shortcut accepts renders to its retained `Arc` through the full path.
 - `both_alignment_regimes_pair_by_canonical_content` and
   `same_decoded_content_is_fingerprint_equality` (`codec/sidecar.rs`): both
   regimes pair by canonical content, and the structural comparison agrees with

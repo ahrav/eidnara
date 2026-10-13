@@ -1302,8 +1302,11 @@ results. The OpenCode driver takes `--mix text_only` (the default) or
 `--mix tool_heavy`, which gives each window assistant a short text part beside a
 completed `read` tool part whose output carries the window text; the Pi tier
 interleaves text, tool calls, tool results, and shell runs and labels itself
-`tool_heavy`. A manifest without `mix` ran text only. The `scale-report`
-dispatch input `scale_mix` passes the OpenCode mix to both arms.
+`tool_heavy`. A manifest without `mix` predates the label: the OpenCode driver
+ran text only and the Pi tier ran its interleaved window. The `scale-report`
+dispatch input `scale_mix` passes the OpenCode mix to both arms. A report that
+carries `mix` parses only with an `eval_runner` from the same commit as its
+writer or a later one, which the dispatched job uses for both arms.
 
 A non-control tier carries a ratio claim only with at least three sessions in
 the tier and in the 10k control and at least `P99_MIN_RUNS` uncensored steady

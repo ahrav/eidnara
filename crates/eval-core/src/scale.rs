@@ -510,7 +510,8 @@ pub struct TierSummary {
 #[serde(deny_unknown_fields)]
 pub struct CohortManifest {
     pub window: u32,
-    /// The content the window's messages carry; a manifest without it ran text only.
+    /// The content the window's messages carry. A manifest without it predates the label: the
+    /// OpenCode driver ran text only and the Pi tier ran its interleaved window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mix: Option<WindowMix>,
 }

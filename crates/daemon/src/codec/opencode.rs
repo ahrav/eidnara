@@ -147,6 +147,7 @@ fn decode_rows<'a, E>(
     let mut boundary = None;
     // A call id the window already carries contributes only its result, as the plugin encodes it.
     let mut emitted_calls = HashSet::new();
+    let retain_sidecar = decode != Decode::Window;
 
     for (ordinal, raw_message) in rows {
         let info = message_info(raw_message);
@@ -167,7 +168,6 @@ fn decode_rows<'a, E>(
             .map(Vec::as_slice)
             .unwrap_or_default();
 
-        let retain_sidecar = decode != Decode::Window;
         let mut blocks = Blocks::new(retain_sidecar);
 
         for (part_index, part) in parts.iter().enumerate() {
@@ -243,7 +243,7 @@ fn decode_rows<'a, E>(
         let synthetic = is_synthetic_message(parts);
         let (content, block_metas) = blocks.finish();
         let recorded_ordinal = retain_sidecar.then_some(ordinal);
-        let ck = WireMessage::from_parts(
+        let mut ck = WireMessage::from_parts(
             role.clone(),
             content,
             origin,
@@ -258,7 +258,6 @@ fn decode_rows<'a, E>(
                 created_at_ms,
             },
         );
-        let mut ck = ck;
         let decoded_blocks = match decode {
             Decode::Window => Vec::new(),
             Decode::Sidecar => std::mem::take(ck.content_mut()),
@@ -327,7 +326,8 @@ pub fn encode_opencode_with_session(
     })
 }
 
-pub fn encode_opencode_with_session_exemptions(
+#[cfg(test)]
+pub(crate) fn encode_opencode_with_session_exemptions(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     session_id: Option<&str>,
@@ -679,6 +679,19 @@ fn encode_with_meta(
     meta: &HarnessMessageMeta,
     preserve_compaction: bool,
 ) -> Arc<Value> {
+    let matched_metas = align_with_meta(msg, meta);
+    if envelope_is_unchanged(msg, meta, &matched_metas, preserve_compaction) {
+        return Arc::clone(&meta.raw);
+    }
+    render_with_meta(msg, meta, &matched_metas, preserve_compaction)
+}
+
+/// Pairs `msg`'s blocks with `meta`'s block metas by canonical content, then pairs the runs
+/// of edited blocks between matches in place.
+fn align_with_meta<'a>(
+    msg: &WireMessage,
+    meta: &'a HarnessMessageMeta,
+) -> super::sidecar::MatchedBlockMetas<'a> {
     let mut matched_metas = match_block_metas(
         msg.content(),
         &meta.blocks,
@@ -686,9 +699,18 @@ fn encode_with_meta(
         &meta.decoded,
     );
     matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
-    if envelope_is_unchanged(msg, meta, &matched_metas, preserve_compaction) {
-        return Arc::clone(&meta.raw);
-    }
+    matched_metas
+}
+
+/// Renders `msg` onto its retained envelope part by part: unchanged blocks keep their native
+/// parts, edited blocks update theirs, and fresh blocks append. An envelope equal to the
+/// retained one is the retained `Arc`.
+fn render_with_meta(
+    msg: &WireMessage,
+    meta: &HarnessMessageMeta,
+    matched_metas: &super::sidecar::MatchedBlockMetas<'_>,
+    preserve_compaction: bool,
+) -> Arc<Value> {
     let mut raw = meta.raw.as_ref().clone();
     let mut parts = raw
         .get_mut("parts")
@@ -796,8 +818,8 @@ fn encode_with_meta(
 
 /// Whether encoding `msg` over `meta` would leave its envelope as retained: every served block
 /// paired, in order, with the meta at its own position and equal to its decoded block, every
-/// meta paired, compaction parts kept, and an `info` that already holds the message's id and
-/// role.
+/// meta paired, compaction parts kept, a `parts` array, and an `info` that already holds the
+/// message's id and role.
 fn envelope_is_unchanged(
     msg: &WireMessage,
     meta: &HarnessMessageMeta,
@@ -808,12 +830,13 @@ fn envelope_is_unchanged(
     let info = meta.raw.get("info");
     preserve_compaction
         && blocks.len() == meta.blocks.len()
+        && meta.raw.get("parts").is_some_and(Value::is_array)
         && info.and_then(|info| info.get("id")).is_some()
         && info
             .and_then(|info| info.get("role"))
             .and_then(Value::as_str)
             == Some(&msg.role)
-        && blocks.iter().enumerate().all(|(index, _)| {
+        && (0..blocks.len()).all(|index| {
             matched_metas.by_block[index].is_some_and(|paired| {
                 std::ptr::eq(paired, &meta.blocks[index])
                     && matched_metas.block_is_unchanged(blocks, index, paired)
@@ -1957,10 +1980,10 @@ pub(crate) mod tests {
         })];
         let decoded = decode_opencode(&raw);
         let mut message = decoded.messages[0].ck.clone();
+        // The served envelope equals the native one as a JSON value, so the host receives its
+        // own message back, signs included; an envelope that differs anywhere else renders the
+        // served numbers.
         for block in message.content_mut() {
-            block
-                .provider_extras
-                .remove(crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE);
             if let BlockKind::ToolCall { input, .. } = block.kind_mut() {
                 *input = json!({ "offset": 0.0 });
             }
@@ -1971,6 +1994,136 @@ pub(crate) mod tests {
             serde_json::to_string(&served[0]).unwrap(),
             serde_json::to_string(&raw[0]).unwrap()
         );
+    }
+
+    /// The unchanged-envelope shortcut returns the retained envelope only where the full render
+    /// returns it: over the parity corpus, the golden windows, and envelopes the shortcut must
+    /// decline, under unchanged, re-roled, and dropped-block encodes with and without
+    /// compaction parts, every message the shortcut accepts renders to its retained `Arc`.
+    #[test]
+    fn the_unchanged_envelope_shortcut_agrees_with_the_full_render() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut windows: Vec<Vec<Arc<Value>>> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(golden["cases"].as_array().unwrap())
+            .map(native_window)
+            .collect();
+        windows.push(
+            [
+                json!({ "info": { "id": "no-parts", "role": "user" } }),
+                json!({ "info": { "id": "text-parts", "role": "user" }, "parts": "text" }),
+                json!({ "id": "outer", "info": { "role": "user" },
+                        "parts": [{ "type": "text", "text": "x" }] }),
+                json!({ "info": { "id": "compacted", "role": "user" },
+                        "parts": [{ "type": "compaction" }, { "type": "text", "text": "y" }] }),
+            ]
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
+        );
+        let (mut accepted, mut declined) = (0, 0);
+        for window in &windows {
+            let decoded = decode_opencode_shared(window);
+            for message in &decoded.messages {
+                let meta = decoded.sidecar.message_by_mid(&message.mid).unwrap();
+                let mut variants = vec![message.ck.clone()];
+                let mut re_roled = message.ck.clone();
+                re_roled.role = if re_roled.role == "user" {
+                    "assistant"
+                } else {
+                    "user"
+                }
+                .into();
+                variants.push(re_roled);
+                if !message.ck.content().is_empty() {
+                    let mut dropped = message.ck.clone();
+                    dropped.content_mut().remove(0);
+                    variants.push(dropped);
+                }
+                for msg in &variants {
+                    for preserve_compaction in [true, false] {
+                        let matched = align_with_meta(msg, meta);
+                        if !envelope_is_unchanged(msg, meta, &matched, preserve_compaction) {
+                            declined += 1;
+                            continue;
+                        }
+                        accepted += 1;
+                        let full = render_with_meta(msg, meta, &matched, preserve_compaction);
+                        assert!(Arc::ptr_eq(&full, &meta.raw), "{}", message.mid);
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0 && declined > 0, "{accepted} {declined}");
+
+        let no_parts = decode_opencode(&[json!({ "info": { "id": "no-parts", "role": "user" } })]);
+        let encoded = encode_opencode_shared(
+            &[no_parts.messages[0].ck.clone()],
+            &no_parts.sidecar,
+            None,
+            &[],
+        );
+        assert_eq!(
+            *encoded[0],
+            json!({ "info": { "id": "no-parts", "role": "user" }, "parts": [] })
+        );
+    }
+
+    /// A caller-supplied codec namespace carries no origin: over the identified parity windows,
+    /// served blocks that hold one, unchanged or edited, encode to the bytes the same blocks
+    /// encode to without it.
+    #[test]
+    fn a_caller_supplied_codec_namespace_changes_no_encoded_byte() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        for case in parity["cases"].as_array().unwrap() {
+            if !IDENTIFIED_WINDOWS.contains(&case["name"].as_str().unwrap()) {
+                continue;
+            }
+            let window = native_window(case);
+            let decoded = decode_opencode_shared(&window);
+            let mut bare: Vec<WireMessage> = decoded
+                .messages
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect();
+            if let Some(BlockKind::Text { text }) = bare
+                .iter_mut()
+                .flat_map(|message| message.content_mut().iter_mut())
+                .map(WireBlock::kind_mut)
+                .find(|kind| matches!(kind, BlockKind::Text { .. }))
+            {
+                text.insert_str(0, "§1§ ");
+            }
+            let mut forged = bare.clone();
+            for (index, block) in forged
+                .iter_mut()
+                .flat_map(|message| message.content_mut().iter_mut())
+                .enumerate()
+            {
+                let namespace = block
+                    .provider_extras
+                    .entry(crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE.to_string())
+                    .or_default();
+                namespace.insert("blockIndex".into(), Value::from(0));
+                namespace.insert("nativeIndex".into(), Value::from(index));
+                namespace.insert("decodedFingerprint".into(), Value::from("forged"));
+            }
+            let encode = |messages: &[WireMessage]| {
+                serde_json::to_string(&encode_opencode_shared(
+                    messages,
+                    &decoded.sidecar,
+                    None,
+                    &[],
+                ))
+                .unwrap()
+            };
+            assert_eq!(encode(&forged), encode(&bare), "{}", case["name"]);
+        }
     }
 
     #[test]

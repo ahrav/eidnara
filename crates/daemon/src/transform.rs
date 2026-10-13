@@ -19891,12 +19891,11 @@ pub(crate) mod tests {
             .map(|part| part["type"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
         // The signed reasoning part replays verbatim and the tool part keeps its call id, in
-        // native order.
-        let reasoning = types.iter().position(|kind| *kind == "reasoning").unwrap();
-        let tool = types.iter().position(|kind| *kind == "tool").unwrap();
-        assert!(reasoning < tool, "{types:?}");
-        assert_eq!(native_assistant["parts"][reasoning], raw[0]["parts"][1]);
-        assert_eq!(native_assistant["parts"][tool]["callID"], "call-tool");
+        // native order; the served step markers render as two trailing text parts. The base
+        // encodes the same unstamped CK to the same parts.
+        assert_eq!(types, ["reasoning", "tool", "text", "text"]);
+        assert_eq!(native_assistant["parts"][0], raw[0]["parts"][1]);
+        assert_eq!(native_assistant["parts"][1]["callID"], "call-tool");
     }
 
     #[test]

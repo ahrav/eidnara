@@ -172,8 +172,8 @@ pub(crate) fn row_id(row: &Value) -> Option<&str> {
 /// Decodes a window of Pi rows, or declines it.
 ///
 /// A message's ordinal is its window position, `index + 1`. Each decoded message's mid is its
-/// row id. The sidecar retains each row through an `Arc` clone. Decoded blocks carry no identity
-/// stamp. [`encode_pi_rows`] decodes rows one at a time with the same per-message decoder.
+/// row id. The sidecar retains each row through an `Arc` clone. [`encode_pi_rows`] decodes rows
+/// one at a time with the same per-message decoder.
 #[cfg(test)]
 pub(crate) fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiDecline> {
     decode_rows(rows)
@@ -417,7 +417,7 @@ pub(crate) fn retained_rows_of(decoded: &DecodedHarnessMessages) -> Vec<Arc<Valu
         .collect()
 }
 
-/// Rewrites a row whose served message is one unstamped block that differs from the row's
+/// Rewrites a row whose served message is one block that differs from the row's
 /// decoded content, for the shapes whose alignment needs no decoded blocks: a tool result, a
 /// message whose native content is a string, and a message with one native part of a kind
 /// [`native_decodes_to`] compares exactly. A tool result block pairs with the row's one decoded
@@ -485,8 +485,7 @@ fn rewrite_single_block(
 }
 
 /// Rewrites a user, custom, or assistant row whose served blocks pair one-to-one with its native
-/// parts, when every part is of a kind [`part_decodes_to`] compares exactly, no block is stamped,
-/// and no block equals the decoded content of a part other than its own. Then the alignment
+/// parts, when every part is of a kind [`part_decodes_to`] compares exactly and no block equals the decoded content of a part other than its own. Then the alignment
 /// matches each block that equals its own part and nothing else, and pairs each run of differing
 /// blocks between matches with the parts at the same positions when every pair's kinds match,
 /// so this rewrite keeps, rewrites, or replaces each part as [`encode_with_meta`] would. Answers
@@ -517,7 +516,7 @@ fn rewrite_parts_in_place(
             }
         }
         let same = part_decodes_to(role, &parts[index], block);
-        // Alignment compares by fingerprint, which tells float zeros of opposite sign apart.
+        // Alignment compares canonical text, which tells float zeros of opposite sign apart.
         if same && holds_float_zero(block) {
             return None;
         }
@@ -631,7 +630,7 @@ fn retained_rows(rows: &[Arc<Value>]) -> HashMap<&str, (usize, &Value, PiRole)> 
     retained
 }
 
-/// Whether `blocks` are exactly the unstamped blocks `decode_content` gives `message`, so the
+/// Whether `blocks` are exactly the blocks `decode_content` gives `message`, so the
 /// encoder replays the row. Each check reads the native fields the decoder reads and compares
 /// them in place. A role or part shape it does not compare answers `false`, and the caller
 /// decodes the row and aligns it.
@@ -1918,7 +1917,7 @@ mod tests {
         let window: Vec<Value> = (0..4)
             .flat_map(|index| [assistant(index), result(index)])
             .collect();
-        let before = super::super::sidecar::identity_digests();
+        let before = super::super::sidecar::codec_digests();
         let source = rows(&window);
         let decoded = decode_pi_rows(&source).unwrap();
         let encoded = encode_pi_rows(&cks(&decoded), &retained_rows_of(&decoded), &[]);
@@ -1936,13 +1935,19 @@ mod tests {
         *text = "§1§ answer 1".to_string();
         let encoded = encode_pi_rows(&edited, &retained_rows_of(&decoded), &[]);
         assert!(!Arc::ptr_eq(&encoded[2], &source[2]));
-        assert_eq!(encoded[2]["message"]["content"][2], window[2]["content"][2]);
+        assert_eq!(
+            serde_json::to_string(&encoded[2]["message"]["content"][2]).unwrap(),
+            serde_json::to_string(&window[2]["content"][2]).unwrap(),
+            "the call holding signed zeros keeps its native bytes"
+        );
         assert_eq!(
             *source[2],
             json!({ "id": "00000002", "message": window[2] })
         );
 
-        let parts: Vec<Value> = (0..1_100)
+        let count = 1_100;
+        assert!(count * count > super::super::sidecar::MAX_ALIGNMENT_CELLS);
+        let parts: Vec<Value> = (0..count)
             .map(|index| json!({ "type": "text", "text": format!("part {index}") }))
             .collect();
         let wide = rows(&[json!({ "role": "user", "content": parts, "timestamp": 1 })]);
@@ -1950,12 +1955,12 @@ mod tests {
         let mut served = cks(&decoded);
         served[0].content_mut().remove(500);
         let encoded = encode_pi_rows(&served, &retained_rows_of(&decoded), &[]);
+        let content = encoded[0]["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), count - 1);
+        assert_eq!(content[499]["text"], "part 499");
+        assert_eq!(content[500]["text"], "part 501");
         assert_eq!(
-            encoded[0]["message"]["content"].as_array().unwrap().len(),
-            1_099
-        );
-        assert_eq!(
-            super::super::sidecar::identity_digests(),
+            super::super::sidecar::codec_digests(),
             before,
             "no digest was taken"
         );
@@ -2268,8 +2273,7 @@ mod tests {
         );
     }
 
-    /// The CK `decode_pi_rows` derives, as the Pi plugin sends it: the daemon's own block
-    /// identity stamps and ordinals removed.
+    /// The CK `decode_pi_rows` derives, as the Pi plugin sends it: ordinals removed.
     fn plugin_ck(decoded: &DecodedHarnessMessages) -> Vec<Value> {
         decoded
             .messages
@@ -2277,17 +2281,10 @@ mod tests {
             .map(|message| {
                 let mut value = serde_json::to_value(message).unwrap();
                 value.as_object_mut().unwrap().remove("ordinal");
-                let ck = &mut value["ck"];
-                ck["meta"].as_object_mut().unwrap().remove("ordinal");
-                for block in ck["content"].as_array_mut().unwrap() {
-                    let extras = block.as_object_mut().unwrap();
-                    if let Some(Value::Object(namespaces)) = extras.get_mut("provider_extras") {
-                        namespaces.remove("_eidnara_codec");
-                        if namespaces.is_empty() {
-                            extras.remove("provider_extras");
-                        }
-                    }
-                }
+                value["ck"]["meta"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("ordinal");
                 value
             })
             .collect()
@@ -2360,23 +2357,8 @@ mod tests {
         assert!(Arc::ptr_eq(&encoded[0], &window[0]));
     }
 
-    fn unstamped(messages: &[WireMessage]) -> Vec<WireMessage> {
-        messages
-            .iter()
-            .cloned()
-            .map(|mut message| {
-                for block in message.content_mut() {
-                    block
-                        .provider_extras
-                        .retain(|namespace, _| namespace == HARNESS);
-                }
-                message
-            })
-            .collect()
-    }
-
     #[test]
-    fn unstamped_messages_replay_untouched_rows_and_encode_edits_as_stamped_metas_do() {
+    fn untouched_golden_rows_replay_by_pointer_and_edits_re_encode() {
         let golden: Value =
             serde_json::from_str(include_str!("../../testdata/codec/pi-golden.json")).unwrap();
         let rows: Vec<Arc<Value>> = golden["cases"][0]["rows"]
@@ -2387,9 +2369,7 @@ mod tests {
             .map(Arc::new)
             .collect();
         let decoded = decode_pi_rows(&rows).unwrap();
-        let stamped = decode_pi_rows(&rows).unwrap();
         let messages = cks(&decoded);
-        assert_eq!(unstamped(&cks(&stamped)), messages);
 
         let encoded = encode_pi_rows(&messages, &retained_rows_of(&decoded), &[]);
         assert_eq!(encoded, rows);
@@ -2433,10 +2413,6 @@ mod tests {
         edited[last_multi_block].content_mut().remove(0);
 
         let encoded = encode_pi_rows(&edited, &retained_rows_of(&decoded), &[]);
-        assert_eq!(
-            encoded,
-            encode_pi_rows(&edited, &retained_rows_of(&stamped), &[])
-        );
         assert_ne!(encoded[multi_block], rows[multi_block]);
         assert!(
             encoded[multi_block]["message"]["content"]
@@ -2454,7 +2430,7 @@ mod tests {
     }
 
     #[test]
-    fn unstamped_in_place_edits_keep_their_native_slot_and_extras() {
+    fn in_place_edits_keep_their_native_slot_and_extras() {
         let raw = vec![
             json!({
                 "role": "user",
@@ -2517,12 +2493,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let unstamped = decode_pi_rows(&rows(&raw)).unwrap();
-        let unstamped_ck = tag(cks(&unstamped));
-        assert_eq!(content(encode(&unstamped_ck, &unstamped)), expected);
-
-        let stamped = decode(&raw);
-        assert_eq!(content(encode(&tag(cks(&stamped)), &stamped)), expected);
+        let decoded = decode(&raw);
+        assert_eq!(content(encode(&tag(cks(&decoded)), &decoded)), expected);
     }
 
     #[test]
