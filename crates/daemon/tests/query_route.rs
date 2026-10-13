@@ -385,11 +385,7 @@ async fn each_bound_saturates_before_its_protected_work() {
     selectors.probes = NonZeroUsize::new(1).unwrap();
     let (outcome, reached) = run(&selectors, "id:rule id:other");
     assert!(matches!(outcome, Err(QueryFailure::InvalidQuery(_))));
-    assert_eq!(
-        reached.last(),
-        Some(&Phase::Probes),
-        "the selector bound refuses while the request is parsed: {reached:?}"
-    );
+    assert_eq!(reached.last(), Some(&Phase::Exact), "{reached:?}");
 
     let mut accepted = limits();
     accepted.lexical_accepted = NonZeroUsize::new(1).unwrap();

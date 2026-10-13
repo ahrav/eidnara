@@ -193,11 +193,18 @@ pub enum LookupRefusal {
     #[error("the projection was built under another schema or analysis identity")]
     SchemaMismatch,
     /// The repository's commits are indexed under the other object format, so a range under this one can say nothing about absence.
-    #[error("the repository's commits are indexed under {indexed}, not {queried}")]
+    #[error(
+        "the repository's commits are indexed under {}, not {}",
+        indexed.code(),
+        queried.code()
+    )]
     ObjectFormatMismatch {
-        queried: &'static str,
-        indexed: &'static str,
+        queried: ObjectFormat,
+        indexed: ObjectFormat,
     },
+    /// No commit of the repository is indexed under either object format, so an empty range is missing context, not absence.
+    #[error("no commit of the repository is indexed")]
+    RepositoryNotIndexed,
     #[error(transparent)]
     Projection(#[from] ProjectionError),
 }
@@ -234,8 +241,12 @@ fn page_sql(has_cursor: bool) -> String {
 /// # Errors
 ///
 /// Refuses an exhausted budget, a projection without a checkpoint or under
-/// another kernel incarnation, a cursor from another query or checkpoint, and
-/// rows derived under another extraction version.
+/// another kernel incarnation, a projection built under another schema or
+/// analysis identity, a cursor from another query or checkpoint, and rows
+/// derived under another extraction version. An empty first SHA page refuses
+/// when the queried format has no indexed commit of the repository: as
+/// `ObjectFormatMismatch` when the other format has one, and as
+/// `RepositoryNotIndexed` when neither does.
 pub fn page(
     conn: &GuardedConn<'_>,
     context: &LookupContext<'_>,
@@ -324,40 +335,42 @@ pub fn page(
         }
         page.rows.push(decoded);
     }
-    check_budget()?;
     if let ExactQuery::Sha(sha) = query
         && cursor.is_none()
         && page.rows.is_empty()
-        && let Some(indexed) = other_format_indexed(conn, sha)?
+        && !sha_indexed(conn, sha.repository_id, sha.object_format)?
     {
-        return Err(LookupRefusal::ObjectFormatMismatch {
-            queried: sha.object_format.code(),
-            indexed: indexed.code(),
+        let other = match sha.object_format {
+            ObjectFormat::Sha1 => ObjectFormat::Sha256,
+            ObjectFormat::Sha256 => ObjectFormat::Sha1,
+        };
+        return Err(if sha_indexed(conn, sha.repository_id, other)? {
+            LookupRefusal::ObjectFormatMismatch {
+                queried: sha.object_format,
+                indexed: other,
+            }
+        } else {
+            LookupRefusal::RepositoryNotIndexed
         });
     }
+    check_budget()?;
     Ok(page)
 }
 
-/// The other object format, when the repository has commits indexed under it; an empty first page under a mismatched format is then no evidence of absence.
-fn other_format_indexed(
+/// Whether any commit of `repository_id` is indexed under `format`.
+fn sha_indexed(
     conn: &GuardedConn<'_>,
-    query: &ShaPrefixQuery<'_>,
-) -> Result<Option<ObjectFormat>, LookupRefusal> {
-    let Some(other) = ObjectFormat::ALL
-        .into_iter()
-        .find(|format| *format != query.object_format)
-    else {
-        return Ok(None);
-    };
-    let indexed: bool = conn.query_row(
+    repository_id: &str,
+    format: ObjectFormat,
+) -> Result<bool, LookupRefusal> {
+    Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM exact_associations WHERE family=?1 AND namespace=?2)",
         params![
             Family::Sha.keyword(),
-            sha_namespace(other.code(), query.repository_id)
+            sha_namespace(format.code(), repository_id)
         ],
         |row| row.get(0),
-    )?;
-    Ok(indexed.then_some(other))
+    )?)
 }
 
 impl AssociationRow {

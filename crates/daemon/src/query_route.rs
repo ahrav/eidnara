@@ -440,8 +440,9 @@ fn lookup_refusal(refusal: &LookupRefusal) -> LaneRefusal {
         LookupRefusal::StaleCursor { .. } => LaneRefusal::Reason("stale_cursor"),
         LookupRefusal::ForeignCursor => LaneRefusal::Reason("foreign_cursor"),
         LookupRefusal::ExtractionMismatch { .. } => LaneRefusal::Reason("extraction_version"),
-        LookupRefusal::SchemaMismatch => LaneRefusal::Reason("schema_version"),
+        LookupRefusal::SchemaMismatch => LaneRefusal::Reason("projection_identity"),
         LookupRefusal::ObjectFormatMismatch { .. } => LaneRefusal::Reason("object_format"),
+        LookupRefusal::RepositoryNotIndexed => LaneRefusal::Reason("repository_not_indexed"),
         LookupRefusal::Projection(error) => LaneRefusal::Reason(projection_reason(error)),
     }
 }
@@ -908,7 +909,8 @@ fn selector_bounds(limits: &QueryRouteLimits) -> SelectorBounds {
     SelectorBounds {
         max_input_bytes: limits.query_bytes,
         max_value_bytes: limits.query_bytes,
-        max_selectors: limits.probes,
+        // Every selector spends at least four request bytes, so this bounds the mentions a request can name without refusing any request `query_bytes` admits; the probe bound on `id:` selectors stays with the exact lane.
+        max_selectors: limits.query_bytes,
     }
 }
 

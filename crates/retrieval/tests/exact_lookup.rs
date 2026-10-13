@@ -459,6 +459,9 @@ fn corpus() -> Vec<Source> {
         commit("repo-b", ObjectFormat::Sha1, oid40("abc1", '0'), 1),
         commit("repo-c", ObjectFormat::Sha256, oid64("abc1", '0'), 1),
         commit("repo-c", ObjectFormat::Sha256, oid64("abc", '1'), 1),
+        // A repository whose commits are indexed under both formats, as across a hash migration.
+        commit("repo-d", ObjectFormat::Sha1, oid40("abc1", '0'), 1),
+        commit("repo-d", ObjectFormat::Sha256, oid64("abc1", '0'), 1),
         claim("obj-1", 1, "decision_summary"),
         claim("obj-1", 1, "rationale"),
         Source::Memory { object_id: "obj-1" },
@@ -714,8 +717,8 @@ fn sha_prefix_enumeration_is_repository_and_algorithm_scoped_and_counts_complete
         );
         // A repository indexed under the other object format refuses rather than reporting no match.
         for (repository, format, indexed) in [
-            ("repo-a", ObjectFormat::Sha256, "sha1"),
-            ("repo-c", ObjectFormat::Sha1, "sha256"),
+            ("repo-a", ObjectFormat::Sha256, ObjectFormat::Sha1),
+            ("repo-c", ObjectFormat::Sha1, ObjectFormat::Sha256),
         ] {
             let prefix = hex("abc");
             let query = ShaPrefixQuery::bind(repository, format, &prefix).unwrap();
@@ -732,7 +735,7 @@ fn sha_prefix_enumeration_is_repository_and_algorithm_scoped_and_counts_complete
             assert_eq!(
                 refused.unwrap_err(),
                 LookupRefusal::ObjectFormatMismatch {
-                    queried: format.code(),
+                    queried: format,
                     indexed,
                 },
                 "{repository}"
@@ -743,11 +746,33 @@ fn sha_prefix_enumeration_is_repository_and_algorithm_scoped_and_counts_complete
             enumerate("repo-a", ObjectFormat::Sha1, "dead", page_rows).1,
             0
         );
-        // A repository with no indexed commits in either format still cannot tell absence apart from missing inventory; the lookup reports an empty page.
-        assert_eq!(
-            enumerate("repo-none", ObjectFormat::Sha1, "abc", page_rows).1,
-            0
-        );
+        // A repository indexed under both formats answers a miss under either one with an empty page.
+        for format in ObjectFormat::ALL {
+            assert_eq!(
+                enumerate("repo-d", format, "dead", page_rows).1,
+                0,
+                "{format:?}"
+            );
+            assert_eq!(
+                enumerate("repo-d", format, "abc1", page_rows).1,
+                1,
+                "{format:?}"
+            );
+        }
+        // A repository with no indexed commit in either format is missing context, not absence.
+        let prefix = hex("abc");
+        let query = ShaPrefixQuery::bind("repo-none", ObjectFormat::Sha1, &prefix).unwrap();
+        let refused = store
+            .with_conn(|conn| {
+                Ok(page(
+                    conn,
+                    &context(page_rows),
+                    &ExactQuery::Sha(query.clone()),
+                    None,
+                ))
+            })
+            .unwrap();
+        assert_eq!(refused.unwrap_err(), LookupRefusal::RepositoryNotIndexed);
     }
     assert_eq!(
         ShaPrefixQuery::bind("repo-a", ObjectFormat::Sha1, &hex(&"a".repeat(41))).unwrap_err(),
