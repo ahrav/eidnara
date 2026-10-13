@@ -169,3 +169,34 @@ fn the_route_vectors_rank_through_the_shared_view() {
     assert_eq!(acquisitions, 1, "the route vectors reuse the held view");
     assert!(Arc::ptr_eq(vectors.view(), &view));
 }
+
+#[test]
+fn a_selector_unreadable_under_a_held_lifecycle_lock_keeps_the_verified_view() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let (held_view, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    // The fixture holds the exclusive transaction here, so reading the selector outlasts the shared lock's bounded wait.
+    assert!(matches!(
+        held_view.selector_holds(Some(fixture.root.path())),
+        Err(AcquireRefusal::Unprotected(_))
+    ));
+    let mut acquisitions = 0;
+    let served = owner
+        .view(&fixture.expected(), &mut |event| {
+            if event == AcquireEvent::BeforeVerification {
+                acquisitions += 1;
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        acquisitions, 0,
+        "the verified view is served without a new hash"
+    );
+    assert!(Arc::ptr_eq(&held_view, &served));
+}
