@@ -464,7 +464,7 @@ pub fn read_selected_claims(
 pub struct SelectedJudgement {
     /// `verdicts[i]` judges `selected.rows[i]`.
     pub verdicts: Vec<UseVerdict>,
-    /// `causality[i]` is the code of the causal class the judgement snapshot records for a permitted `selected.rows[i]`, as [`CausalClass::code`] gives it, and `None` for a denied row.
+    /// `causality[i]` is the code of the causal class the judgement snapshot records for a permitted `selected.rows[i]`, as [`kernel::CausalClass::code`] gives it, and `None` for a denied row.
     pub causality: Vec<Option<&'static str>>,
     pub snapshot: EgressSnapshot,
     pub incarnation: CommitReadIncarnation,
