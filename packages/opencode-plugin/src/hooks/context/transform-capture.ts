@@ -668,40 +668,33 @@ export function historyDigestsEqual(left: HistoryDigest, right: HistoryDigest): 
 /**
  * Walks the members of a digested prefix under the prefix's recorded spend, so a changed prefix
  * costs no more than the original. Each walk is standalone; its spend and hash are kept, and with
- * `record` its tape too.
+ * `record` its tape too, in `tapes`, which describe the members only once `matches()` holds.
  */
 class PrefixVerifier {
     private readonly walker: ReferenceableWalk;
     private readonly hasher = new TapeHasher();
+    readonly tapes?: MessageContentSnapshot[];
 
     constructor(
         readonly expected: HistoryDigest,
-        private readonly record = false,
+        record = false,
     ) {
         this.walker = new ReferenceableWalk(expected.bytes, false);
+        if (record) this.tapes = [];
     }
 
-    /**
-     * Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. With `record`,
-     * returns the member's tape and spend, which describe it only once `matches()` holds.
-     */
-    walk(value: unknown, index: number): MessageContentSnapshot | undefined {
+    /** Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. */
+    walk(value: unknown, index: number): void {
         const before = this.walker.bytes;
-        const fields: SnapshotField[] | undefined = this.record
-            ? Object.setPrototypeOf([], null)
-            : undefined;
-        this.walker.stream(
-            () => this.walker.walk(value, `/${index}`),
-            fields
-                ? (field) => {
-                      this.hasher.push(field);
-                      fields[fields.length] = field;
-                  }
-                : this.hasher.push,
-        );
-        const bytes = this.walker.bytes - before;
-        this.hasher.end(bytes);
-        return fields && { fields: Object.setPrototypeOf(fields, Array.prototype), bytes };
+        if (this.tapes) {
+            const tape = this.walker.recordOrCompare(() => this.walker.walk(value, `/${index}`));
+            tape.bytes = this.walker.bytes - before;
+            this.hasher.add(tape as TapedMember);
+            defineSlot(this.tapes, this.tapes.length, tape);
+            return;
+        }
+        this.walker.stream(() => this.walker.walk(value, `/${index}`), this.hasher.push);
+        this.hasher.end(this.walker.bytes - before);
     }
 
     matches(): boolean {
@@ -725,7 +718,10 @@ export interface CapturedMessages {
     verified?: HistoryDigest;
     /** The verified members keep the tapes their verification walked, charged at `verified.bytes`. */
     verifiedTaped?: true;
-    /** The walk's spend on the root and every member; a recheck of identical content spends exactly this. */
+    /**
+     * The walk's spend on the root and every member, `verified.bytes` included; a recheck of
+     * identical content spends exactly this, the digest's own walk taking `verified.bytes` of it.
+     */
     bytes: number;
 }
 
@@ -774,10 +770,11 @@ export function captureReserved(
 /**
  * With a `prefix`, capture charges only the root and members after the prefix; it verifies
  * leading members instead of retaining them. A mismatch, or no member after the prefix, returns
- * `undefined`. With `tapePrefix`, the verification also keeps each leading member's tape and,
- * once the digest matches, reserves the prefix's recorded spend for them in the same synchronous
- * section: the exact amount a fresh walk of the unchanged members spends. A refused reservation
- * drops the tapes, and rechecks walk the digest instead.
+ * `undefined`. With `tapePrefix` and headroom for the prefix's recorded spend, the verification
+ * also records each leading member's tape; once the digest matches, the capture reserves that
+ * spend in the same synchronous section, the exact amount a fresh walk of the unchanged members
+ * spends, and keeps the tapes. Without that headroom the capture keeps no tapes, and rechecks
+ * walk the digest.
  */
 export function captureHistory(messages: unknown, lease: CaptureLease): CapturedHistory;
 export function captureHistory(
@@ -792,7 +789,12 @@ export function captureHistory(
     prefix?: HistoryDigest,
     options?: { tapePrefix?: boolean },
 ): CapturedHistory | undefined {
-    const verifier = prefix && new PrefixVerifier(prefix, options?.tapePrefix === true);
+    // The walk reserves nothing, so the headroom read here is the headroom the reservation meets.
+    const record =
+        prefix !== undefined &&
+        options?.tapePrefix === true &&
+        lease.remainingBytes >= prefix.bytes;
+    const verifier = prefix && new PrefixVerifier(prefix, record);
     const taped: TapedMember[] = [];
     let captured: CapturedMessages;
     try {
@@ -801,13 +803,16 @@ export function captureHistory(
         if (error === PREFIX_CHANGED) return undefined;
         throw error;
     }
-    if (prefix && options?.tapePrefix === true) {
-        if (lease.reserve(prefix.bytes)) captured.verifiedTaped = true;
-        else {
-            const snapshots = captured.snapshots as (MessageContentSnapshot | undefined)[];
-            for (let index = 0; index < prefix.count; index += 1)
-                defineSlot(snapshots, index, undefined);
-        }
+    const tapes = verifier?.tapes;
+    if (tapes && lease.reserve(verifier.expected.bytes)) {
+        const snapshots: (MessageContentSnapshot | undefined)[] = [];
+        for (let index = 0; index < captured.snapshots.length; index += 1)
+            defineSlot(
+                snapshots,
+                index,
+                index < tapes.length ? tapes[index] : captured.snapshots[index],
+            );
+        captured = { ...captured, snapshots, verifiedTaped: true };
     }
     const hasher = verifier?.continueHashing() ?? new TapeHasher();
     for (let index = 0; index < taped.length - 1; index += 1)
@@ -856,15 +861,14 @@ function walkMembers(
     const rootSnapshot = walker.recordOrCompare(() => {
         const count = walker.members(messages, (slot, index) => {
             if (verifier && index < verifiedCount) {
-                let snapshot: MessageContentSnapshot | undefined;
                 try {
-                    snapshot = verifier.walk(slot.value, index);
+                    verifier.walk(slot.value, index);
                 } catch (error) {
                     if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
                         throw PREFIX_CHANGED;
                     throw error;
                 }
-                defineSlot(snapshots, index, snapshot);
+                defineSlot(snapshots, index, undefined);
             } else {
                 if (index === verifiedCount && verifier && !verifier.matches())
                     throw PREFIX_CHANGED;
@@ -907,15 +911,16 @@ export function capturedMessagesUnchanged(
     compared: number = captured.members.length,
 ): boolean {
     try {
-        const walker = new ReferenceableWalk(
-            Math.min(captured.bytes, TRANSFORM_CAPTURE_MAX_BYTES),
-            false,
-        );
-        const verifiedCount = captured.verified?.count ?? 0;
         const verifier =
             captured.verified && !captured.verifiedTaped
                 ? new PrefixVerifier(captured.verified)
                 : undefined;
+        // The digest's walk spends the verified share of the capture's spend on its own walker.
+        const walker = new ReferenceableWalk(
+            Math.min(captured.bytes - (verifier?.expected.bytes ?? 0), TRANSFORM_CAPTURE_MAX_BYTES),
+            false,
+        );
+        const verifiedCount = captured.verified?.count ?? 0;
         walker.recordOrCompare(() => {
             const count = walker.members(live, (slot, index) => {
                 if (
@@ -923,11 +928,12 @@ export function capturedMessagesUnchanged(
                     !Object.is(slot.value, captured.members[index])
                 )
                     throw CONTENT_CHANGED;
-                if (verifier && index < verifiedCount) {
+                const verifiedMember = index < verifiedCount;
+                if (verifiedMember && verifier) {
                     verifier.walk(slot.value, index);
                     return;
                 }
-                if (index >= compared && index >= verifiedCount) return;
+                if (!verifiedMember && index >= compared) return;
                 // Bounds precede indexing so a short record cannot read an inherited slot.
                 const snapshot =
                     index < captured.snapshots.length ? captured.snapshots[index] : undefined;

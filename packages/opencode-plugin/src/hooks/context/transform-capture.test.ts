@@ -1015,13 +1015,23 @@ describe("digest-verified prefix capture", () => {
 });
 
 describe("taped verified prefix", () => {
-    /** The window a replay pass captures: the earlier pass's members, then one new message. */
+    /**
+     * The window a replay pass captures: the earlier pass's members, then one new message. The
+     * digest covers the earlier members before its terminal, whose strings take the pending-unit,
+     * UTF-8, and chunked UTF-16 hash paths, a lone surrogate included.
+     */
     function replayWindow(): { live: Record<string, unknown>[]; digest: HistoryDigest } {
-        const earlier = [message("m1"), message("m2", "x".repeat(2048)), message("m3")];
+        const earlier = [
+            message("m1"),
+            message("m2", "x".repeat(2048)),
+            message("m3", `${"y".repeat(70_000)}\ud800`),
+            message("m4"),
+        ];
         const digest = captureHistory(earlier).history;
         captureLease?.release();
         captureLease = undefined;
-        return { live: [...earlier, message("m4")], digest };
+        expect(digest.count).toBe(3);
+        return { live: [...earlier, message("m5")], digest };
     }
 
     function ownerOf(maxBytes?: number): TransformCaptureAdmission {
@@ -1036,32 +1046,39 @@ describe("taped verified prefix", () => {
         return admitted.lease;
     }
 
-    /** Charges the partial inspection, then captures with the prefix tapes. */
-    function tapedCapture(
-        live: unknown,
-        digest: HistoryDigest,
-        lease: CaptureLease,
-    ): CapturedHistory | undefined {
-        const inspection = inspectReferenceableMessages(live, undefined, digest.count);
-        if (!inspection.ok || !lease.reserve(inspection.estimatedBytes))
-            throw new Error("root inspection refused");
-        return captureHistoryWithLease(live, lease, digest, { tapePrefix: true });
-    }
-
     function partialCharge(live: unknown, digest: HistoryDigest): number {
         const inspection = inspectReferenceableMessages(live, undefined, digest.count);
         if (!inspection.ok) throw new Error("valid source rejected");
         return inspection.estimatedBytes;
     }
 
+    /** Charges the partial inspection, then captures with the prefix tapes. */
+    function tapedCapture(
+        live: unknown,
+        digest: HistoryDigest,
+        lease: CaptureLease,
+    ): CapturedHistory | undefined {
+        if (!lease.reserve(partialCharge(live, digest))) throw new Error("root inspection refused");
+        return captureHistoryWithLease(live, lease, digest, { tapePrefix: true });
+    }
+
+    /** A full capture of `live` under its own owner, which it charges in full. */
+    function freshCapture(live: unknown): {
+        owner: TransformCaptureAdmission;
+        lease: CaptureLease;
+        fresh: CapturedHistory;
+    } {
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const inspection = inspectReferenceableMessages(live);
+        if (!inspection.ok || !lease.reserve(inspection.estimatedBytes))
+            throw new Error("full inspection refused");
+        return { owner, lease, fresh: captureHistoryWithLease(live, lease) };
+    }
+
     it("keeps the verified tapes at the prefix's recorded spend, which a fresh capture charges too", () => {
         const { live, digest } = replayWindow();
-        const freshOwner = ownerOf();
-        const freshLease = leaseOf(freshOwner);
-        const inspection = inspectReferenceableMessages(live);
-        if (!inspection.ok || !freshLease.reserve(inspection.estimatedBytes))
-            throw new Error("full inspection refused");
-        const fresh = captureHistoryWithLease(live, freshLease);
+        const { owner: freshOwner, lease: freshLease, fresh } = freshCapture(live);
 
         const owner = ownerOf();
         const lease = leaseOf(owner);
@@ -1097,7 +1114,12 @@ describe("taped verified prefix", () => {
         const untaped = tapedCapture(live, digest, short);
         if (!untaped) throw new Error("prefix did not verify");
         expect(untaped.verifiedTaped).toBeUndefined();
-        expect(untaped.snapshots.slice(0, digest.count)).toEqual([undefined, undefined, undefined]);
+        expect(untaped.snapshots.slice(0, digest.count)).toStrictEqual([
+            undefined,
+            undefined,
+            undefined,
+        ]);
+        expect(untaped.snapshots[digest.count]).toBeDefined();
         expect(shortOwner.chargedBytes).toBe(partial);
         expect(capturedMessagesUnchanged(live, untaped)).toBe(true);
         (live[0]?.parts as Array<{ text: string }>)[0].text = "edited";
@@ -1157,11 +1179,7 @@ describe("taped verified prefix", () => {
         captureLease?.release();
         captureLease = undefined;
         const live = [...earlier, message("m3")];
-        const freshLease = leaseOf(ownerOf());
-        const inspection = inspectReferenceableMessages(live);
-        if (!inspection.ok || !freshLease.reserve(inspection.estimatedBytes))
-            throw new Error("full inspection refused");
-        const fresh = captureHistoryWithLease(live, freshLease);
+        const { lease: freshLease, fresh } = freshCapture(live);
         const lease = leaseOf(ownerOf());
         const captured = tapedCapture(live, digest, lease);
         if (!captured) throw new Error("prefix did not verify");

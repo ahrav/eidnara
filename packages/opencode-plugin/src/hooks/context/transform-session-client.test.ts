@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
+import * as logger from "../../shared/logger";
 import { canonicalJsonLength } from "./edit-recipe";
 import { type CaptureLease, TransformCaptureAdmission } from "./transform-capture";
 import {
@@ -331,6 +332,44 @@ describe("transform session client over plain data", () => {
             });
             expect(outcome.kind).toBe(privateWindow ? "applied" : "declined");
             expect(host.published).toHaveLength(privateWindow ? 1 : 0);
+        }
+    });
+
+    it("keeps a shared window's verified tapes and leaves a private window's out", async () => {
+        for (const privateWindow of [false, true]) {
+            const host = plainHost(6);
+            const transport = fakeTransport({
+                "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
+                transform: [
+                    foldReply({ mid: "m3", sequence: 1 }),
+                    foldReply({ mid: "m3", sequence: 1 }),
+                ],
+            });
+            const client = createTransformSessionClient({ moduleClient: transport.client });
+            const admission = new TransformCaptureAdmission();
+            const run = () => {
+                const admitted = admission.admit("ses");
+                if (!("lease" in admitted)) throw new Error("admission declined");
+                return client.run("ses", admitted.lease, { ...source(host), privateWindow });
+            };
+            const debugSpy = spyOn(logger.sessionLog, "debug");
+            try {
+                expect((await run()).kind).toBe("applied");
+                host.values.push({ id: "m7", text: "message 7" });
+                expect((await run()).kind).toBe("applied");
+                const captures = debugSpy.mock.calls
+                    .map(([, line]) => String(line))
+                    .flatMap((line) => {
+                        const match = /phase=capture .* verified=(\d+) taped=(true|false)$/.exec(
+                            line,
+                        );
+                        return match ? [[Number(match[1]), match[2] === "true"] as const] : [];
+                    });
+                expect(captures.at(-1)?.[0]).toBeGreaterThan(0);
+                expect(captures.at(-1)?.[1]).toBe(!privateWindow);
+            } finally {
+                debugSpy.mockRestore();
+            }
         }
     });
 

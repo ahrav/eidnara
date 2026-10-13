@@ -1430,7 +1430,7 @@ export function createTransformSessionClient(
                 "prefixGuard",
                 prefixGuardStartedAt,
                 timings,
-                `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0}`,
+                `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0} taped=${captured.verifiedTaped === true}`,
             );
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();

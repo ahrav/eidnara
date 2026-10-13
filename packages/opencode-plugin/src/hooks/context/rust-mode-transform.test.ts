@@ -3775,10 +3775,19 @@ describe("capture verified against the retained prefix", () => {
         return sessionLogs(spy, sessionId).filter((line) => line.startsWith("rust pass:"));
     }
 
+    /** Whether each pass's capture kept its verified members' tapes. */
+    function tapedFlags(spy: Parameters<typeof sessionLogs>[0], sessionId: string): boolean[] {
+        return sessionLogs(spy, sessionId).flatMap((line) => {
+            const match = /phase=capture .* taped=(true|false)$/.exec(line);
+            return match ? [match[1] === "true"] : [];
+        });
+    }
+
     /** Each pass's count of leading members its capture verified against the retained digest. */
     function verifiedCounts(spy: Parameters<typeof sessionLogs>[0], sessionId: string): number[] {
         return sessionLogs(spy, sessionId).flatMap((line) => {
-            const match = /phase=capture boundary_index=\d+ verified=(\d+)$/.exec(line);
+            const match =
+                /phase=capture boundary_index=\d+ verified=(\d+) taped=(?:true|false)$/.exec(line);
             return match ? [Number(match[1])] : [];
         });
     }
@@ -3861,6 +3870,7 @@ describe("capture verified against the retained prefix", () => {
             await transform.run(sessionId, output);
             expect(bodies[1]?.previous_output_revision).toBeDefined();
             expect(verifiedCounts(debugSpy, sessionId)).toEqual([0, 3]);
+            expect(tapedFlags(debugSpy, sessionId)).toEqual([false, true]);
             expect(output.messages).toEqual(history);
             expect(sessionLogs(debugSpy, sessionId)).toContain(
                 `rust session ${sessionId} pass declined: source_changed (publish)`,
