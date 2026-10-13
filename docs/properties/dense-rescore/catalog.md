@@ -506,7 +506,7 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`, and
 `stale_and_tombstoned_rows_that_would_score_highest_never_enter_the_pool`,
 whose superseded and masked base rows outrank every pool member under the
-base's own codes and still appear as no pool entry and no read.
+base's own codes and still appear as no pool entry and no original-f32 read.
 Physical order here means how rows spread across a composition's layers; the
 order of rows within one layer file is fixed by the format, which writes and
 verifies identifiers in strictly increasing byte order.
@@ -542,7 +542,10 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
 `negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`, and
 `a_tie_across_the_pool_and_ranking_cuts_keeps_identifier_order`, which cuts
-the pool and the ranking inside a three-way tie of equal payloads;
+the pool and the ranking inside a three-way tie of equal payloads in one
+layer, and `a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row`,
+which puts the smallest tied identifier in a delta so layer and row order
+disagree with identifier order and cuts the ranking at each `k` up to three;
 `crates/retrieval/tests/dense_candidates.rs`
 `the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier`
 and
@@ -573,10 +576,10 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
-`cancellation_after_an_empty_selection_is_a_budget_refusal`, and
+`cancellation_after_an_empty_selection_is_a_budget_refusal`,
 `a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`,
-`a_quarantined_composition_with_no_prior_state_serves_nothing_until_rebuilt`,
-and `recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`;
+`a_corrupt_composition_with_no_prior_state_serves_nothing_until_rebuilt`, and
+`recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
 `only_missing_or_malformed_rows_count_as_walk_corruption` in
@@ -598,14 +601,21 @@ classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
 with no read and no quarantine, and so does one cancelled over a pool with no
 entry to read; a
 re-acquisition re-verifies, recovery takes the prior verified composition, and
-its ranking excludes an occurrence retired in the kernel meanwhile. `always`
+its ranking excludes an occurrence retired in the kernel meanwhile, both in the
+same process and in a new process over a store a child left after cutting its
+replacement's rows and exiting without destructors; with no prior verified
+composition, recovery and acquisition refuse `NoCompatibleTarget` until a
+rebuilt layer is published, and every later read names the rebuilt member. `always`
 because a corrupt generation must never yield a result.
 Fault/timing angle: Corruption between selection and the original reads.
 Required faults and enabling state: A truncated and a NaN-filled rows file
 inside `RescoreEvent::AfterSelection`; a prior composition to recover to.
 Confidence: medium - [evidence](evidence/dense-missing-original-quarantines-without-substitute.md).
 The quarantine flag lives on the shared view; persistence across a restart is
-the verification a new acquisition runs.
+the verification a new acquisition runs, which
+`recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`
+exercises across a real process boundary. That is process-restart evidence,
+not power-loss evidence.
 Existing check: `crates/daemon/tests/vector_reader.rs` truncated-row
 refusal for the f32 layered ranking.
 Impact: A substitute row returns scores for bytes the generation never held.
@@ -617,12 +627,6 @@ Open questions:
   code-corruption predicate; no test makes a real file return a read error
   other than a short read, so the rescore's `Io` arm and the scan's
   `ReadFailed` arm are reached only by reading.
-- Process-restart evidence is
-  `recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`:
-  a child process publishes, cuts the replacement's rows, and exits, and a
-  fresh gate and ledger over the left store recover the prior composition and
-  serve it under current eligibility. This is process-restart evidence, not
-  power-loss evidence.
 
 ### dense-stage-evidence-keeps-coverage-and-recall-apart
 
