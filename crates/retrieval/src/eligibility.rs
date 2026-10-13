@@ -199,7 +199,7 @@ pub fn judge_occurrences(
     candidates: &[OccurrenceCandidate],
 ) -> Result<EligibilityReport, KernelError> {
     let batch = kernel.judge_eligibility(project, destination, &kernel_candidates(candidates))?;
-    Ok(report(candidates, batch))
+    report(candidates, batch)
 }
 
 /// [`judge_occurrences`] whose reader wait and read stop at `budget` with [`KernelError::Deadline`].
@@ -220,7 +220,7 @@ pub fn judge_occurrences_within_budget(
         &kernel_candidates(candidates),
         budget,
     )?;
-    Ok(report(candidates, batch))
+    report(candidates, batch)
 }
 
 fn kernel_candidates(candidates: &[OccurrenceCandidate]) -> Vec<EligibilityCandidate> {
@@ -230,9 +230,13 @@ fn kernel_candidates(candidates: &[OccurrenceCandidate]) -> Vec<EligibilityCandi
         .collect()
 }
 
-fn report(candidates: &[OccurrenceCandidate], batch: EligibilityBatch) -> EligibilityReport {
-    debug_assert_eq!(batch.verdicts.len(), candidates.len());
-    EligibilityReport {
+/// Pairs each candidate with its verdict by position. A batch whose verdict count differs from the candidate count is refused, so a short batch cannot drop candidates from a report that still reads as a judgment of every one.
+fn report(
+    candidates: &[OccurrenceCandidate],
+    batch: EligibilityBatch,
+) -> Result<EligibilityReport, KernelError> {
+    aligned(candidates.len(), batch.verdicts.len())?;
+    Ok(EligibilityReport {
         snapshot: batch.snapshot,
         incarnation: batch.incarnation,
         occurrences: candidates
@@ -244,6 +248,15 @@ fn report(candidates: &[OccurrenceCandidate], batch: EligibilityBatch) -> Eligib
                 disposition: verdict.into(),
             })
             .collect(),
+    })
+}
+
+/// `KernelError::InvalidInput` unless the kernel returned one verdict per candidate.
+fn aligned(candidates: usize, verdicts: usize) -> Result<(), KernelError> {
+    if candidates == verdicts {
+        Ok(())
+    } else {
+        Err(KernelError::InvalidInput)
     }
 }
 
@@ -324,7 +337,17 @@ pub fn tally_exclusion(tally: &mut Vec<(EligibilityVerdict, usize)>, verdict: El
 
 #[cfg(test)]
 mod tests {
-    use super::LIVE_CANDIDATES_BY_CLASS_SQL;
+    use super::{LIVE_CANDIDATES_BY_CLASS_SQL, aligned};
+    use kernel::KernelError;
+
+    #[test]
+    fn a_batch_must_carry_one_verdict_per_candidate() {
+        assert_eq!(aligned(3, 3), Ok(()));
+        assert_eq!(aligned(0, 0), Ok(()));
+        assert_eq!(aligned(3, 2), Err(KernelError::InvalidInput));
+        assert_eq!(aligned(2, 3), Err(KernelError::InvalidInput));
+    }
+
     use rusqlite::{Connection, StatementStatus, params};
 
     /// A class-scoped read must search `idx_occurrences_source` by class and remain bounded as an unrelated class grows.

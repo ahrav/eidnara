@@ -7,13 +7,21 @@ mix authority stamps, including decisions that excluded possible winners.
 
 ## Evidence trail
 
-- `judge_tracked` (`crates/retrieval/src/eligibility.rs:282`) records the
+- `judge_tracked` (`crates/retrieval/src/eligibility.rs:309`) records the
   first batch's snapshot and incarnation and reports a later batch that
   differs.
 - Every judgment batch runs after the walk's last page; a batch whose stamps
   differ ends judgment, and the candidate scan then clears the pool
   (`candidates.rs`).
 - A kernel error from judgment propagates as a refusal.
+- `report` (`crates/retrieval/src/eligibility.rs:234`) refuses a batch whose
+  verdict count differs from its candidate count as `InvalidInput` in every
+  build, so `zip` never drops a candidate while the report still reads as a
+  judgment of every one.
+- `a_deadline_inside_judgment_after_admissions_discards_the_pool` ends the
+  budget at the first `AfterJudgment` of a scan whose first two-row batch
+  admitted both rows. The next batch is never judged, the completion is
+  `BudgetExhausted`, and the pool is discarded with its stamps.
 
 ## Failure scenario
 

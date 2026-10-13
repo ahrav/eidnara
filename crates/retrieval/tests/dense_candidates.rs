@@ -14,7 +14,8 @@ use retrieval::dense::scalar::{QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::{
     CandidateCapacity, CandidatePolicy, CandidatePool, CandidateQuery, CandidateRefusal,
     Completion, DenseCoverage, IncompleteReason, Layer, LayerCodes, LayeredRefusal, Metric,
-    OracleRefusal, RescoreRefusal, ScanBounds, StorageBounds, Window, WinnerRow, rescore_pool,
+    OracleRefusal, RescoreRefusal, ResolveRefusal, ScanBounds, StorageBounds, Window, WinnerRow,
+    rescore_pool,
 };
 use retrieval::eligibility::OccurrenceCandidate;
 
@@ -788,6 +789,121 @@ fn an_ended_budget_returns_no_candidate() {
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
     );
     assert_discarded(&pool);
+}
+
+/// A deadline that ends inside judgment, after the first batch admitted rows, leaves the next batch unjudged: the kernel refuses that batch at the deadline, no candidate of it is admitted, and the rows already admitted are discarded with the pool rather than returned as a complete or partial ranking.
+#[test]
+fn a_deadline_inside_judgment_after_admissions_discards_the_pool() {
+    let fixture = Fixture::all_admitted();
+    let coded = [full_base(&fixture)];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let generation = generation();
+    let query = axis(0);
+    let budget = EvalBudget::unbounded();
+    let request = CandidateQuery {
+        generation: &generation,
+        metric: Metric::InnerProduct,
+        unit_norm_tolerance: TOLERANCE,
+        query: &query,
+        authority: fixture.authority(),
+        capacity: capacity(8),
+        bounds: roomy(2),
+        layers: &layers,
+        codes: &codes,
+        max_entries: NonZeroUsize::new(64).unwrap(),
+    };
+    let mut judged = 0;
+    let pool = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(select_candidates_observed(
+                conn,
+                &fixture.kernel,
+                &request,
+                &budget,
+                |window| {
+                    if window == Window::AfterJudgment {
+                        judged += 1;
+                        if judged == 1 {
+                            budget.cancel();
+                        }
+                    }
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(judged, 1, "the batch after the deadline was never judged");
+    // Every row is admitted, so the first batch's judged rows entered the pool before the deadline.
+    assert_eq!(
+        (pool.ranking.consumed.batches, pool.ranking.consumed.judged),
+        (1, 2),
+        "one two-row batch was judged"
+    );
+    assert!(pool.ranking.consumed.excluded.is_empty());
+    assert_eq!(
+        pool.ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert_discarded(&pool);
+}
+
+/// The resolver's entry bound counts every layer's rows and tombstones before any page is read, so a composition one entry over it refuses with nothing visited, and the exact bound selects.
+#[test]
+fn the_entry_bound_refuses_before_any_row_is_visited() {
+    let fixture = Fixture::all_admitted();
+    let coded = [full_base(&fixture)];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let entries = coded[0].layer.ids.len();
+    let generation = generation();
+    let query = axis(0);
+    let select_with = |max_entries: usize, visited: &mut usize| {
+        let request = CandidateQuery {
+            generation: &generation,
+            metric: Metric::InnerProduct,
+            unit_norm_tolerance: TOLERANCE,
+            query: &query,
+            authority: fixture.authority(),
+            capacity: capacity(3),
+            bounds: roomy(2),
+            layers: &layers,
+            codes: &codes,
+            max_entries: NonZeroUsize::new(max_entries).unwrap(),
+        };
+        fixture
+            .store
+            .with_conn(|conn| {
+                Ok(select_candidates_observed(
+                    conn,
+                    &fixture.kernel,
+                    &request,
+                    &EvalBudget::unbounded(),
+                    |window| {
+                        if matches!(window, Window::Visited(_)) {
+                            *visited += 1;
+                        }
+                    },
+                ))
+            })
+            .unwrap()
+    };
+    let mut visited = 0;
+    let refused = select_with(entries - 1, &mut visited);
+    assert!(
+        matches!(
+            refused,
+            Err(CandidateRefusal::Layered(LayeredRefusal::Resolve(
+                ResolveRefusal::OverBound { max }
+            ))) if max == entries - 1
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(visited, 0, "the bound is checked before the first page");
+    let pool = select_with(entries, &mut visited).unwrap();
+    assert!(visited > 0);
+    assert_eq!(pool.ranking.completion, Completion::Complete);
 }
 
 #[test]

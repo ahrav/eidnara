@@ -55,10 +55,10 @@ a wildcard pass that questioned the framing itself.
 
 1. **No record that every required request yields exactly one materialized
    item or a refusal.** `prepare_required` zips `requests`, `selected`, and
-   `report.occurrences` (`crates/daemon/src/packing.rs:326`), and
-   `crates/retrieval/src/eligibility.rs:234` guards the verdict count with a
-   `debug_assert_eq` only, so a short kernel batch in release would drop
-   trailing required items silently, which is the Impact records 2 and 3 name.
+   `report.occurrences` (`crates/daemon/src/packing.rs:326`). A short kernel
+   batch can no longer drop trailing required items silently:
+   `crates/retrieval/src/eligibility.rs:238` refuses a batch whose verdict
+   count differs from its candidate count as `InvalidInput` in every build.
    Only `required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation`
    asserts two items for two requests, incidentally. A one-to-one record is
    due when U3 gives the phase a consumer.
