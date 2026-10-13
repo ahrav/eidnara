@@ -12,17 +12,18 @@ use daemon::claim_sources::{
     claim_units,
 };
 use daemon::harness_sources::{CANONICAL_ROLE, PublishError, Representation, SourcePublisher};
+use daemon::search_catchup::{Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, SearchCatchUp};
 use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactDestination, CausalClass, CausalEvidence,
-    ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, DecisionPayload,
-    DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate, EligibilityVerdict,
-    EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload, ObservationSpec,
-    ProjectScope, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, CommitReadError,
+    DecisionPayload, DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate,
+    EligibilityVerdict, EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload,
+    ObservationSpec, ProjectScope, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec,
+    Sensitivity, SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourcePageBounds, SourceRow, Surface, TaintClass,
 };
 use retrieval::batch::{
@@ -3799,4 +3800,141 @@ fn an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defau
         ),
         "an uninterpretable maturity refuses the batch: {outcome:?}"
     );
+}
+
+/// Catch-up bounds wide enough for the claim corpus; tests narrow one field at a time.
+fn catch_up_bounds() -> EpisodeBounds {
+    EpisodeBounds {
+        commits: CommitPageBounds {
+            max_commits: NonZeroUsize::new(64).unwrap(),
+            max_rows: NonZeroUsize::new(64).unwrap(),
+            max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        },
+        hold_admission: hold_admission(),
+        source_page: page_bounds(),
+        max_source_pages: NonZeroUsize::new(8).unwrap(),
+        max_source_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        batch: batch_bounds(),
+    }
+}
+
+fn kernel_db_writable(root: &Path) -> Connection {
+    let connection = Connection::open_with_flags(
+        root.join("kernel/kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+}
+
+#[test]
+fn a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    corpus.decide(rule);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    corpus
+        .kernel
+        .acknowledge_through_source_hold(&corpus.binding(), &hold.hold_id, hold.snapshot, 2)
+        .unwrap();
+    let consumer = CatchUpConsumer {
+        binding: corpus.binding(),
+        hold_id: hold.hold_id.clone(),
+        kernel_incarnation_id: corpus.kernel_incarnation_id(),
+        generation_id: Some(GENERATION.to_string()),
+    };
+
+    // A correction makes the materializer publish one claim commit that retires the old descriptors and publishes the successor's.
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus.materialize();
+    let (claim_commit, rows, payload_bytes): (i64, i64, i64) = corpus
+        .kernel_db()
+        .query_row(
+            "SELECT commit_seq,COUNT(*),SUM(LENGTH(payload)) FROM outbox WHERE commit_seq>?1
+             GROUP BY commit_seq HAVING COUNT(*)>=2 ORDER BY commit_seq DESC LIMIT 1",
+            [hold.snapshot],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let before = projection_rows(dir.path());
+    let acknowledged = || corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert_eq!(acknowledged(), Some(hold.snapshot));
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let mut refused = |name: &str, bounds: &EpisodeBounds| -> Blocked {
+        let report = driver
+            .run_episode(&consumer, bounds, 3, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            projection_rows(dir.path()),
+            before,
+            "{name}: rows, tombstones and jobs: {report:?}"
+        );
+        assert!(
+            acknowledged().is_some_and(|through| through < claim_commit),
+            "{name}: the acknowledgement never covers the refused commit"
+        );
+        match report.end {
+            EpisodeEnd::Blocked(blocked) => blocked,
+            EpisodeEnd::ReachedTarget => panic!("{name}: the episode was not blocked"),
+        }
+    };
+
+    // The whole claim commit is refused when it cannot fit the payload allowance, which the correction's own commit before it fits; no part of the claim commit applies.
+    let mut tiny = catch_up_bounds();
+    tiny.commits.max_payload_bytes = NonZeroU64::new(payload_bytes as u64 - 1).unwrap();
+    assert_eq!(
+        refused("oversized", &tiny),
+        Blocked::OversizedCommit {
+            commit_seq: claim_commit,
+            rows: rows as usize,
+            payload_bytes: payload_bytes as u64,
+        }
+    );
+
+    // A claim commit whose descriptor ordinals are no longer 0..n is refused whole.
+    let last = rows - 1;
+    let move_last = |from: i64, to: i64| {
+        kernel_db_writable(dir.path())
+            .execute(
+                "UPDATE outbox SET ordinal=?3 WHERE commit_seq=?1 AND ordinal=?2",
+                [claim_commit, from, to],
+            )
+            .unwrap();
+    };
+    move_last(last, last + 1);
+    assert_eq!(
+        refused("ordinals", &catch_up_bounds()),
+        Blocked::Read(CommitReadError::MalformedOrdinals {
+            commit_seq: claim_commit
+        })
+    );
+    move_last(last + 1, last);
+
+    // Once the commit reads whole again, catch-up applies it and the live rows are exactly the successor's ledger.
+    let report = driver
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap();
+    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+    let live: BTreeSet<String> = live_rows(dir.path()).into_iter().map(|row| row.1).collect();
+    let predicted: BTreeSet<String> = successor
+        .ledger()
+        .0
+        .iter()
+        .map(Expected::occurrence_id)
+        .collect();
+    assert_eq!(live, predicted);
+    assert_eq!(acknowledged(), Some(report.acknowledged_through));
 }

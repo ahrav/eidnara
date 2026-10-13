@@ -155,8 +155,15 @@ Reachability: test-only
 Status: active
 Exercised: partial - the reader refuses a request over `max_claims` before any
 row is read; a second record for one subject and an over-bound parent list
-poison the commit so nothing of it lands. Projection-side whole-commit refusal
-belongs to the materialization ticket.
+poison the commit so nothing of it lands. On the projection side, a claim
+commit that exceeds the catch-up payload allowance, or whose descriptor
+ordinals are no longer contiguous, is refused whole: rows, tombstones, pending
+jobs, and the search consumer's acknowledgement stay where they were, and the
+repaired commit then applies to exactly the successor's ledger. The claim
+materializer's `PublicationRefused` exclusion is a different consumer's
+decision: it publishes no descriptor for a revision the artifact store always
+refuses, so the search catch-up has no commit to refuse and its checkpoint
+rule is unchanged.
 Guarantee: Exceeding a declared bound produces a refusal with no partial
 effect: no rows read for a refused request, no rows written for a refused
 commit.
@@ -169,7 +176,7 @@ derivation naming `MAX_DERIVATION_PARENTS + 1` parents.
 Confidence: medium - [evidence](evidence/claim-capacity-failure-is-atomic.md).
 Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`
 and the `too-many` case of `derived_reinjection_rests_on_exact_live_parents`.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; `crates/kernel/tests/kernel_claim_causality.rs`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; `crates/kernel/tests/kernel_claim_causality.rs`; `crates/daemon/tests/claim_sources.rs` - `a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repaired`; status unaudited.
 Impact: a partially applied over-limit request leaves the store or its readers
 with an inventory that never corresponds to one bound.
 Open questions: None.
