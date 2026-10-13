@@ -72,8 +72,8 @@ CREATE TABLE occurrence_tombstones(
 ) STRICT;
 
 -- Exact selector keys the versioned source mapping derives for an occurrence.
--- The primary key serves equality and prefix range scans in stable binary
--- order; the occurrence index serves physical cleanup.
+-- The primary key holds every column and serves equality and prefix range scans
+-- in stable binary order; the occurrence index serves cleanup and claim reads.
 CREATE TABLE exact_associations(
     family TEXT NOT NULL CHECK(family IN ('id','sha','path','symbol','command','config','error')),
     namespace TEXT NOT NULL,
@@ -83,7 +83,7 @@ CREATE TABLE exact_associations(
     extraction_version INTEGER NOT NULL CHECK(extraction_version>0),
     created_commit_seq INTEGER NOT NULL CHECK(created_commit_seq>0),
     PRIMARY KEY(family,namespace,key,occurrence_id)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 CREATE INDEX idx_exact_associations_occurrence ON exact_associations(occurrence_id);
 
 -- One row per live occurrence: the analyzer's original atoms and conservative

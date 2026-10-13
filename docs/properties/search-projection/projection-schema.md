@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild. The schema version is 6.
+rebuild. The schema version is 7.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -121,13 +121,17 @@ occurrence. `family` is the selector keyword, `namespace` scopes the key
 `key` is the normalized key bytes, and `target_id` names the logical target
 the occurrence is evidence for, so alias rows of one target share it. The
 composite primary key serves equality and SHA-prefix range scans in stable
-binary order without a sort; the occurrence index serves physical cleanup.
+binary order without a sort; the occurrence index serves physical cleanup and
+the selected-claim reads.
 `extraction_version` records the mapping the row was derived under. The exact
 extraction version is 1; a new mapping requires a new schema version and a
 rebuild, and both the writer and the page reader refuse rows from another
 version rather than reinterpret them. Rows are written in the same transaction
 as their occurrence and before the projection checkpoint advances, and are
 deleted when message cleanup reclaims the occurrence.
+
+Storage: `WITHOUT ROWID`. The primary-key b-tree holds every column, so a page
+reads each association row in the scan that finds it.
 
 | Column | Type | Not null | Primary key | Column constraints |
 | --- | --- | --- | --- | --- |

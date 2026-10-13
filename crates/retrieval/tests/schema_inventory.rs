@@ -25,6 +25,8 @@ struct Column {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Table {
     strict: bool,
+    /// The primary-key b-tree stores the rows, as a section's `Storage` line states.
+    without_rowid: bool,
     columns: Vec<Column>,
     /// Table-level constraints and index definitions, whitespace-normalized.
     constraints: Vec<String>,
@@ -35,12 +37,19 @@ fn normalize(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The inventory the document freezes.
-fn documented() -> BTreeMap<String, Table> {
-    let text = std::fs::read_to_string(
+fn inventory_text() -> String {
+    std::fs::read_to_string(
         repo_root().join("docs/properties/search-projection/projection-schema.md"),
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// The inventory the document freezes.
+fn documented() -> BTreeMap<String, Table> {
+    documented_in(&inventory_text())
+}
+
+fn documented_in(text: &str) -> BTreeMap<String, Table> {
     assert!(text.contains("Every table below is `STRICT` except the virtual table `lexical`"));
     let mut tables: BTreeMap<String, Table> = BTreeMap::new();
     let mut current: Option<String> = None;
@@ -67,6 +76,10 @@ fn documented() -> BTreeMap<String, Table> {
             table
                 .constraints
                 .push(normalize(definition.trim_end_matches('`')));
+            continue;
+        }
+        if line.starts_with("Storage: `WITHOUT ROWID`") {
+            table.without_rowid = true;
             continue;
         }
         if line.starts_with("Table constraints:") {
@@ -255,15 +268,16 @@ fn stored(baseline: &str) -> BTreeMap<String, Table> {
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                let strict = conn.query_row(
-                    "SELECT strict FROM pragma_table_list WHERE schema='main' AND name=?1",
+                let (strict, without_rowid) = conn.query_row(
+                    "SELECT strict,wr FROM pragma_table_list WHERE schema='main' AND name=?1",
                     [&name],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
                 tables.insert(
                     name,
                     Table {
                         strict,
+                        without_rowid,
                         columns,
                         constraints,
                         indexes,
@@ -447,6 +461,31 @@ fn an_omitted_field_or_constraint_fails_the_inventory() {
         "removing STRICT must fail the inventory: {differences:?}"
     );
     assert!(differences[0].starts_with("projection_identity:"));
+
+    let undocumented = inventory_text().replacen("Storage: `WITHOUT ROWID`.", "", 1);
+    assert_ne!(undocumented, inventory_text());
+    let differences = compare(
+        &with_implied_not_null(documented_in(&undocumented)),
+        &with_implied_not_null(stored(retrieval::BASELINE)),
+    );
+    assert_eq!(differences.len(), 1, "{differences:?}");
+    assert!(
+        differences[0].starts_with("exact_associations:"),
+        "an undocumented WITHOUT ROWID table must fail the inventory: {differences:?}"
+    );
+
+    let rowid_associations =
+        retrieval::BASELINE.replacen(") STRICT, WITHOUT ROWID;", ") STRICT;", 1);
+    assert_ne!(rowid_associations, retrieval::BASELINE);
+    let differences = compare(
+        &documented,
+        &with_implied_not_null(stored(&rowid_associations)),
+    );
+    assert_eq!(differences.len(), 1, "{differences:?}");
+    assert!(
+        differences[0].starts_with("exact_associations:"),
+        "a rowid association table must fail the inventory: {differences:?}"
+    );
 
     let other_tokenizer = retrieval::BASELINE.replace("remove_diacritics 2", "remove_diacritics 1");
     assert_ne!(other_tokenizer, retrieval::BASELINE);

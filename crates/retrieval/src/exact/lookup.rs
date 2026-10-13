@@ -513,7 +513,7 @@ mod tests {
             let first_plan = plan(&conn, &page_sql(false), &first);
             assert!(
                 first_plan.iter().any(|d| d.contains(
-                    "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND key>? AND key<?)"
+                    "SEARCH a USING PRIMARY KEY (family=? AND namespace=? AND key>? AND key<?)"
                 )),
                 "{first_plan:?}"
             );
@@ -529,7 +529,7 @@ mod tests {
             let resume_plan = plan(&conn, &page_sql(true), &resume);
             assert!(
                 resume_plan.iter().any(|d| d.contains(
-                    "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND (key,occurrence_id)>(?,?) AND key<?)"
+                    "SEARCH a USING PRIMARY KEY (family=? AND namespace=? AND (key,occurrence_id)>(?,?) AND key<?)"
                 )),
                 "{resume_plan:?}"
             );
