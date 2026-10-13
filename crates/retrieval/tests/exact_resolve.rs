@@ -2001,37 +2001,56 @@ fn a_deadline_reached_inside_an_exact_page_statement_interrupts_it() {
     let fixture = Fixture::new();
     project_bulk(&fixture, BULK_ROWS);
     let certificate = fixture.certificate();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
-    let polls = Arc::new(AtomicUsize::new(0));
-    let stop = {
-        let budget = budget.clone();
-        let polls = Arc::clone(&polls);
-        // From the second poll the handler waits out the deadline, so the budget ends while a page statement is executing.
-        move || {
-            if polls.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
-                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    // The handler waits out the deadline at its second poll, the first one inside the page statement, so the budget ends while that statement runs.
+    let deadline_stop = || {
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = {
+            let budget = budget.clone();
+            let polls = Arc::clone(&polls);
+            move || {
+                if polls.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                }
+                budget.is_exhausted()
             }
-            budget.is_exhausted()
-        }
+        };
+        (budget, polls, stop)
     };
-    let outcome = fixture.resolve_interruptible(&certificate, &budget, stop);
-    assert!(
-        polls.load(Ordering::Relaxed) >= 2,
-        "the deadline crossed inside SQL"
+
+    let (budget, polls, stop) = deadline_stop();
+    let refused = fixture
+        .store
+        .with_conn_interruptible(Instant::now() + Duration::from_secs(60), stop, |conn| {
+            Ok(page(
+                conn,
+                &LookupContext {
+                    kernel_incarnation_id: &fixture.incarnation,
+                    page_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+                    budget: &budget,
+                },
+                &object_query("bulk"),
+                None,
+            ))
+        })
+        .unwrap();
+    assert!(polls.load(Ordering::Relaxed) >= 2);
+    assert!(budget.is_exhausted());
+    assert_eq!(
+        refused.unwrap_err(),
+        LookupRefusal::Projection(ProjectionError::Interrupted),
+        "the statement was interrupted, not refused by a budget check"
     );
-    assert!(Instant::now() >= deadline);
-    match outcome {
-        Err(ResolveRefusal::BudgetExhausted) => {}
-        Ok(resolution) => {
-            assert_eq!(
-                resolution.completion,
-                Completion::Incomplete(IncompleteReason::BudgetExhausted)
-            );
-            assert!(resolution.proof.is_none());
-        }
-        Err(other) => panic!("a deadline inside SQL must stop as budget exhaustion: {other:?}"),
-    }
+
+    let (budget, polls, stop) = deadline_stop();
+    let outcome = fixture.resolve_interruptible(&certificate, &budget, stop);
+    assert!(polls.load(Ordering::Relaxed) >= 2);
+    assert_eq!(
+        outcome.unwrap_err(),
+        ResolveRefusal::BudgetExhausted,
+        "the first page never completed, so the stop is global"
+    );
 }
 
 #[test]
@@ -2274,15 +2293,113 @@ fn a_classification_change_defeats_the_attempt_and_the_proof_whether_or_not_the_
         .unwrap()
         .proof
         .expect("a healthy singleton proves");
+    let tip = fixture.tip();
     let window = fixture.kernel.hold_classification_change_for_test();
     assert_eq!(
         fixture.validate(&proof, &EvalBudget::unbounded()),
         Err(ProofInvalidation::SnapshotChanged)
     );
+    assert_eq!(fixture.tip(), tip, "the window moves no tip");
     drop(window);
     assert_eq!(
         fixture.validate(&proof, &EvalBudget::unbounded()),
         Err(ProofInvalidation::SnapshotChanged),
         "the closed window leaves a new generation the proof never judged"
+    );
+}
+
+#[test]
+fn an_interrupted_admission_or_final_use_read_is_budget_exhaustion() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    let proof = fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            bounds(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .proof
+        .expect("a healthy singleton proves");
+    // The view returns the stored checkpoint after enough work that the progress handler polls inside the checkpoint read.
+    fixture
+        .store
+        .with_conn_unfenced(|conn| {
+            conn.execute_batch(
+                "ALTER TABLE projection_checkpoint RENAME TO original_checkpoint;
+                 CREATE VIEW projection_checkpoint AS SELECT singleton,snapshot_commit_seq,
+                     checkpoint_commit_seq + (WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL
+                         SELECT i+1 FROM n WHERE i<20000) SELECT count(*)-20000 FROM n)
+                         AS checkpoint_commit_seq,hold_id,updated_at
+                 FROM original_checkpoint;",
+            )
+        })
+        .unwrap();
+    let request = ResolveRequest {
+        query: object_query("obj-1"),
+        intent: RequestIntent::WholeRequest,
+        certificate: &certificate,
+        authority: Authority {
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+            inventory_epoch: EPOCH,
+        },
+        bounds: bounds(),
+    };
+    let interruptible = |budget: &EvalBudget, fire_at: Option<usize>| {
+        let (polls, stop) = cancelling_stop(budget, fire_at.unwrap_or(usize::MAX));
+        let resolved = fixture
+            .store
+            .with_conn_interruptible(Instant::now() + Duration::from_secs(60), stop, |conn| {
+                Ok(resolve(conn, &fixture.kernel, &request, budget))
+            })
+            .unwrap();
+        (polls.load(Ordering::Relaxed), resolved)
+    };
+    let validated = |budget: &EvalBudget, fire_at: Option<usize>| {
+        let (polls, stop) = cancelling_stop(budget, fire_at.unwrap_or(usize::MAX));
+        let outcome = fixture
+            .store
+            .with_conn_interruptible(Instant::now() + Duration::from_secs(60), stop, |conn| {
+                Ok(validate_for_use(
+                    conn,
+                    &fixture.kernel,
+                    &proof,
+                    Authority {
+                        project: &fixture.project,
+                        destination: ArtifactDestination::Local,
+                        inventory_epoch: EPOCH,
+                    },
+                    budget,
+                ))
+            })
+            .unwrap();
+        (polls.load(Ordering::Relaxed), outcome)
+    };
+
+    let (polls, healthy) = interruptible(&EvalBudget::unbounded(), None);
+    assert!(polls >= 3, "the checkpoint read polls: {polls}");
+    assert!(
+        healthy.unwrap().proof.is_some(),
+        "the uninterrupted control proves"
+    );
+    let (_, interrupted) = interruptible(&EvalBudget::unbounded(), Some(2));
+    assert_eq!(
+        interrupted.unwrap_err(),
+        ResolveRefusal::BudgetExhausted,
+        "an interrupt inside certificate admission is the global stop"
+    );
+
+    let (polls, healthy) = validated(&EvalBudget::unbounded(), None);
+    assert!(polls >= 2, "the final-use checkpoint read polls: {polls}");
+    assert_eq!(healthy.unwrap(), Ok(()));
+    let (_, interrupted) = validated(&EvalBudget::unbounded(), Some(2));
+    assert_eq!(
+        interrupted.unwrap(),
+        Err(ProofInvalidation::BudgetExhausted)
     );
 }

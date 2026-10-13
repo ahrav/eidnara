@@ -244,7 +244,10 @@ struct Attempt<'a> {
     resolution: Resolution,
 }
 
-/// Whether `refusal` is SQLite interrupting a projection statement, which the storage progress handler does only when the request's stop fired.
+/// Whether `refusal` is SQLite interrupting a projection statement. The
+/// storage progress handler interrupts only when the read's stop fires, and a
+/// caller ties that stop to this request's budget, so the interrupt is the
+/// budget ending.
 fn is_interrupt(refusal: &ResolveRefusal) -> bool {
     matches!(
         refusal,
@@ -260,6 +263,10 @@ fn budget_refusal(error: KernelError) -> ResolveRefusal {
     }
 }
 
+/// Enumerates the request's exact range and judges every row, proving only an
+/// explicit whole-request singleton. Under an interruptible read, the read's
+/// stop must fire only when `budget` ends: an interrupted statement is
+/// reported as `BudgetExhausted`.
 pub fn resolve(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -396,7 +403,10 @@ impl Attempt<'_> {
         self.stopped.get_or_insert(reason);
     }
 
-    /// Stops the attempt as budget exhaustion when `refusal` is the budget ending, whether a budget check, a kernel deadline, or SQLite interrupting a page statement. Consumed counts cover completed pages only; a page whose statement was interrupted is dropped unjudged.
+    /// Stops the attempt as budget exhaustion when `refusal` is the budget
+    /// ending: a budget check, a kernel deadline, or SQLite interrupting a
+    /// page statement. Consumed counts cover completed pages only; a page
+    /// whose statement was interrupted is dropped unjudged.
     fn late_failure(&mut self, refusal: ResolveRefusal) -> Result<(), ResolveRefusal> {
         match &refusal {
             ResolveRefusal::Lookup(LookupRefusal::BudgetExhausted)
@@ -581,6 +591,9 @@ pub enum ProofInvalidation {
     },
 }
 
+/// Revalidates `proof` for final use at the current authority, projection,
+/// and kernel state. An interrupted checkpoint read, like an ended `budget`,
+/// invalidates the proof as `BudgetExhausted`.
 pub fn validate_for_use(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
