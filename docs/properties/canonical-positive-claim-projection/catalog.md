@@ -310,8 +310,13 @@ Status: active
 Exercised: partial - a stored admission enum or sensitivity class this build
 cannot interpret makes `claim_facts_as_of` fail with `MalformedRequiredField`
 for the whole request, and a decision row that disagrees with its registry row
-fails with `CorruptCanonicalRow`; checkpoint quarantine belongs to the
-materialization ticket.
+fails with `CorruptCanonicalRow`. Through the projection,
+`crates/daemon/tests/claim_sources.rs`
+`an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defaulting`
+rewrites a projected claim's admission maturity to a value no build reads, and
+`classify_live_claims` refuses the batch rather than returning the claim as
+Current. Checkpoint quarantine through catch-up is not yet exercised with a
+claim corpus.
 Guarantee: A required claim field that does not decode is an explicit error,
 never a default that implies approval, and never a silently skipped claim.
 Check: `always` - `Err(MalformedRequiredField)` when any required enum or

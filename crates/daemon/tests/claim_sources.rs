@@ -3785,3 +3785,43 @@ fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
         "a released hold reads nothing: {refused:?}"
     );
 }
+
+/// A5: a claim whose canonical admission row carries an uninterpretable maturity is never classified: the classifier refuses the batch with an error instead of defaulting the claim to Current or dropping it from an otherwise complete answer.
+#[test]
+fn an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defaulting() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    corpus.decide(rule);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    assert!(
+        classified(&projection, &corpus.kernel)
+            .values()
+            .all(|state| *state == CandidateState::Current)
+    );
+    let changed = Connection::open(corpus.root.join("kernel/kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE admission_decisions SET maturity='unheard-of' WHERE subject_object_id='rule'",
+            [],
+        )
+        .unwrap();
+    assert!(changed > 0, "the fixture admitted the claim");
+    let outcome = projection
+        .read(|conn| {
+            Ok(classify_live_claims(
+                conn,
+                &corpus.kernel,
+                &EvalBudget::unbounded(),
+                candidate_bounds(),
+            ))
+        })
+        .unwrap();
+    assert!(
+        outcome.is_err(),
+        "an uninterpretable maturity refuses the batch: {outcome:?}"
+    );
+}
