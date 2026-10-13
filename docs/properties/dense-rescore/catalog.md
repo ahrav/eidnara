@@ -302,7 +302,13 @@ sizes 1, 3, 5, 6, 20 by page sizes 1, 2, 8, plus an underfilled pool),
 `only_resolved_winners_are_scored_and_each_scores_under_its_own_layer`,
 `a_coverage_shortfall_keeps_the_pool_and_says_so`,
 `the_pool_does_not_depend_on_the_order_rows_were_stored_in`,
-`a_revoked_winner_is_never_scored`, and `a_row_at_any_rowid_is_visited`.
+`a_revoked_winner_is_never_scored`, and `a_row_at_any_rowid_is_visited`;
+over real lifecycle generations, `crates/daemon/tests/vector_rescore.rs`
+`a_rejected_leader_across_unequal_scale_layers_with_ties_fills_one_global_pool`
+combines a kernel-hidden leader, a delta with its own calibration that
+supersedes and tombstones base rows, and an exact original-row tie in one
+composition, and the pool equals one global prediction over the eligible
+winners under each winner's own scales.
 Guarantee: Under a stable authority with sufficient bounds, the pool is
 exactly `Top(R, E, quantized_score)` in the U1 order, where `E` is the set of
 resolved winners the projection lists as live and the kernel judges eligible;
@@ -762,7 +768,11 @@ where, with the resident limit set to what one draining request holds, a
 scratch reservation of the drainer's size is refused while it drains and fits
 once it finishes, and a request under the same limit then completes. The
 next admission there is a direct ledger reservation, because the fixture's
-projection connection serves one request at a time.
+projection connection serves one request at a time. `dense_request_lifetime.rs`
+`a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends`
+starts a component shutdown while a unit is held at an original read; the
+unit's scratch, row buffers, and view pin stay charged until it returns, and
+the ledger is empty only after.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
 setters' locks before the unit is submitted (`query_route.rs:1992`), so the

@@ -1716,3 +1716,81 @@ fn a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row() {
         );
     }
 }
+
+/// One composition carries every hazard at once: the query's best row (`alpha`) is hidden by the kernel, a delta calibrated on its own rows supersedes `gamma` and tombstones `beta`, and the delta's `gamma` carries an original vector equal to the base's `epsilon`. The pool equals one global prediction over the eligible winners under each winner's own layer scales; the hidden leader is neither admitted nor read; and the rescore over the pool keeps the tie in identifier order.
+#[test]
+fn a_rejected_leader_across_unequal_scale_layers_with_ties_fills_one_global_pool() {
+    let mut fixture = Fixture::new();
+    let admitted: Vec<&str> = OBJECTS.iter().copied().filter(|o| *o != "alpha").collect();
+    let projection = projection(&fixture, &admitted);
+    let mut corpus = corpus();
+    corpus[0].1 = unit([0.99, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let shared = unit([0.6, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0]);
+    corpus[4].1 = shared.clone();
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    // The delta's rows span other coordinates, so its calibration differs from the base's.
+    let delta_rows: Vec<(&str, Vec<f32>)> = vec![
+        ("gamma", shared.clone()),
+        ("delta", unit([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.98, 0.0])),
+    ];
+    let delta = fixture.layer_from(&export(&delta_rows, &["beta"], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_ne!(
+        view.layers()[0].scales.as_slice(),
+        view.layers()[1].scales.as_slice(),
+        "the layers carry unequal scales"
+    );
+    let query = axis(0);
+
+    let (ranking, reads) = rank_simple(&fixture, &projection, &view, &query, 3, 3);
+    let eligible: BTreeMap<String, (usize, usize)> = [
+        winner(&view, 1, "gamma"),
+        winner(&view, 1, "delta"),
+        winner(&view, 0, "epsilon"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        pool_keys(&ranking),
+        expected_pool(&view, &query, &eligible, 3),
+        "one global pool over the eligible winners, each under its own layer's scales"
+    );
+    let alpha = winner(&view, 0, "alpha").1;
+    assert!(
+        !ranking
+            .pool
+            .winners
+            .iter()
+            .any(|w| (w.layer, w.row) == alpha),
+        "the hidden leader is not admitted"
+    );
+    assert!(!reads.contains(&(view.layers()[0].digest.clone(), alpha.1)));
+    // Each original read names the member and row its pool entry won from, so the tied rows are read from their own layers.
+    let expected_reads: Vec<(String, usize)> = ranking
+        .pool
+        .winners
+        .iter()
+        .map(|w| (view.layers()[w.layer].digest.clone(), w.row))
+        .collect();
+    assert_eq!(reads, expected_reads);
+    // A pool of two cuts the eligible set across the unequal-scale layers; the cut follows the global prediction.
+    let (cut, _) = rank_simple(&fixture, &projection, &view, &query, 2, 2);
+    assert_eq!(pool_keys(&cut), expected_pool(&view, &query, &eligible, 2));
+    let mut vectors: BTreeMap<String, Vec<f32>> = map(&corpus).into_iter().collect();
+    for (object, row) in &delta_rows {
+        vectors.insert(occurrence_id(object), row.clone());
+    }
+    let ranked = rescored(&ranking);
+    assert_eq!(ranked, top_of_pool(&query, &ranking, &vectors, 3));
+    // `gamma` and `epsilon` share an original row, so they tie exactly and lead `delta`; the smaller identifier comes first.
+    let (g, e) = (occurrence_id("gamma"), occurrence_id("epsilon"));
+    let (first, second) = if g < e { (g, e) } else { (e, g) };
+    assert_eq!(
+        ranked.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        vec![first, second, occurrence_id("delta")]
+    );
+    assert_eq!(ranked[0].1.to_bits(), ranked[1].1.to_bits());
+}
