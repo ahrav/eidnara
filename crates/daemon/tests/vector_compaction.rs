@@ -986,9 +986,22 @@ fn a_withdrawn_activation_grant_publishes_nothing_and_a_live_one_publishes_the_s
     );
 }
 
-/// A view whose members carry another value of any identity field the sidecar binds refuses compaction before anything is reserved, read, or written, naming that field; so does a member whose rows were cut after the view pinned it, which refuses with the row it could not read.
+/// Records what an identity refusal must leave untouched: the work directory, the generation set, and the census.
+fn assert_untouched(
+    fixture: &Fixture,
+    dir: &std::path::Path,
+    before: &BTreeSet<String>,
+    census: &Census,
+    case: &str,
+) {
+    assert!(std::fs::read_dir(dir).unwrap().next().is_none(), "{case}");
+    assert_eq!(fixture.generations(), *before, "{case}");
+    assert_eq!(fixture.ledger.census(), *census, "{case}");
+}
+
+/// A view whose members carry another value of any identity field the sidecar binds refuses compaction, naming that field, before any reservation: with the resident limit at one byte the refusal is still the identity, not the reservation. A member whose rows were cut after the view pinned it refuses with the row it could not read and releases every reservation. Each refusal writes nothing.
 #[test]
-fn every_identity_field_and_a_member_cut_after_pinning_refuse_before_anything_is_written() {
+fn every_identity_field_and_a_member_cut_after_pinning_refuse_and_write_nothing() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
@@ -996,9 +1009,77 @@ fn every_identity_field_and_a_member_cut_after_pinning_refuse_before_anything_is
         .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    // A reservation taken before the identity check would be refused at this limit, so an identity refusal shows the check came first.
+    fixture.set_limit(RESIDENT_LIMIT, 1);
     let before = fixture.generations();
     let census = fixture.ledger.census();
-    let refuses = |expected: &ExpectedVectors<'_>, field: &'static str| {
+    let other_checkpoint = ProjectionCheckpoint {
+        snapshot_commit_seq: 1,
+        checkpoint_commit_seq: 2,
+        hold_id: "another-hold".to_owned(),
+    };
+    type Drift = fn(&mut retrieval::batch::VectorGeneration);
+    let generation_drifts: [(&str, Drift); 5] = [
+        ("embedding_model", |g| {
+            g.embedding_model = "another-model".to_owned()
+        }),
+        ("tokenizer_fingerprint", |g| {
+            g.tokenizer_fingerprint = "another-tokenizer".to_owned()
+        }),
+        ("vector_dimension", |g| g.vector_dimension += 1),
+        ("generation_epoch", |g| g.generation_epoch += 1),
+        ("generation_id", |g| {
+            g.generation_id = "another-generation".to_owned()
+        }),
+    ];
+    let generations: Vec<(&str, retrieval::batch::VectorGeneration)> = generation_drifts
+        .into_iter()
+        .map(|(field, drift)| {
+            let mut generation = fixture.generation.clone();
+            drift(&mut generation);
+            (field, generation)
+        })
+        .collect();
+    let expected = fixture.expected();
+    let mut field_cases: Vec<(&str, ExpectedVectors<'_>)> = generations
+        .iter()
+        .map(|(field, generation)| {
+            (
+                *field,
+                ExpectedVectors {
+                    generation,
+                    ..expected
+                },
+            )
+        })
+        .collect();
+    field_cases.push((
+        "unit_norm_tolerance",
+        ExpectedVectors {
+            unit_norm_tolerance: expected.unit_norm_tolerance * 2.0,
+            ..expected
+        },
+    ));
+    field_cases.push((
+        "kernel_incarnation_id",
+        ExpectedVectors {
+            kernel_incarnation_id: "another-incarnation",
+            ..expected
+        },
+    ));
+    field_cases.push((
+        "checkpoint",
+        ExpectedVectors {
+            checkpoint: Some(&other_checkpoint),
+            ..expected
+        },
+    ));
+    assert_eq!(
+        field_cases.len(),
+        8,
+        "every field the sidecar can be built to disagree on"
+    );
+    for (field, expected) in &field_cases {
         let dir = fixture.work_dir();
         let refusal =
             compact(&view, expected, &fixture.staging(), max_entries(), &dir).unwrap_err();
@@ -1010,72 +1091,13 @@ fn every_identity_field_and_a_member_cut_after_pinning_refuse_before_anything_is
             },
             "{field}"
         );
-        assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "{field}");
-        assert_eq!(fixture.generations(), before, "{field}");
-        assert_eq!(fixture.ledger.census(), census, "{field}");
-    };
-    let expected = fixture.expected();
-    let mut generation = fixture.generation.clone();
-    generation.embedding_model = "another-model".to_owned();
-    refuses(
-        &ExpectedVectors {
-            generation: &generation,
-            ..expected
-        },
-        "embedding_model",
-    );
-    let mut generation = fixture.generation.clone();
-    generation.tokenizer_fingerprint = "another-tokenizer".to_owned();
-    refuses(
-        &ExpectedVectors {
-            generation: &generation,
-            ..expected
-        },
-        "tokenizer_fingerprint",
-    );
-    let mut generation = fixture.generation.clone();
-    generation.vector_dimension += 1;
-    refuses(
-        &ExpectedVectors {
-            generation: &generation,
-            ..expected
-        },
-        "vector_dimension",
-    );
-    refuses(
-        &ExpectedVectors {
-            unit_norm_tolerance: expected.unit_norm_tolerance * 2.0,
-            ..expected
-        },
-        "unit_norm_tolerance",
-    );
-    let mut generation = fixture.generation.clone();
-    generation.generation_epoch += 1;
-    refuses(
-        &ExpectedVectors {
-            generation: &generation,
-            ..expected
-        },
-        "generation_epoch",
-    );
-    refuses(
-        &ExpectedVectors {
-            kernel_incarnation_id: "another-incarnation",
-            ..expected
-        },
-        "kernel_incarnation_id",
-    );
-    let mut generation = fixture.generation.clone();
-    generation.generation_id = "another-generation".to_owned();
-    refuses(
-        &ExpectedVectors {
-            generation: &generation,
-            ..expected
-        },
-        "generation_id",
-    );
+        assert_untouched(&fixture, &dir, &before, &census, field);
+    }
+    drop(field_cases);
 
     // The rows are cut to their header after the view verified and pinned them.
+    fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
+    let census = fixture.ledger.census();
     let rows = fixture.generation_dir(&base.digest).join(ROWS_FILE);
     let bytes = std::fs::read(&rows).unwrap();
     std::fs::write(
@@ -1096,13 +1118,7 @@ fn every_identity_field_and_a_member_cut_after_pinning_refuse_before_anything_is
         matches!(refusal, CompactionRefusal::Row { layer: 0, .. }),
         "{refusal:?}"
     );
-    assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
-    assert_eq!(fixture.generations(), before);
-    assert_eq!(
-        fixture.ledger.census(),
-        census,
-        "every reservation was released"
-    );
+    assert_untouched(&fixture, &dir, &before, &census, "cut rows");
 }
 
 /// A tail published after the cut inserts an occurrence the prefix never held, updates one, and deletes another. The compaction carries the tail unchanged, so the inserted occurrence ranks exactly once above the compacted base; a second cut consumes the tail, and the occurrence then lives in the new base exactly once with the same ranking.
@@ -1142,23 +1158,12 @@ fn a_tail_that_inserts_a_new_occurrence_is_carried_once_and_consumed_once_by_the
     let query = axis(0);
     let expected = expected_rows(&[(&corpus, &[]), (first, &[]), (tail_rows, &["beta"])]);
     let reference_ranking = reference(&query, &expected);
-    let ranked_once = |ranking: &[(String, f64)]| {
-        ranking
-            .iter()
-            .filter(|(id, _)| *id == occurrence_id("zeta"))
-            .count()
-    };
-
     let published = publish_compacted(&fixture, &compacted).unwrap();
     assert_eq!(published.tail, vec![with_tail.deltas[1].clone()]);
     let carried = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let carried_ranking = keyed(&rank_view(&fixture, &projection, &carried, &query, 8).unwrap());
+    // The reference holds each occurrence once, so equality shows the insert carried once, ranking first.
     assert_eq!(carried_ranking, reference_ranking);
-    assert_eq!(
-        ranked_once(&carried_ranking),
-        1,
-        "the insert is carried once"
-    );
     assert_eq!(carried_ranking[0].0, occurrence_id("zeta"));
     compacted.discard().unwrap();
 
@@ -1169,13 +1174,14 @@ fn a_tail_that_inserts_a_new_occurrence_is_carried_once_and_consumed_once_by_the
     assert!(republished.tail.is_empty());
     let compacted_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     assert_eq!(compacted_view.members(), vec![republished.base.clone()]);
-    assert!(
+    assert_eq!(
         compacted_view.layers()[0]
             .occurrence_ids()
             .iter()
             .filter(|id| **id == occurrence_id("zeta"))
-            .count()
-            == 1
+            .count(),
+        1,
+        "zeta lives once in the new base"
     );
     let final_ranking =
         keyed(&rank_view(&fixture, &projection, &compacted_view, &query, 8).unwrap());
@@ -1282,42 +1288,26 @@ fn layerings_that_resolve_alike_compact_to_one_base_and_keep_equal_payloads_dist
             *vector = shared.clone();
         }
     }
-    type Rows<'a> = Vec<(&'a str, Vec<f32>)>;
-    let layerings: [(Rows<'_>, Rows<'_>); 2] = [
+    let replacing = |object: &str, vector: Vec<f32>| -> Vec<(&str, Vec<f32>)> {
+        resolved
+            .iter()
+            .map(|(name, row)| {
+                (
+                    *name,
+                    if *name == object {
+                        vector.clone()
+                    } else {
+                        row.clone()
+                    },
+                )
+            })
+            .collect()
+    };
+    let layerings = [
         // The base holds `delta`'s final row and the delta updates `beta`.
-        (
-            resolved
-                .iter()
-                .map(|(object, vector)| {
-                    (
-                        *object,
-                        if *object == "beta" {
-                            axis(6)
-                        } else {
-                            vector.clone()
-                        },
-                    )
-                })
-                .collect(),
-            vec![("beta", shared.clone())],
-        ),
+        (replacing("beta", axis(6)), vec![("beta", shared.clone())]),
         // The base holds `beta`'s final row and the delta updates `delta`.
-        (
-            resolved
-                .iter()
-                .map(|(object, vector)| {
-                    (
-                        *object,
-                        if *object == "delta" {
-                            axis(5)
-                        } else {
-                            vector.clone()
-                        },
-                    )
-                })
-                .collect(),
-            vec![("delta", shared.clone())],
-        ),
+        (replacing("delta", axis(5)), vec![("delta", shared.clone())]),
     ];
     let query = axis(0);
     let mut outcomes = Vec::new();
@@ -1353,9 +1343,9 @@ fn layerings_that_resolve_alike_compact_to_one_base_and_keep_equal_payloads_dist
     assert_eq!(tied[0].1.to_bits(), tied[1].1.to_bits());
 }
 
-/// Competing staging work fills the disk pool between the compaction and its publication, so publishing the base is refused at the bound, the selection and the old view's pins stay, and once the competitor's reservation ends the same compaction publishes.
+/// Competing staging work fills the disk pool between the compaction and its publication, so publishing the base is refused at the disk limit, the refused attempt holds nothing, the selection and the old view's pins stay, and once the competitor's reservation ends the same compaction publishes and its charges end with discard.
 #[test]
-fn competing_disk_work_between_compaction_and_publication_refuses_the_publication_at_the_bound() {
+fn competing_disk_work_that_fills_the_pool_refuses_the_publication_and_holds_nothing() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
@@ -1379,13 +1369,21 @@ fn competing_disk_work_between_compaction_and_publication_refuses_the_publicatio
         )
         .unwrap();
     let generations = fixture.generations();
+    let competing = fixture.ledger.census().disk;
     let refused = publish_compacted(&fixture, &compacted).unwrap_err();
     assert!(
         matches!(
-            refused,
-            CompactionRefusal::Stage(VectorRefusal::Reservation(Refusal::Denied(_)))
+            &refused,
+            CompactionRefusal::Stage(VectorRefusal::Reservation(Refusal::Denied(
+                Denial::LimitExceeded { limit, .. }
+            ))) if limit == DISK_LIMIT
         ),
         "{refused:?}"
+    );
+    assert_eq!(
+        fixture.ledger.census().disk,
+        competing,
+        "the refused attempt holds nothing"
     );
     assert_eq!(fixture.generations(), generations, "nothing was staged");
     assert_eq!(
@@ -1398,10 +1396,12 @@ fn competing_disk_work_between_compaction_and_publication_refuses_the_publicatio
         "the old view stays pinned"
     );
     drop(competitor);
+    assert_eq!(fixture.ledger.census().disk, held);
     let published = publish_compacted(&fixture, &compacted).unwrap();
     assert_eq!(
         fixture.store.read_vector_current().unwrap(),
         host_runtime::generation::CurrentProfile::Current(published.digest)
     );
     compacted.discard().unwrap();
+    assert_eq!(fixture.ledger.census().disk, 0);
 }
