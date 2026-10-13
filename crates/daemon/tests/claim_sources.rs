@@ -4161,7 +4161,12 @@ fn claim_crash_child_reexecuted_by_the_parent() {
     let target = corpus.kernel.tip().unwrap();
     {
         let mut stdout = std::io::stdout().lock();
-        writeln!(stdout, "{CRASH_HOLD} {} {target}", hold.snapshot).unwrap();
+        writeln!(
+            stdout,
+            "{CRASH_HOLD} {} {} {target}",
+            hold.hold_id, hold.snapshot
+        )
+        .unwrap();
         stdout.flush().unwrap();
     }
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
@@ -4181,8 +4186,8 @@ fn claim_crash_child_reexecuted_by_the_parent() {
     panic!("the child was not killed at its barrier: {report:?}");
 }
 
-/// Runs the child to `cut`, kills and reaps it, and returns S and the target it printed.
-fn run_claim_crash_child(root: &Path, cut: ClaimCut) -> (i64, i64) {
+/// Runs the child to `cut`, kills and reaps it, and returns the hold id, S, and the target it printed.
+fn run_claim_crash_child(root: &Path, cut: ClaimCut) -> (String, i64, i64) {
     struct Reaped(std::process::Child);
     impl Drop for Reaped {
         fn drop(&mut self) {
@@ -4220,7 +4225,9 @@ fn run_claim_crash_child(root: &Path, cut: ClaimCut) -> (i64, i64) {
         }
         let _ = tx.send((hold, barrier));
     });
-    let (hold, barrier) = rx.recv_timeout(Duration::from_secs(120)).unwrap();
+    let (hold, barrier) = rx
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap_or_else(|error| panic!("{cut:?}: the child never reached its barrier: {error}"));
     assert_eq!(
         barrier.as_deref(),
         Some(format!("{CRASH_BARRIER} {}", cut.name()).as_str())
@@ -4228,7 +4235,11 @@ fn run_claim_crash_child(root: &Path, cut: ClaimCut) -> (i64, i64) {
     drop(child);
     let hold = hold.expect("the child printed its hold");
     let fields: Vec<&str> = hold.split(' ').collect();
-    (fields[1].parse().unwrap(), fields[2].parse().unwrap())
+    (
+        fields[1].to_string(),
+        fields[2].parse().unwrap(),
+        fields[3].parse().unwrap(),
+    )
 }
 
 #[test]
@@ -4242,7 +4253,7 @@ fn claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_ea
     };
     for cut in ClaimCut::ALL {
         let dir = tempfile::tempdir().unwrap();
-        let (snapshot, target) = run_claim_crash_child(dir.path(), cut);
+        let (hold_id, snapshot, target) = run_claim_crash_child(dir.path(), cut);
         assert!(target > snapshot);
         let (expected_rows, local, acknowledged) = match cut {
             ClaimCut::Staged => (occurrences(ORIGINAL), snapshot, snapshot),
@@ -4259,9 +4270,32 @@ fn claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_ea
                 .expect("the bootstrap installed a checkpoint")
                 .checkpoint_commit_seq;
             let kernel_ack = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
-            let live: BTreeSet<String> =
-                live_rows(dir.path()).into_iter().map(|row| row.1).collect();
-            assert_eq!(live, expected_rows, "{cut:?} reopen {reopen}: live rows");
+            let observe = || {
+                let rows = projection_rows(dir.path());
+                let live: BTreeSet<String> = rows
+                    .iter()
+                    .filter(|row| !row.3)
+                    .map(|row| row.1.clone())
+                    .collect();
+                let tombstoned: BTreeSet<String> = rows
+                    .iter()
+                    .filter(|row| row.3)
+                    .map(|row| row.1.clone())
+                    .collect();
+                (live, tombstoned)
+            };
+            let (live, tombstoned) = observe();
+            assert_eq!(
+                live, expected_rows,
+                "{cut:?} reopen {reopen}: live occurrence ids"
+            );
+            if cut != ClaimCut::Staged {
+                assert_eq!(
+                    tombstoned,
+                    occurrences(ORIGINAL),
+                    "{cut:?} reopen {reopen}: the corrected claim's rows are tombstoned"
+                );
+            }
             assert_eq!(
                 projected, local,
                 "{cut:?} reopen {reopen}: local checkpoint"
@@ -4272,8 +4306,41 @@ fn claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_ea
                 "{cut:?} reopen {reopen}: acknowledgement"
             );
             assert!(
-                acknowledged <= projected,
+                kernel_ack.is_some_and(|through| through <= projected),
                 "the acknowledgement never exceeds the durable local prefix"
+            );
+
+            // The hold belongs to the crashed incarnation: an episode in the reopened one moves nothing, and an acknowledged window needs no further work.
+            let consumer = CatchUpConsumer {
+                binding: corpus.binding(),
+                hold_id: hold_id.clone(),
+                kernel_incarnation_id: incarnation.clone(),
+                generation_id: Some(GENERATION.to_string()),
+            };
+            let report = SearchCatchUp::new(&corpus.kernel, &projection)
+                .run_episode(&consumer, &catch_up_bounds(), 4, &mut |_| {})
+                .unwrap();
+            match cut {
+                ClaimCut::Staged | ClaimCut::Released => assert_eq!(
+                    report.end,
+                    EpisodeEnd::Blocked(Blocked::HoldExtension(
+                        kernel::SourceHoldError::BindingMismatch
+                    )),
+                    "{cut:?} reopen {reopen}: {report:?}"
+                ),
+                ClaimCut::Acknowledged => {
+                    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+                    assert_eq!(report.batches_applied, 0);
+                }
+            }
+            assert_eq!(
+                observe().0,
+                expected_rows,
+                "{cut:?} reopen {reopen}: after the episode"
+            );
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                Some(acknowledged)
             );
         }
     }

@@ -629,12 +629,16 @@ Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
 `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
 kills a child process inside catch-up of a claim correction commit at
 `LocalStaged`, `LocalReleased`, and `Acknowledged`, then reopens twice: the
-live rows equal the seed ledger of the original claim after the staged cut and
-of the successor after the later cuts, the local checkpoint is S or the
-target accordingly, and the acknowledgement stays at S until the
-acknowledged cut and never exceeds the local checkpoint. The materializer's
-own kernel commit, release, and acknowledgement are cut only in process
-through `EpisodeFault`; the kill is process-restart evidence, not power loss.
+live occurrence ids equal the seed ledger of the original claim after the
+staged cut and of the successor after the later cuts, where the original's
+occurrences are tombstoned; the local checkpoint is S or the target
+accordingly; the acknowledgement stays at S until the acknowledged cut and
+never exceeds the local checkpoint; and an episode in the reopened
+incarnation refuses the crashed hold with `BindingMismatch` or, after the
+acknowledged cut, reaches the target applying nothing, leaving that state
+unchanged. The materializer's own acknowledgement is faulted only in process
+through `EpisodeFault`; its kernel commit and release have no cut. The kill is
+process-restart evidence, not power loss.
 Guarantee: Claim rows, tombstones, checkpoint, and pending work are committed
 locally and the transaction released before the kernel consumer is
 acknowledged.
@@ -731,9 +735,9 @@ Exercised: partial -
 cancels catch-up of a claim correction commit at the hold extension, the
 staged and released local transaction, and the acknowledgement request: each
 ends `Cancelled`, the acknowledgement stays at S, nothing is quarantined, the
-live rows equal the original claim's seed ledger before the local commit and
-the successor's after it, and a fresh episode then reaches the target with the
-successor's ledger. Request-level cancellation belongs to the delivery ticket.
+live occurrence ids equal the original claim's seed ledger before the local
+commit and the successor's after it, and a fresh episode then reaches the
+target with the successor's ledger. Request-level cancellation belongs to the delivery ticket.
 Guarantee: Cancelling a claim episode at any write boundary neither
 acknowledges unapplied work nor loses work already committed locally.
 Check: `always` - after cancellation the local prefix and the kernel checkpoint

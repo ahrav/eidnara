@@ -24,3 +24,5 @@ A process kill between the two.
 ## Investigation log
 
 No open questions at authoring time.
+
+`crates/daemon/tests/claim_sources.rs` `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early` constructs the kill: a child process parks inside catch-up of a claim correction commit at `LocalStaged`, `LocalReleased`, and `Acknowledged`, the parent kills and reaps it, and two reopens compare live occurrence ids, tombstones, both checkpoints, and a recovery episode with the seed ledger.
