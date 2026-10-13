@@ -8,16 +8,22 @@ until blocking work exits and is joined.
 ## Evidence trail
 
 - The route clones `DenseVectors`, which holds the view's `Arc`, before
-  `run_unit` for an `Embedded::Vector` request (`query_route.rs:1992`), and
+  `run_unit` for an `Embedded::Vector` request (`query_route.rs:1997`), and
   moves it into the unit's closure; an undeclared or unavailable embedding
   takes no clone.
 - `rank_compressed` holds its `Scratch` and `RowBuffers` reservations for the
   whole call; the view's tables and pins live while any `Arc` does. `Scratch`
-  is sized by `scan_scratch_bytes` (`crates/daemon/src/vector_reader.rs:303`)
+  is sized by `scan_scratch_bytes` (`crates/daemon/src/vector_reader.rs:213`)
   as the scan's retained payload buffers: per layer one decoded block, the
-  query encoded under the layer's scales, and the layer's code window. The
+  query encoded under the layer's scales, and the layer's mapped code bytes
+  (`crates/daemon/src/vector_mapped.rs`), whose pages become resident as the
+  scan reads them; whole code files are charged on every scan, which a
+  production resident limit must admit. A code file truncated while a scan
+  holds its mapping, or a device error behind a mapped page, raises `SIGBUS`
+  and ends the host process, under the cooperative-file threat model the
+  reader states. The
   per-layer descriptor vectors `rank_compressed` builds
-  (`vector_reader.rs:879-889`) and the scan's control structures are bounded
+  (`vector_reader.rs:811-825`) and the scan's control structures are bounded
   by `max_layers` and `max_entries` and stay outside the charge.
 - `SharedBudget::bridge` awaits the unit after cancellation instead of
   dropping it.

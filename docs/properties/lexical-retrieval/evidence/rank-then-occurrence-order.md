@@ -31,7 +31,7 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 - `admit_batches` and `revalidate` (`:1109`) carry each accepted hit's
   `rank` and `ordinal` into `Contribution` unchanged.
 
-Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1111`)
+Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1116`)
 and `admit_lexical` calls `admit` (`:1271`) under the same projection
 connection, with `lexical_retrieval_bounds` (`:172`) from
 `QueryRouteLimits::production` (`:137`).
@@ -116,7 +116,7 @@ its slot, so liveness never moves the window.
 - Sources examined: `Fixture::project` (`lexical_retrieval.rs:378`), which
   calls `apply_batch` on the opened `SqliteStore`; `Fixture::retrieve`
   (`:429`), which calls `retrieve` (`retrieve.rs:359`); `lexical_read`
-  (`query_route.rs:1088`) and the `admit` call (`:1271`).
+  (`query_route.rs:1093`) and the `admit` call (`:1271`).
 - Findings: the tests write rows through the retrieval projection write path
   and call the same `scan` and `admit` the daemon calls. They use `bounds()`
   with `scan_rows` 64 and `max_accepted` 64, while production uses 4096 and

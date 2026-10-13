@@ -92,7 +92,7 @@ every admission batch and before the final re-judgment.
 | `work_counters_report_exact_and_over_bound_work` | `lexical_retrieval.rs:2876` | probes, counted rows, scanned rows, ranked matches, judgments, batches, and `sql_steps` at the bound and one row below it; equal scanned rows and fewer SQL steps under a result cap of one | unaudited |
 | `lexical_scan_p99_at_one_million_occurrences` | `lexical_retrieval.rs:2203` | D26b open-loop p99 at one million occurrences under production bounds; `#[ignore]`, release, D21 host | unaudited |
 | `each_bound_saturates_before_its_protected_work` | `crates/daemon/tests/query_route.rs:320` | each D23 limit refuses or truncates before the work it protects | unaudited |
-| `the_lexical_ranking_bounds_report_every_scope_they_skip` | `query_route.rs:679` | the route reports every skipped scope | unaudited |
+| `the_lexical_ranking_bounds_report_every_scope_they_skip` | `query_route.rs:684` | the route reports every skipped scope | unaudited |
 | `production_limits_are_the_d23_set` | `query_route.rs:532` | the daemon's limits equal D23 | unaudited |
 
 Production counters: `Consumed` in `retrieve.rs`; `vm_steps` (`retrieve.rs:636`)
@@ -102,7 +102,7 @@ reads `SQLITE_STMTSTATUS_VM_STEP` per statement.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `cancellation_and_deadline_are_observed_in_every_phase` | `query_route.rs:74` | cancellation and a passed deadline before each `Phase`, including `Phase::Lexical` (`crates/daemon/src/query_route.rs:1397`) | unaudited |
+| `cancellation_and_deadline_are_observed_in_every_phase` | `query_route.rs:74` | cancellation and a passed deadline before each `Phase`, including `Phase::Lexical` (`crates/daemon/src/query_route.rs:1402`) | unaudited |
 | `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion` | `lexical_retrieval.rs:1457` | a connection interrupt through `with_conn_interruptible` during the lexical scan | unaudited |
 | `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion` | `lexical_retrieval.rs:2543` | the progress handler fires at every point of counting, ranking, and a common scan; the connection serves the next request | unaudited |
 | `a_budget_that_ends_after_a_probe_yields_an_incomplete_result_with_no_contributions` | `lexical_retrieval.rs:1350` | a budget that ends between probes | unaudited |

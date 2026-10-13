@@ -8,8 +8,8 @@ prune.
 
 ## Evidence trail
 
-- `rank_compressed` (`crates/daemon/src/vector_reader.rs:828`) selects the
-  pool through `select_candidates_observed` (`vector_reader.rs:902`) over the
+- `rank_compressed` (`crates/daemon/src/vector_reader.rs:760`) selects the
+  pool through `select_candidates_observed` (`vector_reader.rs:838`) over the
   view's own layers, then rescores
   through `rescore_pool` with a read closure that names
   `view.layers[winner.layer]` and `winner.row`.

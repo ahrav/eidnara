@@ -37,8 +37,8 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
   has a byte field.
 - `:359` `retrieve` is the lane entry; the daemon's `lexical_read`
-  (`crates/daemon/src/query_route.rs:1088`) calls `scan` (`:1111`) and
-  `admit_lexical` (`query_route.rs:1255`) calls `admit` (`:1271`).
+  (`crates/daemon/src/query_route.rs:1093`) calls `scan` (`:1111`) and
+  `admit_lexical` (`query_route.rs:1260`) calls `admit` (`:1271`).
 
 Schema, `crates/retrieval/baseline.sql`:
 

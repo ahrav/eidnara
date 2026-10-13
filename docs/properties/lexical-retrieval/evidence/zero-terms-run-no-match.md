@@ -34,9 +34,9 @@ Production code:
   empty hit list in zero batches, so `batches` stays zero and `snapshot` and
   `incarnation` stay `None`.
 - The daemon ends the lane before `scan`: `lexical_read`
-  (`crates/daemon/src/query_route.rs:1088`) returns
+  (`crates/daemon/src/query_route.rs:1093`) returns
   `LaneRead::Ended(LaneStatus::Undeclared)` on `:1108` when the analysis is
-  empty, and `admit_lanes` (`crates/daemon/src/query_route.rs:1365`) refuses
+  empty, and `admit_lanes` (`crates/daemon/src/query_route.rs:1370`) refuses
   a request whose exact, lexical, and dense lanes are all undeclared with
   `InvalidQuery("the query yields no probe")` on `:1433`.
 
@@ -97,7 +97,7 @@ statement is prepared, and the daemon's `is_empty` check runs before `scan`.
 
 ### Q: Can a zero-probe request reach `scan` through the daemon, and does `scan` still hold the guarantee if it does?
 
-- Sources examined: `crates/daemon/src/query_route.rs:1088` through `:1110`
+- Sources examined: `crates/daemon/src/query_route.rs:1093` through `:1110`
   and `:1429` through `:1436`; `crates/retrieval/src/lexical/retrieve.rs:391`
   and `:378`; `crates/retrieval/tests/lexical_retrieval.rs:627`;
   `crates/daemon/tests/query_route.rs:499`.

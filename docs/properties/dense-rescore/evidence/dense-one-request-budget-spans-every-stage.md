@@ -16,7 +16,7 @@ compressed scan, and the original reads.
   and again between its final page and scoring
   (`crates/retrieval/src/dense/oracle.rs:591`);
   `rank_compressed` checks it before every original read, on both sides of
-  the read's observer (`crates/daemon/src/vector_reader.rs:923`, `:932`), so a
+  the read's observer (`crates/daemon/src/vector_reader.rs:859`, `:868`), so a
   cancellation delivered at `ReadOriginal` ends the request before the row's
   bytes are read.
 - The kernel judges each batch with `judge_eligibility_within_budget`.

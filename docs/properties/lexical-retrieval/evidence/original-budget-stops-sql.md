@@ -126,7 +126,7 @@ most of the work in a count, a ranked read, or a common scan.
 ### Q: Does the route test prove an interrupt inside a lexical statement?
 
 - Sources examined: `crates/daemon/tests/query_route.rs:74` through `:110`;
-  `crates/daemon/src/query_route.rs:1397` through `:1399`.
+  `crates/daemon/src/query_route.rs:1402` through `:1399`.
 - Findings: the hook runs in `before_phase`, before `check(budget)` and before
   `lexical_read`. The cancel and the sleep therefore end the request at the
   phase entry check, not inside a MATCH statement. In-flight interruption is

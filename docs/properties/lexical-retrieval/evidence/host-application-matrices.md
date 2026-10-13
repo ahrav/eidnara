@@ -20,7 +20,7 @@ would exercise and the host tests that stop short of it.
 
 Daemon side:
 
-- `admit_lexical` (`crates/daemon/src/query_route.rs:1255`) turns each
+- `admit_lexical` (`crates/daemon/src/query_route.rs:1260`) turns each
   `Contribution` into one `LaneHit` for `Lane::Lexical`, so the lexical lane
   offers at most one hit per occurrence to fusion. `lexical_incomplete`
   (`:1599`) and `lexical_bound_reason` (`:1612`) map `ScanBound`,

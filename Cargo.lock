@@ -893,6 +893,7 @@ dependencies = [
  "lease",
  "libc",
  "memchr",
+ "memmap2",
  "memory-store",
  "mimalloc",
  "proptest",

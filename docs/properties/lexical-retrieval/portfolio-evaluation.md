@@ -18,7 +18,7 @@ lexical_engine` (`lexical_engine`: 15 passed; `lexical_retrieval`: 36 passed,
 grepped `crates/*/src` for callers of `lexical::retrieve`,
 `retrieve_with_hook_for_test`, `scan`, and `admit` from the lexical module:
 `retrieve` has no production caller; the daemon reaches the lane through
-`scan` (`crates/daemon/src/query_route.rs:1111`) and `admit` (`:1271`), and
+`scan` (`crates/daemon/src/query_route.rs:1116`) and `admit` (`:1271`), and
 `retrieve_with_hook_for_test` is exported only under the `test-support`
 feature (`crates/retrieval/src/lexical/mod.rs:27`). Every `file:line`
 reference in `catalog.md` and `existing-checks.md` was checked with `sed -n`
@@ -46,7 +46,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    in_scope),`.
 2. **The catalog names no production entry point.** In `catalog.md`, after
    "A record exercised only by a fixture engine says so.", add: "The daemon
-   reaches the lane through `scan` (`crates/daemon/src/query_route.rs:1111`)
+   reaches the lane through `scan` (`crates/daemon/src/query_route.rs:1116`)
    and `admit` (`:1271`), each under `QueryRouteLimits::lexical_retrieval_bounds`
    (`:172`); `retrieve` has no production caller, and
    `crates/retrieval/tests/lexical_retrieval.rs:652`
@@ -54,11 +54,11 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    is the bridge every `retrieve`-driven check rests on."
 3. **`zero-terms-run-no-match` asserts a completion production never
    produces.** `lexical_read` returns `LaneStatus::Undeclared` when the
-   analysis is empty (`crates/daemon/src/query_route.rs:1107`) before `scan`
+   analysis is empty (`crates/daemon/src/query_route.rs:1112`) before `scan`
    runs, so `Completion::Empty` is reached only by tests that call `scan` or
    `retrieve` with zero probes. Replace `Reachability: default-production`
    with `Reachability: default-production - the route's guard is the
-   `Undeclared` return at `crates/daemon/src/query_route.rs:1108`;
+   `Undeclared` return at `crates/daemon/src/query_route.rs:1113`;
    `Completion::Empty` itself is test-only`. Append to `Existing check:`
    "; `crates/daemon/tests/query_route_dense.rs:365`
    `a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`
@@ -126,7 +126,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    `eligibility-before-accepted-slots` covers the pre-slot judgment and
    `one-kernel-eligibility-policy` the agreement, neither the re-judgment.
    Queue `accepted-set-is-revalidated-before-return` (`always`,
-   default-production through `admit` at `query_route.rs:1271`): every
+   default-production through `admit` at `query_route.rs:1276`): every
    returned contribution was judged eligible in the final batch, and a
    retirement, snapshot move, or incarnation change after admission drops or
    marks it with the recorded precedence.
@@ -205,7 +205,7 @@ absence of `always-or-unreached` is correct.
   constant, or statement. `crates/kernel/src/eligibility.rs:310` is a call
   site, not the definition (refinement 1).
 - Reachability: `scan` and `admit` are called from
-  `crates/daemon/src/query_route.rs:1111` and `:1271`; `retrieve` and
+  `crates/daemon/src/query_route.rs:1116` and `:1271`; `retrieve` and
   `retrieve_with_hook_for_test` have no caller under `crates/*/src`. The
   `default-production` labels on the eight code-path records hold through
   `scan` and `admit`; refinement 3 narrows one, bias 1 and bias 2 question two.

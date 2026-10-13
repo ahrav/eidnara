@@ -667,6 +667,11 @@ impl DenseVectors {
         }
     }
 
+    /// The verified view this lane ranks through.
+    pub fn view(&self) -> &Arc<PinnedVectors> {
+        &self.view
+    }
+
     /// Runs `observe` at every scan window and rescore event, on the blocking thread that ranks, so a test can hold the physical work there.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_observer_for_test(mut self, observe: DenseObserver) -> Self {

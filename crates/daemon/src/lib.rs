@@ -1,6 +1,7 @@
 //! `Handler` owns the primary host lifecycle, transforms already-decoded wire items, and persists per-session state in the single-writer `memory-store`.
 
-#![forbid(unsafe_code)]
+// `deny(unsafe_code)` permits the one scoped `allow` in `vector_mapped`, which maps a pinned layer's int8 codes for the candidate scan.
+#![deny(unsafe_code)]
 
 pub mod boundary;
 pub mod canonical_memory;
@@ -98,7 +99,9 @@ pub mod request_budget;
 pub mod vector_admission;
 pub mod vector_compaction;
 pub mod vector_composition;
+pub mod vector_current;
 pub mod vector_generation;
+mod vector_mapped;
 pub mod vector_reader;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};

@@ -718,7 +718,7 @@ fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_
 }
 
 #[test]
-fn a_code_window_across_a_cut_serves_the_rows_before_it_and_refuses_the_first_missing_row() {
+fn a_code_file_cut_before_the_scan_serves_the_rows_before_it_and_refuses_the_first_missing_row() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
@@ -726,7 +726,7 @@ fn a_code_window_across_a_cut_serves_the_rows_before_it_and_refuses_the_first_mi
         .publish(&fixture.compose(1, &base, &[]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    // Two of the five rows of codes remain, so the layer's first window cannot be read whole.
+    // Two of the five rows of codes remain when the scan maps the file, so only those two are mapped.
     let codes = fixture
         .generation_dir(&base.digest)
         .join(daemon::vector_generation::CODES_FILE);
@@ -1301,7 +1301,7 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
 }
 
-/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's code window, and the query encoded under that layer's scales.
+/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's mapped codes, and the query encoded under that layer's scales.
 #[test]
 fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     let mut fixture = Fixture::new();
@@ -1316,12 +1316,12 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     let layers = view.layers().len();
     assert_eq!(layers, 3);
     let dimension = 8u64;
-    let windows: u64 = view
+    let mapped: u64 = view
         .layers()
         .iter()
         .map(|layer| layer.occurrence_ids().len() as u64)
         .sum();
-    let expected = (BLOCK_ROWS as u64 * layers as u64 + windows + layers as u64) * dimension;
+    let expected = (BLOCK_ROWS as u64 * layers as u64 + mapped + layers as u64) * dimension;
     let at_selection = std::cell::Cell::new(None);
     let (outcome, _) = run(
         &fixture,
@@ -1337,12 +1337,12 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     assert_eq!(
         at_selection.get(),
         Some(expected),
-        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the window, and the encoded query per layer"
+        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the mapped codes, and the encoded query per layer"
     );
     assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
 }
 
-/// A cancellation delivered at the walk's final `AfterPage` ends the scan before any code window is read for scoring.
+/// A cancellation delivered at the walk's final `AfterPage` ends the scan before any mapped code is read for scoring.
 #[test]
 fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
     let mut fixture = Fixture::new();
@@ -1689,18 +1689,31 @@ fn a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row() {
     }
     let base = fixture.layer_from(&export(&corpus, &[], 10));
     let delta = fixture.layer_from(&export(&[(smallest, lead.clone())], &[], 12));
+    let delta_digest = delta.digest.clone();
     fixture
         .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    assert_eq!(
-        winner(&view, 1, smallest).1.0,
-        1,
-        "the smallest tied identifier wins from the delta"
-    );
+    let (smallest_id, delta_row) = winner(&view, 1, smallest);
     let ordered: Vec<String> = ids.iter().map(|(id, _)| id.clone()).collect();
     for k in 1..=3 {
-        let (ranking, _) = rank_simple(&fixture, &projection, &view, &axis(0), k, 5);
+        let (ranking, reads) = rank_simple(&fixture, &projection, &view, &axis(0), k, 5);
+        let at = ranking
+            .pool
+            .ranking
+            .ranked
+            .iter()
+            .position(|row| row.occurrence_id == smallest_id)
+            .expect("the smallest tied identifier is pooled");
+        assert_eq!(
+            (ranking.pool.winners[at].layer, ranking.pool.winners[at].row),
+            delta_row,
+            "k {k}: the smallest tied identifier wins from the delta"
+        );
+        assert!(
+            reads.contains(&(delta_digest.clone(), delta_row.1)),
+            "k {k}: its original row is read from the delta: {reads:?}"
+        );
         let pool: BTreeSet<String> = pool_keys(&ranking).into_iter().map(|(id, _)| id).collect();
         assert!(
             ordered.iter().all(|id| pool.contains(id)),

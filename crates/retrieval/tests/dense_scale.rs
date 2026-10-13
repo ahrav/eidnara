@@ -126,19 +126,21 @@ fn compressed_top64_matches_the_f64_oracle_for_at_least_99_percent_of_queries() 
     let pool_size = setting("EIDNARA_DENSE_SCALE_POOL", 256);
     assert!(query_count > 0, "the run needs queries");
     assert!(
-        pool_size >= K && rows >= pool_size,
-        "the corpus fills the pool"
+        (K..=kernel::MAX_ELIGIBILITY_CANDIDATES).contains(&pool_size) && rows >= pool_size,
+        "the pool holds at least {K} and at most one kernel batch, and the corpus fills it"
     );
+    assert!(dimension > 0, "rows need at least one coordinate");
     let started = Instant::now();
     let vectors = corpus(rows, dimension);
     let queries = queries(&vectors, query_count);
     let objects: Vec<String> = (0..rows).map(|index| format!("dense-{index:07}")).collect();
     let object_refs: Vec<&str> = objects.iter().map(String::as_str).collect();
-    // Each projected row carries its vector, so its embedding job is complete and every row counts toward dense coverage.
     let projected: Vec<Row> = objects
         .iter()
-        .zip(&vectors)
-        .map(|(object, vector)| Row::claim(object, vector.clone()))
+        .map(|object| Row {
+            vector: None,
+            ..Row::claim(object, Vec::new())
+        })
         .collect();
     let width = u32::try_from(dimension).unwrap();
     let fixture = Fixture::with_dimension(&object_refs, &object_refs, projected, width);

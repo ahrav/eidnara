@@ -82,8 +82,8 @@ Type: safety
 Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:527`)
 is built by `select_inner` (`crates/retrieval/src/dense/candidates.rs:312`)
 under `select_candidates_observed`, which `rank_compressed` calls;
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`) reaches
-`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1878`)
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:701`) reaches
+`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1883`)
 installs a composition, and no production caller installs one at this HEAD.
 `TermTable::score_rows` (`scalar.rs:644`) is called from
 `crates/retrieval/tests/` only.
@@ -228,7 +228,7 @@ is one allocation scaling with `R`. At the route,
 installation for a NaN alpha, an alpha below one, and an over-cap pool with
 their refusal classes, and a producer carrying each degrades the lane as
 `capacity` with no observed scan window. Only the producer's first check
-(`crates/daemon/src/query_route.rs:704-707`) returns `capacity`, ahead of
+(`crates/daemon/src/query_route.rs:709-712`) returns `capacity`, ahead of
 `rank_compressed`'s reservations; the ledger census after the request cannot
 show a reservation that was released. A zero `K` cannot reach the route,
 whose `DenseLimits.k` is a `NonZeroUsize`.
@@ -344,7 +344,8 @@ Open questions:
 Type: liveness
 Reachability: test-only - `select_candidates`
 (`crates/retrieval/src/dense/candidates.rs:263`) is called only from
-`crates/retrieval/tests/dense_candidates.rs`; `select_candidates_observed`
+`crates/retrieval/tests/dense_candidates.rs` and the ignored scale driver
+`crates/retrieval/tests/dense_scale.rs`; `select_candidates_observed`
 (`candidates.rs:273`) runs the same `select_inner` from `rank_compressed`,
 which the route reaches only behind an installed composition, and no
 production caller installs one at this HEAD.
@@ -384,10 +385,11 @@ Type: safety
 Reachability: test-only - `select_candidates_observed`
 (`crates/retrieval/src/dense/candidates.rs:273`) is called from
 `crates/retrieval/tests/dense_candidates.rs` and from `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:902`); `select_candidates`
-(`candidates.rs:263`) has no caller in the workspace. The route reaches
+(`crates/daemon/src/vector_reader.rs:838`); `select_candidates`
+(`candidates.rs:263`) is called only by those tests and the ignored scale
+driver `crates/retrieval/tests/dense_scale.rs`. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
-`set_dense_vectors` (`crates/daemon/src/query_route.rs:1878`) installs a
+`set_dense_vectors` (`crates/daemon/src/query_route.rs:1883`) installs a
 composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
@@ -501,9 +503,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:828`) is called by
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`), which the
-route builds only after `set_dense_vectors` (`query_route.rs:1878`) installs a
+(`crates/daemon/src/vector_reader.rs:760`) is called by
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:701`), which the
+route builds only after `set_dense_vectors` (`query_route.rs:1883`) installs a
 composition; no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
@@ -694,8 +696,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:2027`) only when `set_dense_vectors`
-(`query_route.rs:1877`) has installed a composition, and no production caller
+(`crates/daemon/src/query_route.rs:2032`) only when `set_dense_vectors`
+(`query_route.rs:1882`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -745,7 +747,7 @@ Open questions:
   check between the final page and scoring
   (`crates/retrieval/src/dense/oracle.rs:591`), its batch checks, and the
   checks around each original read's observer
-  (`vector_reader.rs:923`, `:932`) (needs human input).
+  (`vector_reader.rs:859`, `:868`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.
@@ -770,18 +772,19 @@ once it finishes, and a request under the same limit then completes. The
 next admission there is a direct ledger reservation, because the fixture's
 projection connection serves one request at a time. `dense_request_lifetime.rs`
 `a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends`
-starts a component shutdown while a unit is held at an original read; the
-unit's scratch, row buffers, and view pin stay charged until it returns, and
-the ledger is empty only after.
+runs a component shutdown to completion while a unit is held at an original
+read; the unit's scratch, row buffers, and view pin stay charged until it
+returns, the ledger is empty only after, and the released request still
+answers `fused`.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
-setters' locks before the unit is submitted (`query_route.rs:1992`), so the
+setters' locks before the unit is submitted (`query_route.rs:2006-2016`), so the
 unit ranks under a pair the setters checked together and the view's pins and the ranking's `Scratch` and
 `RowBuffers` reservations stay charged until the blocking work returns; a
 cancelled request settles only after that work ends, and every charge is
 released when it does. A request whose embedding is undeclared or unavailable
 holds no clone, so an uninstall while its unit is pending leaves the retired
-view's teardown to the clones that rank. Corrected from `query_route.rs:1977`,
+view's teardown to the clones that rank. Corrected from `query_route.rs:1982`,
 the clone's line before the match on `embedded`.
 Check: `always` - with the ranking thread held at each stage after the client
 cancelled, no error frame is published for 200 ms; on release the ledger
@@ -863,7 +866,7 @@ later route-limit change that the installed vectors cannot serve, and
 `vectors_install_only_under_the_tolerance_their_layers_carry`.
 Guarantee: A composition installs only under declared dense limits whose
 `unit_norm_tolerance` equals the view's layout bit for bit (`check_pair`,
-`query_route.rs:753`), and only when the pool `CompressedLimits::capacity`
+`query_route.rs:758`), and only when the pool `CompressedLimits::capacity`
 (`query_route.rs:617`) derives from the lane's `k` and the alpha policy passes
 the capacity checks and fits one kernel eligibility batch, with scan pages
 within the batch as well; a later route-limit change is checked against the
@@ -886,12 +889,12 @@ Open questions:
 - Parent Q6 approval of the production values; #825 D23 and D27 name `k` 64
   and a pool of 256 (needs human input).
 - Installation leaves the entry bound to request time. `check_pair`
-  (`query_route.rs:753`) calls `CompressedLimits::capacity`
+  (`query_route.rs:758`) calls `CompressedLimits::capacity`
   (`query_route.rs:618`), which checks `k`, the alpha policy, `candidates`, and
   `scan_page_rows`; `max_entries` is first compared with the view's rows inside
   the request's scan. A composition whose entry bound is below its rows
   installs, and every request then reserves `Scratch` and `RowBuffers`
-  (`vector_reader.rs:876`, `:878`) and degrades as `layers`, as
+  (`vector_reader.rs:808`, `:810`) and degrades as `layers`, as
   `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan` shows. This
   conflicts with the Check rationale that a limit every request would refuse
   must never reach a request (needs human input).
@@ -919,7 +922,7 @@ quarantine, and no charge left, one missing at the route's final
 revalidation ends the request as `Unavailable("eligibility")`, and the next
 request serves after each; cancellation and deadlines end the request with
 their own
-terminals (`compressed_refusal`, `query_route.rs:770`; `lane_status`,
+terminals (`compressed_refusal`, `query_route.rs:775`; `lane_status`,
 `query_route.rs:582`).
 Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
@@ -928,8 +931,8 @@ degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
 `reservation`, and a view of another kernel incarnation as `identity`; an
 entry bound of one degrades as `layers` with no row visited and no scratch or
 row-buffer charge left, although the route reserves both
-(`vector_reader.rs:876`, `:878`) before the scan applies the bound
-(`vector_reader.rs:900`), and the bound equal to the view's rows completes;
+(`vector_reader.rs:808`, `:810`) before the scan applies the bound
+(`vector_reader.rs:836`), and the bound equal to the view's rows completes;
 the corruption and the quarantine reasons are those strings. `always` because no
 failure may pass as a successful dense completion.
 Fault/timing angle: Corruption between selection and the reads.
