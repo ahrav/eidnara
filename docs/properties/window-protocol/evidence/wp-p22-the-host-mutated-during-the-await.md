@@ -106,3 +106,11 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Re-evidence 2026-10-13 (#996)
+
+The await-mutation witnesses still run with the mutation after send and before
+the response at a nonzero boundary, now over a capture that kept its verified
+tapes. "rejects a hook planted in a verified prefix message while the pass
+awaits the daemon, without running it" adds a pass whose deferred response
+receives the planted accessor and declines at publish.
