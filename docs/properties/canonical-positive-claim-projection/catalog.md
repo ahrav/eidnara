@@ -20,11 +20,15 @@ and harness delivery are not yet wired; their records say so.
 
 ## Reachability classes
 
-- `default-production`: reached by the daemon with no configuration. The search
-  lifecycle owner runs the claim materializer, and the query route reads claim
-  facts for validation; records whose subject those callers reach say so. The
-  causality writer has no daemon caller.
-- `test-only`: constructed only by `crates/kernel/tests/kernel_claim_facts.rs`.
+Each record states its own class and the evidence for it.
+
+- `default-production`: reached by the daemon with no configuration.
+- `explicit-config-only`: reached by the daemon only after an owner installs a
+  search admission manifest and campaign evidence
+  (`crates/daemon/src/projection_admission.rs:220`) that admit the hooks the
+  path takes.
+- `test-only`: constructed only by tests under `crates/kernel/tests/` and
+  `crates/daemon/tests/`.
 
 ## Index
 
@@ -128,9 +132,10 @@ Impact: a projection built from drifting facts serves approval or maturity the
 kernel never granted; a cache or fenced comparison that treats `served` as
 fixed at S misses a later tightening.
 Open questions:
-- The projected-row comparison predicts the facts from the seeds, not from a
-  direct query of the canonical tables at S; the kernel reader test makes that
-  table comparison.
+- No test compares the facts at S with an independent query of the canonical
+  tables at S, which the Check requires: the projected-row test predicts them
+  from the seeds, and the kernel reader test compares them with the writer's
+  returned admission, the serving route's `visible_as_of`, and literal values.
 
 ### canonical-provenance-survives-approved-write-read-path
 
@@ -197,37 +202,51 @@ Open questions: None.
 ### claim-enablement-requires-approved-evidence
 
 Type: safety
-Reachability: default-production - the search lifecycle owner runs
-`ClaimMaterializer` from `run_claim_slice`
-(`crates/daemon/src/search_lifecycle_owner.rs:551`, the materializer call at
-`:570`), whose publication grants and checks no projection-gate admission; the
-query route validates claims through `validate_claims`
-(`crates/daemon/src/query_route.rs:1707`), which reads the kernel's claim facts
-through `retrieval::claims::read_selected_claims`
-(`crates/retrieval/src/claims.rs:441`).
-Status: active - not held at this HEAD: claim publication and claim validation
-run in production with no claim-specific admission and no approved RP2.9
-limits.
+Reachability: default-production - the search maintenance loop calls
+`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2216`), which
+runs `ClaimMaterializer` (`:551`, the materializer call at `:570`) and grants
+and checks no projection-gate admission before it publishes claim source
+descriptors. Claim validation on the query route is `explicit-config-only`:
+`validate_claims` (`crates/daemon/src/query_route.rs:1707`) runs inside the
+unit that first calls `SearchLifecycleOwner::pin` (`query_route.rs:2016`),
+which admits `ProjectionHook::EmbeddingBootstrap` through
+`SearchSelection::admit_reader`
+(`crates/daemon/src/search_replacement/selection.rs:430`). That hook needs
+`CanonicalClaims` coverage (`crates/daemon/src/projection_gates.rs:80-84`) and
+opens only under an installed search admission. `validate_claims` reads the
+kernel's claim facts through `retrieval::claims::judge_selected_for_surface`
+(`query_route.rs:1747`; `crates/retrieval/src/claims.rs:476`), which calls
+`KernelStore::judge_surface_eligibility_with_selected_claims`
+(`claims.rs:516`); `read_selected_claims` (`claims.rs:441`) reads only the
+projection rows.
+Status: active - not held at this HEAD: claim publication runs in production
+with no projection-gate admission and no approved RP2.9 limits. Claim
+validation runs only under the generic `EmbeddingBootstrap` admission, which
+approves no claim-specific limits or evidence.
 Exercised: not yet - no test asserts that claim projection or delivery stops
-without an admitted hook, because no such hook exists.
+without an admitted claim hook, because no such hook exists.
 Guarantee: No production path enables claim projection or delivery without the
 approved RP2.9 limits and evidence the specification requires.
-Check: `unreachable` - a production route that reads claim facts or records
-claim causality without an admitted `projection_gates` hook must not exist.
-The two callers above are such routes.
+Check: `unreachable` - a production route that publishes claim source
+descriptors, reads claim facts, or records claim causality without an admitted
+`projection_gates` hook must not exist. The claim slice above is such a route.
+The query route admits `EmbeddingBootstrap` before it reads claim facts; it has
+no claim-specific hook.
 Fault/timing angle: none.
-Required faults and enabling state: the default-production claim slice and
-query route above.
+Required faults and enabling state: the default-production claim slice above;
+for the query route, an installed search admission that admits
+`EmbeddingBootstrap`.
 Confidence: medium - [evidence](evidence/claim-enablement-requires-approved-evidence.md).
 Verified by search at this HEAD: `ClaimMaterializer::new` and
-`read_selected_claims` have the callers named above; `record_claim_causality`
-has no daemon caller.
+`judge_selected_for_surface` have the callers named above;
+`record_claim_causality` has no daemon caller.
 Existing check: none.
 Impact: unapproved capacity or evidence reaches users.
 Open questions:
-- Which `ProjectionHook` variant gates claim projection and retrieval, and
-  whether the running claim slice must stop until it exists? (needs human
-  input)
+- Which `ProjectionHook` variant gates claim projection and retrieval, whether
+  the generic `EmbeddingBootstrap` admission on the query route satisfies this
+  record, and whether the running claim slice must stop until a claim hook
+  exists? (needs human input)
 
 ### claim-export-predecode-bounds
 
@@ -628,7 +647,11 @@ Open questions: None.
 ### claim-local-commit-before-ack
 
 Type: safety
-Reachability: test-only
+Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
+(`crates/daemon/src/search_lifecycle_owner.rs:1129`) runs
+`SearchCatchUp::run_episode` (`:1173`) over the claim commits the claim slice
+publishes, after an installed search admission admits `EmbeddingBootstrap`
+and `GitDurableRows` (`:1148-1154`).
 Status: active
 Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
 `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
@@ -733,7 +756,11 @@ Open questions: None.
 ### claim-cancellation-preserves-durable-work
 
 Type: safety
-Reachability: test-only
+Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
+(`crates/daemon/src/search_lifecycle_owner.rs:1129`) runs claim catch-up under
+a budget linked to the caller's (`:1172`) and cancels the episode when an
+admission grant is invalidated (`:1180-1182`), after an installed search
+admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1148-1154`).
 Status: active
 Exercised: partial -
 `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`
