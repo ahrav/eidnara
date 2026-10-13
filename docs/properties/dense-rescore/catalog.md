@@ -574,12 +574,15 @@ Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
+`an_ordinary_read_failure_of_an_accepted_row_is_io_and_leaves_the_view_usable`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
 `cancellation_after_an_empty_selection_is_a_budget_refusal`,
 `a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`,
 `a_corrupt_composition_with_no_prior_state_serves_nothing_until_rebuilt`, and
 `recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`;
+`crates/daemon/tests/query_route_compressed.rs`
+`a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
 `only_missing_or_malformed_rows_count_as_walk_corruption` in
@@ -597,7 +600,15 @@ Check: `always` - a rows file cut to its header after selection refuses with
 row buffers; NaN rows and doubled, finite rows refuse with `Rejected` naming
 the member and the pool's best entry; an emptied codes file refuses the scan
 and quarantines the view, while a cancelled scan does not; the read
-classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
+classifier maps only `UnexpectedEof` to `Missing`; an accepted-row read
+that reports another error refuses the ranking as `Io` naming the member and
+the pool's best entry after one attempted read and leaves the view
+unquarantined, and the same view ranks the same result once reads succeed;
+the route degrades the dense lane as `read_failed` while the other lanes keep
+their healthy status, releases the charges, and serves the lane again once
+reads succeed; the same
+seam reporting `UnexpectedEof` refuses as `Missing` and quarantines; a
+cancelled budget refuses
 with no read and no quarantine, and so does one cancelled over a pool with no
 entry to read; a
 re-acquisition re-verifies, recovery takes the prior verified composition, and
@@ -623,10 +634,11 @@ Open questions:
 - Parent Q4: persistent quarantine is re-verification on acquisition, which
   refuses a member whose files no longer hash; a transient fault that leaves
   the files intact is served again after re-acquisition (needs human input).
-- The I/O classification is checked at the classifier and the
-  code-corruption predicate; no test makes a real file return a read error
-  other than a short read, so the rescore's `Io` arm and the scan's
-  `ReadFailed` arm are reached only by reading.
+- The rescore's `Io` arm is reached through
+  `PinnedVectors::fail_original_reads_for_test`, which hands an error kind to
+  the production classifier in place of the positioned read; no test makes a
+  real file return such an error, and the scan's `ReadFailed` arm is reached
+  only by reading.
 
 ### dense-stage-evidence-keeps-coverage-and-recall-apart
 

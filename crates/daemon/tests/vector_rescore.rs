@@ -591,6 +591,76 @@ fn a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute() {
 }
 
 #[test]
+fn an_ordinary_read_failure_of_an_accepted_row_is_io_and_leaves_the_view_usable() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let rank = || {
+        run(
+            &fixture,
+            &projection,
+            &view,
+            &axis(0),
+            capacity(5, 5),
+            &ROOMY,
+            &EvalBudget::unbounded(),
+            || {},
+        )
+    };
+    let (healthy, _) = rank();
+    let healthy = healthy.unwrap();
+
+    // An error other than a file ending early is a failed read: the request refuses with the accepted row named after attempting only that row, and the view stays usable.
+    for kind in [
+        std::io::ErrorKind::Other,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        view.fail_original_reads_for_test(Some(kind));
+        let (outcome, reads) = rank();
+        match outcome {
+            Err(CompressedRefusal::Io {
+                member,
+                occurrence_id: refused,
+                ..
+            }) => {
+                assert_eq!(member, base.digest, "{kind:?}");
+                assert_eq!(refused, occurrence_id("alpha"), "{kind:?}");
+            }
+            other => panic!("{kind:?}: {other:?}"),
+        }
+        assert_eq!(reads.len(), 1, "{kind:?}: the first accepted row only");
+        assert!(!view.is_quarantined(), "{kind:?}");
+    }
+
+    view.fail_original_reads_for_test(None);
+    let (recovered, _) = rank();
+    let recovered = recovered.unwrap();
+    assert_eq!(
+        recovered.rescored, healthy.rescored,
+        "the same view ranks again once reads succeed"
+    );
+
+    // The same seam reporting a file that ends early is a missing row, which quarantines.
+    view.fail_original_reads_for_test(Some(std::io::ErrorKind::UnexpectedEof));
+    let (outcome, _) = rank();
+    assert!(
+        matches!(
+            outcome,
+            Err(CompressedRefusal::Corrupt {
+                fault: RowFault::Missing(_),
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(view.is_quarantined());
+}
+
+#[test]
 fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);

@@ -338,6 +338,9 @@ pub struct PinnedVectors {
     pinned: Pinned,
     /// Set when a read found this view's rows or codes missing or corrupt; every later ranking over this view refuses. The flag belongs to this view alone: another acquisition of the same composition re-verifies its members and refuses one whose files no longer hash.
     quarantined: AtomicBool,
+    /// An error every original-row read of this view reports instead of reading, so a test can drive a non-short read failure through rescoring.
+    #[cfg(any(test, feature = "test-support"))]
+    original_read_failure: std::sync::Mutex<Option<std::io::ErrorKind>>,
 }
 
 impl std::fmt::Debug for PinnedVectors {
@@ -375,6 +378,15 @@ impl PinnedVectors {
 
     fn quarantine(&self) {
         self.quarantined.store(true, Ordering::Relaxed);
+    }
+
+    /// Makes every later original-row read of this view fail with `kind` until it is set back to `None`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_original_reads_for_test(&self, kind: Option<std::io::ErrorKind>) {
+        *self
+            .original_read_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
     }
 
     pub fn is_quarantined(&self) -> bool {
@@ -611,6 +623,8 @@ fn hand_off(
         resident,
         pinned,
         quarantined: AtomicBool::new(false),
+        #[cfg(any(test, feature = "test-support"))]
+        original_read_failure: std::sync::Mutex::new(None),
     }))
 }
 
@@ -917,6 +931,17 @@ pub fn rank_compressed(
             // The budget check after `observe` stops the request on a cancellation delivered at `ReadOriginal`, before `row_into` reads the row's bytes.
             if budget.check().is_err() {
                 return Err(ReadStop::Budget);
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(kind) = *view
+                .original_read_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err(ReadStop::Fault(read_fault(
+                    winner.row,
+                    &std::io::Error::from(kind),
+                )));
             }
             layer
                 .row_into(winner.row, &mut bytes, row)
