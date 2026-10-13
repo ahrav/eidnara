@@ -221,7 +221,7 @@ impl From<rusqlite::Error> for LookupRefusal {
 macro_rules! page_sql {
     ($lower:literal) => {
         concat!(
-            "SELECT a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,\
+            "SELECT a.key,a.occurrence_id,a.extraction_version,a.created_commit_seq,\
              o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,\
              o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,\
              t.invalidated_commit_seq,t.reason,o.tuple \
@@ -318,7 +318,7 @@ pub fn page(
             });
             break;
         }
-        let version: u32 = row.get(3)?;
+        let version: u32 = row.get(2)?;
         if version != EXTRACTION_VERSION {
             return Err(LookupRefusal::ExtractionMismatch {
                 stored: version,
@@ -419,26 +419,26 @@ fn sha_indexed(
 impl AssociationRow {
     fn decode(row: &rusqlite::Row<'_>, range: &KeyRange) -> Result<Self, LookupRefusal> {
         let corrupt = || ProjectionError::CorruptRow;
-        let span = decode_span(row.get(9)?, row.get(10)?)?;
-        let occurrence_created_commit_seq: i64 = row.get(15)?;
-        let created_commit_seq: i64 = row.get(4)?;
+        let span = decode_span(row.get(8)?, row.get(9)?)?;
+        let occurrence_created_commit_seq: i64 = row.get(14)?;
+        let created_commit_seq: i64 = row.get(3)?;
         if created_commit_seq != occurrence_created_commit_seq {
             return Err(corrupt().into());
         }
         // Columns the row only checks are borrowed from the statement.
         let borrowed = |index| row.get_ref(index).map_err(LookupRefusal::from);
-        let reason = match borrowed(17)? {
+        let reason = match borrowed(16)? {
             ValueRef::Null => None,
             reason => Some(reason.as_str().map_err(|_| corrupt())?),
         };
-        let tombstone = decode_tombstone(row.get(16)?, reason, occurrence_created_commit_seq)?;
-        let class = borrowed(6)?.as_str().map_err(|_| corrupt())?;
+        let tombstone = decode_tombstone(row.get(15)?, reason, occurrence_created_commit_seq)?;
+        let class = borrowed(5)?.as_str().map_err(|_| corrupt())?;
         let class = OccurrenceClass::from_code(class).ok_or_else(corrupt)?;
-        let occurrence_id: String = row.get(2)?;
-        let lineage_id: String = row.get(5)?;
-        let revision: i64 = row.get(7)?;
-        let representation: String = row.get(8)?;
-        let tuple = borrowed(18)?.as_blob().map_err(|_| corrupt())?;
+        let occurrence_id: String = row.get(1)?;
+        let lineage_id: String = row.get(4)?;
+        let revision: i64 = row.get(6)?;
+        let representation: String = row.get(7)?;
+        let tuple = borrowed(17)?.as_blob().map_err(|_| corrupt())?;
         let key: Vec<u8> = row.get(0)?;
         let key_text = std::str::from_utf8(&key).map_err(|_| corrupt())?;
         let identity: &[(&str, &str)] = match (range.family, class) {
@@ -467,10 +467,9 @@ impl AssociationRow {
         {
             return Err(corrupt().into());
         }
-        let target_id: String = row.get(1)?;
-        if derived_target(range.family, &key, &lineage_id) != Some(target_id.as_bytes()) {
-            return Err(corrupt().into());
-        }
+        let target_id = derived_target(range.family, key_text, &lineage_id)
+            .ok_or_else(corrupt)?
+            .to_owned();
         Ok(Self {
             key,
             target_id,
@@ -481,10 +480,10 @@ impl AssociationRow {
             revision,
             representation,
             span,
-            payload_id: row.get(11)?,
-            source_object_id: row.get(12)?,
-            source_evidence_id: row.get(13)?,
-            source_artifact_digest: row.get(14)?,
+            payload_id: row.get(10)?,
+            source_object_id: row.get(11)?,
+            source_evidence_id: row.get(12)?,
+            source_artifact_digest: row.get(13)?,
             tombstone,
         })
     }
@@ -508,15 +507,15 @@ mod tests {
              SELECT printf('occ-%08d',n),x'00','l','canonical_claims',1,'decision_summary','p','d',
                  'normal','s','e','digest',1,0 FROM ids;
              WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
-             INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+             INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                  extraction_version,created_commit_seq)
              SELECT 'id','canonical_object',CAST(printf('obj-%08d',n) AS BLOB),printf('occ-%08d',n),
-                 printf('obj-%08d',n),1,1 FROM ids;
+                 1,1 FROM ids;
              WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
-             INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+             INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                  extraction_version,created_commit_seq)
              SELECT 'sha','sha1:repo',CAST(printf('ab%038x',n) AS BLOB),printf('occ-%08d',n),
-                 printf('obj-%08d',n),1,1 FROM ids;"
+                 1,1 FROM ids;"
         ))
         .unwrap();
         conn

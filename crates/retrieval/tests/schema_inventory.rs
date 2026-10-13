@@ -362,7 +362,7 @@ fn the_baseline_matches_the_frozen_inventory_field_for_field() {
         ("occurrences", "payload_id"),
         ("occurrence_tombstones", "invalidated_commit_seq"),
         ("exact_associations", "key"),
-        ("exact_associations", "target_id"),
+        ("exact_associations", "occurrence_id"),
         ("projection_checkpoint", "checkpoint_commit_seq"),
         ("embedding_jobs", "attempts"),
         ("embedding_jobs", "state"),

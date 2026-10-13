@@ -1163,8 +1163,8 @@ fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
 }
 
 /// The kernel judges the occurrence's source object; the proof names the
-/// association target. A row retargeted by rewriting both its key and its
-/// target, while its tuple still names the original object, must refuse the
+/// association target, which is the key. A row retargeted by rewriting its
+/// key, while its tuple still names the original object, must refuse the
 /// attempt rather than prove the new target.
 #[test]
 fn an_association_retargeted_against_its_tuple_refuses_the_attempt() {
@@ -1177,7 +1177,7 @@ fn an_association_retargeted_against_its_tuple_refuses_the_attempt() {
         .with_conn_fenced(|conn| {
             let altered = conn
                 .execute(
-                    "UPDATE exact_associations SET key=?2, target_id='obj-2' WHERE key=?1",
+                    "UPDATE exact_associations SET key=?2 WHERE key=?1",
                     [b"obj-1".as_slice(), b"obj-2".as_slice()],
                 )
                 .unwrap();
@@ -1675,7 +1675,7 @@ fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_p
                 conn.execute_batch(
                     "ALTER TABLE exact_associations RENAME TO original_associations;
                      CREATE VIEW exact_associations AS SELECT family,namespace,key,occurrence_id,
-                         target_id,extraction_version,interfere(created_commit_seq) AS created_commit_seq
+                         extraction_version,interfere(created_commit_seq) AS created_commit_seq
                      FROM original_associations;",
                 )
             })

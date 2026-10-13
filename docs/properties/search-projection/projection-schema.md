@@ -118,8 +118,9 @@ An occurrence that stopped being live. The occurrence row stays so the invalidat
 One row per exact selector key the versioned source mapping derives for an
 occurrence. `family` is the selector keyword, `namespace` scopes the key
 (`canonical_object` for `id`, `<object_format>:<repository_id>` for `sha`),
-`key` is the normalized key bytes, and `target_id` names the logical target
-the occurrence is evidence for, so alias rows of one target share it. The
+and `key` is the normalized key bytes. Readers derive the logical target the
+occurrence is evidence for: the key for `id` rows, so alias rows of one object
+share it, and the occurrence's `lineage_id` for `sha` rows. The
 composite primary key serves equality and SHA-prefix range scans in stable
 binary order without a sort; the occurrence index serves physical cleanup and
 the selected-claim reads.
@@ -131,7 +132,9 @@ as their occurrence and before the projection checkpoint advances, and are
 deleted when message cleanup reclaims the occurrence.
 
 Storage: `WITHOUT ROWID`. The primary-key b-tree holds every column, so a page
-reads each association row in the scan that finds it.
+reads each association row in the scan that finds it. A row whose key and
+namespace are at the identity-value bound stays within the b-tree's inline
+payload limit, so it uses no overflow page.
 
 | Column | Type | Not null | Primary key | Column constraints |
 | --- | --- | --- | --- | --- |
@@ -139,7 +142,6 @@ reads each association row in the scan that finds it.
 | `namespace` | TEXT | yes | yes |  |
 | `key` | BLOB | yes | yes |  |
 | `occurrence_id` | TEXT | yes | yes | `REFERENCES occurrences(occurrence_id) ON DELETE RESTRICT` |
-| `target_id` | TEXT | yes | no |  |
 | `extraction_version` | INTEGER | yes | no | `CHECK(extraction_version>0)` |
 | `created_commit_seq` | INTEGER | yes | no | `CHECK(created_commit_seq>0)` |
 

@@ -649,9 +649,9 @@ mod live_rows {
                         ],
                     )?;
                     conn.execute(
-                        "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                        "INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                              extraction_version,created_commit_seq)
-                         VALUES ('id','canonical_object',CAST(?1 AS BLOB),?2,?1,1,1)",
+                         VALUES ('id','canonical_object',CAST(?1 AS BLOB),?2,1,1)",
                         params![object_id, encoded.occurrence_id],
                     )?;
                 }
@@ -762,26 +762,11 @@ mod live_rows {
     }
 
     #[test]
-    fn an_association_whose_target_disagrees_with_its_key_or_row_is_refused() {
+    fn an_association_whose_key_disagrees_with_its_row_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         seed(&store, 2);
-        // The key and the row still identify obj-1; the target names obj-2.
-        store
-            .with_conn_fenced(|conn| {
-                conn.execute(
-                    "UPDATE exact_associations SET target_id='obj-00000002' WHERE occurrence_id=?1",
-                    [occ(1)],
-                )
-            })
-            .unwrap();
-        assert!(matches!(
-            store
-                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
-                .unwrap(),
-            Err(ProjectionError::CorruptRow)
-        ));
-        // Key and target agree on obj-2, but the row's tuple identifies obj-1.
+        // The key names obj-2, but the row's tuple identifies obj-1.
         store
             .with_conn_fenced(|conn| {
                 conn.execute(
@@ -834,7 +819,7 @@ mod live_rows {
                     [occ(1), occ(2)],
                 )?;
                 conn.execute(
-                    "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB), target_id='obj-00000002'
+                    "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB)
                      WHERE occurrence_id=?1",
                     [occ(1)],
                 )
@@ -877,10 +862,9 @@ mod live_rows {
         store
             .with_conn_fenced(|conn| {
                 conn.execute(
-                    "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                    "INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                          extraction_version,created_commit_seq)
-                     VALUES ('id','canonical_object',CAST('obj-00000002' AS BLOB),?1,
-                         'obj-00000002',1,1)",
+                     VALUES ('id','canonical_object',CAST('obj-00000002' AS BLOB),?1,1,1)",
                     [occ(1)],
                 )
             })
