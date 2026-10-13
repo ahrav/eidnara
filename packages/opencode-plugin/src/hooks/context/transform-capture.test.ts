@@ -44,6 +44,7 @@ function reserveCapture(messages: unknown): CaptureLease {
 function captureWithLease(messages: unknown, lease: CaptureLease): CapturedMessages {
     const {
         verified: _verified,
+        verifiedTaped: _verifiedTaped,
         history: _history,
         terminal: _terminal,
         boundary: _boundary,
@@ -1480,6 +1481,63 @@ describe("taped verified prefix", () => {
         roomyHolder.release();
         expect(roomyOwner.chargedBytes).toBe(0);
     });
+
+    it("fills the capture's own snapshots array with the tapes instead of retaining a second one", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        const snapshots = captured.snapshots;
+        expect(snapshots[0]).toBeDefined();
+        expect(lease.reserve(digest.bytes)).toBe(true);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(captured.snapshots).toBe(snapshots);
+        expect(snapshots.slice(0, digest.count)).toStrictEqual([undefined, undefined, undefined]);
+        expect(snapshots[digest.count]).toBeDefined();
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        lease.release();
+    });
+
+    it("keeps the taped flag in an own slot, so an inherited verifiedTaped neither throws nor taints the recheck", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const saved = Object.getOwnPropertyDescriptor(Object.prototype, "verifiedTaped");
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const shortOwner = ownerOf(partial + digest.bytes - 1);
+        const short = leaseOf(shortOwner);
+        try {
+            // A read-only inherited slot: the strict-mode flag write lands on the own slot.
+            Object.defineProperty(Object.prototype, "verifiedTaped", {
+                value: false,
+                writable: false,
+                configurable: true,
+            });
+            const taped = tapedCapture(live, digest, lease);
+            if (!taped) throw new Error("prefix did not verify");
+            expect(Object.hasOwn(taped, "verifiedTaped")).toBe(true);
+            expect(taped.verifiedTaped).toBe(true);
+            expect(capturedMessagesUnchanged(live, taped)).toBe(true);
+            // The capture's own value selects the recheck path while the inherited one reads true.
+            Object.defineProperty(Object.prototype, "verifiedTaped", {
+                value: true,
+                writable: true,
+                configurable: true,
+            });
+            const untaped = tapedCapture(live, digest, short);
+            if (!untaped) throw new Error("prefix did not verify");
+            expect(Object.hasOwn(untaped, "verifiedTaped")).toBe(true);
+            expect(untaped.verifiedTaped).toBeUndefined();
+            expect(capturedMessagesUnchanged(live, untaped)).toBe(true);
+        } finally {
+            if (saved) Object.defineProperty(Object.prototype, "verifiedTaped", saved);
+            else Reflect.deleteProperty(Object.prototype, "verifiedTaped");
+            lease.release();
+            short.release();
+        }
+    });
 });
 
 describe("tape digest encoding", () => {
@@ -2110,6 +2168,20 @@ describe("bounded capture sizing", () => {
         );
         source.bookkeeping.text = "changed";
         expect(capturedMessagesUnchanged(source, captured)).toBe(false);
+    });
+
+    it("charges a nested array's length before enumerating its keys", () => {
+        const dense = new Array(4096).fill(0);
+        const ownKeys = spyOn(Reflect, "ownKeys");
+        try {
+            expect(() => inspectReferenceableMessages([{ dense }], 1024)).toThrow(
+                CaptureBudgetExceeded,
+            );
+            // The length charge rejects the array before its index names are materialized.
+            expect(ownKeys.mock.calls.some(([target]) => target === dense)).toBe(false);
+        } finally {
+            ownKeys.mockRestore();
+        }
     });
 
     it("charges descriptions of retained symbol keys in root and nested metadata", () => {

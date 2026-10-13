@@ -467,17 +467,17 @@ class ReferenceableWalk {
         }
         const lengthSlot = array ? this.data(value, "length", path) : undefined;
         const length: number = lengthSlot?.value ?? 0;
+        // The declared length is charged before the key list exists, so a huge array fails before
+        // its index names are materialized.
+        if (array) this.spend(length);
         // Own keys list every string key before the first symbol, so the symbols are a suffix.
         const keys = Reflect.ownKeys(value);
         let names = keys.length;
         while (names > 0 && typeof keys[names - 1] === "symbol") names -= 1;
-        if (array) {
-            // The declared length is charged before any element read so a huge sparse length fails early.
-            this.spend(length);
+        if (array)
             for (let index = names; index < keys.length; index += 1)
                 if (ARRAY_SYMBOLS.includes(keys[index] as symbol))
                     throw new SourceRejected("extra_property", path);
-        }
         // Opening and closing brackets; each element or key pays its own separator.
         if (array) this.marker(ARRAY, ARRAY_CHARGE, 1);
         else this.marker(OBJECT, OBJECT_CHARGE, 1);
@@ -794,6 +794,10 @@ export interface CapturedMessages {
     bytes: number;
 }
 
+interface WalkedMessages extends CapturedMessages {
+    snapshots: (MessageContentSnapshot | undefined)[];
+}
+
 export interface CapturedHistory extends CapturedMessages {
     /** `history` excludes the final member; `terminal` hashes it alone. */
     history: HistoryDigest;
@@ -870,7 +874,7 @@ export function captureHistory(
         prefix !== undefined && options?.tapePrefix === true && lease.freeBytes >= prefix.bytes;
     const verifier = prefix && new PrefixVerifier(prefix, record);
     const taped: TapedMember[] = [];
-    let captured: CapturedMessages;
+    let captured: WalkedMessages;
     try {
         captured = walkCapture(messages, lease, { taped, verifier });
     } catch (error) {
@@ -890,29 +894,26 @@ export function captureHistory(
     const history: CapturedHistory = {
         ...captured,
         verified: prefix,
+        // The own slot keeps flag reads and writes independent of inherited properties.
+        verifiedTaped: undefined,
         history: hasher.digest(),
         terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
         boundary,
     };
     const tapes = verifier?.tapes;
-    // A reservation the headroom cannot otherwise meet takes the tapes back; the capture then
-    // rechecks its verified members against the digest.
+    // The tapes fill the verified slots of the array the walk built, so the hold retains one
+    // snapshots array; a reclaim clears those slots and the flag.
     const held =
         tapes !== undefined &&
         prefix !== undefined &&
         lease.reserveReclaimable(prefix.bytes, () => {
-            history.snapshots = captured.snapshots;
+            for (let index = 0; index < tapes.length; index += 1)
+                defineSlot(captured.snapshots, index, undefined);
             history.verifiedTaped = undefined;
         });
     if (!held) return history;
-    const snapshots: (MessageContentSnapshot | undefined)[] = [];
-    for (let index = 0; index < captured.snapshots.length; index += 1)
-        defineSlot(
-            snapshots,
-            index,
-            index < tapes.length ? tapes[index] : captured.snapshots[index],
-        );
-    history.snapshots = snapshots;
+    for (let index = 0; index < tapes.length; index += 1)
+        defineSlot(captured.snapshots, index, tapes[index]);
     history.verifiedTaped = true;
     return history;
 }
@@ -922,7 +923,7 @@ function walkCapture(
     messages: unknown,
     lease: CaptureLease,
     digest: { taped: TapedMember[]; verifier?: PrefixVerifier },
-): CapturedMessages {
+): WalkedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
     return walkMembers(
@@ -937,7 +938,7 @@ function walkMembers(
     messages: unknown,
     digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
     reuse?: ReadonlyMap<unknown, MessageContentSnapshot | undefined>,
-): CapturedMessages {
+): WalkedMessages {
     const verifier = digest?.verifier;
     const verifiedCount = verifier?.expected.count ?? 0;
     const members: unknown[] = [];
