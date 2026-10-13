@@ -870,13 +870,18 @@ Status: active
 Exercised: yes - `query_route_compressed.rs`
 `view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_and_quarantines`,
 `each_view_and_scan_bound_degrades_the_lane_with_its_own_reason`,
-`a_view_of_another_kernel_incarnation_degrades_the_lane`, and
-`the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
+`a_view_of_another_kernel_incarnation_degrades_the_lane`,
+`a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`,
+`a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavailable_eligibility`,
+and `the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
 Guarantee: A served compressed ranking reaches fusion with each hit's exact
 original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
-`quarantined`; cancellation and deadlines end the request with their own
+`quarantined`; a canonical registry missing from candidate judgement through
+final revalidation ends the request as `Unavailable("eligibility")` with an
+unexhausted budget, no quarantine, and no charge left, and the next request
+serves; cancellation and deadlines end the request with their own
 terminals (`compressed_refusal`, `query_route.rs:770`; `lane_status`,
 `query_route.rs:582`).
 Check: `always` - the dense positions and raw score bits equal the f64

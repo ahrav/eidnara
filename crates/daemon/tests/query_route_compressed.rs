@@ -383,6 +383,69 @@ async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_co
     fixture.daemon.shutdown().await;
 }
 
+/// The kernel database under `root`, found by name.
+fn kernel_database(root: &std::path::Path) -> std::path::PathBuf {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name == "kernel.sqlite") {
+                return path;
+            }
+        }
+    }
+    panic!("no kernel database under {}", root.display());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavailable_eligibility() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let database = kernel_database(fixture.daemon.data_home());
+    let rename = move |from: &str, to: &str| {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    // The registry the kernel judges candidates against disappears after the scan visits its first window, before judgement, and stays missing through the route's final revalidation.
+    let hidden = Arc::new(Mutex::new(false));
+    let vectors = {
+        let hidden = Arc::clone(&hidden);
+        let rename = rename.clone();
+        composition.observed(move |event| {
+            let mut hidden = hidden.lock().unwrap();
+            if !*hidden && matches!(event, RescoreEvent::Scan(Window::Visited(_))) {
+                rename("object_registry", "object_registry_hidden");
+                *hidden = true;
+            }
+        })
+    };
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, vectors, &budget);
+    rename("object_registry_hidden", "object_registry");
+    assert!(*hidden.lock().unwrap(), "the fault was injected");
+    assert!(
+        matches!(outcome, Err(QueryFailure::Unavailable("eligibility"))),
+        "a failed canonical judgement is a typed failure, never a degraded dense success: {:?}",
+        outcome.as_ref().map(|outcome| &outcome.statuses)
+    );
+    assert!(
+        !budget.shared().is_exhausted(),
+        "a kernel failure is not a budget stop"
+    );
+    assert!(!composition.view.is_quarantined());
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+    fixture.daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
     let fixture = Fixture::build().await;
