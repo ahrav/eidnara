@@ -49,9 +49,17 @@ function daemonLedger(
     const fields = Object.fromEntries(DAEMON_FIELDS.map((field) => [field, count(value[field])]));
     if (DAEMON_FIELDS.some((field) => fields[field] === undefined)) return undefined;
     const counts = fields as Record<(typeof DAEMON_FIELDS)[number], number>;
-    // A base-arm daemon can report the derivation stage as `derive_ck_us`.
-    const named = "derivation_us" in value ? value.derivation_us : value.derive_ck_us;
-    const derivation = named === null || named === undefined ? null : count(named);
+    // A base-arm daemon can carry the derivation stage under an alternate `_us` key.
+    const spelled = Object.keys(value).filter(
+        (key) => key.endsWith("_us") && !(DAEMON_FIELDS as readonly string[]).includes(key),
+    );
+    const stage = spelled.includes("derivation_us")
+        ? "derivation_us"
+        : spelled.length === 1
+          ? spelled[0]
+          : undefined;
+    const named = stage === undefined ? null : value[stage];
+    const derivation = named === null ? null : count(named);
     if (derivation === undefined) return undefined;
     const staged =
         counts.admit_us +
