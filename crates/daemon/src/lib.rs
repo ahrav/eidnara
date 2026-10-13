@@ -25387,7 +25387,7 @@ mod tests {
             serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
         assert_eq!(ledger.admit_us, 15_000);
         assert!(ledger.lane_gate_and_decode_us >= 25_000, "{ledger:?}");
-        assert_eq!(ledger.derive_ck_us, None);
+        assert_eq!(ledger.derivation_us, None);
         assert_eq!(
             ledger.admit_us
                 + ledger.lane_gate_and_decode_us
@@ -25441,7 +25441,7 @@ mod tests {
     /// Each malformed corpus window refuses with one code and text whether the daemon reads the
     /// CK the OpenCode plugin encodes or derives the CK from the native window itself.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_malformed_opencode_window_refuses_alike_from_plugin_ck_and_derived_ck() {
+    async fn a_malformed_opencode_window_refuses_alike_from_the_plugin_and_the_daemon_derivation() {
         use codec::opencode::tests::{PARITY_FIXTURE, native_window, plugin_form};
         let mut fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
         let write = std::env::var_os("EIDNARA_WRITE_OPENCODE_CODEC_PARITY").is_some();
