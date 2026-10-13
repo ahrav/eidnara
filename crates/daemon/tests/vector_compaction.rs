@@ -1405,3 +1405,86 @@ fn competing_disk_work_that_fills_the_pool_refuses_the_publication_and_holds_not
     compacted.discard().unwrap();
     assert_eq!(fixture.ledger.census().disk, 0);
 }
+
+/// The disk pool stages a compacted base with exactly its staged bytes free, the inventory and its manifest, and refuses it one byte short; either refusal holds nothing and leaves the current composition, and the publication succeeds once the pool is free.
+#[test]
+fn the_disk_pool_stages_a_compacted_base_at_its_exact_bytes_and_refuses_one_byte_less() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    let old = fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    // Staging reserves the inventory's files and the manifest the store's walk counts.
+    let need = inventory_bytes(&compacted)
+        + compacted
+            .built()
+            .sidecar
+            .stage_manifest()
+            .canonical_bytes()
+            .len() as u64;
+    let limit: u64 = 1 << 30;
+    fixture.set_limit(DISK_LIMIT, limit);
+    let store_bytes = daemon::vector_admission::Ledger::store_bytes(&fixture.store).unwrap();
+    let held = fixture.ledger.census().disk;
+    let free = limit - store_bytes - held;
+    let compete = |left: u64| {
+        fixture
+            .ledger
+            .reserve_disk(
+                &fixture.admission,
+                ResourceClass::Staging,
+                free - left,
+                &fixture.store,
+            )
+            .unwrap()
+    };
+
+    let competitor = compete(need - 1);
+    let competing = fixture.ledger.census().disk;
+    let refused = publish_compacted(&fixture, &compacted).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            CompactionRefusal::Stage(VectorRefusal::Reservation(Refusal::Denied(
+                Denial::LimitExceeded { limit, .. }
+            ))) if limit == DISK_LIMIT
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.ledger.census().disk, competing);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(old.clone())
+    );
+    drop(competitor);
+
+    // With exactly the base's staged bytes free the base stages, and the publication refuses at the composition record that needs bytes beyond it.
+    let competitor = compete(need);
+    let competing = fixture.ledger.census().disk;
+    let refused = publish_compacted(&fixture, &compacted).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            CompactionRefusal::Composition(daemon::vector_composition::CompositionRefusal::Stage(
+                VectorRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded { limit, .. }))
+            )) if limit == DISK_LIMIT
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.ledger.census().disk, competing);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(old.clone())
+    );
+    drop(competitor);
+
+    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(published.digest)
+    );
+    compacted.discard().unwrap();
+}
