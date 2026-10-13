@@ -340,6 +340,50 @@ async fn a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connec
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    // The next request runs on the same projection connection after its predecessor's budget is cancelled late, so a progress handler left behind would interrupt it.
+    let next_completes = |earlier: &tokio_util::sync::CancellationToken| {
+        earlier.cancel();
+        let (_token, budget) = request_budget(10_000);
+        let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+        assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+        assert_eq!(dense_positions(&outcome).len(), 2);
+        assert!(!budget.shared().is_exhausted());
+        assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+        assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    };
+
+    // A read failure inside the request's guarded read ends its dense lane with an error.
+    composition
+        .view
+        .fail_original_reads_for_test(Some(std::io::ErrorKind::Other));
+    let (token, budget) = request_budget(10_000);
+    let failed = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(failed.statuses[2], LaneStatus::Unavailable("read_failed"));
+    composition.view.fail_original_reads_for_test(None);
+    next_completes(&token);
+
+    // A panic inside the scan unwinds out of the request's guarded read.
+    let (token, budget) = request_budget(10_000);
+    let vectors = composition.observed(|event| {
+        if matches!(event, RescoreEvent::Scan(Window::Visited(_))) {
+            panic!("injected unwind inside the dense scan");
+        }
+    });
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(&fixture, 2, vectors, &budget)
+    }));
+    assert!(
+        unwound.is_err(),
+        "the injected panic unwinds out of the request"
+    );
+    next_completes(&token);
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
     let fixture = Fixture::build().await;
     let mut composition = Composition::of(&fixture);

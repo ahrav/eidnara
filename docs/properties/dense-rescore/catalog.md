@@ -796,14 +796,20 @@ Type: safety
 Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
-`a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`.
+`a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`
+and `a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete`.
 Guarantee: The projection's connection carries one request's stop predicate
 only for that request's read; after request A ends cancelled, request B on the
 same connection completes even when A's token is cancelled again during B's
 original reads, and after request C completes uncancelled, request D
-completes when C's token is first cancelled during D's original reads.
+completes when C's token is first cancelled during D's original reads; a
+request whose dense lane ends `read_failed`, and one that unwinds from a panic
+inside the scan, each leave the next request on the connection complete after
+their own token is cancelled late.
 Check: `always` - A ends `Cancelled`; B and D end with a complete dense lane
-and an unexhausted budget; C's answer stands. `always` because a reused
+and an unexhausted budget; C's answer stands; after the failed and the unwound
+request, the next answers a complete dense lane of two hits with an
+unexhausted budget and no scratch or row-buffer charge left. `always` because a reused
 connection must never carry an earlier caller's cancellation.
 Fault/timing angle: A late cancellation of A inside B's ranking.
 Required faults and enabling state: Two sequential requests on one
