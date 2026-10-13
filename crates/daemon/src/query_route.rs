@@ -14,8 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot, KernelError,
-    KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
+    ArtifactDestination, CausalClass, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot,
+    KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
@@ -1779,7 +1779,8 @@ fn validate_claims(
             .rows
             .into_iter()
             .zip(judgement.verdicts)
-            .filter_map(|(row, verdict)| {
+            .zip(judgement.causality)
+            .filter_map(|((row, verdict), causality)| {
                 let UseVerdict::Permitted(visibility) = verdict else {
                     return None;
                 };
@@ -1789,6 +1790,7 @@ fn validate_claims(
                         object_id: row.object_id,
                         revision: row.revision,
                         visibility,
+                        causality: causality_code(causality.as_ref()),
                     },
                 ))
             }),
@@ -1802,6 +1804,17 @@ struct CanonicalReference {
     revision: i64,
     /// `labeled` obliges the presentation to carry the claim's label.
     visibility: SurfaceVisibility,
+    /// The claim's causal class at the validation snapshot; it informs presentation and never ranking.
+    causality: &'static str,
+}
+
+/// The wire code of a claim's causal class; a permitted claim always has facts, and a claim without them reads as `unknown`.
+fn causality_code(causality: Option<&CausalClass>) -> &'static str {
+    match causality {
+        Some(CausalClass::DirectObservation { .. }) => "direct_observation",
+        Some(CausalClass::DerivedReinjection { .. }) => "derived_reinjection",
+        Some(CausalClass::Unknown(_)) | None => "unknown",
+    }
 }
 
 fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Value {
@@ -1829,6 +1842,7 @@ fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Val
             "decision_object_id": reference.object_id,
             "source_revision": reference.revision,
             "visibility": reference.visibility.as_str(),
+            "causality": reference.causality,
         });
     }
     value

@@ -14,6 +14,7 @@ type Entry = {
     revision?: number;
     lanes?: string[];
     labeled?: boolean;
+    causality?: string;
     /** The fused position; the daemon keeps it when it filters earlier entries out. */
     position?: number;
 };
@@ -41,6 +42,7 @@ function fused(entries: Entry[], extra: Record<string, unknown> = {}) {
                           decision_object_id: entry.object,
                           source_revision: entry.revision ?? 1,
                           visibility: entry.labeled ? "labeled" : "visible",
+                          causality: entry.causality ?? "unknown",
                       },
                   }
                 : {}),
@@ -301,6 +303,7 @@ describe("eidnara_search through the fused route", () => {
                             decision_object_id: id(1),
                             source_revision: 1,
                             visibility: "hidden",
+                            causality: "unknown",
                         },
                     },
                 ],
@@ -417,9 +420,56 @@ describe("eidnara_search through the fused route", () => {
             fused([{ object: id(1) }, { object: id(2) }, { object: id(1), labeled: true }]);
         const execution = await run({ query: "rule" });
         expect(execution.text).toContain(
-            `id=${id(1)} category=NAMING match=fused lanes=dense trust=[labeled]`,
+            `id=${id(1)} category=NAMING match=fused lanes=dense provenance=unknown trust=[labeled]`,
         );
-        expect(execution.text).toContain(`id=${id(2)} category=NAMING match=fused lanes=dense\n`);
+        expect(execution.text).toContain(
+            `id=${id(2)} category=NAMING match=fused lanes=dense provenance=unknown\n`,
+        );
+    });
+
+    it("renders each result's causal class and keeps the route's order whatever the class", async () => {
+        const { kernel, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Unknown first.",
+            labeled: false,
+        });
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "NAMING",
+            summary: "Observed second.",
+            labeled: false,
+        });
+        kernel.routeReply = () =>
+            fused([{ object: id(1) }, { object: id(2), causality: "direct_observation" }]);
+        const execution = await run({ query: "rule" });
+        const first = execution.text.indexOf(
+            `id=${id(1)} category=NAMING match=fused lanes=dense provenance=unknown\n`,
+        );
+        const second = execution.text.indexOf(
+            `id=${id(2)} category=NAMING match=fused lanes=dense provenance=direct_observation\n`,
+        );
+        expect(first).toBeGreaterThan(-1);
+        expect(second).toBeGreaterThan(first);
+    });
+
+    it("refuses a ranked claim whose causal class is not a declared value", async () => {
+        const { kernel, run } = harness();
+        kernel.seedDecision({ object_id: id(1), decision_kind: "NAMING", summary: "Rule." });
+        kernel.routeReply = () => fused([{ object: id(1), causality: "trusted" }]);
+        const execution = await run({ query: "rule" });
+        expect(execution.text).not.toContain("Rule.");
+    });
+
+    it("treats one decision ranked under two causal classes as changed after ranking", async () => {
+        const { kernel, run } = harness();
+        kernel.seedDecision({ object_id: id(1), decision_kind: "NAMING", summary: "Split rule." });
+        kernel.routeReply = () =>
+            fused([{ object: id(1) }, { object: id(1), causality: "direct_observation" }]);
+        const execution = await run({ query: "rule" });
+        expect(execution.text).not.toContain("Split rule.");
+        expect(execution.text).toContain("changed or became unreadable after ranking");
     });
 
     it("stops at the caller's abort and renders nothing withdrawn after ranking", async () => {

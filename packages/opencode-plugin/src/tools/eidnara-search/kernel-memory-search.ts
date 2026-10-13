@@ -39,6 +39,8 @@ export interface MemorySearchResult {
     lanes?: readonly string[];
     sourceName?: string;
     policyLabel?: string;
+    /** The causal class the daemon's route validated a `fused` result's claim under: `direct_observation`, `derived_reinjection`, or `unknown`. */
+    provenance?: string;
     /** Exact SHA-256 digest of the served revision's content bytes. */
     contentDigest?: string;
 }
@@ -60,6 +62,8 @@ export interface AntiMemorySearchResult {
     /** The route lanes that ranked a `fused` result. */
     lanes?: readonly string[];
     policyLabel?: string;
+    /** The causal class the daemon's route validated a `fused` result's claim under. */
+    provenance?: string;
 }
 
 export type KernelMemorySearchResult = MemorySearchResult | AntiMemorySearchResult;

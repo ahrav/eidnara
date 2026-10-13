@@ -987,3 +987,113 @@ async fn a_run_of_denied_claims_is_validated_in_logarithmically_many_batches() {
     );
     fixture.daemon.shutdown().await;
 }
+
+/// Every served claim reports its causal class at the validation snapshot: `unknown` until a causality record exists, then `direct_observation`. The class informs presentation only: recording it leaves every fused position and score unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn served_claims_report_their_causal_class_without_changing_the_ranking() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let before = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let ranked = |body: &serde_json::Value| -> Vec<(String, u64, String)> {
+        body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["occurrence_id"].as_str().unwrap().to_owned(),
+                    entry["score"].as_f64().unwrap().to_bits(),
+                    entry["canonical"]["decision_object_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            })
+            .collect()
+    };
+    let causality = |body: &serde_json::Value, decision: &str| -> Vec<String> {
+        body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["canonical"]["decision_object_id"] == decision)
+            .map(|entry| entry["canonical"]["causality"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let served = causality(&before.body, "rule");
+    assert!(!served.is_empty(), "{}", before.body);
+    assert!(
+        before.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| !entry["canonical"].is_null())
+            .all(|entry| entry["canonical"]["causality"] == "unknown"),
+        "no causality record exists yet: {}",
+        before.body
+    );
+
+    let handle = fixture
+        .store
+        .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+            intent: intent("acquisition"),
+            payload: b"observed".to_vec(),
+            evidence_id: "evidence-acquisition".to_string(),
+            object_id: "evidence-object-acquisition".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: support::query_route::MEMORY.to_string(),
+            source_kind: "tool_output".to_string(),
+            source_id: "native/acquisition".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: kernel::Sensitivity::Normal,
+            provider_egress: kernel::ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("causality:rule"), |envelope| {
+            envelope
+                .record_claim_causality(&kernel::ClaimCausalityRequest {
+                    subject_object_id: "rule",
+                    subject_revision: 1,
+                    evidence: kernel::CausalEvidence::DirectObservation {
+                        acquisition_evidence_id: handle.evidence_id.clone(),
+                        artifact_digest: handle.digest.clone(),
+                    },
+                    observed_at: support::query_route::NOW,
+                })
+                .unwrap();
+            Ok(String::new())
+        })
+        .unwrap();
+    let after = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(
+        causality(&after.body, "rule"),
+        vec!["direct_observation".to_owned(); served.len()],
+        "{}",
+        after.body
+    );
+    assert!(
+        after.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| !entry["canonical"].is_null()
+                && entry["canonical"]["decision_object_id"] != "rule")
+            .all(|entry| entry["canonical"]["causality"] == "unknown")
+    );
+    assert_eq!(
+        ranked(&after.body),
+        ranked(&before.body),
+        "the causal class changes no position or score"
+    );
+    fixture.daemon.shutdown().await;
+}

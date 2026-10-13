@@ -490,7 +490,12 @@ export interface RouteCanonicalReference {
     source_revision: number;
     /** `labeled` obliges the rendered result to carry the claim's label. */
     visibility: "visible" | "labeled";
+    /** The claim's causal class at the daemon's validation snapshot; it informs presentation, never ranking. */
+    causality: RouteCausality;
 }
+
+export const ROUTE_CAUSALITIES = ["direct_observation", "derived_reinjection", "unknown"] as const;
+export type RouteCausality = (typeof ROUTE_CAUSALITIES)[number];
 
 export interface RouteEntry {
     occurrence_id: string;
@@ -531,7 +536,8 @@ function parseRouteEntry(raw: unknown): RouteEntry | null {
             !isRecord(reference) ||
             typeof reference.decision_object_id !== "string" ||
             !isNonNegativeInteger(reference.source_revision) ||
-            (reference.visibility !== "visible" && reference.visibility !== "labeled")
+            (reference.visibility !== "visible" && reference.visibility !== "labeled") ||
+            !oneOf(ROUTE_CAUSALITIES, reference.causality)
         ) {
             return null;
         }
@@ -539,6 +545,7 @@ function parseRouteEntry(raw: unknown): RouteEntry | null {
             decision_object_id: reference.decision_object_id,
             source_revision: reference.source_revision,
             visibility: reference.visibility,
+            causality: reference.causality,
         };
     }
     return { occurrence_id: raw.occurrence_id, position: raw.position, lanes, canonical };

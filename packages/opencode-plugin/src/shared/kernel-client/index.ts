@@ -94,6 +94,7 @@ export {
     type ReadRow,
     ROUTE_LANES,
     type RouteCanonicalReference,
+    type RouteCausality,
     type RouteEntry,
     type RouteLane,
     type RouteTerminal,

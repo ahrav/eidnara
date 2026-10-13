@@ -27,7 +27,11 @@ export function renderAntiMemoryWarning(result: AntiMemorySearchResult): string 
 }
 
 function lanesOf(result: KernelMemorySearchResult): string {
-    return result.lanes && result.lanes.length > 0 ? ` lanes=${result.lanes.join(",")}` : "";
+    const lanes = result.lanes && result.lanes.length > 0 ? ` lanes=${result.lanes.join(",")}` : "";
+    const provenance = result.provenance
+        ? ` provenance=${boundDynamicField(result.provenance)}`
+        : "";
+    return `${lanes}${provenance}`;
 }
 
 function formatResult(result: KernelMemorySearchResult, index: number): string {

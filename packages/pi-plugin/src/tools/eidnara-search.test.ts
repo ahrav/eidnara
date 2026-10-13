@@ -104,6 +104,7 @@ describe("createEidnaraSearchTool", () => {
                         decision_object_id: OBJECT_B,
                         source_revision: 1,
                         visibility: "visible",
+                        causality: "unknown",
                     },
                 },
             ],

@@ -592,7 +592,13 @@ fact combination under `Unknown`, `DirectObservation`, and
 `DerivedReinjection` and asserts equal states; `classify` takes no causal
 class by signature; the daemon test classifies the caught-up projection,
 records a `DirectObservation` on the successor, classifies again, and asserts
-the two maps are equal.
+the two maps are equal. At the route, `crates/daemon/tests/query_route.rs`
+`served_claims_report_their_causal_class_without_changing_the_ranking` serves
+every claim with `canonical.causality` `unknown`, records a
+`DirectObservation` for one decision, and shows that decision's entries report
+`direct_observation` while every fused position and score stays bit-equal; the
+OpenCode and Pi `eidnara_search` tools render the class as `provenance=` and
+keep the route's order (`route-search.test.ts`).
 Guarantee: The causal class of a claim never changes its candidate state, and
 no field of a candidate carries a score, boost, corroboration count, or
 suppression flag derived from it.
