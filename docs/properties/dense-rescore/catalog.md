@@ -805,7 +805,7 @@ original reads, and after request C completes uncancelled, request D
 completes when C's token is first cancelled during D's original reads; a
 request whose dense lane ends `read_failed`, and one that unwinds from a panic
 inside the scan, each leave the next request on the connection complete after
-their own token is cancelled late.
+their own token is cancelled before it.
 Check: `always` - A ends `Cancelled`; B and D end with a complete dense lane
 and an unexhausted budget; C's answer stands; after the failed and the unwound
 request, the next answers a complete dense lane of two hits with an
@@ -872,16 +872,18 @@ Exercised: yes - `query_route_compressed.rs`
 `each_view_and_scan_bound_degrades_the_lane_with_its_own_reason`,
 `a_view_of_another_kernel_incarnation_degrades_the_lane`,
 `a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`,
-`a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavailable_eligibility`,
+`a_kernel_failure_during_candidate_judgement_degrades_the_dense_lane_as_kernel`,
 and `the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
 Guarantee: A served compressed ranking reaches fusion with each hit's exact
 original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
-`quarantined`; a canonical registry missing from candidate judgement through
-final revalidation ends the request as `Unavailable("eligibility")` with an
-unexhausted budget, no quarantine, and no charge left, and the next request
-serves; cancellation and deadlines end the request with their own
+`quarantined`; a canonical registry missing only while the dense candidates
+are judged degrades the dense lane as `kernel` with an unexhausted budget, no
+quarantine, and no charge left, one missing at the route's final
+revalidation ends the request as `Unavailable("eligibility")`, and the next
+request serves after each; cancellation and deadlines end the request with
+their own
 terminals (`compressed_refusal`, `query_route.rs:770`; `lane_status`,
 `query_route.rs:582`).
 Check: `always` - the dense positions and raw score bits equal the f64

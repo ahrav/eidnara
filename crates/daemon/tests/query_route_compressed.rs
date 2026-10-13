@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use daemon::query_route::{
     CompressedLimits, CompressedProducer, DenseLane, DenseLimits, DenseVectors, LaneStatus,
-    LimitsRefusal, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
+    LimitsRefusal, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
 };
 use daemon::request_budget::{Exhaustion, RequestBudget};
 use daemon::vector_admission::{Census, RESIDENT_LIMIT, ResourceClass};
@@ -125,6 +125,17 @@ fn run(
     vectors: DenseVectors,
     budget: &RequestBudget,
 ) -> Result<QueryOutcome, QueryFailure> {
+    run_phased(fixture, k, vectors, budget, |_| {})
+}
+
+/// [`run`] with `before_phase` called as the route enters each phase.
+fn run_phased(
+    fixture: &Fixture,
+    k: usize,
+    vectors: DenseVectors,
+    budget: &RequestBudget,
+    before_phase: impl FnMut(Phase),
+) -> Result<QueryOutcome, QueryFailure> {
     let producer = CompressedProducer {
         limits: dense_limits(k),
         vectors,
@@ -145,7 +156,7 @@ fn run(
             generation_id: GENERATION,
             producer: &producer,
         },
-        |_| {},
+        before_phase,
     )
 }
 
@@ -343,7 +354,7 @@ async fn a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connec
 async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete() {
     let fixture = Fixture::build().await;
     let composition = Composition::of(&fixture);
-    // The next request runs on the same projection connection after its predecessor's budget is cancelled late, so a progress handler left behind would interrupt it.
+    // The next request runs on the same projection connection after its predecessor's token is cancelled, so a progress handler left behind would interrupt it.
     let next_completes = |earlier: &tokio_util::sync::CancellationToken| {
         earlier.cancel();
         let (_token, budget) = request_budget(10_000);
@@ -375,9 +386,12 @@ async fn a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_co
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run(&fixture, 2, vectors, &budget)
     }));
-    assert!(
-        unwound.is_err(),
-        "the injected panic unwinds out of the request"
+    let payload = unwound
+        .err()
+        .expect("the injected panic unwinds out of the request");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"injected unwind inside the dense scan")
     );
     next_completes(&token);
     fixture.daemon.shutdown().await;
@@ -400,7 +414,7 @@ fn kernel_database(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavailable_eligibility() {
+async fn a_kernel_failure_during_candidate_judgement_degrades_the_dense_lane_as_kernel() {
     let fixture = Fixture::build().await;
     let composition = Composition::of(&fixture);
     let database = kernel_database(fixture.daemon.data_home());
@@ -410,7 +424,7 @@ async fn a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavail
         conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
             .unwrap();
     };
-    // The registry the kernel judges candidates against disappears after the scan visits its first window, before judgement, and stays missing through the route's final revalidation.
+    // The registry the kernel judges dense candidates against is missing from the scan's first window until the route admits the exact hits, so only the dense judgement sees the fault.
     let hidden = Arc::new(Mutex::new(false));
     let vectors = {
         let hidden = Arc::clone(&hidden);
@@ -423,15 +437,28 @@ async fn a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavail
             }
         })
     };
+    let restored = Arc::new(Mutex::new(false));
     let (_token, budget) = request_budget(10_000);
-    let outcome = run(&fixture, 2, vectors, &budget);
-    rename("object_registry_hidden", "object_registry");
+    let outcome = {
+        let hidden = Arc::clone(&hidden);
+        let restored = Arc::clone(&restored);
+        let rename = rename.clone();
+        run_phased(&fixture, 2, vectors, &budget, move |phase| {
+            if phase == Phase::Admission && *hidden.lock().unwrap() {
+                rename("object_registry_hidden", "object_registry");
+                *restored.lock().unwrap() = true;
+            }
+        })
+    };
     assert!(*hidden.lock().unwrap(), "the fault was injected");
     assert!(
-        matches!(outcome, Err(QueryFailure::Unavailable("eligibility"))),
-        "a failed canonical judgement is a typed failure, never a degraded dense success: {:?}",
-        outcome.as_ref().map(|outcome| &outcome.statuses)
+        *restored.lock().unwrap(),
+        "the registry returned before admission"
     );
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("kernel"));
+    assert_eq!(outcome.body["degraded"], true);
+    assert_eq!(outcome.body["lanes"]["dense"]["status"], "unavailable");
     assert!(
         !budget.shared().is_exhausted(),
         "a kernel failure is not a budget stop"
@@ -440,6 +467,23 @@ async fn a_kernel_failure_during_candidate_judgement_ends_the_request_as_unavail
     assert_eq!(composition.charged(ResourceClass::Scratch), 0);
     assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
 
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+
+    // A registry still missing at the route's final revalidation fails the whole request with its typed reason.
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run_phased(&fixture, 2, composition.vectors(), &budget, |phase| {
+        if phase == Phase::Revalidation {
+            rename("object_registry", "object_registry_hidden");
+        }
+    });
+    rename("object_registry_hidden", "object_registry");
+    assert!(
+        matches!(outcome, Err(QueryFailure::Unavailable("eligibility"))),
+        "{:?}",
+        outcome.as_ref().map(|outcome| &outcome.statuses)
+    );
     let (_token, budget) = request_budget(10_000);
     let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
     assert_eq!(outcome.statuses[2], LaneStatus::Complete);
