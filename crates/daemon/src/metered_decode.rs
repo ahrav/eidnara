@@ -155,6 +155,8 @@ pub struct ResidentMeter<'r> {
     refusal: AtomicU8,
     shortfall: Mutex<Option<ShortfallMarker>>,
     longest_escaped: AtomicUsize,
+    reserved_needed: AtomicUsize,
+    reserved_longest_escaped: AtomicUsize,
     admitted: AtomicBool,
     /// Set while [`decode_metered_typed_direct`] runs: a string spelling [`RAW_VALUE_TOKEN`]
     /// makes the decode invalid.
@@ -177,6 +179,8 @@ impl<'r> ResidentMeter<'r> {
             refusal: AtomicU8::new(NO_REFUSAL),
             shortfall: Mutex::new(None),
             longest_escaped: AtomicUsize::new(0),
+            reserved_needed: AtomicUsize::new(0),
+            reserved_longest_escaped: AtomicUsize::new(0),
             admitted: AtomicBool::new(false),
             direct: AtomicBool::new(false),
         }
@@ -225,15 +229,23 @@ impl<'r> ResidentMeter<'r> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Starts the footprint over for a second decode of the same body while keeping the
-    /// bytes already held, which the second decode uses before charging more.
+    /// Resets the decode accounting to the footprint and longest escaped length that
+    /// [`Self::reserve_unescape_scratch_of`] recorded, keeping the bytes already held, so a
+    /// second decode of the same body counts the up-front unescape charge once. A meter whose
+    /// charges were taken keeps its permanent refusal.
     pub fn restart(&self) {
         if self.refusal.load(Ordering::Relaxed) == TAKEN {
             return;
         }
-        self.needed.store(0, Ordering::Relaxed);
+        self.needed.store(
+            self.reserved_needed.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         self.refusal.store(NO_REFUSAL, Ordering::Relaxed);
-        self.longest_escaped.store(0, Ordering::Relaxed);
+        self.longest_escaped.store(
+            self.reserved_longest_escaped.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 
     /// Gives every held byte back. A refused decode releases at once rather than at the end
@@ -296,7 +308,13 @@ impl<'r> ResidentMeter<'r> {
         &self,
         longest_escaped: usize,
     ) -> Result<(), Refusal> {
-        self.escaped_text(longest_escaped)
+        self.escaped_text(longest_escaped)?;
+        self.reserved_needed.store(self.needed(), Ordering::Relaxed);
+        self.reserved_longest_escaped.store(
+            self.longest_escaped.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Ok(())
     }
 
     /// Charges `bytes` a request is about to allocate past its decode, with the decode's

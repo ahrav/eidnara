@@ -461,3 +461,19 @@ capacities for every frozen and supplementary corpus body; and the A1 checks
 named above with `crates/daemon/tests/parse_charge_covers_typed_decode.rs`,
 including `a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key` and
 `byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`.
+
+## Restart unescape-charge re-evidence, 2026-10-13 (#994)
+
+`ResidentMeter::restart` (`crates/daemon/src/metered_decode.rs`) returns the
+footprint and the longest escaped length to the values
+`reserve_unescape_scratch_of` recorded at admission. An invalid typed prefix
+therefore restarts into a tree decode that counts the up-front unescape charge
+at the raw length admission took it at, and the direct entry counts the tree
+lane's footprint for the same bytes.
+
+Executed on the #994 branch:
+`a_restarted_tree_decode_keeps_the_admission_unescape_charge`, where a
+duplicate `mid` fails the typed decode ahead of a string of 4096 escaped
+newlines. One byte under the tree lane's footprint both entries answer the
+capacity-excess `invalid_params` refusal; at the footprint both serve the same
+response, and the two meters count one footprint.

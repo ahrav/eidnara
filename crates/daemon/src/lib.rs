@@ -21749,6 +21749,86 @@ mod tests {
         assert!(store.load("ses").unwrap().row_version.is_none());
     }
 
+    /// A duplicate `mid` fails the typed decode ahead of a long escaped string, and the body
+    /// restarts into the tree decode. The direct entry then counts the tree lane's footprint,
+    /// admission's raw-length unescape charge included, and refuses the body one byte under
+    /// that footprint with the tree lane's code.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_restarted_tree_decode_keeps_the_admission_unescape_charge() {
+        async fn through(
+            body: &[u8],
+            pool: &TestPool,
+            direct: bool,
+        ) -> (BodyLane, (String, String, Option<Value>), usize) {
+            let (handler, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let meter = ResidentMeter::new(pool);
+            let runner = transform_unit::DetachedRunner::default();
+            let probe = if direct { lane_probe(body) } else { None };
+            let entry = PassEntry {
+                core: &handler.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+                clock: transform_unit::PassClock::now(),
+            };
+            let (lane, outcome) = handler.dispatch_body(&entry, body).await;
+            (lane, comparable_outcome(outcome), meter.needed())
+        }
+
+        // Each newline is two raw bytes, so the string's raw length is twice its decoded length.
+        let escaped = json!(ck("m2", 2, &"\n".repeat(4096)));
+        let first = json!(ck("m1", 1, "hello"));
+        let mut body = request(Vec::new());
+        body["messages"] = json!([]);
+        let body = serde_json::to_string(&body)
+            .unwrap()
+            .replacen(
+                "\"messages\":[]",
+                &format!(
+                    "\"messages\":[{{\"mid\":\"first\",\"mid\":\"m1\",\"ck\":{}}},{}]",
+                    serde_json::to_string(&first["ck"]).unwrap(),
+                    serde_json::to_string(&escaped).unwrap()
+                ),
+                1,
+            )
+            .into_bytes();
+        assert!(
+            lane_probe(&body)
+                .as_ref()
+                .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
+        );
+
+        let (lane, served, tree_needed) = through(&body, &TestPool::unbounded(), false).await;
+        assert_eq!((lane, served.0.as_str()), (BodyLane::Tree, "response"));
+        let (lane, _, _) = through(&body, &TestPool::unbounded(), true).await;
+        assert_eq!(
+            lane,
+            BodyLane::Tree,
+            "the duplicate key fails the typed decode"
+        );
+
+        for capacity in [tree_needed - 1, tree_needed] {
+            let (_, through_tree, tree_count) =
+                through(&body, &TestPool::with_capacity(capacity), false).await;
+            let (_, through_direct, direct_count) =
+                through(&body, &TestPool::with_capacity(capacity), true).await;
+            assert_eq!(
+                (&through_direct.0, &through_direct.1),
+                (&through_tree.0, &through_tree.1),
+                "at capacity {capacity}"
+            );
+            assert_eq!(through_direct, through_tree, "at capacity {capacity}");
+            assert_eq!(direct_count, tree_count, "at capacity {capacity}");
+            if capacity < tree_needed {
+                assert_eq!(through_tree, comparable_outcome(request_too_large_error()));
+            } else {
+                assert_eq!(through_tree, served);
+            }
+        }
+    }
+
     /// Both lanes count the same footprint for the same bytes, so a pool that is one byte
     /// short of a body refuses it on either lane with one code, and a pool that just fits
     /// admits it on either lane.

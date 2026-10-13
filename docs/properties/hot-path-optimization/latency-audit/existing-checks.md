@@ -102,6 +102,7 @@ documents timer placement only and leaves W2 invalidated.
 | [`byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`][t-cap-alloc] | A 900 KiB body whose one key holds an escape passes the byte cap allocating less than half its size. | unaudited |
 | [`a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string`][t-held] | Against a reserve that grants nothing, the direct lane's metered typed decode is refused as transient at its first value and allocates under 64 KiB for a body holding a 4 MiB escaped text block. | unaudited |
 | [`a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped`][t-prefix] | With 64 KiB of pool, a body holding a 4 MiB escaped text block is refused as transient by the up-front unescape-buffer charge and allocates under 64 KiB. | unaudited |
+| [`a_restarted_tree_decode_keeps_the_admission_unescape_charge`][t-restart-scratch] | A duplicate `mid` fails the typed decode ahead of a 4096-newline string; the restarted tree decode counts the tree lane's footprint, raw-length unescape charge included, and both entries answer alike one byte under it (the capacity-excess `invalid_params`) and at it (served). | unaudited |
 | [`a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key`][t-probe-pool] | Against a reserve that grants nothing, the handler entry refuses a sub-cap body holding a 900 KiB escaped key as transient before the lane probe reads it, allocating under 64 KiB. | unaudited |
 | [`request_observed_to_handler_ends_before_the_typed_decode`][t-observed] | A typed decode begun ten seconds before the handler is not counted in `request_observed_to_handler`. | unaudited |
 | [`decode_footprint_counts_values_and_retained_string_copies`][t-footprint] | Separators inside strings are not values; a 1 MiB text block is charged three times; a scalar-dense body's footprint is far above its wire size and string bytes are not charged as values; a cut body counts its decoded part. | unaudited |
@@ -560,6 +561,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L311
 [t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L285
 [t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L238
+[t-restart-scratch]: ../../../../crates/daemon/src/lib.rs#L21757
 [t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L202
 [t-observed]: ../../../../crates/daemon/src/lib.rs#L22466
 [t-footprint]: ../../../../crates/daemon/src/lib.rs#L20617
