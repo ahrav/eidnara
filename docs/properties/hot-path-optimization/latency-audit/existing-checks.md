@@ -558,9 +558,9 @@ not a claim that no related check exists anywhere in the repository.
 [t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L21472
 [t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L108
 [t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L184
-[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L316
-[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L290
-[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L243
+[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L353
+[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L327
+[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L262
 [t-restart-scratch]: ../../../../crates/daemon/src/lib.rs#L21757
 [t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L207
 [t-observed]: ../../../../crates/daemon/src/lib.rs#L22466
