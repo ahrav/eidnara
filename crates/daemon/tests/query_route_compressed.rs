@@ -9,7 +9,7 @@ use daemon::query_route::{
     LimitsRefusal, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
 };
 use daemon::request_budget::{Exhaustion, RequestBudget};
-use daemon::vector_admission::{RESIDENT_LIMIT, ResourceClass};
+use daemon::vector_admission::{Census, RESIDENT_LIMIT, ResourceClass};
 use daemon::vector_generation::ROWS_FILE;
 use daemon::vector_reader::{PinnedVectors, RescoreEvent};
 use daemon::{Handler, HandlerCore};
@@ -822,6 +822,110 @@ async fn compressed_vectors_install_and_rank_only_under_a_live_activation_grant(
         *reads.lock().unwrap() > 0,
         "no row was rescored after the close"
     );
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    fixture.daemon.shutdown().await;
+}
+
+/// Holds one request at its first original read, runs `during` while its scratch and row buffers are charged, and returns the request's lane status with what `during` returned.
+fn while_draining<T>(
+    fixture: &Fixture,
+    composition: &Composition,
+    during: impl FnOnce(&Census) -> T,
+) -> (LaneStatus, T) {
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(Some(released));
+    let held = composition.observed(move |event| {
+        if matches!(event, RescoreEvent::ReadOriginal { .. })
+            && let Some(released) = released.lock().unwrap().take()
+        {
+            entered_tx.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(20)).unwrap();
+        }
+    });
+    std::thread::scope(|scope| {
+        let drain = scope.spawn(|| {
+            let (_token, budget) = request_budget(10_000);
+            run(fixture, 2, held, &budget).unwrap().statuses[2].clone()
+        });
+        entered.recv_timeout(Duration::from_secs(20)).unwrap();
+        let observed = during(&composition.store.ledger.census());
+        release.send(()).unwrap();
+        (drain.join().unwrap(), observed)
+    })
+}
+
+/// A request draining at an original read holds its scratch and row buffers. With the resident limit set to exactly what the ledger holds while one request drains, a scratch reservation the size of the drainer's is refused, so draining work counts against the next admission. Once the drain finishes, its charges are gone and a request under the same limit completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes() {
+    let fixture = Fixture::build().await;
+    let mut composition = Composition::of(&fixture);
+    let (status, probe) = while_draining(&fixture, &composition, Census::clone);
+    assert_eq!(status, LaneStatus::Complete);
+    let scratch = probe.held[&ResourceClass::Scratch];
+    assert!(scratch > 0);
+    assert!(probe.held[&ResourceClass::RowBuffers] > 0);
+    composition
+        .store
+        .set_limit(daemon::vector_admission::RESIDENT_LIMIT, probe.resident);
+
+    let (status, refused) = while_draining(&fixture, &composition, |census| {
+        assert_eq!(census.resident, probe.resident, "one drain fills the limit");
+        composition
+            .store
+            .ledger
+            .reserve(
+                &composition.store.admission,
+                ResourceClass::Scratch,
+                scratch,
+            )
+            .map(|_| ())
+    });
+    assert_eq!(
+        status,
+        LaneStatus::Complete,
+        "the drain itself fits the limit"
+    );
+    assert!(
+        matches!(refused, Err(daemon::vector_admission::Refusal::Denied(_))),
+        "the draining request's charges count against the next reservation: {refused:?}"
+    );
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    let (_token, budget) = request_budget(10_000);
+    let recovered = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(
+        recovered.statuses[2],
+        LaneStatus::Complete,
+        "the finished drain left the limit's headroom free"
+    );
+    fixture.daemon.shutdown().await;
+}
+
+/// An entry bound below the view's rows refuses the scan before any row is visited, and the lane degrades as `layers`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_bound_below_the_view_degrades_the_lane_before_a_scan() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let mut limits = compressed_limits();
+    limits.max_entries = NonZeroUsize::new(1).unwrap();
+    let events = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&events);
+    let vectors = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        composition.store.activation(),
+        limits,
+    )
+    .with_observer_for_test(Arc::new(move |event| {
+        if matches!(event, RescoreEvent::Scan(Window::Visited(_))) {
+            *counted.lock().unwrap() += 1;
+        }
+    }));
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, vectors, &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("layers"));
+    assert_eq!(*events.lock().unwrap(), 0, "no row was visited");
     assert_eq!(composition.charged(ResourceClass::Scratch), 0);
     fixture.daemon.shutdown().await;
 }
