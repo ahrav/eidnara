@@ -107,7 +107,7 @@ export const WRITER_FIXTURE_ROWS: PassRow[] = [
         other_us: 1_500,
         admit_us: 300,
         lane_gate_and_decode_us: 2_900,
-        derive_ck_us: 1_200,
+        derivation_us: 1_200,
         transform_core_us: 6_900,
         native_attach_us: 2_800,
         daemon_residual_us: 900,

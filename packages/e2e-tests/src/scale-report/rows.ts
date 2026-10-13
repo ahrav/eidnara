@@ -38,7 +38,7 @@ export interface PassRow {
     other_us: number | null;
     admit_us: number | null;
     lane_gate_and_decode_us: number | null;
-    derive_ck_us: number | null;
+    derivation_us: number | null;
     transform_core_us: number | null;
     native_attach_us: number | null;
     daemon_residual_us: number | null;
@@ -57,11 +57,11 @@ const PLUGIN_STAGES = [
     "apply_us",
     "other_us",
 ] as const;
-/** The daemon stage fields, in ledger order; `derive_ck_us` is `null` on a CK-only profile's pass. */
+/** The daemon stage fields, in ledger order; `derivation_us` is `null` on a CK profile's pass. */
 const DAEMON_STAGES = [
     "admit_us",
     "lane_gate_and_decode_us",
-    "derive_ck_us",
+    "derivation_us",
     "transform_core_us",
     "native_attach_us",
     "daemon_residual_us",
@@ -116,7 +116,7 @@ function optionalCount(name: string, value: number | null): number | null {
 /** The checks `eval_core`'s report build applies, so a row the report would refuse never reaches the file. */
 function checkLedger(row: PassRow): void {
     const plugin = PLUGIN_STAGES.map((field) => row[field]);
-    const daemon = DAEMON_STAGES.filter((field) => field !== "derive_ck_us").map(
+    const daemon = DAEMON_STAGES.filter((field) => field !== "derivation_us").map(
         (field) => row[field],
     );
     const daemonGroup = [...daemon, row.window_messages, row.window_blocks];
@@ -124,12 +124,12 @@ function checkLedger(row: PassRow): void {
     const absent = (values: (number | null)[]) => values.every((value) => value === null);
     if (!present(plugin) && !absent(plugin))
         throw new Error("plugin stages are all present or all unavailable");
-    if (!present(daemonGroup) && !absent([...daemonGroup, row.derive_ck_us]))
+    if (!present(daemonGroup) && !absent([...daemonGroup, row.derivation_us]))
         throw new Error("daemon stages and the served window are all present or all unavailable");
     if (present(daemonGroup) !== (row.daemon_total_us !== null))
         throw new Error("daemon_total_us accompanies exactly the daemon stages");
     const sum = (values: (number | null)[]) => values.reduce<number>((a, b) => a + (b ?? 0), 0);
-    if (row.daemon_total_us !== null && sum([...daemon, row.derive_ck_us]) !== row.daemon_total_us)
+    if (row.daemon_total_us !== null && sum([...daemon, row.derivation_us]) !== row.daemon_total_us)
         throw new Error("daemon stages must sum to daemon_total_us");
     if (present(plugin)) {
         if (row.daemon_total_us === null)

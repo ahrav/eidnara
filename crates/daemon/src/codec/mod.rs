@@ -15,38 +15,38 @@ pub use opencode::{
 pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
 
 /// The bytes a native window's CK derivation may allocate, its derived CK included, charged
-/// to the pass before the derivation runs. `crates/daemon/tests/derived_ck_charge.rs` measures
+/// to the pass before the derivation runs. `crates/daemon/tests/derivation_charge.rs` measures
 /// the derivation's heap peak over text-, tool-, extras-, and structure-heavy windows of both
 /// codecs and holds it under this bound.
 ///
 /// The bound is linear in what the codecs copy: every native byte at most
-/// [`DERIVED_CK_BYTES_PER_NATIVE_BYTE`] times (a reasoning signature is copied out of its
+/// [`DERIVATION_BYTES_PER_NATIVE_BYTE`] times (a reasoning signature is copied out of its
 /// metadata, which is copied whole), a fixed cost per message and per block-producing element
 /// (an OpenCode part or attachment, a Pi content block), and each message and tool-call id once
 /// per copy the decoders keep of it.
-pub fn derived_ck_charge(native: &[std::sync::Arc<serde_json::Value>]) -> usize {
+pub fn derivation_charge(native: &[std::sync::Arc<serde_json::Value>]) -> usize {
     native
         .iter()
         .map(|message| {
             let elements = element_count(message);
             crate::retained_size::value_retained_bytes(message)
-                .saturating_mul(DERIVED_CK_BYTES_PER_NATIVE_BYTE)
-                .saturating_add(DERIVED_CK_BYTES_PER_MESSAGE)
-                .saturating_add(id_bytes(message).saturating_mul(DERIVED_CK_ID_COPIES))
-                .saturating_add(elements.saturating_mul(DERIVED_CK_BYTES_PER_ELEMENT))
+                .saturating_mul(DERIVATION_BYTES_PER_NATIVE_BYTE)
+                .saturating_add(DERIVATION_BYTES_PER_MESSAGE)
+                .saturating_add(id_bytes(message).saturating_mul(DERIVATION_ID_COPIES))
+                .saturating_add(elements.saturating_mul(DERIVATION_BYTES_PER_ELEMENT))
         })
         .fold(0usize, usize::saturating_add)
 }
 
 /// Copies of a native byte in the derived CK and the decode's transient values.
-pub const DERIVED_CK_BYTES_PER_NATIVE_BYTE: usize = 2;
+pub const DERIVATION_BYTES_PER_NATIVE_BYTE: usize = 2;
 /// The fixed derived bytes of one message: its envelope, a hash id, and fixed summary text.
-pub const DERIVED_CK_BYTES_PER_MESSAGE: usize = 2048;
+pub const DERIVATION_BYTES_PER_MESSAGE: usize = 2048;
 /// The fixed derived bytes of one block-producing element: its block, opaque source, and ids.
-pub const DERIVED_CK_BYTES_PER_ELEMENT: usize = 3072;
+pub const DERIVATION_BYTES_PER_ELEMENT: usize = 3072;
 /// Copies the decoders keep of an id: a message's mid, harness id, and decode keys, or a tool
 /// call's call, result, and native ids.
-pub const DERIVED_CK_ID_COPIES: usize = 5;
+pub const DERIVATION_ID_COPIES: usize = 5;
 
 /// OpenCode parts and their tool attachments, and Pi content blocks, of one native message.
 fn element_count(message: &serde_json::Value) -> usize {

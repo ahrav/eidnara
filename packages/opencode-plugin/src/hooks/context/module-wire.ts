@@ -424,7 +424,7 @@ export function buildPagedModuleTransformPayloads(
         throw new TypeError("Invalid serialized transform body", { cause });
     }
 
-    // The window arrays: a native profile's `native_messages` and a CK-only profile's `messages`.
+    // The window arrays: a native profile's `native_messages` and a CK profile's `messages`.
     const arrayFields = ["messages", "native_messages"].filter((field) =>
         Array.isArray(body[field]),
     );

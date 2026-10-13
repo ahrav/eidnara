@@ -39,11 +39,11 @@ const PLUGIN_STAGES: [&str; 7] = [
     "other_us",
 ];
 /// The daemon stage fields of a row, in ledger order. They sum to `daemon_total_us` on a row
-/// that carries them; `derive_ck_us` is `null` on a CK-only profile's pass, which derives no CK.
+/// that carries them; `derivation_us` is `null` on a CK profile's pass, which derives no CK.
 const DAEMON_STAGES: [&str; 6] = [
     "admit_us",
     "lane_gate_and_decode_us",
-    "derive_ck_us",
+    "derivation_us",
     "transform_core_us",
     "native_attach_us",
     "daemon_residual_us",
@@ -186,7 +186,7 @@ pub struct PassRow {
     #[serde(default)]
     pub lane_gate_and_decode_us: Option<u64>,
     #[serde(default)]
-    pub derive_ck_us: Option<u64>,
+    pub derivation_us: Option<u64>,
     #[serde(default)]
     pub transform_core_us: Option<u64>,
     #[serde(default)]
@@ -220,7 +220,7 @@ impl PassRow {
         [
             self.admit_us,
             self.lane_gate_and_decode_us,
-            self.derive_ck_us,
+            self.derivation_us,
             self.transform_core_us,
             self.native_attach_us,
             self.daemon_residual_us,
@@ -829,7 +829,7 @@ fn uncensored(observations: &[(u64, bool)]) -> u32 {
         .count() as u32
 }
 
-/// A ledger group is all present or all unavailable (`derive_ck_us` may stay unavailable in a
+/// A ledger group is all present or all unavailable (`derivation_us` may stay unavailable in a
 /// present daemon group), the daemon total and the served window accompany exactly a present
 /// daemon group, a present daemon group sums to `daemon_total_us`, and a present plugin group
 /// plus `daemon_total_us` sums to `response_us`.

@@ -113,7 +113,7 @@ fn auto_search_is_enabled_by_the_wire_default_and_drives_the_hint_query() {
     );
     assert!(
         minimal.native_messages.is_none(),
-        "a CK-only profile carries no native window"
+        "a CK profile carries no native window"
     );
 }
 

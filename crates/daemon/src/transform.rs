@@ -723,7 +723,7 @@ pub struct TransformRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_surface_guidance_override: Option<String>,
     /// The window of a native profile (`pi`, `opencode-aisdk`), from which the daemon derives
-    /// `messages`; a CK-only profile carries none.
+    /// `messages`; a CK profile carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_messages: Option<Vec<Arc<Value>>>,
     /// Names this attempt's exact input snapshot; every `transform` request must carry one, and the
@@ -1240,12 +1240,12 @@ pub struct TransformTimings {
 /// the instant the ledger is taken, which precedes the response encode. On the paged lane every
 /// stage measures the final page's request. `derive_ck` is the derivation of a native profile's
 /// CK from its native window, a span inside `lane_gate_and_decode`'s bracket that the ledger
-/// reports apart from it; a CK-only profile derives nothing and reports `None`.
+/// reports apart from it; a CK profile derives nothing and reports `None`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStageLedger {
     pub admit_us: u64,
     pub lane_gate_and_decode_us: u64,
-    pub derive_ck_us: Option<u64>,
+    pub derivation_us: Option<u64>,
     pub transform_core_us: u64,
     pub native_attach_us: u64,
     pub residual_us: u64,
@@ -1276,21 +1276,21 @@ impl DaemonStageLedger {
             u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX)
         };
         let admit_us = micros(at.received_at, at.admitted_at);
-        let derive_ck_us = at.derive_ck.map(|(from, to)| micros(from, to));
+        let derivation_us = at.derive_ck.map(|(from, to)| micros(from, to));
         let lane_gate_and_decode_us = micros(at.admitted_at, at.core_started_at)
-            .saturating_sub(derive_ck_us.unwrap_or_default());
+            .saturating_sub(derivation_us.unwrap_or_default());
         let transform_core_us = micros(at.core_started_at, at.native_attach_started_at);
         let native_attach_us = micros(at.native_attach_started_at, at.native_attach_ended_at);
         let total_us = micros(at.received_at, ended_at);
         let staged = admit_us
             .saturating_add(lane_gate_and_decode_us)
-            .saturating_add(derive_ck_us.unwrap_or_default())
+            .saturating_add(derivation_us.unwrap_or_default())
             .saturating_add(transform_core_us)
             .saturating_add(native_attach_us);
         Self {
             admit_us,
             lane_gate_and_decode_us,
-            derive_ck_us,
+            derivation_us,
             transform_core_us,
             native_attach_us,
             residual_us: total_us.saturating_sub(staged),
@@ -13638,19 +13638,22 @@ pub(crate) mod tests {
             (
                 derived.admit_us,
                 derived.lane_gate_and_decode_us,
-                derived.derive_ck_us,
+                derived.derivation_us,
                 derived.transform_core_us,
                 derived.native_attach_us,
             ),
             (1_000, 6_000, Some(3_000), 2_000, 1_000)
         );
         let ck = DaemonStageLedger::measure(instants(None), &served);
-        assert_eq!((ck.lane_gate_and_decode_us, ck.derive_ck_us), (9_000, None));
+        assert_eq!(
+            (ck.lane_gate_and_decode_us, ck.derivation_us),
+            (9_000, None)
+        );
         for ledger in [derived, ck] {
             assert_eq!(
                 ledger.admit_us
                     + ledger.lane_gate_and_decode_us
-                    + ledger.derive_ck_us.unwrap_or_default()
+                    + ledger.derivation_us.unwrap_or_default()
                     + ledger.transform_core_us
                     + ledger.native_attach_us
                     + ledger.residual_us,

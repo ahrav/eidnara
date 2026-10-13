@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use daemon::codec::derived_ck_charge;
+use daemon::codec::derivation_charge;
 use serde_json::{Value, json};
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -183,14 +183,14 @@ fn pi_windows() -> Vec<(&'static str, Vec<Value>)> {
 /// The charge covers the derivation's peak for every window, and the measured peak per charged
 /// native byte stays under the factor the charge applies.
 #[test]
-fn the_derived_ck_charge_covers_the_derivation_peak() {
+fn the_derivation_charge_covers_the_derivation_peak() {
     let _serial = measure();
     let mut worst = 0.0f64;
     // The measured peak over its charge; the evidence for the bound's constants.
     for (profile, windows) in [("opencode-aisdk", opencode_windows()), ("pi", pi_windows())] {
         for (name, window) in windows {
             let native = shared(window);
-            let charge = derived_ck_charge(&native);
+            let charge = derivation_charge(&native);
             let peak = derivation_peak(profile, &native);
             let used = peak as f64 / charge as f64;
             println!("{profile} {name}: peak {peak} charge {charge} used {used:.3}");
