@@ -1247,8 +1247,8 @@ span, so it holds the transport and the daemon's response encode. The
 daemon ledger is `admit_us` (from the handler taking the body through the byte
 cap, admission charge, and lane probe), `lane_gate_and_decode_us` (the typed
 decode, request checks, session lane wait, and unit permit, less the
-derivation), `derive_ck_us` (the charge and derivation of a native profile's CK
-from its native window, `null` for a CK-only profile),
+derivation), `derivation_us` (the charge and derivation of a native profile's CK
+from its native window, `null` for a CK profile),
 `transform_core_us`, `native_attach_us`, and `daemon_residual_us`; they sum to
 `daemon_total_us`, which the transform response carries as `timings.ledger`
 measured just before the response encode; a pass the daemon serves
@@ -1264,7 +1264,7 @@ as overlapping diagnostics outside both ledgers, and `response_encode` stays a
 log-only diagnostic.
 
 A `null` stage is unavailable, never zero. Each ledger group is all present or
-all unavailable, except `derive_ck_us`, which a CK-only profile's present daemon
+all unavailable, except `derivation_us`, which a CK profile's present daemon
 group leaves `null`; a plugin
 group needs a present daemon total to reconcile. A pass whose final response
 carried no ledger, such as a refused or censored pass, has every stage

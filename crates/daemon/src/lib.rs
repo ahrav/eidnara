@@ -889,7 +889,7 @@ const TRANSFORM_PAGE_FIELDS: [&str; 6] = [
     "transform_page_digest",
 ];
 /// The window arrays a transform page series splits: a native profile's `native_messages` and a
-/// CK-only profile's `messages`.
+/// CK profile's `messages`.
 const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 2] = ["messages", "native_messages"];
 /// One ready-snapshot budget serves every session's wrapup. A snapshot charges only its CK
 /// input and scalar fields, never native payload, so 64 MiB holds several large sessions.
@@ -14132,7 +14132,7 @@ fn unknown_serializer_profile_error() -> PreparedOutcome {
     }
 }
 
-/// A native profile's window is `native_messages` alone and a CK-only profile's is `messages`
+/// A native profile's window is `native_messages` alone and a CK profile's is `messages`
 /// alone; a body carrying the other profile kind's window is outside the shape.
 fn check_window_shape(
     request: &TransformRequest,
@@ -14155,7 +14155,7 @@ fn check_window_shape(
 
 /// Replaces a native profile's empty `messages` with the CK its codec derives from
 /// `native_messages`, after charging the derivation's bounded peak to the pass meter, and returns
-/// the derivation's span. A CK-only profile derives nothing. A shortfall answers the meter's
+/// the derivation's span. A CK profile derives nothing. A shortfall answers the meter's
 /// refusal; a window its codec refuses answers that refusal. Either refusal precedes every
 /// effect of the pass.
 fn derive_native_window(
@@ -14169,7 +14169,7 @@ fn derive_native_window(
     let started_at = Instant::now();
     let native = request.native_messages.as_deref().unwrap_or_default();
     meter
-        .charge(codec::derived_ck_charge(native))
+        .charge(codec::derivation_charge(native))
         .map_err(resident_refusal)?;
     request.messages = derive_ck(profile, native)?.into_iter().collect();
     Ok(Some((started_at, Instant::now())))
@@ -25733,7 +25733,7 @@ mod tests {
             serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
         assert_eq!(ledger.admit_us, 15_000);
         assert!(ledger.lane_gate_and_decode_us >= 25_000, "{ledger:?}");
-        assert_eq!(ledger.derive_ck_us, None);
+        assert_eq!(ledger.derivation_us, None);
         assert_eq!(
             ledger.admit_us
                 + ledger.lane_gate_and_decode_us
@@ -25788,7 +25788,7 @@ mod tests {
     /// CK the OpenCode plugin encodes on the CK path or derives the CK from the native window an
     /// `opencode-aisdk` pass sends.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_malformed_opencode_window_refuses_alike_from_plugin_ck_and_derived_ck() {
+    async fn a_malformed_opencode_window_refuses_alike_from_the_plugin_and_the_daemon_derivation() {
         use codec::opencode::tests::PARITY_FIXTURE;
         let mut fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
         let write = std::env::var_os("EIDNARA_WRITE_OPENCODE_CODEC_PARITY").is_some();
@@ -25900,7 +25900,7 @@ mod tests {
                 .cloned()
                 .map(Arc::new)
                 .collect();
-        let derivation = codec::derived_ck_charge(&native);
+        let derivation = codec::derivation_charge(&native);
         let decode = needed - derivation;
         assert!(
             decode >= footprint_of(&body),
@@ -26018,7 +26018,7 @@ mod tests {
             call_transform_request(&handler, serde_json::to_value(request).unwrap()).await;
         let ledger: transform::DaemonStageLedger =
             serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
-        let derive_ck = ledger.derive_ck_us.expect("a native pass derives its CK");
+        let derive_ck = ledger.derivation_us.expect("a native pass derives its CK");
         assert_eq!(
             ledger.admit_us
                 + ledger.lane_gate_and_decode_us
@@ -26036,10 +26036,10 @@ mod tests {
     async fn each_profile_kind_refuses_the_other_kinds_window() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let mut ck_with_native = request(vec![ck("m1", 1, "hello")]);
-        ck_with_native["native_messages"] = json!([]);
+        let mut messages_with_native = request(vec![ck("m1", 1, "hello")]);
+        messages_with_native["native_messages"] = json!([]);
         assert_eq!(
-            error_frame(call_transform_outcome(&handler, ck_with_native).await),
+            error_frame(call_transform_outcome(&handler, messages_with_native).await),
             (
                 "invalid_params".to_string(),
                 "serializer_profile owned-llmrunner carries its window in messages, not native_messages"

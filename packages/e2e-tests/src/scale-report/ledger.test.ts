@@ -7,7 +7,7 @@ import { WRITER_FIXTURE_ROWS } from "./writer-fixture";
 const daemonLedger = {
     admit_us: 300,
     lane_gate_and_decode_us: 4_100,
-    derive_ck_us: null,
+    derivation_us: null,
     transform_core_us: 6_900,
     native_attach_us: 2_800,
     residual_us: 900,
@@ -41,16 +41,16 @@ describe("pass row ledger", () => {
     it("carries a native pass's derive_ck stage inside the reconciled daemon total", () => {
         const derived = rowLedger(31_000, {
             ...observed,
-            daemonLedger: { ...daemonLedger, lane_gate_and_decode_us: 2_900, derive_ck_us: 1_200 },
+            daemonLedger: { ...daemonLedger, lane_gate_and_decode_us: 2_900, derivation_us: 1_200 },
         });
-        expect(derived.derive_ck_us).toBe(1_200);
+        expect(derived.derivation_us).toBe(1_200);
         expect(derived.lane_gate_and_decode_us).toBe(2_900);
         expect(derived.daemon_total_us).toBe(15_000);
         const base = { ...(WRITER_FIXTURE_ROWS[0] as Parameters<typeof serializePassRow>[0]) };
         expect(() => serializePassRow({ ...base, response_us: 31_000, ...derived })).not.toThrow();
         const malformed = rowLedger(31_000, {
             ...observed,
-            daemonLedger: { ...daemonLedger, derive_ck_us: -1 },
+            daemonLedger: { ...daemonLedger, derivation_us: -1 },
         });
         expect(malformed.daemon_total_us).toBeNull();
     });

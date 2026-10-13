@@ -1241,7 +1241,7 @@ pub(crate) mod tests {
     /// The plugin encoder is the oracle: for every corpus window the daemon derives the CK the
     /// plugin encodes, equal as typed values and as canonical bytes.
     #[test]
-    fn the_daemon_derives_the_ck_the_opencode_plugin_encodes() {
+    fn the_daemon_derives_the_window_the_opencode_plugin_encodes() {
         let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
         let cases = fixture["cases"].as_array().unwrap();
         assert!(cases.len() >= 10);

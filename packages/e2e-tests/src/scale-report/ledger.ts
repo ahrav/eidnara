@@ -44,19 +44,19 @@ function count(value: unknown): number | undefined {
 /** The daemon ledger the response carried, or `undefined` when it is absent or malformed. */
 function daemonLedger(
     value: Record<string, unknown> | undefined,
-): (Record<(typeof DAEMON_FIELDS)[number], number> & { derive_ck_us: number | null }) | undefined {
+): (Record<(typeof DAEMON_FIELDS)[number], number> & { derivation_us: number | null }) | undefined {
     if (!value) return undefined;
     const fields = Object.fromEntries(DAEMON_FIELDS.map((field) => [field, count(value[field])]));
     if (DAEMON_FIELDS.some((field) => fields[field] === undefined)) return undefined;
-    // A native profile's pass derives its CK; a CK-only profile's carries `null`.
+    // A native profile's pass derives its CK; a CK profile's carries `null`.
     const deriveCk =
-        value.derive_ck_us === null || value.derive_ck_us === undefined
+        value.derivation_us === null || value.derivation_us === undefined
             ? null
-            : count(value.derive_ck_us);
+            : count(value.derivation_us);
     if (deriveCk === undefined) return undefined;
     return {
         ...(fields as Record<(typeof DAEMON_FIELDS)[number], number>),
-        derive_ck_us: deriveCk,
+        derivation_us: deriveCk,
     };
 }
 
@@ -72,7 +72,7 @@ export function rowLedger(responseUs: number, observed: ObservedPassLedger | und
         ...NO_LEDGER,
         admit_us: daemon.admit_us,
         lane_gate_and_decode_us: daemon.lane_gate_and_decode_us,
-        derive_ck_us: daemon.derive_ck_us,
+        derivation_us: daemon.derivation_us,
         transform_core_us: daemon.transform_core_us,
         native_attach_us: daemon.native_attach_us,
         daemon_residual_us: daemon.residual_us,
