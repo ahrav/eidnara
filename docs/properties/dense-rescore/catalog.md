@@ -386,12 +386,18 @@ composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_kernel_change_between_batches_discards_the_pool`,
-`a_change_to_an_excluded_row_discards_the_pool_too`, and
-`a_corrupt_identity_field_refuses_the_scan_with_no_candidate`.
+`a_change_to_an_excluded_row_discards_the_pool_too`,
+`a_corrupt_identity_field_refuses_the_scan_with_no_candidate`, and
+`a_budget_ended_after_an_admitted_batch_discards_the_pool`;
+`crates/retrieval/src/eligibility.rs` `a_batch_must_carry_one_verdict_per_candidate`
+for the verdict-count check.
 Guarantee: Every batch of one scan, including batches whose verdicts only
 excluded rows, is judged under one kernel snapshot and incarnation; every
 batch runs after the walk's last page, so a change between batches discards
-the pool, and a validation failure refuses the scan with no candidate.
+the pool, and a validation failure refuses the scan with no candidate. A
+kernel batch whose verdict count differs from its candidate count is refused
+as `InvalidInput` in every build, so verdicts stay positionally aligned with
+identities.
 Check: `always` - after a retirement, an admission of a row already judged
 hidden, or a kernel restore between the first and second batch, the
 completion names the change and the pool is empty; a kernel refusal returns an
@@ -402,7 +408,7 @@ Required faults and enabling state: A kernel commit or restore inside the
 walk's hook after the first judgment batch, with two-row pages so the batches
 hold two rows each; a corrupt identity field the kernel refuses.
 Confidence: high - [evidence](evidence/dense-pool-never-mixes-authority-states.md).
-`judge_tracked` (`crates/retrieval/src/eligibility.rs:296`) compares each
+`judge_tracked` (`crates/retrieval/src/eligibility.rs:309`) compares each
 batch's stamps with the first. The pool carries no re-judgment: a change after
 the last batch is outside the scan, as a change after it returns is, and
 validation-to-use freshness stays with RP2.7.
@@ -412,10 +418,14 @@ policy excludes.
 Open questions:
 - Parent Q3 approval of snapshot plus incarnation as the usable authority
   identity, and of discard without restart (needs human input).
-- A kernel judgment that fails after earlier batches admitted rows propagates
-  through `judge_page` as a refusal by reading; no test injects a judgment-time
-  kernel fault, only the identity-field refusal the kernel raises before
-  reading.
+- A budget that ends after one batch admitted its rows discards the pool at
+  the next batch's admission check
+  (`a_budget_ended_after_an_admitted_batch_discards_the_pool`, with a
+  no-cancel control that admits rows from more than one batch). The kernel's
+  own `Deadline` refusal in `judge_page`, and any other kernel fault between
+  batches, propagate as a refusal by reading; no test reaches them, because no
+  hook sits between one batch's admissions and the next batch's kernel call
+  and the kernel has no read-side fault seam.
 
 ### dense-scan-bounds-end-with-no-candidate
 
@@ -431,14 +441,16 @@ Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `each_storage_and_row_bound_saturates_alone_and_returns_no_candidate`,
 `an_ended_budget_returns_no_candidate`,
 `an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush`,
-`a_coverage_shortfall_keeps_the_pool_and_says_so`, and
-`codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read`;
+`a_coverage_shortfall_keeps_the_pool_and_says_so`,
+`codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read`, and
+`the_entry_bound_refuses_before_any_row_is_visited`;
 `crates/retrieval/src/dense/oracle.rs`
 `a_batch_reserves_only_the_slots_its_batch_bytes_can_fill` for the slot
 reservation.
 Guarantee: The scan-row bound, the batch-byte bound on the rows of one
 judgment batch, the heap-byte bound on the accepted set, the preallocated-slot
-check, the kernel batch limit on the pool, and the request budget each stop
+check, the resolver's entry bound, the kernel batch limit on the pool, and the
+request budget each stop
 the scan alone; every stop except a coverage shortfall returns no candidate,
 and the slot check and pool limit refuse before any row is read.
 Check: `always` - one row short of the population ends `RowBound`; with
@@ -450,7 +462,9 @@ the heap bound equal to the slots plus the final set's strings completes and
 one byte less ends `HeapBytes`; slots one byte over the bound refuse with no
 row visited; a pool of 2000 refuses
 `BatchOverBound`; a code set shorter than its layer refuses before any row is
-visited; cancellation after a page ends `BudgetExhausted`, and wins over a
+visited; an entry bound one below the layer's rows refuses
+`ResolveRefusal::OverBound` with no row visited and the exact bound
+completes; cancellation after a page ends `BudgetExhausted`, and wins over a
 batch bound reached in the same flush; a row bound reached alongside a
 coverage shortfall names the bound; each returns an empty pool. `always`
 because a truncated pool must never pass as complete.
