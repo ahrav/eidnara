@@ -135,19 +135,56 @@ fn fixture_codes() -> Vec<(&'static str, [i8; 4])> {
     ]
 }
 
-/// A unit query whose first coordinate dominates.
+/// A unit query whose first coordinate dominates, as literal bits so a replay does not depend on decimal parsing or normalization; `the_fixture_query_is_the_normalized_decimal_query` derives the same bits from `[0.8, 0.1, 0.5, -0.3]`.
 fn fixture_query() -> Vec<f32> {
-    let raw = [0.8f32, 0.1, 0.5, -0.3];
-    let norm = raw
+    bits([0x3f4d_d4ed, 0x3dcd_d4ed, 0x3f00_a514, 0xbe9a_5fb2])
+}
+
+/// The quantized fixture's scores and order under the references above: `(score bits, identifier)`, best first.
+const PINNED_QUANTIZED: [(u64, &str); 8] = [
+    (0x3fc4_4fad_749c_c8b0, "dup-a"),
+    (0x3fc4_4fad_749c_c8b0, "dup-b"),
+    (0x3fa9_652f_24b6_4640, "coarse"),
+    (0x3fa4_3091_8143_0300, "fine"),
+    (0x0000_0000_0000_0000, "zero"),
+    (0xbfba_f5cb_52cc_9b3a, "neg"),
+    (0xbfdb_89e1_5a81_1551, "mixed"),
+    (0xbfeb_b870_de4c_78f4, "max"),
+];
+
+/// Whether `score` reproduces the oracle on the quantized fixture: every score's bits equal the reference's, and every `k` cut that `TopK` keeps under `score` equals the reference full sort's prefix. The production scorer and the negative controls go through this one check.
+fn agrees_with_oracle(
+    query: &QuantizedQuery<'_>,
+    scales: &Scales,
+    score: &dyn Fn(&[i8]) -> f64,
+) -> bool {
+    let rows = fixture_codes();
+    let reference = |codes: &[i8]| reference_quantized(scales.as_slice(), query.codes(), codes);
+    if rows
         .iter()
-        .map(|v| f64::from(*v).powi(2))
-        .sum::<f64>()
-        .sqrt();
-    raw.iter().map(|v| (f64::from(*v) / norm) as f32).collect()
+        .any(|(_, codes)| score(codes).to_bits() != reference(codes).to_bits())
+    {
+        return false;
+    }
+    let expected = reference_order(
+        rows.iter()
+            .map(|(id, codes)| (reference(codes), (*id).to_owned()))
+            .collect(),
+    );
+    (1..=rows.len()).all(|k| order_by(score, &rows, k) == expected[..k])
 }
 
 fn production_quantized_order(
     query: &QuantizedQuery<'_>,
+    rows: &[(&str, [i8; 4])],
+    k: usize,
+) -> Vec<(u64, String)> {
+    order_by(&|codes| query.score(codes), rows, k)
+}
+
+/// The top `k` of `rows` under `score`, ordered by the production `TopK`.
+fn order_by(
+    score: &dyn Fn(&[i8]) -> f64,
     rows: &[(&str, [i8; 4])],
     k: usize,
 ) -> Vec<(u64, String)> {
@@ -157,7 +194,7 @@ fn production_quantized_order(
             Ranked {
                 occurrence_id: (*id).to_owned(),
                 class: OccurrenceClass::Messages,
-                score: query.score(codes),
+                score: score(codes),
             },
             (),
         );
@@ -489,16 +526,30 @@ fn the_fixture_order_is_pinned() {
     let scales = fixture_scales();
     let query = QuantizedQuery::new(&layout(), &scales, &fixture_query()).unwrap();
     assert_eq!(query.codes(), &[127, 1, 32, -10]);
-    let ids: Vec<String> = production_quantized_order(&query, &fixture_codes(), 8)
-        .into_iter()
-        .map(|(_, id)| id)
+    let pinned: Vec<(u64, String)> = PINNED_QUANTIZED
+        .iter()
+        .map(|(bits, id)| (*bits, (*id).to_owned()))
         .collect();
     assert_eq!(
-        ids,
-        [
-            "dup-a", "dup-b", "coarse", "fine", "zero", "neg", "mixed", "max"
-        ]
+        production_quantized_order(&query, &fixture_codes(), 8),
+        pinned
     );
+}
+
+#[test]
+fn the_fixture_query_is_the_normalized_decimal_query() {
+    let raw = [0.8f32, 0.1, 0.5, -0.3];
+    let norm = raw
+        .iter()
+        .map(|v| f64::from(*v).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let normalized: Vec<u32> = raw
+        .iter()
+        .map(|v| ((f64::from(*v) / norm) as f32).to_bits())
+        .collect();
+    let pinned: Vec<u32> = fixture_query().iter().map(|v| v.to_bits()).collect();
+    assert_eq!(normalized, pinned);
 }
 
 #[test]
@@ -641,6 +692,19 @@ fn the_fixture_rejects_unweighted_and_f32_first_quantized_scoring() {
                 .collect(),
         )
     };
+    assert!(agrees_with_oracle(&query, &scales, &|codes| query.score(codes)));
+    assert!(
+        !agrees_with_oracle(&query, &scales, &|codes| unweighted(query.codes(), codes)),
+        "the oracle check rejects the unweighted dot"
+    );
+    assert!(
+        !agrees_with_oracle(&query, &scales, &|codes| f32_first_quantized(
+            scales.as_slice(),
+            query.codes(),
+            codes
+        )),
+        "the oracle check rejects f32-first multiplication"
+    );
     let weighted = order_of(&|codes| reference_quantized(scales.as_slice(), query.codes(), codes));
     let raw = order_of(&|codes| unweighted(query.codes(), codes));
     let position = |order: &[(u64, String)], id: &str| order.iter().position(|(_, row)| row == id);
@@ -842,9 +906,19 @@ fn rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ti
         .map(|row| (row.score.to_bits(), row.occurrence_id))
         .collect();
     assert_eq!(actual, expected);
-    assert_eq!(actual[0].1, "a-same");
-    assert_eq!(actual[1].1, "b-same");
-    assert_eq!(actual.last().unwrap().1, "opposite");
+    // Pinned from the reference so a change to the scorer or the order is a visible diff.
+    let pinned: Vec<(u64, String)> = [
+        (0x3fef_ffff_ed9f_aa40, "a-same"),
+        (0x3fef_ffff_ed9f_aa40, "b-same"),
+        (0x3fe6_a09e_6000_0000, "half"),
+        (0x0000_0000_0000_0000, "negative-zero"),
+        (0x0000_0000_0000_0000, "orthogonal"),
+        (0xbfef_ffff_ed9f_aa40, "opposite"),
+    ]
+    .into_iter()
+    .map(|(bits, id)| (bits, id.to_owned()))
+    .collect();
+    assert_eq!(actual, pinned);
 }
 
 #[test]

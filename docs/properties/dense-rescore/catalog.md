@@ -79,19 +79,24 @@ alignment, and extrema fixtures, which are not measured here.
 ### dense-quantized-score-matches-weighted-reference
 
 Type: safety
-Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:448`)
+Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:527`)
 is built by `select_inner` (`crates/retrieval/src/dense/candidates.rs:312`)
 under `select_candidates_observed`, which `rank_compressed` calls;
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:729`) reaches
-`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1877`)
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`) reaches
+`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1878`)
 installs a composition, and no production caller installs one at this HEAD.
-`TermTable::score_rows` (`scalar.rs:565`) is called from
+`TermTable::score_rows` (`scalar.rs:644`) is called from
 `crates/retrieval/tests/` only.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
 `extreme_scales_and_codes_score_finite_and_match_the_reference`,
-`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`,
+`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`, which runs
+the production scorer and both negative controls through one oracle check
+(`agrees_with_oracle`: score bits and every `k` cut of the `TopK` order),
+`the_fixture_order_is_pinned`, which pins all eight score bits and
+identifiers from a query stored as literal bits,
+`the_fixture_query_is_the_normalized_decimal_query`,
 `term_table_scores_match_the_reference_for_every_chunk_and_tile_shape`,
 `term_table_scores_the_fixture_like_the_row_scorer`,
 `scales_from_every_constructor_score_like_the_reference` (scales from
@@ -122,8 +127,8 @@ magnitude across coordinates, codes at `+127` and `-127`, scales at
 leave a partial 16-coordinate chunk, and row counts that leave a partial
 512-row tile.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:628`), `weighted_dot_block` (`scalar.rs:655`), and
-`QuantizedQuery::term_table` (`scalar.rs:501`) were read against the formula
+`weighted_dot` (`scalar.rs:707`), `weighted_dot_block` (`scalar.rs:734`), and
+`QuantizedQuery::term_table` (`scalar.rs:580`) were read against the formula
 and the tests run against them.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
@@ -146,7 +151,8 @@ equal to `inner_product` bit for bit. Corrected from `score.rs:194` and
 `dense_properties.rs:258`, their lines at main `f6f42ea4a`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
-`rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`,
+`rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`
+(which also pins the six score bits and identifiers),
 `original_scores_separate_rows_an_f32_product_would_tie`, and
 `signed_zero_coordinates_score_positive_zero`.
 Guarantee: The retained-original score multiplies each pair of f32
@@ -198,11 +204,11 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `CandidateCapacity::new`
 (`crates/retrieval/src/dense/capacity.rs:38`) is called by
-`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:619`) at
+`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:618`) at
 `set_dense_vectors` and per compressed request; no production caller installs
 a composition at this HEAD.
 Status: active
-Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
+Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `the_capacity_is_ceil_alpha_times_k_and_never_below_k`,
 `the_capacity_takes_the_ceiling_of_the_exact_binary_product`,
 `a_malformed_alpha_refuses_before_zero_k_is_considered`,
@@ -211,17 +217,25 @@ Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
 `a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted`,
 `a_large_alpha_shifts_exactly_or_refuses`, and the seeded property
 `the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas`
-exercise the arithmetic and the refusal precedence over three scalars;
-`CandidateCapacity::new` reaches production only behind an installed
-composition, so the clause that a pool is sized from the checked capacity
-before any R-sized state exists waits for #610's scan witness.
+exercise the arithmetic and the refusal precedence over three scalars.
+`crates/retrieval/tests/dense_capacity_allocations.rs`
+`every_capacity_refusal_and_a_zero_k_allocate_nothing` records zero allocator
+calls for each refusal class, a zero `K`, and an accepted capacity, and
+`the_pool_a_capacity_sizes_is_one_allocation_proportional_to_r` shows the pool
+is one allocation scaling with `R`. At the route,
+`crates/daemon/tests/query_route_compressed.rs`
+`a_refused_capacity_installs_nothing_and_ranks_without_a_scan` refuses
+installation for a NaN alpha, an alpha below one, and an over-cap pool, and a
+producer carrying each degrades the lane as `capacity` with no scan window,
+original read, or ledger charge. A zero `K` cannot reach the route, whose
+`DenseLimits.k` is a `NonZeroUsize`.
 Guarantee: `R = ceil(alpha * K)` is computed exactly; alpha that is not finite
 or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
 size, and the candidate scan sizes its pool from it
-(`crates/retrieval/src/dense/candidates.rs:324`).
+(`crates/retrieval/src/dense/candidates.rs:323`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -241,7 +255,7 @@ Open questions:
 ### dense-invalid-query-never-enters-scoring
 
 Type: safety
-Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:464`) is reached
+Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:543`) is reached
 from tests only; `rescore` (`score.rs:228`) is also test-only at this base and
 validates its query the same way through `codec::validate`.
 Status: active
@@ -465,8 +479,8 @@ Open questions:
 Type: safety
 Reachability: test-only - `rank_compressed`
 (`crates/daemon/src/vector_reader.rs:814`) is called by
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:729`), which the
-route builds only after `set_dense_vectors` (`query_route.rs:1877`) installs a
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`), which the
+route builds only after `set_dense_vectors` (`query_route.rs:1878`) installs a
 composition; no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`

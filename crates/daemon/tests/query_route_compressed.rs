@@ -545,6 +545,44 @@ fn the_pool_the_limits_give_is_checked_before_a_view_is_installed() {
     ));
 }
 
+/// A malformed alpha or an over-cap pool refuses installation, and a producer carrying it degrades the lane before any scan window, original read, or ledger charge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_capacity_installs_nothing_and_ranks_without_a_scan() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let handler = Handler::new();
+    handler.set_query_route_limits(Some(with_dense(2))).unwrap();
+    let (_token, budget) = request_budget(10_000);
+    for alpha in [f64::NAN, 0.5, 64.0] {
+        let mut limits = compressed_limits();
+        limits.candidates.alpha = alpha;
+        let events = Arc::new(Mutex::new(0_usize));
+        let counted = Arc::clone(&events);
+        let vectors = DenseVectors::new(
+            Arc::clone(&composition.view),
+            composition.store.admission.clone(),
+            composition.store.activation(),
+            limits,
+        )
+        .with_observer_for_test(Arc::new(move |_| *counted.lock().unwrap() += 1));
+        let refused = handler.set_dense_vectors(Some(vectors.clone()));
+        assert!(
+            matches!(refused, Err(LimitsRefusal::DenseCapacity(_))),
+            "alpha {alpha}: {refused:?}"
+        );
+        let outcome = run(&fixture, 2, vectors, &budget).unwrap();
+        assert_eq!(
+            outcome.statuses[2],
+            LaneStatus::Unavailable("capacity"),
+            "alpha {alpha}"
+        );
+        assert_eq!(*events.lock().unwrap(), 0, "alpha {alpha}: no scan window");
+        assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+        assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
+    }
+    fixture.daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vectors_install_only_under_declared_dense_limits() {
     let fixture = Fixture::build().await;
