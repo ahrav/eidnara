@@ -985,3 +985,508 @@ fn a_withdrawn_activation_grant_publishes_nothing_and_a_live_one_publishes_the_s
         host_runtime::generation::CurrentProfile::Current(published.digest)
     );
 }
+
+/// Records what an identity refusal must leave untouched: the work directory, the generation set, and the census.
+fn assert_untouched(
+    fixture: &Fixture,
+    dir: &std::path::Path,
+    before: &BTreeSet<String>,
+    census: &Census,
+    case: &str,
+) {
+    assert!(std::fs::read_dir(dir).unwrap().next().is_none(), "{case}");
+    assert_eq!(fixture.generations(), *before, "{case}");
+    assert_eq!(fixture.ledger.census(), *census, "{case}");
+}
+
+/// A view whose members carry another value of any identity field the sidecar binds refuses compaction as that field, both with the resident limit at one byte and with the disk limit at one byte, so the identity check precedes the reservation from either pool. A member whose rows were cut after the view pinned it refuses with the row it could not read. Each refusal leaves the work directory empty, the generation set unchanged, and the census as it was.
+#[test]
+fn every_identity_field_and_a_member_cut_after_pinning_refuse_and_write_nothing() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let before = fixture.generations();
+    let other_checkpoint = ProjectionCheckpoint {
+        snapshot_commit_seq: 1,
+        checkpoint_commit_seq: 2,
+        hold_id: "another-hold".to_owned(),
+    };
+    type Drift = fn(&mut retrieval::batch::VectorGeneration);
+    let generation_drifts: [(&str, Drift); 5] = [
+        ("embedding_model", |g| {
+            g.embedding_model = "another-model".to_owned()
+        }),
+        ("tokenizer_fingerprint", |g| {
+            g.tokenizer_fingerprint = "another-tokenizer".to_owned()
+        }),
+        ("vector_dimension", |g| g.vector_dimension += 1),
+        ("generation_epoch", |g| g.generation_epoch += 1),
+        ("generation_id", |g| {
+            g.generation_id = "another-generation".to_owned()
+        }),
+    ];
+    let generations: Vec<(&str, retrieval::batch::VectorGeneration)> = generation_drifts
+        .into_iter()
+        .map(|(field, drift)| {
+            let mut generation = fixture.generation.clone();
+            drift(&mut generation);
+            (field, generation)
+        })
+        .collect();
+    // Starving each pool in turn makes a reservation taken before the identity check fail the identity assertion.
+    for starved in [RESIDENT_LIMIT, DISK_LIMIT] {
+        fixture.set_limit(starved, 1);
+        let census = fixture.ledger.census();
+        let expected = fixture.expected();
+        let mut field_cases: Vec<(&str, ExpectedVectors<'_>)> = generations
+            .iter()
+            .map(|(field, generation)| {
+                (
+                    *field,
+                    ExpectedVectors {
+                        generation,
+                        ..expected
+                    },
+                )
+            })
+            .collect();
+        field_cases.push((
+            "unit_norm_tolerance",
+            ExpectedVectors {
+                unit_norm_tolerance: expected.unit_norm_tolerance * 2.0,
+                ..expected
+            },
+        ));
+        field_cases.push((
+            "kernel_incarnation_id",
+            ExpectedVectors {
+                kernel_incarnation_id: "another-incarnation",
+                ..expected
+            },
+        ));
+        field_cases.push((
+            "checkpoint",
+            ExpectedVectors {
+                checkpoint: Some(&other_checkpoint),
+                ..expected
+            },
+        ));
+        assert_eq!(
+            field_cases.len(),
+            8,
+            "every field the sidecar can be built to disagree on"
+        );
+        for (field, expected) in &field_cases {
+            let case = format!("{starved}: {field}");
+            let dir = fixture.work_dir();
+            let refusal =
+                compact(&view, expected, &fixture.staging(), max_entries(), &dir).unwrap_err();
+            assert_eq!(
+                refusal,
+                CompactionRefusal::Identity {
+                    digest: view.members()[0].clone(),
+                    field
+                },
+                "{case}"
+            );
+            assert_untouched(&fixture, &dir, &before, &census, &case);
+        }
+    }
+
+    // The rows are cut to their header after the view verified and pinned them.
+    fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
+    let census = fixture.ledger.census();
+    let rows = fixture.generation_dir(&base.digest).join(ROWS_FILE);
+    let bytes = std::fs::read(&rows).unwrap();
+    std::fs::write(
+        &rows,
+        &bytes[..retrieval::dense::codec::ARTIFACT_HEADER_BYTES],
+    )
+    .unwrap();
+    let dir = fixture.work_dir();
+    let refusal = compact(
+        &view,
+        &fixture.expected(),
+        &fixture.staging(),
+        max_entries(),
+        &dir,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(refusal, CompactionRefusal::Row { layer: 0, .. }),
+        "{refusal:?}"
+    );
+    assert_untouched(&fixture, &dir, &before, &census, "cut rows");
+}
+
+/// A tail published after the cut inserts an occurrence the prefix never held, updates one, and deletes another. The compaction carries the tail unchanged, so the inserted occurrence ranks exactly once above the compacted base; a second cut consumes the tail, and the occurrence then lives in the new base exactly once with the same ranking.
+#[test]
+fn a_tail_that_inserts_a_new_occurrence_is_carried_once_and_consumed_once_by_the_next_cut() {
+    let mut fixture = Fixture::new();
+    let objects: Vec<&str> = OBJECTS.iter().copied().chain(["zeta"]).collect();
+    let projection = support::dense_projection::Projection::new(
+        fixture.root.path(),
+        &fixture.identity,
+        &fixture.generation,
+        &objects,
+        &objects,
+    );
+    let corpus = corpus();
+    let first: &[(&str, Vec<f32>)] = &[("alpha", axis(7))];
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    let d1 = fixture.layer_from(&export(first, &[], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[d1]).unwrap())
+        .unwrap();
+    let cut_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &cut_view).unwrap();
+
+    let zeta = unit([0.97, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let tail_rows: &[(&str, Vec<f32>)] = &[("zeta", zeta.clone()), ("epsilon", axis(3))];
+    let d2 = fixture.layer_from(&export(tail_rows, &["beta"], 16));
+    let d1_verified = daemon::vector_generation::verify(
+        &fixture.store,
+        &cut_view.members()[1],
+        &fixture.expected(),
+        u64::MAX,
+    )
+    .unwrap();
+    let with_tail = fixture.compose(2, &base, &[d1_verified, d2]).unwrap();
+    fixture.publish(&with_tail).unwrap();
+    let query = axis(0);
+    let expected = expected_rows(&[(&corpus, &[]), (first, &[]), (tail_rows, &["beta"])]);
+    let reference_ranking = reference(&query, &expected);
+    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert_eq!(published.tail, vec![with_tail.deltas[1].clone()]);
+    let carried = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let carried_ranking = keyed(&rank_view(&fixture, &projection, &carried, &query, 8).unwrap());
+    // The reference holds each occurrence once, so equality shows the insert carried once, ranking first.
+    assert_eq!(carried_ranking, reference_ranking);
+    assert_eq!(carried_ranking[0].0, occurrence_id("zeta"));
+    compacted.discard().unwrap();
+
+    // The next cut consumes the tail: the new base holds `zeta` once, and nothing follows it.
+    let consumed = compact_view(&fixture, &carried).unwrap();
+    assert_eq!(consumed.winners, expected.len());
+    let republished = publish_compacted(&fixture, &consumed).unwrap();
+    assert!(republished.tail.is_empty());
+    let compacted_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(compacted_view.members(), vec![republished.base.clone()]);
+    assert_eq!(
+        compacted_view.layers()[0]
+            .occurrence_ids()
+            .iter()
+            .filter(|id| **id == occurrence_id("zeta"))
+            .count(),
+        1,
+        "zeta lives once in the new base"
+    );
+    let final_ranking =
+        keyed(&rank_view(&fixture, &projection, &compacted_view, &query, 8).unwrap());
+    assert_eq!(final_ranking, reference_ranking);
+    consumed.discard().unwrap();
+}
+
+/// The compaction's publication loses its reply after the rename, and before anyone reconciles it a writer composes a tail delta over the selection it finds, the compacted one. Reconciliation then reports the selection on the writer's composition, recovery takes that composition, the tail stands once above the compacted base, and a retry from the old cut refuses, so no second history is published.
+#[test]
+fn a_tail_published_over_an_unreconciled_compaction_is_kept_once_and_the_retry_refuses() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let corpus = corpus();
+    let first: &[(&str, Vec<f32>)] = &[("alpha", axis(7))];
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    let d1 = fixture.layer_from(&export(first, &[], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[d1]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let outcome = publish(
+        &compacted,
+        &fixture.staging(),
+        &fixture.activation(),
+        &fixture.expected(),
+        bounds(),
+        &fixture.work_dir(),
+        &mut |event| {
+            if event == ProfileEvent::AfterRename {
+                Err(GenerationError::NativePayloadInvalid { detail: "cut" })
+            } else {
+                Ok(())
+            }
+        },
+    );
+    let Err(CompactionRefusal::Unknown { digest, .. }) = outcome else {
+        panic!("{outcome:?}");
+    };
+
+    // The writer reads the selection the rename left and composes its delta over that composition's base.
+    assert_eq!(fixture.predecessor().as_deref(), Some(digest.as_str()));
+    let compacted_base = daemon::vector_generation::verify(
+        &fixture.store,
+        &compacted.built().digest(),
+        &fixture.expected(),
+        u64::MAX,
+    )
+    .unwrap();
+    let tail_rows: &[(&str, Vec<f32>)] = &[("epsilon", axis(3))];
+    let tail = fixture.layer_from(&export(tail_rows, &["beta"], 16));
+    let tail_digest = tail.digest.clone();
+    let written = fixture
+        .publish(&fixture.compose(3, &compacted_base, &[tail]).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        reconcile(&fixture.store, fixture.transaction(), &digest).unwrap(),
+        Reconciled::Other(Some(written.clone())),
+        "the selection moved past the compaction to the writer's composition"
+    );
+    let recovered = recover(
+        &fixture.store,
+        fixture.transaction(),
+        &fixture.expected(),
+        max_deltas(),
+        u64::MAX,
+        NonZeroUsize::new(8).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.composition.digest, written);
+    let retry = compact_view(&fixture, &view).unwrap();
+    assert_eq!(
+        publish_compacted(&fixture, &retry).unwrap_err(),
+        CompactionRefusal::PrefixMoved
+    );
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(written.clone())
+    );
+    let current = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(
+        current.members(),
+        vec![compacted.built().digest(), tail_digest],
+        "the tail stands once above the compacted base"
+    );
+    let query = axis(0);
+    let expected = expected_rows(&[(&corpus, &[]), (first, &[]), (tail_rows, &["beta"])]);
+    assert_eq!(
+        keyed(&rank_view(&fixture, &projection, &current, &query, 8).unwrap()),
+        reference(&query, &expected)
+    );
+    compacted.discard().unwrap();
+    retry.discard().unwrap();
+}
+
+/// Two compositions that resolve to the same rows through different layerings, with two occurrences sharing one payload, compact to the same base digest and rank to the same scores: compaction keeps logical meaning, not physical layout.
+#[test]
+fn layerings_that_resolve_alike_compact_to_one_base_and_keep_equal_payloads_distinct() {
+    let shared = unit([0.8, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut resolved = corpus();
+    for (object, vector) in &mut resolved {
+        if matches!(*object, "beta" | "delta") {
+            *vector = shared.clone();
+        }
+    }
+    let replacing = |object: &str, vector: Vec<f32>| -> Vec<(&str, Vec<f32>)> {
+        resolved
+            .iter()
+            .map(|(name, row)| {
+                (
+                    *name,
+                    if *name == object {
+                        vector.clone()
+                    } else {
+                        row.clone()
+                    },
+                )
+            })
+            .collect()
+    };
+    let layerings = [
+        // The base holds `delta`'s final row and the delta updates `beta`.
+        (replacing("beta", axis(6)), vec![("beta", shared.clone())]),
+        // The base holds `beta`'s final row and the delta updates `delta`.
+        (replacing("delta", axis(5)), vec![("delta", shared.clone())]),
+    ];
+    let query = axis(0);
+    let mut outcomes = Vec::new();
+    for (base_rows, delta_rows) in &layerings {
+        let mut fixture = Fixture::new();
+        let projection = projection(&fixture, &OBJECTS);
+        let base = fixture.layer_from(&export(base_rows, &[], 10));
+        let delta = fixture.layer_from(&export(delta_rows, &[], 12));
+        fixture
+            .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+            .unwrap();
+        let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+        let compacted = compact_view(&fixture, &view).unwrap();
+        let digest = compacted.built().digest();
+        publish_compacted(&fixture, &compacted).unwrap();
+        let after = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+        let ranking = keyed(&rank_view(&fixture, &projection, &after, &query, 8).unwrap());
+        compacted.discard().unwrap();
+        outcomes.push((digest, ranking));
+    }
+    assert_eq!(
+        outcomes[0].0, outcomes[1].0,
+        "one base for one logical content"
+    );
+    assert_eq!(outcomes[0].1, outcomes[1].1);
+    assert_eq!(outcomes[0].1, reference(&query, &map(&resolved)));
+    let tied: Vec<&(String, f64)> = outcomes[0]
+        .1
+        .iter()
+        .filter(|(id, _)| *id == occurrence_id("beta") || *id == occurrence_id("delta"))
+        .collect();
+    assert_eq!(tied.len(), 2, "equal payloads stay two occurrences");
+    assert_eq!(tied[0].1.to_bits(), tied[1].1.to_bits());
+}
+
+/// Competing staging work fills the disk pool between the compaction and its publication, so publishing the base is refused at the disk limit, the refused attempt holds nothing, the selection and the old view's pins stay, and once the competitor's reservation ends the same compaction publishes and its charges end with discard.
+#[test]
+fn competing_disk_work_that_fills_the_pool_refuses_the_publication_and_holds_nothing() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    let old = fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let limit: u64 = 1 << 30;
+    fixture.set_limit(DISK_LIMIT, limit);
+    let pinned = fixture.ledger.census().pinned;
+    let store_bytes = daemon::vector_admission::Ledger::store_bytes(&fixture.store).unwrap();
+    let held = fixture.ledger.census().disk;
+    let competitor = fixture
+        .ledger
+        .reserve_disk(
+            &fixture.admission,
+            ResourceClass::Staging,
+            limit - store_bytes - held,
+            &fixture.store,
+        )
+        .unwrap();
+    let generations = fixture.generations();
+    let competing = fixture.ledger.census().disk;
+    let refused = publish_compacted(&fixture, &compacted).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            CompactionRefusal::Stage(VectorRefusal::Reservation(Refusal::Denied(
+                Denial::LimitExceeded { limit, .. }
+            ))) if limit == DISK_LIMIT
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.ledger.census().disk,
+        competing,
+        "the refused attempt holds nothing"
+    );
+    assert_eq!(fixture.generations(), generations, "nothing was staged");
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(old)
+    );
+    assert_eq!(
+        fixture.ledger.census().pinned,
+        pinned,
+        "the old view stays pinned"
+    );
+    drop(competitor);
+    assert_eq!(fixture.ledger.census().disk, held);
+    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(published.digest)
+    );
+    compacted.discard().unwrap();
+    assert_eq!(fixture.ledger.census().disk, 0);
+}
+
+/// The disk pool stages a compacted base with exactly its staged bytes free, the inventory and its manifest, and refuses it one byte short; either refusal holds nothing and leaves the current composition, and the publication succeeds once the pool is free.
+#[test]
+fn the_disk_pool_stages_a_compacted_base_at_its_exact_bytes_and_refuses_one_byte_less() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    let old = fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    // Staging reserves the inventory's files and the manifest the store's walk counts.
+    let need = inventory_bytes(&compacted)
+        + compacted
+            .built()
+            .sidecar
+            .stage_manifest()
+            .canonical_bytes()
+            .len() as u64;
+    let limit: u64 = 1 << 30;
+    fixture.set_limit(DISK_LIMIT, limit);
+    let store_bytes = daemon::vector_admission::Ledger::store_bytes(&fixture.store).unwrap();
+    let held = fixture.ledger.census().disk;
+    let free = limit - store_bytes - held;
+    let compete = |left: u64| {
+        fixture
+            .ledger
+            .reserve_disk(
+                &fixture.admission,
+                ResourceClass::Staging,
+                free - left,
+                &fixture.store,
+            )
+            .unwrap()
+    };
+
+    let competitor = compete(need - 1);
+    let competing = fixture.ledger.census().disk;
+    let refused = publish_compacted(&fixture, &compacted).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            CompactionRefusal::Stage(VectorRefusal::Reservation(Refusal::Denied(
+                Denial::LimitExceeded { limit, .. }
+            ))) if limit == DISK_LIMIT
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.ledger.census().disk, competing);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(old.clone())
+    );
+    drop(competitor);
+
+    // With exactly the base's staged bytes free the base stages, and the publication refuses at the composition record that needs bytes beyond it.
+    let competitor = compete(need);
+    let competing = fixture.ledger.census().disk;
+    let refused = publish_compacted(&fixture, &compacted).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            CompactionRefusal::Composition(daemon::vector_composition::CompositionRefusal::Stage(
+                VectorRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded { limit, .. }))
+            )) if limit == DISK_LIMIT
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.ledger.census().disk, competing);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(old.clone())
+    );
+    drop(competitor);
+
+    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(published.digest)
+    );
+    compacted.discard().unwrap();
+}
