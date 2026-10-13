@@ -93,10 +93,10 @@ unprotected, and asserts `prune` preserves it byte-for-byte.
 
 ### Q: None recorded in the catalog. Verified here instead: are all four failure modes real, and which are reachable?
 
-- Sources examined: `generation.rs:1569-1591`, `:976-1016`, `:1259-1307`,
+- Sources examined: `generation.rs:941-968`, `:976-1016`, `:1259-1307`,
   `:364-384`; `crates/host-runtime/src/instance.rs:852-865`;
   `crates/host-runtime/src/lifecycle.rs:250-284`; the one existing test at
-  `generation.rs:2282-2348`; `existing-checks.md:171-173`.
+  `generation.rs:2059-2100`; `existing-checks.md:171-173`.
 - Findings: all four are real and distinct, as enumerated above. Reachability
   ranks 1 (high, two independent causes including the mode-bit test), 2 (high),
   4 (moderate, `EIO`), 3 (low, `EIO` on an open descriptor only). The catalog's
@@ -118,3 +118,20 @@ invalidated. At the #989 head, the lifecycle record carries no `schema` key,
 and a record whose key set differs from the record shape is quarantined
 byte-for-byte as `unsupported_state_schema`. Line anchors into files #989
 changed are as of their earlier recorded head.
+
+## Dated note (2026-10-13, #1012)
+
+Every line anchor above is as of the recorded head of the investigation. At the
+#1012 head the manifest-side gate `is_quarantined_schema` is at
+`crates/host-runtime/src/generation.rs:1569-1591`, its only caller `prune` is at
+`:1665-1750`, `open_child_dir` is at `:1949-1956`, `read_all_fd` is at
+`crates/host-runtime/src/instance.rs:991-1004`, and the prune test covering the
+undecodable cases is `undecodable_generations_survive_prune_after_a_successor`
+at `generation.rs:2282-2348`. The gate's first open is now
+`store_fs::open_dir_for_removal`
+(`crates/host-runtime/src/store_fs.rs:200-210`), which checks ownership and
+directory type only, so the group/other mode-bit
+return that this record ranks most reachable is no longer on the gate's path;
+that test stages a future-schema manifest behind a 0o500 directory and asserts
+`prune` quarantines it. The `lifecycle.rs` gate named above is not present under
+that name at this head.
