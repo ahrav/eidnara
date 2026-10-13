@@ -295,6 +295,26 @@ function buildTransformBody(
 }
 
 /**
+ * The CK window of an OpenCode message array. Compaction summary rows leave the window, and every
+ * kept message carries its unfiltered window position, which names its synthetic tool calls.
+ */
+export function encodeOpenCodeWindowToCk(
+    messages: readonly unknown[],
+): ReturnType<typeof encodeOpenCodeMessagesToCk> {
+    const positions: number[] = [];
+    const kept = messages.filter(
+        (message, i) => !isRawCompactionSummaryInfo(infoOf(message)) && positions.push(i + 1),
+    );
+    return encodeOpenCodeMessagesToCk(kept, positions);
+}
+
+function infoOf(message: unknown): unknown {
+    return message !== null && typeof message === "object"
+        ? (message as Record<string, unknown>).info
+        : undefined;
+}
+
+/**
  * OpenCode's message array as discovery reads it. Each hop is an own data read, so a planted
  * proxy, revoked proxy, or accessor reads as no id and none of its traps or getters runs.
  */
@@ -496,14 +516,8 @@ export function createRustModeTransform(
                 };
                 const usageEntry = deps.contextUsageMap.get(sessionId);
                 return {
-                    // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects; kept messages carry unfiltered window positions (push returns a truthy length).
                     encodeInput() {
-                        const positions: number[] = [];
-                        const kept = messages.filter(
-                            (message, i) =>
-                                !isRawCompactionSummaryInfo(message.info) && positions.push(i + 1),
-                        );
-                        return encodeOpenCodeMessagesToCk(kept, positions);
+                        return encodeOpenCodeWindowToCk(messages);
                     },
                     fields: transformPassFields({
                         passInputs,

@@ -14492,9 +14492,7 @@ pub(crate) mod tests {
             .unwrap()
             .0;
         assert_eq!(
-            sidecar
-                .matches("served_json::canonical_block_bytes(")
-                .count(),
+            sidecar.matches("served_json::canonical_block_in(").count(),
             1
         );
         assert!(!sidecar.contains("serde_json::to_value("));

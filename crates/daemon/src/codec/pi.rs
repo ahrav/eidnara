@@ -279,6 +279,7 @@ fn decode_rows(rows: &[Arc<Value>], stamp: bool) -> Result<DecodedHarnessMessage
                 raw: Arc::clone(row),
                 stable_key: None,
                 blocks: block_metas,
+                folded_native_indices: Vec::new(),
             },
         );
     }
@@ -1228,7 +1229,6 @@ fn push_block(
         native_id: string_field(raw, "id").or_else(|| string_field(raw, "toolCallId")),
         item_id: None,
         content_fingerprint: None,
-        raw: Value::Null,
     });
     content.push(block);
 }
