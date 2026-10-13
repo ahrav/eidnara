@@ -1,21 +1,19 @@
-//! Read-only mappings of a pinned layer's int8 code file for one candidate scan.
+//! Read-only mappings of a pinned layer's int8 code file for the candidate scan.
 //!
-//! The scan maps the rows the file holds when the scan starts and reads every row it scores directly from that mapping. A file shorter than its layer declares when the scan maps it maps only its whole rows, and a row past them reads as missing, the classification a short positioned read gives.
+//! A pinned layer maps its code file once, after verification, and every scan over the layer reads the rows it scores directly from that mapping while the file still holds every row the mapping covers. A scan that finds the file shorter maps the rows the file holds when the scan starts, and a row past them reads as missing, the classification a short positioned read gives.
 //!
-//! The mapping rests on the cooperative-file threat model `vector_reader` states: same-user files stay unchanged after verification. A file truncated while a scan holds its mapping, or a device error behind a mapped page, raises `SIGBUS` when the scan touches the page and ends the host process, where a positioned read would have returned an error the scan classifies.
+//! The mapping rests on the cooperative-file threat model `vector_reader` states: same-user files stay unchanged after verification. A file truncated while a scan reads its mapping, or a device error behind a mapped page, raises `SIGBUS` when the scan touches the page and ends the host process, where a positioned read would have returned an error the scan classifies.
 
 use std::fs::File;
-use std::marker::PhantomData;
 
 use memmap2::{Mmap, MmapOptions};
 use retrieval::dense::{CodeAccess, RowFault};
 
-/// One layer's codes for one candidate scan: `declared` rows of `width` bytes each from offset 0 of the layer's code file, mapped read-only for as long as the scan holds this value. The value borrows the file, so the pinned layer that owns the file outlives the mapping.
-pub(crate) struct MappedCodes<'a> {
+/// One layer's codes: `declared` rows of `width` bytes each from offset 0 of the layer's code file, mapped read-only for as long as this value lives. The pinned layer owns its mapping beside the member's pin, and a scan's own mapping lives inside a borrow of that layer, so the pin outlives every mapping of the file.
+pub(crate) struct MappedCodes {
     mapping: Mapping,
     width: usize,
     declared: usize,
-    _file: PhantomData<&'a File>,
 }
 
 enum Mapping {
@@ -25,11 +23,11 @@ enum Mapping {
     Failed(String),
 }
 
-impl<'a> MappedCodes<'a> {
+impl MappedCodes {
     /// Maps the first `declared` rows of `codes`, or the whole rows it holds when it is shorter.
     ///
-    /// `codes` must be a verified generation member that the caller keeps pinned, so its bytes stay as verified for as long as the mapping lives.
-    pub(crate) fn map(codes: &'a File, width: usize, declared: usize) -> Self {
+    /// `codes` must be a verified generation member whose pin outlives the returned value, so its bytes stay as verified for as long as the mapping lives.
+    pub(crate) fn map(codes: &File, width: usize, declared: usize) -> Self {
         let length = match codes.metadata() {
             Ok(metadata) => metadata.len(),
             Err(error) => return Self::failed(width, declared, &error),
@@ -50,10 +48,9 @@ impl<'a> MappedCodes<'a> {
                 },
                 width,
                 declared,
-                _file: PhantomData,
             };
         }
-        // SAFETY: `codes` is a published generation member that the caller keeps pinned for the life of this value, which borrows it. The store writes a member once while staging, renames it into place, verifies its hash on acquisition, and removes it only under the lifecycle's exclusive lock, which a pinned member excludes; removal unlinks, and an unlinked file keeps its mapped pages. So the store leaves the mapped bytes as verified while they are borrowed. A same-user process outside the store could still write or truncate the file, because the locks are advisory; the cooperative-file threat model in `vector_reader` assumes it does not, and the module documentation states the effect if it does. The mapping is read-only, covers only bytes the file held when it was measured, and every borrow of it is shared.
+        // SAFETY: `codes` is a published generation member whose pin outlives this value: the pinned layer owns its mapping beside the pin, and a scan's own mapping lives inside a borrow of that layer. The store writes a member once while staging, renames it into place, verifies its hash on acquisition, and removes it only under the lifecycle's exclusive lock, which a pinned member excludes; removal unlinks, and an unlinked file keeps its mapped pages. So the store leaves the mapped bytes as verified while the pin is held. A same-user process outside the store could still write or truncate the file, because the locks are advisory; the cooperative-file threat model in `vector_reader` assumes it does not, and the module documentation states the effect if it does. The mapping is read-only, covers only bytes the file held when it was measured, and every borrow of it is shared.
         #[allow(unsafe_code)]
         let mapped = unsafe { MmapOptions::new().len(mapped).map(codes) };
         match mapped {
@@ -64,7 +61,6 @@ impl<'a> MappedCodes<'a> {
                 },
                 width,
                 declared,
-                _file: PhantomData,
             },
             Err(error) => Self::failed(width, declared, &error),
         }
@@ -75,7 +71,23 @@ impl<'a> MappedCodes<'a> {
             mapping: Mapping::Failed(error.to_string()),
             width,
             declared,
-            _file: PhantomData,
+        }
+    }
+
+    /// A fresh mapping of `codes` as it stands when this mapping no longer reads as such a mapping would; `None` while it still does.
+    pub(crate) fn remap_if_stale(&self, codes: &File) -> Option<Self> {
+        (!self.covers(codes)).then(|| Self::map(codes, self.width, self.declared))
+    }
+
+    /// Whether this mapping reads exactly as a fresh mapping of `codes` would: it holds every declared row, and `codes` still holds every byte it covers.
+    fn covers(&self, codes: &File) -> bool {
+        match &self.mapping {
+            Mapping::Rows { rows, .. } if *rows == self.declared => {
+                codes.metadata().is_ok_and(|metadata| {
+                    metadata.len() >= Self::mapped_bytes(self.width, self.declared)
+                })
+            }
+            _ => false,
         }
     }
 
@@ -85,7 +97,7 @@ impl<'a> MappedCodes<'a> {
     }
 }
 
-impl CodeAccess for MappedCodes<'_> {
+impl CodeAccess for MappedCodes {
     fn row_count(&self) -> usize {
         self.declared
     }
@@ -187,6 +199,48 @@ mod tests {
             mapped.codes_into(DECLARED, &mut into),
             Err(RowFault::Missing(_))
         ));
+    }
+
+    #[test]
+    fn a_scan_remaps_only_a_file_its_shared_mapping_no_longer_covers() {
+        let codes = all_codes();
+        let file = tempfile::tempfile().unwrap();
+        file.write_all_at(&codes, 0).unwrap();
+        let whole = MappedCodes::map(&file, WIDTH, DECLARED);
+        assert!(whole.remap_if_stale(&file).is_none());
+        file.write_all_at(&[0xff; WIDTH], codes.len() as u64)
+            .unwrap();
+        assert!(
+            whole.remap_if_stale(&file).is_none(),
+            "a longer file still holds every mapped row"
+        );
+
+        file.set_len((2 * WIDTH) as u64).unwrap();
+        let cut = whole.remap_if_stale(&file).expect("a cut file is remapped");
+        let mut into = Vec::new();
+        cut.codes_into(1, &mut into).unwrap();
+        assert_eq!(into, row_codes(&codes, 1));
+        assert!(matches!(
+            cut.codes_into(2, &mut into),
+            Err(RowFault::Missing(_))
+        ));
+
+        file.write_all_at(&codes, 0).unwrap();
+        let restored = cut
+            .remap_if_stale(&file)
+            .expect("a short mapping is always remapped");
+        restored.codes_into(DECLARED - 1, &mut into).unwrap();
+        assert_eq!(into, row_codes(&codes, DECLARED - 1));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codes");
+        std::fs::write(&path, &codes).unwrap();
+        let write_only = File::options().write(true).open(&path).unwrap();
+        let failed = MappedCodes::map(&write_only, WIDTH, DECLARED);
+        assert!(
+            failed.remap_if_stale(&write_only).is_some(),
+            "a failed mapping is always remapped"
+        );
     }
 
     #[test]

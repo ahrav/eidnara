@@ -1,5 +1,5 @@
 //! Reads a vector composition through pinned files. Acquisition takes the lifecycle's shared protection only around manifest reads: it observes the selector, pins the candidate record and every member it names with shared locks, and reserves the bytes the view keeps resident and records the bytes it pins on disk in the ledger, then releases the protection before verification hashes the members under the pins alone; it keeps the row and code artifacts open on the descriptors verification hashed them through and re-reads the selector under the protection once more before handoff. A failure anywhere returns nothing, and the pins, descriptors, and reservations go with it.
-//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec. The candidate scan reads a layer's int8 codes through a read-only mapping of that layer's code file (`vector_mapped`) and scores only the rows the resolver names, under the layer's own scales. Positioned reads and mappings after acquisition rely on the hashes verification checked: pins protect lifetime, and the cooperative-file threat model assumes same-user files stay unchanged after verification.
+//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec. The candidate scan reads a layer's int8 codes through the read-only mapping of that layer's code file the pinned layer holds (`vector_mapped`) and scores only the rows the resolver names, under the layer's own scales. Positioned reads and mappings after acquisition rely on the hashes verification checked: pins protect lifetime, and the cooperative-file threat model assumes same-user files stay unchanged after verification.
 //! A caller runs the ranking through the request's blocking seam with the view moved into the work, so the view lives until the physical read returns whatever happens to the caller.
 
 use std::collections::VecDeque;
@@ -79,7 +79,7 @@ impl From<GenerationError> for AcquireRefusal {
     }
 }
 
-/// One member's open artifacts and resident tables; the layer keeps its shared lock through `_generation`.
+/// One member's open artifacts, resident tables, and code mapping; the layer keeps its shared lock through `_generation`.
 pub struct PinnedLayer {
     pub digest: String,
     pub sidecar: VectorSidecar,
@@ -90,6 +90,7 @@ pub struct PinnedLayer {
     tombstones: Vec<String>,
     rows: File,
     codes: File,
+    mapped: MappedCodes,
     _generation: ValidatedGeneration,
 }
 
@@ -123,6 +124,11 @@ impl PinnedLayer {
                 delta_ordinal: ordinal,
             },
             checkpoint: sidecar.checkpoint(),
+            mapped: MappedCodes::map(
+                &codes,
+                sidecar.vector_dimension as usize,
+                occurrence_ids.len(),
+            ),
             digest,
             sidecar,
             scales,
@@ -809,18 +815,18 @@ pub fn rank_compressed(
     // The rescore reads one row at a time: its raw bytes and its decoded coordinates.
     let _rows = reserve(ResourceClass::RowBuffers, row_bytes.saturating_mul(2))?;
     let layers = view.resolver_layers();
-    let mapped: Vec<MappedCodes> = view
+    let remapped: Vec<Option<MappedCodes>> = view
         .layers
         .iter()
-        .map(|layer| MappedCodes::map(&layer.codes, layer.dimension(), layer.occurrence_ids.len()))
+        .map(|layer| layer.mapped.remap_if_stale(&layer.codes))
         .collect();
     let codes: Vec<LayerCodes<'_>> = view
         .layers
         .iter()
-        .zip(&mapped)
-        .map(|(layer, mapped)| LayerCodes {
+        .zip(&remapped)
+        .map(|(layer, remapped)| LayerCodes {
             scales: &layer.scales,
-            codes: mapped,
+            codes: remapped.as_ref().unwrap_or(&layer.mapped),
         })
         .collect();
     let query = CandidateQuery {
