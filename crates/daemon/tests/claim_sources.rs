@@ -29,7 +29,6 @@ use kernel::{
     Sensitivity, SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourcePageBounds, SourceRow, Surface, TaintClass,
 };
-use retrieval::batch::read_checkpoint;
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, read_checkpoint,
     register_generation, row_identities,
