@@ -15976,21 +15976,24 @@ fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, String> {
         }
     }
     for field in TRANSFORM_PAGE_ARRAY_FIELDS {
-        let had_field = final_page.get(field).is_some();
+        let mut had_field = false;
         let mut values = Vec::new();
         for page in pages.iter_mut().chain(std::iter::once(&mut final_page)) {
             let Some(object) = page.as_object_mut() else {
                 return Err("transform page was not an object".to_string());
             };
             match object.remove(field) {
-                Some(Value::Array(mut items)) => values.append(&mut items),
+                Some(Value::Array(mut items)) => {
+                    had_field = true;
+                    values.append(&mut items);
+                }
                 Some(_) => {
                     return Err(format!("transform page field {field} must be an array"));
                 }
                 None => {}
             }
         }
-        if had_field || !values.is_empty() {
+        if had_field {
             let values = assemble_transform_page_field(field, values)?;
             let Some(object) = final_page.as_object_mut() else {
                 return Err("transform page was not an object".to_string());
@@ -31912,6 +31915,21 @@ mod tests {
         assert!(error.contains("messages must be an array"), "{error}");
         let final_only = vec![json!({"kind": "transform", "messages": {"a": 1}})];
         assert!(assemble_transform_pages(final_only).is_err());
+    }
+
+    #[test]
+    fn assemble_transform_pages_keeps_an_empty_array_a_non_final_page_carries() {
+        let pages = vec![
+            json!({"native_messages": []}),
+            json!({"kind": "transform", "messages": []}),
+        ];
+        let assembled = assemble_transform_pages(pages).unwrap();
+        assert_eq!(assembled["native_messages"], json!([]));
+        assert_eq!(assembled["messages"], json!([]));
+        let absent = vec![json!({"messages": []}), json!({"kind": "transform"})];
+        let assembled = assemble_transform_pages(absent).unwrap();
+        assert!(assembled.get("native_messages").is_none());
+        assert_eq!(assembled["messages"], json!([]));
     }
 
     #[tokio::test(flavor = "current_thread")]
