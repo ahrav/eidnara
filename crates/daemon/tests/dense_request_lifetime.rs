@@ -964,7 +964,7 @@ async fn a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_dead
     daemon.shutdown().await;
 }
 
-/// A daemon shutdown that starts while a request's dense unit is held at an original read releases none of the unit's charges or pins: the scratch, row buffers, and view stay held until the unit itself finishes, and the ledger is empty only after it returns.
+/// A component shutdown that runs while a request's dense unit is held at an original read returns without releasing any of the unit's charges or pins: the scratch, row buffers, and view stay held after the shutdown completes and until the unit itself finishes, and the ledger is empty only after it returns. The unit runs on the test dispatcher's detached blocking runner, so this covers the unit's own ownership of its charges, not a host runner that cancels on shutdown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends() {
     let (daemon, ids) = served_daemon().await;
@@ -1011,15 +1011,13 @@ async fn a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends
     daemon.handler().set_dense_vectors(None).unwrap();
     drop(view);
 
-    let shutdown = {
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move { CompositeComponent::shutdown(daemon.handler()).await })
-    };
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    watchdog(CompositeComponent::shutdown(daemon.handler()))
+        .await
+        .unwrap();
     let while_held = store.ledger.census();
     assert!(
         while_held.held[&ResourceClass::Scratch] > 0,
-        "the held unit keeps its scratch through the shutdown"
+        "the held unit keeps its scratch after the shutdown returned"
     );
     assert!(while_held.held[&ResourceClass::RowBuffers] > 0);
     assert!(
@@ -1041,8 +1039,12 @@ async fn a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends
         at_release.held[&ResourceClass::Scratch] > 0,
         "the charges were still held when the unit was released"
     );
-    watchdog(shutdown).await.unwrap().unwrap();
-    let _ = watchdog(pending).await.unwrap();
+    let daemon::dispatch::PreparedOutcome::Response(output) = watchdog(pending).await.unwrap()
+    else {
+        panic!("the held request answers once its unit returns");
+    };
+    let answer = output.json_for_test().unwrap().clone();
+    assert_eq!(answer["kind"], "fused", "{answer}");
     assert!(store.ledger.census().held.is_empty());
     assert_eq!(store.ledger.census().pinned, 0);
 }

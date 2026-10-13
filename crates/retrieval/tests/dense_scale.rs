@@ -1,10 +1,11 @@
 //! The dense quality driver compares production retrieval with a brute-force f64 oracle over seeded unit vectors: the candidate selection keeps one global pool of 256 by scale-weighted int8 score, the rescore returns the top 64 from the original rows, and each query's ordered result is compared with the oracle written here.
 //!
-//! Ignored by default. `EIDNARA_DENSE_SCALE_ROWS` (default 1,000,000), `EIDNARA_DENSE_SCALE_DIMENSION` (768), and `EIDNARA_DENSE_SCALE_QUERIES` (1,000) size the run; `EIDNARA_DENSE_SCALE_SAMPLES` names a file, kept outside the repository, for the raw per-query microseconds.
+//! Ignored by default. `EIDNARA_DENSE_SCALE_ROWS` (default 1,000,000), `EIDNARA_DENSE_SCALE_DIMENSION` (768), and `EIDNARA_DENSE_SCALE_QUERIES` (1,000) size the run, and `EIDNARA_DENSE_SCALE_POOL` (256) sets the candidate pool, so a pool of 64 runs the negative control; `EIDNARA_DENSE_SCALE_SAMPLES` names a file, kept outside the repository, for the raw per-query microseconds.
+//!
+//! The corpus is a seeded synthetic workload, not the frozen model corpus the production gate names. The timed span is in-process candidate selection plus rescore over rows held in memory, under test scan bounds; it is a local figure, not the reference-host dense-lane latency. Two copies of the f32 rows stay resident, so a 1M by 768 run holds about 6 GB of rows plus 0.8 GB of codes.
 
 mod support;
 
-use std::cmp::Ordering;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::time::Instant;
@@ -21,14 +22,15 @@ use retrieval::dense::{
 use support::dense::{Fixture, Row, TOLERANCE, generation_of};
 use support::layers::OwnedLayer;
 
-const POOL: usize = 256;
 const K: usize = 64;
 
 fn setting(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("{name}={value} is not a count")),
+        Err(_) => default,
+    }
 }
 
 /// `Mix` uses SplitMix64 to reproduce the corpus and queries from their seeds.
@@ -101,9 +103,9 @@ fn oracle(query: &[f32], ids: &[String], rows: &[Vec<f32>]) -> Vec<(String, u64)
         .enumerate()
         .map(|(index, row)| (score(query, row), index))
         .collect();
+    // A partial selection keeps the oracle linear in the corpus per query, which a full sort over a million rows would not.
     let order = |a: &(f64, usize), b: &(f64, usize)| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(Ordering::Equal)
+        b.0.total_cmp(&a.0)
             .then_with(|| ids[a.1].as_bytes().cmp(ids[b.1].as_bytes()))
     };
     scored.select_nth_unstable_by(K - 1, order);
@@ -117,13 +119,19 @@ fn oracle(query: &[f32], ids: &[String], rows: &[Vec<f32>]) -> Vec<(String, u64)
 
 #[test]
 #[ignore = "builds a large dense corpus; run in release with --ignored"]
-fn compressed_top64_matches_the_f32_oracle_for_at_least_99_percent_of_queries() {
+fn compressed_top64_matches_the_f64_oracle_for_at_least_99_percent_of_queries() {
     let rows = setting("EIDNARA_DENSE_SCALE_ROWS", 1_000_000);
     let dimension = setting("EIDNARA_DENSE_SCALE_DIMENSION", 768);
     let query_count = setting("EIDNARA_DENSE_SCALE_QUERIES", 1_000);
-    assert!(rows >= POOL, "the corpus fills the pool");
+    let pool_size = setting("EIDNARA_DENSE_SCALE_POOL", 256);
+    assert!(query_count > 0, "the run needs queries");
+    assert!(
+        pool_size >= K && rows >= pool_size,
+        "the corpus fills the pool"
+    );
     let started = Instant::now();
     let vectors = corpus(rows, dimension);
+    let queries = queries(&vectors, query_count);
     let objects: Vec<String> = (0..rows).map(|index| format!("dense-{index:07}")).collect();
     let object_refs: Vec<&str> = objects.iter().map(String::as_str).collect();
     // Each projected row carries its vector, so its embedding job is complete and every row counts toward dense coverage.
@@ -139,7 +147,7 @@ fn compressed_top64_matches_the_f32_oracle_for_at_least_99_percent_of_queries() 
     let layer = OwnedLayer::new(
         generation.generation_epoch,
         0,
-        ids.iter().cloned().zip(vectors.iter().cloned()).collect(),
+        ids.into_iter().zip(vectors).collect(),
         vec![],
     );
     let layout = RowLayout {
@@ -164,13 +172,13 @@ fn compressed_top64_matches_the_f32_oracle_for_at_least_99_percent_of_queries() 
     let capacity = CandidateCapacity::new(
         K,
         CandidatePolicy {
-            alpha: (POOL / K) as f64,
-            cap: NonZeroUsize::new(POOL).unwrap(),
+            alpha: pool_size as f64 / K as f64,
+            cap: NonZeroUsize::new(pool_size).unwrap(),
         },
     )
     .unwrap()
     .unwrap();
-    assert_eq!(capacity.candidates().get(), POOL);
+    assert_eq!(capacity.candidates().get(), pool_size);
     let bounds = ScanBounds {
         page_rows: NonZeroUsize::new(256).unwrap(),
         max_rows: NonZeroUsize::new(rows + 1).unwrap(),
@@ -179,7 +187,6 @@ fn compressed_top64_matches_the_f32_oracle_for_at_least_99_percent_of_queries() 
             heap_bytes: NonZeroUsize::new(1 << 24).unwrap(),
         },
     };
-    let queries = queries(&vectors, query_count);
     let (mut exact, mut covered) = (0usize, 0usize);
     let mut samples = Vec::with_capacity(query_count);
     for query in &queries {
@@ -217,7 +224,7 @@ fn compressed_top64_matches_the_f32_oracle_for_at_least_99_percent_of_queries() 
             .iter()
             .map(|row| (row.occurrence_id.clone(), row.score.to_bits()))
             .collect();
-        let expected = oracle(query, &ids, &vectors);
+        let expected = oracle(query, &layer.ids, &layer.rows);
         if returned == expected {
             exact += 1;
         }
@@ -236,7 +243,7 @@ fn compressed_top64_matches_the_f32_oracle_for_at_least_99_percent_of_queries() 
     sorted.sort_unstable();
     let percentile = |p: f64| sorted[((sorted.len() as f64 * p).ceil() as usize).saturating_sub(1)];
     println!(
-        "dense scale: rows {rows}, dimension {dimension}, queries {query_count}, built in {:.1}s; exact top-{K} {exact}/{query_count}; candidate coverage {:.4}; select+rescore p50 {} us, p99 {} us, max {} us",
+        "dense scale (synthetic corpus, in-process, not the reference host): rows {rows}, dimension {dimension}, queries {query_count}, pool {pool_size}, built in {:.1}s; exact top-{K} {exact}/{query_count}; candidate coverage {:.4}; select+rescore p50 {} us, p99 {} us, max {} us",
         built.as_secs_f64(),
         covered as f64 / (query_count * K) as f64,
         percentile(0.5),

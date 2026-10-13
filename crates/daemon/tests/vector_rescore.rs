@@ -1717,7 +1717,7 @@ fn a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row() {
     }
 }
 
-/// One composition carries every hazard at once: the query's best row (`alpha`) is hidden by the kernel, a delta calibrated on its own rows supersedes `gamma` and tombstones `beta`, and the delta's `gamma` shares its original row with the base's `epsilon`. The pool equals one global prediction over the eligible winners under each winner's own layer scales; the hidden leader is neither admitted nor read; and the rescore over the pool keeps the tie in identifier order.
+/// One composition carries every hazard at once: the query's best row (`alpha`) is hidden by the kernel, a delta calibrated on its own rows supersedes `gamma` and tombstones `beta`, and the delta's `gamma` carries an original vector equal to the base's `epsilon`. The pool equals one global prediction over the eligible winners under each winner's own layer scales; the hidden leader is neither admitted nor read; and the rescore over the pool keeps the tie in identifier order.
 #[test]
 fn a_rejected_leader_across_unequal_scale_layers_with_ties_fills_one_global_pool() {
     let mut fixture = Fixture::new();
@@ -1768,6 +1768,17 @@ fn a_rejected_leader_across_unequal_scale_layers_with_ties_fills_one_global_pool
         "the hidden leader is not admitted"
     );
     assert!(!reads.contains(&(view.layers()[0].digest.clone(), alpha.1)));
+    // Each original read names the member and row its pool entry won from, so the tied rows are read from their own layers.
+    let expected_reads: Vec<(String, usize)> = ranking
+        .pool
+        .winners
+        .iter()
+        .map(|w| (view.layers()[w.layer].digest.clone(), w.row))
+        .collect();
+    assert_eq!(reads, expected_reads);
+    // A pool of two cuts the eligible set across the unequal-scale layers; the cut follows the global prediction.
+    let (cut, _) = rank_simple(&fixture, &projection, &view, &query, 2, 2);
+    assert_eq!(pool_keys(&cut), expected_pool(&view, &query, &eligible, 2));
     let mut vectors: BTreeMap<String, Vec<f32>> = map(&corpus).into_iter().collect();
     for (object, row) in &delta_rows {
         vectors.insert(occurrence_id(object), row.clone());
