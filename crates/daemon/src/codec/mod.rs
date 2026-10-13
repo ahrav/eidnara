@@ -6,13 +6,125 @@ pub mod sidecar;
 
 mod json;
 
+pub use opencode::MessageV2Json;
 #[cfg(test)]
-pub(crate) use opencode::decode_opencode;
-pub use opencode::{
-    MessageV2Json, encode_opencode, encode_opencode_with_session,
-    encode_opencode_with_session_exemptions,
-};
+pub(crate) use opencode::{decode_opencode, encode_opencode, encode_opencode_with_session};
 pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
+
+/// The bytes a native window's CK derivation may allocate, its derived CK included, charged
+/// to the pass before the derivation runs. `crates/daemon/tests/derivation_charge.rs` measures
+/// the derivation's heap peak over text-, tool-, extras-, and structure-heavy windows of both
+/// codecs and holds it under this bound.
+///
+/// The bound is linear in what the codecs copy: every native byte at most
+/// [`DERIVATION_BYTES_PER_NATIVE_BYTE`] times (a reasoning signature is copied out of its
+/// metadata, which is copied whole), a fixed cost per message and per block-producing element
+/// (an OpenCode part or attachment, a Pi content block), and each message and tool-call id once
+/// per copy the decoders keep of it.
+///
+/// The decoders clone values inside elements, so the native bytes of an element count each of
+/// its objects as `retained_size::value_heap_bytes_leaf_floored` does.
+pub fn derivation_charge(native: &[std::sync::Arc<serde_json::Value>]) -> usize {
+    native
+        .iter()
+        .map(|message| {
+            let elements = element_count(message);
+            native_bytes(message)
+                .saturating_mul(DERIVATION_BYTES_PER_NATIVE_BYTE)
+                .saturating_add(DERIVATION_BYTES_PER_MESSAGE)
+                .saturating_add(id_bytes(message).saturating_mul(DERIVATION_ID_COPIES))
+                .saturating_add(elements.saturating_mul(DERIVATION_BYTES_PER_ELEMENT))
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+fn native_bytes(message: &serde_json::Value) -> usize {
+    use crate::retained_size::{
+        value_heap_bytes, value_heap_bytes_by, value_heap_bytes_leaf_floored,
+    };
+    let elements = |value: &serde_json::Value| {
+        value_heap_bytes_by(value, |_, element| value_heap_bytes_leaf_floored(element))
+    };
+    let heap = value_heap_bytes_by(message, |key, field| match key {
+        Some("parts") => elements(field),
+        Some("message") => value_heap_bytes_by(field, |key, field| match key {
+            Some("content") => elements(field),
+            _ => value_heap_bytes(field),
+        }),
+        _ => value_heap_bytes(field),
+    });
+    std::mem::size_of::<serde_json::Value>().saturating_add(heap)
+}
+
+/// Copies of a native byte in the derived CK and the decode's transient values.
+pub const DERIVATION_BYTES_PER_NATIVE_BYTE: usize = 2;
+/// The fixed derived bytes of one message: its envelope, a hash id, and fixed summary text.
+pub const DERIVATION_BYTES_PER_MESSAGE: usize = 2048;
+/// The fixed derived bytes of one block-producing element: its block, opaque source, and ids.
+pub const DERIVATION_BYTES_PER_ELEMENT: usize = 3072;
+/// Copies the decoders keep of an id: a message's mid, harness id, and decode keys, or a tool
+/// call's call, result, and native ids.
+pub const DERIVATION_ID_COPIES: usize = 5;
+
+/// OpenCode parts and their tool attachments, and Pi content blocks, of one native message.
+fn element_count(message: &serde_json::Value) -> usize {
+    let len = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    let parts = message.get("parts").and_then(serde_json::Value::as_array);
+    let attachments: usize = parts
+        .into_iter()
+        .flatten()
+        .map(|part| {
+            len(part.get("attachments"))
+                + len(part.get("state").and_then(|state| state.get("attachments")))
+        })
+        .sum();
+    parts.map_or(0, Vec::len)
+        + attachments
+        + len(message
+            .get("message")
+            .and_then(|message| message.get("content")))
+}
+
+/// The bytes of a message's ids, which the decoders copy several times: the message's own `id`
+/// and `info.id`, a Pi tool result's `toolCallId`, and every `id`, `callID`, `callId`, and
+/// `toolCallId` of the message's OpenCode parts and Pi content blocks.
+///
+/// A tool part or tool call name counts as an ID because `json::synth_tool_id` embeds the name
+/// in the synthesized ID.
+fn id_bytes(message: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    let len = |value: Option<&Value>| value.and_then(Value::as_str).map_or(0, str::len);
+    let element_ids = |element: &Value| -> usize {
+        let names: &[&str] = match element.get("type").and_then(Value::as_str) {
+            Some("tool" | "toolCall") => &["tool", "toolName", "name"],
+            _ => &[],
+        };
+        ["id", "callID", "callId", "toolCallId"]
+            .iter()
+            .chain(names)
+            .map(|key| len(element.get(*key)))
+            .sum()
+    };
+    let pi_message = message.get("message");
+    let elements: usize = [
+        message.get("parts"),
+        pi_message.and_then(|message| message.get("content")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_array)
+    .flatten()
+    .map(element_ids)
+    .sum();
+    len(message.get("id"))
+        + len(message.get("info").and_then(|info| info.get("id")))
+        + len(pi_message.and_then(|message| message.get("toolCallId")))
+        + elements
+}
 
 #[cfg(test)]
 mod tests {

@@ -507,9 +507,18 @@ fn text_heavy_admission_ceiling_witnesses() {
         (CAPACITY / 3 + margin, false, true),
     ] {
         let body = text_body(text_bytes, escaped);
+        // The admission steps refuse a body whose scratch charge exceeds the capacity; the
+        // typed decode refuses one whose values do.
         let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
+        let meter = ResidentMeter::new(&reserve);
+        let typed = outcome.is_ok().then(|| {
+            meter
+                .reserve_unescape_scratch(&body)
+                .expect("the scratch charge is granted");
+            decode_metered::<TransformRequest>(&body, &meter).is_ok()
+        });
         assert_eq!(
-            outcome.is_ok(),
+            typed == Some(true),
             admitted,
             "{text_bytes} text bytes (escaped: {escaped}) against {CAPACITY}: {outcome:?}"
         );
@@ -531,10 +540,10 @@ fn text_heavy_admission_ceiling_witnesses() {
                 "{text_bytes} text bytes (escaped: {escaped}) peaked at {peak} bytes against a charge of {}",
                 meter.needed()
             );
-        } else {
+        } else if let Err(outcome) = outcome {
             assert!(matches!(
                 outcome,
-                Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "invalid_params"
+                daemon::dispatch::PreparedOutcome::Error { code, .. } if code == "invalid_params"
             ));
         }
     }

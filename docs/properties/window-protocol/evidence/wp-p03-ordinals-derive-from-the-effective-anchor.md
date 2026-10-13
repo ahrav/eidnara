@@ -108,3 +108,15 @@ as unknown fields, `transform_revision_unsupported` and
 `transform/recorded_goldens.rs`, and the golden fixture `transform-revision-2-goldens.json` is now
 `transform-recorded-goldens.json`; `serve_native` remains until #993. Line
 anchors into files #989 changed are as of their earlier recorded head.
+
+## Dated note (2026-10-12, #993)
+
+Dated note, 2026-10-12, #993 (spec #988 milestone U3): the transform request
+carries no `serve_native`. The `pi` and `opencode-aisdk` profiles send
+`native_messages` as their only window, the daemon derives the pass's CK from
+it through the profile's codec before any projection and always serves native
+recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
+`messages`. Every clause here that names `serve_native`, a CK window sent
+beside the native window, or the Pi check that aligned rows with `messages` is
+invalidated; line anchors into files #993 changed are as of their earlier
+recorded head.

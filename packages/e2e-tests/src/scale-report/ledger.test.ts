@@ -38,6 +38,23 @@ describe("pass row ledger", () => {
         expect(JSON.parse(line).daemon_total_us).toBe(15_000);
     });
 
+    it("carries a native pass's derive_ck stage inside the reconciled daemon total", () => {
+        const derived = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...daemonLedger, lane_gate_and_decode_us: 2_900, derivation_us: 1_200 },
+        });
+        expect(derived.derivation_us).toBe(1_200);
+        expect(derived.lane_gate_and_decode_us).toBe(2_900);
+        expect(derived.daemon_total_us).toBe(15_000);
+        const base = { ...(WRITER_FIXTURE_ROWS[0] as Parameters<typeof serializePassRow>[0]) };
+        expect(() => serializePassRow({ ...base, response_us: 31_000, ...derived })).not.toThrow();
+        const malformed = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...daemonLedger, derivation_us: -1 },
+        });
+        expect(malformed.daemon_total_us).toBeNull();
+    });
+
     it("marks every stage unavailable without a daemon ledger and keeps the daemon ledger on a negative residual", () => {
         const none = rowLedger(31_000, { ...observed, daemonLedger: undefined });
         expect(Object.values(none).every((value) => value === null)).toBe(true);

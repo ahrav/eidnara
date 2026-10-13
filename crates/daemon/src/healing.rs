@@ -24,6 +24,11 @@ const ALL_PROFILES: [SerializerProfile; 5] = [
 ];
 
 impl SerializerProfile {
+    /// Whether the profile's window is its native messages, served back as native recipes.
+    pub const fn serves_native(self) -> bool {
+        matches!(self, Self::OpencodeAiSdk | Self::Pi)
+    }
+
     pub const fn wire_id(self) -> &'static str {
         match self {
             Self::OwnedLlmRunner => "owned-llmrunner",

@@ -112,8 +112,8 @@ fn auto_search_is_enabled_by_the_wire_default_and_drives_the_hint_query() {
         DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS
     );
     assert!(
-        !minimal.serve_native,
-        "attachment waits for the plugin's serve_native opt-in"
+        minimal.native_messages.is_none(),
+        "a CK profile carries no native window"
     );
 }
 

@@ -232,8 +232,13 @@ pub(super) fn golden_handler() -> (Handler, Arc<MemoryStore>, tempfile::TempDir)
     (handler, store, dir)
 }
 
-/// The transform body; the caller adds `messages` and `boundary`.
+/// The transform body over the native window the codec derives the CK `messages` from; the
+/// caller adds `boundary`.
 pub(super) fn pass_body(messages: Vec<Value>) -> Value {
+    let messages: Vec<IngressMessage> = messages
+        .into_iter()
+        .map(|message| serde_json::from_value(message).unwrap())
+        .collect();
     json!({
         "kind": "transform",
         "serializer_profile": "opencode-aisdk",
@@ -241,7 +246,7 @@ pub(super) fn pass_body(messages: Vec<Value>) -> Value {
         "render_config": "cfg0",
         "tool_present": true,
         "usage": { "current_total_input_tokens": 1_000, "context_limit_tokens": 200_000 },
-        "messages": messages,
+        "native_messages": super::opencode_native_window(&messages),
     })
 }
 
@@ -274,7 +279,18 @@ pub(super) async fn call(handler: &Handler, body: Value) -> Value {
 
 /// The recorded step after one operation.
 pub(super) fn step(op: Op, response: &Value, store: &MemoryStore) -> Value {
-    let mut served = response["messages"].clone();
+    // A native pass serves its CK window through the native recipe; the step records that window.
+    let mut served = if response["output_revision"].is_string() {
+        serde_json::to_value(
+            super::served_output_for_test(response)
+                .into_iter()
+                .map(transform::ServedMessage::into_message)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    } else {
+        Value::Null
+    };
     strip_ordinals(&mut served);
     let loaded = store.load(SESSION).unwrap();
     let m0 = loaded

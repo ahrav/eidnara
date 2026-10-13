@@ -52,7 +52,6 @@ function source(
         liveWindow: (start, end) => host.values.slice(start, end),
         contextLimit: () => undefined,
         prepare: async () => ({
-            encodeInput: () => [],
             fields,
         }),
         publicationRejection: () => null,
@@ -319,7 +318,7 @@ describe("transform session client over plain data", () => {
             privateWindow,
             prepare: async () => {
                 edit();
-                return { encodeInput: () => [], fields: { model_key: "test/model" } };
+                return { fields: { model_key: "test/model" } };
             },
         });
     }

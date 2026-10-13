@@ -13,8 +13,8 @@ use support::eval_surface::{block_on, tail};
 const SESSION: &str = "crash-cut-session";
 
 fn transform_request() -> Value {
-    let (first, first_native) = tail(SESSION, "plan the survey cadence for the quarter", 1);
-    let (second, second_native) = tail(SESSION, "and write the weekly schedule down", 2);
+    let first_native = tail(SESSION, "plan the survey cadence for the quarter", 1);
+    let second_native = tail(SESSION, "and write the weekly schedule down", 2);
     json!({
         "kind": "transform",
         "boundary": null,
@@ -22,9 +22,7 @@ fn transform_request() -> Value {
         "session_id": SESSION,
         "serializer_profile": "opencode-aisdk",
         "render_config": "crash-cut-config",
-        "serve_native": true,
         "native_messages": [first_native, second_native],
-        "messages": [first, second],
     })
 }
 

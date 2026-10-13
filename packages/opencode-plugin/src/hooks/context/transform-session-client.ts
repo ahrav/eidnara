@@ -75,8 +75,8 @@ if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no 
 /** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
 const INVOCATION_HEADROOM_PERMILLE = 250;
 const HOST_BYTES_BEFORE_CHUNK = 32;
-/** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
-const WIRE_PROJECTION_FACTOR = 4;
+/** WIRE_PROJECTION_FACTOR accounts for the native text, the paging parse copy, and the page texts. */
+const WIRE_PROJECTION_FACTOR = 3;
 /** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
 const MAX_ANCHOR_PAGE = 4096;
 
@@ -540,7 +540,7 @@ export interface TransformRequestCore {
     baseRevision: string;
     previousOutputRevision?: string;
     serializerProfile: string;
-    input: unknown[];
+    /** The native window; the daemon derives the pass's CK from it. */
     nativeMessages: readonly unknown[];
 }
 
@@ -559,13 +559,11 @@ export function buildTransformRequest(
         kind: "transform",
         boundary: core.boundary,
         serializer_profile: core.serializerProfile,
-        serve_native: true,
         session_id: core.sessionId,
         base_revision: core.baseRevision,
         ...(core.previousOutputRevision
             ? { previous_output_revision: core.previousOutputRevision }
             : {}),
-        messages: core.input,
         native_messages: core.nativeMessages,
     };
 }
@@ -665,8 +663,6 @@ export interface TransformHostView {
 
 /** What the adapter computed for one pass after the window was captured. */
 export interface TransformPassPreparation {
-    /** The CK window, encoded from the captured members when the request is built. */
-    encodeInput(): unknown[];
     /** Pass inputs the request carries after its protocol fields. */
     fields: Record<string, unknown>;
 }
@@ -1479,7 +1475,6 @@ export function createTransformSessionClient(
             state.routeRoot = projectRoot;
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
-            const encodedInput = preparation.encodeInput();
             timings.wireMessages = messages.length;
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
             const inputLengths = measureInputLengths(
@@ -1519,7 +1514,6 @@ export function createTransformSessionClient(
                     baseRevision,
                     previousOutputRevision: previousApplied?.revision,
                     serializerProfile: source.serializerProfile,
-                    input: encodedInput,
                     nativeMessages: messages,
                 },
                 preparation.fields,

@@ -241,7 +241,6 @@ function sessionLogs(
 
 const bodyDefaults = {
     boundary: null,
-    input: [] as unknown[],
     nativeMessages: [] as unknown[],
     passInputs: {},
     usage: {},
@@ -286,7 +285,6 @@ describe("Rust mode transform request", () => {
         const body = __rustModeTransformTest.buildTransformBody({
             ...bodyDefaults,
             sessionId: "shape-wire",
-            input: [{ mid: "m-1" }],
             nativeMessages: [{ info: { id: "m-1" } }],
             passInputs: {
                 history_budget_tokens: 42_000,
@@ -302,7 +300,6 @@ describe("Rust mode transform request", () => {
             kind: "transform",
             boundary: null,
             serializer_profile: "opencode-aisdk",
-            serve_native: true,
             render_config: "provider:anthropic|model:anthropic/opus|system:abc",
             upgrade_state: "",
             channel2_nudge_state: "",
@@ -312,9 +309,12 @@ describe("Rust mode transform request", () => {
             history_budget_tokens: 42_000,
             terse_text_compression_enabled: true,
             terse_text_compression_min_chars: 240,
-            messages: [{ mid: "m-1" }],
+            native_messages: [{ info: { id: "m-1" } }],
         });
+        // The daemon derives the CK window from `native_messages`, so the body carries none.
         for (const absent of [
+            "messages",
+            "serve_native",
             "pass_inputs",
             "mural",
             "detected_context_limit",
@@ -443,7 +443,6 @@ describe("Rust mode transform request", () => {
         expect(calls.map((call) => call.method)).toEqual(["transform"]);
         const first = bodies[0]!;
         expect(first).toMatchObject({
-            serve_native: true,
             tool_present: true,
             todo_tool_present: true,
             cache_ttl: "5m",
@@ -458,7 +457,7 @@ describe("Rust mode transform request", () => {
         // The carried text is the wire contract; `output.messages` is rewritten in place after the send.
         const firstWire = JSON.parse(serializedJsonText(first)!) as Record<string, unknown>;
         expect(firstWire.native_messages).toEqual(makeMessages(sessionId));
-        expect(Array.isArray(first.messages)).toBe(true);
+        expect("messages" in first).toBe(false);
         expect("pass_inputs" in first).toBe(false);
         expect(output.messages).toEqual(native);
 
@@ -469,7 +468,7 @@ describe("Rust mode transform request", () => {
         for (const body of bodies) {
             expect("tail_delta" in body).toBe(false);
             expect("full_array_fingerprint" in body).toBe(false);
-            expect(body.messages).toHaveLength(1);
+            expect("messages" in body).toBe(false);
             expect(body.native_messages).toHaveLength(secondInput.length);
         }
         const secondWire = JSON.parse(serializedJsonText(bodies[1]!)!) as Record<string, unknown>;
@@ -1062,7 +1061,7 @@ describe("Rust mode transform transport", () => {
         await transform.run(sessionId, { messages: [...afterClear] });
 
         expect(bodies[2]?.previous_output_revision).toBeUndefined();
-        expect(bodies[2]?.messages).toHaveLength(1);
+        expect(bodies[2]?.native_messages).toHaveLength(afterClear.length);
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
 
@@ -1468,7 +1467,7 @@ describe("Rust mode transform transport", () => {
         });
         const buildMessages = () =>
             rowMessages(sessionId, rows, (row) =>
-                row.id === "m-4" ? `large delta ${"x".repeat(350 * 1024)}` : `message ${row.id}`,
+                row.id === "m-4" ? `large delta ${"x".repeat(700 * 1024)}` : `message ${row.id}`,
             );
 
         const initial = buildMessages();
@@ -2055,15 +2054,13 @@ describe("whole-array sends after host mutation", () => {
         const mutatedOutput = { messages: [...mutated] as unknown[] };
         await transform.run(sessionId, mutatedOutput);
         expect(bodies).toHaveLength(3);
-        expect(bodies[2]?.messages).toHaveLength(4);
         expect(bodies[2]?.native_messages).toEqual(mutated);
-        expect(JSON.stringify(bodies[2]?.messages)).toContain("MESSAGE m-1");
+        expect(JSON.stringify(bodies[2]?.native_messages)).toContain("MESSAGE m-1");
         expect(mutatedOutput.messages).toEqual(mutated);
 
         const stableOutput = { messages: [...mutated] as unknown[] };
         await transform.run(sessionId, stableOutput);
         expect(bodies).toHaveLength(4);
-        expect(bodies[3]?.messages).toHaveLength(4);
         expect(bodies[3]?.native_messages).toEqual(mutated);
         expect(stableOutput.messages).toEqual(mutatedOutput.messages);
     });
@@ -2097,7 +2094,8 @@ describe("whole-array sends after host mutation", () => {
 
         const first = buildMessages(2, "summary v1");
         await transform.run(sessionId, { messages: [...first] });
-        expect(bodies[0]?.messages).toHaveLength(1);
+        // The compaction summary rides in the native window; the daemon's derivation drops it.
+        expect(bodies[0]?.native_messages).toEqual(first);
 
         rows.push({
             id: "m-3",
@@ -2974,7 +2972,7 @@ describe("bounded transform ownership", () => {
         // Capture walk, wire projection, and one window slot plus one retained length slot per message.
         const heldCharge =
             largeInspection.estimatedBytes +
-            largeInspection.messageWireBytes.reduce((sum, bytes) => sum + 4 * bytes, 0) +
+            largeInspection.messageWireBytes.reduce((sum, bytes) => sum + 3 * bytes, 0) +
             largeMessages.length * 16;
         const maxBytes = heldCharge + smallInspection.estimatedBytes - 1;
         const admission = new TransformCaptureAdmission({

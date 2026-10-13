@@ -11,6 +11,7 @@ import * as eventResolvers from "./event-resolvers";
 import { chargeInvocation } from "./invocation-budget";
 import {
     createRustModeTransform,
+    encodeOpenCodeWindowToCk,
     openCodeHostView,
     type RustModeModuleClient,
     type RustModeTransformDeps,
@@ -191,7 +192,7 @@ describe("id scan and membership filter", () => {
 });
 
 describe("window capture and publication", () => {
-    it("sends the declared window in both representations and publishes the recipe at boundaryIndex + i", async () => {
+    it("sends the declared native window and publishes the recipe at boundaryIndex + i", async () => {
         const sessionId = `window-steady-${Date.now()}`;
         const first = hostArray(sessionId, 10);
         const { client, bodies, cursors } = fakeDaemon({
@@ -218,12 +219,7 @@ describe("window capture and publication", () => {
         expect(Object.hasOwn(body, "v")).toBe(false);
         expect(body.boundary).toEqual({ mid: "m-6", sequence: 3 });
         expect(body.native_messages).toEqual(first.slice(6));
-        expect((body.messages as Array<{ mid: string }>).map((entry) => entry.mid)).toEqual([
-            "m-6",
-            "m-7",
-            "m-8",
-            "m-9",
-        ]);
+        expect(Object.hasOwn(body, "messages")).toBe(false);
         expect(JSON.stringify(body)).not.toContain("ordinal");
         // Window position i is host index 6 + i.
         expect(output.messages).toEqual([first[7], first[8]]);
@@ -792,7 +788,14 @@ describe("boundary discovery", () => {
                     return { status: "boundary_unknown" };
                 }
                 if (sends === 3) {
-                    Bun.gc(true);
+                    // The collector scans stacks conservatively, so a stale slot can keep an
+                    // unreferenced window for one collection; a held window survives them all.
+                    for (let attempt = 0; attempt < 10 && firstWindow?.deref(); attempt += 1) {
+                        await Bun.sleep(1);
+                        // Fresh allocations overwrite the scratch slots a stale pointer sits in.
+                        Array.from({ length: 4096 }, (_, index) => ({ index }));
+                        Bun.gc(true);
+                    }
                     releasedBeforeRerun = firstWindow?.deref() === undefined;
                 }
                 return keepAll(request, { mid: "m-2", sequence: 7 });
@@ -908,7 +911,9 @@ describe("boundary discovery", () => {
         const { client, bodies } = fakeDaemon({});
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
         await transform.run(sessionId, { messages: [...host] });
-        const ck = bodies[0]?.messages as Array<{ mid: string; ck: { content: unknown[] } }>;
+        expect(bodies[0]?.native_messages).toEqual(host);
+        // The daemon derives this CK from the native window (opencode-codec-parity.json).
+        const ck = encodeOpenCodeWindowToCk(host);
         expect(ck.map((entry) => entry.mid)).toEqual(["m-0", "m-2"]);
         // The native decoder numbers the tool part's message 3, counting the summary.
         expect(JSON.stringify(ck[1]?.ck.content)).toContain('"id":"synth-tool-3-0-read-');
@@ -938,7 +943,8 @@ describe("boundary discovery", () => {
         const { client, bodies } = fakeDaemon({});
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
         await transform.run(sessionId, { messages: [...host] });
-        const ck = bodies[0]?.messages as Array<{ mid: string; ck: { content: unknown[] } }>;
+        expect(bodies[0]?.native_messages).toEqual(host);
+        const ck = encodeOpenCodeWindowToCk(host);
         expect(ck.map((entry) => entry.mid)).toEqual(["m-1"]);
         expect(JSON.stringify(ck[0]?.ck.content)).toContain('"type":"tool_call","id":"call-1"');
     });
@@ -999,7 +1005,7 @@ describe("work counters", () => {
             const work = /work=scanned:(\d+) charged:(\d+) retained:(\d+)$/.exec(line ?? "");
             if (!work) throw new Error(`no work counters in ${line}`);
             const body = bodies[1] as Body;
-            const windowBytes = JSON.stringify([body.messages, body.native_messages]).length;
+            const windowBytes = JSON.stringify(body.native_messages).length;
             return [...work.slice(1).map(Number), windowBytes];
         } finally {
             debug.mockRestore();

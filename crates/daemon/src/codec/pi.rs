@@ -2,8 +2,8 @@
 //!
 //! A row is `{"id": <plugin-assigned id>, "message": <AgentMessage>}`. The id is the persisted Pi
 //! entry id for a host message and a reserved id for a synthetic entry. The role set is closed to
-//! Pi 0.80.2's `AgentMessage` union; a row with any other role makes [`check_pi_rows`] decline
-//! the window. Encoding reads the window's rows directly: a served message equal to its row's
+//! Pi 0.80.2's `AgentMessage` union; a row with any other role makes [`derive_pi_window`]
+//! decline the window. Encoding reads the window's rows directly: a served message equal to its row's
 //! decoded content replays the row's exact value, and an edited message updates the edited native
 //! parts in place and removes deleted ones. The replay check compares served blocks with the
 //! native fields the decoder reads, so only an edited message whose shape needs alignment decodes
@@ -18,11 +18,11 @@ use serde_json::{Value, json};
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
 use crate::injection::SYNTHETIC_TIMESTAMP;
+use crate::window_coverage::MAX_SAFE_INTEGER;
 use crate::wire::{
     BlockKind, IngressMessage, MediaBlock, MediaKind, OpaqueBlock, OutputKind, ProviderExtras,
     ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
 };
-#[cfg(test)]
 use crate::wire::{HarnessMeta, MessageOrigin};
 
 use super::sidecar::{
@@ -30,7 +30,6 @@ use super::sidecar::{
     equals_decoded_block, has_stamped_block_identity, holds_float_zero, match_block_metas_by,
     stable_hash_prefix,
 };
-#[cfg(test)]
 use super::sidecar::{
     DecodeSidecar, DecodedHarnessMessages, HarnessMessageMeta, decoded_block_fingerprint,
     stamp_block_identity,
@@ -110,7 +109,6 @@ impl PiRole {
     }
 
     /// The canonical role Pi's `convertToLlm` gives the message.
-    #[cfg(test)]
     const fn wire_role(self) -> &'static str {
         match self {
             Self::Assistant => "assistant",
@@ -129,31 +127,11 @@ impl PiRole {
 pub(crate) enum PiDecline {
     /// The row is not an object with a non-empty string `id` and an object `message` whose
     /// `role` is a string.
-    MalformedRow {
-        index: usize,
-    },
+    MalformedRow { index: usize },
     /// The row's role is outside the closed set.
-    UnknownRole {
-        index: usize,
-        role: String,
-    },
+    UnknownRole { index: usize, role: String },
     /// A host-message row carries a reserved id, or a synthetic-entry row carries a host id.
-    IdSpace {
-        index: usize,
-        role: PiRole,
-    },
-    /// The row's id is not the `mid` of the CK message at its position.
-    IdMismatch {
-        index: usize,
-    },
-    HarnessIdMismatch {
-        index: usize,
-    },
-    /// The native window and the CK window hold different message counts.
-    LengthMismatch {
-        rows: usize,
-        messages: usize,
-    },
+    IdSpace { index: usize, role: PiRole },
 }
 
 impl std::error::Error for PiDecline {}
@@ -181,18 +159,6 @@ impl fmt::Display for PiDecline {
                     role.wire_id()
                 )
             }
-            Self::IdMismatch { index } => write!(
-                f,
-                "pi native message {index} does not carry the mid of messages[{index}]"
-            ),
-            Self::HarnessIdMismatch { index } => write!(
-                f,
-                "messages[{index}].ck.meta.harness_id is not the message's mid"
-            ),
-            Self::LengthMismatch { rows, messages } => write!(
-                f,
-                "native_messages holds {rows} pi rows for {messages} messages"
-            ),
         }
     }
 }
@@ -226,7 +192,22 @@ pub(crate) fn decode_pi_rows_stamped(
     decode_rows(rows, true)
 }
 
-#[cfg(test)]
+/// Derives the CK window the Pi plugin encodes from the Pi rows of a native window, or declines
+/// it. The derived messages carry no ordinal and no block identity, as the plugin sends them, and
+/// a creation time is kept only when it is a JavaScript safe integer, as the plugin keeps it.
+pub(crate) fn derive_pi_window(rows: &[Arc<Value>]) -> Result<Vec<IngressMessage>, PiDecline> {
+    let mut messages = decode_rows(rows, false)?.messages;
+    for message in &mut messages {
+        message.ordinal = 0;
+        let meta = &mut message.ck.meta;
+        meta.ordinal = None;
+        meta.created_at_ms = meta
+            .created_at_ms
+            .filter(|ms| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(ms));
+    }
+    Ok(messages)
+}
+
 fn decode_rows(rows: &[Arc<Value>], stamp: bool) -> Result<DecodedHarnessMessages, PiDecline> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
     let mut decoded = Vec::with_capacity(rows.len());
@@ -312,46 +293,25 @@ fn decode_content(message: &Value, role: PiRole, ordinal: u64) -> (Vec<WireBlock
         PiRole::BranchSummary => push_message_text(
             &mut content,
             &mut block_metas,
-            format!(
-                "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
-                string_field(message, "summary").unwrap_or_default()
-            ),
+            [
+                BRANCH_SUMMARY_PREFIX,
+                message["summary"].as_str().unwrap_or_default(),
+                BRANCH_SUMMARY_SUFFIX,
+            ]
+            .concat(),
         ),
         PiRole::CompactionSummary => push_message_text(
             &mut content,
             &mut block_metas,
-            format!(
-                "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
-                string_field(message, "summary").unwrap_or_default()
-            ),
+            [
+                COMPACTION_SUMMARY_PREFIX,
+                message["summary"].as_str().unwrap_or_default(),
+                COMPACTION_SUMMARY_SUFFIX,
+            ]
+            .concat(),
         ),
     }
     (content, block_metas)
-}
-
-pub(crate) fn check_pi_rows<'a>(
-    rows: &[Arc<Value>],
-    messages: impl ExactSizeIterator<Item = &'a IngressMessage>,
-) -> Result<(), PiDecline> {
-    if rows.len() != messages.len() {
-        return Err(PiDecline::LengthMismatch {
-            rows: rows.len(),
-            messages: messages.len(),
-        });
-    }
-    rows.iter()
-        .zip(messages)
-        .enumerate()
-        .try_for_each(|(index, (row, message))| {
-            let (id, _, _) = classify_row(index, row)?;
-            if id != message.mid {
-                Err(PiDecline::IdMismatch { index })
-            } else if message.ck.meta.harness_id.as_deref() != Some(id) {
-                Err(PiDecline::HarnessIdMismatch { index })
-            } else {
-                Ok(())
-            }
-        })
 }
 
 fn classify_row(index: usize, row: &Value) -> Result<(&str, &Value, PiRole), PiDecline> {
@@ -388,24 +348,49 @@ fn classify_row(index: usize, row: &Value) -> Result<(&str, &Value, PiRole), PiD
 
 /// Pi 0.80.2 `bashExecutionToText`.
 fn bash_execution_text(message: &Value) -> String {
-    let command = string_field(message, "command").unwrap_or_default();
-    let mut text = format!("Ran `{command}`\n");
-    match string_field(message, "output").filter(|output| !output.is_empty()) {
-        Some(output) => text.push_str(&format!("```\n{output}\n```")),
-        None => text.push_str("(no output)"),
+    let field = |key| message.get(key).and_then(Value::as_str);
+    let command = field("command").unwrap_or_default();
+    let output = field("output").filter(|output| !output.is_empty());
+    let exit_code = message.get("exitCode").and_then(js_nonzero_integer_text);
+    let status = if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        Some("\n\n(command cancelled)".to_string())
+    } else {
+        exit_code.map(|code| format!("\n\nCommand exited with code {code}"))
+    };
+    let path = (message.get("truncated").and_then(Value::as_bool) == Some(true))
+        .then(|| field("fullOutputPath"))
+        .flatten()
+        .filter(|path| !path.is_empty());
+    // The pieces borrow the row and the text is sized once, so a long output is copied once.
+    let mut pieces = vec!["Ran `", command, "`\n"];
+    match output {
+        Some(output) => pieces.extend(["```\n", output, "\n```"]),
+        None => pieces.push("(no output)"),
     }
-    let exit_code = message.get("exitCode").and_then(Value::as_i64);
-    if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
-        text.push_str("\n\n(command cancelled)");
-    } else if let Some(code) = exit_code.filter(|code| *code != 0) {
-        text.push_str(&format!("\n\nCommand exited with code {code}"));
+    if let Some(status) = &status {
+        pieces.push(status);
     }
-    if message.get("truncated").and_then(Value::as_bool) == Some(true)
-        && let Some(path) = string_field(message, "fullOutputPath").filter(|path| !path.is_empty())
-    {
-        text.push_str(&format!("\n\n[Output truncated. Full output: {path}]"));
+    if let Some(path) = path {
+        pieces.extend(["\n\n[Output truncated. Full output: ", path, "]"]);
     }
-    text
+    pieces.concat()
+}
+
+/// Pi's `${exitCode}` uses JavaScript number formatting: JavaScript reads every JSON number as
+/// an f64 and writes an integer in decimal notation when its absolute value is below `1e21` and
+/// in exponent notation (`1e+21`) otherwise.
+fn js_nonzero_integer_text(value: &Value) -> Option<String> {
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 || number == 0.0 {
+        return None;
+    }
+    if number.abs() < 1e21 {
+        return Some(format!("{number}"));
+    }
+    let exponent = format!("{number:e}");
+    let (mantissa, exponent) = exponent.split_once('e')?;
+    let sign = if exponent.starts_with('-') { "" } else { "+" };
+    Some(format!("{mantissa}e{sign}{exponent}"))
 }
 
 /// Encodes canonical messages as Pi rows, reusing the window's rows matched by mid.
@@ -418,7 +403,7 @@ fn bash_execution_text(message: &Value) -> String {
 /// synthetic or unidentified one takes a reserved id derived from its encoded message, suffixed
 /// with its occurrence when an equal message earlier in the output took that id. A retained
 /// message whose content is empty after editing is omitted. `rows` is the window
-/// [`check_pi_rows`] accepts; a repeated id retains its last row, and a window with a malformed
+/// [`derive_pi_window`] accepts; a repeated id retains its last row, and a window with a malformed
 /// row retains no row. A message equal to its row's decoded content replays the row without
 /// decoding it; an edited message whose blocks pair with its native parts without alignment
 /// rewrites those parts directly, and any other edited message decodes its row and aligns it.
@@ -1656,7 +1641,6 @@ fn render_block_as_content_part(block: &WireBlock) -> Value {
     }
 }
 
-#[cfg(test)]
 fn pi_origin(message: &Value) -> Option<MessageOrigin> {
     Some(MessageOrigin {
         api: string_field(message, "api")?,
@@ -2100,33 +2084,9 @@ mod tests {
                 role: "system".to_string()
             })
         );
-        let messages = decode_pi_rows_stamped(&window[..7]).unwrap().messages;
-        let mut window_messages = messages.clone();
-        window_messages.push(messages[0].clone());
         assert_eq!(
-            check_pi_rows(&window, window_messages.iter()),
-            decode_pi_rows_stamped(&window).map(drop)
-        );
-        let mut other_mid = messages[0].clone();
-        other_mid.mid = "other".to_string();
-        assert_eq!(
-            check_pi_rows(&window[..1], [&other_mid].into_iter()),
-            Err(PiDecline::IdMismatch { index: 0 })
-        );
-        for harness_id in [None, Some("other".to_string())] {
-            let mut unlinked = messages[0].clone();
-            unlinked.ck.meta.harness_id = harness_id;
-            assert_eq!(
-                check_pi_rows(&window[..1], [&unlinked].into_iter()),
-                Err(PiDecline::HarnessIdMismatch { index: 0 })
-            );
-        }
-        assert_eq!(
-            check_pi_rows(&window[..1], std::iter::empty()),
-            Err(PiDecline::LengthMismatch {
-                rows: 1,
-                messages: 0
-            })
+            derive_pi_window(&window),
+            decode_pi_rows_stamped(&window).map(|decoded| decoded.messages)
         );
         for malformed in [
             json!({ "message": { "role": "user", "content": "x" } }),
@@ -2347,6 +2307,51 @@ mod tests {
             return;
         }
         assert_eq!(Value::Array(derived), fixture["expected"]);
+        // The production derivation gives the same CK, its ordinal the only daemon field.
+        let window: Vec<Value> = derive_pi_window(&rows)
+            .unwrap()
+            .into_iter()
+            .map(|message| {
+                assert_eq!((message.ordinal, message.ck.meta.ordinal), (0, None));
+                let mut value = serde_json::to_value(message).unwrap();
+                value.as_object_mut().unwrap().remove("ordinal");
+                value
+            })
+            .collect();
+        assert_eq!(Value::Array(window), fixture["expected"]);
+    }
+
+    /// Expected statuses follow JavaScript's `Number.isInteger(exitCode) && exitCode !== 0`
+    /// predicate and `${exitCode}` formatting.
+    #[test]
+    fn a_bash_exit_code_reads_as_the_javascript_number_it_is() {
+        for (literal, expected) in [
+            ("255", Some("255")),
+            ("-1", Some("-1")),
+            ("9007199254740993", Some("9007199254740992")),
+            ("10000000000000000000", Some("10000000000000000000")),
+            ("18446744073709552000", Some("18446744073709552000")),
+            ("1e21", Some("1e+21")),
+            ("-1e21", Some("-1e+21")),
+            ("1.5e22", Some("1.5e+22")),
+            ("2.0", Some("2")),
+            ("0", None),
+            ("-0.0", None),
+            ("2.5", None),
+            ("null", None),
+            ("\"2\"", None),
+        ] {
+            let message: Value =
+                serde_json::from_str(&format!(r#"{{"command":"c","exitCode":{literal}}}"#))
+                    .unwrap();
+            let text = bash_execution_text(&message);
+            let status = expected.map(|code| format!("\n\nCommand exited with code {code}"));
+            assert_eq!(
+                text,
+                format!("Ran `c`\n(no output){}", status.unwrap_or_default()),
+                "{literal}"
+            );
+        }
     }
 
     #[test]

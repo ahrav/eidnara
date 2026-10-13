@@ -2515,6 +2515,73 @@
         }
       ],
       "name": "malformed_envelopes_take_defaults"
+    },
+    {
+      "expected": [
+        {
+          "ck": {
+            "content": [
+              {
+                "kind": {
+                  "id": "call-shared",
+                  "input": {},
+                  "name": "read",
+                  "type": "tool_call"
+                }
+              }
+            ],
+            "meta": {
+              "errored": false,
+              "harness_id": "msg_x1",
+              "summary": false,
+              "synthetic": false
+            },
+            "role": "assistant"
+          },
+          "mid": "msg_x1"
+        }
+      ],
+      "messages": [
+        {
+          "info": {
+            "finish": "stop",
+            "id": "msg_x0",
+            "role": "assistant",
+            "sessionID": "ses_parity",
+            "summary": true
+          },
+          "parts": [
+            {
+              "callID": "call-shared",
+              "state": {
+                "input": {},
+                "status": "pending"
+              },
+              "tool": "read",
+              "type": "tool"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "msg_x1",
+            "role": "assistant",
+            "sessionID": "ses_parity"
+          },
+          "parts": [
+            {
+              "callID": "call-shared",
+              "state": {
+                "input": {},
+                "status": "pending"
+              },
+              "tool": "read",
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "name": "compaction_summary_shares_a_call_id"
     }
   ],
   "description": "OpenCode native windows and the CK the OpenCode plugin encodes from each (opencode-transform-adapter.ts encodeOpenCodeWindowToCk). The daemon's OpenCode codec derives the same CK from `messages` after removing only its ordinals and block identity stamps (crates/daemon/src/codec/opencode.rs). Each refusal records the code and text the daemon answers the window with on either path. Regenerate with EIDNARA_WRITE_OPENCODE_CODEC_PARITY=1: first `bun test opencode-codec-parity` for `expected`, then `cargo nextest run -p daemon -E 'test(a_malformed_opencode_window)'` for each `refusal`.",

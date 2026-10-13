@@ -424,14 +424,10 @@ export function buildPagedModuleTransformPayloads(
         throw new TypeError("Invalid serialized transform body", { cause });
     }
 
-    const arrayFields = [
-        "input",
-        "messages",
-        "native_messages",
-        "ts_output",
-        "ts_messages",
-        "normalizations",
-    ].filter((field) => Array.isArray(body[field]));
+    // The window arrays: a native profile's `native_messages` and a CK profile's `messages`.
+    const arrayFields = ["messages", "native_messages"].filter((field) =>
+        Array.isArray(body[field]),
+    );
     if (arrayFields.length === 0) {
         throw new Error("module transform body has no pageable message arrays");
     }

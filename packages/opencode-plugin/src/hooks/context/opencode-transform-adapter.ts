@@ -276,7 +276,6 @@ function buildTransformBody(
         boundary: TransformBoundary | null;
         baseRevision: string;
         previousOutputRevision?: string;
-        input: unknown[];
         nativeMessages: readonly unknown[];
     },
 ): Record<string, unknown> {
@@ -287,7 +286,6 @@ function buildTransformBody(
             baseRevision: args.baseRevision,
             previousOutputRevision: args.previousOutputRevision,
             serializerProfile: "opencode-aisdk",
-            input: args.input,
             nativeMessages: args.nativeMessages,
         },
         transformPassFields(args),
@@ -295,8 +293,10 @@ function buildTransformBody(
 }
 
 /**
- * The CK window of an OpenCode message array. Compaction summary rows leave the window, and every
- * kept message carries its unfiltered window position, which names its synthetic tool calls.
+ * The CK window of an OpenCode message array, the oracle the daemon's OpenCode codec derives to
+ * (`__fixtures__/opencode-codec-parity.json`); a pass sends the native window alone. Compaction
+ * summary rows leave the window, and every kept message carries its unfiltered window position,
+ * which names its synthetic tool calls.
  */
 export function encodeOpenCodeWindowToCk(
     messages: readonly unknown[],
@@ -516,9 +516,6 @@ export function createRustModeTransform(
                 };
                 const usageEntry = deps.contextUsageMap.get(sessionId);
                 return {
-                    encodeInput() {
-                        return encodeOpenCodeWindowToCk(messages);
-                    },
                     fields: transformPassFields({
                         passInputs,
                         // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.

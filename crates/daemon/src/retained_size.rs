@@ -79,21 +79,53 @@ pub(crate) fn value_retained_bytes(value: &Value) -> usize {
 /// String and vector branches charge capacity. Object branches charge entry
 /// count because `serde_json::Map` does not expose tree-node capacity.
 pub(crate) fn value_heap_bytes(value: &Value) -> usize {
+    value_heap_bytes_by(value, |_, child| value_heap_bytes(child))
+}
+
+pub(crate) fn value_heap_bytes_by(
+    value: &Value,
+    mut child: impl FnMut(Option<&str>, &Value) -> usize,
+) -> usize {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => 0,
         Value::String(value) => value.capacity(),
         Value::Array(values) => values
             .capacity()
             .saturating_mul(size_of::<Value>())
-            .saturating_add(values.iter().map(value_heap_bytes).sum::<usize>()),
+            .saturating_add(values.iter().map(|value| child(None, value)).sum::<usize>()),
         Value::Object(values) => btree_map_allocation_bytes::<String, Value>(values.len())
             .saturating_add(
                 values
                     .iter()
-                    .map(|(key, value)| key.capacity().saturating_add(value_heap_bytes(value)))
+                    .map(|(key, value)| key.capacity().saturating_add(child(Some(key), value)))
                     .sum::<usize>(),
             ),
     }
+}
+
+/// As [`value_heap_bytes`], with every non-empty object charged at least one whole `BTreeMap`
+/// leaf node, which a clone of the object allocates however few entries it holds.
+pub(crate) fn value_heap_bytes_leaf_floored(value: &Value) -> usize {
+    let heap = value_heap_bytes_by(value, |_, child| value_heap_bytes_leaf_floored(child));
+    match value {
+        Value::Object(fields) if !fields.is_empty() => heap.saturating_add(
+            btree_leaf_node_bytes::<String, Value>()
+                .saturating_sub(btree_map_allocation_bytes::<String, Value>(fields.len())),
+        ),
+        _ => heap,
+    }
+}
+
+/// Entries one `BTreeMap` node holds at most: the standard library's `2 * B - 1` with `B = 6`.
+const BTREE_NODE_CAPACITY: usize = 11;
+
+/// The bytes of one `BTreeMap` leaf node: its parent pointer, its key and value arrays, and its
+/// parent index and length, padded to `usize` alignment.
+const fn btree_leaf_node_bytes<K, V>() -> usize {
+    (size_of::<usize>()
+        + BTREE_NODE_CAPACITY * (size_of::<K>() + size_of::<V>())
+        + 2 * size_of::<u16>())
+    .next_multiple_of(std::mem::align_of::<usize>())
 }
 
 /// Estimates heap bytes retained by provider namespaces, fields, and JSON values.

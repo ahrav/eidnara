@@ -764,3 +764,15 @@ Six limits, stated so a later pass does not read absence as absence of risk.
   and it governs all 112 checks inventoried above.** 4c raised it, the scope map
   raised it at `:681`, lens A and lens C raised it. It needs a human ruling, not
   a synthesis decision.
+
+## Dated note (2026-10-12, #993)
+
+Dated note, 2026-10-12, #993 (spec #988 milestone U3): the transform request
+carries no `serve_native`. The `pi` and `opencode-aisdk` profiles send
+`native_messages` as their only window, the daemon derives the pass's CK from
+it through the profile's codec before any projection and always serves native
+recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
+`messages`. Every clause here that names `serve_native`, a CK window sent
+beside the native window, or the Pi check that aligned rows with `messages` is
+invalidated; line anchors into files #993 changed are as of their earlier
+recorded head.

@@ -11,7 +11,7 @@ import {
 } from "@eidnara/opencode/hooks/context/transform-session-client";
 
 import type { PiBranchIndex, PiBranchReader } from "./pi-branch";
-import { encodePiRowsToCk, isPiRole, PI_RESERVED_ID_PREFIX, type PiRow, piRowSize } from "./pi-ck";
+import { isPiRole, PI_RESERVED_ID_PREFIX, type PiRow, piRowSize } from "./pi-ck";
 
 type Json = Record<string, unknown>;
 
@@ -281,7 +281,6 @@ export function createPiTransform(options: PiTransformOptions) {
                     return entry ? Date.parse(entry.timestamp) : undefined;
                 };
                 return {
-                    encodeInput: () => encodePiRowsToCk(window),
                     fields: inputs.fields(
                         window.map((row) => row.message),
                         writtenAt,

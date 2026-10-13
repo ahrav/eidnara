@@ -687,6 +687,23 @@ mod tests {
     use super::*;
     use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
+    #[test]
+    fn a_json_value_over_the_limit_is_refused_at_the_serializer_length() {
+        let value = Value::String("\u{1}".repeat(MAX_WIRE_BODY_BYTES / 6 + 1));
+        let mut counter = CountingWriter::default();
+        let result =
+            serde_json::to_writer(&mut counter, &value).map_err(PreparedOutputError::Serialize);
+        let expected = finish_count(counter, result).map(|counter| counter.len);
+        assert!(matches!(
+            expected,
+            Err(PreparedOutputError::BodyTooLarge { .. })
+        ));
+        assert_eq!(
+            format!("{:?}", measure_json(&value)),
+            format!("{expected:?}")
+        );
+    }
+
     fn json_value() -> impl proptest::strategy::Strategy<Value = Value> {
         use proptest::prelude::*;
         let leaf = prop_oneof![

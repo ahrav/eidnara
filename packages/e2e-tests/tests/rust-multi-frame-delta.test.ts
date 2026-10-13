@@ -8,6 +8,8 @@ const TAIL_BYTES_FLOOR = 350_000;
 /** Below half the daemon's window cap, where a pass with no coverage sends the whole array. */
 const HISTORY_MESSAGES = 350;
 const HISTORY_TEXT_BYTES = 3_072;
+/** The prompts and replies a window holds beside its synthetic history, at most. */
+const NON_HISTORY_MESSAGES = 20;
 
 describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large tail", () => {
     let h: RustTestHarness;
@@ -85,14 +87,23 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
         const largeTail = (await h.waitForRustPasses(before + 1)).at(-1)!;
         const providerBytesAfterLargeTail = h.lastMainWireBytes();
 
-        // Every pass carries the whole synthetic history on the wire, not a tail delta of a few messages.
-        const historyBytes = HISTORY_MESSAGES * HISTORY_TEXT_BYTES;
+        // Every pass carries its whole native window on the wire, not a tail delta of a few
+        // messages: the window's synthetic history bytes, its non-history turns aside.
+        const windowHistoryBytes = (pass: RustPassLine) =>
+            Math.max(0, pass.inputCount - NON_HISTORY_MESSAGES) * HISTORY_TEXT_BYTES;
+        // A fold keeps a suffix of the history, never a tail delta of a few messages.
+        expect(smallSends.every((pass) => pass.inputCount > HISTORY_MESSAGES / 2)).toBe(true);
         expect(smallSends.every((pass) => pass.applied)).toBe(true);
-        expect(smallSends.every((pass) => pass.transportBytes > historyBytes)).toBe(true);
+        expect(smallSends.every((pass) => pass.transportBytes > windowHistoryBytes(pass))).toBe(
+            true,
+        );
         expect(smallSends.every((pass) => pass.transportPages === 1)).toBe(true);
 
+        expect(largeTail.inputCount).toBeGreaterThan(HISTORY_MESSAGES / 2);
         expect(largeTail.applied).toBe(true);
-        expect(largeTail.transportBytes).toBeGreaterThan(historyBytes + TAIL_BYTES_FLOOR);
+        expect(largeTail.transportBytes).toBeGreaterThan(
+            windowHistoryBytes(largeTail) + TAIL_BYTES_FLOOR,
+        );
         expect(largeTail.transportPages).toBe(1);
         expect(providerBytesAfterLargeTail).toBeGreaterThan(
             providerBytesBeforeLargeTail + TAIL_BYTES_FLOOR,

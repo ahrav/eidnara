@@ -887,14 +887,9 @@ const TRANSFORM_PAGE_FIELDS: [&str; 6] = [
     "transform_page_complete",
     "transform_page_digest",
 ];
-const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 6] = [
-    "input",
-    "messages",
-    "native_messages",
-    "ts_output",
-    "ts_messages",
-    "normalizations",
-];
+/// The window arrays a transform page series splits: a native profile's `native_messages` and a
+/// CK profile's `messages`.
+const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 2] = ["messages", "native_messages"];
 /// One ready-snapshot budget serves every session's wrapup. A snapshot charges only its CK
 /// input and scalar fields, never native payload, so 64 MiB holds several large sessions.
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
@@ -1808,6 +1803,12 @@ impl TransformRequest {
         self.execute_threshold_or_else(|| fallback)
     }
 
+    /// Whether the request's profile serves native messages from a native window.
+    fn serves_native(&self) -> bool {
+        SerializerProfile::parse(&self.serializer_profile)
+            .is_some_and(SerializerProfile::serves_native)
+    }
+
     /// As [`Self::execute_threshold_or`], computing the fallback only when the request omits its threshold.
     fn execute_threshold_or_else(&self, fallback: impl FnOnce() -> f64) -> f64 {
         self.effective_execute_threshold.unwrap_or_else(fallback)
@@ -1816,7 +1817,6 @@ impl TransformRequest {
     fn ready_snapshot(&self) -> Self {
         Self {
             native_messages: None,
-            serve_native: false,
             coverage: self
                 .coverage
                 .as_deref()
@@ -3459,6 +3459,8 @@ struct EntryTimings {
     request_observed_to_handler: f64,
     pass_state_load_ms: f64,
     clock: transform_unit::PassClock,
+    /// The derivation of a native profile's CK from its native window, as `(start, end)`.
+    derive_ck: Option<(Instant, Instant)>,
     core_started_at: Instant,
 }
 
@@ -8767,22 +8769,11 @@ impl HandlerCore {
             }
             Some(_) => {}
         }
-        let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
-        if serializer_profile.is_none() {
+        let Some(serializer_profile) = SerializerProfile::parse(&parsed.serializer_profile) else {
             return unknown_serializer_profile_error();
-        }
-        if parsed.serve_native {
-            match serializer_profile {
-                Some(SerializerProfile::OpencodeAiSdk) => {}
-                Some(SerializerProfile::Pi) => {
-                    let rows = parsed.native_messages.as_deref().unwrap_or_default();
-                    let messages = parsed.messages.iter().map(Arc::as_ref);
-                    if let Err(decline) = codec::pi::check_pi_rows(rows, messages) {
-                        return invalid_params_error(decline.to_string());
-                    }
-                }
-                _ => return serve_native_unsupported_profile_error(&parsed.serializer_profile),
-            }
+        };
+        if let Err(refusal) = check_window_shape(&parsed, serializer_profile) {
+            return refusal;
         }
         if parsed.base_revision.is_none() {
             return PreparedOutcome::Error {
@@ -8791,6 +8782,10 @@ impl HandlerCore {
                     .to_string(),
             };
         }
+        let derive_ck = match derive_native_window(entry.meter, &mut parsed, serializer_profile) {
+            Ok(span) => span,
+            Err(refusal) => return refusal,
+        };
         if parsed
             .session_id
             .starts_with(history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX)
@@ -8873,7 +8868,7 @@ impl HandlerCore {
         if let Some(refused) = page_refused() {
             return refused;
         }
-        apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
+        apply_claude_code_config_controls(&mut parsed, &binding.config, Some(serializer_profile));
         parsed
             .prompt_surface_tool_descriptions
             .retain(|tool_id, _| {
@@ -8963,6 +8958,7 @@ impl HandlerCore {
                 request_observed_to_handler,
                 pass_state_load_ms,
                 clock: entry.clock,
+                derive_ck,
                 core_started_at,
             },
             held: PassHold {
@@ -9699,7 +9695,7 @@ impl HandlerCore {
             return revision_exhausted_error();
         };
         let native_attach_started_at = Instant::now();
-        let (encoded_messages, stored, recipe) = if parsed.serve_native {
+        let (encoded_messages, stored, recipe) = if parsed.serves_native() {
             // The retained output stays a keep source only for the revision the caller says it applied.
             let retained = self
                 .native_outputs
@@ -9834,6 +9830,7 @@ impl HandlerCore {
                 transform::LedgerInstants {
                     received_at: timings.entry.clock.received_at,
                     admitted_at: timings.entry.clock.admitted_at,
+                    derive_ck: timings.entry.derive_ck,
                     core_started_at: timings.entry.core_started_at,
                     native_attach_started_at,
                     native_attach_ended_at,
@@ -9857,7 +9854,7 @@ impl HandlerCore {
         let Some(output_revision) = self.output_revisions.allocate() else {
             return revision_exhausted_error();
         };
-        let recipe = if request.serve_native {
+        let recipe = if request.serves_native() {
             attach_native_messages(&mut response, request, 0, None);
             // Auto-search does not run on a passthrough pass; the recorder must say so.
             #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
@@ -14205,12 +14202,67 @@ fn unknown_serializer_profile_error() -> PreparedOutcome {
     }
 }
 
-fn serve_native_unsupported_profile_error(profile: &str) -> PreparedOutcome {
-    PreparedOutcome::Error {
-        code: "serve_native_unsupported_profile".to_string(),
-        message: format!(
-            "serve_native requires serializer_profile opencode-aisdk or pi, got {profile}"
-        ),
+/// A native profile's window is `native_messages` alone and a CK profile's is `messages`
+/// alone; a body carrying the other profile kind's window is outside the shape.
+fn check_window_shape(
+    request: &TransformRequest,
+    profile: SerializerProfile,
+) -> Result<(), PreparedOutcome> {
+    if profile.serves_native() && !request.messages.is_empty() {
+        return Err(invalid_params_error(format!(
+            "serializer_profile {} carries its window in native_messages, not messages",
+            profile.wire_id()
+        )));
+    }
+    if !profile.serves_native() && request.native_messages.is_some() {
+        return Err(invalid_params_error(format!(
+            "serializer_profile {} carries its window in messages, not native_messages",
+            profile.wire_id()
+        )));
+    }
+    Ok(())
+}
+
+/// Replaces a native profile's empty `messages` with the CK its codec derives from
+/// `native_messages`, after charging the derivation's bounded peak to the pass meter, and returns
+/// the derivation's span. A CK profile derives nothing. A shortfall answers the meter's
+/// refusal; a window its codec refuses answers that refusal. Either refusal precedes every
+/// effect of the pass.
+fn derive_native_window(
+    meter: &ResidentMeter<'_>,
+    request: &mut TransformRequest,
+    profile: SerializerProfile,
+) -> Result<Option<(Instant, Instant)>, PreparedOutcome> {
+    if !profile.serves_native() {
+        return Ok(None);
+    }
+    let started_at = Instant::now();
+    let native = request.native_messages.as_deref().unwrap_or_default();
+    meter
+        .charge(codec::derivation_charge(native))
+        .map_err(resident_refusal)?;
+    request.messages = derive_ck(profile, native)?.into_iter().collect();
+    Ok(Some((started_at, Instant::now())))
+}
+
+/// The CK a native profile's codec derives from `native`, or the refusal its codec answers: a Pi
+/// row decline as `invalid_params`, and an OpenCode creation time the request decode would refuse
+/// as `bad_request`.
+fn derive_ck(
+    profile: SerializerProfile,
+    native: &[Arc<Value>],
+) -> Result<Vec<wire::IngressMessage>, PreparedOutcome> {
+    match profile {
+        SerializerProfile::Pi => codec::pi::derive_pi_window(native)
+            .map_err(|decline| invalid_params_error(decline.to_string())),
+        SerializerProfile::OpencodeAiSdk => codec::opencode::derive_opencode_window(native)
+            .map_err(|error| PreparedOutcome::Error {
+                code: "bad_request".to_string(),
+                message: error.to_string(),
+            }),
+        SerializerProfile::OwnedLlmRunner
+        | SerializerProfile::OwnedModelExecution
+        | SerializerProfile::ClaudeCodeAnthropic => Ok(Vec::new()),
     }
 }
 
@@ -14257,7 +14309,7 @@ fn attach_native_messages_with_tags(
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
 ) {
-    if !request.serve_native {
+    if !request.serves_native() {
         return;
     }
     let profile = SerializerProfile::parse(&request.serializer_profile);
@@ -14278,7 +14330,7 @@ fn attach_native_messages_with_tags(
                 .iter()
                 .map(Deref::deref)
                 .collect::<Vec<_>>();
-            let mut native_messages = codec::opencode::encode_opencode_against_window(
+            let mut native_messages = codec::opencode::encode_opencode_window(
                 &served_messages,
                 native_input,
                 Some(&request.session_id),
@@ -14296,7 +14348,7 @@ fn attach_native_messages_with_tags(
                     tag_numbers,
                 );
             }
-            native_messages.into_iter().map(Arc::new).collect()
+            native_messages
         }
     };
     response.native_messages = Some(native_messages);
@@ -15924,21 +15976,24 @@ fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, String> {
         }
     }
     for field in TRANSFORM_PAGE_ARRAY_FIELDS {
-        let had_field = final_page.get(field).is_some();
+        let mut had_field = false;
         let mut values = Vec::new();
         for page in pages.iter_mut().chain(std::iter::once(&mut final_page)) {
             let Some(object) = page.as_object_mut() else {
                 return Err("transform page was not an object".to_string());
             };
             match object.remove(field) {
-                Some(Value::Array(mut items)) => values.append(&mut items),
+                Some(Value::Array(mut items)) => {
+                    had_field = true;
+                    values.append(&mut items);
+                }
                 Some(_) => {
                     return Err(format!("transform page field {field} must be an array"));
                 }
                 None => {}
             }
         }
-        if had_field || !values.is_empty() {
+        if had_field {
             let values = assemble_transform_page_field(field, values)?;
             let Some(object) = final_page.as_object_mut() else {
                 return Err("transform page was not an object".to_string());
@@ -16542,6 +16597,9 @@ fn tree_decode_parses(body: &[u8]) -> bool {
 /// decode the same way; `Err` is the walk's refused charge, taken before the value that
 /// needed it was built, so a held pool stops the walk at its first value.
 fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refusal> {
+    if !may_name_raw_value_token(body) {
+        return Ok(true);
+    }
     let walked = match decode_metered::<SkippedValue>(body, meter) {
         Ok(SkippedValue) => true,
         Err(DecodeFailure::Invalid(_)) => false,
@@ -16549,6 +16607,15 @@ fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refu
     };
     meter.restart();
     Ok(walked)
+}
+
+/// Conservatively identifies a body that may spell [`RAW_VALUE_TOKEN`]: the scan accepts the
+/// literal token bytes or a `\u00` prefix followed by a digit from `2` through `7`, including
+/// partial escape sequences. Matching bodies undergo the metered gate walk.
+fn may_name_raw_value_token(body: &[u8]) -> bool {
+    memchr::memmem::find(body, RAW_VALUE_TOKEN.as_bytes()).is_some()
+        || memchr::memmem::find_iter(body, b"\\u00")
+            .any(|at| matches!(body.get(at + 4), Some(b'2'..=b'7')))
 }
 
 /// The admission steps `dispatch_body` runs for an unpaged transform body before its typed
@@ -16896,6 +16963,24 @@ fn resident_refusal(refusal: Refusal) -> PreparedOutcome {
 #[cfg(feature = "test-support")]
 pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
     enforce_request_byte_cap(body).is_ok()
+}
+
+/// Derives a native profile's CK from `native` as a transform pass does, for the allocation
+/// test: `Ok` holds the derived message count, kept alive until the caller drops it, and `Err`
+/// the refusal.
+#[cfg(feature = "test-support")]
+pub fn derive_native_window_for_test(
+    profile: &str,
+    native: &[Arc<Value>],
+) -> Result<wire::IngressMessages, String> {
+    let profile = SerializerProfile::parse(profile)
+        .filter(|profile| profile.serves_native())
+        .ok_or_else(|| format!("{profile} derives no CK"))?;
+    match derive_ck(profile, native) {
+        Ok(messages) => Ok(messages.into_iter().collect()),
+        Err(PreparedOutcome::Error { code, message }) => Err(format!("{code}: {message}")),
+        Err(other) => Err(format!("{other:?}")),
+    }
 }
 
 /// The steps `Handler::handle` runs on a sub-cap body before `dispatch_body`, against
@@ -18208,6 +18293,15 @@ fn served_output_for_test(response: &Value) -> Vec<transform::ServedMessage> {
         .expect("the pass recorded its served array")
 }
 
+/// Whether a test body's profile serves native messages from a native window.
+#[cfg(test)]
+fn serves_native_body(request: &Value) -> bool {
+    request["serializer_profile"]
+        .as_str()
+        .and_then(SerializerProfile::parse)
+        .is_some_and(SerializerProfile::serves_native)
+}
+
 #[cfg(test)]
 impl Handler {
     /// Records the complete arrays and names the attempt with a fresh `base_revision` unless the test supplied one. Advertises the applied
@@ -18216,6 +18310,25 @@ impl Handler {
         let Some(session_id) = request["session_id"].as_str().map(str::to_owned) else {
             return request;
         };
+        let native = serves_native_body(&request);
+        // A native profile sends its native window alone, as the plugins send it; a test that
+        // states its window in CK sends the native window that derives it. A test that states
+        // both sends its native window, so its stated CK goes unread; a test of the mixed shape
+        // dispatches without this client.
+        if native && let Some(body) = request.as_object_mut() {
+            let stated = body.remove("messages");
+            if body.get("native_messages").is_none()
+                && let Some(stated) = stated
+            {
+                let stated: Vec<wire::IngressMessage> = serde_json::from_value(stated).unwrap();
+                let window = if body.get("serializer_profile") == Some(&json!("pi")) {
+                    tests::pi_native_window(&stated)
+                } else {
+                    tests::opencode_native_window(&stated)
+                };
+                body.insert("native_messages".to_string(), json!(window));
+            }
+        }
         // A null boundary over plugin-assigned ordinals is sent as the plugin would send it.
         if request["boundary"].is_null()
             && request.get("native_messages").is_none()
@@ -18230,7 +18343,6 @@ impl Handler {
         }
         let mut clients = self.test_client.lock().expect("test client mutex");
         let client = clients.entry(session_id).or_default();
-        let native = request["serve_native"] == true;
         // A CK keep addresses `request.messages[i].ck`, never the ingress envelope around it.
         let suffix_ck: Vec<Value> = request["messages"]
             .as_array()
@@ -18275,7 +18387,7 @@ impl Handler {
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        let native = request["serve_native"] == true;
+        let native = serves_native_body(request);
         let recipe = edit_recipe::Recipe::from_json(&response).expect("wire recipe validates");
         let mut clients = self.test_client.lock().expect("test client mutex");
         let client = clients.entry(session_id).or_default();
@@ -20765,6 +20877,53 @@ mod tests {
         serde_json::from_slice::<TransformRequest>(body).map_err(|error| error.to_string())
     }
 
+    #[test]
+    fn the_gate_admits_without_its_walk_only_what_the_tree_decodes_alike() {
+        let reserve = metered_decode::unbounded_reserve();
+        let mut admitted = 0;
+        for (name, body) in &transform_decode_corpus() {
+            if may_name_raw_value_token(body) {
+                continue;
+            }
+            assert!(
+                !name.contains("raw-value token"),
+                "{name}: a token body walks"
+            );
+            let meter = ResidentMeter::new(&reserve);
+            let Ok(direct) = decode_metered::<TransformRequest>(body, &meter) else {
+                continue;
+            };
+            admitted += 1;
+            let tree = tree_decode(body).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                serde_json::to_value(&direct).unwrap(),
+                serde_json::to_value(&tree).unwrap(),
+                "{name}"
+            );
+        }
+        assert!(
+            admitted > 10,
+            "{admitted} corpus bodies decode on the direct lane"
+        );
+        for spelling in [
+            RAW_VALUE_TOKEN.to_string(),
+            RAW_VALUE_TOKEN.replacen('$', "\\u0024", 1),
+            RAW_VALUE_TOKEN.replacen('R', "\\u0052", 1),
+            RAW_VALUE_TOKEN.replacen('e', "\\u0065", 1),
+            RAW_VALUE_TOKEN.replacen(':', "\\u003A", 1),
+            RAW_VALUE_TOKEN.replacen('_', "\\u005f", 1),
+        ] {
+            let body = format!(r#"{{"kind":"transform","x":{{"{spelling}":1}}}}"#);
+            let key: Value = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
+            assert_eq!(key, RAW_VALUE_TOKEN, "{spelling}");
+            assert!(may_name_raw_value_token(body.as_bytes()), "{spelling}");
+        }
+        for text in [r#""\u001b[0m\n\t\"""#, r#""\ud83d\ude00""#, r#""plain""#] {
+            let body = format!(r#"{{"kind":"transform","x":{text}}}"#);
+            assert!(!may_name_raw_value_token(body.as_bytes()), "{text}");
+        }
+    }
+
     /// Where both decodes accept a body they decode it to the same request. The two
     /// decodes differ in acceptance on exactly two shapes, and the handler keeps both off
     /// the direct lane: a repeated key in a derived struct, top-level or nested, which the
@@ -22199,7 +22358,6 @@ mod tests {
         };
         // The snapshot keeps the CK input and is charged for it alone, not the 64 KiB native payload.
         assert!(lease.request.native_messages.is_none());
-        assert!(!lease.request.serve_native);
         assert_eq!(lease.request.messages.len(), 1);
         assert_eq!(
             lease._charge.retained_bytes,
@@ -22242,11 +22400,9 @@ mod tests {
     fn ready_snapshot_shares_messages_and_charges_at_least_their_bytes() {
         let charge = |text: &str| {
             let mut request = transform_request(vec![ck("m1", 1, text)], 1, 200_000);
-            request.serve_native = true;
             request.native_messages = Some(vec![Arc::new(json!({ "info": { "id": "m1" } }))]);
             let snapshot = request.ready_snapshot();
             assert!(snapshot.native_messages.is_none());
-            assert!(!snapshot.serve_native);
             assert!(Arc::ptr_eq(&snapshot.messages[0], &request.messages[0]));
             let bytes = snapshot.snapshot_retained_bytes();
             let ingress = snapshot
@@ -25319,7 +25475,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn serve_native_false_is_response_byte_identical_for_all_profiles() {
+    /// The retired `serve_native` opt-in is an unknown field: whatever it holds, every profile
+    /// answers as if it were absent.
+    async fn a_retired_serve_native_field_is_never_read() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
         for profile in [
@@ -25336,22 +25494,24 @@ mod tests {
             let mut absent = request(vec![ck("m1", 1, "hello")]);
             absent["session_id"] = json!(session_id);
             absent["serializer_profile"] = json!(profile);
-            let mut explicit_false = absent.clone();
-            explicit_false["serve_native"] = json!(false);
-            let mut absent_response = call_transform_request(&handler, absent).await;
-            let mut explicit_response = call_transform_request(&handler, explicit_false).await;
-            // Every recomputation names a fresh output revision and may keep from the previous one.
-            for response in [&mut absent_response, &mut explicit_response] {
-                let object = response.as_object_mut().unwrap();
-                object.remove("output_revision");
-                object.remove("previous_output_revision");
-                object.remove("operations");
+            let mut absent_response = call_transform_request(&handler, absent.clone()).await;
+            for retired in [json!(false), json!(true), json!("yes")] {
+                let mut carrying = absent.clone();
+                carrying["serve_native"] = retired.clone();
+                let mut carrying_response = call_transform_request(&handler, carrying).await;
+                // Every recomputation names a fresh output revision and may keep from the previous one.
+                for response in [&mut absent_response, &mut carrying_response] {
+                    let object = response.as_object_mut().unwrap();
+                    object.remove("output_revision");
+                    object.remove("previous_output_revision");
+                    object.remove("operations");
+                }
+                assert_eq!(
+                    serde_json::to_vec(&absent_response).unwrap(),
+                    serde_json::to_vec(&carrying_response).unwrap(),
+                    "profile {profile} read serve_native={retired}"
+                );
             }
-            assert_eq!(
-                serde_json::to_vec(&absent_response).unwrap(),
-                serde_json::to_vec(&explicit_response).unwrap(),
-                "profile {profile} changed the response when serve_native=false"
-            );
         }
     }
 
@@ -25504,10 +25664,11 @@ mod tests {
     }
 
     /// Each malformed corpus window refuses with one code and text whether the daemon reads the
-    /// CK the OpenCode plugin encodes or derives the CK from the native window itself.
+    /// CK the OpenCode plugin encodes on the CK path or derives the CK from the native window an
+    /// `opencode-aisdk` pass sends.
     #[tokio::test(flavor = "current_thread")]
     async fn a_malformed_opencode_window_refuses_alike_from_the_plugin_and_the_daemon_derivation() {
-        use codec::opencode::tests::{PARITY_FIXTURE, native_window, plugin_form};
+        use codec::opencode::tests::PARITY_FIXTURE;
         let mut fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
         let write = std::env::var_os("EIDNARA_WRITE_OPENCODE_CODEC_PARITY").is_some();
         let refusals = fixture["refusals"].as_array_mut().unwrap();
@@ -25518,19 +25679,22 @@ mod tests {
                 case["refusal"]["code"].as_str().unwrap().to_string(),
                 case["refusal"]["message"].as_str().unwrap().to_string(),
             );
-            let dispatch = |messages: Value| async move {
+            let dispatch = |profile: &'static str, field: &'static str, window: Value| async move {
                 let (handler, _store, _dir, _project) =
                     handler_with_store(Arc::new(ProducerState::default()), default_test_config());
                 let mut body = request(Vec::new());
-                body["serializer_profile"] = json!("opencode-aisdk");
-                body["messages"] = messages;
+                body["serializer_profile"] = json!(profile);
+                body[field] = window;
                 error_frame(call_transform_outcome(&handler, body).await)
             };
-            let from_plugin = dispatch(case["expected"].clone()).await;
-            let derived = match codec::opencode::derive_opencode_window(&native_window(case)) {
-                Ok(decoded) => dispatch(serde_json::to_value(plugin_form(&decoded)).unwrap()).await,
-                Err(error) => ("bad_request".to_string(), error.to_string()),
-            };
+            let from_plugin =
+                dispatch("owned-llmrunner", "messages", case["expected"].clone()).await;
+            let derived = dispatch(
+                "opencode-aisdk",
+                "native_messages",
+                case["messages"].clone(),
+            )
+            .await;
             if write {
                 case["refusal"] = json!({ "code": from_plugin.0, "message": from_plugin.1 });
                 continue;
@@ -25550,14 +25714,228 @@ mod tests {
         }
     }
 
+    /// One native-window body through the body entry against a pool of `capacity` bytes: the
+    /// outcome, the bytes the meter needed, whether the session gained durable state, and whether
+    /// the pool holds all its bytes again once the pass has ended.
+    async fn native_body_against_a_pool(
+        body: &[u8],
+        capacity: usize,
+    ) -> (PreparedOutcome, usize, bool, bool) {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let pool = TestPool::with_capacity(capacity);
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let probe = lane_probe(body);
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner: &runner,
+            clock: transform_unit::PassClock::now(),
+        };
+        let (_, outcome) = handler.dispatch_body(&entry, body).await;
+        let needed = meter.needed();
+        drop(meter);
+        let released = pool.budget.try_charge(capacity).is_some();
+        (
+            outcome,
+            needed,
+            store.has_cache_state("ses").unwrap(),
+            released,
+        )
+    }
+
+    /// The derivation is funded before it allocates: a pool holding exactly the decode and the
+    /// derivation charge admits the pass, one byte short refuses it after the decode fit and
+    /// before any effect, and a pool holding the decode alone refuses the derivation the same way.
     #[tokio::test(flavor = "current_thread")]
-    async fn serve_native_rejects_unsupported_profiles() {
+    async fn a_native_window_is_admitted_at_its_exact_charge_and_refused_one_byte_short() {
+        let window: Vec<IngressMessage> = (1..=40)
+            .map(|ordinal| ck(&format!("m{ordinal}"), ordinal, &"text ".repeat(200)))
+            .collect();
+        let body = serde_json::to_vec(&json!({
+            "kind": "transform",
+            "boundary": null,
+            "base_revision": "test-base",
+            "serializer_profile": "opencode-aisdk",
+            "session_id": "ses",
+            "render_config": "cfg0",
+            "native_messages": opencode_native_window(&window),
+        }))
+        .unwrap();
+        let (outcome, needed, durable, _) = native_body_against_a_pool(&body, 1 << 30).await;
+        assert!(
+            matches!(outcome, PreparedOutcome::Response(_)),
+            "{outcome:?}"
+        );
+        assert!(durable);
+        let native: Vec<Arc<Value>> =
+            serde_json::from_slice::<Value>(&body).unwrap()["native_messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(Arc::new)
+                .collect();
+        let derivation = codec::derivation_charge(&native);
+        let decode = needed - derivation;
+        assert!(
+            decode >= footprint_of(&body),
+            "the decode charge precedes the derivation's"
+        );
+
+        let (exact, _, durable, _) = native_body_against_a_pool(&body, needed).await;
+        assert!(matches!(exact, PreparedOutcome::Response(_)), "{exact:?}");
+        assert!(durable);
+        for capacity in [needed - 1, decode] {
+            let (short, _, durable, released) = native_body_against_a_pool(&body, capacity).await;
+            assert_eq!(
+                error_frame(short),
+                error_frame(request_too_large_error()),
+                "capacity {capacity}"
+            );
+            assert!(!durable, "a refused derivation leaves no session state");
+            assert!(released, "a refused derivation releases every charge");
+        }
+    }
+
+    /// The pages of `whole` split at `cuts` in its native window, as the plugins page it: every
+    /// page carries its native slice and content digest, and only the final page the scalars.
+    fn native_page_series(whole: &Value, cuts: &[usize]) -> Vec<Value> {
+        let native = whole["native_messages"].as_array().unwrap();
+        let bounds: Vec<usize> = std::iter::once(0)
+            .chain(cuts.iter().copied())
+            .chain(std::iter::once(native.len()))
+            .collect();
+        let total = bounds.len() - 1;
+        bounds
+            .windows(2)
+            .enumerate()
+            .map(|(index, range)| {
+                let complete = index + 1 == total;
+                let mut page = if complete {
+                    whole.clone()
+                } else {
+                    json!({ "method": "transform", "session_id": whole["session_id"] })
+                };
+                page["native_messages"] = json!(native[range[0]..range[1]]);
+                page["transform_page_id"] = json!("native-series");
+                page["transform_generation"] = json!(1);
+                page["transform_page_index"] = json!(index);
+                page["transform_page_total"] = json!(total);
+                page["transform_page_complete"] = json!(complete);
+                page["transform_page_digest"] = json!(transform_page_content_digest(&page));
+                page
+            })
+            .collect()
+    }
+
+    /// A native window paged in any partition assembles in order, derives the same CK, and
+    /// answers exactly as the unpaged window does; a page whose digest names other arrays
+    /// refuses as a digest mismatch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_native_window_paged_in_any_partition_serves_the_unpaged_response() {
+        let stated: Vec<IngressMessage> = (1..=12)
+            .map(|ordinal| ck(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
+            .collect();
+        let whole = json!({
+            "method": "transform",
+            "kind": "transform",
+            "boundary": null,
+            "base_revision": "test-base",
+            "serializer_profile": "opencode-aisdk",
+            "session_id": "ses",
+            "render_config": "cfg0",
+            "native_messages": opencode_native_window(&stated),
+        });
+        let run = |pages: Vec<Value>| async move {
+            let (handler, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            // Pages go out as the plugins send them, with no test client filling in fields.
+            let mut last = None;
+            for page in pages {
+                last = Some(handler.dispatch_value_for_test(test_route(7), page).await);
+            }
+            comparable_outcome(last.unwrap())
+        };
+        let unpaged = run(vec![whole.clone()]).await;
+        assert_eq!(unpaged.0, "response", "{unpaged:?}");
+        for cuts in [vec![1], vec![6], vec![11], vec![3, 7, 10]] {
+            let paged = run(native_page_series(&whole, &cuts)).await;
+            assert_eq!(paged, unpaged, "partition {cuts:?}");
+        }
+
+        let mut series = native_page_series(&whole, &[6]);
+        series[0]["transform_page_digest"] = json!(transform_page_content_digest(&json!({
+            "messages": series[0]["native_messages"],
+        })));
+        series.truncate(1);
+        let refused = run(series).await;
+        assert_eq!(
+            (refused.0.as_str(), refused.1.as_str()),
+            (
+                "authority_transform_page_digest_mismatch",
+                "transform page content digest did not match the supplied digest"
+            )
+        );
+    }
+
+    /// A native pass reports its derivation as `derive_ck`, a stage apart from
+    /// `lane_gate_and_decode`, and the daemon stages still sum to the carried total.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_native_pass_reports_its_derivation_inside_the_reconciled_ledger() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let request = native_cache_request(
+            "ses",
+            vec![ck("m1", 1, "hello"), ck("m2", 2, "there")],
+            Vec::new(),
+        );
+        let response =
+            call_transform_request(&handler, serde_json::to_value(request).unwrap()).await;
+        let ledger: transform::DaemonStageLedger =
+            serde_json::from_value(response["timings"]["ledger"].clone()).unwrap();
+        let derive_ck = ledger.derivation_us.expect("a native pass derives its CK");
+        assert_eq!(
+            ledger.admit_us
+                + ledger.lane_gate_and_decode_us
+                + derive_ck
+                + ledger.transform_core_us
+                + ledger.native_attach_us
+                + ledger.residual_us,
+            ledger.total_us,
+            "{ledger:?}"
+        );
+        assert_eq!((ledger.window_messages, ledger.window_blocks), (2, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn each_profile_kind_refuses_the_other_kinds_window() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let mut request = request(vec![ck("m1", 1, "hello")]);
-        request["serve_native"] = json!(true);
-        let outcome = call_transform_outcome(&handler, request).await;
-        assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
+        let mut messages_with_native = request(vec![ck("m1", 1, "hello")]);
+        messages_with_native["native_messages"] = json!([]);
+        assert_eq!(
+            error_frame(call_transform_outcome(&handler, messages_with_native).await),
+            (
+                "invalid_params".to_string(),
+                "serializer_profile owned-llmrunner carries its window in messages, not native_messages"
+                    .to_string()
+            )
+        );
+        let mut native_with_ck = request(vec![ck("m1", 1, "hello")]);
+        native_with_ck["serializer_profile"] = json!("opencode-aisdk");
+        // The test client sends a native body alone, so this dispatch skips it.
+        assert_eq!(
+            error_frame(handler.handle_transform_for_test(test_route(7), native_with_ck).await),
+            (
+                "invalid_params".to_string(),
+                "serializer_profile opencode-aisdk carries its window in native_messages, not messages"
+                    .to_string()
+            )
+        );
     }
 
     fn lineage_summary_user() -> IngressMessage {
@@ -25806,7 +26184,6 @@ mod tests {
             history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
         ));
         request["serializer_profile"] = json!("opencode-aisdk");
-        request["serve_native"] = json!(true);
         request["native_messages"] = json!([{
             "info": {"id": "m1", "sessionID": "ses", "role": "user"},
             "parts": [{"type": "text", "text": "hello"}]
@@ -25898,12 +26275,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn serve_native_adds_opencode_messages_without_changing_wire_response() {
+    async fn native_attachment_adds_opencode_messages_without_changing_wire_response() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
         let mut request = request(vec![ck("m1", 1, "hello")]);
         request["serializer_profile"] = json!("opencode-aisdk");
-        request["serve_native"] = json!(true);
         request["native_messages"] = json!([
             {
                 "info": {
@@ -25992,13 +26368,11 @@ mod tests {
         let full_request = || {
             let mut body = request(vec![ck("m1", 1, "hello")]);
             body["serializer_profile"] = json!("opencode-aisdk");
-            body["serve_native"] = json!(true);
             body["native_messages"] = json!([first_native.clone()]);
             body
         };
         let mut full_followup = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "next")]);
         full_followup["serializer_profile"] = json!("opencode-aisdk");
-        full_followup["serve_native"] = json!(true);
         full_followup["native_messages"] = json!([first_native.clone(), second_native.clone()]);
         let cold_start = |handler: &Handler| {
             handler.native_outputs.lock().unwrap().remove("ses");
@@ -26039,11 +26413,84 @@ mod tests {
         );
     }
 
+    /// The OpenCode native window the codec derives `messages` from, for a test that states its
+    /// window in CK; the derivation is checked to give `messages` back.
+    pub(crate) fn opencode_native_window(messages: &[IngressMessage]) -> Vec<Value> {
+        let native = opencode_native_of(messages);
+        let shared: Vec<Arc<Value>> = native.iter().cloned().map(Arc::new).collect();
+        let derived = codec::opencode::derive_opencode_window(&shared).unwrap();
+        assert_derives_the_stated_ck(derived, messages);
+        native
+    }
+
+    /// The OpenCode messages the codec encodes `messages` as, where OpenCode carries some of
+    /// their content in another form, such as a JSON tool output as its text.
+    fn opencode_native_of(messages: &[IngressMessage]) -> Vec<Value> {
+        let cks: Vec<WireMessage> = messages.iter().map(|message| message.ck.clone()).collect();
+        codec::encode_opencode(&cks, &codec::DecodeSidecar::new("opencode"), None)
+    }
+
+    /// The Pi rows for a test that states its window in CK. Pi's rows carry fields CK leaves
+    /// out, such as an origin and a timestamp, so the derivation is checked to keep each stated
+    /// message's mid, role, and block kinds.
+    pub(crate) fn pi_native_window(messages: &[IngressMessage]) -> Vec<Value> {
+        let rows: Vec<Value> = codec::pi::encode_pi_rows(messages.iter().map(|m| &m.ck), &[], &[])
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect();
+        let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
+        let shape = |messages: &[IngressMessage]| {
+            messages
+                .iter()
+                .map(|message| {
+                    let kinds: Vec<Value> = message
+                        .ck
+                        .content()
+                        .iter()
+                        .map(|block| serde_json::to_value(block.kind()).unwrap()["type"].clone())
+                        .collect();
+                    (message.mid.clone(), message.ck.role.clone(), kinds)
+                })
+                .collect::<Vec<_>>()
+        };
+        let derived = codec::pi::derive_pi_window(&shared).unwrap();
+        assert_eq!(
+            shape(&derived),
+            shape(messages),
+            "the rows derive the stated window"
+        );
+        rows
+    }
+
+    fn assert_derives_the_stated_ck(derived: Vec<IngressMessage>, messages: &[IngressMessage]) {
+        let stated: Vec<(String, WireMessage)> = messages
+            .iter()
+            .map(|message| {
+                let mut ck = message.ck.clone();
+                ck.meta.ordinal = None;
+                (message.mid.clone(), ck)
+            })
+            .collect();
+        let derived: Vec<(String, WireMessage)> = derived
+            .into_iter()
+            .map(|message| (message.mid, message.ck))
+            .collect();
+        assert_eq!(derived, stated, "the native window derives the stated CK");
+    }
+
+    /// An `opencode-aisdk` request over `native_messages`, or over the native window that derives
+    /// `messages` when the test states none. The CK `messages` ride along for tests that read
+    /// them; the test client sends the native window alone.
     fn native_cache_request(
         session_id: &str,
         messages: Vec<IngressMessage>,
         native_messages: Vec<Value>,
     ) -> TransformRequest {
+        let native_messages = if native_messages.is_empty() {
+            opencode_native_window(&messages)
+        } else {
+            native_messages
+        };
         serde_json::from_value(json!({
             "kind": "transform",
             "boundary": null,
@@ -26052,7 +26499,6 @@ mod tests {
             "session_id": session_id,
             "render_config": "cfg0",
             "provider_id": "anthropic",
-            "serve_native": true,
             "messages": messages,
             "native_messages": native_messages,
         }))
@@ -26398,10 +26844,19 @@ mod tests {
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let (control_handler, _control_store, _control_dir, _control_project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        // OpenCode carries a finished call and its result as one assistant message.
+        let fold = |mut call: IngressMessage, result: IngressMessage| {
+            call.ck
+                .content_mut()
+                .extend(result.ck.content().iter().cloned());
+            call
+        };
         let initial_messages = vec![
             ck("todo-prefix", 1, "prefix"),
-            assistant_tool_call("call-ordinary", 2),
-            tool_result("result-ordinary", 3, "ordinary"),
+            fold(
+                assistant_tool_call("call-ordinary", 2),
+                tool_result("result-ordinary", 3, "ordinary"),
+            ),
         ];
         // Only the cached handler sees the prefix first; the control stays cold.
         let request = native_cache_request("ses", initial_messages, Vec::new());
@@ -26421,24 +26876,32 @@ mod tests {
         result.meta.harness_id = Some("todo-reserved-result".to_string());
         let changed_messages = vec![
             ck("todo-prefix", 1, "prefix"),
-            IngressMessage {
-                mid: "todo-reserved-call".to_string(),
-                ordinal: 2,
-                ck: call,
-            },
-            IngressMessage {
-                mid: "todo-reserved-result".to_string(),
-                ordinal: 3,
-                ck: result,
-            },
+            fold(
+                IngressMessage {
+                    mid: "todo-reserved-call".to_string(),
+                    ordinal: 2,
+                    ck: call,
+                },
+                IngressMessage {
+                    mid: "todo-reserved-result".to_string(),
+                    ordinal: 3,
+                    ck: result,
+                },
+            ),
         ];
-        let warm = native_cache_request("ses", changed_messages.clone(), Vec::new());
+        // OpenCode carries the todo result's JSON output as text.
+        let changed_native = opencode_native_of(&changed_messages);
+        let warm = native_cache_request("ses", changed_messages.clone(), changed_native.clone());
         let cached =
             call_transform_request(&cached_handler, serde_json::to_value(warm).unwrap()).await;
         let full = call_transform_request(
             &control_handler,
-            serde_json::to_value(native_cache_request("ses", changed_messages, Vec::new()))
-                .unwrap(),
+            serde_json::to_value(native_cache_request(
+                "ses",
+                changed_messages,
+                changed_native,
+            ))
+            .unwrap(),
         )
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
@@ -26662,7 +27125,6 @@ mod tests {
         let body_with = |tail: &str| {
             let mut body = request(vec![ck("m1", 1, "hello"), ck("m2", 2, tail)]);
             body["serializer_profile"] = json!("opencode-aisdk");
-            body["serve_native"] = json!(true);
             body["native_messages"] = json!([
                 native_text_message("m1", "user", "hello"),
                 native_text_message("m2", "user", tail),
@@ -26732,7 +27194,6 @@ mod tests {
             ck("user-new", 100, "new prompt"),
         ]);
         request["serializer_profile"] = json!("opencode-aisdk");
-        request["serve_native"] = json!(true);
         request["tool_present"] = json!(true);
         request["provider_id"] = json!("anthropic");
         request["native_messages"] = json!([
@@ -26766,7 +27227,7 @@ mod tests {
         assert_eq!(
             store.tag_number_query_count_for_test(),
             0,
-            "serve_native must reuse transform tag rows instead of issuing a numbers-only scan"
+            "native attachment must reuse transform tag rows instead of issuing a numbers-only scan"
         );
         let preserved_reasoning = actual_native
             .iter()
@@ -26837,7 +27298,6 @@ mod tests {
             ck("user-new", 100, "new prompt"),
         ]);
         request["serializer_profile"] = json!("opencode-aisdk");
-        request["serve_native"] = json!(true);
         // Empty sentinels require the exact canonical provider identity; native metadata alone cannot broaden that provider gate.
         request["provider_id"] = json!("anthropic");
         request["native_messages"] = json!([
@@ -26947,11 +27407,21 @@ mod tests {
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
         let output = "tool output ".repeat(8_000);
         let mut messages = Vec::new();
+        // OpenCode carries a finished call and its result as one assistant message.
+        let mut opencode_messages = Vec::new();
         for index in 0..45u64 {
             let call_mid = format!("call-{index}");
             let result_mid = format!("result-{index}");
-            messages.push(assistant_tool_call(&call_mid, index * 2 + 1));
-            messages.push(tool_result(&result_mid, index * 2 + 2, &output));
+            let call = assistant_tool_call(&call_mid, index * 2 + 1);
+            let result = tool_result(&result_mid, index * 2 + 2, &output);
+            let mut folded = call.clone();
+            folded
+                .ck
+                .content_mut()
+                .extend(result.ck.content().iter().cloned());
+            opencode_messages.push(folded);
+            messages.push(call);
+            messages.push(result);
         }
         let opencode_request = json!({
             "kind": "transform",
@@ -26962,7 +27432,7 @@ mod tests {
             "render_config": "cfg0",
             "protected_tags": 0,
             "usage": { "current_total_input_tokens": 90_000, "context_limit_tokens": 100_000 },
-            "messages": messages.clone(),
+            "messages": opencode_messages,
         });
         let first = call_transform_request(&handler, opencode_request.clone()).await;
         let first_text = first["host_directives"]["channel2_nudge"]["text"]
@@ -31445,6 +31915,21 @@ mod tests {
         assert!(error.contains("messages must be an array"), "{error}");
         let final_only = vec![json!({"kind": "transform", "messages": {"a": 1}})];
         assert!(assemble_transform_pages(final_only).is_err());
+    }
+
+    #[test]
+    fn assemble_transform_pages_keeps_an_empty_array_a_non_final_page_carries() {
+        let pages = vec![
+            json!({"native_messages": []}),
+            json!({"kind": "transform", "messages": []}),
+        ];
+        let assembled = assemble_transform_pages(pages).unwrap();
+        assert_eq!(assembled["native_messages"], json!([]));
+        assert_eq!(assembled["messages"], json!([]));
+        let absent = vec![json!({"messages": []}), json!({"kind": "transform"})];
+        let assembled = assemble_transform_pages(absent).unwrap();
+        assert!(assembled.get("native_messages").is_none());
+        assert_eq!(assembled["messages"], json!([]));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -37986,7 +38471,6 @@ mod tests {
         let mut transform_request = request(messages);
         transform_request["serializer_profile"] = json!("opencode-aisdk");
         transform_request["tool_present"] = json!(true);
-        transform_request["serve_native"] = json!(true);
 
         let transition = call_transform_request(&handler, transform_request.clone()).await;
         assert_eq!(transition["surface_state"], "transition");
@@ -40373,7 +40857,6 @@ mod tests {
             .collect();
         let mut request = request_with_usage(messages, 48_000, 50_000);
         request["serializer_profile"] = json!("opencode-aisdk");
-        request["serve_native"] = json!(true);
         request["native_messages"] = json!(native);
         request["auto_search_enabled"] = json!(true);
         request["auto_search_score_threshold"] = json!(0.3);
