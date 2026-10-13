@@ -540,50 +540,51 @@ fn dev_payload_without_explicit_test_self_exec_fails_closed() {
     );
 }
 
-/// Every command returns `unsupported_state_schema` for a quarantined record with both fences free.
-///
-/// A command that checks only the `wedged` shape would treat the quarantined record as startable.
-/// `start` and `restart` would spawn a child that `InstanceGuard` refuses, then report `startup_timeout`.
-/// `probe_lifecycle`, `start`, `restart`, and `stop` must not modify the preserved bytes.
 #[cfg(target_os = "linux")]
 #[test]
-fn quarantined_record_is_classified_alike_by_every_command() {
+fn a_record_outside_the_shape_is_stale_evidence_for_every_command() {
     let root = tempfile::tempdir().expect("root");
-    let data = root.path().join("data");
-    let run_dir = data.join("eidnara").join("run");
-    std::fs::create_dir_all(&run_dir).expect("runtime dir");
-    for dir in [&data, &data.join("eidnara"), &run_dir] {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("dir mode");
-    }
-    // Schema 2 decodes as an unknown schema: preserved, never repaired.
-    let record = run_dir.join(host_runtime::LIFECYCLE_RECORD_NAME);
-    let original = br#"{"schema":2,"unknown_future_field":true}"#;
-    std::fs::write(&record, original).expect("quarantined record");
-    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).expect("record mode");
+    let plant = |name: &str, record: Option<&[u8]>| {
+        let data = root.path().join(name);
+        let run_dir = data.join("eidnara").join("run");
+        std::fs::create_dir_all(&run_dir).expect("runtime dir");
+        for dir in [&data, &data.join("eidnara"), &run_dir] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .expect("dir mode");
+        }
+        if let Some(bytes) = record {
+            let path = run_dir.join(host_runtime::LIFECYCLE_RECORD_NAME);
+            std::fs::write(&path, bytes).expect("record");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("record mode");
+        }
+        data
+    };
+    let foreign = plant(
+        "foreign",
+        Some(br#"{"schema":2,"unknown_future_field":true}"#),
+    );
+    let empty = plant("empty", None);
 
-    for (args, command, state) in [
-        (vec!["probe"], "status", "stopped"),
-        (vec!["start"], "start", "stopped"),
-        (vec!["stop"], "stop", "stopped"),
-        (vec!["restart"], "restart", "stopped"),
+    for (args, command) in [
+        (vec!["probe"], "status"),
+        (vec!["start"], "start"),
+        (vec!["stop"], "stop"),
+        (vec!["restart"], "restart"),
     ] {
-        let out = run(&data, &args);
-        let value = out.json();
-        assert_eq!(out.code, 1, "{command} must fail closed");
-        assert_result(&value, command, false, state, "unsupported_state_schema");
-        assert_eq!(value["remediation"], "align_versions");
-        if command == "restart" {
+        let (with_record, without_record) = (run(&foreign, &args), run(&empty, &args));
+        let (with_value, without_value) = (with_record.json(), without_record.json());
+        assert_ne!(
+            with_value["reason"], "unsupported_state_schema",
+            "{command} must not quarantine the record"
+        );
+        assert_eq!(with_record.code, without_record.code, "{command} exit code");
+        for field in ["command", "ok", "state", "reason", "remediation"] {
             assert_eq!(
-                effects(&value),
-                (false, false),
-                "restart must not commit a stop over a quarantined record"
+                with_value[field], without_value[field],
+                "{command} {field} must match the answer over an absent record"
             );
         }
-        assert_eq!(
-            std::fs::read(&record).expect("record still present"),
-            original,
-            "{command} must not rewrite the quarantined record"
-        );
     }
 }
 
@@ -1114,44 +1115,30 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
     assert_eq!(stopped.code, 0);
     janitor.active = false;
 
-    let unknown = b"{\"schema\":3,\"future\":\"preserve-me\"}";
-    std::fs::write(&selection, unknown).expect("unknown selection fixture");
-    std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
-        .expect("unknown selection mode");
-    let unknown_start = run(&data, &["start"]);
-    assert_eq!(unknown_start.code, 1);
-    assert_result(
-        &unknown_start.json(),
-        "start",
-        false,
-        "wedged",
-        "unsupported_state_schema",
-    );
-    let unknown_restart = run(&data, &["restart"]);
-    assert_eq!(unknown_restart.code, 1);
-    assert_result(
-        &unknown_restart.json(),
-        "restart",
-        false,
-        "wedged",
-        "unsupported_state_schema",
-    );
-    assert_eq!(effects(&unknown_restart.json()), (false, false));
-    let unknown_stop = run(&data, &["stop"]);
-    assert_eq!(unknown_stop.code, 1);
-    assert_result(
-        &unknown_stop.json(),
-        "stop",
-        false,
-        "wedged",
-        "unsupported_state_schema",
-    );
-    assert_eq!(
-        std::fs::read(&selection).expect("unknown selection preserved"),
-        unknown
-    );
+    for foreign in [
+        &b"{\"schema\":3,\"future\":\"carried\"}"[..],
+        b"{\"schema\":1}",
+        b"{\"schema\":2}",
+    ] {
+        std::fs::write(&selection, foreign).expect("foreign selection fixture");
+        std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
+            .expect("foreign selection mode");
+        let foreign_stop = run(&data, &["stop"]);
+        assert_eq!(foreign_stop.code, 0);
+        assert_result(
+            &foreign_stop.json(),
+            "stop",
+            true,
+            "stopped",
+            "already_stopped",
+        );
+        assert!(
+            !selection.exists(),
+            "stop must clear the invalid selection {foreign:?}"
+        );
+    }
 
-    std::fs::write(&selection, b"{\"schema\":2}").expect("stale selection fixture");
+    std::fs::write(&selection, b"{}").expect("stale selection fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
         .expect("stale selection mode");
     let stopped_again = run(&data, &["stop"]);
@@ -1168,22 +1155,9 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
         "already-stopped cleanup must remove stale active selection"
     );
 
-    let prior_generation = b"{\"schema\":1}";
-    std::fs::write(&selection, prior_generation).expect("prior generation fixture");
-    std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
-        .expect("prior generation mode");
-    let prior_stop = run(&data, &["stop"]);
-    assert_eq!(prior_stop.code, 0);
-    assert_eq!(
-        std::fs::read(&selection).expect("prior generation selection kept for rollback"),
-        prior_generation
-    );
-    std::fs::remove_file(&selection).expect("remove prior generation fixture");
-
-    // A schema-2 selection that cites a digest outside the qualified closure is stale state owned by this binary; `stop` clears it instead of treating it as tampering.
     std::fs::write(
         &selection,
-        format!("{{\"schema\":2,\"opencode\":\"{}\"}}", "f".repeat(64)).as_bytes(),
+        format!("{{\"opencode\":\"{}\"}}", "f".repeat(64)).as_bytes(),
     )
     .expect("unqualified selection fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
@@ -1205,8 +1179,7 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
     // After the stop transaction commits, selector-cleanup failures do not fail `stop`.
     // Selector-cleanup residue is stale bookkeeping.
     // A later `start` rewrites stale selector state; failing `stop` would force recovery for a host that is already stopped.
-    // An unsupported selector schema causes `stop` to fail.
-    std::fs::write(&selection, b"{\"schema\":2}").expect("cleanup-fault fixture");
+    std::fs::write(&selection, b"{}").expect("cleanup-fault fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
         .expect("cleanup-fault mode");
     let already_stopped_cleanup_fault = run_with_envelope_and_env(

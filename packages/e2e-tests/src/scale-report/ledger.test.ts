@@ -55,6 +55,48 @@ describe("pass row ledger", () => {
         expect(malformed.daemon_total_us).toBeNull();
     });
 
+    it("reads the derivation stage a base-arm daemon carries under an alternate key, keeping a measured zero", () => {
+        const { derivation_us: _, ...unnamed } = daemonLedger;
+        const base = { ...(WRITER_FIXTURE_ROWS[0] as Parameters<typeof serializePassRow>[0]) };
+        const derived = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...unnamed, lane_gate_and_decode_us: 2_900, derive_us: 1_200 },
+        });
+        expect(derived.derivation_us).toBe(1_200);
+        expect(derived.daemon_total_us).toBe(15_000);
+        expect(() => serializePassRow({ ...base, response_us: 31_000, ...derived })).not.toThrow();
+        // A zero under the alternate key is a measured derivation, distinct from a CK profile's null.
+        const zero = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...unnamed, derive_us: 0 },
+        });
+        expect(zero.derivation_us).toBe(0);
+        expect(zero.daemon_total_us).toBe(15_000);
+        const ck = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...unnamed, derive_us: null },
+        });
+        expect(ck.derivation_us).toBeNull();
+        expect(ck.daemon_total_us).toBe(15_000);
+        expect(() => serializePassRow({ ...base, response_us: 31_000, ...ck })).not.toThrow();
+        // A ledger that omits the derivation stage keeps its daemon total when the named stages sum to it.
+        const unstaged = rowLedger(31_000, { ...observed, daemonLedger: unnamed });
+        expect(unstaged.derivation_us).toBeNull();
+        expect(unstaged.daemon_total_us).toBe(15_000);
+        // rowLedger sets daemon_total_us to null when the stages sum to a value other than total_us,
+        // whether the derivation key is derivation_us or an alternate.
+        const overdrawn = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...unnamed, lane_gate_and_decode_us: 5_000, derive_us: 1_200 },
+        });
+        expect(overdrawn.daemon_total_us).toBeNull();
+        const short = rowLedger(31_000, {
+            ...observed,
+            daemonLedger: { ...daemonLedger, lane_gate_and_decode_us: 2_900 },
+        });
+        expect(short.daemon_total_us).toBeNull();
+    });
+
     it("marks every stage unavailable without a daemon ledger and keeps the daemon ledger on a negative residual", () => {
         const none = rowLedger(31_000, { ...observed, daemonLedger: undefined });
         expect(Object.values(none).every((value) => value === null)).toBe(true);

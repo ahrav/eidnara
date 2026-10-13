@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use host_runtime::generation::{GENERATIONS_DIR_NAME, GenerationStore, PruneReport};
 
-use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
+use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity, VectorJudgment};
 
 /// The limits the ledger's two pools and delta admission are judged against, named where the manifest parser accepts them so the two cannot drift.
 pub use crate::projection_gates::{
@@ -17,33 +17,56 @@ pub use crate::projection_gates::{
     VECTOR_RESIDENT_BYTES as RESIDENT_LIMIT,
 };
 
-/// What a reservation holds. Every class belongs to one pool and one limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResourceClass {
-    /// The embedding model's resident memory; charged once per process.
-    ModelMemory,
-    /// Tokenizer instances and their cache; charged once per process.
-    TokenizerCache,
-    /// The projection's SQLite page cache; charged once per process.
-    SqliteCache,
-    /// Text held for embedding.
-    Text,
-    /// Row scratch a ranking reads into.
-    Scratch,
-    /// Decoded f32 or int8 rows held beyond one page.
-    RowBuffers,
-    /// A view's identifiers, tombstones, scales, and sidecars.
-    LayerTables,
-    /// Files being copied into the store.
-    Staging,
-    /// A compactor's working files.
-    CompactionScratch,
+/// Implicit discriminants make `variant as usize` the variant's index in `ALL`, so arrays sized `ALL.len()` have a slot for every variant.
+macro_rules! indexed_enum {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident,)+
+        }
+    ) => {
+        $(#[$meta])*
+        pub enum $name {
+            $($(#[$variant_meta])* $variant,)+
+        }
+
+        impl $name {
+            const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
+        }
+    };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pool {
-    Resident,
-    Disk,
+indexed_enum! {
+    /// What a reservation holds. Every class belongs to one pool and one limit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum ResourceClass {
+        /// The embedding model's resident memory; charged once per process.
+        ModelMemory,
+        /// Tokenizer instances and their cache; charged once per process.
+        TokenizerCache,
+        /// The projection's SQLite page cache; charged once per process.
+        SqliteCache,
+        /// Text held for embedding.
+        Text,
+        /// Row scratch a ranking reads into.
+        Scratch,
+        /// Decoded f32 or int8 rows held beyond one page.
+        RowBuffers,
+        /// A view's identifiers, tombstones, scales, and sidecars.
+        LayerTables,
+        /// Files being copied into the store.
+        Staging,
+        /// A compactor's working files.
+        CompactionScratch,
+    }
+}
+
+indexed_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Pool {
+        Resident,
+        Disk,
+    }
 }
 
 impl ResourceClass {
@@ -117,19 +140,22 @@ impl Reconciliation {
     }
 }
 
+// `charged` holds one bit per class.
+const _: () = assert!(ResourceClass::ALL.len() <= u16::BITS as usize);
+
+/// `held` indexes classes by declaration order. `charged` tracks each class from its first successful reservation until a release leaves its held bytes at zero, so a zero-byte reservation still charges a static class. `pools` caches each pool's sum of `held` for constant-time reservation checks.
 #[derive(Default)]
 struct Tally {
-    held: BTreeMap<ResourceClass, u64>,
+    held: [u64; ResourceClass::ALL.len()],
+    charged: u16,
+    pools: [u64; Pool::ALL.len()],
     pinned: u64,
+    judgment: VectorJudgment,
 }
 
 impl Tally {
-    fn pool_total(&self, pool: Pool) -> Option<u64> {
-        self.held
-            .iter()
-            .filter(|(class, _)| class.pool() == pool)
-            .map(|(_, held)| *held)
-            .try_fold(0u64, |sum, held| sum.checked_add(held))
+    fn is_charged(&self, class: ResourceClass) -> bool {
+        self.charged & (1 << class as u16) != 0
     }
 }
 
@@ -167,9 +193,13 @@ impl Ledger {
     pub fn census(&self) -> Census {
         let tally = self.lock();
         Census {
-            held: tally.held.clone(),
-            resident: tally.pool_total(Pool::Resident).unwrap_or(u64::MAX),
-            disk: tally.pool_total(Pool::Disk).unwrap_or(u64::MAX),
+            held: ResourceClass::ALL
+                .into_iter()
+                .filter(|class| tally.is_charged(*class))
+                .map(|class| (class, tally.held[class as usize]))
+                .collect(),
+            resident: tally.pools[Pool::Resident as usize],
+            disk: tally.pools[Pool::Disk as usize],
             pinned: tally.pinned,
         }
     }
@@ -248,18 +278,24 @@ impl Ledger {
     ) -> Result<Reservation, Refusal> {
         let pool = class.pool();
         let mut tally = self.lock();
-        if class.is_static() && tally.held.contains_key(&class) {
+        if class.is_static() && tally.is_charged(class) {
             return Err(Refusal::AlreadyCharged { class });
         }
-        let total = tally
-            .pool_total(pool)
-            .and_then(|held| held.checked_add(bytes))
-            .and_then(|total| total.checked_add(base))
+        let held = tally.pools[pool as usize]
+            .checked_add(bytes)
             .ok_or(Refusal::Overflow { pool })?;
-        self.gate
-            .check_limits(grant, &self.identity, &[(pool.limit(), total)])?;
-        let entry = tally.held.entry(class).or_insert(0);
-        *entry = entry.checked_add(bytes).ok_or(Refusal::Overflow { pool })?;
+        let total = held.checked_add(base).ok_or(Refusal::Overflow { pool })?;
+        self.gate.check_vector_limit(
+            &mut tally.judgment,
+            grant,
+            &self.identity,
+            pool.limit(),
+            total,
+        )?;
+        // A class holds at most its pool's total, so the class sum fits wherever the pool sum does.
+        tally.held[class as usize] += bytes;
+        tally.charged |= 1 << class as u16;
+        tally.pools[pool as usize] = held;
         Ok(Reservation {
             ledger: Arc::clone(self),
             class,
@@ -283,8 +319,14 @@ impl Ledger {
     ///
     /// The gate's denial.
     pub fn admit_deltas(&self, grant: &Admission, deltas: usize) -> Result<(), Denial> {
-        self.gate
-            .check_limits(grant, &self.identity, &[(DELTA_LIMIT, deltas as u64)])
+        let mut tally = self.lock();
+        self.gate.check_vector_limit(
+            &mut tally.judgment,
+            grant,
+            &self.identity,
+            DELTA_LIMIT,
+            deltas as u64,
+        )
     }
 
     pub fn reconcile(&self, report: &PruneReport) -> Reconciliation {
@@ -296,10 +338,12 @@ impl Ledger {
 
     fn release(&self, class: ResourceClass, bytes: u64) {
         let mut tally = self.lock();
-        if let Some(entry) = tally.held.get_mut(&class) {
-            *entry = entry.saturating_sub(bytes);
-            if *entry == 0 {
-                tally.held.remove(&class);
+        if tally.is_charged(class) {
+            let released = bytes.min(tally.held[class as usize]);
+            tally.held[class as usize] -= released;
+            tally.pools[class.pool() as usize] -= released;
+            if tally.held[class as usize] == 0 {
+                tally.charged &= !(1 << class as u16);
             }
         }
     }

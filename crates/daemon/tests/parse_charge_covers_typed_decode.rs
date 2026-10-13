@@ -239,30 +239,67 @@ impl ResidentReserve for Drained {
     }
 }
 
+/// A drained reserve that records the bytes of the last charge it refused. The meter halves a
+/// refused batch down to the exact shortfall, so that last charge is the shortfall of the step
+/// that was refused.
+#[derive(Default)]
+struct DrainedRecording {
+    last_asked: AtomicUsize,
+}
+
+impl ResidentReserve for DrainedRecording {
+    fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        self.last_asked.store(bytes, Ordering::Relaxed);
+        None
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
 #[test]
 fn a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string() {
     let _serial = measure();
-    // The direct lane's typed decode is charged as values are visited, so a pool that has no
-    // bytes free refuses it at its first value and serde_json never grows an unescape buffer
-    // for the 4 MiB text block further into the body.
-    let body = text_body(1 << 22, true);
-    assert!(
-        footprint_of(&body) > 1 << 22,
-        "the body's footprint covers its text"
-    );
+    // The admission charges the unescape buffer for the body's longest escaped string ahead of
+    // the typed decode, and the decode charges each value before it is built. A pool with
+    // nothing free refuses an escaped body at that buffer charge and an unescaped body at the
+    // decode's first value; serde_json never grows a buffer for the 4 MiB text block either way.
+    for escaped in [true, false] {
+        let body = text_body(1 << 22, escaped);
+        assert!(
+            footprint_of(&body) > 1 << 22,
+            "the body's footprint covers its text"
+        );
+        let reserve = DrainedRecording::default();
 
-    let base = reset_peak();
-    let outcome = daemon::direct_lane_admission_for_test(&body, &Drained);
-    let peak = peak_since(base);
-    assert!(
-        peak < 64 * 1024,
-        "the refusal allocated {peak} bytes against a held pool; the 4 MiB text block was \
-         unescaped before any charge (outcome: {outcome:?})"
-    );
-    assert!(
-        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
-        "the held pool refuses the body as transient: {outcome:?}"
-    );
+        let base = reset_peak();
+        let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
+        let peak = peak_since(base);
+        assert!(
+            peak < 64 * 1024,
+            "escaped {escaped}: the refusal allocated {peak} bytes against a held pool; the 4 MiB \
+             text block was unescaped before any charge (outcome: {outcome:?})"
+        );
+        assert!(
+            matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+            "escaped {escaped}: the held pool refuses the body as transient: {outcome:?}"
+        );
+        let asked = reserve.last_asked.load(Ordering::Relaxed);
+        if escaped {
+            assert!(
+                asked > 1 << 22,
+                "the escaped body is refused at the admission's unescape charge, a shortfall \
+                 covering the 4 MiB string, but the refused shortfall was {asked} bytes"
+            );
+        } else {
+            assert!(
+                asked < 64 * 1024,
+                "the unescaped body is admitted and refused at the typed decode's first value, \
+                 but the refused shortfall was {asked} bytes"
+            );
+        }
+    }
 }
 
 /// A reserve that grants charges until `limit` bytes are held, then refuses every one.
@@ -512,6 +549,8 @@ fn text_heavy_admission_ceiling_witnesses() {
         (CAPACITY / 3 + margin, false, true),
     ] {
         let body = text_body(text_bytes, escaped);
+        // The admission steps refuse a body whose scratch charge exceeds the capacity; the
+        // typed decode refuses one whose values do.
         let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
         assert_eq!(
             outcome.is_ok(),

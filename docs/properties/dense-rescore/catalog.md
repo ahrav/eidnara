@@ -79,19 +79,24 @@ alignment, and extrema fixtures, which are not measured here.
 ### dense-quantized-score-matches-weighted-reference
 
 Type: safety
-Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:448`)
+Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:527`)
 is built by `select_inner` (`crates/retrieval/src/dense/candidates.rs:312`)
 under `select_candidates_observed`, which `rank_compressed` calls;
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:718`) reaches
-`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1866`)
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`) reaches
+`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1878`)
 installs a composition, and no production caller installs one at this HEAD.
-`TermTable::score_rows` (`scalar.rs:565`) is called from
+`TermTable::score_rows` (`scalar.rs:644`) is called from
 `crates/retrieval/tests/` only.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
 `extreme_scales_and_codes_score_finite_and_match_the_reference`,
-`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`,
+`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`, which runs
+the production scorer and both negative controls through one oracle check
+(`agrees_with_oracle`: score bits and every `k` cut of the `TopK` order),
+`the_fixture_order_is_pinned`, which pins all eight score bits and
+identifiers from a query stored as literal bits,
+`the_fixture_query_is_the_normalized_decimal_query`,
 `term_table_scores_match_the_reference_for_every_chunk_and_tile_shape`,
 `term_table_scores_the_fixture_like_the_row_scorer`,
 `scales_from_every_constructor_score_like_the_reference` (scales from
@@ -122,8 +127,8 @@ magnitude across coordinates, codes at `+127` and `-127`, scales at
 leave a partial 16-coordinate chunk, and row counts that leave a partial
 512-row tile.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:628`), `weighted_dot_block` (`scalar.rs:655`), and
-`QuantizedQuery::term_table` (`scalar.rs:501`) were read against the formula
+`weighted_dot` (`scalar.rs:707`), `weighted_dot_block` (`scalar.rs:734`), and
+`QuantizedQuery::term_table` (`scalar.rs:580`) were read against the formula
 and the tests run against them.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
@@ -137,7 +142,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the query route's `ExhaustiveProducer`
-(`crates/daemon/src/query_route.rs:544`) ranks through the oracle walk, which
+(`crates/daemon/src/query_route.rs:546`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
 `rescore` (`score.rs:228`), which have no production caller at this base, so
@@ -146,7 +151,8 @@ equal to `inner_product` bit for bit. Corrected from `score.rs:194` and
 `dense_properties.rs:258`, their lines at main `f6f42ea4a`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
-`rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`,
+`rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`
+(which also pins the six score bits and identifiers),
 `original_scores_separate_rows_an_f32_product_would_tie`, and
 `signed_zero_coordinates_score_positive_zero`.
 Guarantee: The retained-original score multiplies each pair of f32
@@ -198,11 +204,11 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `CandidateCapacity::new`
 (`crates/retrieval/src/dense/capacity.rs:38`) is called by
-`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:617`) at
+`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:618`) at
 `set_dense_vectors` and per compressed request; no production caller installs
 a composition at this HEAD.
 Status: active
-Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
+Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `the_capacity_is_ceil_alpha_times_k_and_never_below_k`,
 `the_capacity_takes_the_ceiling_of_the_exact_binary_product`,
 `a_malformed_alpha_refuses_before_zero_k_is_considered`,
@@ -211,17 +217,28 @@ Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
 `a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted`,
 `a_large_alpha_shifts_exactly_or_refuses`, and the seeded property
 `the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas`
-exercise the arithmetic and the refusal precedence over three scalars;
-`CandidateCapacity::new` reaches production only behind an installed
-composition, so the clause that a pool is sized from the checked capacity
-before any R-sized state exists waits for #610's scan witness.
+exercise the arithmetic and the refusal precedence over three scalars.
+`crates/retrieval/tests/dense_capacity_allocations.rs`
+`every_capacity_refusal_and_a_zero_k_allocate_nothing` records zero allocator
+calls for each refusal class, a zero `K`, and an accepted capacity, and
+`the_pool_a_capacity_sizes_is_one_allocation_proportional_to_r` shows the pool
+is one allocation scaling with `R`. At the route,
+`crates/daemon/tests/query_route_compressed.rs`
+`a_refused_capacity_installs_nothing_and_ranks_without_a_scan` refuses
+installation for a NaN alpha, an alpha below one, and an over-cap pool with
+their refusal classes, and a producer carrying each degrades the lane as
+`capacity` with no observed scan window. Only the producer's first check
+(`crates/daemon/src/query_route.rs:704-707`) returns `capacity`, ahead of
+`rank_compressed`'s reservations; the ledger census after the request cannot
+show a reservation that was released. A zero `K` cannot reach the route,
+whose `DenseLimits.k` is a `NonZeroUsize`.
 Guarantee: `R = ceil(alpha * K)` is computed exactly; alpha that is not finite
 or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
 size, and the candidate scan sizes its pool from it
-(`crates/retrieval/src/dense/candidates.rs:324`).
+(`crates/retrieval/src/dense/candidates.rs:323`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -241,7 +258,7 @@ Open questions:
 ### dense-invalid-query-never-enters-scoring
 
 Type: safety
-Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:464`) is reached
+Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:543`) is reached
 from tests only; `rescore` (`score.rs:228`) is also test-only at this base and
 validates its query the same way through `codec::validate`.
 Status: active
@@ -285,7 +302,13 @@ sizes 1, 3, 5, 6, 20 by page sizes 1, 2, 8, plus an underfilled pool),
 `only_resolved_winners_are_scored_and_each_scores_under_its_own_layer`,
 `a_coverage_shortfall_keeps_the_pool_and_says_so`,
 `the_pool_does_not_depend_on_the_order_rows_were_stored_in`,
-`a_revoked_winner_is_never_scored`, and `a_row_at_any_rowid_is_visited`.
+`a_revoked_winner_is_never_scored`, and `a_row_at_any_rowid_is_visited`;
+over real lifecycle generations, `crates/daemon/tests/vector_rescore.rs`
+`a_rejected_leader_across_unequal_scale_layers_with_ties_fills_one_global_pool`
+combines a kernel-hidden leader, a delta with its own calibration that
+supersedes and tombstones base rows, and an exact original-row tie in one
+composition, and the pool equals one global prediction over the eligible
+winners under each winner's own scales.
 Guarantee: Under a stable authority with sufficient bounds, the pool is
 exactly `Top(R, E, quantized_score)` in the U1 order, where `E` is the set of
 resolved winners the projection lists as live and the kernel judges eligible;
@@ -361,20 +384,26 @@ Type: safety
 Reachability: test-only - `select_candidates_observed`
 (`crates/retrieval/src/dense/candidates.rs:273`) is called from
 `crates/retrieval/tests/dense_candidates.rs` and from `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:881`); `select_candidates`
+(`crates/daemon/src/vector_reader.rs:902`); `select_candidates`
 (`candidates.rs:263`) has no caller in the workspace. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
-`set_dense_vectors` (`crates/daemon/src/query_route.rs:1866`) installs a
+`set_dense_vectors` (`crates/daemon/src/query_route.rs:1878`) installs a
 composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_kernel_change_between_batches_discards_the_pool`,
-`a_change_to_an_excluded_row_discards_the_pool_too`, and
-`a_corrupt_identity_field_refuses_the_scan_with_no_candidate`.
+`a_change_to_an_excluded_row_discards_the_pool_too`,
+`a_corrupt_identity_field_refuses_the_scan_with_no_candidate`, and
+`a_budget_ended_after_an_admitted_batch_discards_the_pool`;
+`crates/retrieval/src/eligibility.rs` `a_batch_must_carry_one_verdict_per_candidate`
+for the verdict-count check.
 Guarantee: Every batch of one scan, including batches whose verdicts only
 excluded rows, is judged under one kernel snapshot and incarnation; every
 batch runs after the walk's last page, so a change between batches discards
-the pool, and a validation failure refuses the scan with no candidate.
+the pool, and a validation failure refuses the scan with no candidate. A
+kernel batch whose verdict count differs from its candidate count is refused
+as `InvalidInput` in every build, so verdicts stay positionally aligned with
+identities.
 Check: `always` - after a retirement, an admission of a row already judged
 hidden, or a kernel restore between the first and second batch, the
 completion names the change and the pool is empty; a kernel refusal returns an
@@ -385,7 +414,7 @@ Required faults and enabling state: A kernel commit or restore inside the
 walk's hook after the first judgment batch, with two-row pages so the batches
 hold two rows each; a corrupt identity field the kernel refuses.
 Confidence: high - [evidence](evidence/dense-pool-never-mixes-authority-states.md).
-`judge_tracked` (`crates/retrieval/src/eligibility.rs:296`) compares each
+`judge_tracked` (`crates/retrieval/src/eligibility.rs:309`) compares each
 batch's stamps with the first. The pool carries no re-judgment: a change after
 the last batch is outside the scan, as a change after it returns is, and
 validation-to-use freshness stays with RP2.7.
@@ -395,10 +424,14 @@ policy excludes.
 Open questions:
 - Parent Q3 approval of snapshot plus incarnation as the usable authority
   identity, and of discard without restart (needs human input).
-- A kernel judgment that fails after earlier batches admitted rows propagates
-  through `judge_page` as a refusal by reading; no test injects a judgment-time
-  kernel fault, only the identity-field refusal the kernel raises before
-  reading.
+- A budget that ends after one batch admitted its rows discards the pool at
+  the next batch's admission check
+  (`a_budget_ended_after_an_admitted_batch_discards_the_pool`, with a
+  no-cancel control that admits rows from more than one batch). The kernel's
+  own `Deadline` refusal in `judge_page`, and any other kernel fault between
+  batches, propagate as a refusal by reading; no test reaches them, because no
+  hook sits between one batch's admissions and the next batch's kernel call
+  and the kernel has no read-side fault seam.
 
 ### dense-scan-bounds-end-with-no-candidate
 
@@ -414,14 +447,16 @@ Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `each_storage_and_row_bound_saturates_alone_and_returns_no_candidate`,
 `an_ended_budget_returns_no_candidate`,
 `an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush`,
-`a_coverage_shortfall_keeps_the_pool_and_says_so`, and
-`codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read`;
+`a_coverage_shortfall_keeps_the_pool_and_says_so`,
+`codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read`, and
+`the_entry_bound_refuses_before_any_row_is_visited`;
 `crates/retrieval/src/dense/oracle.rs`
 `a_batch_reserves_only_the_slots_its_batch_bytes_can_fill` for the slot
 reservation.
 Guarantee: The scan-row bound, the batch-byte bound on the rows of one
 judgment batch, the heap-byte bound on the accepted set, the preallocated-slot
-check, the kernel batch limit on the pool, and the request budget each stop
+check, the resolver's entry bound, the kernel batch limit on the pool, and the
+request budget each stop
 the scan alone; every stop except a coverage shortfall returns no candidate,
 and the slot check and pool limit refuse before any row is read.
 Check: `always` - one row short of the population ends `RowBound`; with
@@ -433,7 +468,9 @@ the heap bound equal to the slots plus the final set's strings completes and
 one byte less ends `HeapBytes`; slots one byte over the bound refuse with no
 row visited; a pool of 2000 refuses
 `BatchOverBound`; a code set shorter than its layer refuses before any row is
-visited; cancellation after a page ends `BudgetExhausted`, and wins over a
+visited; an entry bound one below the layer's rows refuses
+`ResolveRefusal::OverBound` with no row visited and the exact bound
+completes; cancellation after a page ends `BudgetExhausted`, and wins over a
 batch bound reached in the same flush; a row bound reached alongside a
 coverage shortfall names the bound; each returns an empty pool. `always`
 because a truncated pool must never pass as complete.
@@ -464,15 +501,18 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:810`) is called by
-`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:718`), which the
-route builds only after `set_dense_vectors` (`query_route.rs:1866`) installs a
+(`crates/daemon/src/vector_reader.rs:828`) is called by
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:696`), which the
+route builds only after `set_dense_vectors` (`query_route.rs:1878`) installs a
 composition; no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
 `a_promotion_and_prune_after_selection_leave_the_rescore_on_the_pinned_files`,
-and `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`.
+`the_ranking_is_the_same_however_the_rows_are_spread_across_layers`, and
+`stale_and_tombstoned_rows_that_would_score_highest_never_enter_the_pool`,
+whose superseded and masked base rows outrank every pool member under the
+base's own codes and still appear as no pool entry and no original-f32 read.
 Physical order here means how rows spread across a composition's layers; the
 order of rows within one layer file is fixed by the format, which writes and
 verifies identifiers in strictly increasing byte order.
@@ -505,8 +545,13 @@ Reachability: test-only - as above; `rescore_pool`
 (`crates/retrieval/src/dense/candidates.rs:410`) is pure.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
-`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
-`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`;
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
+`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`, and
+`a_tie_across_the_pool_and_ranking_cuts_keeps_identifier_order`, which cuts
+the pool and the ranking inside a three-way tie of equal payloads in one
+layer, and `a_tie_across_layers_is_cut_by_identifier_not_by_layer_or_row`,
+which puts the smallest tied identifier in a delta so layer and row order
+disagree with identifier order and cuts the ranking at each `k` up to three;
 `crates/retrieval/tests/dense_candidates.rs`
 `the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier`
 and
@@ -535,10 +580,15 @@ Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
+`an_ordinary_read_failure_of_an_accepted_row_is_io_and_leaves_the_view_usable`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
-`cancellation_after_an_empty_selection_is_a_budget_refusal`, and
-`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`;
+`cancellation_after_an_empty_selection_is_a_budget_refusal`,
+`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`,
+`a_corrupt_composition_with_no_prior_state_serves_nothing_until_rebuilt`, and
+`recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`;
+`crates/daemon/tests/query_route_compressed.rs`
+`a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
 `only_missing_or_malformed_rows_count_as_walk_corruption` in
@@ -556,18 +606,43 @@ Check: `always` - a rows file cut to its header after selection refuses with
 row buffers; NaN rows and doubled, finite rows refuse with `Rejected` naming
 the member and the pool's best entry; an emptied codes file refuses the scan
 and quarantines the view, while a cancelled scan does not; the read
-classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
+classifier maps only `UnexpectedEof` to `Missing`; an accepted-row read
+that reports another error refuses the ranking as `Io` naming the member and
+the pool's best entry after one attempted read and leaves the view
+unquarantined, and the same view ranks the same result once reads succeed;
+the route degrades the dense lane as `read_failed` while the other lanes keep
+their healthy status, releases the charges, and serves the lane again once
+reads succeed; the same
+seam reporting `UnexpectedEof` refuses as `Missing` and quarantines; a
+cancelled budget refuses
 with no read and no quarantine, and so does one cancelled over a pool with no
 entry to read; a
 re-acquisition re-verifies, recovery takes the prior verified composition, and
-its ranking excludes an occurrence retired in the kernel meanwhile. `always`
+its ranking excludes an occurrence retired in the kernel meanwhile, both in the
+same process and in a new process over a store a child left after cutting its
+replacement's rows and exiting without destructors; with no prior verified
+composition, recovery and acquisition refuse `NoCompatibleTarget` until a
+rebuilt layer is published, and every later read names the rebuilt member. `always`
 because a corrupt generation must never yield a result.
-Fault/timing angle: Corruption between selection and the original reads.
+Fault/timing angle: Corruption between selection and the original reads;
+an ordinary read error on an accepted row; corruption found by
+re-verification on acquisition, in the same process and after a restart.
 Required faults and enabling state: A truncated and a NaN-filled rows file
-inside `RescoreEvent::AfterSelection`; a prior composition to recover to.
+inside `RescoreEvent::AfterSelection`, with a prior composition to recover
+to; an accepted-row read driven to an error other than a short read through
+`PinnedVectors::fail_original_reads_for_test`, then a read that succeeds on
+the same view, in the rescore and under the route; a composition whose only
+member is corrupt with no prior verified composition, then a rebuilt layer
+published under a new composition; a store a child process left after
+publishing a composition and its replacement, cutting the replacement's
+rows to the header, and exiting without destructors, reopened by a fresh
+process with its own gate and ledger.
 Confidence: medium - [evidence](evidence/dense-missing-original-quarantines-without-substitute.md).
 The quarantine flag lives on the shared view; persistence across a restart is
-the verification a new acquisition runs.
+the verification a new acquisition runs, which
+`recovery_in_a_new_process_refuses_the_cut_member_and_serves_the_prior_set`
+exercises across a real process boundary. That is process-restart evidence,
+not power-loss evidence.
 Existing check: `crates/daemon/tests/vector_reader.rs` truncated-row
 refusal for the f32 layered ranking.
 Impact: A substitute row returns scores for bytes the generation never held.
@@ -575,13 +650,11 @@ Open questions:
 - Parent Q4: persistent quarantine is re-verification on acquisition, which
   refuses a member whose files no longer hash; a transient fault that leaves
   the files intact is served again after re-acquisition (needs human input).
-- The I/O classification is checked at the classifier and the
-  code-corruption predicate; no test makes a real file return a read error
-  other than a short read, so the rescore's `Io` arm and the scan's
-  `ReadFailed` arm are reached only by reading.
-- Process-restart evidence here is a fresh acquisition in the same process,
-  which reads only durable state; it is not a separate process and not
-  power-loss evidence.
+- The rescore's `Io` arm is reached through
+  `PinnedVectors::fail_original_reads_for_test`, which hands an error kind to
+  the production classifier in place of the positioned read; no test makes a
+  real file return such an error, and the scan's `ReadFailed` arm is reached
+  only by reading.
 
 ### dense-stage-evidence-keeps-coverage-and-recall-apart
 
@@ -621,8 +694,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:2012`) only when `set_dense_vectors`
-(`query_route.rs:1866`) has installed a composition, and no production caller
+(`crates/daemon/src/query_route.rs:2027`) only when `set_dense_vectors`
+(`query_route.rs:1877`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -632,7 +705,16 @@ and `a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline`;
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
 through a real host, client, and `RequestCtx`; `vector_rescore.rs`
 `cancellation_at_an_original_read_ends_the_request_before_the_row_is_read` and
-`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`.
+`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`;
+`dense_request_lifetime.rs`
+`a_unit_released_after_its_deadline_passed_in_the_queue_answers_the_deadline`,
+where a unit held at the blocking gate for twice its 1.5 s deadline answers
+the `deadline` terminal with no scan window while the same budget completes
+for an unqueued unit, so the queue wait does not renew the deadline; and
+`crates/retrieval/tests/dense_candidates.rs`
+`a_cancelled_budget_stops_the_walk_within_one_check_interval`, where a
+cancellation at the second row of a forty-row page stops the walk at row
+index 16, the next `BUDGET_STRIDE` check.
 Guarantee: The request's one `EvalBudget`, derived with its absolute
 deadline before the dense unit is submitted, stops the compressed scan, the
 canonical eligibility batches, and the original reads; a cancellation at any
@@ -663,7 +745,7 @@ Open questions:
   check between the final page and scoring
   (`crates/retrieval/src/dense/oracle.rs:591`), its batch checks, and the
   checks around each original read's observer
-  (`vector_reader.rs:902`, `:911`) (needs human input).
+  (`vector_reader.rs:923`, `:932`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.
@@ -680,16 +762,26 @@ and `a_request_that_ranks_no_dense_lane_holds_no_view` and
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`;
 `vector_rescore.rs` `the_scan_scratch_charges_the_encoded_query_of_every_layer`
-for the payload buffers `Scratch` covers.
+for the payload buffers `Scratch` covers; `query_route_compressed.rs`
+`draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes`,
+where, with the resident limit set to what one draining request holds, a
+scratch reservation of the drainer's size is refused while it drains and fits
+once it finishes, and a request under the same limit then completes. The
+next admission there is a direct ledger reservation, because the fixture's
+projection connection serves one request at a time. `dense_request_lifetime.rs`
+`a_shutdown_during_held_dense_work_keeps_its_charges_until_the_work_ends`
+starts a component shutdown while a unit is held at an original read; the
+unit's scratch, row buffers, and view pin stay charged until it returns, and
+the ledger is empty only after.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
-setters' locks before the unit is submitted (`query_route.rs:1977`), so the
+setters' locks before the unit is submitted (`query_route.rs:1992`), so the
 unit ranks under a pair the setters checked together and the view's pins and the ranking's `Scratch` and
 `RowBuffers` reservations stay charged until the blocking work returns; a
 cancelled request settles only after that work ends, and every charge is
 released when it does. A request whose embedding is undeclared or unavailable
 holds no clone, so an uninstall while its unit is pending leaves the retired
-view's teardown to the clones that rank. Corrected from `query_route.rs:1962`,
+view's teardown to the clones that rank. Corrected from `query_route.rs:1977`,
 the clone's line before the match on `embedded`.
 Check: `always` - with the ranking thread held at each stage after the client
 cancelled, no error frame is published for 200 ms; on release the ledger
@@ -724,15 +816,29 @@ Type: safety
 Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
-`a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`.
+`a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connection_complete`
+and `a_failed_or_unwound_request_leaves_the_next_on_the_reused_connection_complete`,
+with `a_leaked_progress_handler_fails_a_plain_read_that_the_next_guarded_request_masks`
+as its negative control.
 Guarantee: The projection's connection carries one request's stop predicate
 only for that request's read; after request A ends cancelled, request B on the
 same connection completes even when A's token is cancelled again during B's
 original reads, and after request C completes uncancelled, request D
-completes when C's token is first cancelled during D's original reads.
+completes when C's token is first cancelled during D's original reads; a
+request whose dense lane ends `read_failed`, and one that unwinds from a panic
+inside the scan, each leave the connection without their handler once their
+token is cancelled, and the next request on it completes.
 Check: `always` - A ends `Cancelled`; B and D end with a complete dense lane
-and an unexhausted budget; C's answer stands. `always` because a reused
-connection must never carry an earlier caller's cancellation.
+and an unexhausted budget; C's answer stands; after the failed and the unwound
+request and the cancellation of their tokens, a plain read of a 20,000-row
+recursive scan completes before the next request, and the next request
+answers a complete dense lane of two hits with an unexhausted budget and no
+scratch or row-buffer charge left. The plain read runs first because a guarded
+read replaces the connection's progress handler when it starts
+(`crates/storage/src/lib.rs:474`), which masks a leaked one; the negative
+control shows a leaked handler fails the plain read while the next guarded
+request still completes. `always` because a reused connection must never
+carry an earlier caller's cancellation.
 Fault/timing angle: A late cancellation of A inside B's ranking.
 Required faults and enabling state: Two sequential requests on one
 `SearchProjection`.
@@ -757,8 +863,8 @@ later route-limit change that the installed vectors cannot serve, and
 `vectors_install_only_under_the_tolerance_their_layers_carry`.
 Guarantee: A composition installs only under declared dense limits whose
 `unit_norm_tolerance` equals the view's layout bit for bit (`check_pair`,
-`query_route.rs:741`), and only when the pool `CompressedLimits::capacity`
-(`query_route.rs:615`) derives from the lane's `k` and the alpha policy passes
+`query_route.rs:753`), and only when the pool `CompressedLimits::capacity`
+(`query_route.rs:617`) derives from the lane's `k` and the alpha policy passes
 the capacity checks and fits one kernel eligibility batch, with scan pages
 within the batch as well; a later route-limit change is checked against the
 installed vectors the same way.
@@ -779,6 +885,16 @@ Impact: An oversized pool allocates or judges past what the kernel accepts.
 Open questions:
 - Parent Q6 approval of the production values; #825 D23 and D27 name `k` 64
   and a pool of 256 (needs human input).
+- Installation leaves the entry bound to request time. `check_pair`
+  (`query_route.rs:753`) calls `CompressedLimits::capacity`
+  (`query_route.rs:618`), which checks `k`, the alpha policy, `candidates`, and
+  `scan_page_rows`; `max_entries` is first compared with the view's rows inside
+  the request's scan. A composition whose entry bound is below its rows
+  installs, and every request then reserves `Scratch` and `RowBuffers`
+  (`vector_reader.rs:876`, `:878`) and degrades as `layers`, as
+  `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan` shows. This
+  conflicts with the Check rationale that a limit every request would refuse
+  must never reach a request (needs human input).
 
 ### dense-failures-keep-their-classification-at-the-route
 
@@ -788,21 +904,33 @@ Status: active
 Exercised: yes - `query_route_compressed.rs`
 `view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_and_quarantines`,
 `each_view_and_scan_bound_degrades_the_lane_with_its_own_reason`,
-`a_view_of_another_kernel_incarnation_degrades_the_lane`, and
-`the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
+`a_view_of_another_kernel_incarnation_degrades_the_lane`,
+`a_failed_original_read_degrades_the_lane_as_read_failed_without_quarantine`,
+`a_kernel_failure_during_candidate_judgement_degrades_the_dense_lane_as_kernel`,
+`an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`,
+and `the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
 Guarantee: A served compressed ranking reaches fusion with each hit's exact
 original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
-`quarantined`; cancellation and deadlines end the request with their own
-terminals (`compressed_refusal`, `query_route.rs:758`; `lane_status`,
-`query_route.rs:580`).
+`quarantined`; a canonical registry missing only while the dense candidates
+are judged degrades the dense lane as `kernel` with an unexhausted budget, no
+quarantine, and no charge left, one missing at the route's final
+revalidation ends the request as `Unavailable("eligibility")`, and the next
+request serves after each; cancellation and deadlines end the request with
+their own
+terminals (`compressed_refusal`, `query_route.rs:770`; `lane_status`,
+`query_route.rs:582`).
 Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
 degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
 `heap_over_bound`, a one-byte batch as `batch_bytes`, a full ledger as
-`reservation`, and a view of another kernel incarnation as `identity`; the
-corruption and the quarantine reasons are those strings. `always` because no
+`reservation`, and a view of another kernel incarnation as `identity`; an
+entry bound of one degrades as `layers` with no row visited and no scratch or
+row-buffer charge left, although the route reserves both
+(`vector_reader.rs:876`, `:878`) before the scan applies the bound
+(`vector_reader.rs:900`), and the bound equal to the view's rows completes;
+the corruption and the quarantine reasons are those strings. `always` because no
 failure may pass as a successful dense completion.
 Fault/timing angle: Corruption between selection and the reads.
 Required faults and enabling state: A one-byte read bound; a rows file cut

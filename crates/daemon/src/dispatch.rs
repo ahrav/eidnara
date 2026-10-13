@@ -480,58 +480,41 @@ pub(crate) fn measure_json(value: &Value) -> Result<usize, PreparedOutputError> 
     }
 }
 
-/// The byte length of `value`'s compact `serde_json` serialization; `None` past `usize::MAX`.
+/// Returns the byte length of `serde_json::to_vec(value)` when the count fits in `usize`.
 fn compact_json_len(value: &Value) -> Option<usize> {
-    // Brackets or braces, one comma between consecutive items, and one colon per entry.
-    let enclosed = |items: usize| items.saturating_sub(1) + 2;
     match value {
-        Value::Null | Value::Bool(true) => Some(4),
+        Value::Null => Some(4),
+        Value::Bool(true) => Some(4),
         Value::Bool(false) => Some(5),
-        Value::Number(number) => measure_serialize(number).ok(),
-        Value::String(text) => escaped_str_len(text),
-        Value::Array(items) => items.iter().try_fold(enclosed(items.len()), |len, item| {
-            len.checked_add(compact_json_len(item)?)
-        }),
+        Value::Number(number) => Some(compact_number_len(number)),
+        Value::String(text) => Some(crate::json_string::json_string_len(text)),
+        Value::Array(items) => items
+            .iter()
+            .try_fold(items.len().saturating_sub(1) + 2, |len, item| {
+                len.checked_add(compact_json_len(item)?)
+            }),
         Value::Object(fields) => {
             fields
                 .iter()
-                .try_fold(enclosed(fields.len()), |len, (key, item)| {
-                    len.checked_add(escaped_str_len(key)?)?
-                        .checked_add(compact_json_len(item)?)?
-                        .checked_add(1)
+                .try_fold(fields.len().saturating_sub(1) + 2, |len, (key, item)| {
+                    len.checked_add(crate::json_string::json_string_len(key) + 1)?
+                        .checked_add(compact_json_len(item)?)
                 })
         }
     }
 }
 
-/// The byte length of `text` as a quoted JSON string under `serde_json`'s escapes; `None` past
-/// `usize::MAX`.
-fn escaped_str_len(text: &str) -> Option<usize> {
-    let (chunks, remainder) = text.as_bytes().as_chunks::<64>();
-    chunks
-        .iter()
-        .map(|chunk| escape_extra_bytes(chunk))
-        .try_fold(escape_extra_bytes(remainder), usize::checked_add)?
-        .checked_add(text.len())?
-        .checked_add(2)
-}
-
-/// The bytes `serde_json`'s escapes add to `run` of at most 64 bytes: one for each `"` and `\`
-/// and each control byte with a short escape (`\b`, `\t`, `\n`, `\f`, `\r`), five for each other
-/// control byte, written `\u00XX`.
-fn escape_extra_bytes(run: &[u8]) -> usize {
-    let (mut controls, mut quoted, mut short) = (0u8, 0u8, 0u8);
-    for byte in run {
-        controls += u8::from(*byte < 0x20);
-        quoted += u8::from(matches!(byte, b'"' | b'\\'));
+fn compact_number_len(number: &serde_json::Number) -> usize {
+    let digits = |value: u64| value.checked_ilog10().map_or(1, |log| log as usize + 1);
+    if let Some(value) = number.as_u64() {
+        digits(value)
+    } else if let Some(value) = number.as_i64() {
+        1 + digits(value.unsigned_abs())
+    } else {
+        let mut writer = CountingWriter::default();
+        let _ = serde_json::to_writer(&mut writer, number);
+        writer.len
     }
-    if controls == 0 {
-        return usize::from(quoted);
-    }
-    for byte in run {
-        short += u8::from(matches!(byte, 0x08..=0x0a | 0x0c | 0x0d));
-    }
-    5 * usize::from(controls) - 4 * usize::from(short) + usize::from(quoted)
 }
 
 fn finish_count(
@@ -703,6 +686,80 @@ mod tests {
     use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
     use serde_json::json;
 
+    #[test]
+    fn a_json_value_over_the_limit_is_refused_at_the_serializer_length() {
+        let value = Value::String("\u{1}".repeat(MAX_WIRE_BODY_BYTES / 6 + 1));
+        let mut counter = CountingWriter::default();
+        let result =
+            serde_json::to_writer(&mut counter, &value).map_err(PreparedOutputError::Serialize);
+        let expected = finish_count(counter, result).map(|counter| counter.len);
+        assert!(matches!(
+            expected,
+            Err(PreparedOutputError::BodyTooLarge { .. })
+        ));
+        assert_eq!(
+            format!("{:?}", measure_json(&value)),
+            format!("{expected:?}")
+        );
+    }
+
+    fn json_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<u64>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            any::<f64>().prop_map(Value::from),
+            Just(Value::from(-0.0)),
+            "(\\PC|[\\x00-\\x1f\"\\\\\u{7f}\u{2028}])*".prop_map(Value::from),
+        ];
+        leaf.prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                proptest::collection::btree_map("(\\PC|[\\x00-\\x1f\"\\\\])*", inner, 0..8)
+                    .prop_map(|fields| Value::Object(fields.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest::proptest! {
+        /// The tree count is the serializer's count for every value under the cap.
+        #[test]
+        fn measured_json_length_is_the_serialized_length(value in json_value()) {
+            proptest::prop_assert_eq!(compact_json_len(&value), Some(serde_json::to_vec(&value).unwrap().len()));
+            proptest::prop_assert_eq!(measure_json(&value).unwrap(), serde_json::to_vec(&value).unwrap().len());
+        }
+    }
+
+    #[test]
+    fn measured_json_length_counts_integer_extremes_and_float_spellings() {
+        use serde_json::json;
+        for value in [
+            json!(0),
+            json!(9),
+            json!(10),
+            json!(u64::MAX),
+            json!(i64::MIN),
+            json!(-1),
+            json!(1.0),
+            json!(-0.0),
+            json!(1e300),
+            json!(5e-324),
+            json!(0.1),
+            json!([]),
+            json!({}),
+            json!([[], {}, null, true, false]),
+            json!({"k\n": "v\u{1}"}),
+        ] {
+            assert_eq!(
+                measure_json(&value).unwrap(),
+                serde_json::to_vec(&value).unwrap().len(),
+                "{value}"
+            );
+        }
+    }
+
     /// A served message whose tool input nests `levels` arrays inside the block's own containers.
     fn served_with_nested_input(levels: usize) -> PreparedSegment {
         let mut input = serde_json::json!("leaf [brackets] {braces} \\\"quotes\\\"");
@@ -824,7 +881,7 @@ mod tests {
         }
     }
 
-    fn json_value() -> impl proptest::strategy::Strategy<Value = Value> {
+    fn escaped_json_value() -> impl proptest::strategy::Strategy<Value = Value> {
         use proptest::prelude::*;
         let leaf = prop_oneof![
             Just(Value::Null),
@@ -846,7 +903,7 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn structural_length_equals_the_serialized_length(value in json_value()) {
+        fn structural_length_equals_the_serialized_length(value in escaped_json_value()) {
             proptest::prop_assert_eq!(compact_json_len(&value), Some(serialized_len(&value)));
             proptest::prop_assert_eq!(measure_json(&value).unwrap(), serialized_len(&value));
         }

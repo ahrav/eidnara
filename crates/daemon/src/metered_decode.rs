@@ -155,6 +155,8 @@ pub struct ResidentMeter<'r> {
     refusal: AtomicU8,
     shortfall: Mutex<Option<ShortfallMarker>>,
     longest_escaped: AtomicUsize,
+    reserved_needed: AtomicUsize,
+    reserved_longest_escaped: AtomicUsize,
     admitted: AtomicBool,
     /// Set while [`decode_metered_typed_direct`] runs: a string spelling [`RAW_VALUE_TOKEN`]
     /// makes the decode invalid.
@@ -177,6 +179,8 @@ impl<'r> ResidentMeter<'r> {
             refusal: AtomicU8::new(NO_REFUSAL),
             shortfall: Mutex::new(None),
             longest_escaped: AtomicUsize::new(0),
+            reserved_needed: AtomicUsize::new(0),
+            reserved_longest_escaped: AtomicUsize::new(0),
             admitted: AtomicBool::new(false),
             direct: AtomicBool::new(false),
         }
@@ -225,15 +229,23 @@ impl<'r> ResidentMeter<'r> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Starts the footprint over for a second decode of the same body while keeping the
-    /// bytes already held, which the second decode uses before charging more.
+    /// Resets the decode accounting to the footprint and longest escaped length that
+    /// [`Self::reserve_unescape_scratch`] recorded, keeping the bytes already held, so a
+    /// second decode of the same body counts the up-front unescape charge once. A meter whose
+    /// charges were taken keeps its permanent refusal.
     pub fn restart(&self) {
         if self.refusal.load(Ordering::Relaxed) == TAKEN {
             return;
         }
-        self.needed.store(0, Ordering::Relaxed);
+        self.needed.store(
+            self.reserved_needed.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         self.refusal.store(NO_REFUSAL, Ordering::Relaxed);
-        self.longest_escaped.store(0, Ordering::Relaxed);
+        self.longest_escaped.store(
+            self.reserved_longest_escaped.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 
     /// Gives every held byte back. A refused decode releases at once rather than at the end
@@ -288,7 +300,21 @@ impl<'r> ResidentMeter<'r> {
     /// A visited string never exceeds the raw length counted here, so the decodes charge
     /// nothing more for the buffer.
     pub fn reserve_unescape_scratch(&self, body: &[u8]) -> Result<(), Refusal> {
-        self.escaped_text(longest_escaped_string(body))
+        self.reserve_unescape_scratch_of(longest_escaped_string(body))
+    }
+
+    /// `longest_escaped` is the raw byte length of the body's longest escaped string.
+    pub(crate) fn reserve_unescape_scratch_of(
+        &self,
+        longest_escaped: usize,
+    ) -> Result<(), Refusal> {
+        self.escaped_text(longest_escaped)?;
+        self.reserved_needed.store(self.needed(), Ordering::Relaxed);
+        self.reserved_longest_escaped.store(
+            self.longest_escaped.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Ok(())
     }
 
     /// Charges `bytes` a request is about to allocate past its decode, with the decode's
@@ -455,7 +481,7 @@ pub fn footprint_of(body: &[u8]) -> usize {
 
 /// The raw length of the longest string in `body` that holds an escape, from its bytes
 /// alone; zero when no string does. Raw length is at least the decoded length.
-fn longest_escaped_string(body: &[u8]) -> usize {
+pub(crate) fn longest_escaped_string(body: &[u8]) -> usize {
     if memchr::memchr(b'\\', body).is_none() {
         return 0;
     }
@@ -525,6 +551,16 @@ pub fn footprint_floor_exceeds(body: &[u8], capacity: usize) -> bool {
     most > capacity && footprint_floor(body) > capacity
 }
 
+/// The footprint floor of a body holding `values` values, object keys included.
+pub(crate) fn floor_of_values(values: usize) -> usize {
+    if values == 0 {
+        return 0;
+    }
+    values
+        .saturating_mul(NODE_BYTES)
+        .saturating_add(VALUE_ENVELOPE_BYTES)
+}
+
 /// Returns a lower bound on the footprint `body` reaches when decoded, from its bytes alone:
 /// one node per value start outside a string, with string bytes left out. A value starts at
 /// an opening quote, `[`, `{`, the first byte of a number, or the first letter of a literal,
@@ -572,12 +608,7 @@ pub(crate) fn footprint_floor(body: &[u8]) -> usize {
             _ => in_number = false,
         }
     }
-    if values == 0 {
-        return 0;
-    }
-    values
-        .saturating_mul(NODE_BYTES)
-        .saturating_add(VALUE_ENVELOPE_BYTES)
+    floor_of_values(values)
 }
 
 /// Skips one value through `deserialize_any`, so every check the deserializer applies to a

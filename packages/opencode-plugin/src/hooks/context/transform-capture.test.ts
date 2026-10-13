@@ -875,7 +875,7 @@ describe("digest-verified prefix capture", () => {
         }
     });
 
-    it("tapes only the members after the prefix and charges only them", () => {
+    it("tapes only the members after the prefix and charges the verified tapes it keeps", () => {
         const first = [
             message("m1", "x".repeat(4096)),
             message("m2", "y".repeat(4096)),
@@ -894,10 +894,18 @@ describe("digest-verified prefix capture", () => {
         if (!("lease" in admitted)) throw new Error("admission refused");
         try {
             expect(admitted.lease.reserve(partial.estimatedBytes)).toBe(true);
-            const verified = captureHistoryWithLease(next, admitted.lease, captured.history);
+            const verified = captureHistoryWithLease(next, admitted.lease, captured.history, {
+                tapePrefix: true,
+            });
             if (!verified) throw new Error("unchanged prefix did not verify");
-            expect(verified.snapshots.slice(0, 2)).toEqual([undefined, undefined]);
-            expect(verified.snapshots[2]).toBeDefined();
+            // The verified members keep their tapes for this pass, charged at their recorded spend.
+            expect(verified.verifiedTaped).toBe(true);
+            expect(admitted.lease.chargedBytes).toBe(
+                partial.estimatedBytes + captured.history.bytes,
+            );
+            const fresh = captureMessages(next);
+            for (let index = 0; index < 3; index += 1)
+                expect(verified.snapshots[index]).toEqual(fresh.snapshots[index]);
             expect(verified.verified).toBe(captured.history);
             expect(
                 historyDigestsEqual(
@@ -908,9 +916,14 @@ describe("digest-verified prefix capture", () => {
             expect(verified.history.count).toBe(3);
             expect(historyDigestsEqual(verified.history, captureHistory(next).history)).toBe(true);
             expect(capturedMessagesUnchanged(next, verified)).toBe(true);
-            // A verified member is still rechecked in full against the digest.
+            // A capture whose rechecks compare identity keeps no verified tapes.
+            const untaped = captureHistoryWithLease(next, admitted.lease, captured.history);
+            expect(untaped?.verifiedTaped).toBeUndefined();
+            expect(untaped?.snapshots.slice(0, 2)).toEqual([undefined, undefined]);
+            // A verified member is rechecked in full against its tape, whatever `compared` names.
             (next[1]?.parts as Array<{ text: string }>)[0].text = "edited";
             expect(capturedMessagesUnchanged(next, verified)).toBe(false);
+            expect(capturedMessagesUnchanged(next, verified, 0)).toBe(false);
             expect(captureHistoryWithLease(next, admitted.lease, captured.history)).toBeUndefined();
             // The prefix alone, with nothing after it, does not verify.
             expect(
@@ -918,6 +931,85 @@ describe("digest-verified prefix capture", () => {
             ).toBe(undefined);
         } finally {
             admitted.lease.release();
+        }
+    });
+
+    it("rechecks a verified prefix by digest when the lease has no headroom for its tapes", () => {
+        const first = [
+            message("m1", "x".repeat(4096)),
+            message("m2", "y".repeat(4096)),
+            message("m3"),
+        ];
+        const captured = captureHistory(first);
+        const next = [...structuredClone(first), message("m4")];
+        const partial = inspectReferenceableMessages(next, undefined, 2);
+        if (!partial.ok) throw new Error("valid source rejected");
+        const owner = new TransformCaptureAdmission({
+            maxPasses: 1,
+            maxBytes: partial.estimatedBytes + captured.history.bytes - 1,
+        });
+        const admitted = owner.admit("tight");
+        if (!("lease" in admitted)) throw new Error("admission refused");
+        try {
+            expect(admitted.lease.reserve(partial.estimatedBytes)).toBe(true);
+            const verified = captureHistoryWithLease(next, admitted.lease, captured.history, {
+                tapePrefix: true,
+            });
+            if (!verified) throw new Error("unchanged prefix did not verify");
+            expect(verified.verifiedTaped).toBeUndefined();
+            expect(verified.snapshots.slice(0, 2)).toEqual([undefined, undefined]);
+            expect(verified.snapshots[2]).toBeDefined();
+            expect(admitted.lease.chargedBytes).toBe(partial.estimatedBytes);
+            expect(capturedMessagesUnchanged(next, verified)).toBe(true);
+            (next[0]?.parts as Array<{ text: string }>)[0].text = "edited";
+            expect(capturedMessagesUnchanged(next, verified)).toBe(false);
+        } finally {
+            admitted.lease.release();
+        }
+    });
+
+    it("rechecks a taped prefix against every kind of in-place edit", () => {
+        const first = [message("m1", "x".repeat(512)), message("m2", "y"), message("m3")];
+        const captured = captureHistory(first);
+        const edits: Array<(messages: Array<Record<string, unknown>>) => void> = [
+            (m) => {
+                (m[0]?.parts as Array<{ text: string }>)[0].text = `${"x".repeat(511)}z`;
+            },
+            (m) => {
+                (m[1]?.info as Record<string, unknown>).role = "assistant";
+            },
+            (m) => {
+                (m[1]?.parts as unknown[]).push({ type: "text", text: "more" });
+            },
+            (m) => {
+                delete (m[0]?.info as Record<string, unknown>).sessionID;
+            },
+            (m) => {
+                Object.defineProperty(m[1]?.info as object, "role", { enumerable: false });
+            },
+            (m) => {
+                (m[0] as Record<PropertyKey, unknown>)[Symbol("planted")] = 1;
+            },
+        ];
+        for (const edit of edits) {
+            const next = [...structuredClone(first), message("m4")];
+            const admitted = new TransformCaptureAdmission().admit("edit");
+            if (!("lease" in admitted)) throw new Error("admission refused");
+            try {
+                const partial = inspectReferenceableMessages(next, undefined, 2);
+                if (!partial.ok || !admitted.lease.reserve(partial.estimatedBytes))
+                    throw new Error("root inspection refused");
+                const verified = captureHistoryWithLease(next, admitted.lease, captured.history, {
+                    tapePrefix: true,
+                });
+                if (!verified) throw new Error("unchanged prefix did not verify");
+                expect(verified.verifiedTaped).toBe(true);
+                expect(capturedMessagesUnchanged(next, verified)).toBe(true);
+                edit(next as Array<Record<string, unknown>>);
+                expect(capturedMessagesUnchanged(next, verified)).toBe(false);
+            } finally {
+                admitted.lease.release();
+            }
         }
     });
 

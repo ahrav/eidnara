@@ -596,6 +596,42 @@
         "role": "user"
       },
       "mid": "a0000009"
+    },
+    {
+      "ck": {
+        "content": [
+          {
+            "kind": {
+              "text": "Ran `exit 1e19`\n(no output)\n\nCommand exited with code 10000000000000000000",
+              "type": "text"
+            }
+          }
+        ],
+        "meta": {
+          "created_at_ms": 10,
+          "harness_id": "a0000010"
+        },
+        "role": "user"
+      },
+      "mid": "a0000010"
+    },
+    {
+      "ck": {
+        "content": [
+          {
+            "kind": {
+              "text": "Ran `exit 1e21`\n(no output)\n\nCommand exited with code 1e+21",
+              "type": "text"
+            }
+          }
+        ],
+        "meta": {
+          "created_at_ms": 11,
+          "harness_id": "a0000011"
+        },
+        "role": "user"
+      },
+      "mid": "a0000011"
     }
   ],
   "rows": [
@@ -1028,6 +1064,30 @@
         ],
         "role": "user",
         "timestamp": 9
+      }
+    },
+    {
+      "id": "a0000010",
+      "message": {
+        "cancelled": false,
+        "command": "exit 1e19",
+        "exitCode": 10000000000000000000,
+        "output": "",
+        "role": "bashExecution",
+        "timestamp": 10,
+        "truncated": false
+      }
+    },
+    {
+      "id": "a0000011",
+      "message": {
+        "cancelled": false,
+        "command": "exit 1e21",
+        "exitCode": 1e+21,
+        "output": "",
+        "role": "bashExecution",
+        "timestamp": 11,
+        "truncated": false
       }
     }
   ]

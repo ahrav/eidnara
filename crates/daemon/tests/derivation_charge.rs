@@ -136,6 +136,18 @@ fn opencode_windows() -> Vec<(&'static str, Vec<Value>)> {
         ("scalar_messages", vec![json!(0); 50_000]),
         ("unknown_parts", vec![json!({ "info": { "id": "m" }, "parts": vec![json!({ "type": "x", "approvalId": "a" }); 50_000] })]),
         ("attachments", vec![json!({ "info": { "id": "m" }, "parts": [{ "type": "tool", "callID": "c", "state": { "status": "completed", "attachments": vec![json!({}); 50_000] } }] })]),
+        ("idless_long_tool_name", vec![json!({ "info": { "id": "m" }, "parts": [{
+            "type": "tool", "tool": "t".repeat(1 << 20),
+            "state": { "status": "completed", "input": {}, "output": "" }
+        }] })]),
+        ("long_tool_name", vec![json!({ "info": { "id": "m" }, "parts": [{
+            "type": "tool", "callID": "c", "tool": "t".repeat(1 << 20),
+            "state": { "status": "completed", "input": {}, "output": "" }
+        }] })]),
+        ("small_object_input", vec![json!({ "info": { "id": "m" }, "parts": [{
+            "type": "tool", "callID": "c", "tool": "bash",
+            "state": { "status": "pending", "input": { "items": vec![json!({ "x": 0 }); 50_000] } }
+        }] })]),
     ]
 }
 
@@ -177,6 +189,21 @@ fn pi_windows() -> Vec<(&'static str, Vec<Value>)> {
         ]),
         ("bash", (0..20_000).map(|i| pi(i, json!({ "role": "bashExecution", "command": "", "timestamp": 1 }))).collect()),
         ("summaries", (0..20_000).map(|i| json!({ "id": format!("eidnara:branchSummary:{i:08x}"), "message": { "role": "branchSummary", "summary": "", "timestamp": 1 } })).collect()),
+        ("idless_long_call_name", vec![pi(1, json!({
+            "role": "assistant",
+            "content": [{ "type": "toolCall", "name": "n".repeat(1 << 20), "arguments": {} }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": 1
+        }))]),
+        ("long_call_name", vec![pi(1, json!({
+            "role": "assistant",
+            "content": [{ "type": "toolCall", "id": "c", "name": "n".repeat(1 << 20), "arguments": {} }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": 1
+        }))]),
+        ("small_object_arguments", vec![pi(1, json!({
+            "role": "assistant",
+            "content": [{ "type": "toolCall", "id": "c", "name": "bash", "arguments": { "items": vec![json!({ "x": 0 }); 50_000] } }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": 1
+        }))]),
     ]
 }
 
@@ -186,6 +213,7 @@ fn pi_windows() -> Vec<(&'static str, Vec<Value>)> {
 fn the_derivation_charge_covers_the_derivation_peak() {
     let _serial = measure();
     let mut worst = 0.0f64;
+    let mut over = Vec::new();
     // The measured peak over its charge; the evidence for the bound's constants.
     for (profile, windows) in [("opencode-aisdk", opencode_windows()), ("pi", pi_windows())] {
         for (name, window) in windows {
@@ -195,11 +223,13 @@ fn the_derivation_charge_covers_the_derivation_peak() {
             let used = peak as f64 / charge as f64;
             println!("{profile} {name}: peak {peak} charge {charge} used {used:.3}");
             worst = worst.max(used);
-            assert!(
-                peak <= charge,
-                "{profile} {name}: peak {peak} over charge {charge}"
-            );
+            if peak > charge {
+                over.push(format!(
+                    "{profile} {name}: peak {peak} over charge {charge}"
+                ));
+            }
         }
     }
     println!("largest share of the charge used {worst:.3}");
+    assert!(over.is_empty(), "{over:#?}");
 }

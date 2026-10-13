@@ -109,7 +109,8 @@ corpora (`whole_request_decode_fits_its_resident_charge`), tree conversion of
 text-heavy bodies (`parse_charge_covers_text_heavy_peaks_on_both_lanes`),
 fallback after a typed prefix fails at a late duplicate key
 (`parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`, which
-asserts the walk accepted and the typed decode refused), escaped scratch (the
+asserts the admission restarts the body, the typed decode fails it as invalid,
+and the tree fallback decodes it), escaped scratch (the
 escaped variants), pool shortfall with a held pool
 (`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`
 in `crates/daemon/src/lib.rs`, where a backed `TestPool` holds bytes for a

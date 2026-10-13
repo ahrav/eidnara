@@ -29,7 +29,7 @@ use retrieval::dense::{
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
 
-use crate::projection_gates::Admission;
+use crate::projection_gates::{ActivationGrant, Admission};
 use crate::vector_admission::{self, Ledger, Pinned, Reservation, ResourceClass};
 use crate::vector_composition::{self, Candidate, SelectorState, Unavailable, VerifiedComposition};
 use crate::vector_generation::{
@@ -338,6 +338,9 @@ pub struct PinnedVectors {
     pinned: Pinned,
     /// Set when a read found this view's rows or codes missing or corrupt; every later ranking over this view refuses. The flag belongs to this view alone: another acquisition of the same composition re-verifies its members and refuses one whose files no longer hash.
     quarantined: AtomicBool,
+    /// An error every original-row read of this view reports instead of reading, so a test can drive a non-short read failure through rescoring.
+    #[cfg(any(test, feature = "test-support"))]
+    original_read_failure: std::sync::Mutex<Option<std::io::ErrorKind>>,
 }
 
 impl std::fmt::Debug for PinnedVectors {
@@ -375,6 +378,15 @@ impl PinnedVectors {
 
     fn quarantine(&self) {
         self.quarantined.store(true, Ordering::Relaxed);
+    }
+
+    /// Makes every later original-row read of this view fail with `kind` until it is set back to `None`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_original_reads_for_test(&self, kind: Option<std::io::ErrorKind>) {
+        *self
+            .original_read_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
     }
 
     pub fn is_quarantined(&self) -> bool {
@@ -611,6 +623,8 @@ fn hand_off(
         resident,
         pinned,
         quarantined: AtomicBool::new(false),
+        #[cfg(any(test, feature = "test-support"))]
+        original_read_failure: std::sync::Mutex::new(None),
     }))
 }
 
@@ -734,6 +748,8 @@ pub struct CompressedRequest<'a> {
     pub max_pinned_bytes: u64,
     /// Original-row bytes the rescore may read. Each pool entry is one positioned read of exactly one row, so a full pool reads `R` rows and nothing else.
     pub max_read_bytes: u64,
+    /// The gate's compressed activation; the ranking refuses when it is withdrawn before the first check or before the result returns.
+    pub activation: &'a ActivationGrant,
 }
 
 /// The rescored ranking and the quantized pool it came from, kept apart so candidate coverage and rescored quality are measured on their own stages.
@@ -745,6 +761,8 @@ pub struct CompressedRanking {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CompressedRefusal {
+    #[error("the compressed activation grant was withdrawn")]
+    ActivationRevoked,
     #[error("the view's {field} is not the request's")]
     Identity { field: &'static str },
     #[error("the view of composition {digest} is quarantined")]
@@ -816,6 +834,9 @@ pub fn rank_compressed(
     grant: &Admission,
     observe: &mut dyn FnMut(RescoreEvent<'_>),
 ) -> Result<CompressedRanking, CompressedRefusal> {
+    if request.activation.is_revoked() {
+        return Err(CompressedRefusal::ActivationRevoked);
+    }
     if view.is_quarantined() {
         return Err(CompressedRefusal::Quarantined {
             digest: view.digest.clone(),
@@ -911,6 +932,17 @@ pub fn rank_compressed(
             if budget.check().is_err() {
                 return Err(ReadStop::Budget);
             }
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(kind) = *view
+                .original_read_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err(ReadStop::Fault(read_fault(
+                    winner.row,
+                    &std::io::Error::from(kind),
+                )));
+            }
             layer
                 .row_into(winner.row, &mut bytes, row)
                 .map_err(ReadStop::Fault)
@@ -918,6 +950,10 @@ pub fn rank_compressed(
     );
     let rescored = rescored.map_err(|refusal| rescore_refusal(view, refusal))?;
     budget.check().map_err(|_| CompressedRefusal::Budget)?;
+    // A grant withdrawn during the scan or the rescore discards the ranking.
+    if request.activation.is_revoked() {
+        return Err(CompressedRefusal::ActivationRevoked);
+    }
     Ok(CompressedRanking { pool, rescored })
 }
 

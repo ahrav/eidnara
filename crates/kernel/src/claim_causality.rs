@@ -159,6 +159,15 @@ impl CausalClass {
     pub fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown(_))
     }
+
+    /// The class's stable code: the classification a causality record stores for a known class, and `unknown` otherwise.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::DirectObservation { .. } => "direct_observation",
+            Self::DerivedReinjection { .. } => "derived_reinjection",
+            Self::Unknown(_) => "unknown",
+        }
+    }
 }
 
 /// `producer` is the commit log's producer for the record's commit.
@@ -727,4 +736,36 @@ fn parents_existed(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CausalClass, ParentReference, UnknownReason};
+
+    #[test]
+    fn every_causal_class_has_its_own_code() {
+        let classes = [
+            (
+                CausalClass::DirectObservation {
+                    acquisition_evidence_id: "evidence".to_owned(),
+                    artifact_digest: "0".repeat(64),
+                },
+                "direct_observation",
+            ),
+            (
+                CausalClass::DerivedReinjection {
+                    parents: vec![ParentReference {
+                        object_id: "parent".to_owned(),
+                        revision: 1,
+                    }],
+                },
+                "derived_reinjection",
+            ),
+            (CausalClass::Unknown(UnknownReason::NoRecord), "unknown"),
+            (CausalClass::Unknown(UnknownReason::Conflicting), "unknown"),
+        ];
+        for (class, code) in classes {
+            assert_eq!(class.code(), code, "{class:?}");
+        }
+    }
 }

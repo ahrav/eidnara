@@ -51,12 +51,73 @@ pub const MEMBERS_FILE_NAME: &str = "members.json";
 /// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
 const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
 
+/// One step of a selector replacement, reported in execution order: the temp write and its sync, the rename over the selector, and the lifecycle root's sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileEvent {
+    /// Before the selector temp is created and written.
+    BeforeTempWrite,
+    /// After the selector temp was written and before its `fsync`.
+    BeforeTempSync,
+    /// After the selector temp's `fsync` returned.
+    AfterTempSync,
     BeforeRename,
     AfterRename,
     BeforeDirectorySync,
     AfterDirectorySync,
+}
+
+/// One step of [`GenerationStore::stage_observed`], reported to its observer in execution order. Paths are relative to the staged generation root.
+///
+/// A `Before*` event fires before its operation runs and an `After*` event fires after it returned; an observer error at a `Before*` event stands in for that operation failing, and at an `After*` event for a failure reported after it completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageEvent {
+    /// Before the source for this manifest path is opened and copied.
+    BeforeCopy(String),
+    /// After every byte of this manifest path was copied; the copy is unsynced until its group's sync.
+    AfterCopy(String),
+    /// Before `manifest.json` is created and written.
+    BeforeManifestWrite,
+    /// After `manifest.json` was written; it is unsynced until the last group's sync.
+    AfterManifestWrite,
+    /// Before one group of copied files is fsynced together. The value is the group's index: groups hold up to eight outputs in copy order, and the last group ends with `manifest.json`.
+    BeforeFileSyncs(usize),
+    /// After every `fsync` in the group returned.
+    AfterFileSyncs(usize),
+    /// Before a nested staged directory's `fsync`; directories sync deepest first.
+    BeforeDirectorySync(String),
+    AfterDirectorySync(String),
+    /// Before the staging temp root's `fsync`.
+    BeforeRootSync,
+    AfterRootSync,
+    /// Before the temp is renamed to its digest name.
+    BeforeRename,
+    /// After the rename returned and published the digest name.
+    AfterRename,
+    /// Before the repair path atomically exchanges a corrupt, unprotected occupant of the digest name with the temp.
+    BeforeExchange,
+    /// After the exchange returned: the digest name holds the temp's content and the temp name holds the former occupant.
+    AfterExchange,
+    /// Before a `fsync` of the generations directory.
+    BeforeGenerationsSync,
+    AfterGenerationsSync,
+}
+
+/// The observer [`GenerationStore::stage_observed`] reports each [`StageEvent`] to; an `Err` cuts staging at that event.
+pub type StageObserver<'a> = dyn FnMut(StageEvent) -> Result<(), rustix::io::Errno> + 'a;
+
+/// Classifies a failed syscall's errno: `ENOSPC` and `EDQUOT` are storage exhaustion, any other errno is a payload fault carrying `detail`.
+///
+/// The syscall's errno is the quota signal because `statvfs` reports filesystem free blocks, not the caller's remaining quota.
+fn classify_errno(errno: rustix::io::Errno, detail: &'static str) -> GenerationError {
+    match errno {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        _ => invalid(detail),
+    }
+}
+
+/// Runs the stage observer at `event` and classifies its errno with [`classify_errno`], the classifier the store's write, sync, and rename sites use.
+fn observe(observer: &mut StageObserver<'_>, event: StageEvent) -> Result<(), GenerationError> {
+    observer(event).map_err(|e| classify_errno(e, "staging step failed"))
 }
 
 /// The `files` array excludes `manifest.json` because its bytes produce the generation digest.
@@ -149,21 +210,7 @@ fn fsync_preserving_storage<Fd: rustix::fd::AsFd>(
     fd: Fd,
     detail: &'static str,
 ) -> Result<(), GenerationError> {
-    fsync(fd).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid(detail),
-    })
-}
-
-///
-/// `statvfs` cannot detect per-user quota exhaustion because it reports filesystem free blocks, not the caller's remaining quota.
-fn is_storage_exhausted(err: &std::io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(code)
-            if code == rustix::io::Errno::NOSPC.raw_os_error()
-                || code == rustix::io::Errno::DQUOT.raw_os_error()
-    )
+    fsync(fd).map_err(|e| classify_errno(e, detail))
 }
 
 /// `GenerationManifest::files` paths are relative, contain no parent segments, and are unique and sorted in canonical encoding.
@@ -190,10 +237,6 @@ pub struct GenerationManifest {
     pub target: String,
     pub release_contract_sha256: String,
     pub inputs_lock_sha256: String,
-    /// `None` denotes a generation without a recorded source payload manifest.
-    ///
-    /// `#[serde(default)]` preserves decoding of schema-1 manifests that omit this field.
-    /// Generations without a source manifest digest fail only checks that require that digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_payload_manifest_sha256: Option<String>,
     pub files: Vec<ManifestFile>,
@@ -863,7 +906,7 @@ impl GenerationStore {
 
     /// Failed validation never selects another generation.
     pub fn validate(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
-        self.validate_keeping(digest, false, &[])
+        self.validate_keeping(digest, false, &|_| false)
     }
 
     /// [`Self::validate`] that keeps open the descriptor it opened for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads a file without hashing it again. Each file in `streamed` has its shape checked and its hash left to the [`StreamedFile`] the caller reads it through, so each of its bytes is read once.
@@ -872,7 +915,16 @@ impl GenerationStore {
         digest: &str,
         streamed: &[&str],
     ) -> Result<PendingGeneration, GenerationError> {
-        let generation = self.validate_keeping(digest, true, streamed)?;
+        let generation = self.validate_keeping(digest, true, &|path| streamed.contains(&path))?;
+        Ok(PendingGeneration { generation })
+    }
+
+    /// [`Self::validate_streaming`] with every manifest file streamed: validation checks every manifest file's shape and defers hashing to its [`StreamedFile`] reader.
+    pub fn validate_streaming_all(
+        &self,
+        digest: &str,
+    ) -> Result<PendingGeneration, GenerationError> {
+        let generation = self.validate_keeping(digest, true, &|_| true)?;
         Ok(PendingGeneration { generation })
     }
 
@@ -880,7 +932,7 @@ impl GenerationStore {
         &self,
         digest: &str,
         retain: bool,
-        streamed: &[&str],
+        is_streamed: &dyn Fn(&str) -> bool,
     ) -> Result<ValidatedGeneration, GenerationError> {
         if !is_canonical_payload_digest(digest) {
             return Err(invalid("generation digest is noncanonical"));
@@ -888,7 +940,7 @@ impl GenerationStore {
         let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
             return Err(invalid("generation directory is missing or insecure"));
         };
-        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, streamed)?;
+        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, is_streamed)?;
         Ok(ValidatedGeneration {
             digest: digest.to_owned(),
             manifest,
@@ -998,7 +1050,7 @@ impl GenerationStore {
         dir: &OwnedFd,
         digest: &str,
         retain: bool,
-        streamed: &[&str],
+        is_streamed: &dyn Fn(&str) -> bool,
     ) -> Result<(GenerationManifest, Vec<Retained>), GenerationError> {
         let manifest = Self::read_manifest_in_dir(dir, digest)?;
         let mut expected: BTreeSet<String> = BTreeSet::new();
@@ -1011,7 +1063,7 @@ impl GenerationStore {
             }
             let fd = open_rel_file(dir, &entry.path)
                 .ok_or_else(|| invalid("manifest-listed file is missing"))?;
-            let streamed = streamed.contains(&entry.path.as_str());
+            let streamed = is_streamed(&entry.path);
             if streamed {
                 check_file_shape(&fd, entry)?;
             } else {
@@ -1079,11 +1131,18 @@ impl GenerationStore {
         meta: &StageMeta,
         protected: &BTreeSet<String>,
     ) -> Result<String, GenerationError> {
-        // A quarantined profile blocks mutation because its references are uncertain.
-        if self.read_current()? == CurrentProfile::Quarantined {
-            return Err(GenerationError::UnsupportedStateSchema);
-        }
-        self.verify_named_identity()?;
+        self.stage_observed(sources, meta, protected, &mut |_| Ok(()))
+    }
+
+    /// Runs [`Self::stage`] and reports each [`StageEvent`] to `observer` before or after its step. An observer error stops staging at that step with the error class the store gives that errno at a syscall, carrying the detail `staging step failed`: the temp is removed when the cut precedes the rename, and the published digest directory stays for `prune` when it follows.
+    pub fn stage_observed(
+        &self,
+        sources: &[SourceSpec],
+        meta: &StageMeta,
+        protected: &BTreeSet<String>,
+        observer: &mut StageObserver<'_>,
+    ) -> Result<String, GenerationError> {
+        self.ensure_mutable()?;
         // The preflight records each source's absolute path and inode snapshot; the copy reopens by that path and rejects a changed snapshot, so only one descriptor is open at a time.
         // One working directory is captured for the whole batch so a concurrent `chdir` cannot
         // resolve two relative sources against different directories.
@@ -1106,7 +1165,7 @@ impl GenerationStore {
         }
 
         let (temp_name, temp_fd) = self.create_staging_temp()?;
-        let result = self.stage_into_temp(&temp_fd, sources, &preflighted, meta);
+        let result = self.stage_into_temp(&temp_fd, sources, &preflighted, meta, observer);
         let manifest = match result {
             Ok(manifest) => manifest,
             Err(err) => {
@@ -1115,13 +1174,66 @@ impl GenerationStore {
             }
         };
         let digest = manifest.digest();
-        if let Err(err) = self.promote_temp(&temp_name, &digest, protected) {
+        if let Err(err) = self.promote_temp(&temp_name, &digest, protected, observer) {
             let _ = remove_tree(&self.generations_fd, &temp_name);
             return Err(err);
         }
         // A tree renamed away during the copy holds the published object detached from the named store; the digest must not be reported for it.
         self.verify_named_identity()?;
         Ok(digest)
+    }
+
+    /// The caller uses `confirm_staged` to confirm `digest` after a staging attempt with an uncertain outcome, such as a failure after the rename or a crash, under its exclusive `transaction`. For a valid generation, `confirm_staged` syncs the generations directory, reports [`StageEvent::BeforeGenerationsSync`] and [`StageEvent::AfterGenerationsSync`] to `observer` around the sync, and returns `true`. Repeated confirmations validate and sync the existing generation. A missing generation or a validation failure returns `false` with no event, except that `UnsupportedStateSchema` propagates as an error.
+    ///
+    /// The `fsync` makes the directory entry durable against an operating-system crash. After an earlier failed `fsync` on this store's descriptor, device durability remains uncertain.
+    ///
+    /// # Errors
+    ///
+    /// A shared `transaction`; `UnsupportedStateSchema` for a quarantined deployment profile or an occupant of an unknown manifest schema; a replaced store; or the generations-directory sync failure.
+    pub fn confirm_staged(
+        &self,
+        digest: &str,
+        transaction: &LifecycleTransactionLock,
+        observer: &mut StageObserver<'_>,
+    ) -> Result<bool, GenerationError> {
+        if !transaction.is_exclusive() {
+            return Err(invalid(
+                "staging confirmation requires the exclusive lifecycle transaction",
+            ));
+        }
+        self.ensure_mutable()?;
+        if !self.holds_valid(digest)? {
+            return Ok(false);
+        }
+        self.sync_generations(observer)?;
+        self.verify_named_identity()?;
+        Ok(true)
+    }
+
+    /// A quarantined profile blocks mutation because its references are uncertain, and a replaced store holds only detached writes.
+    fn ensure_mutable(&self) -> Result<(), GenerationError> {
+        if self.read_current()? == CurrentProfile::Quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        self.verify_named_identity()
+    }
+
+    /// Whether the store names a generation `digest` that validates. An occupant of an unknown manifest schema is an error, because only its quarantine preserves it.
+    fn holds_valid(&self, digest: &str) -> Result<bool, GenerationError> {
+        match self.validate(digest) {
+            Ok(_) => Ok(true),
+            Err(GenerationError::UnsupportedStateSchema) => {
+                Err(GenerationError::UnsupportedStateSchema)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Syncs the generations directory, reporting [`StageEvent::BeforeGenerationsSync`] and [`StageEvent::AfterGenerationsSync`] around it.
+    fn sync_generations(&self, observer: &mut StageObserver<'_>) -> Result<(), GenerationError> {
+        observe(observer, StageEvent::BeforeGenerationsSync)?;
+        fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+        observe(observer, StageEvent::AfterGenerationsSync)
     }
 
     /// The named `lifecycle` and `generations` directories must still resolve to the retained
@@ -1148,12 +1260,7 @@ impl GenerationStore {
             temp_name.as_str(),
             Mode::from_raw_mode(0o700),
         )
-        .map_err(|e| match e {
-            rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
-                GenerationError::InsufficientStorage
-            }
-            _ => invalid("staging temp creation failed"),
-        })?;
+        .map_err(|e| classify_errno(e, "staging temp creation failed"))?;
         // `mkdirat` rejects `EEXIST`, so success proves this call created the entry and the pathname `chmod` cannot follow a planted symlink.
         // A failure after creation must remove the entry here, because the caller never learns
         // the name and repeated attempts would otherwise accumulate `tmp-*` directories.
@@ -1179,9 +1286,11 @@ impl GenerationStore {
         sources: &[SourceSpec],
         preflighted: &[PreflightSource],
         meta: &StageMeta,
+        observer: &mut StageObserver<'_>,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
         let mut written = Vec::with_capacity(sources.len() + 1);
+        let mut groups = 0;
         let mut seen = BTreeSet::new();
         // The code fsyncs each directory that receives an entry because fsyncing a file does not persist its parent entry.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
@@ -1190,11 +1299,14 @@ impl GenerationStore {
             if !seen.insert(spec.rel_path.clone()) {
                 return Err(invalid("duplicate staged path"));
             }
+            observe(observer, StageEvent::BeforeCopy(spec.rel_path.clone()))?;
             let (entry, output) = copy_source_into(temp_fd, spec, source, &mut dirs)?;
+            observe(observer, StageEvent::AfterCopy(spec.rel_path.clone()))?;
             files.push(entry);
             written.push(output);
             if written.len() == crate::store_fs::CONCURRENT_SYNCS {
-                sync_staged(&written)?;
+                sync_group(&written, groups, observer)?;
+                groups += 1;
                 written.clear();
             }
         }
@@ -1204,6 +1316,7 @@ impl GenerationStore {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(invalid("staged manifest exceeds the manifest size cap"));
         }
+        observe(observer, StageEvent::BeforeManifestWrite)?;
         written.push(
             crate::store_fs::write_new_file_unsynced(
                 temp_fd,
@@ -1213,15 +1326,20 @@ impl GenerationStore {
             )
             .map_err(|e| storage_or(e, "file write failed"))?,
         );
+        observe(observer, StageEvent::AfterManifestWrite)?;
         // Every staged file and the manifest are durable before any directory that names them is synced; the temp stays unnamed by the store until promotion, so the file syncs need no order among themselves.
-        sync_staged(&written)?;
+        sync_group(&written, groups, observer)?;
         // The code fsyncs directories deepest-first so each directory's entries are durable before its entry in its parent.
         for rel in dirs.iter().rev() {
             let dir = open_rel_nofollow(temp_fd, rel, true)
                 .map_err(|_| invalid("staged directory reopen failed"))?;
+            observe(observer, StageEvent::BeforeDirectorySync(rel.clone()))?;
             fsync_preserving_storage(&dir, "staged directory fsync failed")?;
+            observe(observer, StageEvent::AfterDirectorySync(rel.clone()))?;
         }
+        observe(observer, StageEvent::BeforeRootSync)?;
         fsync_preserving_storage(temp_fd, "staging temp fsync failed")?;
+        observe(observer, StageEvent::AfterRootSync)?;
         Ok(manifest)
     }
 
@@ -1236,34 +1354,26 @@ impl GenerationStore {
         temp_name: &str,
         digest: &str,
         protected: &BTreeSet<String>,
+        observer: &mut StageObserver<'_>,
     ) -> Result<(), GenerationError> {
-        let result = match rename_no_replace(&self.generations_fd, temp_name, digest) {
-            Ok(renamed) => renamed,
-            Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
-                return Err(GenerationError::InsufficientStorage);
-            }
-            Err(_) => return Err(invalid("generation rename failed")),
-        };
+        observe(observer, StageEvent::BeforeRename)?;
+        let result = rename_no_replace(&self.generations_fd, temp_name, digest)
+            .map_err(|e| classify_errno(e, "generation rename failed"))?;
         if result {
-            fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+            observe(observer, StageEvent::AfterRename)?;
+            self.sync_generations(observer)?;
             // A same-UID writer can alter a staged file between its copy and this rename.
             self.validate(digest)?;
             return Ok(());
         }
-        match self.validate(digest) {
-            // A valid target occupant wins; cleanup attempts to remove the temp. A prior run may
-            // have crashed between its rename and fsync, so the occupant's dirent is made durable
-            // before the profile names it.
-            Ok(_) => {
-                let _ = remove_tree(&self.generations_fd, temp_name);
-                fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
-                return Ok(());
-            }
-            // An unsupported manifest schema is quarantined because exchange would delete bytes that `prune` preserves.
-            Err(GenerationError::UnsupportedStateSchema) => {
-                return Err(GenerationError::UnsupportedStateSchema);
-            }
-            Err(_) => {}
+        // A valid target occupant wins; cleanup attempts to remove the temp. A prior run may
+        // have crashed between its rename and fsync, so the occupant's dirent is made durable
+        // before the profile names it. An unsupported manifest schema is quarantined because
+        // exchange would delete bytes that `prune` preserves.
+        if self.holds_valid(digest)? {
+            let _ = remove_tree(&self.generations_fd, temp_name);
+            self.sync_generations(observer)?;
+            return Ok(());
         }
         if protected.contains(digest) {
             return Err(invalid("corrupt digest target is protected"));
@@ -1288,8 +1398,10 @@ impl GenerationStore {
             Reclamation::Pinned => invalid("corrupt generation is pinned"),
             Reclamation::Unopenable(err) => err,
         })?;
+        observe(observer, StageEvent::BeforeExchange)?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
-        fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+        observe(observer, StageEvent::AfterExchange)?;
+        self.sync_generations(observer)?;
         self.validate(digest)?;
         let _ = remove_tree(&self.generations_fd, temp_name);
         Ok(())
@@ -1302,27 +1414,30 @@ impl GenerationStore {
         self.replace_profile_at(CURRENT_PROFILE_NAME, digest, &mut |_| Ok(()))
     }
 
+    /// Points the search selector at a generation. A shared `transaction` is refused before any read, so only the exclusive transaction holder changes a selector.
     pub fn select_search(
         &self,
         digest: &str,
-        _transaction: &LifecycleTransactionLock,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
-        self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
+        self.select_owner(SEARCH_PROFILE_NAME, digest, None, transaction, observer)
     }
 
     /// Points the vector selector at a composition. A generation whose manifest target is not [`VECTOR_SELECTION_TARGET`] belongs to another owner and is refused, and a composition whose members are not all present and valid is refused, so the selector never exposes a partial set.
     /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the composition and its members precedes this call and is not repeated here.
+    /// A shared `transaction` is refused before any read, as for [`Self::select_search`].
     pub fn select_vector(
         &self,
         digest: &str,
-        _transaction: &LifecycleTransactionLock,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
         self.select_owner(
             VECTOR_PROFILE_NAME,
             digest,
             Some(VECTOR_SELECTION_TARGET),
+            transaction,
             observer,
         )
     }
@@ -1332,8 +1447,14 @@ impl GenerationStore {
         name: &str,
         digest: &str,
         target: Option<&str>,
+        transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
+        if !transaction.is_exclusive() {
+            return Err(invalid(
+                "selector change requires the exclusive lifecycle transaction",
+            ));
+        }
         self.verify_named_identity()?;
         if self.read_profile(name)? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
@@ -1394,15 +1515,19 @@ impl GenerationStore {
         getrandom::getrandom(&mut suffix)
             .map_err(|_| GenerationError::Instance(InstanceError::Random))?;
         let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
-        let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
+        let mut write_and_rename = || {
+            observer(ProfileEvent::BeforeTempWrite)?;
+            let temp =
+                crate::store_fs::write_new_file_unsynced(&self.root_fd, &temp_name, &bytes, 0o600)
+                    .map_err(|e| storage_or(e, "file write failed"))?;
+            observer(ProfileEvent::BeforeTempSync)?;
+            fsync_preserving_storage(&temp, "profile temp fsync failed")?;
+            observer(ProfileEvent::AfterTempSync)?;
             observer(ProfileEvent::BeforeRename)?;
-            renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name).map_err(|e| match e {
-                rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
-                    GenerationError::InsufficientStorage
-                }
-                _ => invalid("profile rename failed"),
-            })
-        });
+            renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name)
+                .map_err(|e| classify_errno(e, "profile rename failed"))
+        };
+        let result = write_and_rename();
         if result.is_err() {
             let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
         }
@@ -1654,10 +1779,9 @@ fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
 }
 
 fn storage_or(e: std::io::Error, detail: &'static str) -> GenerationError {
-    if is_storage_exhausted(&e) {
-        GenerationError::InsufficientStorage
-    } else {
-        invalid(detail)
+    match e.raw_os_error() {
+        Some(code) => classify_errno(rustix::io::Errno::from_raw_os_error(code), detail),
+        None => invalid(detail),
     }
 }
 
@@ -1670,9 +1794,8 @@ fn ensure_parent_dirs(
     dirs: &mut BTreeSet<String>,
 ) -> Result<(OwnedFd, String), GenerationError> {
     let (parent, basename) = open_or_create_parents(temp_fd, rel_path).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
         rustix::io::Errno::PERM => invalid("staging directory failed security checks"),
-        _ => invalid("staging directory creation failed"),
+        e => classify_errno(e, "staging directory creation failed"),
     })?;
     let mut prefix = String::new();
     for component in rel_path.split('/').take(rel_path.matches('/').count()) {
@@ -1726,15 +1849,23 @@ fn open_source_file(path: &Path) -> Result<(OwnedFd, rustix::fs::Stat), Generati
     Ok((fd, stat))
 }
 
-/// The copy reopens the preflighted path and fails if the source's identity or timestamps
-/// differ from the preflight snapshot or change before the copy completes.
 fn sync_staged(files: &[OwnedFd]) -> Result<(), GenerationError> {
-    crate::store_fs::fsync_all(files).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("staging output fsync failed"),
-    })
+    crate::store_fs::fsync_all(files).map_err(|e| classify_errno(e, "staging output fsync failed"))
 }
 
+/// Syncs one group of staged outputs together, reporting [`StageEvent::BeforeFileSyncs`] and [`StageEvent::AfterFileSyncs`] with the group's index around it.
+fn sync_group(
+    files: &[OwnedFd],
+    group: usize,
+    observer: &mut StageObserver<'_>,
+) -> Result<(), GenerationError> {
+    observe(observer, StageEvent::BeforeFileSyncs(group))?;
+    sync_staged(files)?;
+    observe(observer, StageEvent::AfterFileSyncs(group))
+}
+
+/// The copy reopens the preflighted path and fails if the source's identity or timestamps
+/// differ from the preflight snapshot or change before the copy completes.
 fn copy_source_into(
     temp_fd: &OwnedFd,
     spec: &SourceSpec,
@@ -1754,10 +1885,7 @@ fn copy_source_into(
         OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(raw_mode(mode)),
     )
-    .map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("staging output creation failed"),
-    })?;
+    .map_err(|e| classify_errno(e, "staging output creation failed"))?;
     rustix::fs::fchmod(&dest_fd, Mode::from_raw_mode(raw_mode(mode)))
         .map_err(|_| invalid("staging output chmod failed"))?;
 
@@ -1796,26 +1924,13 @@ fn copy_source_into(
     ))
 }
 
-fn write_new_file(
-    dir: &OwnedFd,
-    name: &str,
-    bytes: &[u8],
-    mode: u32,
-) -> Result<(), GenerationError> {
-    crate::store_fs::write_new_file(dir, name, bytes, mode)
-        .map(drop)
-        .map_err(|e| storage_or(e, "file write failed"))
-}
-
 fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
     crate::store_fs::remove_tree(parent, name).map_err(|_| invalid("entry removal failed"))
 }
 
 fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
-    crate::store_fs::exchange_dirs(dir, a, b).map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("atomic digest-target exchange failed"),
-    })
+    crate::store_fs::exchange_dirs(dir, a, b)
+        .map_err(|e| classify_errno(e, "atomic digest-target exchange failed"))
 }
 
 /// A lifecycle root is an owned directory whose ancestry cannot be replaced under the process.
@@ -1940,22 +2055,69 @@ mod tests {
         GenerationStore::open(Some(root)).expect("open store")
     }
 
+    fn write_new_file(
+        dir: &OwnedFd,
+        name: &str,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<(), GenerationError> {
+        crate::store_fs::write_new_file(dir, name, bytes, mode)
+            .map(drop)
+            .map_err(|e| storage_or(e, "file write failed"))
+    }
+
     #[test]
-    fn a_generation_staged_before_the_source_digest_field_still_decodes() {
-        // Schema 1 omits `source_payload_manifest_sha256` without a schema-version change.
-        // The decoder must accept retained schema-1 manifests that omit `source_payload_manifest_sha256`.
-        // Rejecting a retained schema-1 manifest that omits `source_payload_manifest_sha256` would report `native_payload_invalid` on the first no-`--payload-dir` start after an upgrade.
-        let predecessor = br#"{"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}"#;
-        let decoded = match decode_with_schema::<GenerationManifest>(predecessor) {
+    fn the_errno_classifier_maps_exhaustion_to_insufficient_storage_and_keeps_the_site_detail() {
+        /// `None` is `InsufficientStorage`; `Some(detail)` is a payload fault with that detail.
+        fn class(err: GenerationError) -> Option<&'static str> {
+            match err {
+                GenerationError::InsufficientStorage => None,
+                GenerationError::NativePayloadInvalid { detail } => Some(detail),
+                other => panic!("unexpected class {other:?}"),
+            }
+        }
+        let detail = "staging output fsync failed";
+        for (errno, expected) in [
+            (rustix::io::Errno::NOSPC, None),
+            (rustix::io::Errno::DQUOT, None),
+            (rustix::io::Errno::IO, Some(detail)),
+            (rustix::io::Errno::PERM, Some(detail)),
+        ] {
+            assert_eq!(class(classify_errno(errno, detail)), expected, "{errno:?}");
+            let io = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert_eq!(class(storage_or(io, detail)), expected, "{errno:?} via io");
+        }
+        assert_eq!(
+            class(storage_or(std::io::Error::other("no errno"), detail)),
+            Some(detail)
+        );
+        for (errno, expected) in [
+            (rustix::io::Errno::DQUOT, None),
+            (rustix::io::Errno::IO, Some("staging step failed")),
+        ] {
+            let mut cut = |_| Err(errno);
+            let observed = observe(&mut cut, StageEvent::BeforeRootSync).unwrap_err();
+            assert_eq!(class(observed), expected, "observer {errno:?}");
+        }
+        // A pipe rejects `fsync` with `EINVAL`, so a batched sync reports the staging output detail.
+        let (reader, _writer) = rustix::pipe::pipe().expect("pipe");
+        assert_eq!(
+            class(sync_staged(&[reader]).unwrap_err()),
+            Some("staging output fsync failed")
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_a_source_digest_round_trips() {
+        let manifest = br#"{"schema":1,"target":"linux-x64-gnu","release_contract_sha256":"aa","inputs_lock_sha256":"bb","files":[]}"#;
+        let decoded = match decode_with_schema::<GenerationManifest>(manifest) {
             SchemaDecode::Valid(manifest) => manifest,
-            SchemaDecode::UnknownSchema => panic!("schema 1 must stay readable"),
-            SchemaDecode::Malformed => {
-                panic!("a predecessor generation is not corrupt merely for predating a field")
+            SchemaDecode::UnknownSchema | SchemaDecode::Malformed => {
+                panic!("a manifest without a source digest decodes")
             }
         };
         assert_eq!(decoded.source_payload_manifest_sha256, None);
-        // A predecessor manifest that omits the field serializes to its original bytes.
-        assert_eq!(decoded.canonical_bytes(), predecessor);
+        assert_eq!(decoded.canonical_bytes(), manifest);
     }
 
     fn meta() -> StageMeta {
@@ -2030,6 +2192,57 @@ mod tests {
 
         let again = stage_default(&store, src.path());
         assert_eq!(again, digest);
+    }
+
+    #[test]
+    fn each_sync_group_is_reported_after_its_copies_and_the_last_ends_with_the_manifest() {
+        let sync = crate::store_fs::CONCURRENT_SYNCS;
+        for count in [1, sync, sync * 2 + 3] {
+            let root = tempfile::tempdir().expect("root");
+            let src = tempfile::tempdir().expect("src");
+            let store = store_at(root.path());
+            let sources: Vec<SourceSpec> = (0..count)
+                .map(|index| SourceSpec {
+                    rel_path: format!("part/{index:02}.txt"),
+                    source: write_source(src.path(), &format!("source-{index}"), b"bytes"),
+                    executable: false,
+                    expected_size: None,
+                    expected_sha256: None,
+                })
+                .collect();
+            let mut trace = Vec::new();
+            store
+                .stage_observed(&sources, &meta(), &BTreeSet::new(), &mut |event| {
+                    trace.push(event);
+                    Ok(())
+                })
+                .expect("stage");
+            let mut expected = Vec::new();
+            for index in 0..count {
+                let rel = format!("part/{index:02}.txt");
+                expected.push(StageEvent::BeforeCopy(rel.clone()));
+                expected.push(StageEvent::AfterCopy(rel));
+                if (index + 1) % sync == 0 {
+                    expected.push(StageEvent::BeforeFileSyncs(index / sync));
+                    expected.push(StageEvent::AfterFileSyncs(index / sync));
+                }
+            }
+            expected.extend([
+                StageEvent::BeforeManifestWrite,
+                StageEvent::AfterManifestWrite,
+                StageEvent::BeforeFileSyncs(count / sync),
+                StageEvent::AfterFileSyncs(count / sync),
+                StageEvent::BeforeDirectorySync("part".to_owned()),
+                StageEvent::AfterDirectorySync("part".to_owned()),
+                StageEvent::BeforeRootSync,
+                StageEvent::AfterRootSync,
+                StageEvent::BeforeRename,
+                StageEvent::AfterRename,
+                StageEvent::BeforeGenerationsSync,
+                StageEvent::AfterGenerationsSync,
+            ]);
+            assert_eq!(trace, expected, "{count} files");
+        }
     }
 
     #[test]
@@ -3488,6 +3701,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn confirm_staged_confirms_only_a_valid_occupant_under_the_exclusive_transaction() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let confirm = |transaction: &LifecycleTransactionLock, digest: &str| {
+            let mut events = Vec::new();
+            let result = store.confirm_staged(digest, transaction, &mut |event| {
+                events.push(event);
+                Ok(())
+            });
+            (result, events)
+        };
+        // The exclusive acquisition creates the coordination root the shared probe needs.
+        drop(LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap());
+        let shared = LifecycleTransactionLock::acquire_shared(Some(root.path()))
+            .expect("probe")
+            .expect("shared lock");
+        let (result, events) = confirm(&shared, &digest);
+        assert!(
+            matches!(result, Err(GenerationError::NativePayloadInvalid { .. })),
+            "{result:?}"
+        );
+        assert!(events.is_empty(), "a shared transaction confirms nothing");
+        drop(shared);
+        let exclusive = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+
+        let (result, events) = confirm(&exclusive, &digest);
+        assert!(matches!(result, Ok(true)), "{result:?}");
+        assert_eq!(
+            events,
+            [
+                StageEvent::BeforeGenerationsSync,
+                StageEvent::AfterGenerationsSync
+            ]
+        );
+
+        let missing = "0".repeat(64);
+        let (result, events) = confirm(&exclusive, &missing);
+        assert!(matches!(result, Ok(false)), "{result:?}");
+        assert!(events.is_empty(), "a missing generation is not synced");
+
+        let gen_dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let bin = gen_dir.join("bin/eidnara-host");
+        let mut bytes = std::fs::read(&bin).expect("read");
+        bytes[0] ^= 1;
+        std::fs::write(&bin, &bytes).expect("corrupt");
+        let (result, events) = confirm(&exclusive, &digest);
+        assert!(matches!(result, Ok(false)), "{result:?}");
+        assert!(events.is_empty(), "a corrupt occupant is left to repair");
+
+        let manifest = gen_dir.join(GENERATION_MANIFEST_NAME);
+        let occupant = br#"{"schema":2,"unknown_future_field":true}"#.to_vec();
+        std::fs::write(&manifest, &occupant).expect("quarantine the occupant");
+        let (result, events) = confirm(&exclusive, &digest);
+        assert!(
+            matches!(result, Err(GenerationError::UnsupportedStateSchema)),
+            "{result:?}"
+        );
+        assert!(events.is_empty());
+        assert_eq!(std::fs::read(&manifest).expect("occupant"), occupant);
+
+        let other = tempfile::tempdir().expect("other root");
+        let other_src = tempfile::tempdir().expect("other src");
+        let other_store = store_at(other.path());
+        let valid = stage_default(&other_store, other_src.path());
+        let profile = other_store.root().join(CURRENT_PROFILE_NAME);
+        std::fs::write(&profile, br#"{"schema":9,"future":"state"}"#).expect("profile");
+        let other_tx = LifecycleTransactionLock::acquire_exclusive(Some(other.path())).unwrap();
+        let mut events = Vec::new();
+        let result = other_store.confirm_staged(&valid, &other_tx, &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        assert!(
+            matches!(result, Err(GenerationError::UnsupportedStateSchema)),
+            "a quarantined profile blocks confirmation: {result:?}"
+        );
+        assert!(events.is_empty());
+    }
+
     fn age_past_stale_threshold(path: &Path) {
         let old = SystemTime::now() - STALE_PROFILE_TEMP_AFTER * 2;
         let secs = old
@@ -3915,5 +4210,54 @@ mod tests {
         ));
         store.validate(&other).unwrap();
         store.validate(&digest).unwrap();
+    }
+
+    #[test]
+    fn streaming_every_file_checks_shape_and_defers_each_hash_to_finish() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let sources = [
+            ("a.json", b"first".as_slice()),
+            ("b.json", b"second".as_slice()),
+        ]
+        .map(|(name, bytes)| SourceSpec {
+            rel_path: name.to_owned(),
+            source: write_source(src.path(), name, bytes),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        });
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+
+        let mut pending = store.validate_streaming_all(&digest).unwrap();
+        assert_eq!(pending.manifest().files.len(), 2);
+        let mut stream = pending.stream("a.json").unwrap();
+        assert_eq!(stream.read_rest().unwrap(), b"first");
+        let mut generation = pending.finish([stream]).unwrap();
+        assert_eq!(
+            read_all(generation.take_verified_file("b.json").unwrap()),
+            b"second"
+        );
+
+        // Bytes changed in place keep the file's shape, so validation succeeds and only finishing refuses them.
+        std::fs::write(dir.join("b.json"), b"SECOND").unwrap();
+        let pending = store.validate_streaming_all(&digest).unwrap();
+        assert_eq!(pending.manifest().files[1].path, "b.json");
+        assert!(matches!(
+            pending.finish([]),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file hash diverges from the manifest"
+            })
+        ));
+        std::fs::write(dir.join("b.json"), b"second").unwrap();
+
+        // Shape and inventory are still checked before any stream is handed out.
+        std::fs::write(dir.join("b.json"), b"second!").unwrap();
+        assert!(store.validate_streaming_all(&digest).is_err());
+        std::fs::write(dir.join("b.json"), b"second").unwrap();
+        std::fs::write(dir.join("stray"), b"x").unwrap();
+        assert!(store.validate_streaming_all(&digest).is_err());
     }
 }

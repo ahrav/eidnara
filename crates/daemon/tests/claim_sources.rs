@@ -1,6 +1,7 @@
 //! Tests verify independent claim and promoted-memory inventories, distinct dual-class objects, non-resurrecting correction and retirement tombstones, replay after lost or skipped acknowledgements, and memory-domain-name-independent identities.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,22 +13,25 @@ use daemon::claim_sources::{
     claim_units,
 };
 use daemon::harness_sources::{CANONICAL_ROLE, PublishError, Representation, SourcePublisher};
+use daemon::search_catchup::{
+    Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
+};
 use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactDestination, CausalClass, CausalEvidence,
-    ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, DecisionPayload,
-    DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate, EligibilityVerdict,
-    EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload, ObservationSpec,
-    ProjectScope, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, CommitReadError,
+    DecisionPayload, DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate,
+    EligibilityVerdict, EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload,
+    ObservationSpec, ProjectScope, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec,
+    Sensitivity, SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourcePageBounds, SourceRow, Surface, TaintClass,
 };
 use retrieval::batch::{
-    BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
-    row_identities,
+    BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, read_checkpoint,
+    register_generation, row_identities,
 };
 use retrieval::claims::{
     CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateBounds, ClaimCandidateError,
@@ -488,37 +492,7 @@ impl Corpus {
 
     /// The live inventory the kernel exports, as ledger rows; the scope is read from the descriptor object's registry state.
     fn inventory(&self) -> BTreeSet<Expected> {
-        let rows = self.export();
-        let ids: Vec<String> = rows.iter().map(|row| row.object_id.clone()).collect();
-        let states = self.kernel.object_states(&ids).unwrap().1;
-        rows.into_iter()
-            .zip(states)
-            .filter(|(row, _)| row.invalidated_commit_seq.is_none())
-            .map(|(row, state)| {
-                let (field, object_id) = row.detail.identity[0].clone();
-                Expected {
-                    class: OccurrenceClass::from_code(&row.detail.class)
-                        .unwrap()
-                        .code(),
-                    field: match field.as_str() {
-                        "object_id" => "object_id",
-                        "decision_object_id" => "decision_object_id",
-                        other => panic!("unexpected identity field {other}"),
-                    },
-                    object_id,
-                    revision: row.revision,
-                    representation: match row.detail.representation.as_str() {
-                        "decision_summary" => "decision_summary",
-                        "rationale" => "rationale",
-                        "summary" => "summary",
-                        other => panic!("unexpected representation {other}"),
-                    },
-                    text: row.text.unwrap(),
-                    domain_id: row.domain_id,
-                    scope_id: state.unwrap().scope_id,
-                }
-            })
-            .collect()
+        exported_ledger(self, &self.export())
     }
 
     /// The admission classes recorded for every live descriptor, one row per admission.
@@ -3671,4 +3645,844 @@ fn a_selected_judgement_reads_permitted_objects_and_only_their_selected_occurren
     let required = judge(&foreign, true);
     assert_eq!(required.claims.len(), 1);
     assert_eq!(required.claims[0].occurrences.len(), 1);
+}
+
+/// The ledger rows a snapshot export names, with each descriptor's scope as the registry held it when the export ran.
+fn exported_ledger(corpus: &Corpus, rows: &[SourceRow]) -> BTreeSet<Expected> {
+    let ids: Vec<String> = rows.iter().map(|row| row.object_id.clone()).collect();
+    let states = corpus.kernel.object_states(&ids).unwrap().1;
+    rows.iter()
+        .zip(states)
+        .filter(|(row, _)| row.invalidated_commit_seq.is_none())
+        .map(|(row, state)| {
+            let (field, object_id) = row.detail.identity[0].clone();
+            Expected {
+                class: OccurrenceClass::from_code(&row.detail.class)
+                    .unwrap()
+                    .code(),
+                field: match field.as_str() {
+                    "object_id" => "object_id",
+                    "decision_object_id" => "decision_object_id",
+                    other => panic!("unexpected identity field {other}"),
+                },
+                object_id,
+                revision: row.revision,
+                representation: match row.detail.representation.as_str() {
+                    "decision_summary" => "decision_summary",
+                    "rationale" => "rationale",
+                    "summary" => "summary",
+                    other => panic!("unexpected representation {other}"),
+                },
+                text: row.text.clone().unwrap(),
+                domain_id: row.domain_id.clone(),
+                scope_id: state.unwrap().scope_id,
+            }
+        })
+        .collect()
+}
+
+/// A1: at one protected snapshot S, the exported claim rows equal the ledger the seeds predict, field by field, and every row was created at or before S. Writes committed after S, a correction, a retirement, a quarantine, and a new decision, all materialized, leave the export at S byte-identical. Once the hold is released, S can no longer be read, and the export refuses rather than returning a partial page.
+#[test]
+fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    let retired = Seed::scoped("retired", MEMORY, "PROJECT_RULES", 1, "Shelve it.", "");
+    let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
+    for seed in [rule, retired, quiet] {
+        corpus.decide(seed);
+    }
+    corpus.materialize();
+    let hold = corpus.capture();
+    let at_s = corpus.export_window(&hold, ExportWindow::Snapshot);
+    assert!(
+        at_s.iter().all(|row| row.invalidated_commit_seq.is_none()),
+        "every row at S is live at S"
+    );
+    assert_eq!(
+        exported_ledger(&corpus, &at_s),
+        ledger(&[rule, retired, quiet])
+    );
+    let snapshot = hold.snapshot;
+    assert!(
+        at_s.iter().all(|row| row.created_commit_seq <= snapshot),
+        "every row exported at S was created at or before S"
+    );
+
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus.retire("retired");
+    corpus
+        .kernel
+        .commit(intent("quarantine:quiet"), |envelope| {
+            let mut request = admission("quiet");
+            request.event.kind = EventKind::Quarantine;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.decide(memory("late", "Arrived later."));
+    corpus.materialize();
+    assert!(corpus.kernel.tip().unwrap() > snapshot);
+    assert_eq!(
+        corpus.export_window(&hold, ExportWindow::Snapshot),
+        at_s,
+        "the export at S is unchanged by writes after S"
+    );
+
+    corpus
+        .kernel
+        .release_source_hold(&corpus.binding(), &hold.hold_id, hold.captured_at)
+        .unwrap();
+    let refused = corpus.kernel.export_source_page(
+        &corpus.binding(),
+        &hold.hold_id,
+        hold.captured_at,
+        ExportWindow::Snapshot,
+        None,
+        page_bounds(),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(kernel::SourceExportError::Hold(
+                kernel::SourceHoldError::Invalid(kernel::SourceHoldInvalidity::Released)
+            ))
+        ),
+        "a released hold reads nothing: {refused:?}"
+    );
+}
+
+/// A5: a claim whose canonical admission row carries an uninterpretable maturity is never classified: the classifier refuses the batch with an error instead of defaulting the claim to Current or dropping it from an otherwise complete answer.
+#[test]
+fn an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defaulting() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    corpus.decide(rule);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    assert_eq!(
+        classified(&projection, &corpus.kernel),
+        expected_states(&[(rule, CandidateState::Current)])
+    );
+    let changed = Connection::open(corpus.root.join("kernel/kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE admission_decisions SET maturity='unheard-of' WHERE subject_object_id='rule'",
+            [],
+        )
+        .unwrap();
+    assert!(changed > 0, "the fixture admitted the claim");
+    let outcome = projection
+        .read(|conn| {
+            Ok(classify_live_claims(
+                conn,
+                &corpus.kernel,
+                &EvalBudget::unbounded(),
+                candidate_bounds(),
+            ))
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Err(ClaimCandidateError::Facts(
+                kernel::ClaimFactsError::MalformedRequiredField
+            ))
+        ),
+        "an uninterpretable maturity refuses the batch: {outcome:?}"
+    );
+}
+
+/// Catch-up bounds wide enough for the claim corpus; tests narrow one field at a time.
+fn catch_up_bounds() -> EpisodeBounds {
+    EpisodeBounds {
+        commits: CommitPageBounds {
+            max_commits: NonZeroUsize::new(64).unwrap(),
+            max_rows: NonZeroUsize::new(64).unwrap(),
+            max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        },
+        hold_admission: hold_admission(),
+        source_page: page_bounds(),
+        max_source_pages: NonZeroUsize::new(8).unwrap(),
+        max_source_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        batch: batch_bounds(),
+    }
+}
+
+fn kernel_db_writable(root: &Path) -> Connection {
+    let connection = Connection::open_with_flags(
+        root.join("kernel/kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+}
+
+#[test]
+fn a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    corpus.decide(rule);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    corpus
+        .kernel
+        .acknowledge_through_source_hold(&corpus.binding(), &hold.hold_id, hold.snapshot, 2)
+        .unwrap();
+    let consumer = CatchUpConsumer {
+        binding: corpus.binding(),
+        hold_id: hold.hold_id.clone(),
+        kernel_incarnation_id: corpus.kernel_incarnation_id(),
+        generation_id: Some(GENERATION.to_string()),
+    };
+
+    // A correction makes the materializer publish one claim commit that retires the old descriptors and publishes the successor's.
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus.materialize();
+    let (claim_commit, rows, payload_bytes): (i64, i64, i64) = corpus
+        .kernel_db()
+        .query_row(
+            "SELECT commit_seq,COUNT(*),SUM(LENGTH(payload)) FROM outbox WHERE commit_seq>?1
+             GROUP BY commit_seq HAVING COUNT(*)>=2 ORDER BY commit_seq DESC LIMIT 1",
+            [hold.snapshot],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let before = projection_rows(dir.path());
+    let acknowledged = || corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert_eq!(acknowledged(), Some(hold.snapshot));
+    let kernel_incarnation_id = corpus.kernel_incarnation_id();
+    let projected_through = || {
+        projection
+            .read(|conn| read_checkpoint(conn, &kernel_incarnation_id))
+            .unwrap()
+            .expect("the bootstrap installed a checkpoint")
+            .checkpoint_commit_seq
+    };
+    assert_eq!(projected_through(), hold.snapshot);
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let mut refused = |name: &str, bounds: &EpisodeBounds| -> Blocked {
+        let report = driver
+            .run_episode(&consumer, bounds, 3, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            projection_rows(dir.path()),
+            before,
+            "{name}: rows, tombstones and jobs: {report:?}"
+        );
+        assert!(
+            acknowledged().is_some_and(|through| through < claim_commit),
+            "{name}: the acknowledgement never covers the refused commit"
+        );
+        assert!(
+            projected_through() < claim_commit,
+            "{name}: the projection checkpoint never covers the refused commit"
+        );
+        match report.end {
+            EpisodeEnd::Blocked(blocked) => blocked,
+            EpisodeEnd::ReachedTarget => panic!("{name}: the episode was not blocked"),
+        }
+    };
+
+    // The whole claim commit is refused when it cannot fit the payload allowance, which the correction's own commit before it fits; no part of the claim commit applies.
+    let mut tiny = catch_up_bounds();
+    tiny.commits.max_payload_bytes = NonZeroU64::new(payload_bytes as u64 - 1).unwrap();
+    assert_eq!(
+        refused("oversized", &tiny),
+        Blocked::OversizedCommit {
+            commit_seq: claim_commit,
+            rows: rows as usize,
+            payload_bytes: payload_bytes as u64,
+        }
+    );
+
+    // A claim commit whose descriptor ordinals are no longer 0..n is refused whole.
+    let last = rows - 1;
+    let move_last = |from: i64, to: i64| {
+        kernel_db_writable(dir.path())
+            .execute(
+                "UPDATE outbox SET ordinal=?3 WHERE commit_seq=?1 AND ordinal=?2",
+                [claim_commit, from, to],
+            )
+            .unwrap();
+    };
+    move_last(last, last + 1);
+    assert_eq!(
+        refused("ordinals", &catch_up_bounds()),
+        Blocked::Read(CommitReadError::MalformedOrdinals {
+            commit_seq: claim_commit
+        })
+    );
+    move_last(last + 1, last);
+
+    // Once the commit reads whole again, catch-up applies it and the live rows are exactly the successor's ledger.
+    let report = driver
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap();
+    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+    let live: BTreeSet<String> = live_rows(dir.path()).into_iter().map(|row| row.1).collect();
+    let predicted: BTreeSet<String> = successor
+        .ledger()
+        .0
+        .iter()
+        .map(Expected::occurrence_id)
+        .collect();
+    assert_eq!(live, predicted);
+    assert_eq!(acknowledged(), Some(report.acknowledged_through));
+    assert_eq!(projected_through(), report.acknowledged_through);
+}
+
+#[test]
+fn claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
+    for seed in [rule, quiet] {
+        corpus.decide(seed);
+    }
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (_projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let projected: BTreeSet<String> = live_rows(dir.path()).into_iter().map(|row| row.1).collect();
+    let ids = vec!["rule".to_string(), "quiet".to_string()];
+    let facts_at = |seq: i64| {
+        corpus
+            .kernel
+            .claim_facts_as_of(&ids, seq, candidate_bounds().facts)
+            .unwrap()
+    };
+    let at_s = facts_at(hold.snapshot);
+    assert_eq!(at_s.known_as_of, hold.snapshot);
+    assert!(at_s.missing.is_empty());
+
+    // Every revisioned field the classifier reads for a projected row equals what the seeds alone predict at S.
+    assert_eq!(at_s.claims.len(), 2);
+    let mut covered = BTreeSet::new();
+    for (facts, seed) in at_s.claims.iter().zip([rule, quiet]) {
+        let object = &facts.object;
+        assert_eq!(object.object_id, seed.object);
+        assert_eq!(object.domain_id, seed.domain);
+        assert_eq!(object.source_revision, seed.revision);
+        assert_eq!(object.invalidated_commit_seq, None);
+        assert_eq!(object.superseded_by, None);
+        assert!(object.created_commit_seq <= hold.snapshot);
+        assert_eq!(facts.decision.decision_kind, seed.kind);
+        assert_eq!(facts.decision.scope_id.as_deref(), Some(SCOPE));
+        assert_eq!(facts.lineage_admission, None);
+        let admission = facts.own_admission.as_ref().expect("admitted");
+        assert!(admission.commit_seq <= hold.snapshot);
+        assert_eq!(admission.disposition, kernel::Disposition::Active);
+        assert_eq!(
+            (admission.source_class, admission.taint_class),
+            CLASSES,
+            "{}",
+            seed.object
+        );
+        assert_eq!(
+            facts.causality,
+            CausalClass::Unknown(kernel::UnknownReason::NoRecord)
+        );
+        let occurrences: BTreeSet<String> = facts
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.occurrence_id.clone())
+            .collect();
+        let predicted: BTreeSet<String> = seed
+            .ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect();
+        assert_eq!(occurrences, predicted, "{}", seed.object);
+        assert!(
+            facts
+                .occurrences
+                .iter()
+                .all(|occurrence| occurrence.descriptor_commit_seq <= hold.snapshot)
+        );
+        covered.extend(occurrences);
+    }
+    assert_eq!(
+        covered, projected,
+        "the facts name exactly the rows projected at S"
+    );
+
+    // Later writes touch both lineages: a correction and a quarantine.
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus
+        .kernel
+        .commit(intent("quarantine:quiet"), |envelope| {
+            let mut request = admission("quiet");
+            request.event.kind = EventKind::Quarantine;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.materialize();
+    let tip = corpus.kernel.tip().unwrap();
+    assert!(tip > hold.snapshot);
+
+    let reread = facts_at(hold.snapshot);
+    assert_eq!(reread.known_as_of, hold.snapshot);
+    assert_eq!(reread.tip, tip);
+    assert_eq!(
+        reread.claims, at_s.claims,
+        "S reads the same facts after later writes"
+    );
+    let now = facts_at(tip);
+    assert!(now.claims[0].object.invalidated_commit_seq.is_some());
+    assert_eq!(
+        now.claims[1].own_admission.as_ref().unwrap().disposition,
+        kernel::Disposition::Quarantined
+    );
+}
+
+// ---- Claim catch-up process crashes ------------------------------------------
+
+const CRASH_ROOT: &str = "EIDNARA_CLAIM_CRASH_ROOT";
+const CRASH_CUT: &str = "EIDNARA_CLAIM_CRASH_CUT";
+const CRASH_BARRIER: &str = "CLAIM-CRASH-BARRIER";
+const CRASH_HOLD: &str = "CLAIM-CRASH-HOLD";
+
+/// A catch-up boundary the child parks at until the parent kills it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimCut {
+    /// The claim window's statements ran inside the open local transaction.
+    Staged,
+    /// The local transaction committed and released; the kernel has not acknowledged.
+    Released,
+    /// The kernel acknowledged the window.
+    Acknowledged,
+}
+
+impl ClaimCut {
+    const ALL: [Self; 3] = [Self::Staged, Self::Released, Self::Acknowledged];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Released => "released",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+
+    fn reached(self, event: &EpisodeEvent) -> bool {
+        matches!(
+            (self, event),
+            (Self::Staged, EpisodeEvent::LocalStaged { .. })
+                | (Self::Released, EpisodeEvent::LocalReleased { .. })
+                | (Self::Acknowledged, EpisodeEvent::Acknowledged { .. })
+        )
+    }
+}
+
+const SUCCESSOR: Seed<'static> = Seed::scoped(
+    "rule-v2",
+    MEMORY,
+    "PROJECT_RULES",
+    2,
+    CONTRACT,
+    "Relied on.",
+);
+const ORIGINAL: Seed<'static> =
+    Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+
+/// A projection bootstrapped and acknowledged at S over `ORIGINAL`, with `ORIGINAL` corrected to `SUCCESSOR` and materialized after S, so one claim commit awaits catch-up.
+fn corrected_claim_corpus(root: &Path) -> (Corpus, SearchProjection, SourceHold, CatchUpConsumer) {
+    let corpus = Corpus::open(root);
+    corpus.seed();
+    corpus.decide(ORIGINAL);
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(root, &hold);
+    corpus
+        .kernel
+        .acknowledge_through_source_hold(&corpus.binding(), &hold.hold_id, hold.snapshot, 2)
+        .unwrap();
+    corpus.correct("rule", SUCCESSOR);
+    corpus.materialize();
+    let consumer = CatchUpConsumer {
+        binding: corpus.binding(),
+        hold_id: hold.hold_id.clone(),
+        kernel_incarnation_id: corpus.kernel_incarnation_id(),
+        generation_id: Some(GENERATION.to_string()),
+    };
+    (corpus, projection, hold, consumer)
+}
+
+/// The child builds a projection acknowledged at S, corrects the claim so the materializer publishes one claim commit after S, and parks inside catch-up at its cut until the parent kills it.
+#[test]
+#[ignore = "re-executed by the claim crash-cut test with its environment set"]
+fn claim_crash_child_reexecuted_by_the_parent() {
+    let (root, cut) = match (std::env::var(CRASH_ROOT), std::env::var(CRASH_CUT)) {
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => return,
+        (Ok(root), Ok(cut)) => (PathBuf::from(root), cut),
+        (root, cut) => panic!("incomplete child environment: {root:?}, {cut:?}"),
+    };
+    let cut = ClaimCut::ALL
+        .into_iter()
+        .find(|candidate| candidate.name() == cut)
+        .unwrap();
+    let (corpus, projection, hold, consumer) = corrected_claim_corpus(&root);
+    let target = corpus.kernel.tip().unwrap();
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(
+            stdout,
+            "{CRASH_HOLD} {} {} {target}",
+            hold.hold_id, hold.snapshot
+        )
+        .unwrap();
+        stdout.flush().unwrap();
+    }
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let report = driver
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |event| {
+            if cut.reached(&event) {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{CRASH_BARRIER} {}", cut.name()).unwrap();
+                stdout.flush().unwrap();
+                drop(stdout);
+                loop {
+                    std::thread::park();
+                }
+            }
+        })
+        .unwrap();
+    panic!("the child was not killed at its barrier: {report:?}");
+}
+
+/// Runs the child to `cut`, kills and reaps it, and returns the hold id, S, and the target it printed.
+fn run_claim_crash_child(root: &Path, cut: ClaimCut) -> (String, i64, i64) {
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Reaped(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "claim_crash_child_reexecuted_by_the_parent",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CRASH_ROOT, root)
+            .env(CRASH_CUT, cut.name())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut hold = None;
+        let mut barrier = None;
+        for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok) {
+            if let Some(start) = line.find(CRASH_HOLD) {
+                hold = Some(line[start..].to_string());
+            } else if let Some(start) = line.find(CRASH_BARRIER) {
+                barrier = Some(line[start..].to_string());
+                break;
+            }
+        }
+        let _ = tx.send((hold, barrier));
+    });
+    let (hold, barrier) = rx
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap_or_else(|error| panic!("{cut:?}: the child never reached its barrier: {error}"));
+    assert_eq!(
+        barrier.as_deref(),
+        Some(format!("{CRASH_BARRIER} {}", cut.name()).as_str())
+    );
+    drop(child);
+    let hold = hold.expect("the child printed its hold");
+    let fields: Vec<&str> = hold.split(' ').collect();
+    (
+        fields[1].to_string(),
+        fields[2].parse().unwrap(),
+        fields[3].parse().unwrap(),
+    )
+}
+
+#[test]
+fn claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early() {
+    let occurrences = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    for cut in ClaimCut::ALL {
+        let dir = tempfile::tempdir().unwrap();
+        let (hold_id, snapshot, target) = run_claim_crash_child(dir.path(), cut);
+        assert!(target > snapshot);
+        let (expected_rows, local, acknowledged) = match cut {
+            ClaimCut::Staged => (occurrences(ORIGINAL), snapshot, snapshot),
+            ClaimCut::Released => (occurrences(SUCCESSOR), target, snapshot),
+            ClaimCut::Acknowledged => (occurrences(SUCCESSOR), target, target),
+        };
+        for reopen in 0..2 {
+            let corpus = Corpus::open(dir.path());
+            let projection = SearchProjection::open(dir.path()).unwrap();
+            let incarnation = corpus.kernel_incarnation_id();
+            let projected = projection
+                .read(|conn| read_checkpoint(conn, &incarnation))
+                .unwrap()
+                .expect("the bootstrap installed a checkpoint")
+                .checkpoint_commit_seq;
+            let kernel_ack = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+            let observe = || {
+                let rows = projection_rows(dir.path());
+                let live: BTreeSet<String> = rows
+                    .iter()
+                    .filter(|row| !row.3)
+                    .map(|row| row.1.clone())
+                    .collect();
+                let tombstoned: BTreeSet<String> = rows
+                    .iter()
+                    .filter(|row| row.3)
+                    .map(|row| row.1.clone())
+                    .collect();
+                (live, tombstoned)
+            };
+            let (live, tombstoned) = observe();
+            assert_eq!(
+                live, expected_rows,
+                "{cut:?} reopen {reopen}: live occurrence ids"
+            );
+            if cut != ClaimCut::Staged {
+                assert_eq!(
+                    tombstoned,
+                    occurrences(ORIGINAL),
+                    "{cut:?} reopen {reopen}: the corrected claim's rows are tombstoned"
+                );
+            }
+            assert_eq!(
+                projected, local,
+                "{cut:?} reopen {reopen}: local checkpoint"
+            );
+            assert_eq!(
+                kernel_ack,
+                Some(acknowledged),
+                "{cut:?} reopen {reopen}: acknowledgement"
+            );
+            assert!(
+                kernel_ack.is_some_and(|through| through <= projected),
+                "the acknowledgement never exceeds the durable local prefix"
+            );
+
+            // The hold belongs to the crashed incarnation: an episode in the reopened one moves nothing, and an acknowledged window needs no further work.
+            let consumer = CatchUpConsumer {
+                binding: corpus.binding(),
+                hold_id: hold_id.clone(),
+                kernel_incarnation_id: incarnation.clone(),
+                generation_id: Some(GENERATION.to_string()),
+            };
+            let report = SearchCatchUp::new(&corpus.kernel, &projection)
+                .run_episode(&consumer, &catch_up_bounds(), 4, &mut |_| {})
+                .unwrap();
+            match cut {
+                ClaimCut::Staged | ClaimCut::Released => assert_eq!(
+                    report.end,
+                    EpisodeEnd::Blocked(Blocked::HoldExtension(
+                        kernel::SourceHoldError::BindingMismatch
+                    )),
+                    "{cut:?} reopen {reopen}: {report:?}"
+                ),
+                ClaimCut::Acknowledged => {
+                    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+                    assert_eq!(report.batches_applied, 0);
+                }
+            }
+            assert_eq!(
+                observe().0,
+                expected_rows,
+                "{cut:?} reopen {reopen}: after the episode"
+            );
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                Some(acknowledged)
+            );
+        }
+    }
+}
+
+#[test]
+fn cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger() {
+    let occurrences = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    for cut in ["hold", "staged", "released", "ack"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (corpus, projection, hold, consumer) = corrected_claim_corpus(dir.path());
+        let target = corpus.kernel.tip().unwrap();
+        let live =
+            || -> BTreeSet<String> { live_rows(dir.path()).into_iter().map(|row| row.1).collect() };
+        let acknowledged = || corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+        let budget = EvalBudget::unbounded();
+        let mut driver =
+            SearchCatchUp::new(&corpus.kernel, &projection).with_budget(budget.clone());
+        let mut hit = false;
+        let report = driver
+            .run_episode(&consumer, &catch_up_bounds(), 3, &mut |event| {
+                let phase = match event {
+                    EpisodeEvent::HoldExtensionRequested { .. } => "hold",
+                    EpisodeEvent::LocalStaged { .. } => "staged",
+                    EpisodeEvent::LocalReleased { .. } => "released",
+                    EpisodeEvent::AcknowledgementRequested { .. } => "ack",
+                    EpisodeEvent::Acknowledged { .. } => {
+                        panic!("{cut}: a cancelled window was acknowledged")
+                    }
+                };
+                if phase == cut {
+                    hit = true;
+                    budget.cancel();
+                }
+            })
+            .unwrap();
+        assert!(hit, "{cut}");
+        assert_eq!(report.end, EpisodeEnd::Blocked(Blocked::Cancelled), "{cut}");
+        assert_eq!(acknowledged(), Some(hold.snapshot), "{cut}");
+        assert!(
+            projection.quarantine().is_none(),
+            "{cut}: cancellation never quarantines"
+        );
+        let kept = if matches!(cut, "released" | "ack") {
+            SUCCESSOR
+        } else {
+            ORIGINAL
+        };
+        assert_eq!(live(), occurrences(kept), "{cut}: durable work");
+
+        let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+            .unwrap();
+        assert_eq!(replay.end, EpisodeEnd::ReachedTarget, "{cut}: {replay:?}");
+        assert_eq!(live(), occurrences(SUCCESSOR), "{cut}");
+        assert_eq!(acknowledged(), Some(target), "{cut}");
+    }
+}
+
+#[test]
+fn a_corrupt_projection_or_a_foreign_identity_stops_claim_catch_up_without_acknowledging() {
+    let occurrences = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    let rows = |root: &Path| projection_rows(root);
+
+    // A consumer naming another kernel incarnation is refused before any window is read.
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, projection, hold, consumer) = corrected_claim_corpus(dir.path());
+    let before = rows(dir.path());
+    let foreign = CatchUpConsumer {
+        kernel_incarnation_id: "another-kernel".to_string(),
+        ..consumer.clone()
+    };
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&foreign, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        report.end,
+        EpisodeEnd::Blocked(Blocked::ProjectionIdentity),
+        "{report:?}"
+    );
+    assert_eq!(rows(dir.path()), before);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(hold.snapshot)
+    );
+    assert!(
+        projection.quarantine().is_none(),
+        "an identity refusal is not corruption"
+    );
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap();
+    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+
+    // The original claim's occurrences vanish from the projection, so the correction's retirements name rows the checkpoint says exist.
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, projection, hold, consumer) = corrected_claim_corpus(dir.path());
+    let corruptor = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
+    corruptor.busy_timeout(Duration::from_secs(5)).unwrap();
+    corruptor
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let deleted = corruptor.execute("DELETE FROM occurrences", []).unwrap();
+    assert_eq!(deleted, occurrences(ORIGINAL).len());
+    drop(corruptor);
+    let before = rows(dir.path());
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &catch_up_bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let daemon::search_catchup::CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        quarantine.kind,
+        daemon::search_catchup::QuarantineKind::Integrity
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(hold.snapshot),
+        "a quarantined projection is never acknowledged"
+    );
+    assert_eq!(rows(dir.path()), before);
+    let again = driver
+        .run_episode(&consumer, &catch_up_bounds(), 4, &mut |_| {
+            panic!("a quarantined projection runs no work")
+        })
+        .unwrap_err();
+    assert!(matches!(
+        again,
+        daemon::search_catchup::CatchUpError::Quarantined(repeated) if repeated == quarantine
+    ));
 }

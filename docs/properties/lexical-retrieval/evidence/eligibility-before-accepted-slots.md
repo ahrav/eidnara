@@ -27,7 +27,7 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   it records `AcceptedBound`; `PolicyExcluded` goes to `consumed.exclude`.
   An ineligible leader therefore consumes judgment work and no slot.
 - `judge_batch` (`:972`) calls `judge_tracked`
-  (`crates/retrieval/src/eligibility.rs:296`), which calls the kernel's
+  (`crates/retrieval/src/eligibility.rs:309`), which calls the kernel's
   eligibility batch and reports a moved snapshot or incarnation.
 - Kernel policy: `judge` (`crates/kernel/src/eligibility.rs:198`) returns
   `Hidden` when no read serves the object or the served visibility is
@@ -39,9 +39,9 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   a lexical row names one occurrence, so equal-byte occurrences of distinct
   objects stay separate hits with bit-equal ranks under `rank.total_cmp`.
 
-Daemon path: the route calls `admit` (`crates/daemon/src/query_route.rs:1259`)
+Daemon path: the route calls `admit` (`crates/daemon/src/query_route.rs:1271`)
 with `validation_batch` 128 as `batch_rows` and `lexical_accepted` 128 as
-`max_accepted` (`:135`, `:170`).
+`max_accepted` (`:137`, `:172`).
 
 Tests, `crates/retrieval/tests/lexical_retrieval.rs`, on a projection written
 through `apply_batch` (`Fixture::project`, `:378`) and a real `KernelStore`:

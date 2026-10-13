@@ -48,16 +48,28 @@ function daemonLedger(
     if (!value) return undefined;
     const fields = Object.fromEntries(DAEMON_FIELDS.map((field) => [field, count(value[field])]));
     if (DAEMON_FIELDS.some((field) => fields[field] === undefined)) return undefined;
-    // A native profile's pass derives its CK; a CK profile's carries `null`.
-    const deriveCk =
-        value.derivation_us === null || value.derivation_us === undefined
-            ? null
-            : count(value.derivation_us);
-    if (deriveCk === undefined) return undefined;
-    return {
-        ...(fields as Record<(typeof DAEMON_FIELDS)[number], number>),
-        derivation_us: deriveCk,
-    };
+    const counts = fields as Record<(typeof DAEMON_FIELDS)[number], number>;
+    // A base-arm daemon can carry the derivation stage under an alternate `_us` key.
+    const spelled = Object.keys(value).filter(
+        (key) => key.endsWith("_us") && !(DAEMON_FIELDS as readonly string[]).includes(key),
+    );
+    const stage = spelled.includes("derivation_us")
+        ? "derivation_us"
+        : spelled.length === 1
+          ? spelled[0]
+          : undefined;
+    const named = stage === undefined ? null : value[stage];
+    const derivation = named === null ? null : count(named);
+    if (derivation === undefined) return undefined;
+    const staged =
+        counts.admit_us +
+        counts.lane_gate_and_decode_us +
+        (derivation ?? 0) +
+        counts.transform_core_us +
+        counts.native_attach_us +
+        counts.residual_us;
+    if (staged !== counts.total_us) return undefined;
+    return { ...counts, derivation_us: derivation };
 }
 
 /**

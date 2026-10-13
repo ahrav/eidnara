@@ -105,6 +105,11 @@ pub struct HarnessMessageMeta {
     /// The Pi codec keeps it empty and hands each encode the blocks it decodes from the row.
     #[serde(default)]
     pub decoded: Vec<WireBlock>,
+    /// Indices of tool parts whose call id an earlier part already emitted and whose status
+    /// carries only the call. The encoder drops these parts, so each served call id names one
+    /// tool part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_native_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +143,17 @@ impl MatchedBlockMetas<'_> {
         meta: &BlockMeta,
     ) -> bool {
         decoded_matches(self.decoded, self.native, &blocks[block_index], meta)
+    }
+
+    /// Marks `native_indices` for removal by [`Self::remove_unretained_native_parts`]. A folded
+    /// part is decoded by no block of its own, so its envelope rebuilds without it.
+    pub(crate) fn fold_native_parts(&mut self, native_indices: &[usize]) {
+        for &native_index in native_indices {
+            if self.unretained_native_parts.len() <= native_index {
+                self.unretained_native_parts.resize(native_index + 1, false);
+            }
+            self.unretained_native_parts[native_index] = true;
+        }
     }
 
     /// Removes native parts whose decoded blocks were removed.

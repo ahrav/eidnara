@@ -169,7 +169,7 @@ fn decode_rows<'a, E>(
             .map(Vec::as_slice)
             .unwrap_or_default();
 
-        let mut blocks = Blocks::new(retain_sidecar);
+        let mut blocks = Blocks::new(retain_sidecar, parts.len());
 
         for (part_index, part) in parts.iter().enumerate() {
             let part_type = part
@@ -244,7 +244,7 @@ fn decode_rows<'a, E>(
             }
         }
 
-        let (content, block_metas) = blocks.finish();
+        let (content, block_metas, folded) = blocks.finish();
         let decoded_blocks = if decode == Decode::Sidecar {
             content
         } else {
@@ -287,6 +287,7 @@ fn decode_rows<'a, E>(
                     stable_key: Some(stable_key),
                     blocks: block_metas,
                     decoded: decoded_blocks,
+                    folded_native_indices: folded,
                 },
             );
         }
@@ -303,7 +304,8 @@ fn decode_rows<'a, E>(
 ///
 /// `mutation_exempt_mid` selects one retained message for exact raw replay.
 /// In debug builds, encoding panics if two emitted tool parts share a call ID.
-pub fn encode_opencode(
+#[cfg(test)]
+pub(crate) fn encode_opencode(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     mutation_exempt_mid: Option<&str>,
@@ -319,7 +321,8 @@ pub fn encode_opencode(
 /// `session_id` applies only to newly created synthetic user messages.
 /// Retained raw values preserve provider fields that CK does not model.
 /// The decoder retains compaction parts to replay untouched ingress.
-pub fn encode_opencode_with_session(
+#[cfg(test)]
+pub(crate) fn encode_opencode_with_session(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     session_id: Option<&str>,
@@ -358,6 +361,16 @@ pub(crate) fn encode_opencode_shared<M: Borrow<WireMessage>>(
     encode_opencode_impl(messages, sidecar, session_id, true, mutation_exempt_mids)
 }
 
+/// One encoded output message: a pair rendered as one tool part, a fresh message with no
+/// retained envelope, or one message to encode against its retained metadata, which depends on
+/// that message alone.
+enum EncodeUnit<'a> {
+    Rendered(MessageV2Json),
+    Fresh(&'a WireMessage),
+    Retained(&'a WireMessage, &'a HarnessMessageMeta),
+}
+
+/// Each unit encodes on its own, so the units run on the bounded pool.
 fn encode_opencode_impl<M: Borrow<WireMessage>>(
     messages: &[M],
     sidecar: &DecodeSidecar,
@@ -365,7 +378,7 @@ fn encode_opencode_impl<M: Borrow<WireMessage>>(
     preserve_compaction: bool,
     mutation_exempt_mids: &[&str],
 ) -> Vec<Arc<MessageV2Json>> {
-    let mut encoded = Vec::with_capacity(messages.len());
+    let mut units = Vec::with_capacity(messages.len());
     let mut index = 0;
     // `looked_up` caches metadata for the message at `index` from the preceding iteration.
     let mut looked_up = None;
@@ -381,7 +394,7 @@ fn encode_opencode_impl<M: Borrow<WireMessage>>(
         if let Some(next) = next {
             if let Some(part) = render_synthetic_todo_pair(msg, next) {
                 let info = synthetic_message_info(msg, session_id);
-                encoded.push(Arc::new(json!({
+                units.push(EncodeUnit::Rendered(json!({
                     "info": info,
                     "parts": [part],
                 })));
@@ -395,26 +408,32 @@ fn encode_opencode_impl<M: Borrow<WireMessage>>(
             {
                 let mut message = encode_new_message(msg, session_id);
                 set_value(&mut message, "parts", Value::Array(vec![part]));
-                encoded.push(Arc::new(message));
+                units.push(EncodeUnit::Rendered(message));
                 index += 2;
                 continue;
             }
             looked_up = Some(next_meta);
         }
-        encoded.push(match meta {
-            Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
-                Arc::clone(&meta.raw)
-            }
-            Some(meta) => encode_with_meta(msg, meta, preserve_compaction),
-            None => Arc::new(encode_new_message(msg, session_id)),
+        units.push(match meta {
+            Some(meta) => EncodeUnit::Retained(msg, meta),
+            None => EncodeUnit::Fresh(msg),
         });
         index += 1;
     }
+    let encoded = crate::parallel_map::map_with(units, |(), unit| match unit {
+        EncodeUnit::Rendered(message) => Arc::new(message),
+        EncodeUnit::Fresh(msg) => Arc::new(encode_new_message(msg, session_id)),
+        EncodeUnit::Retained(_, meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
+            Arc::clone(&meta.raw)
+        }
+        EncodeUnit::Retained(msg, meta) => encode_with_meta(msg, meta, preserve_compaction),
+    });
     assert_unique_tool_use_ids(encoded.iter().map(Arc::as_ref));
     encoded
 }
 
 /// The owned values of an encode, for callers that edit them.
+#[cfg(test)]
 fn owned(encoded: Vec<Arc<MessageV2Json>>) -> Vec<MessageV2Json> {
     encoded.into_iter().map(Arc::unwrap_or_clone).collect()
 }
@@ -480,7 +499,8 @@ fn decode_tool_part<'a>(
         .and_then(|m| m.get("providerExecuted"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if emitted_calls.insert(id.clone()) {
+    let fresh_call = emitted_calls.insert(id.clone());
+    if fresh_call {
         let call_block = WireBlock::bare(BlockKind::ToolCall {
             id: id.to_string(),
             name: tool_name.clone(),
@@ -507,20 +527,25 @@ fn decode_tool_part<'a>(
             provider_executed,
         });
         blocks.push_with_native_id(result_block, part_index, "tool_result", Some(&id));
+    } else if !fresh_call {
+        blocks.folded.push(part_index);
     }
 }
 
-/// One message's decoded blocks and, when the sidecar is retained, each block's meta.
+/// One message's decoded blocks and, when the sidecar is retained, each block's meta. `folded`
+/// lists the parts whose content an earlier block holds.
 struct Blocks {
     content: Vec<WireBlock>,
     metas: Option<Vec<BlockMeta>>,
+    folded: Vec<usize>,
 }
 
 impl Blocks {
-    fn new(retain_sidecar: bool) -> Self {
+    fn new(retain_sidecar: bool, parts: usize) -> Self {
         Self {
-            content: Vec::new(),
-            metas: retain_sidecar.then(Vec::new),
+            content: Vec::with_capacity(parts),
+            metas: retain_sidecar.then(|| Vec::with_capacity(parts)),
+            folded: Vec::new(),
         }
     }
 
@@ -553,8 +578,8 @@ impl Blocks {
         self.content.push(block);
     }
 
-    fn finish(self) -> (Vec<WireBlock>, Option<Vec<BlockMeta>>) {
-        (self.content, self.metas)
+    fn finish(self) -> (Vec<WireBlock>, Option<Vec<BlockMeta>>, Vec<usize>) {
+        (self.content, self.metas, self.folded)
     }
 }
 
@@ -713,6 +738,7 @@ fn align_with_meta<'a>(
         Some(&meta.raw),
     );
     matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
+    matched_metas.fold_native_parts(&meta.folded_native_indices);
     matched_metas
 }
 
@@ -904,6 +930,7 @@ fn envelope_is_unchanged(
     let blocks = msg.content();
     let info = meta.raw.get("info");
     preserve_compaction
+        && meta.folded_native_indices.is_empty()
         && blocks.len() == meta.blocks.len()
         && meta.raw.get("parts").is_some_and(Value::is_array)
         && info.and_then(|info| info.get("id")).is_some()
@@ -2007,6 +2034,65 @@ pub(crate) mod tests {
                 ("tool_result", Some("call_a"), Some(1)),
             ]
         );
+    }
+
+    #[test]
+    fn a_repeated_call_id_without_a_result_leaves_the_encoded_window() {
+        let tool = |part_id: &str, state: Value| json!({ "id": part_id, "type": "tool", "callID": "call_a", "tool": "read", "state": state });
+        let done = || {
+            tool(
+                "prt_1",
+                json!({ "status": "completed", "input": {}, "output": "one" }),
+            )
+        };
+        let running = || tool("prt_2", json!({ "status": "running", "input": {} }));
+        let text = json!({ "type": "text", "text": "again" });
+        let windows = [
+            (
+                vec![json!({
+                    "info": { "id": "msg_tools", "role": "assistant" },
+                    "parts": [done(), text.clone(), running()]
+                })],
+                vec![json!({
+                    "info": { "id": "msg_tools", "role": "assistant" },
+                    "parts": [done(), text.clone()]
+                })],
+            ),
+            (
+                vec![
+                    json!({ "info": { "id": "msg_done", "role": "assistant" }, "parts": [done()] }),
+                    json!({
+                        "info": { "id": "msg_repeat", "role": "assistant" },
+                        "parts": [text.clone(), running()]
+                    }),
+                ],
+                vec![
+                    json!({ "info": { "id": "msg_done", "role": "assistant" }, "parts": [done()] }),
+                    json!({
+                        "info": { "id": "msg_repeat", "role": "assistant" },
+                        "parts": [text.clone()]
+                    }),
+                ],
+            ),
+        ];
+        for (raw, expected) in windows {
+            let decoded = decode_opencode(&raw);
+            let messages: Vec<_> = decoded.messages.iter().map(|m| m.ck.clone()).collect();
+            assert_eq!(encode_opencode(&messages, &decoded.sidecar, None), expected);
+            // The attach encode renders the envelope with the folded part omitted, so the
+            // unchanged-envelope shortcut declines the message that carries one.
+            let window = raw.iter().cloned().map(Arc::new).collect::<Vec<_>>();
+            let served = messages.iter().collect::<Vec<_>>();
+            assert_eq!(
+                owned(encode_opencode_shared(
+                    &served,
+                    &decode_opencode_sidecar(&window),
+                    None,
+                    &[]
+                )),
+                expected
+            );
+        }
     }
 
     #[test]

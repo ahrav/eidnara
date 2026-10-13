@@ -24,6 +24,21 @@
 > `temperature` with no `revision`; absence of `temperature` selects the
 > model-native decoding policy. Line anchors into files #989 changed are as of
 > their earlier recorded head.
+>
+> Dated note, 2026-10-12, #989: the host carries no cross-build state handling.
+> The lifecycle record has one shape and one decoder: bytes of any other shape,
+> including an empty or noncanonical digest, are a corrupt record, and a host
+> start under the fences replaces it. Probe, start, stop, and restart treat such
+> a record like any corrupt record, so `unsupported_state_schema` is no longer a
+> lifecycle-record reason, `InstanceError::UnsupportedStateSchema` and
+> `quarantined_record_present` no longer exist, and a held runtime lock with a
+> free lifetime fence is `wedged` whatever the record carries. The active
+> harness selection likewise has one shape with no `schema` member: any other
+> shape is invalid, `stop` removes it, a fresh start replaces it, and
+> `active-selection.v1.json` is no longer written. Record
+> `legacy-incumbent-classification-needs-an-unforgeable-witness` is invalidated;
+> clauses below that cite the record quarantine gate or a pre-coordination
+> incumbent describe the earlier head.
 
 Records for `crates/host-runtime`, merged from six source catalogs (host lifecycle, ring datapath, setup identity,
 client peer, request path, runtime config) in the host repo at `39e823037`. This file is the only authority for its
@@ -1109,7 +1124,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 `crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
-Status: active
+Status: invalidated
 Exercised: partial - the regression test plants exactly the forgery by hand.
 Guarantee: A running verdict derived from a legacy record is accompanied by
 evidence the record's author cannot forge, or the verdict is wedged.
@@ -1183,8 +1198,13 @@ The daemon CLI that reads the current profile and promotes on every start
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
 Status: active
-Exercised: partial - success and post-hoc tampering only; no fault injection and
-no crash test.
+Exercised: partial - success, post-hoc tampering, and hook-injected `EIO`,
+`ENOSPC`, and `EDQUOT` plus a `SIGKILL` child at every `StageEvent` of `stage`
+(`crates/daemon/tests/vector_staging_cuts.rs:513-617`), and the kernel's `ENOSPC`
+from a `tmpfs` exhausted before each staged write plus a short write and `EFBIG`
+under `RLIMIT_FSIZE` (`crates/daemon/tests/vector_staging_kernel_faults.rs:253-485`);
+the window between promotion and the `current-profile.json` rename in
+`stage_and_promote` has no cut.
 Guarantee: After any outcome of staging and promotion, including a crash at any
 point, the current profile is absent, quarantined, or names a digest that
 validates.
@@ -1202,7 +1222,9 @@ Confidence: high - [evidence](evidence/current-profile-never-names-an-unvalidata
 exchange-then-revalidate window has a state where the digest name holds a
 candidate and the temp name holds the corrupt orphan.
 Existing check: four tests cover the success path, same-digest convergence,
-post-hoc tampering, and the quarantine abort. Status unaudited.
+post-hoc tampering, and the quarantine abort; `vector_staging_cuts.rs` cuts every
+`StageEvent` of `stage` with hook errors and process kills and checks that nothing
+is selected, the residue is reclaimed, and a restage succeeds. Status unaudited.
 Impact: the profile is the selector that decides which payload the daemon
 executes.
 Open questions:
@@ -1297,7 +1319,7 @@ Status: active
 Exercised: not yet - statically checkable, and currently false.
 Guarantee: The size above which persisted state is unreadable and therefore
 quarantined is one value across the lifecycle record and the generation manifest.
-Check: `always` - the lifecycle-record cap and the generation-manifest cap (`MAX_MANIFEST_BYTES`, `generation.rs:46`, 1 MiB) are the same value. This is a predicted violation at HEAD, where the two thresholds differ (64 KiB against 1 MiB) while the source comment claims they match; accepting distinct caps requires revising or invalidating this guarantee, not passing the check.
+Check: `always` - the lifecycle-record cap and the generation-manifest cap (`MAX_MANIFEST_BYTES`, `generation.rs:149`, 1 MiB) are the same value. This is a predicted violation at HEAD, where the two thresholds differ (64 KiB against 1 MiB) while the source comment claims they match; accepting distinct caps requires revising or invalidating this guarantee, not passing the check.
 Fault/timing angle: forward compatibility. Verified: the evidence cap is 65,536
 bytes and the manifest cap is 1,048,576 bytes, sixteen times apart, while the
 manifest constant is documented as "matching the lifecycle evidence cap". A future
@@ -2294,7 +2316,7 @@ daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
 that lands it.
 Status: active
 Exercised: partial - one byte-exact golden vector exists
-(`generation.rs:1395-1412`) but its fixture omits the optional field and
+(`generation.rs:2111-2121`) but its fixture omits the optional field and
 carries an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
@@ -2310,11 +2332,11 @@ decoding `GOLDEN_BYTES` and re-encoding. `always` because the encoding is
 evaluated on every stage and every validate; there is no configuration in which
 it is unreached.
 Fault/timing angle: none. This is a static encoding contract. The mechanism is
-that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:172-174`),
-so the byte order is literally the declaration order at `:153-168` for the
-outer struct and `:141-144` for each file entry, and `digest` is the SHA-256 of
-exactly those bytes (`:176-178`). The optional field's
-`skip_serializing_if = "Option::is_none"` at `:166` is what makes the existing
+that `canonical_bytes` is `serde_json::to_vec(self)` (`generation.rs:262-264`),
+so the byte order is literally the declaration order at `:236-246` for the
+outer struct and `:220-223` for each file entry, and `digest` is the SHA-256 of
+exactly those bytes (`:266-268`). The optional field's
+`skip_serializing_if = "Option::is_none"` at `:244` is what makes the existing
 vector blind to its position: with the field absent, moving it changes nothing
 about the fixture's bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
@@ -2324,9 +2346,9 @@ Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-p
 Both structs, both encoding functions, and the existing fixture were read at
 HEAD, and the three blind spots were each confirmed by reasoning from the
 fixture's literal contents.
-Existing check: `generation.rs:1395-1412`
+Existing check: `generation.rs:2111-2121`
 `a_generation_staged_before_the_source_digest_field_still_decodes` asserts
-`decoded.canonical_bytes() == predecessor` against the literal at `:1401`. It
+`decoded.canonical_bytes() == predecessor` against the literal at `:2112`. It
 is the only byte-exact manifest vector in the crate and it does pin the
 relative order of the four leading scalars and `files`, and it does catch the
 addition of a required field, because `deny_unknown_fields` plus a missing
@@ -2361,16 +2383,16 @@ that leaves the existing golden test green must be detectable by some check.
 number does not change when a field moves, so there is no version in which the
 obligation lapses.
 Fault/timing angle: none, but the failure shape needed correcting. The break is
-**fail-closed, not silent**. `validate_in_dir` enforces the binding twice
-(`generation.rs:636-648`): first `hex(sha256(bytes)) != digest`, then
+**fail-closed, not silent**. `read_manifest_in_dir` enforces the binding twice
+(`generation.rs:1037-1043`): first `hex(sha256(bytes)) != digest`, then
 `manifest.canonical_bytes() != bytes`. Under a reordered struct the on-disk
 bytes still hash to the directory name, so the first check passes, and the
 re-encode of the decoded manifest differs, so the second fails with
-`invalid("manifest is not canonically encoded")`. The comment at `:640-647`
+`invalid("manifest is not canonically encoded")`. The comment at `:644-651`
 explains why that second check exists: without it one logical manifest would
 have two identities. So reordering produces a refusal of intact payloads, which
 is precisely the outcome the `source_payload_manifest_sha256` doc comment at
-`:157-165` was written to avoid, reached by a different route. The second,
+`:161-169` was written to avoid, reached by a different route. The second,
 independent consequence is that staging the same logical content under the
 reordered struct computes a different digest, so it lands in a new directory
 and content-addressed deduplication stops deduplicating without any error at
@@ -2384,7 +2406,7 @@ Both equality checks were read at HEAD, and the fail-closed conclusion was
 derived from them rather than assumed; the prompt's "silently change every
 retained generation's digest" is corrected in the evidence file.
 Existing check: partial and narrow. The predecessor fixture at
-`generation.rs:1395-1412` is the only cross-version manifest test, and it
+`generation.rs:2111-2121` is the only cross-version manifest test, and it
 covers one specific evolution, a field added at the end and omitted when
 absent. Nothing covers a field that moves.
 Impact: the first start after an upgrade reports `native_payload_invalid` for
@@ -2409,7 +2431,7 @@ that lands it.
 Status: active
 Exercised: partial - the Linux arm is covered by one test through `promote_temp`
 (`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`,
-`generation.rs:1526`, re-located at HEAD); the macOS arm and the non-Linux
+`generation.rs:2984`, re-located at HEAD); the macOS arm and the non-Linux
 non-macOS stub have never executed under observation; after PR #131 (merge `5d638e3e8`) `ci.yml` has no macOS job,
 so no CI executor for that arm exists.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
@@ -2425,22 +2447,21 @@ observable state in which either name is absent. Also assert the non-Linux
 non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when
 the digest target is occupied by a corrupt unprotected generation
-(`generation.rs:751-770`), so a run that never meets that condition owes
+(`generation.rs:1369-1407`), so a run that never meets that condition owes
 nothing and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
-`generation.rs:1191-1198` gives Linux and macOS a shared arm calling
-`rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, and its own doc comment
-at `:1191-1193` records that this is `renameat2(RENAME_EXCHANGE)` on Linux and
-`renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
+`store_fs.rs:112-115` gives Linux and macOS a shared arm calling
+`rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, which `rustix` issues as
+`renameat2(RENAME_EXCHANGE)` on Linux and `renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
 with independent semantics, error sets, and filesystem support, reached through
-one line of Rust. The call site at `:905` sits between an exchange and a
-revalidate-then-delete (`:907-910`), so a non-atomic or partially-applied
-exchange deletes the wrong directory. `promote_temp`'s contract at `:865-876`
+one line of Rust. The call site at `generation.rs:1402` sits between an exchange and a
+revalidate-then-delete (`:1405-1406`), so a non-atomic or partially-applied
+exchange deletes the wrong directory. `promote_temp`'s contract at `:1345-1351`
 depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing
 test `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-(`generation.rs:1689`) already builds that fixture, so the fault is available;
+(`generation.rs:2984`) already builds that fixture, so the fault is available;
 the missing element is executing it on macOS. On the stub platforms the check
 is a compile-and-call assertion.
 Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
@@ -2449,7 +2470,7 @@ with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
 since deleted that job with every other macOS job, so the claim that no macOS
 lifecycle or generation test executes now holds trivially: `ci.yml` at HEAD
 contains only `ubuntu-latest` jobs.
-Existing check: partial, Linux only. `generation.rs:1526` (re-located at HEAD)
+Existing check: partial, Linux only. `generation.rs:2984` (re-located at HEAD)
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
 branch. The macOS CI job this entry previously described was removed by
 PR #131 (merge `5d638e3e8`); no `generation` or `lifecycle` test body runs on
@@ -2489,26 +2510,26 @@ Linux path and the portable path, forcing the portable path either by a
 filesystem that rejects `renameat2` flags or by extracting the fallback so it
 can be called directly. On the portable path also close the check-then-act
 window: with a failpoint between the `statat` that reports `NOENT`
-(`generation.rs:1062-1064`) and the plain `renameat` (`:1067`), create the target,
+(`store_fs.rs:69-71`) and the plain `renameat` (`:74`), create the target,
 as an empty directory and as a file, while the call is parked, and assert the
 rename does not replace it; pre-planting the target alone tests occupancy before
 the window and cannot fail on the race the guarantee forbids. `always` because the caller's contract at
-`generation.rs:744` is unconditional, so an occupied target that gets
+`generation.rs:1348` is unconditional, so an occupied target that gets
 replaced is a violation rather than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one
-platform and load-bearing on another. `generation.rs:1216-1242`: the Linux
-block at `:1217-1230` returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`,
-falling through only on `INVAL`, `NOSYS`, or `OPNOTSUPP`, so on a current
+platform and load-bearing on another. `store_fs.rs:53-79`: the Linux
+block at `:58-68` returns on `Ok`, `EXIST`, `NOTEMPTY`, and every errno other
+than `INVAL`, `NOSYS`, and `OPNOTSUPP`, so on a current
 kernel with ext4, tmpfs, or overlayfs the fallback never runs. On macOS that
-block is absent by cfg, so `statat` at `:1231-1235` followed by `renameat` at
-`:1236-1241` is the only path. POSIX `rename` replaces an existing *empty*
-directory, which `promote_temp`'s comment at `:868-871` calls out by name as
+block is absent by cfg, so `statat` at `:69-73` followed by `renameat` at
+`:74-78` is the only path. POSIX `rename` replaces an existing *empty*
+directory, which `promote_temp`'s comment at `generation.rs:1348` calls out by name as
 the thing that must not happen, so the flagged path and the fallback do not
-implement the same guarantee. The fallback's justification at `:1211-1215` is a
-prose claim that `transaction.lock` (`lifecycle.rs:44`, `:495-496`) excludes
+implement the same guarantee. The fallback's justification at `store_fs.rs:49-52` is a
+prose claim that `transaction.lock` (`lifecycle.rs:37`, `:444-445`) excludes
 concurrent creation. That is a claim about actors inside the trust model only,
 and the same file defends against out-of-model directory replacement elsewhere:
-the walk comment at `:669-678` describes exactly that attack, and the catalog's
+the `ValidatedGeneration` comments at `generation.rs:326` and `:578` name exactly that attack, and the catalog's
 `validation-and-enumeration-address-one-directory-object` records two shipped
 defects from the class.
 Required faults and enabling state: a directory appearing at the target between
@@ -2536,7 +2557,7 @@ Open questions:
   (needs human input)
 - Should the fallback be removed rather than justified? If macOS is supported,
   it needs a real no-replace primitive; if it is not, the fallback is dead code
-  on every supported platform and the stub at `:1200-1205` is the honest shape.
+  on every supported platform and the stub at `:1204-1209` is the honest shape.
   (needs human input)
 
 ---
