@@ -36,11 +36,11 @@ Inside `generation.rs`, no third instance of that shape exists. Every
 directory-relative operation in production code resolves against a pinned
 descriptor - `root_fd`, `generations_fd`, `temp_fd`, or a `dir`/`parent`
 argument. The only non-descriptor filesystem call in production code is
-`open_source_file` (`generation.rs:1841-1849`), which opens a pathname from `CWD`
+`open_source_file` (`generation.rs:1837-1850`), which opens a pathname from `CWD`
 with `O_NOFOLLOW`, and its subject is a staging
-*source*, not a store object; `preflight_source` (`:1793`) uses it for capacity
-sizing, and `copy_source_into` re-opens the same source by pathname at `:1841`
-under a before/after identity check (`:1842`, `:1867-1868`).
+*source*, not a store object; `preflight_source` (`:1827`) uses it for capacity
+sizing, and `copy_source_into` re-opens the same source by pathname at `:1875`
+under a before/after identity check (`:1876`, `:1901-1902`).
 
 The class does survive, in two weaker forms.
 

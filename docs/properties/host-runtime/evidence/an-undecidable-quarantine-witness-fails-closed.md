@@ -93,10 +93,10 @@ unprotected, and asserts `prune` preserves it byte-for-byte.
 
 ### Q: None recorded in the catalog. Verified here instead: are all four failure modes real, and which are reachable?
 
-- Sources examined: `generation.rs:941-968`, `:976-1016`, `:1259-1307`,
+- Sources examined: `generation.rs:1569-1591`, `:976-1016`, `:1259-1307`,
   `:364-384`; `crates/host-runtime/src/instance.rs:852-865`;
   `crates/host-runtime/src/lifecycle.rs:250-284`; the one existing test at
-  `generation.rs:2097-2138`; `existing-checks.md:171-173`.
+  `generation.rs:2282-2348`; `existing-checks.md:171-173`.
 - Findings: all four are real and distinct, as enumerated above. Reachability
   ranks 1 (high, two independent causes including the mode-bit test), 2 (high),
   4 (moderate, `EIO`), 3 (low, `EIO` on an open descriptor only). The catalog's

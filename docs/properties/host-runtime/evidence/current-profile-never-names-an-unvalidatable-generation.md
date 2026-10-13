@@ -27,14 +27,14 @@ relative paths: a prefix sorts before its extensions, so `a` precedes `a/b`
 lexicographically and the reversed walk emits `a/b` before `a`. Children are
 durable before the parent entry naming them.
 
-Promotion (`:1307-1374`) is the first rename. `rename_no_replace`
+Promotion (`:1352-1408`) is the first rename. `rename_no_replace`
 (`store_fs.rs:53-79`) must not replace, because POSIX `renameat` succeeds onto an
-existing empty directory (`generation.rs:1352`); on success `generations_fd` is
-fsynced (`:1324`) and the digest is validated (`:1326`) before returning. Only
-then does `replace_profile` (`:1379-1381`, through `replace_profile_at` at
-`:1469-1506`) write the profile temp unsynced (`:1487`, through
-`write_new_file_unsynced`, `store_fs.rs:317`), fsync it (`:1490`), rename it over
-`current-profile.json` (`:1493-1494`), and fsync the root (`:1503`). So the
+existing empty directory (`generation.rs:1348`); on success `generations_fd` is
+fsynced (`:1364`) and the digest is validated (`:1366`) before returning. Only
+then does `replace_profile` (`:1413-1415`, through `replace_profile_at` at
+`:1503-1540`) write the profile temp unsynced (`:1521`, through
+`write_new_file_unsynced`, `store_fs.rs:317`), fsync it (`:1524`), rename it over
+`current-profile.json` (`:1527-1528`), and fsync the root (`:1537`). So the
 ordering is: temp contents durable, digest entry durable, profile durable - never
 inverted.
 
@@ -86,24 +86,24 @@ promote and `replace_profile`. Depends on
 
 Storage exhaustion at each write and sync point, which needs `fsync`-time
 exhaustion on a delayed-allocation filesystem to reach the
-`fsync_preserving_storage` classification (`:202-207`, through `classify_errno` at
-`:104-109`), and a process kill between
+`fsync_preserving_storage` classification (`:209-214`, through `classify_errno` at
+`:111-116`), and a process kill between
 the promoting rename and the profile rename. The staging half is covered through
 `stage_observed`: `crates/daemon/tests/vector_staging_cuts.rs:513-527` injects
-`EIO`, `ENOSPC`, and `EDQUOT` at every `StageEvent`, `:508-578` sends a child
+`EIO`, `ENOSPC`, and `EDQUOT` at every `StageEvent`, `:545-617` sends a child
 `SIGKILL` at every event and checks what the next process finds and reclaims, and
-`:663-676` checks the deployment selector's bytes across a cut. Those cells are
+`:828-842` checks the deployment selector's bytes across a cut. Those cells are
 hook-simulated errors and process kills, not kernel `fsync` exhaustion or power
 loss, and they stop at `stage`: the window between promotion and the
-`current-profile.json` rename in `stage_and_promote` (`:1123-1124`) has no cut,
-because `replace_profile` (`:1379-1381`) runs with the no-op `ProfileEvent`
+`current-profile.json` rename in `stage_and_promote` (`:1119-1120`) has no cut,
+because `replace_profile` (`:1413-1415`) runs with the no-op `ProfileEvent`
 observer. Four in-crate tests cover adjacent ground:
-`stage_validate_and_read_current_roundtrip` (`:2135`), the same-digest repair
+`stage_validate_and_read_current_roundtrip` (`:2164`), the same-digest repair
 including the protected-target refusal
-(`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`, `:2955`),
-post-hoc tampering (`validation_rejects_every_tampered_shape`, `:2443`), and the
-quarantine abort (`unknown_schemas_are_quarantined_and_block_mutation`, `:2572`).
-`interrupted_staging_leaves_the_old_profile_complete` (`:2997`) plants a leftover
+(`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`, `:2984`),
+post-hoc tampering (`validation_rejects_every_tampered_shape`, `:2472`), and the
+quarantine abort (`unknown_schemas_are_quarantined_and_block_mutation`, `:2601`).
+`interrupted_staging_leaves_the_old_profile_complete` (`:3026`) plants a leftover
 temp and a leftover profile temp rather than interrupting anything, so it proves
 inertness of residue, not crash recovery.
 
@@ -111,9 +111,9 @@ inertness of residue, not crash recovery.
 
 ### Q: Should the exchange-then-revalidate window be crash-tested? Whether any reader can observe the intermediate was not established.
 
-- Sources examined: `generation.rs:1356-1412` (`promote_temp`), `:1379-1381` and
-  `:1469-1506` (`replace_profile` and `replace_profile_at`), `:912` and
-  `:1052-1096` (`validate` and `validate_in_dir`), `store_fs.rs:112-120`
+- Sources examined: `generation.rs:1352-1408` (`promote_temp`), `:1413-1415` and
+  `:1503-1540` (`replace_profile` and `replace_profile_at`), `:908` and
+  `:1048-1092` (`validate` and `validate_in_dir`), `store_fs.rs:112-120`
   (`exchange_dirs`), `:53-79` (`rename_no_replace`); every `GenerationStore`
   construction site
   (`crates/daemon/src/bin/eidnara-host.rs:845`, `:966`, `:1001`;
