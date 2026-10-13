@@ -221,6 +221,16 @@ class SourceRejected extends Error {
 }
 const CONTENT_CHANGED = Symbol("content_changed");
 
+interface WalkLimits {
+    /**
+     * Reads of own object keys with `undefined` values, which JSON and the tape both omit, spend
+     * `untapedBytes` under this limit when it is set, and `bytes` when it is unset.
+     */
+    untapedMaxBytes?: number;
+    /** Returns a limit that covers `needed` total spend, or `undefined` when none can. */
+    extend?: (needed: number) => number | undefined;
+}
+
 /**
  * The charge covers retained tape slots and the strings they can keep alive, not engine
  * enumeration, transient descriptors, or RSS. Own-name inspection includes hidden accessors; a
@@ -228,6 +238,8 @@ const CONTENT_CHANGED = Symbol("content_changed");
  */
 class ReferenceableWalk {
     bytes = 0;
+    /** Tracks spend for omitted `undefined`-valued keys when `untapedMaxBytes` is set. */
+    untapedBytes = 0;
     /** Upper bound on the canonical JSON length of the walked values, in two-byte units for strings. */
     wireBytes = 0;
     private field?: (value: SnapshotField) => void;
@@ -246,15 +258,35 @@ class ReferenceableWalk {
 
     /** Only inspection reads `wireBytes`; capture and recheck walks skip the per-unit escape scan. */
     constructor(
-        private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
+        private maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
         private readonly estimateWire = true,
+        private readonly limits: WalkLimits = {},
     ) {}
 
     spend(bytes: number): void {
-        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes) {
-            throw new CaptureBudgetExceeded("source and snapshot walk");
-        }
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes)
+            this.extendFor(bytes);
         this.bytes += bytes;
+    }
+
+    private extendFor(bytes: number): void {
+        const extend = this.limits.extend;
+        const limit =
+            extend && Number.isSafeInteger(bytes) && bytes >= 0
+                ? extend(this.bytes + bytes)
+                : undefined;
+        if (limit === undefined || bytes > limit - this.bytes)
+            throw new CaptureBudgetExceeded("source and snapshot walk");
+        this.maxBytes = limit;
+    }
+
+    private untaped(): void {
+        const limit = this.limits.untapedMaxBytes;
+        if (limit === undefined) return;
+        this.bytes -= TAPE_SLOT_BYTES;
+        if (TAPE_SLOT_BYTES > limit - this.untapedBytes)
+            throw new CaptureBudgetExceeded("undefined-valued key reads");
+        this.untapedBytes += TAPE_SLOT_BYTES;
     }
 
     /** `wireBytes` counts only tokens JSON serialization emits; tape-only markers pass zero. */
@@ -485,6 +517,7 @@ class ReferenceableWalk {
                 }
                 if (slot.value === undefined) {
                     if (array) throw new SourceRejected("undefined_element", `${path}/${key}`);
+                    this.untaped();
                     continue;
                 }
                 // Object keys render quoted with a colon; array elements pay only their comma.
@@ -756,7 +789,7 @@ export interface CapturedMessages {
     verifiedTaped?: true;
     /**
      * The walk's spend on the root and every member, `verified.bytes` included; a recheck of
-     * identical content spends exactly this, the digest's own walk taking `verified.bytes` of it.
+     * identical content spends at most this, the digest's own walk taking `verified.bytes` of it.
      */
     bytes: number;
 }
@@ -785,9 +818,16 @@ export function captureReserved(
     unchanged?: { values: readonly unknown[]; capture: CapturedMessages },
 ): { capture: CapturedMessages; bytes: number } | undefined {
     if (lease.signal.aborted) return undefined;
+    // The walk records into free headroom; held headroom is reclaimed only as the walk needs it.
     const walker = new ReferenceableWalk(
-        Math.min(lease.remainingBytes, TRANSFORM_CAPTURE_MAX_BYTES),
+        Math.min(lease.freeBytes, TRANSFORM_CAPTURE_MAX_BYTES),
         false,
+        {
+            extend: (needed) =>
+                needed <= TRANSFORM_CAPTURE_MAX_BYTES && lease.reclaim(needed)
+                    ? Math.min(lease.freeBytes, TRANSFORM_CAPTURE_MAX_BYTES)
+                    : undefined,
+        },
     );
     const reuse = new Map<unknown, MessageContentSnapshot | undefined>();
     for (let index = 0; unchanged && index < unchanged.values.length; index += 1)
@@ -946,8 +986,9 @@ function walkMembers(
  * Membership requires own data descriptors. Content edits to members at or past `compared` can
  * pass when those members lie outside the verified prefix and retain their identity and position.
  * Every compared member is walked again, descriptors included, under the capture's spend, so
- * grown content returns `false` within that bound. A verified member compares against its tape
- * when the capture kept one, and against the digest otherwise.
+ * grown content returns `false` within that bound; reads of keys whose `undefined` value JSON
+ * omits spend a separate allowance. A verified member compares against its tape when the capture
+ * kept one, and against the digest otherwise; both require the digest's spend over the prefix.
  */
 export function capturedMessagesUnchanged(
     live: unknown,
@@ -963,8 +1004,12 @@ export function capturedMessagesUnchanged(
         const walker = new ReferenceableWalk(
             Math.min(captured.bytes - (verifier?.expected.bytes ?? 0), TRANSFORM_CAPTURE_MAX_BYTES),
             false,
+            { untapedMaxBytes: TRANSFORM_CAPTURE_MAX_BYTES },
         );
         const verifiedCount = captured.verified?.count ?? 0;
+        // Tape replay validates the verified prefix through snapshot comparisons and matching
+        // captured byte spend.
+        let verifiedSpend = 0;
         walker.recordOrCompare(() => {
             const count = walker.members(live, (slot, index) => {
                 if (
@@ -982,10 +1027,18 @@ export function capturedMessagesUnchanged(
                 const snapshot =
                     index < captured.snapshots.length ? captured.snapshots[index] : undefined;
                 if (!snapshot) throw CONTENT_CHANGED;
+                if (!verifiedMember) {
+                    walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`), snapshot);
+                    return;
+                }
+                const before = walker.bytes + walker.untapedBytes;
                 walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`), snapshot);
+                verifiedSpend += walker.bytes + walker.untapedBytes - before;
             });
             if (count !== captured.members.length) throw CONTENT_CHANGED;
             if (verifier && !verifier.matches()) throw CONTENT_CHANGED;
+            if (verifiedCount > 0 && !verifier && verifiedSpend !== captured.verified?.bytes)
+                throw CONTENT_CHANGED;
         }, captured.rootSnapshot);
         return true;
     } catch (error) {
@@ -1011,6 +1064,12 @@ export interface CaptureLease {
     readonly freeBytes: number;
     /** Reserves `bytes`, reclaiming other holds first when free headroom is short. */
     reserve(bytes: number): boolean;
+    /**
+     * `reclaim` reclaims holds in acquisition order until owner-wide free headroom reaches
+     * `bytes`; when free and held headroom total less than `bytes`, `reclaim` returns `false` and
+     * preserves all holds.
+     */
+    reclaim(bytes: number): boolean;
     /**
      * Reserves `bytes` from free headroom as a hold any later reservation of any lease may
      * reclaim; a reclaim calls `reclaim` synchronously, then returns the bytes. One hold per lease.
@@ -1104,16 +1163,20 @@ export class TransformCaptureAdmission {
                 return released ? 0 : owner.freeBytes;
             },
             reserve(additional) {
-                if (
-                    released ||
-                    !Number.isSafeInteger(additional) ||
-                    additional < 0 ||
-                    additional > owner.remainingBytes
-                )
-                    return false;
-                owner.reclaimFor(additional);
+                if (!lease.reclaim(additional)) return false;
                 owner.chargedBytesTotal += additional;
                 bytes += additional;
+                return true;
+            },
+            reclaim(needed) {
+                if (
+                    released ||
+                    !Number.isSafeInteger(needed) ||
+                    needed < 0 ||
+                    needed > owner.remainingBytes
+                )
+                    return false;
+                owner.reclaimFor(needed);
                 return true;
             },
             reserveReclaimable(additional, reclaim) {

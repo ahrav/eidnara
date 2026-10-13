@@ -653,6 +653,7 @@ describe("transform session client invocation gate before the window", () => {
                     return lease.freeBytes;
                 },
                 reserve: (bytes) => !refuse && lease.reserve(bytes),
+                reclaim: (bytes) => !refuse && lease.reclaim(bytes),
                 reserveReclaimable: (bytes, reclaim) =>
                     !refuse && lease.reserveReclaimable(bytes, reclaim),
                 refund: () => lease.refund(),
