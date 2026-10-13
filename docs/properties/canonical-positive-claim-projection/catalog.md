@@ -20,10 +20,10 @@ and harness delivery are not yet wired; their records say so.
 
 ## Reachability classes
 
-- `default-production`: reached by the kernel store API with no configuration.
-  The claim facts reader and the causality writer are library calls; no daemon
-  route calls them yet, so a production request cannot reach them today. Every
-  record below is therefore `test-only` until a caller lands.
+- `default-production`: reached by the daemon with no configuration. The search
+  lifecycle owner runs the claim materializer, and the query route reads claim
+  facts for validation; records whose subject those callers reach say so. The
+  causality writer has no daemon caller.
 - `test-only`: constructed only by `crates/kernel/tests/kernel_claim_facts.rs`.
 
 ## Index
@@ -178,28 +178,36 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - the search lifecycle owner runs
-`ClaimMaterializer` (`crates/daemon/src/search_lifecycle_owner.rs:570`), and
-the query route validates claims through `validate_claims`
-(`crates/daemon/src/query_route.rs:1707`), which reads the kernel's claim
-facts. The owner's maintenance is admitted under
-`ProjectionHook::EmbeddingBootstrap` (`search_lifecycle_owner.rs:773`); no
-claim-specific hook exists.
-Status: active
+`ClaimMaterializer` from `run_claim_slice`
+(`crates/daemon/src/search_lifecycle_owner.rs:551`, the materializer call at
+`:570`), whose publication grants and checks no projection-gate admission; the
+query route validates claims through `validate_claims`
+(`crates/daemon/src/query_route.rs:1707`), which reads the kernel's claim facts
+through `retrieval::claims::read_selected_claims`
+(`crates/retrieval/src/claims.rs:441`).
+Status: active - not held at this HEAD: claim publication and claim validation
+run in production with no claim-specific admission and no approved RP2.9
+limits.
 Exercised: not yet - no test asserts that claim projection or delivery stops
-when that admission is refused.
+without an admitted hook, because no such hook exists.
 Guarantee: No production path enables claim projection or delivery without the
 approved RP2.9 limits and evidence the specification requires.
-Check: `unreachable` - a production route that calls `claim_facts_as_of` or
-`record_claim_causality` without an admitted `projection_gates` hook must not
-exist.
+Check: `unreachable` - a production route that reads claim facts or records
+claim causality without an admitted `projection_gates` hook must not exist.
+The two callers above are such routes.
 Fault/timing angle: none.
-Required faults and enabling state: a daemon caller wired to these APIs.
-Confidence: low - [evidence](evidence/claim-enablement-requires-approved-evidence.md).
-Verified by search: no caller outside `crates/kernel` at authoring time.
+Required faults and enabling state: the default-production claim slice and
+query route above.
+Confidence: medium - [evidence](evidence/claim-enablement-requires-approved-evidence.md).
+Verified by search at this HEAD: `ClaimMaterializer::new` and
+`read_selected_claims` have the callers named above; `record_claim_causality`
+has no daemon caller.
 Existing check: none.
 Impact: unapproved capacity or evidence reaches users.
 Open questions:
-- Which `ProjectionHook` variant will gate claim retrieval? (needs human input)
+- Which `ProjectionHook` variant gates claim projection and retrieval, and
+  whether the running claim slice must stop until it exists? (needs human
+  input)
 
 ### claim-export-predecode-bounds
 

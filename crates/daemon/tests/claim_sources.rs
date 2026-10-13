@@ -488,37 +488,7 @@ impl Corpus {
 
     /// The live inventory the kernel exports, as ledger rows; the scope is read from the descriptor object's registry state.
     fn inventory(&self) -> BTreeSet<Expected> {
-        let rows = self.export();
-        let ids: Vec<String> = rows.iter().map(|row| row.object_id.clone()).collect();
-        let states = self.kernel.object_states(&ids).unwrap().1;
-        rows.into_iter()
-            .zip(states)
-            .filter(|(row, _)| row.invalidated_commit_seq.is_none())
-            .map(|(row, state)| {
-                let (field, object_id) = row.detail.identity[0].clone();
-                Expected {
-                    class: OccurrenceClass::from_code(&row.detail.class)
-                        .unwrap()
-                        .code(),
-                    field: match field.as_str() {
-                        "object_id" => "object_id",
-                        "decision_object_id" => "decision_object_id",
-                        other => panic!("unexpected identity field {other}"),
-                    },
-                    object_id,
-                    revision: row.revision,
-                    representation: match row.detail.representation.as_str() {
-                        "decision_summary" => "decision_summary",
-                        "rationale" => "rationale",
-                        "summary" => "summary",
-                        other => panic!("unexpected representation {other}"),
-                    },
-                    text: row.text.unwrap(),
-                    domain_id: row.domain_id,
-                    scope_id: state.unwrap().scope_id,
-                }
-            })
-            .collect()
+        exported_ledger(self, &self.export())
     }
 
     /// The admission classes recorded for every live descriptor, one row per admission.
@@ -3714,19 +3684,22 @@ fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
-    let anti = Seed::scoped("anti", MEMORY, "PROJECT_RULES", 1, "Shelve it.", "");
+    let retired = Seed::scoped("retired", MEMORY, "PROJECT_RULES", 1, "Shelve it.", "");
     let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
-    for seed in [rule, anti, quiet] {
+    for seed in [rule, retired, quiet] {
         corpus.decide(seed);
     }
     corpus.materialize();
     let hold = corpus.capture();
     let at_s = corpus.export_window(&hold, ExportWindow::Snapshot);
-    let expected: BTreeSet<Expected> = [rule, anti, quiet]
-        .iter()
-        .flat_map(|seed| seed.ledger().0)
-        .collect();
-    assert_eq!(exported_ledger(&corpus, &at_s), expected);
+    assert!(
+        at_s.iter().all(|row| row.invalidated_commit_seq.is_none()),
+        "every row at S is live at S"
+    );
+    assert_eq!(
+        exported_ledger(&corpus, &at_s),
+        ledger(&[rule, retired, quiet])
+    );
     let snapshot = hold.snapshot;
     assert!(
         at_s.iter().all(|row| row.created_commit_seq <= snapshot),
@@ -3742,7 +3715,7 @@ fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
         "Relied on.",
     );
     corpus.correct("rule", successor);
-    corpus.retire("anti");
+    corpus.retire("retired");
     corpus
         .kernel
         .commit(intent("quarantine:quiet"), |envelope| {
@@ -3752,14 +3725,7 @@ fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
             Ok(String::new())
         })
         .unwrap();
-    corpus.decide(Seed::scoped(
-        "late",
-        MEMORY,
-        "PROJECT_RULES",
-        1,
-        "Arrived later.",
-        "",
-    ));
+    corpus.decide(memory("late", "Arrived later."));
     corpus.materialize();
     assert!(corpus.kernel.tip().unwrap() > snapshot);
     assert_eq!(
@@ -3781,7 +3747,12 @@ fn the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes() {
         page_bounds(),
     );
     assert!(
-        refused.is_err(),
+        matches!(
+            refused,
+            Err(kernel::SourceExportError::Hold(
+                kernel::SourceHoldError::Invalid(kernel::SourceHoldInvalidity::Released)
+            ))
+        ),
         "a released hold reads nothing: {refused:?}"
     );
 }
@@ -3797,10 +3768,9 @@ fn an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defau
     corpus.materialize();
     let hold = corpus.capture();
     let (projection, _) = corpus.bootstrap(dir.path(), &hold);
-    assert!(
-        classified(&projection, &corpus.kernel)
-            .values()
-            .all(|state| *state == CandidateState::Current)
+    assert_eq!(
+        classified(&projection, &corpus.kernel),
+        expected_states(&[(rule, CandidateState::Current)])
     );
     let changed = Connection::open(corpus.root.join("kernel/kernel.sqlite"))
         .unwrap()
@@ -3821,7 +3791,12 @@ fn an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defau
         })
         .unwrap();
     assert!(
-        outcome.is_err(),
+        matches!(
+            outcome,
+            Err(ClaimCandidateError::Facts(
+                kernel::ClaimFactsError::MalformedRequiredField
+            ))
+        ),
         "an uninterpretable maturity refuses the batch: {outcome:?}"
     );
 }
