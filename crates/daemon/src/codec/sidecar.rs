@@ -125,6 +125,7 @@ pub(crate) struct MatchedBlockMetas<'a> {
     pub(crate) by_block: Vec<Option<&'a BlockMeta>>,
     unretained_native_parts: Vec<bool>,
     decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
 }
 
 impl MatchedBlockMetas<'_> {
@@ -136,7 +137,7 @@ impl MatchedBlockMetas<'_> {
         block_index: usize,
         meta: &BlockMeta,
     ) -> bool {
-        decoded_matches(self.decoded, &blocks[block_index], meta)
+        decoded_matches(self.decoded, self.native, &blocks[block_index], meta)
     }
 
     /// Removes native parts whose decoded blocks were removed.
@@ -244,21 +245,56 @@ pub fn decoded_block_fingerprint_for_test(block: &WireBlock) -> String {
 pub const BLOCK_IDENTITY_NAMESPACE_FOR_TEST: &str = BLOCK_IDENTITY_NAMESPACE;
 
 pub(crate) fn equals_decoded_block(block: &WireBlock, decoded: &WireBlock) -> bool {
+    block.kind() == decoded.kind() && same_extras(block, decoded)
+}
+
+fn same_extras(block: &WireBlock, decoded: &WireBlock) -> bool {
     fn content(block: &WireBlock) -> impl Iterator<Item = (&String, &BTreeMap<String, Value>)> {
         block
             .provider_extras
             .iter()
             .filter(|(namespace, _)| namespace.as_str() != BLOCK_IDENTITY_NAMESPACE)
     }
-    block.kind() == decoded.kind() && content(block).eq(content(decoded))
+    content(block).eq(content(decoded))
 }
 
 /// Whether `block` is the decoded block `meta` names in `decoded`, compared by canonical
-/// content; a meta naming no decoded block matches nothing.
-pub(crate) fn decoded_matches(decoded: &[WireBlock], block: &WireBlock, meta: &BlockMeta) -> bool {
-    decoded
-        .get(meta.block_index)
-        .is_some_and(|decoded| same_decoded_content(block, decoded))
+/// content.
+pub(crate) fn decoded_matches(
+    decoded: &[WireBlock],
+    native: Option<&Value>,
+    block: &WireBlock,
+    meta: &BlockMeta,
+) -> bool {
+    let Some(decoded) = decoded.get(meta.block_index) else {
+        return false;
+    };
+    match native_text(native, decoded, meta) {
+        Some(text) => {
+            matches!(block.kind(), BlockKind::Text { text: served } if served == text)
+                && same_extras(block, decoded)
+                && (!holds_float_zero(block)
+                    || canonical_text(block) == canonical_text(&native_block(decoded, text)))
+        }
+        None => same_decoded_content(block, decoded),
+    }
+}
+
+fn native_text<'a>(
+    native: Option<&'a Value>,
+    decoded: &WireBlock,
+    meta: &BlockMeta,
+) -> Option<&'a str> {
+    let part = native?.get("parts")?.get(meta.native_index?)?;
+    matches!(decoded.kind(), BlockKind::Text { .. })
+        .then(|| part.get("text").and_then(Value::as_str).unwrap_or_default())
+}
+
+fn native_block(decoded: &WireBlock, text: &str) -> WireBlock {
+    let kind = BlockKind::Text {
+        text: text.to_owned(),
+    };
+    WireBlock::with_provider_extras(kind, decoded.provider_extras.clone())
 }
 
 /// Whether two blocks have equal canonical text, decided without serializing them where the
@@ -341,8 +377,9 @@ fn alignment_candidate(
     meta: &BlockMeta,
     kind_matches: bool,
     decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> bool {
-    if kind_matches && decoded_matches(decoded, block, meta) {
+    if kind_matches && decoded_matches(decoded, native, block, meta) {
         return true;
     }
     // A meta naming no decoded block pairs by position alone: an unchanged block index and a
@@ -370,12 +407,13 @@ pub(crate) fn match_block_metas<'a>(
     metas: &'a [BlockMeta],
     mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
 ) -> MatchedBlockMetas<'a> {
     let cells = blocks.len().saturating_mul(metas.len());
     let by_block = if cells > MAX_ALIGNMENT_CELLS {
-        greedy_block_metas(blocks, metas, &mut matches, decoded)
+        greedy_block_metas(blocks, metas, &mut matches, decoded, native)
     } else {
-        optimal_block_metas(blocks, metas, &mut matches, decoded)
+        optimal_block_metas(blocks, metas, &mut matches, decoded, native)
     };
 
     let native_parts = metas
@@ -398,6 +436,7 @@ pub(crate) fn match_block_metas<'a>(
         by_block,
         unretained_native_parts,
         decoded,
+        native,
     }
 }
 
@@ -406,6 +445,7 @@ fn greedy_block_metas<'a>(
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> Vec<Option<&'a BlockMeta>> {
     // Every candidate pairing is reachable through one of two keys, so indexing the metas
     // once keeps each block to a few lookups instead of a rescan of the remaining suffix. A
@@ -416,7 +456,10 @@ fn greedy_block_metas<'a>(
     for (meta_index, meta) in metas.iter().enumerate() {
         match decoded.get(meta.block_index) {
             Some(decoded) => by_text
-                .entry(canonical_text(decoded))
+                .entry(match native_text(native, decoded, meta) {
+                    Some(text) => canonical_text(&native_block(decoded, text)),
+                    None => canonical_text(decoded),
+                })
                 .or_default()
                 .push(meta_index),
             None => by_block_index
@@ -464,6 +507,7 @@ fn optimal_block_metas<'a>(
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> Vec<Option<&'a BlockMeta>> {
     let (rows, columns) = (blocks.len(), metas.len());
     let mut candidates = vec![false; rows * columns];
@@ -471,7 +515,7 @@ fn optimal_block_metas<'a>(
         for (meta_index, meta) in metas.iter().enumerate() {
             let kind_matches = matches(block, meta);
             candidates[block_index * columns + meta_index] =
-                alignment_candidate(block, block_index, meta, kind_matches, decoded);
+                alignment_candidate(block, block_index, meta, kind_matches, decoded, native);
         }
     }
 
@@ -812,9 +856,10 @@ mod tests {
         served[3] = call(3, -0.0);
         served.remove(10);
         let kind = |_: &WireBlock, meta: &BlockMeta| meta.kind == "tool_call";
-        let greedy = match_block_metas(&served, &metas, kind, &decoded);
+        let greedy = match_block_metas(&served, &metas, kind, &decoded, None);
         let small = 40;
-        let optimal = match_block_metas(&served[..small], &metas[..small + 1], kind, &decoded);
+        let optimal =
+            match_block_metas(&served[..small], &metas[..small + 1], kind, &decoded, None);
         for matched in [&greedy.by_block[..small], &optimal.by_block[..]] {
             let paired: Vec<Option<usize>> = matched
                 .iter()
@@ -846,7 +891,7 @@ mod tests {
             .map(|index| text_block(&format!("block {index}")))
             .collect::<Vec<_>>();
         let metas = (0..count).map(text_meta).collect::<Vec<_>>();
-        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text", &[]);
+        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text", &[], None);
         for (index, meta) in matched.by_block.iter().enumerate() {
             assert_eq!(
                 meta.map(|meta| meta.block_index),
@@ -933,7 +978,7 @@ mod tests {
         let metas: Vec<BlockMeta> = (0..3).map(text_meta).collect();
         let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
         let paired = |blocks: &[WireBlock]| {
-            let mut matched = match_block_metas(blocks, &metas, text, &decoded);
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded, None);
             matched.pair_in_place_edits(blocks, &metas, text);
             let by_block = matched
                 .by_block
@@ -984,7 +1029,7 @@ mod tests {
         ];
         let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
         let kept = |blocks: &[WireBlock]| {
-            let mut matched = match_block_metas(blocks, &metas, text, &decoded);
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded, None);
             matched.pair_in_place_edits(blocks, &metas, text);
             matched.remove_unretained_native_parts(vec![0, 1, 2, 3, 4])
         };
@@ -1015,7 +1060,13 @@ mod tests {
         let blocks = vec![text_block("a"), text_block("b"), text_block("c")];
         // Only block 1 has a positional meta; blocks 0 and 2 have none.
         let metas = vec![text_meta(1)];
-        let by_block = greedy_block_metas(&blocks, &metas, &mut |_, meta| meta.kind == "text", &[]);
+        let by_block = greedy_block_metas(
+            &blocks,
+            &metas,
+            &mut |_, meta| meta.kind == "text",
+            &[],
+            None,
+        );
         assert_eq!(by_block[0].map(|meta| meta.block_index), None);
         assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
         assert_eq!(by_block[2].map(|meta| meta.block_index), None);
@@ -1038,6 +1089,7 @@ mod tests {
             &metas,
             &mut |_, meta| meta.kind == "text",
             &decoded,
+            None,
         );
         let paired: Vec<Option<usize>> = by_block
             .iter()

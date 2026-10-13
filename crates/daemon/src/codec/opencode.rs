@@ -178,7 +178,10 @@ fn decode_rows<'a, E>(
                 .unwrap_or("unknown");
             match part_type {
                 "text" if part.get("ignored") != Some(&Value::Bool(true)) => {
-                    let text = string_field(part, "text").unwrap_or_default();
+                    let text = (decode != Decode::Sidecar)
+                        .then(|| string_field(part, "text"))
+                        .flatten()
+                        .unwrap_or_default();
                     let block = block_with_extras(BlockKind::Text { text }, part);
                     blocks.push(block, part_index, part, "text");
                 }
@@ -707,6 +710,7 @@ fn align_with_meta<'a>(
         &meta.blocks,
         block_matches_meta,
         &meta.decoded,
+        Some(&meta.raw),
     );
     matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
     matched_metas
@@ -1436,12 +1440,155 @@ pub(crate) mod tests {
         assert_eq!(sidecar.message_by_mid("dup").unwrap().role, "assistant");
         windows.push(edges);
         for window in &windows {
-            assert_eq!(
-                decode_opencode_sidecar(window),
-                decode_opencode_shared(window).sidecar
-            );
+            let mut full = decode_opencode_shared(window).sidecar;
+            for meta in full.messages.values_mut() {
+                let HarnessMessageMeta {
+                    raw,
+                    blocks,
+                    decoded,
+                    ..
+                } = Arc::make_mut(meta);
+                for block_meta in blocks.iter() {
+                    if let BlockKind::Text { text } = decoded[block_meta.block_index].kind_mut() {
+                        let part = &raw["parts"][block_meta.native_index.unwrap()];
+                        assert_eq!(part["text"].as_str().unwrap_or_default(), text);
+                        text.clear();
+                    }
+                }
+            }
+            assert_eq!(decode_opencode_sidecar(window), full);
         }
         assert!(windows.len() > 2);
+    }
+
+    #[test]
+    fn the_attach_sidecar_encodes_the_full_decode_sidecar_bytes() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut windows: Vec<Vec<Arc<Value>>> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| IDENTIFIED_WINDOWS.contains(&case["name"].as_str().unwrap()))
+            .chain(golden["cases"].as_array().unwrap())
+            .map(native_window)
+            .collect();
+        let signed =
+            |sign: f64| json!({ "type": "text", "text": "z", "metadata": { "z": sign * 0.0 } });
+        let wide: Vec<Value> = (0..1_100)
+            .map(|index| json!({ "type": "text", "text": format!("w{}", index % 7) }))
+            .collect();
+        windows.push(
+            [
+                json!({ "info": { "id": "signed", "role": "user" },
+                        "parts": [signed(1.0), signed(-1.0), { "type": "text" }] }),
+                json!({ "info": { "id": "wide", "role": "assistant" }, "parts": wide }),
+            ]
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
+        );
+        let mut encoded_variants = 0;
+        let mut compared_blocks = 0;
+        for window in &windows {
+            let full = decode_opencode_shared(window);
+            let attach = decode_opencode_sidecar(window);
+            let served: Vec<WireMessage> = full
+                .messages
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect();
+            let mut variants = vec![served.clone()];
+            for (index, message) in served.iter().enumerate() {
+                for edit in 0..4 {
+                    let mut edited = served.clone();
+                    let content = edited[index].content_mut();
+                    match edit {
+                        0 => content.iter_mut().for_each(|block| {
+                            if let BlockKind::Text { text } = block.kind_mut() {
+                                text.push('x');
+                            }
+                        }),
+                        1 if content
+                            .iter()
+                            .all(|block| matches!(block.kind(), BlockKind::Text { .. })) =>
+                        {
+                            content.reverse()
+                        }
+                        2 if content.first().is_some_and(|block| {
+                            matches!(block.kind(), BlockKind::Text { .. })
+                        }) =>
+                        {
+                            drop(content.remove(0))
+                        }
+                        3 => content.iter_mut().for_each(|block| {
+                            if let Some(namespace) = block.provider_extras.get_mut(HARNESS)
+                                && let Some(metadata) = namespace.get_mut("metadata")
+                                && metadata.get("z").is_some()
+                            {
+                                metadata["z"] = json!(-metadata["z"].as_f64().unwrap());
+                            }
+                        }),
+                        _ => continue,
+                    }
+                    if edited[index] != *message || edit == 3 {
+                        variants.push(edited);
+                    }
+                }
+            }
+            for variant in &variants {
+                for (index, msg) in variant.iter().enumerate() {
+                    let (Some(by_decoded), Some(by_native)) = (
+                        meta_for_ck(&full.sidecar, msg, index),
+                        meta_for_ck(&attach, msg, index),
+                    ) else {
+                        continue;
+                    };
+                    let content = msg.content();
+                    let oracle = match_block_metas(
+                        content,
+                        &by_decoded.blocks,
+                        block_matches_meta,
+                        &by_decoded.decoded,
+                        None,
+                    );
+                    let elided = align_with_meta(msg, by_native);
+                    let mut oracle = oracle;
+                    oracle.pair_in_place_edits(content, &by_decoded.blocks, block_matches_meta);
+                    for block_index in 0..content.len() {
+                        let pairs = (oracle.by_block[block_index], elided.by_block[block_index]);
+                        assert_eq!(
+                            pairs.0.map(|meta| meta.block_index),
+                            pairs.1.map(|meta| meta.block_index)
+                        );
+                        if let (Some(decoded), Some(native)) = pairs {
+                            assert_eq!(
+                                oracle.block_is_unchanged(content, block_index, decoded),
+                                elided.block_is_unchanged(content, block_index, native)
+                            );
+                            compared_blocks += 1;
+                        }
+                    }
+                }
+                let by_full = encode_opencode_shared(variant, &full.sidecar, None, &[]);
+                let by_attach = encode_opencode_shared(variant, &attach, None, &[]);
+                assert_eq!(by_full.len(), by_attach.len());
+                for (full, attach) in by_full.iter().zip(&by_attach) {
+                    assert_eq!(
+                        serde_json::to_vec(full).unwrap(),
+                        serde_json::to_vec(attach).unwrap()
+                    );
+                    let input =
+                        |value: &Arc<Value>| window.iter().any(|raw| Arc::ptr_eq(raw, value));
+                    assert_eq!(input(full), input(attach));
+                }
+                encoded_variants += 1;
+            }
+        }
+        assert!(encoded_variants > 100, "{encoded_variants}");
+        assert!(compared_blocks > 1_000, "{compared_blocks}");
     }
 
     /// The corpus windows whose every message is an object carrying `info.id` and whose call

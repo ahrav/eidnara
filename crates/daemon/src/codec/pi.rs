@@ -1178,8 +1178,13 @@ fn encode_with_meta(
     if replays_retained_row(msg, block_metas, decoded) {
         return Some(Arc::clone(raw));
     }
-    let mut matched_metas =
-        match_block_metas(msg.content(), block_metas, block_matches_meta, decoded);
+    let mut matched_metas = match_block_metas(
+        msg.content(),
+        block_metas,
+        block_matches_meta,
+        decoded,
+        None,
+    );
     matched_metas.pair_in_place_edits(msg.content(), block_metas, block_matches_meta);
     let unchanged = msg.content().len() == block_metas.len()
         && msg
@@ -1187,7 +1192,7 @@ fn encode_with_meta(
             .iter()
             .zip(&matched_metas.by_block)
             .all(|(block, matched)| {
-                matched.is_some_and(|meta| decoded_matches(decoded, block, meta))
+                matched.is_some_and(|meta| decoded_matches(decoded, None, block, meta))
             });
     if unchanged {
         return Some(Arc::clone(raw));
@@ -1318,7 +1323,7 @@ fn update_pi_message_content(
             if let Some(part_index) = block_meta.and_then(|block_meta| block_meta.native_index)
                 && let Some(part) = parts.get_mut(part_index)
             {
-                if block_meta.is_some_and(|meta| decoded_matches(decoded, block, meta)) {
+                if block_meta.is_some_and(|meta| decoded_matches(decoded, None, block, meta)) {
                     continue;
                 }
                 if !matches!(
@@ -1344,7 +1349,7 @@ fn update_pi_message_content(
             .and_then(|block_meta| block_meta.native_index)
             .filter(|part_index| *part_index < native_parts.len());
         if let Some(part_index) = part_index
-            && !block_meta.is_some_and(|meta| decoded_matches(decoded, block, meta))
+            && !block_meta.is_some_and(|meta| decoded_matches(decoded, None, block, meta))
             && !matches!(
                 block.kind(),
                 BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
