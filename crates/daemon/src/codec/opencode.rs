@@ -364,9 +364,17 @@ fn encode_opencode_impl<M: Borrow<WireMessage>>(
 ) -> Vec<Arc<MessageV2Json>> {
     let mut encoded = Vec::with_capacity(messages.len());
     let mut index = 0;
+    // `looked_up` caches metadata for the message at `index` from the preceding iteration.
+    let mut looked_up = None;
     while index < messages.len() {
         let msg: &WireMessage = messages[index].borrow();
         let next: Option<&WireMessage> = messages.get(index + 1).map(Borrow::borrow);
+        // Decoded messages retain their harness IDs for metadata rebinding.
+        // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
+        // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
+        let meta = looked_up
+            .take()
+            .unwrap_or_else(|| meta_for_ck(sidecar, msg, index));
         if let Some(next) = next {
             if let Some(part) = render_synthetic_todo_pair(msg, next) {
                 let info = synthetic_message_info(msg, session_id);
@@ -377,10 +385,9 @@ fn encode_opencode_impl<M: Borrow<WireMessage>>(
                 index += 2;
                 continue;
             }
-            let call_is_fresh = meta_for_ck(sidecar, msg, index).is_none();
-            let result_is_fresh = meta_for_ck(sidecar, next, index + 1).is_none();
-            if call_is_fresh
-                && result_is_fresh
+            let next_meta = meta_for_ck(sidecar, next, index + 1);
+            if meta.is_none()
+                && next_meta.is_none()
                 && let Some(part) = render_adjacent_tool_pair(msg, next)
             {
                 let mut message = encode_new_message(msg, session_id);
@@ -389,11 +396,8 @@ fn encode_opencode_impl<M: Borrow<WireMessage>>(
                 index += 2;
                 continue;
             }
+            looked_up = Some(next_meta);
         }
-        // Decoded messages retain their harness IDs for metadata rebinding.
-        // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
-        // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
-        let meta = meta_for_ck(sidecar, msg, index);
         encoded.push(match meta {
             Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
                 Arc::clone(&meta.raw)
@@ -437,11 +441,13 @@ fn duplicate_tool_use_locations<'a>(
 }
 
 fn assert_unique_tool_use_ids<'a>(messages: impl IntoIterator<Item = &'a MessageV2Json>) {
-    let duplicates = duplicate_tool_use_locations(messages);
-    debug_assert!(
-        duplicates.is_empty(),
-        "OpenCode serialization produced duplicate tool_use ids: {duplicates:?}"
-    );
+    if cfg!(debug_assertions) {
+        let duplicates = duplicate_tool_use_locations(messages);
+        assert!(
+            duplicates.is_empty(),
+            "OpenCode serialization produced duplicate tool_use ids: {duplicates:?}"
+        );
+    }
 }
 
 fn decode_tool_part<'a>(
@@ -715,12 +721,16 @@ fn render_with_meta(
     matched_metas: &super::sidecar::MatchedBlockMetas<'_>,
     preserve_compaction: bool,
 ) -> Arc<Value> {
-    let mut raw = meta.raw.as_ref().clone();
-    let mut parts = raw
-        .get_mut("parts")
-        .and_then(Value::as_array_mut)
-        .map(std::mem::take)
-        .unwrap_or_default();
+    // Native parts stay borrowed until an update copies them or the finished render keeps them.
+    let mut parts: Vec<Cow<'_, Value>> = meta
+        .raw
+        .get("parts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(Cow::Borrowed)
+        .collect();
 
     let mut block_index = 0;
     while block_index < msg.content().len() {
@@ -749,7 +759,7 @@ fn render_with_meta(
                     if !arc_meta.is_some_and(|meta| {
                         matched_metas.block_is_unchanged(msg.content(), arc_index, meta)
                     }) {
-                        update_part_from_block(part, &msg.content()[arc_index]);
+                        update_native_part(part, &msg.content()[arc_index]);
                     }
                 }
                 block_index += 2;
@@ -760,7 +770,7 @@ fn render_with_meta(
                 // The paired call and result blocks must retain one `callID`.
                 // The paired blocks must retain one `callID` even when no renderer-transition marker exists.
                 // OpenCode matches call and result shells by their shared `callID`.
-                parts.push(render_tool_pair_as_part(block, result));
+                parts.push(Cow::Owned(render_tool_pair_as_part(block, result)));
                 block_index += 2;
                 continue;
             }
@@ -781,12 +791,12 @@ fn render_with_meta(
                 block.kind(),
                 BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             ) {
-                update_part_from_block(part, block);
+                update_native_part(part, block);
             }
             block_index += 1;
             continue;
         }
-        parts.push(render_block_as_part(block));
+        parts.push(Cow::Owned(render_block_as_part(block)));
         block_index += 1;
     }
 
@@ -794,22 +804,34 @@ fn render_with_meta(
     if !preserve_compaction {
         parts.retain(|part| part.get("type").and_then(Value::as_str) != Some("compaction"));
     }
+    let parts = parts.into_iter().map(Cow::into_owned).collect::<Vec<_>>();
 
-    if let Some(obj) = raw.as_object_mut() {
-        obj.insert("parts".to_string(), Value::Array(parts));
-        let info = obj.entry("info").or_insert_with(|| json!({}));
-        if let Some(info_obj) = info.as_object_mut() {
-            info_obj
-                .entry("id".to_string())
-                .or_insert_with(|| Value::String(meta.mid.clone()));
-            info_obj.insert("role".to_string(), Value::String(msg.role.clone()));
+    let raw = match meta.raw.as_ref() {
+        Value::Object(fields) => {
+            let mut obj = fields
+                .iter()
+                .filter(|(key, _)| key.as_str() != "parts")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Map<_, _>>();
+            obj.insert("parts".to_string(), Value::Array(parts));
+            if !obj.contains_key("info") {
+                obj.insert("info".to_string(), json!({}));
+            }
+            if let Some(info_obj) = obj.get_mut("info").and_then(Value::as_object_mut) {
+                if !info_obj.contains_key("id") {
+                    info_obj.insert("id".to_string(), Value::String(meta.mid.clone()));
+                }
+                if info_obj.get("role").and_then(Value::as_str) != Some(msg.role.as_str()) {
+                    info_obj.insert("role".to_string(), Value::String(msg.role.clone()));
+                }
+            }
+            Value::Object(obj)
         }
-    } else {
-        raw = json!({
+        _ => json!({
             "info": { "id": meta.mid, "role": msg.role },
             "parts": parts,
-        });
-    }
+        }),
+    };
     // An equal envelope is the retained one. JSON value equality treats `0.0` and `-0.0` as
     // equal although they serialize apart, so returning `meta.raw` also keeps the original
     // float-zero signs.
@@ -818,6 +840,50 @@ fn render_with_meta(
     } else {
         Arc::new(raw)
     }
+}
+
+fn update_native_part(part: &mut Cow<'_, Value>, block: &WireBlock) {
+    if let Cow::Borrowed(native) = *part {
+        *part = Cow::Owned(part_for_update(native, block));
+    }
+    update_part_from_block(part.to_mut(), block);
+}
+
+fn part_for_update(part: &Value, block: &WireBlock) -> Value {
+    let Value::Object(fields) = part else {
+        return Value::Null;
+    };
+    let (written, state_written): (&[&str], &[&str]) = match block.kind() {
+        BlockKind::Text { .. }
+        | BlockKind::Reasoning { .. }
+        | BlockKind::RedactedReasoning { .. } => (&["type", "text"], &[]),
+        BlockKind::ToolCall { .. } => (&["type", "callID", "tool"], &["input"]),
+        BlockKind::ToolResult { .. } => (
+            &["type", "callID", "tool"],
+            &["status", "output", "error", "attachments"],
+        ),
+        BlockKind::Media(_) | BlockKind::Opaque(_) => return Value::Null,
+    };
+    let kept = |key: &String, written: &[&str]| !written.contains(&key.as_str());
+    Value::Object(
+        fields
+            .iter()
+            .filter(|(key, _)| kept(key, written))
+            .map(|(key, value)| {
+                let value = match value {
+                    Value::Object(state) if key == "state" => Value::Object(
+                        state
+                            .iter()
+                            .filter(|(key, _)| kept(key, state_written))
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    ),
+                    value => value.clone(),
+                };
+                (key.clone(), value)
+            })
+            .collect(),
+    )
 }
 
 /// Whether encoding `msg` over `meta` would leave its envelope as retained: every served block
@@ -2130,6 +2196,108 @@ pub(crate) mod tests {
             *encoded[0],
             json!({ "info": { "id": "no-parts", "role": "user" }, "parts": [] })
         );
+    }
+
+    #[test]
+    fn a_partial_part_copy_updates_to_the_bytes_of_a_full_copy() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut parts: Vec<Value> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(golden["cases"].as_array().unwrap())
+            .flat_map(native_window)
+            .filter_map(|message| message.get("parts").and_then(Value::as_array).cloned())
+            .flatten()
+            .collect();
+        parts.extend([
+            json!("text"),
+            json!(null),
+            json!({ "type": "text", "text": "t", "metadata": { "k": -0.0 }, "id": "p" }),
+            json!({ "type": "tool", "callID": "c", "tool": "read", "state": "done" }),
+            json!({ "type": "tool", "callID": "c", "tool": "read", "metadata": 3,
+                    "state": { "status": "error", "error": "e", "input": { "n": 0.0 },
+                               "attachments": [{ "type": "file", "mime": "text/plain" }],
+                               "title": "kept", "time": { "start": 1 } } }),
+            json!({ "type": "tool", "callID": "c", "tool": "read",
+                    "state": { "status": "completed", "output": "o", "input": {} } }),
+        ]);
+        let mut blocks: Vec<WireBlock> = decode_opencode(
+            &parity["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(golden["cases"].as_array().unwrap())
+                .flat_map(native_window)
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
+        )
+        .messages
+        .into_iter()
+        .flat_map(|message| message.ck.content().to_vec())
+        .collect();
+        let attachment = ResultBlock {
+            kind: ResultBlockKind::Text { text: "a".into() },
+            provider_extras: ProviderExtras::new(),
+        };
+        blocks.extend([
+            WireBlock::bare(BlockKind::Text {
+                text: "edited".into(),
+            }),
+            WireBlock::with_provider_extras(
+                BlockKind::Text {
+                    text: "edited".into(),
+                },
+                ProviderExtras::from([(
+                    HARNESS.to_string(),
+                    BTreeMap::from([("metadata".to_string(), json!({ "m": 1 }))]),
+                )]),
+            ),
+            WireBlock::bare(BlockKind::Reasoning {
+                text: "r".into(),
+                signature: Some("s".into()),
+            }),
+            WireBlock::bare(BlockKind::RedactedReasoning { data: "d".into() }),
+            WireBlock::bare(BlockKind::ToolCall {
+                id: "c2".into(),
+                name: "write".into(),
+                input: json!({ "path": "p" }),
+                provider_executed: true,
+            }),
+            WireBlock::bare(BlockKind::ToolResult {
+                id: "c2".into(),
+                tool_name: "write".into(),
+                output: ToolOutput::bare(OutputKind::ErrorText { text: "bad".into() }),
+                provider_executed: false,
+            }),
+            WireBlock::bare(BlockKind::ToolResult {
+                id: "c2".into(),
+                tool_name: "write".into(),
+                output: ToolOutput::bare(OutputKind::Content {
+                    blocks: vec![attachment],
+                }),
+                provider_executed: false,
+            }),
+        ]);
+        let mut kinds = HashSet::new();
+        for part in &parts {
+            for block in &blocks {
+                kinds.insert(std::mem::discriminant(block.kind()));
+                let mut full = part.clone();
+                update_part_from_block(&mut full, block);
+                let mut partial = part_for_update(part, block);
+                update_part_from_block(&mut partial, block);
+                assert_eq!(
+                    serde_json::to_vec(&partial).unwrap(),
+                    serde_json::to_vec(&full).unwrap(),
+                    "part {part} under block {block:?}"
+                );
+            }
+        }
+        assert_eq!(kinds.len(), 7, "every block kind updates a part");
     }
 
     /// A caller-supplied codec namespace carries no origin: over the identified parity windows,
