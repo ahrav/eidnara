@@ -266,7 +266,7 @@ count runs only for a value past the wire cap.
 [unit-settle-live]: ../../../../crates/daemon/src/lib.rs#L8993-L9011
 [unit-abort-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L254
 [unit-emergency-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L771-L837
-[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
+[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L444-L472
 [unit-failure-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L839-L929
 
 ## Index
@@ -3127,7 +3127,7 @@ evaluation of this area and its disposition are recorded in
 [commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L1485
 [res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L1497
 [config-validate]: ../../../../crates/host-runtime/src/config.rs#L127-L131
-[outbuf]: ../../../../crates/host-runtime/src/handler.rs#L323-L332
+[outbuf]: ../../../../crates/host-runtime/src/handler.rs#L327-L332
 [into-parts]: ../../../../crates/host-runtime/src/handler.rs#L394
 [from-writer]: ../../../../crates/host-runtime/src/handler.rs#L554
 [reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L574

@@ -18920,7 +18920,7 @@ mod tests {
         }
     }
 
-    /// A direct settlement reserves exactly the measured length, and a cancellation before or after the reservation settles `request_cancelled`.
+    /// Charges a response holds travel with its direct serializer and return once it runs; a retained clone and an error outcome hold none.
     #[tokio::test]
     async fn a_held_response_keeps_its_request_charges_until_its_direct_serializer_runs() {
         let pool = TestPool::with_capacity(64);
@@ -18960,6 +18960,7 @@ mod tests {
         drop(error);
     }
 
+    /// A direct settlement reserves exactly the measured length, and a cancellation before or after the reservation settles `request_cancelled`.
     #[tokio::test]
     async fn direct_settlement_reserves_the_measured_length_and_stops_when_cancelled() {
         let output = PreparedOutput::cached_bytes(b"exact-body".to_vec());
