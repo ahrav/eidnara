@@ -1527,28 +1527,39 @@ pub(super) fn regular_file_bytes(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<u64>, StorageError> {
     let mut bytes = 0_u64;
-    for entry in rfs::Dir::read_from(objects).map_err(classify_errno)? {
+    let mut top_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+    let mut shard_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+    // Reading a directory advances its descriptor's offset, so the walk reads a
+    // descriptor of its own and concurrent walks of `objects` stay independent.
+    let top = open_shard_nofollow(objects, c".")?;
+    let mut entries = rfs::RawDir::new(&top, top_buffer.spare_capacity_mut());
+    while let Some(entry) = next_dir_entry(&mut entries)? {
         if cancelled() {
             return Ok(None);
         }
-        let entry = entry.map_err(classify_errno)?;
         let name = entry.file_name();
         if is_dot_entry(name) {
             continue;
         }
-        // Reclamation can unlink an entry between the directory read and this stat.
-        let stat = match rfs::statat(objects, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(rustix::io::Errno::NOENT) => continue,
-            Err(error) => return Err(classify_errno(error)),
-        };
-        let kind = rfs::FileType::from_raw_mode(stat.st_mode);
-        if kind.is_file() {
-            bytes = bytes.saturating_add(stat_bytes(&stat));
-            continue;
-        }
-        if !kind.is_dir() {
-            continue;
+        match entry.file_type() {
+            rfs::FileType::Directory => {}
+            rfs::FileType::RegularFile | rfs::FileType::Unknown => {
+                // Reclamation can unlink an entry between the directory read and this stat.
+                let stat = match rfs::statat(objects, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) => stat,
+                    Err(rustix::io::Errno::NOENT) => continue,
+                    Err(error) => return Err(classify_errno(error)),
+                };
+                let kind = rfs::FileType::from_raw_mode(stat.st_mode);
+                if kind.is_file() {
+                    bytes = bytes.saturating_add(stat_bytes(&stat));
+                    continue;
+                }
+                if !kind.is_dir() {
+                    continue;
+                }
+            }
+            _ => continue,
         }
         let shard = match open_shard_nofollow(objects, name) {
             Ok(shard) => shard,
@@ -1557,13 +1568,18 @@ pub(super) fn regular_file_bytes(
             }
             Err(error) => return Err(error),
         };
-        for shard_entry in rfs::Dir::read_from(&shard).map_err(classify_errno)? {
+        let mut shard_entries = rfs::RawDir::new(&shard, shard_buffer.spare_capacity_mut());
+        while let Some(shard_entry) = next_dir_entry(&mut shard_entries)? {
             if cancelled() {
                 return Ok(None);
             }
-            let shard_entry = shard_entry.map_err(classify_errno)?;
             let shard_name = shard_entry.file_name();
-            if is_dot_entry(shard_name) {
+            if is_dot_entry(shard_name)
+                || !matches!(
+                    shard_entry.file_type(),
+                    rfs::FileType::RegularFile | rfs::FileType::Unknown
+                )
+            {
                 continue;
             }
             let shard_stat = match rfs::statat(&shard, shard_name, AtFlags::SYMLINK_NOFOLLOW) {
@@ -1577,6 +1593,19 @@ pub(super) fn regular_file_bytes(
         }
     }
     Ok(Some(bytes))
+}
+
+const WALK_BUFFER_BYTES: usize = 16 * 1024;
+
+/// `next_dir_entry` treats `ENOENT` from a removed directory as end-of-directory.
+fn next_dir_entry<'dir>(
+    directory: &'dir mut rfs::RawDir<'_, &File>,
+) -> Result<Option<rfs::RawDirEntry<'dir>>, StorageError> {
+    match directory.next() {
+        None | Some(Err(rustix::io::Errno::NOENT)) => Ok(None),
+        Some(Ok(entry)) => Ok(Some(entry)),
+        Some(Err(error)) => Err(classify_errno(error)),
+    }
 }
 
 fn object_is_present(objects: &File, digest: &str) -> bool {

@@ -416,3 +416,25 @@ fn a_restore_reconciles_the_count_it_held_and_keeps_admission_open() {
     store.ingest_artifact(request("after", b"after")).unwrap();
     assert_usage_matches_walk(&store, root.path(), "ingest after restore");
 }
+
+#[test]
+fn a_walk_counts_only_regular_files_at_both_levels() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    let handle = store.ingest_artifact(request("one", b"1234")).unwrap();
+    let target = outside.path().join("target");
+    fs::write(&target, b"outside bytes").unwrap();
+    let objects = root.path().join("artifacts/objects");
+    let shard = objects.join(&handle.digest[..2]);
+    std::os::unix::fs::symlink(&target, objects.join("linked-file")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), objects.join("linked-shard")).unwrap();
+    std::os::unix::fs::symlink(&target, shard.join("linked-object")).unwrap();
+    fs::create_dir(shard.join("nested")).unwrap();
+    fs::write(shard.join("nested/object"), b"nested bytes").unwrap();
+    fs::write(objects.join("stray"), b"top").unwrap();
+    store.forget_artifact_usage_for_test();
+    assert_eq!(reported(&store), 7, "the object and the top-level file");
+    assert_usage_matches_walk(&store, root.path(), "non-regular entries");
+}
