@@ -268,10 +268,12 @@ Clustered:
   `store.repair_note_artifacts_v51()?` and
   `store.prune_transform_session_roots(..)?` at the end of the constructor. The
   prune reports a `TransformRootPrune`: it keeps every root when the clock read
-  is unusable and ends its window at the store's newest recorded activity when
-  the clock runs ahead, which
-  `a_clock_ahead_of_every_recorded_write_prunes_only_roots_idle_before_the_newest_activity`
-  and `an_unreadable_clock_keeps_every_transform_session_root` (unaudited) check. The
+  is unusable or disagrees with the store's newest recorded write (later than
+  the clock, or more than one retention window before it), which
+  `a_clock_that_disagrees_with_the_newest_recorded_write_keeps_every_root`,
+  `an_agreeing_clock_prunes_roots_idle_past_the_window_and_keeps_its_boundary`,
+  and `an_unreadable_clock_keeps_every_transform_session_root` (unaudited)
+  check. The
   refusal at `lib.rs:1375-1385` is asymmetric: it errors on `recorded <
   OLDEST_ADOPTABLE_MIGRATION_VERSION` and falls through to `_ => Ok(())` for
   everything else, and `OLDEST_ADOPTABLE_MIGRATION_VERSION` is

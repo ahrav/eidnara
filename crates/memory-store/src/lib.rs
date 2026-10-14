@@ -460,16 +460,38 @@ pub const PASS_SCHEDULER_TELEMETRY_MAX_BYTES: usize =
 
 /// What opening the store did to `transform_session_roots`, the lineage that authenticates a transform session's project root after a restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransformRootPrune {
     /// Deleted this many roots idle past the retention window.
     Pruned(usize),
     /// The clock read before the epoch or past `i64` milliseconds, so retention kept every root.
     ClockUnreadable,
+    /// The clock read and the store's newest recorded write disagree: the newest write is later than the clock, or the clock is more than one retention window past it. Retention kept every root, since either reading could be the wrong one.
+    ClockDisagrees { now_ms: i64, newest_ms: i64 },
 }
 
 /// Milliseconds since the epoch, or `None` for a clock before the epoch or past `i64` milliseconds.
 fn epoch_millis(elapsed: Result<std::time::Duration, std::time::SystemTimeError>) -> Option<i64> {
     i64::try_from(elapsed.ok()?.as_millis()).ok()
+}
+
+fn log_transform_root_prune(prune: TransformRootPrune) {
+    match prune {
+        TransformRootPrune::Pruned(0) => {}
+        TransformRootPrune::Pruned(rows) => {
+            eprintln!("memory-store: pruned {rows} idle transform session roots at open");
+        }
+        TransformRootPrune::ClockUnreadable => {
+            eprintln!(
+                "memory-store: kept every transform session root at open: the clock read is unusable"
+            );
+        }
+        TransformRootPrune::ClockDisagrees { now_ms, newest_ms } => {
+            eprintln!(
+                "memory-store: kept every transform session root at open: the clock reads {now_ms} ms and the newest recorded write {newest_ms} ms"
+            );
+        }
+    }
 }
 
 fn current_time_ms() -> i64 {
@@ -8083,17 +8105,7 @@ impl MemoryStore {
         store.transform_root_prune = store.prune_transform_session_roots(epoch_millis(
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH),
         ))?;
-        match store.transform_root_prune {
-            TransformRootPrune::Pruned(0) => {}
-            TransformRootPrune::Pruned(rows) => {
-                eprintln!("memory-store: pruned {rows} idle transform session roots at open");
-            }
-            TransformRootPrune::ClockUnreadable => {
-                eprintln!(
-                    "memory-store: kept every transform session root at open: the clock read is unusable"
-                );
-            }
-        }
+        log_transform_root_prune(store.transform_root_prune);
         store.ensure_memory_reviewer_store_identity(current_time_ms())?;
         store.resume_memory_capture_after_open()?;
         Ok(store)
@@ -8104,12 +8116,12 @@ impl MemoryStore {
         self.transform_root_prune
     }
 
-    /// Deletes roots whose observation and cache activity are both older than the retention window. The window ends at `now_ms` or at the newest root observation or cache activity the store recorded, whichever is earlier, so a clock running ahead of every recorded write prunes only roots idle that long before the store's own latest activity.
+    /// Deletes roots whose observation and cache activity are both older than the retention window ending at `now_ms`. The store's newest recorded root observation or cache activity checks the clock: when that write is later than `now_ms`, or more than one window before it, retention keeps every root. A dormant store therefore prunes at the first open after new activity, and a clock that jumps ahead at open deletes nothing.
     fn prune_transform_session_roots(
         &self,
         now_ms: Option<i64>,
     ) -> Result<TransformRootPrune, MemoryStoreError> {
-        const THIRTY_DAYS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+        const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
         let Some(now_ms) = now_ms else {
             return Ok(TransformRootPrune::ClockUnreadable);
         };
@@ -8123,12 +8135,14 @@ impl MemoryStore {
                     [],
                     |row| row.get(0),
                 )?;
-                let Some(newest) = newest else {
+                let Some(newest_ms) = newest else {
                     return Ok(TransformRootPrune::Pruned(0));
                 };
+                if newest_ms > now_ms || now_ms.saturating_sub(newest_ms) > RETENTION_MS {
+                    return Ok(TransformRootPrune::ClockDisagrees { now_ms, newest_ms });
+                }
                 // Cache rows are retained across session teardown, so row existence is not
-                // activity. A root is pruned only when both its observation and its cache
-                // activity watermark are older than the window.
+                // activity.
                 let deleted = conn.execute(
                     "DELETE FROM transform_session_roots AS roots
                       WHERE roots.observed_at < ?1
@@ -8137,7 +8151,7 @@ impl MemoryStore {
                              WHERE cache.session_id = roots.session_id
                                AND cache.last_activity_at >= ?1
                         )",
-                    params![now_ms.min(newest).saturating_sub(THIRTY_DAYS_MS)],
+                    params![now_ms - RETENTION_MS],
                 )?;
                 Ok(TransformRootPrune::Pruned(deleted))
             })
@@ -22767,33 +22781,104 @@ mod tests {
 
     const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
-    /// A clock a year ahead of every recorded write prunes only the roots idle for the retention window before the store's newest activity, so live lineage survives; the same store under its own clock prunes the same root.
+    /// Under a clock that agrees with the store's newest write, a root observed exactly one window ago is kept even with older cache activity, one observed a millisecond earlier is pruned, and a stale observation whose cache activity sits exactly at the cutoff is kept.
     #[test]
-    fn a_clock_ahead_of_every_recorded_write_prunes_only_roots_idle_before_the_newest_activity() {
+    fn an_agreeing_clock_prunes_roots_idle_past_the_window_and_keeps_its_boundary() {
         let now_ms =
             epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
                 .unwrap();
-        for clock in [now_ms + 365 * DAY_MS, now_ms] {
-            let dir = tempfile::tempdir().unwrap();
-            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-            root_observed_at(&store, "live", now_ms - DAY_MS);
-            root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+        let cutoff = now_ms - 30 * DAY_MS;
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "live", now_ms - DAY_MS);
+        root_observed_at(&store, "at-cutoff", cutoff);
+        root_observed_at(&store, "past-cutoff", cutoff - 1);
+        root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+        root_observed_at(&store, "active-at-cutoff", now_ms - 40 * DAY_MS);
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = ?1 WHERE session_id = 'active-at-cutoff'",
+                    params![cutoff],
+                )?;
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = ?1 WHERE session_id = 'at-cutoff'",
+                    params![cutoff - 1],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(2)
+        );
+        for (session, kept) in [
+            ("live", true),
+            ("at-cutoff", true),
+            ("active-at-cutoff", true),
+            ("past-cutoff", false),
+            ("stale", false),
+        ] {
             assert_eq!(
-                store.prune_transform_session_roots(Some(clock)).unwrap(),
-                TransformRootPrune::Pruned(1),
-                "clock {clock}"
-            );
-            assert!(
                 store
-                    .knows_transform_session_root("live", "/root-a")
-                    .unwrap()
-            );
-            assert!(
-                !store
-                    .knows_transform_session_root("stale", "/root-a")
-                    .unwrap()
+                    .knows_transform_session_root(session, "/root-a")
+                    .unwrap(),
+                kept,
+                "{session}"
             );
         }
+    }
+
+    /// A clock that disagrees with the store's newest write keeps every root: a clock a year ahead at open, a clock behind a write recorded under an earlier fast clock, and a clock more than one window past a dormant store's last write. The same rows under an agreeing clock prune the stale root.
+    #[test]
+    fn a_clock_that_disagrees_with_the_newest_recorded_write_keeps_every_root() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        let keeps_all = |rows: &[(&str, i64)], clock: i64| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            for (session, at) in rows {
+                root_observed_at(&store, session, *at);
+            }
+            let newest_ms = rows.iter().map(|(_, at)| *at).max().unwrap();
+            assert_eq!(
+                store.prune_transform_session_roots(Some(clock)).unwrap(),
+                TransformRootPrune::ClockDisagrees {
+                    now_ms: clock,
+                    newest_ms
+                },
+                "{rows:?} at {clock}"
+            );
+            for (session, _) in rows {
+                assert!(
+                    store
+                        .knows_transform_session_root(session, "/root-a")
+                        .unwrap()
+                );
+            }
+        };
+        let rows = [("live", now_ms - DAY_MS), ("stale", now_ms - 40 * DAY_MS)];
+        keeps_all(&rows, now_ms + 365 * DAY_MS);
+        keeps_all(
+            &[
+                ("live", now_ms - DAY_MS),
+                ("fast-write", now_ms + 365 * DAY_MS),
+            ],
+            now_ms,
+        );
+        keeps_all(&rows, now_ms + 60 * DAY_MS);
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        for (session, at) in rows {
+            root_observed_at(&store, session, at);
+        }
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(1)
+        );
     }
 
     /// An unreadable clock keeps every root, whatever its age, and a clock before the epoch or past `i64` milliseconds reads as unreadable rather than as zero or the maximum.

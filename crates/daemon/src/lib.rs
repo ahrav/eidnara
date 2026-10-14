@@ -31426,12 +31426,18 @@ mod tests {
                     .await;
             assert_eq!(transformed["action"], "HARD");
             // Setting both timestamps to 0 causes the next store open to prune the root
-            // observation while the cache state remains.
+            // observation while the cache state remains. A root another session observed now
+            // keeps the store's newest write in agreement with the clock, so the open prunes.
             store
                 .with_fenced_conn_for_test(|conn| {
                     conn.execute(
                         "UPDATE transform_session_roots SET observed_at = 0 WHERE session_id = 'ses'",
                         [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO transform_session_roots(session_id,project_root,observed_at)
+                         VALUES ('recent','/recent',?1)",
+                        [now_ms()],
                     )?;
                     conn.execute(
                         "UPDATE cache_state SET last_activity_at = 0 WHERE session_id = 'ses'",
