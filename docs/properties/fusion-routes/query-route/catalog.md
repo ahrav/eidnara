@@ -341,7 +341,8 @@ over it ends the request as `lane_unavailable` with reason `response_bytes`;
 `fused_union` and the fusion phase is the last one reached; one exact page of
 one row reports the exact lane `incomplete` with reason `page_bound`;
 `validation_batch = 1` judges in several batches and returns the same entries;
-`probes = 1` refuses two selectors as invalid before the exact phase runs and
+`probes = 1` refuses two selectors as invalid before the exact lane reads a
+page, so the exact phase is the last one reached, and
 reports two prose atoms as the lexical lane `unavailable` while the exact lane
 still serves; `lexical_accepted = 1` and `lexical_scan_rows = 1` report
 `accepted_bound` and `scan_bound`; `lexical_qualifying_matches = 1` reads
@@ -363,7 +364,12 @@ Confidence: medium - [evidence](evidence/route-bounds-are-enforced-before-protec
 Every bound has a route-level witness; the approved values are not yet fixed.
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs` scan and accepted
 bound tests, status unaudited; `crates/retrieval/tests/exact_lookup.rs` page
-cursor tests, status unaudited; `crates/retrieval/tests/fusion.rs` union bound
+cursor tests, the object-format refusal in
+`sha_prefix_enumeration_is_repository_and_algorithm_scoped_and_counts_complete_oids`,
+and `a_page_refuses_a_projection_built_under_another_schema_or_analysis_identity`,
+status unaudited; `crates/retrieval/src/exact/selector.rs`
+`the_selector_bound_refuses_a_request_before_it_collects_one_more`, status
+unaudited; `crates/retrieval/tests/fusion.rs` union bound
 test, status unaudited.
 Impact: An unbounded phase could read or serialize past the approved envelope
 under one request's budget.

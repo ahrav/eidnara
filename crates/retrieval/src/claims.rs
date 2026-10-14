@@ -30,6 +30,7 @@ use rusqlite::params;
 use storage::GuardedConn;
 
 use crate::batch::read_checkpoint;
+use crate::exact::association::derived_target;
 use crate::exact::selector::Family;
 use crate::exact::{CANONICAL_OBJECT_NAMESPACE, Coverage, EXTRACTION_VERSION, coverage};
 use crate::{ProjectionError, decode_span, read_identity};
@@ -150,7 +151,7 @@ fn claim_classes() -> &'static [OccurrenceClass] {
 
 macro_rules! claim_row_columns {
     () => {
-        "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
+        "SELECT o.occurrence_id,o.class,o.representation,a.extraction_version,o.revision,
             a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
             o.created_commit_seq,o.source_artifact_digest\n"
     };
@@ -185,7 +186,6 @@ struct LiveRow {
     occurrence_id: String,
     class: String,
     representation: String,
-    target_id: Option<String>,
     version: Option<u32>,
     revision: i64,
     key: Option<Vec<u8>>,
@@ -247,17 +247,16 @@ fn live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveRow> {
         occurrence_id: row.get(0)?,
         class: row.get(1)?,
         representation: row.get(2)?,
-        target_id: row.get(3)?,
-        version: row.get(4)?,
-        revision: row.get(5)?,
-        key: row.get(6)?,
-        tuple: row.get(7)?,
-        lineage_id: row.get(8)?,
-        span_start: row.get(9)?,
-        span_end: row.get(10)?,
-        association_commit_seq: row.get(11)?,
-        created_commit_seq: row.get(12)?,
-        source_artifact_digest: row.get(13)?,
+        version: row.get(3)?,
+        revision: row.get(4)?,
+        key: row.get(5)?,
+        tuple: row.get(6)?,
+        lineage_id: row.get(7)?,
+        span_start: row.get(8)?,
+        span_end: row.get(9)?,
+        association_commit_seq: row.get(10)?,
+        created_commit_seq: row.get(11)?,
+        source_artifact_digest: row.get(12)?,
     })
 }
 
@@ -300,19 +299,20 @@ pub fn selected_claim_candidates(
 fn candidate_row(row: LiveRow) -> Result<ClaimCandidateRow, ProjectionError> {
     let corrupt = || ProjectionError::CorruptRow;
     let class = OccurrenceClass::from_code(&row.class).ok_or_else(corrupt)?;
-    let object_id = row.target_id.ok_or_else(corrupt)?;
+    let key =
+        std::str::from_utf8(row.key.as_deref().ok_or_else(corrupt)?).map_err(|_| corrupt())?;
+    let object_id = derived_target(Family::Id, key, &row.lineage_id)
+        .ok_or_else(corrupt)?
+        .to_owned();
     if row.association_commit_seq != Some(row.created_commit_seq) {
         return Err(corrupt());
     }
-    // The `id` family derives the target from the key, and the extractor
-    // takes both from the occurrence's identity field, so the three must name
-    // one object.
+    // The extractor takes the `id` key from the occurrence's identity field,
+    // so the key must name the object the tuple names.
     let [field] = class.identity_fields() else {
         return Err(corrupt());
     };
-    if row.key.as_deref() != Some(object_id.as_bytes())
-        || !occurrence_identity_matches(&row.tuple, class, &[(field, &object_id)])
-    {
+    if !occurrence_identity_matches(&row.tuple, class, &[(field, &object_id)]) {
         return Err(corrupt());
     }
     let span = decode_span(row.span_start, row.span_end)?.map(|(start, end)| Span { start, end });

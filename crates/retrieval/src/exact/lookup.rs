@@ -2,12 +2,13 @@ use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{
-    OccurrenceClass, Span, derived_lineage_id, identity_digest, occurrence_identity_matches,
+    OccurrenceClass, Span, is_derived_lineage_id, is_identity_digest, occurrence_identity_matches,
 };
 use rusqlite::params;
+use rusqlite::types::ValueRef;
 use storage::GuardedConn;
 
-use crate::batch::{ProjectionCheckpoint, read_checkpoint};
+use crate::batch::ProjectionCheckpoint;
 use crate::exact::association::{
     CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, derived_target, sha_namespace,
 };
@@ -189,6 +190,22 @@ pub enum LookupRefusal {
     ForeignCursor,
     #[error("a stored association carries extraction version {stored}, not {expected}")]
     ExtractionMismatch { stored: u32, expected: u32 },
+    /// The projection was built by another schema or analysis identity, so its associations follow other rules and the projection is rebuilt.
+    #[error("the projection was built under another schema or analysis identity")]
+    SchemaMismatch,
+    /// The repository's commits are indexed under the other object format, so a range under this one can say nothing about absence.
+    #[error(
+        "the repository's commits are indexed under {}, not {}",
+        indexed.code(),
+        queried.code()
+    )]
+    ObjectFormatMismatch {
+        queried: ObjectFormat,
+        indexed: ObjectFormat,
+    },
+    /// No commit of the repository is indexed under either object format, so an empty range is missing context, not absence.
+    #[error("no commit of the repository is indexed")]
+    RepositoryNotIndexed,
     #[error(transparent)]
     Projection(#[from] ProjectionError),
 }
@@ -199,24 +216,31 @@ impl From<rusqlite::Error> for LookupRefusal {
     }
 }
 
-const PAGE_COLUMNS: &str =
-    "a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,
-     o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,
-     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,
-     t.invalidated_commit_seq,t.reason,o.tuple";
-
-const PAGE_FROM: &str = "FROM exact_associations a
-     JOIN occurrences o ON o.occurrence_id=a.occurrence_id
-     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=a.occurrence_id
-     WHERE a.family=?1 AND a.namespace=?2 AND a.key<?4";
-
-fn page_sql(has_cursor: bool) -> String {
-    let lower = if has_cursor {
-        "(a.key,a.occurrence_id)>(?3,?6)"
-    } else {
-        "a.key>=?3"
+/// Both page statements, built at compile time from the column list, the joins, and the lower bound on `(key, occurrence_id)`.
+/// The unary `+` on the limit keeps the plan independent of the bound value, so rebinding it for the next page reuses the prepared statement.
+macro_rules! page_sql {
+    ($lower:literal) => {
+        concat!(
+            "SELECT a.key,a.occurrence_id,a.extraction_version,a.created_commit_seq,\
+             o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,\
+             o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,\
+             t.invalidated_commit_seq,t.reason,o.tuple \
+             FROM exact_associations a \
+             JOIN occurrences o ON o.occurrence_id=a.occurrence_id \
+             LEFT JOIN occurrence_tombstones t ON t.occurrence_id=a.occurrence_id \
+             WHERE a.family=?1 AND a.namespace=?2 AND a.key<?4 AND ",
+            $lower,
+            " ORDER BY a.key,a.occurrence_id LIMIT +?5"
+        )
     };
-    format!("SELECT {PAGE_COLUMNS} {PAGE_FROM} AND {lower} ORDER BY a.key,a.occurrence_id LIMIT ?5")
+}
+
+fn page_sql(has_cursor: bool) -> &'static str {
+    if has_cursor {
+        page_sql!("(a.key,a.occurrence_id)>(?3,?6)")
+    } else {
+        page_sql!("a.key>=?3")
+    }
 }
 
 /// Checks cancellation between SQLite steps and before returning a page.
@@ -225,8 +249,12 @@ fn page_sql(has_cursor: bool) -> String {
 /// # Errors
 ///
 /// Refuses an exhausted budget, a projection without a checkpoint or under
-/// another kernel incarnation, a cursor from another query or checkpoint, and
-/// rows derived under another extraction version.
+/// another kernel incarnation, a projection built under another schema or
+/// analysis identity, a cursor from another query or checkpoint, and rows
+/// derived under another extraction version. An empty first SHA page refuses
+/// when the queried format has no indexed commit of the repository: as
+/// `ObjectFormatMismatch` when the other format has one, and as
+/// `RepositoryNotIndexed` when neither does.
 pub fn page(
     conn: &GuardedConn<'_>,
     context: &LookupContext<'_>,
@@ -240,8 +268,7 @@ pub fn page(
             .map_err(|_| LookupRefusal::BudgetExhausted)
     };
     check_budget()?;
-    let checkpoint =
-        read_checkpoint(conn, context.kernel_incarnation_id)?.ok_or(LookupRefusal::NoCheckpoint)?;
+    let checkpoint = read_state(conn, context.kernel_incarnation_id)?;
     let range = query.range();
     if let Some(cursor) = cursor {
         if cursor.range != range || cursor.kernel_incarnation_id != context.kernel_incarnation_id {
@@ -255,7 +282,7 @@ pub fn page(
         }
     }
     let limit = i64::try_from(context.page_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
-    let mut statement = conn.prepare_cached(&page_sql(cursor.is_some()))?;
+    let mut statement = conn.prepare_cached(page_sql(cursor.is_some()))?;
     let family = range.family.keyword();
     let mut rows = match cursor {
         Some(cursor) => statement.query(params![
@@ -275,8 +302,8 @@ pub fn page(
         distinct_keys: 0,
     };
     let cursor_key = cursor.map(|cursor| cursor.last_key.as_slice());
+    check_budget()?;
     loop {
-        check_budget()?;
         let row = rows.next()?;
         check_budget()?;
         let Some(row) = row else { break };
@@ -291,7 +318,7 @@ pub fn page(
             });
             break;
         }
-        let version: u32 = row.get(3)?;
+        let version: u32 = row.get(2)?;
         if version != EXTRACTION_VERSION {
             return Err(LookupRefusal::ExtractionMismatch {
                 stored: version,
@@ -309,31 +336,109 @@ pub fn page(
         }
         page.rows.push(decoded);
     }
+    if let ExactQuery::Sha(sha) = query
+        && cursor.is_none()
+        && page.rows.is_empty()
+        && !sha_indexed(conn, sha.repository_id, sha.object_format)?
+    {
+        let other = match sha.object_format {
+            ObjectFormat::Sha1 => ObjectFormat::Sha256,
+            ObjectFormat::Sha256 => ObjectFormat::Sha1,
+        };
+        return Err(if sha_indexed(conn, sha.repository_id, other)? {
+            LookupRefusal::ObjectFormatMismatch {
+                queried: sha.object_format,
+                indexed: other,
+            }
+        } else {
+            LookupRefusal::RepositoryNotIndexed
+        });
+    }
     check_budget()?;
     Ok(page)
+}
+
+/// The identity columns a page checks and the checkpoint, read by one cached statement from the transaction's snapshot.
+const STATE_SQL: &str = "SELECT i.kernel_incarnation_id,i.schema_version,i.analysis_identity,
+        c.snapshot_commit_seq,c.checkpoint_commit_seq,c.hold_id
+     FROM projection_identity i LEFT JOIN projection_checkpoint c ON c.singleton=1
+     WHERE i.singleton=1";
+
+/// Refuses a missing identity or another kernel incarnation, then a missing checkpoint, then another schema or analysis identity.
+fn read_state(
+    conn: &GuardedConn<'_>,
+    kernel_incarnation_id: &str,
+) -> Result<ProjectionCheckpoint, LookupRefusal> {
+    let mut statement = conn.prepare_cached(STATE_SQL)?;
+    let mut rows = statement.query([])?;
+    let row = rows.next()?.ok_or(ProjectionError::IdentityMismatch)?;
+    let text = |index| {
+        row.get_ref(index)?
+            .as_str()
+            .map_err(|_| LookupRefusal::from(ProjectionError::CorruptRow))
+    };
+    if text(0)? != kernel_incarnation_id {
+        return Err(ProjectionError::IdentityMismatch.into());
+    }
+    let (Some(snapshot_commit_seq), Some(checkpoint_commit_seq)) = (row.get(3)?, row.get(4)?)
+    else {
+        return Err(LookupRefusal::NoCheckpoint);
+    };
+    let schema_version: i64 = row.get(1)?;
+    if schema_version != i64::from(crate::SCHEMA_VERSION)
+        || text(2)? != crate::lexical::AnalysisIdentity::current_str()
+    {
+        return Err(LookupRefusal::SchemaMismatch);
+    }
+    Ok(ProjectionCheckpoint {
+        snapshot_commit_seq,
+        checkpoint_commit_seq,
+        hold_id: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+    })
+}
+
+/// Whether any commit of `repository_id` is indexed under `format`.
+fn sha_indexed(
+    conn: &GuardedConn<'_>,
+    repository_id: &str,
+    format: ObjectFormat,
+) -> Result<bool, LookupRefusal> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM exact_associations WHERE family=?1 AND namespace=?2)",
+        )?
+        .query_row(
+            params![
+                Family::Sha.keyword(),
+                sha_namespace(format.code(), repository_id)
+            ],
+            |row| row.get(0),
+        )?)
 }
 
 impl AssociationRow {
     fn decode(row: &rusqlite::Row<'_>, range: &KeyRange) -> Result<Self, LookupRefusal> {
         let corrupt = || ProjectionError::CorruptRow;
-        let span = decode_span(row.get(9)?, row.get(10)?)?;
-        let occurrence_created_commit_seq: i64 = row.get(15)?;
-        let created_commit_seq: i64 = row.get(4)?;
+        let span = decode_span(row.get(8)?, row.get(9)?)?;
+        let occurrence_created_commit_seq: i64 = row.get(14)?;
+        let created_commit_seq: i64 = row.get(3)?;
         if created_commit_seq != occurrence_created_commit_seq {
             return Err(corrupt().into());
         }
-        let tombstone = decode_tombstone(
-            row.get(16)?,
-            row.get::<_, Option<String>>(17)?.as_deref(),
-            occurrence_created_commit_seq,
-        )?;
-        let class: String = row.get(6)?;
-        let class = OccurrenceClass::from_code(&class).ok_or_else(corrupt)?;
-        let occurrence_id: String = row.get(2)?;
-        let lineage_id: String = row.get(5)?;
-        let revision: i64 = row.get(7)?;
-        let representation: String = row.get(8)?;
-        let tuple: Vec<u8> = row.get(18)?;
+        // Columns the row only checks are borrowed from the statement.
+        let borrowed = |index| row.get_ref(index).map_err(LookupRefusal::from);
+        let reason = match borrowed(16)? {
+            ValueRef::Null => None,
+            reason => Some(reason.as_str().map_err(|_| corrupt())?),
+        };
+        let tombstone = decode_tombstone(row.get(15)?, reason, occurrence_created_commit_seq)?;
+        let class = borrowed(5)?.as_str().map_err(|_| corrupt())?;
+        let class = OccurrenceClass::from_code(class).ok_or_else(corrupt)?;
+        let occurrence_id: String = row.get(1)?;
+        let lineage_id: String = row.get(4)?;
+        let revision: i64 = row.get(6)?;
+        let representation: String = row.get(7)?;
+        let tuple = borrowed(17)?.as_blob().map_err(|_| corrupt())?;
         let key: Vec<u8> = row.get(0)?;
         let key_text = std::str::from_utf8(&key).map_err(|_| corrupt())?;
         let identity: &[(&str, &str)] = match (range.family, class) {
@@ -349,23 +454,22 @@ impl AssociationRow {
             }
             _ => return Err(corrupt().into()),
         };
-        let lineage = derived_lineage_id(
-            &tuple,
-            class.code(),
-            revision,
-            &representation,
-            span.map(|(start, end)| Span { start, end }),
-        );
-        if !occurrence_identity_matches(&tuple, class, identity)
-            || identity_digest(&tuple) != occurrence_id
-            || lineage.as_deref() != Some(&*lineage_id)
+        if !occurrence_identity_matches(tuple, class, identity)
+            || !is_identity_digest(&occurrence_id, tuple)
+            || !is_derived_lineage_id(
+                &lineage_id,
+                tuple,
+                class.code(),
+                revision,
+                &representation,
+                span.map(|(start, end)| Span { start, end }),
+            )
         {
             return Err(corrupt().into());
         }
-        let target_id: String = row.get(1)?;
-        if derived_target(range.family, &key, &lineage_id) != Some(target_id.as_bytes()) {
-            return Err(corrupt().into());
-        }
+        let target_id = derived_target(range.family, key_text, &lineage_id)
+            .ok_or_else(corrupt)?
+            .to_owned();
         Ok(Self {
             key,
             target_id,
@@ -376,10 +480,10 @@ impl AssociationRow {
             revision,
             representation,
             span,
-            payload_id: row.get(11)?,
-            source_object_id: row.get(12)?,
-            source_evidence_id: row.get(13)?,
-            source_artifact_digest: row.get(14)?,
+            payload_id: row.get(10)?,
+            source_object_id: row.get(11)?,
+            source_evidence_id: row.get(12)?,
+            source_artifact_digest: row.get(13)?,
             tombstone,
         })
     }
@@ -403,15 +507,15 @@ mod tests {
              SELECT printf('occ-%08d',n),x'00','l','canonical_claims',1,'decision_summary','p','d',
                  'normal','s','e','digest',1,0 FROM ids;
              WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
-             INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+             INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                  extraction_version,created_commit_seq)
              SELECT 'id','canonical_object',CAST(printf('obj-%08d',n) AS BLOB),printf('occ-%08d',n),
-                 printf('obj-%08d',n),1,1 FROM ids;
+                 1,1 FROM ids;
              WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
-             INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+             INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                  extraction_version,created_commit_seq)
              SELECT 'sha','sha1:repo',CAST(printf('ab%038x',n) AS BLOB),printf('occ-%08d',n),
-                 printf('obj-%08d',n),1,1 FROM ids;"
+                 1,1 FROM ids;"
         ))
         .unwrap();
         conn
@@ -444,10 +548,10 @@ mod tests {
                 hi.clone(),
                 Value::Integer(9),
             ];
-            let first_plan = plan(&conn, &page_sql(false), &first);
+            let first_plan = plan(&conn, page_sql(false), &first);
             assert!(
                 first_plan.iter().any(|d| d.contains(
-                    "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND key>? AND key<?)"
+                    "SEARCH a USING PRIMARY KEY (family=? AND namespace=? AND key>? AND key<?)"
                 )),
                 "{first_plan:?}"
             );
@@ -460,17 +564,17 @@ mod tests {
                 Value::Integer(9),
                 Value::Text(format!("occ-{:08}", count - 1)),
             ];
-            let resume_plan = plan(&conn, &page_sql(true), &resume);
+            let resume_plan = plan(&conn, page_sql(true), &resume);
             assert!(
                 resume_plan.iter().any(|d| d.contains(
-                    "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND (key,occurrence_id)>(?,?) AND key<?)"
+                    "SEARCH a USING PRIMARY KEY (family=? AND namespace=? AND (key,occurrence_id)>(?,?) AND key<?)"
                 )),
                 "{resume_plan:?}"
             );
             for plan in [&first_plan, &resume_plan] {
                 assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
             }
-            let mut statement = conn.prepare(&page_sql(false)).unwrap();
+            let mut statement = conn.prepare(page_sql(false)).unwrap();
             let keys = statement
                 .query_map(rusqlite::params_from_iter(first.iter()), |row| {
                     row.get::<_, Vec<u8>>(0)
@@ -482,7 +586,7 @@ mod tests {
             assert_eq!(statement.get_status(StatementStatus::Sort), 0);
             first_steps.push(statement.get_status(StatementStatus::VmStep));
 
-            let mut statement = conn.prepare(&page_sql(true)).unwrap();
+            let mut statement = conn.prepare(page_sql(true)).unwrap();
             let keys = statement
                 .query_map(rusqlite::params_from_iter(resume.iter()), |row| {
                     row.get::<_, Vec<u8>>(0)
@@ -502,6 +606,38 @@ mod tests {
             resume_steps[1] <= resume_steps[0] * 2,
             "a cursor page must not rescan the range: {resume_steps:?}"
         );
+    }
+
+    #[test]
+    fn each_page_query_serves_every_page_from_one_preparation() {
+        use rusqlite::types::Value;
+        let conn = seeded(16);
+        for has_cursor in [false, true] {
+            for (key, limit) in [("ab", 2), ("ab0", 9), ("ab00", 65)] {
+                let mut params = vec![
+                    Value::Text("sha".into()),
+                    Value::Text("sha1:repo".into()),
+                    Value::Blob(key.as_bytes().to_vec()),
+                    Value::Blob(b"abg".to_vec()),
+                    Value::Integer(limit),
+                ];
+                if has_cursor {
+                    params.push(Value::Text("occ-00000001".into()));
+                }
+                let mut statement = conn.prepare_cached(page_sql(has_cursor)).unwrap();
+                {
+                    let mut rows = statement
+                        .query(rusqlite::params_from_iter(params.iter()))
+                        .unwrap();
+                    assert!(rows.next().unwrap().is_some());
+                }
+                assert_eq!(
+                    statement.get_status(StatementStatus::RePrepare),
+                    0,
+                    "cursor {has_cursor}, limit {limit}"
+                );
+            }
+        }
     }
 
     #[test]

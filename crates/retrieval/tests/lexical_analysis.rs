@@ -322,6 +322,7 @@ fn selector_bounds() -> SelectorBounds {
     SelectorBounds {
         max_input_bytes: NonZeroUsize::new(256).unwrap(),
         max_value_bytes: NonZeroUsize::new(128).unwrap(),
+        max_selectors: NonZeroUsize::new(64).unwrap(),
     }
 }
 

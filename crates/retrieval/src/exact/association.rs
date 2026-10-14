@@ -34,14 +34,13 @@ pub struct AssociationKey {
     pub family: Family,
     pub namespace: String,
     pub key: Vec<u8>,
-    pub target_id: String,
 }
 
 pub fn sha_namespace(object_format: &str, repository_id: &str) -> String {
     format!("{object_format}:{repository_id}")
 }
 
-pub fn extract(record: &OccurrenceRecord<'_>, lineage_id: &str) -> Vec<AssociationKey> {
+pub fn extract(record: &OccurrenceRecord<'_>) -> Vec<AssociationKey> {
     let field = |name: &str| {
         record
             .occurrence
@@ -57,7 +56,6 @@ pub fn extract(record: &OccurrenceRecord<'_>, lineage_id: &str) -> Vec<Associati
                     family: Family::Sha,
                     namespace: sha_namespace(format, repository),
                     key: oid.as_bytes().to_vec(),
-                    target_id: lineage_id.to_string(),
                 }],
                 _ => Vec::new(),
             }
@@ -68,17 +66,18 @@ pub fn extract(record: &OccurrenceRecord<'_>, lineage_id: &str) -> Vec<Associati
     }
 }
 
-/// The target `extract` derives for a stored key: the key itself for `id`
-/// rows, the occurrence lineage for `sha` rows, and nothing for families
-/// without a mapping.
+/// The logical target a stored key is evidence for: the key itself for `id`
+/// rows, so a claim and its promoted memory share one target, the occurrence
+/// lineage for `sha` rows, and `None` for unmapped families. Readers derive
+/// the target from the key and the occurrence row.
 pub(crate) fn derived_target<'a>(
     family: Family,
-    key: &'a [u8],
+    key: &'a str,
     lineage_id: &'a str,
-) -> Option<&'a [u8]> {
+) -> Option<&'a str> {
     match family {
         Family::Id => Some(key),
-        Family::Sha => Some(lineage_id.as_bytes()),
+        Family::Sha => Some(lineage_id),
         Family::Path | Family::Symbol | Family::Command | Family::Config | Family::Error => None,
     }
 }
@@ -89,7 +88,6 @@ fn canonical_object(object_id: Option<&str>) -> Vec<AssociationKey> {
             family: Family::Id,
             namespace: CANONICAL_OBJECT_NAMESPACE.to_string(),
             key: object_id.as_bytes().to_vec(),
-            target_id: object_id.to_string(),
         })
         .into_iter()
         .collect()
@@ -102,13 +100,13 @@ pub(crate) fn persist(
     created_commit_seq: i64,
 ) -> Result<usize, ProjectionError> {
     let mut lookup = conn.prepare_cached(
-        "SELECT target_id,extraction_version,created_commit_seq FROM exact_associations
+        "SELECT extraction_version,created_commit_seq FROM exact_associations
          WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4",
     )?;
     let mut insert = conn.prepare_cached(
         "INSERT INTO exact_associations(
-             family,namespace,key,occurrence_id,target_id,extraction_version,created_commit_seq
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+             family,namespace,key,occurrence_id,extraction_version,created_commit_seq
+         ) VALUES (?1,?2,?3,?4,?5,?6)
          ON CONFLICT(family,namespace,key,occurrence_id) DO NOTHING",
     )?;
     let mut inserted = 0;
@@ -120,7 +118,6 @@ pub(crate) fn persist(
             key.namespace,
             key.key,
             occurrence_id,
-            key.target_id,
             EXTRACTION_VERSION,
             created_commit_seq,
         ])? == 1
@@ -128,9 +125,9 @@ pub(crate) fn persist(
             inserted += 1;
             continue;
         }
-        let (target, version, created): (String, u32, i64) = lookup.query_row(
+        let (version, created): (u32, i64) = lookup.query_row(
             params![key.family.keyword(), key.namespace, key.key, occurrence_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if version != EXTRACTION_VERSION {
             return Err(ProjectionError::ExtractionVersionMismatch {
@@ -138,7 +135,7 @@ pub(crate) fn persist(
                 expected: EXTRACTION_VERSION,
             });
         }
-        if target != key.target_id || created != created_commit_seq {
+        if created != created_commit_seq {
             return Err(ProjectionError::AssociationCollision {
                 occurrence_id: occurrence_id.to_string(),
             });
@@ -155,8 +152,8 @@ pub(crate) fn stored(
 ) -> Result<bool, ProjectionError> {
     let mut lookup = conn.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM exact_associations
-         WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4 AND target_id=?5
-           AND extraction_version=?6 AND created_commit_seq=?7)",
+         WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4
+           AND extraction_version=?5 AND created_commit_seq=?6)",
     )?;
     for key in keys {
         let present: bool = lookup.query_row(
@@ -165,7 +162,6 @@ pub(crate) fn stored(
                 key.namespace,
                 key.key,
                 occurrence_id,
-                key.target_id,
                 EXTRACTION_VERSION,
                 created_commit_seq
             ],
@@ -212,37 +208,44 @@ mod tests {
             ("object_format", "sha1"),
             ("oid", oid.as_str()),
         ];
-        let keys = extract(&record("git_commits", &identity), "lineage-1");
+        let keys = extract(&record("git_commits", &identity));
         assert_eq!(
             keys,
             vec![AssociationKey {
                 family: Family::Sha,
                 namespace: "sha1:repo-1".into(),
                 key: oid.as_bytes().to_vec(),
-                target_id: "lineage-1".into(),
             }]
+        );
+        assert_eq!(
+            derived_target(keys[0].family, &oid, "lineage-1"),
+            Some("lineage-1")
         );
     }
 
     #[test]
     fn claims_and_promoted_memory_of_one_object_share_a_target() {
-        let claim = extract(&record("canonical_claims", &[("object_id", "obj-1")]), "l1");
-        let memory = extract(
-            &record("promoted_memory", &[("decision_object_id", "obj-1")]),
-            "l2",
-        );
+        let claim = extract(&record("canonical_claims", &[("object_id", "obj-1")]));
+        let memory = extract(&record(
+            "promoted_memory",
+            &[("decision_object_id", "obj-1")],
+        ));
         assert_eq!(claim.len(), 1);
         assert_eq!(claim[0].family, Family::Id);
         assert_eq!(claim[0].namespace, CANONICAL_OBJECT_NAMESPACE);
         assert_eq!(claim[0].key, b"obj-1");
-        assert_eq!(claim[0].target_id, memory[0].target_id);
+        assert_eq!(claim, memory);
+        assert_eq!(
+            derived_target(claim[0].family, "obj-1", "l1"),
+            derived_target(memory[0].family, "obj-1", "l2"),
+        );
     }
 
     #[test]
     fn classes_without_a_mapping_yield_no_keys_and_families_report_missing_coverage() {
-        assert!(extract(&record("messages", &[("message_id", "m")]), "l").is_empty());
-        assert!(extract(&record("raw_tool_spans", &[]), "l").is_empty());
-        assert!(extract(&record("unknown", &[]), "l").is_empty());
+        assert!(extract(&record("messages", &[("message_id", "m")])).is_empty());
+        assert!(extract(&record("raw_tool_spans", &[])).is_empty());
+        assert!(extract(&record("unknown", &[])).is_empty());
         for family in [
             Family::Path,
             Family::Symbol,
@@ -280,7 +283,7 @@ mod tests {
             let covered: Vec<OccurrenceClass> = identities
                 .iter()
                 .filter(|(class, identity)| {
-                    extract(&record(class.code(), identity), "l")
+                    extract(&record(class.code(), identity))
                         .iter()
                         .any(|key| key.family == family)
                 })

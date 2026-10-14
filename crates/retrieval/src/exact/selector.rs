@@ -1,6 +1,7 @@
 //! Selector grammar for exact lookup and lexical query compilation.
 //! Byte equality is the contract.
 
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
@@ -45,6 +46,8 @@ pub struct SelectorBounds {
     /// The limit applies to the encoded token; JSON and percent decoding never
     /// lengthen a value, so the decoded bytes stay within it.
     pub max_value_bytes: NonZeroUsize,
+    /// Selectors one request may name across every family; the classifier refuses the request before it collects one more.
+    pub max_selectors: NonZeroUsize,
 }
 
 pub const MAX_SHA_HEX: usize = 64;
@@ -159,6 +162,8 @@ pub enum SelectorRefusal {
     MalformedPercentEscape { offset: usize },
     #[error("path selector at {offset} is not repository-relative: {reason:?}")]
     InvalidPath { offset: usize, reason: PathRefusal },
+    #[error("the request names more than {bound} selectors")]
+    TooManySelectors { bound: usize },
 }
 
 /// Trimming removes only ASCII space, tab, CR, and LF at both ends.
@@ -194,46 +199,62 @@ pub fn classify(request: &str, bounds: SelectorBounds) -> Result<Intent, Selecto
             return Ok(Intent::Direct(selector));
         }
     }
-    Ok(Intent::Hybrid(mentions(trimmed, start, bounds)))
+    Ok(Intent::Hybrid(mentions(trimmed, start, bounds)?))
 }
 
 const ASCII_TRIM: [char; 4] = [' ', '\t', '\r', '\n'];
 
-fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention> {
+/// Visits candidate heads in increasing order, each at most once. A head's
+/// keyword ends at a colon and no keyword ends another, so each colon has at
+/// most one candidate: the position of the keyword that ends there.
+fn mentions(
+    trimmed: &str,
+    start: usize,
+    bounds: SelectorBounds,
+) -> Result<Vec<Mention>, SelectorRefusal> {
     let mut found = Vec::new();
+    // Positions before `at` lie inside an accepted mention.
     let mut at = 0;
     let mut run = BareRun::default();
-    while at < trimmed.len() {
-        if !trimmed.is_char_boundary(at) {
-            at += 1;
+    for (colon, _) in trimmed.match_indices(':') {
+        let before = &trimmed.as_bytes()[..colon];
+        let Some(head) = Family::ALL.into_iter().find_map(|family| {
+            before
+                .ends_with(family.keyword().as_bytes())
+                .then(|| colon - family.keyword().len())
+        }) else {
+            continue;
+        };
+        if head < at {
             continue;
         }
-        let Some((family, value_at)) = selector_head(trimmed, at) else {
-            at += 1;
+        let Some((family, value_at)) = selector_head(trimmed, head) else {
             continue;
         };
         let Some(token) = token_extent(trimmed, value_at, &mut run) else {
-            at += 1;
             continue;
         };
-        match decode_value(
+        let Ok(selector) = decode_value(
             family,
             &trimmed[value_at..token.end],
             token.quoted,
             start + value_at,
             bounds,
-        ) {
-            Ok(selector) => {
-                found.push(Mention {
-                    selector,
-                    span: start + at..start + token.end,
-                });
-                at = token.end;
-            }
-            Err(_) => at += 1,
+        ) else {
+            continue;
+        };
+        if found.len() == bounds.max_selectors.get() {
+            return Err(SelectorRefusal::TooManySelectors {
+                bound: bounds.max_selectors.get(),
+            });
         }
+        found.push(Mention {
+            selector,
+            span: start + head..start + token.end,
+        });
+        at = token.end;
     }
-    found
+    Ok(found)
 }
 
 /// A selector head starts the text or follows whitespace or ASCII punctuation
@@ -275,16 +296,44 @@ fn token_extent(text: &str, value_at: usize, run: &mut BareRun) -> Option<Token>
         });
     }
     if run.end < value_at {
-        run.end = value_at
-            + rest
-                .char_indices()
-                .find(|(_, c)| !bare_char(*c))
-                .map_or(rest.len(), |(index, _)| index);
+        run.end = value_at + bare_len(rest);
     }
     Some(Token {
         end: run.end,
         quoted: false,
     })
+}
+
+/// Bytes of the bare run that opens `text`. ASCII bytes are classified
+/// without decoding; other characters are decoded one at a time.
+fn bare_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        if byte.is_ascii() {
+            if !bare_ascii(byte) {
+                return index;
+            }
+            index += 1;
+            continue;
+        }
+        let c = text[index..]
+            .chars()
+            .next()
+            .expect("index advances by whole characters");
+        if !bare_char(c) {
+            return index;
+        }
+        index += c.len_utf8();
+    }
+    bytes.len()
+}
+
+/// `bare_char` for an ASCII byte: controls, space, quotes, backslash, comma, and semicolon stop a bare token.
+fn bare_ascii(byte: u8) -> bool {
+    #[cfg(test)]
+    BARE_SCAN_STEPS.with(|steps| steps.set(steps.get() + 1));
+    !(byte <= b' ' || byte == 0x7f || matches!(byte, b'"' | b'\'' | b'\\' | b',' | b';'))
 }
 
 #[cfg(test)]
@@ -333,10 +382,12 @@ fn decode_value(
             bound,
         });
     }
-    let text = if quoted {
-        decode_json_string(token).ok_or(SelectorRefusal::MalformedQuote { family, offset })?
+    let text: Cow<'_, str> = if quoted {
+        Cow::Owned(
+            decode_json_string(token).ok_or(SelectorRefusal::MalformedQuote { family, offset })?,
+        )
     } else {
-        token.to_string()
+        Cow::Borrowed(token)
     };
     if text.is_empty() {
         return Err(SelectorRefusal::EmptyValue { family, offset });
@@ -347,7 +398,7 @@ fn decode_value(
         }
         Family::Path => {
             let bytes = if quoted {
-                text.into_bytes()
+                text.into_owned().into_bytes()
             } else {
                 percent_decode(text.as_bytes())
                     .ok_or(SelectorRefusal::MalformedPercentEscape { offset })?
@@ -363,7 +414,7 @@ fn decode_value(
             if text.contains('\0') {
                 return Err(SelectorRefusal::Nul { family, offset });
             }
-            SelectorValue::Text(text)
+            SelectorValue::Text(text.into_owned())
         }
     };
     Ok(Selector { family, value })
@@ -410,6 +461,7 @@ mod tests {
         SelectorBounds {
             max_input_bytes: NonZeroUsize::new(256).unwrap(),
             max_value_bytes: NonZeroUsize::new(128).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         }
     }
 
@@ -784,6 +836,7 @@ mod tests {
         let tight = SelectorBounds {
             max_input_bytes: NonZeroUsize::new(10).unwrap(),
             max_value_bytes: NonZeroUsize::new(4).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         };
         assert!(matches!(
             classify("id:abcdefghij", tight),
@@ -803,6 +856,7 @@ mod tests {
         let loose = SelectorBounds {
             max_input_bytes: NonZeroUsize::new(64).unwrap(),
             max_value_bytes: NonZeroUsize::new(8).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         };
         assert!(
             matches!(
@@ -838,6 +892,7 @@ mod tests {
         let bounds = SelectorBounds {
             max_input_bytes: NonZeroUsize::new(1 << 20).unwrap(),
             max_value_bytes: NonZeroUsize::new(64).unwrap(),
+            max_selectors: NonZeroUsize::new(64).unwrap(),
         };
         let mut steps = Vec::new();
         for heads in [1_024usize, 4_096] {
@@ -857,6 +912,193 @@ mod tests {
         assert_eq!(
             mentions[0].selector.value,
             SelectorValue::Text("abc".into())
+        );
+    }
+    /// `token_extent` as it decoded every character of a bare run.
+    fn token_extent_by_chars(text: &str, value_at: usize, run: &mut BareRun) -> Option<Token> {
+        let rest = &text[value_at..];
+        if rest.starts_with('"') {
+            let end = json_string_end(rest)?;
+            return Some(Token {
+                end: value_at + end,
+                quoted: true,
+            });
+        }
+        if run.end < value_at {
+            run.end = value_at
+                + rest
+                    .char_indices()
+                    .find(|(_, c)| !bare_char(*c))
+                    .map_or(rest.len(), |(index, _)| index);
+        }
+        Some(Token {
+            end: run.end,
+            quoted: false,
+        })
+    }
+
+    /// Tries a head at every char boundary, the scan `mentions` must agree with.
+    fn mentions_at_every_position(
+        trimmed: &str,
+        start: usize,
+        bounds: SelectorBounds,
+    ) -> Result<Vec<Mention>, SelectorRefusal> {
+        let mut found = Vec::new();
+        let mut at = 0;
+        let mut run = BareRun::default();
+        while at < trimmed.len() {
+            if !trimmed.is_char_boundary(at) {
+                at += 1;
+                continue;
+            }
+            let Some((family, value_at)) = selector_head(trimmed, at) else {
+                at += 1;
+                continue;
+            };
+            let Some(token) = token_extent_by_chars(trimmed, value_at, &mut run) else {
+                at += 1;
+                continue;
+            };
+            match decode_value(
+                family,
+                &trimmed[value_at..token.end],
+                token.quoted,
+                start + value_at,
+                bounds,
+            ) {
+                Ok(selector) => {
+                    if found.len() == bounds.max_selectors.get() {
+                        return Err(SelectorRefusal::TooManySelectors {
+                            bound: bounds.max_selectors.get(),
+                        });
+                    }
+                    found.push(Mention {
+                        selector,
+                        span: start + at..start + token.end,
+                    });
+                    at = token.end;
+                }
+                Err(_) => at += 1,
+            }
+        }
+        Ok(found)
+    }
+
+    #[test]
+    fn ascii_bytes_classify_as_their_characters_do() {
+        for byte in 0..=0x7f_u8 {
+            assert_eq!(bare_ascii(byte), bare_char(char::from(byte)), "{byte:#04x}");
+        }
+    }
+
+    #[test]
+    fn no_family_keyword_ends_another_so_a_colon_has_one_candidate_head() {
+        for family in Family::ALL {
+            for other in Family::ALL {
+                assert!(
+                    family == other || !family.keyword().ends_with(other.keyword()),
+                    "{family:?} ends with {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colon_anchored_scanning_finds_exactly_the_mentions_of_a_scan_at_every_position() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+        let fragment = prop::sample::select(vec![
+            "id:",
+            "sha:",
+            "path:",
+            "symbol:",
+            "command:",
+            "config:",
+            "error:",
+            "id",
+            "sha",
+            "error",
+            "abc",
+            "F0",
+            "x",
+            "_",
+            " ",
+            "\t",
+            ",",
+            ";",
+            ":",
+            "::",
+            "\"",
+            "\\",
+            "'",
+            "(",
+            "%41",
+            "%",
+            "/",
+            "..",
+            "\u{e9}",
+            "\u{a0}",
+            "\u{2003}",
+            "\u{301}",
+            "\u{1}",
+            "\"a b\"",
+            "\"\\u00e9\"",
+        ]);
+        let requests = prop::collection::vec(fragment, 0..24).prop_map(|parts| parts.concat());
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 2048,
+                rng_algorithm: RngAlgorithm::ChaCha,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, b"selector-head-scan-equivalence-1"),
+        );
+        runner
+            .run(
+                &(requests, 1usize..4, 2usize..12),
+                |(request, selectors, value)| {
+                    let bounds = SelectorBounds {
+                        max_input_bytes: NonZeroUsize::new(4096).unwrap(),
+                        max_value_bytes: NonZeroUsize::new(value).unwrap(),
+                        max_selectors: NonZeroUsize::new(selectors).unwrap(),
+                    };
+                    BARE_SCAN_STEPS.with(|steps| steps.set(0));
+                    let scanned = mentions(&request, 3, bounds);
+                    let scanned_steps = BARE_SCAN_STEPS.with(std::cell::Cell::get);
+                    BARE_SCAN_STEPS.with(|steps| steps.set(0));
+                    let expected = mentions_at_every_position(&request, 3, bounds);
+                    prop_assert_eq!(&scanned, &expected, "{:?}", request);
+                    prop_assert_eq!(
+                        scanned_steps,
+                        BARE_SCAN_STEPS.with(std::cell::Cell::get),
+                        "{:?}",
+                        request
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_selector_bound_refuses_a_request_before_it_collects_one_more() {
+        let bounded = SelectorBounds {
+            max_selectors: NonZeroUsize::new(2).unwrap(),
+            ..bounds()
+        };
+        let Intent::Hybrid(mentions) = classify("see id:a and id:b", bounded).unwrap() else {
+            panic!("two mentions are hybrid");
+        };
+        assert_eq!(mentions.len(), 2, "the bound itself is admitted");
+        assert_eq!(
+            classify("see id:a and sha:abc and path:src/x.rs", bounded),
+            Err(SelectorRefusal::TooManySelectors { bound: 2 }),
+            "the bound counts every family"
+        );
+        assert!(
+            matches!(classify("id:a", bounded), Ok(Intent::Direct(_))),
+            "a direct selector names one"
         );
     }
 }

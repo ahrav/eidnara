@@ -256,7 +256,7 @@ pub fn batch_status(
                 payload_id: stored.payload_id,
             });
         }
-        let keys = crate::exact::extract(record, &stored.lineage_id);
+        let keys = crate::exact::extract(record);
         if !crate::exact::association::stored(
             conn,
             &occurrence_id,
@@ -620,7 +620,7 @@ fn apply_batch_inner(
     phase!(fault, AfterRows);
 
     for (record, row) in batch.records.iter().zip(&persisted) {
-        let keys = crate::exact::extract(record, &row.lineage_id);
+        let keys = crate::exact::extract(record);
         outcome.associations_inserted += crate::exact::association::persist(
             conn,
             &row.occurrence_id,

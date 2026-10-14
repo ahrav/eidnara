@@ -459,6 +459,9 @@ fn corpus() -> Vec<Source> {
         commit("repo-b", ObjectFormat::Sha1, oid40("abc1", '0'), 1),
         commit("repo-c", ObjectFormat::Sha256, oid64("abc1", '0'), 1),
         commit("repo-c", ObjectFormat::Sha256, oid64("abc", '1'), 1),
+        // A repository whose commits are indexed under both formats, as across a hash migration.
+        commit("repo-d", ObjectFormat::Sha1, oid40("abc1", '0'), 1),
+        commit("repo-d", ObjectFormat::Sha256, oid64("abc1", '0'), 1),
         claim("obj-1", 1, "decision_summary"),
         claim("obj-1", 1, "rationale"),
         Source::Memory { object_id: "obj-1" },
@@ -712,18 +715,64 @@ fn sha_prefix_enumeration_is_repository_and_algorithm_scoped_and_counts_complete
             enumerate("repo-c", ObjectFormat::Sha256, "abc10", page_rows).1,
             1
         );
+        // A repository indexed under the other object format refuses rather than reporting no match.
+        for (repository, format, indexed) in [
+            ("repo-a", ObjectFormat::Sha256, ObjectFormat::Sha1),
+            ("repo-c", ObjectFormat::Sha1, ObjectFormat::Sha256),
+        ] {
+            let prefix = hex("abc");
+            let query = ShaPrefixQuery::bind(repository, format, &prefix).unwrap();
+            let refused = store
+                .with_conn(|conn| {
+                    Ok(page(
+                        conn,
+                        &context(page_rows),
+                        &ExactQuery::Sha(query.clone()),
+                        None,
+                    ))
+                })
+                .unwrap();
+            assert_eq!(
+                refused.unwrap_err(),
+                LookupRefusal::ObjectFormatMismatch {
+                    queried: format,
+                    indexed,
+                },
+                "{repository}"
+            );
+        }
+        // A prefix that matches nothing under the repository's own format is an empty answer.
         assert_eq!(
-            enumerate("repo-a", ObjectFormat::Sha256, "abc", page_rows).1,
+            enumerate("repo-a", ObjectFormat::Sha1, "dead", page_rows).1,
             0
         );
-        assert_eq!(
-            enumerate("repo-c", ObjectFormat::Sha1, "abc", page_rows).1,
-            0
-        );
-        assert_eq!(
-            enumerate("repo-none", ObjectFormat::Sha1, "abc", page_rows).1,
-            0
-        );
+        // A repository indexed under both formats answers a miss under either one with an empty page.
+        for format in ObjectFormat::ALL {
+            assert_eq!(
+                enumerate("repo-d", format, "dead", page_rows).1,
+                0,
+                "{format:?}"
+            );
+            assert_eq!(
+                enumerate("repo-d", format, "abc1", page_rows).1,
+                1,
+                "{format:?}"
+            );
+        }
+        // A repository with no indexed commit in either format is missing context, not absence.
+        let prefix = hex("abc");
+        let query = ShaPrefixQuery::bind("repo-none", ObjectFormat::Sha1, &prefix).unwrap();
+        let refused = store
+            .with_conn(|conn| {
+                Ok(page(
+                    conn,
+                    &context(page_rows),
+                    &ExactQuery::Sha(query.clone()),
+                    None,
+                ))
+            })
+            .unwrap();
+        assert_eq!(refused.unwrap_err(), LookupRefusal::RepositoryNotIndexed);
     }
     assert_eq!(
         ShaPrefixQuery::bind("repo-a", ObjectFormat::Sha1, &hex(&"a".repeat(41))).unwrap_err(),
@@ -915,7 +964,7 @@ fn cancellation_after_entry_never_returns_a_complete_or_partial_page() {
             } else {
                 "ALTER TABLE exact_associations RENAME TO original_associations;
                  CREATE VIEW exact_associations AS SELECT family,namespace,key,occurrence_id,
-                     target_id,extraction_version,cancel_lookup(created_commit_seq) AS created_commit_seq
+                     extraction_version,cancel_lookup(created_commit_seq) AS created_commit_seq
                  FROM original_associations;"
             })
         }).unwrap();
@@ -960,11 +1009,11 @@ fn association_keys_and_namespaces_must_match_the_occurrence_tuple() {
             sha("repo-a", ObjectFormat::Sha1),
         ),
         (
-            "UPDATE exact_associations SET key=CAST('forged' AS BLOB),target_id='forged' WHERE family='id'",
+            "UPDATE exact_associations SET key=CAST('forged' AS BLOB) WHERE family='id'",
             ExactQuery::CanonicalObject(b"forged"),
         ),
         (
-            "UPDATE exact_associations SET family='id',namespace='canonical_object',key=CAST('forged' AS BLOB),target_id='forged' WHERE family='sha'",
+            "UPDATE exact_associations SET family='id',namespace='canonical_object',key=CAST('forged' AS BLOB) WHERE family='sha'",
             ExactQuery::CanonicalObject(b"forged"),
         ),
     ] {
@@ -1015,52 +1064,6 @@ fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
     apply(&store, &sources, mutation(0, 5), vec![], 10).unwrap();
     let damaged = occurrence_id(&sources[0]);
     let query = ExactQuery::CanonicalObject(b"obj-1");
-    let prefix = hex("abc");
-    let sha_query =
-        ExactQuery::Sha(ShaPrefixQuery::bind("repo-a", ObjectFormat::Sha1, &prefix).unwrap());
-    for (name, sql, query) in [
-        (
-            "id target",
-            "UPDATE exact_associations SET target_id='elsewhere' WHERE family='id'",
-            &query,
-        ),
-        (
-            "sha target",
-            "UPDATE exact_associations SET target_id='elsewhere' WHERE family='sha'",
-            &sha_query,
-        ),
-    ] {
-        store
-            .with_conn_fenced(|conn| {
-                conn.execute(sql, [])?;
-                Ok(())
-            })
-            .unwrap();
-        store
-            .with_conn(|conn| {
-                assert_eq!(
-                    page(conn, &context(8), query, None).unwrap_err(),
-                    LookupRefusal::Projection(ProjectionError::CorruptRow),
-                    "{name}: a target the mapping did not derive is refused"
-                );
-                Ok(())
-            })
-            .unwrap();
-    }
-    store
-        .with_conn_fenced(|conn| {
-            conn.execute(
-                "UPDATE exact_associations SET target_id='obj-1' WHERE family='id'",
-                [],
-            )?;
-            conn.execute(
-                "UPDATE exact_associations SET target_id=o.lineage_id FROM occurrences o
-                 WHERE o.occurrence_id=exact_associations.occurrence_id AND family='sha'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
     for (name, invalidated_commit_seq) in [("at creation", 5), ("before creation", 3)] {
         store
             .with_conn_fenced(|conn| {
@@ -1150,22 +1153,16 @@ fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
     }
 }
 
-fn association_rows(conn: &GuardedConn<'_>) -> Vec<(String, String, Vec<u8>, String, String)> {
+fn association_rows(conn: &GuardedConn<'_>) -> Vec<(String, String, Vec<u8>, String)> {
     let mut statement = conn
         .prepare(
-            "SELECT family,namespace,key,occurrence_id,target_id FROM exact_associations
+            "SELECT family,namespace,key,occurrence_id FROM exact_associations
              ORDER BY family,namespace,key,occurrence_id",
         )
         .unwrap();
     statement
         .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .unwrap()
         .collect::<Result<_, _>>()
@@ -1297,23 +1294,7 @@ fn associations_replay_revise_and_invalidate_atomically_with_the_checkpoint() {
     store
         .with_conn_fenced(|conn| {
             conn.execute(
-                "UPDATE exact_associations SET target_id='elsewhere' WHERE family='id'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        apply(&store, &first, mutation(0, 2), vec![], 8).unwrap_err(),
-        ProjectionError::AssociationCollision {
-            occurrence_id: occurrence_id(&first[0]),
-        },
-        "a stored row with another target is refused, never overwritten"
-    );
-    store
-        .with_conn_fenced(|conn| {
-            conn.execute(
-                "UPDATE exact_associations SET target_id='obj-1',extraction_version=99 WHERE family='id'",
+                "UPDATE exact_associations SET extraction_version=99 WHERE family='id'",
                 [],
             )?;
             Ok(())
@@ -1428,9 +1409,9 @@ fn message_cleanup_reclaims_association_rows_with_their_occurrence() {
     store
         .with_conn_fenced(|conn| {
             conn.execute(
-                "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                "INSERT INTO exact_associations(family,namespace,key,occurrence_id,
                      extraction_version,created_commit_seq)
-                 VALUES ('symbol','n',CAST('k' AS BLOB),?1,'t',?2,2)",
+                 VALUES ('symbol','n',CAST('k' AS BLOB),?1,?2,2)",
                 rusqlite::params![message_id, retrieval::exact::EXTRACTION_VERSION],
             )?;
             Ok(())
@@ -1478,4 +1459,164 @@ fn message_cleanup_reclaims_association_rows_with_their_occurrence() {
             Ok(())
         })
         .unwrap();
+}
+
+/// A projection whose identity records another schema version or analysis identity was built by other rules, so its pages refuse rather than serving associations this build did not derive.
+#[test]
+fn a_page_refuses_a_projection_built_under_another_schema_or_analysis_identity() {
+    let sources = corpus();
+    for (column, value) in [
+        ("schema_version", "schema_version+1"),
+        ("analysis_identity", "'another-analysis'"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        setup(&store);
+        apply(&store, &sources, mutation(0, 3), vec![], 10).unwrap();
+        let query = ExactQuery::CanonicalObject(b"obj-1");
+        store
+            .with_conn(|conn| {
+                assert!(page(conn, &context(2), &query, None).is_ok(), "{column}");
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    &format!("UPDATE projection_identity SET {column}={value}"),
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &context(2), &query, None).unwrap_err(),
+                    LookupRefusal::SchemaMismatch,
+                    "{column}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn a_page_refuses_another_kernel_before_a_missing_checkpoint_and_both_before_another_schema() {
+    let query = ExactQuery::CanonicalObject(b"obj-1");
+    let other_kernel = LookupContext {
+        kernel_incarnation_id: "kernel-2",
+        ..context(2)
+    };
+    let identity_mismatch = LookupRefusal::Projection(ProjectionError::IdentityMismatch);
+    // (reads under another kernel, has a checkpoint, identity damage, refusal)
+    let cases = [
+        (true, false, None, identity_mismatch.clone()),
+        (
+            false,
+            false,
+            Some("schema_version=schema_version+1"),
+            LookupRefusal::NoCheckpoint,
+        ),
+        (
+            false,
+            false,
+            Some("schema_version=4294967296"),
+            LookupRefusal::NoCheckpoint,
+        ),
+        (
+            true,
+            true,
+            Some("analysis_identity='another-analysis'"),
+            identity_mismatch,
+        ),
+        (
+            false,
+            true,
+            Some("schema_version=4294967296"),
+            LookupRefusal::SchemaMismatch,
+        ),
+    ];
+    for (foreign, checkpointed, damage, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        setup(&store);
+        if checkpointed {
+            apply(&store, &corpus(), mutation(0, 3), vec![], 10).unwrap();
+        }
+        if let Some(damage) = damage {
+            store
+                .with_conn_fenced(|conn| {
+                    conn.execute(&format!("UPDATE projection_identity SET {damage}"), [])?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let reader = if foreign { other_kernel } else { context(2) };
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &reader, &query, None).unwrap_err(),
+                    expected,
+                    "another kernel {foreign}, checkpoint {checkpointed}, {damage:?}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn associations_at_the_identity_value_bound_store_inline() {
+    let longest = |fill: &str| -> &'static str {
+        Box::leak(
+            fill.repeat(kernel::source_identity::MAX_IDENTITY_VALUE_BYTES)
+                .into_boxed_str(),
+        )
+    };
+    let object_id = longest("o");
+    let repository = longest("r");
+    let sources = vec![
+        claim(object_id, 1, "decision_summary"),
+        Source::Memory { object_id },
+        commit(repository, ObjectFormat::Sha256, oid64("abc", '0'), 1),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    apply(&store, &sources, mutation(0, 3), vec![], 10).unwrap();
+    for (key, expected) in inventory(&sources) {
+        let (pages, _) = key.run(&store, 64);
+        let rows: Vec<_> = pages.iter().flat_map(|page| &page.rows).collect();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.occurrence_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected.occurrences,
+            "{key:?}"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.target_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected.targets,
+            "{key:?}"
+        );
+    }
+    let overflow: i64 = store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM dbstat
+                 WHERE name IN ('exact_associations','idx_exact_associations_occurrence')
+                   AND pagetype='overflow'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        overflow, 0,
+        "an association row spilled to an overflow page"
+    );
 }

@@ -1163,8 +1163,8 @@ fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
 }
 
 /// The kernel judges the occurrence's source object; the proof names the
-/// association target. A row retargeted by rewriting both its key and its
-/// target, while its tuple still names the original object, must refuse the
+/// association target, which is the key. A row retargeted by rewriting its
+/// key, while its tuple still names the original object, must refuse the
 /// attempt rather than prove the new target.
 #[test]
 fn an_association_retargeted_against_its_tuple_refuses_the_attempt() {
@@ -1177,7 +1177,7 @@ fn an_association_retargeted_against_its_tuple_refuses_the_attempt() {
         .with_conn_fenced(|conn| {
             let altered = conn
                 .execute(
-                    "UPDATE exact_associations SET key=?2, target_id='obj-2' WHERE key=?1",
+                    "UPDATE exact_associations SET key=?2 WHERE key=?1",
                     [b"obj-1".as_slice(), b"obj-2".as_slice()],
                 )
                 .unwrap();
@@ -1547,8 +1547,39 @@ fn a_budget_expiring_anywhere_inside_resolve_refuses_as_budget_exhaustion() {
     }
 }
 
+/// What the association view runs inside the enumeration, at the row it is armed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interference {
+    /// A kernel commit moves authority while the attempt is between its first and last page.
+    Churn,
+    /// The attempt's budget is cancelled.
+    Cancel,
+}
+
+/// A request from the association view to the thread that owns the kernel handle.
+enum Writer {
+    Commit(String),
+    Stop,
+}
+
+/// Stops the writer when the test body ends, including by a failed assertion, so the scope can join it.
+struct StopWriter(std::sync::mpsc::SyncSender<Writer>);
+
+impl Drop for StopWriter {
+    fn drop(&mut self) {
+        let _ = self.0.send(Writer::Stop);
+    }
+}
+
+/// Bounds each wait between the association view and the writer, so a deadlock fails the test.
+const WRITER_WAIT: Duration = Duration::from_secs(30);
+
 #[test]
 fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_prove() {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
     let fixture = Fixture::new();
     let objects: Vec<&'static str> = vec![
         "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "b0", "b1", "b2", "b3", "b4",
@@ -1573,78 +1604,122 @@ fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_p
         .map(|(index, object)| Row::Claim {
             key: "churned",
             object,
-            revision: 1,
+            revision: (index / 2) as i64 + 1,
             representation: ["decision_summary", "rationale"][index % 2],
             payload: object,
         })
         .collect();
-    let rows: Vec<Row> = rows
-        .into_iter()
-        .enumerate()
-        .map(|(index, row)| match row {
-            Row::Claim {
-                key,
-                object,
-                representation,
-                payload,
-                ..
-            } => Row::Claim {
-                key,
-                object,
-                revision: (index / 2) as i64 + 1,
-                representation,
-                payload,
-            },
-            other => other,
-        })
-        .collect();
     fixture.project(&rows, vec![]);
+    let mut in_key_order: Vec<String> = rows.iter().map(Row::occurrence_id).collect();
+    in_key_order.sort();
     let one_row = ResolveBounds {
         page_rows: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
 
-    let mut snapshot_changed = false;
-    let mut cancelled_midway = false;
-    let mut iteration = 0;
-    while !(snapshot_changed && cancelled_midway) {
-        assert!(
-            iteration < 200,
-            "authority churn never overlapped an attempt"
-        );
-        iteration += 1;
-        fixture.project(&[], vec![]);
-        let certificate = fixture.certificate();
-        let interrupt = Arc::new(AtomicBool::new(false));
-        let budget = EvalBudget::new(None, Arc::clone(&interrupt));
-        let cancel = iteration % 3 == 2;
-        let resolution = std::thread::scope(|scope| {
-            let kernel = &fixture.kernel;
-            let stop = Arc::new(AtomicBool::new(false));
-            let writer_stop = Arc::clone(&stop);
-            let writer_interrupt = Arc::clone(&interrupt);
-            let writer = scope.spawn(move || {
-                let mut commits = 0;
-                while !writer_stop.load(Ordering::Relaxed) && commits < 64 {
-                    kernel
-                        .commit(
-                            intent(&format!("churn-{iteration}-{commits}")),
-                            |envelope| {
-                                envelope.insert_decision(decision(
-                                    &format!("churn-{iteration}-{commits}"),
-                                    Some(SCOPE_A),
-                                    Sensitivity::Normal,
-                                ))?;
-                                Ok(String::new())
-                            },
-                        )
-                        .unwrap();
-                    commits += 1;
-                    if cancel && commits == 3 {
-                        writer_interrupt.store(true, Ordering::Relaxed);
-                    }
-                }
-            });
+    // Every association row a page statement steps passes through `interfere`;
+    // each armed call runs its interference before the statement yields the row.
+    let stepped = Arc::new(AtomicUsize::new(0));
+    let armed: Arc<Mutex<Vec<(usize, Interference)>>> = Arc::new(Mutex::new(Vec::new()));
+    let budget_slot: Arc<Mutex<Option<EvalBudget>>> = Arc::new(Mutex::new(None));
+    let (requests, writer_requests) = mpsc::sync_channel::<Writer>(0);
+    let (writer_done, done) = mpsc::sync_channel::<()>(0);
+    let stop = requests.clone();
+    {
+        let stepped = Arc::clone(&stepped);
+        let armed = Arc::clone(&armed);
+        let budget_slot = Arc::clone(&budget_slot);
+        let done = Mutex::new(done);
+        // A repeated intent replays without committing, so every churn names a new one.
+        let churns = AtomicUsize::new(0);
+        fixture
+            .store
+            .with_conn_unfenced(|conn| {
+                conn.create_scalar_function(
+                    "interfere",
+                    1,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                        | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                    move |ctx| {
+                        let call = stepped.fetch_add(1, Ordering::Relaxed) + 1;
+                        let fired: Vec<Interference> = {
+                            let mut armed = armed.lock().unwrap();
+                            let fired = armed
+                                .iter()
+                                .filter(|(at, _)| *at == call)
+                                .map(|(_, interference)| *interference)
+                                .collect();
+                            armed.retain(|(at, _)| *at != call);
+                            fired
+                        };
+                        for interference in fired {
+                            match interference {
+                                Interference::Churn => {
+                                    let churn = churns.fetch_add(1, Ordering::Relaxed);
+                                    requests
+                                        .send(Writer::Commit(format!("churn-{churn}")))
+                                        .unwrap();
+                                    done.lock()
+                                        .unwrap()
+                                        .recv_timeout(WRITER_WAIT)
+                                        .expect("the writer commits within the bound");
+                                }
+                                Interference::Cancel => {
+                                    budget_slot.lock().unwrap().as_ref().unwrap().cancel();
+                                }
+                            }
+                        }
+                        ctx.get::<i64>(0)
+                    },
+                )?;
+                conn.execute_batch(
+                    "ALTER TABLE exact_associations RENAME TO original_associations;
+                     CREATE VIEW exact_associations AS SELECT family,namespace,key,occurrence_id,
+                         extraction_version,interfere(created_commit_seq) AS created_commit_seq
+                     FROM original_associations;",
+                )
+            })
+            .unwrap();
+    }
+
+    std::thread::scope(|scope| {
+        let _stop = StopWriter(stop);
+        let kernel = &fixture.kernel;
+        scope.spawn(move || {
+            while let Ok(Writer::Commit(key)) = writer_requests.recv() {
+                kernel
+                    .commit(intent(&key), |envelope| {
+                        envelope.insert_decision(decision(
+                            &key,
+                            Some(SCOPE_A),
+                            Sensitivity::Normal,
+                        ))?;
+                        Ok(String::new())
+                    })
+                    .unwrap();
+                writer_done.send(()).unwrap();
+            }
+        });
+        // A page of one row steps that row and one more to learn whether a next page exists,
+        // so page k steps rows 2k-1 and 2k: call 1 lands in the first page, and calls 4 and 21
+        // land after one and ten pages were judged.
+        let cases: [&[(usize, Interference)]; 8] = [
+            &[],
+            &[(1, Interference::Churn)],
+            &[(4, Interference::Churn)],
+            &[(21, Interference::Churn)],
+            &[(1, Interference::Cancel)],
+            &[(4, Interference::Cancel)],
+            &[(21, Interference::Cancel)],
+            &[(4, Interference::Churn), (21, Interference::Cancel)],
+        ];
+        for interferences in cases {
+            fixture.project(&[], vec![]);
+            let certificate = fixture.certificate();
+            let budget = EvalBudget::new(None, Arc::new(AtomicBool::new(false)));
+            stepped.store(0, Ordering::Relaxed);
+            *budget_slot.lock().unwrap() = Some(budget.clone());
+            *armed.lock().unwrap() = interferences.to_vec();
             let resolution = fixture.resolve(
                 object_query("churned"),
                 true,
@@ -1652,57 +1727,74 @@ fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_p
                 one_row,
                 &budget,
             );
-            stop.store(true, Ordering::Relaxed);
-            writer.join().unwrap();
-            resolution
-        });
-        match resolution {
-            Err(ResolveRefusal::BudgetExhausted) => {
-                assert!(cancel, "only a cancelled budget refuses at entry");
-            }
-            Err(other) => panic!("{other:?}"),
-            Ok(resolution) => {
-                if let Some(proof) = &resolution.proof {
-                    assert_eq!(
-                        proof.snapshot().tip,
-                        certificate.complete_through_commit_seq,
-                        "a proof never covers a snapshot past the certified horizon"
-                    );
-                    assert_eq!(resolution.disqualified, None);
-                }
-                if resolution.disqualified == Some(Disqualification::SnapshotChanged)
-                    || matches!(
-                        resolution.disqualified,
-                        Some(Disqualification::ProjectionLag { .. })
-                    )
-                {
-                    snapshot_changed = true;
-                    assert!(resolution.proof.is_none());
-                }
-                if resolution.completion
-                    == Completion::Incomplete(IncompleteReason::BudgetExhausted)
-                {
-                    assert!(cancel);
-                    cancelled_midway = true;
-                    assert!(resolution.proof.is_none());
-                }
-                assert!(
-                    resolution.retained.len() <= resolution.consumed.rows,
-                    "retained progress never exceeds the rows read"
+            let case = format!("{interferences:?}");
+            assert!(
+                armed.lock().unwrap().is_empty(),
+                "{case}: every interference must fire inside the attempt"
+            );
+            let churned = interferences
+                .iter()
+                .any(|(_, interference)| *interference == Interference::Churn);
+            let cancelled_at = interferences
+                .iter()
+                .find(|(_, interference)| *interference == Interference::Cancel)
+                .map(|(at, _)| *at);
+            if cancelled_at == Some(1) {
+                assert_eq!(
+                    resolution.unwrap_err(),
+                    ResolveRefusal::BudgetExhausted,
+                    "{case}: a cancellation before any page completes refuses the attempt"
                 );
-                assert_eq!(resolution.retained.len(), resolution.observations.eligible);
-                if resolution.completion == Completion::Complete {
-                    assert_eq!(resolution.consumed.rows, rows.len());
-                }
+                continue;
             }
+            let resolution = resolution.unwrap_or_else(|refusal| panic!("{case}: {refusal:?}"));
+            assert_eq!(resolution.retained.len(), resolution.observations.eligible);
+            let retained: Vec<&str> = resolution
+                .retained
+                .iter()
+                .map(|row| row.occurrence_id.as_str())
+                .collect();
+            let read = match cancelled_at {
+                Some(at) => {
+                    assert_eq!(
+                        resolution.completion,
+                        Completion::Incomplete(IncompleteReason::BudgetExhausted),
+                        "{case}: cancellation landed mid-attempt"
+                    );
+                    (at - 1) / 2
+                }
+                None => {
+                    assert_eq!(resolution.completion, Completion::Complete, "{case}");
+                    rows.len()
+                }
+            };
+            assert_eq!(resolution.consumed.pages, read, "{case}");
+            assert_eq!(resolution.consumed.rows, read, "{case}");
+            assert_eq!(
+                retained,
+                in_key_order[..read],
+                "{case}: every row read before the interference is kept, in key order"
+            );
+            if churned {
+                assert_eq!(
+                    resolution.disqualified,
+                    Some(Disqualification::SnapshotChanged),
+                    "{case}: the writer moved authority mid-attempt"
+                );
+            }
+            if churned || cancelled_at.is_some() {
+                assert!(resolution.proof.is_none(), "{case}");
+                continue;
+            }
+            assert_eq!(resolution.disqualified, None, "{case}");
+            let proof = resolution
+                .proof
+                .expect("an undisturbed attempt over one target proves");
+            assert_eq!(
+                proof.snapshot().tip,
+                certificate.complete_through_commit_seq,
+                "a proof never covers a snapshot past the certified horizon"
+            );
         }
-    }
-    assert!(
-        snapshot_changed,
-        "the writer must have moved authority mid-attempt"
-    );
-    assert!(
-        cancelled_midway,
-        "cancellation must have landed mid-attempt"
-    );
+    });
 }
