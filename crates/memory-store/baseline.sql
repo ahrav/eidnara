@@ -12,9 +12,9 @@
 CREATE TABLE cache_state (
             session_id   TEXT PRIMARY KEY,
             row_version  INTEGER NOT NULL,
+            last_activity_at INTEGER NOT NULL DEFAULT 0, -- precedes the text columns, so a read of it touches no overflow page
             core_state   TEXT NOT NULL,
-            meta         TEXT NOT NULL
-        , last_activity_at INTEGER NOT NULL DEFAULT 0);
+            meta         TEXT NOT NULL);
 
 -- The ordered block identity vector of each producer message id a session's
 -- transform has recorded, as a JSON array of `BlockIdentity`. It lives beside

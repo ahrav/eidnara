@@ -456,11 +456,11 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
     );
 }
 
-/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds no
-/// `covered_system_messages` table.
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It stores
+/// `cache_state.last_activity_at` after the text columns.
 const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
-    "14f25ad8b7044a4c89219e1a4a34cd54d12abc596fca6a3438fdcb831e3bf855";
+    "45baed0c314ba5d29d925f063ff5caa5e5260bc81240acdd4deee0f622885f36";
 
 /// A store laid down under the prior baseline refuses to open and is left byte-identical.
 #[test]
@@ -485,5 +485,30 @@ fn a_store_created_under_the_prior_baseline_refuses_to_open_untouched() {
     assert_eq!(
         std::fs::read(dir.path().join("memory.sqlite")).unwrap(),
         before
+    );
+}
+
+/// `cache_state.last_activity_at` precedes the unbounded `core_state` and `meta` text, so the
+/// open-time retention scan reads it from each row's first page and walks no overflow chain.
+#[test]
+fn cache_state_stores_last_activity_at_ahead_of_its_text_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(MemoryStore::open_for_test(dir.path(), "eidnara-test"));
+    let columns: Vec<String> = inspect(dir.path())
+        .prepare("SELECT name FROM pragma_table_info('cache_state') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "session_id",
+            "row_version",
+            "last_activity_at",
+            "core_state",
+            "meta"
+        ]
     );
 }

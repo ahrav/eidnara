@@ -8116,7 +8116,7 @@ impl MemoryStore {
         self.transform_root_prune
     }
 
-    /// Deletes roots whose observation and cache activity are both older than the retention window ending at `now_ms`. The store's newest recorded root observation or cache activity checks the clock: when that write is later than `now_ms`, or more than one window before it, retention keeps every root. A dormant store therefore prunes at the first open after new activity, and a clock that jumps ahead at open deletes nothing.
+    /// Deletes roots whose observation and cache activity are both older than the retention window ending at `now_ms`. The store's newest recorded root observation or cache activity checks the clock: when that write is later than `now_ms`, or more than one window before it, retention keeps every root. A dormant store therefore prunes at the first open after new activity, and a clock that jumps ahead at open deletes nothing. `cache_state` stores `last_activity_at` ahead of its text columns, so the newest-activity scan and the per-root probe read each row's first page and no `core_state` or `meta` overflow page.
     fn prune_transform_session_roots(
         &self,
         now_ms: Option<i64>,
