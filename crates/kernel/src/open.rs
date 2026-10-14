@@ -429,10 +429,11 @@ impl KernelStore {
             _lease: lease,
         };
         store.reconcile_artifact_usage();
+        let seeded_walk = store.held_artifact_usage();
         // A purge unlink that cannot complete keeps its pending row for maintenance
         // to retry; refusing to open over it would take the whole store offline
         // for one object, so the count is not an open failure.
-        store.recover_interrupted_work()?;
+        store.recover_interrupted_work(seeded_walk)?;
         Ok(store)
     }
 
@@ -444,12 +445,21 @@ impl KernelStore {
     /// counted artifact usage with a walk of the object tree. Returns how many
     /// pending purge unlinks could not be completed.
     ///
+    /// `seeded_walk` is the count from the walk `open` takes before recovery.
+    /// A recovery that leaves the count equal to it skips the reconciliation
+    /// walk; `None` always reconciles.
+    ///
     /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
     /// explicit call, so opening a store is not a destructive act.
-    pub(super) fn recover_interrupted_work(&self) -> Result<usize, KernelError> {
+    pub(super) fn recover_interrupted_work(
+        &self,
+        seeded_walk: Option<u64>,
+    ) -> Result<usize, KernelError> {
         self.abandon_expired_staging_runs(crate::current_time_ms())?;
         let unfinished_purges = self.run_artifact_recovery(crate::current_time_ms())?;
-        self.reconcile_artifact_usage();
+        if seeded_walk.is_none() || self.held_artifact_usage() != seeded_walk {
+            self.reconcile_artifact_usage();
+        }
         Ok(unfinished_purges)
     }
 

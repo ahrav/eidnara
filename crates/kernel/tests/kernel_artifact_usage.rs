@@ -244,6 +244,11 @@ fn an_unrecovered_publish_counts_until_startup_recovery_removes_it() {
     let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 8).unwrap();
     let removed = before - walked_bytes(root.path());
     assert_eq!(removed, 6, "{RECOVERY_MARKER}");
+    assert_eq!(
+        store.artifact_census_walks_for_test(),
+        2,
+        "a recovery that removed bytes is reconciled with a second walk"
+    );
     assert_usage_matches_walk(&store, root.path(), "startup recovery");
     // Admission stays open only if the walk after recovery matched the count
     // recovery kept.

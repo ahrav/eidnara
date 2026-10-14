@@ -560,7 +560,7 @@ fn ingestion_and_reclaim_keep_the_count_without_walking_the_object_tree() {
     seed_domain(&store);
     let walks = || store.artifact_census_walks_for_test();
     let opened = walks();
-    assert_eq!(opened, 2, "open walks before and after startup recovery");
+    assert_eq!(opened, 1, "a clean open walks once");
     let first = store.ingest_artifact(request("one", b"12")).unwrap();
     store.ingest_artifact(request("two", b"34")).unwrap();
     store.ingest_artifact(request("two-again", b"34")).unwrap();

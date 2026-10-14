@@ -106,6 +106,10 @@ impl KernelStore {
         regular_file_bytes(&self.objects_directory, cancelled).map_err(|_| KernelError::Io)
     }
 
+    pub(crate) fn held_artifact_usage(&self) -> Option<u64> {
+        *self.counted_usage()
+    }
+
     /// Walks of the object tree this store took to count its usage since it
     /// opened.
     #[cfg(feature = "test-support")]
