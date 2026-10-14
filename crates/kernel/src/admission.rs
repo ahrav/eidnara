@@ -3254,7 +3254,7 @@ pub(crate) fn egress_candidates_tx(
 
 /// A seqlock read: an even, unchanged generation proves no classification
 /// merge ran during the snapshot.
-fn stable_generation(before: u64, after: u64) -> Option<u64> {
+pub(crate) fn stable_generation(before: u64, after: u64) -> Option<u64> {
     (before == after && before.is_multiple_of(2)).then_some(before)
 }
 

@@ -7,7 +7,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::applicability::EvalBudget;
-use super::open::AcquireLimit;
+use super::open::{AcquireLimit, checked_database_incarnation_id};
 use super::outbox::{OutboxEntry, outbox_entry};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
@@ -37,6 +37,24 @@ pub struct CommitReadIncarnation {
 pub struct CommitReadTarget {
     pub through_commit: i64,
     pub incarnation: CommitReadIncarnation,
+}
+
+/// One reader guard covers the statement that reads the committed tip and the durable database identity, and the incarnation read beside it. The classification generation brackets that statement under the seqlock discipline of [`crate::EgressSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifiedCommitReadTarget {
+    pub database_incarnation_id: String,
+    pub target: CommitReadTarget,
+    pub classification_generation: Option<u64>,
+}
+
+impl IdentifiedCommitReadTarget {
+    /// The egress state the capture observed, comparable with an eligibility batch's snapshot.
+    pub fn egress_snapshot(&self) -> crate::EgressSnapshot {
+        crate::EgressSnapshot {
+            tip: self.target.through_commit,
+            classification_generation: self.classification_generation,
+        }
+    }
 }
 
 /// Page capacity, checked from `COUNT` and `SUM(LENGTH())` before any payload is selected.
@@ -226,6 +244,48 @@ impl KernelStore {
     ) -> Result<CommitReadTarget, KernelError> {
         let limit = budget.acquire_limit();
         limit.run(|| self.capture_commit_read_target_inner(&limit))
+    }
+
+    /// One statement reads `through_commit` and `database_incarnation_id`; the same reader guard covers the call to `self.incarnation()`.
+    ///
+    /// # Errors
+    ///
+    /// The method returns [`KernelError::CorruptCanonicalRow`] when the database identity is missing or malformed, and [`KernelError::Deadline`] when the budget is exhausted, including when a reader is free.
+    pub fn capture_identified_commit_read_target_within_budget(
+        &self,
+        budget: &EvalBudget,
+    ) -> Result<IdentifiedCommitReadTarget, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let reader = self.reader_with_limit(&limit)?;
+            let generation_before = self
+                .classification_generation
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let (through_commit, database_incarnation_id) = reader
+                .query_row_cached(
+                    "SELECT (SELECT COALESCE(MAX(commit_seq),0) FROM commit_log),
+                            (SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(map_sqlite)?;
+            let generation_after = self
+                .classification_generation
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let captured = IdentifiedCommitReadTarget {
+                database_incarnation_id: checked_database_incarnation_id(database_incarnation_id)?,
+                target: CommitReadTarget {
+                    through_commit,
+                    incarnation: self.incarnation(),
+                },
+                classification_generation: crate::admission::stable_generation(
+                    generation_before,
+                    generation_after,
+                ),
+            };
+            limit.check()?;
+            Ok(captured)
+        })
     }
 
     fn capture_commit_read_target_inner(
