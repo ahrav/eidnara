@@ -1705,9 +1705,17 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Round-trip, concurrent-writer, and per-byte agreement
-tests run natively and under Miri; none covers `to_vec` with span lengths
-that do not sum to `body_len`.
+Exercised: yes - `to_vec` allocates without zero-fill and copies through
+`copy_out_uninit`; under the [Miri job][ci-miri],
+`copy_out_uninit_initializes_every_byte_at_every_alignment_and_length`
+reads back an uninitialized destination at every shift and length,
+`to_vec_copies_every_body_length_without_a_zero_fill` covers every body
+length through a lease, and
+`a_span_length_mismatch_refuses_before_writing_any_byte` shows a mismatched
+destination returns `LengthMismatch` with no byte written; skipping one tail
+byte in `copy_out_uninit` fails the first under Miri as an uninitialized read.
+The round-trip, concurrent-writer, and per-byte agreement tests still run,
+and the [Valgrind job][ci-valgrind] round-trips frames through `to_vec`.
 Guarantee: A concurrent peer store of the same shape yields stale bytes,
 never a mixed-size data race, and a receiver never reads uninitialized
 process memory as payload.
@@ -1721,10 +1729,11 @@ still returns a `Vec` whose every byte in `0..body_len` was written by
 the buffer. `always` because the soundness argument in the
 [`LeaseSpan` contract][span-safety] and the crate's [AGENTS.md][agents]
 treat this as a verification boundary.
-Fault/timing angle: The zero-fill at [`to_vec:331`][to-vec-fill] makes the
-`Vec` initialized before any early `Err` return; replacing it with capacity
-plus `set_len` or `MaybeUninit` moves the initialization proof onto the
-per-span length checks. A `memcpy` replacement forms a reference over
+Fault/timing angle: `to_vec` reserves capacity and sets the length only
+after `copy_to_uninit` returns `Ok`, so the initialization proof rests on the
+span's length check, which refuses before writing, and on
+`copy_out_uninit` writing every byte of the range `AccessShape` partitions.
+Any early `Err` drops the buffer unexposed. A `memcpy` replacement forms a reference over
 peer-writable memory, which the shm-transport catalog's
 [no-reference record][shm-noref] forbids.
 Required faults and enabling state: A peer writing the same span while the
@@ -3099,7 +3108,6 @@ evaluation of this area and its disposition are recorded in
 [copy-out]: ../../../../crates/shm-transport/src/lease.rs#L186
 [copy-in]: ../../../../crates/shm-transport/src/lease.rs#L216
 [to-vec]: ../../../../crates/shm-transport/src/lease.rs#L330
-[to-vec-fill]: ../../../../crates/shm-transport/src/lease.rs#L331
 [t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L581-L619
 [max-resident]: ../../../../crates/host-runtime/src/ring_transport.rs#L57-L58
 [affordable]: ../../../../crates/host-runtime/src/ring_transport.rs#L60

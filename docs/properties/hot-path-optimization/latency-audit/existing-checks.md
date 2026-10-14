@@ -412,6 +412,9 @@ forcing and observing a failed live read.
 | [`copy_in_then_copy_out_round_trips_at_every_alignment_and_length`][t-roundtrip] | 16 source offsets x 16 shifts x 40 lengths round-trip; bytes before the shift are untouched. | unaudited |
 | [`span_reads_tolerate_a_concurrent_writer`][t-concurrent] | A concurrent same-shape `copy_in` never tears a byte through `read_byte`, `copy_to`, or `checksum`. | unaudited |
 | [`read_byte_agrees_with_copy_to_at_every_alignment`][t-readbyte] | Per-byte and bulk reads agree. | unaudited |
+| `copy_out_uninit_initializes_every_byte_at_every_alignment_and_length` (`lease.rs`, Miri witness) | An uninitialized destination is fully written at 16 shifts x 40 lengths. | unaudited |
+| `to_vec_copies_every_body_length_without_a_zero_fill` (`lease.rs`, Miri witness) | `to_vec` returns the exact body at lengths 0 to 39 through the uninitialized buffer. | unaudited |
+| `a_span_length_mismatch_refuses_before_writing_any_byte` (`lease.rs`, Miri witness) | A destination of another length refuses with `LengthMismatch` and keeps its sentinel bytes, through `copy_to_uninit` and `copy_to`. | unaudited |
 | [Miri job][ci-miri] | `lease::` and `backend::ring::miri` tests run under Miri; the job fails unless at least one passes. | unaudited |
 | [Valgrind job][ci-valgrind] | `shm-transport --test ring` runs under memcheck. | unaudited |
 | [`a_commit_past_the_write_deadline_is_refused`][t-deadline] | `publish_direct` with a slow serializer publishes nothing. | unaudited |
@@ -428,8 +431,7 @@ forcing and observing a failed live read.
 None found: a test that asserts `arena_reclaimed - punched <
 punch_batch_bytes` as an inequality over a long publish and release sequence,
 or that measures resident pages on an idle host ring; any production reader
-of `resident_arena_pages` or of process RSS; a test of `to_vec` with span
-lengths that do not sum to `body_len`; a test of a queued direct frame
+of `resident_arena_pages` or of process RSS; a test of a queued direct frame
 dropped by generation retirement.
 
 Suspiciously quiet: the [hardware envelope bench][bench] counts

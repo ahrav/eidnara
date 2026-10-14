@@ -1,6 +1,6 @@
 use std::fmt;
 use std::marker::PhantomData;
-use std::mem::size_of;
+use std::mem::{MaybeUninit, size_of};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -91,6 +91,18 @@ impl<'lease> LeaseSpan<'lease> {
         // SAFETY: the constructor's contract keeps `len` source bytes valid for reads and
         // writes throughout `'lease` with no Rust reference over them.
         unsafe { copy_out(self.base.as_ptr(), destination) };
+        Ok(())
+    }
+
+    /// Copies every byte into `destination`, which must be exactly `len` long, initializing
+    /// all of it. A length mismatch returns `Err` before any byte is written.
+    pub fn copy_to_uninit(self, destination: &mut [MaybeUninit<u8>]) -> Result<(), LeaseError> {
+        if destination.len() != self.len {
+            return Err(LeaseError::LengthMismatch);
+        }
+        // SAFETY: the constructor's contract keeps `len` source bytes valid for reads and
+        // writes throughout `'lease` with no Rust reference over them.
+        unsafe { copy_out_uninit(self.base.as_ptr(), destination) };
         Ok(())
     }
 
@@ -186,6 +198,22 @@ impl AccessShape {
 /// overlap `destination`, and no Rust reference may cover that source range while the call
 /// runs.
 pub(crate) unsafe fn copy_out(source: *mut u8, destination: &mut [u8]) {
+    // SAFETY: `copy_out_uninit` stores only initialized bytes through the view, so every byte
+    // of `destination` stays initialized; the caller upholds its source contract.
+    unsafe {
+        copy_out_uninit(
+            source,
+            &mut *(std::ptr::from_mut::<[u8]>(destination) as *mut [MaybeUninit<u8>]),
+        );
+    }
+}
+
+/// [`copy_out`] into memory that need not be initialized. Every byte of `destination` is
+/// written, so a caller may treat the whole slice as initialized once the call returns.
+///
+/// # Safety
+/// The source contract of [`copy_out`].
+pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUninit<u8>]) {
     let shape = AccessShape::of(source, destination.len());
     let (head, rest) = destination.split_at_mut(shape.head);
     let (words, tail) = rest.split_at_mut(shape.words * WORD);
@@ -195,14 +223,14 @@ pub(crate) unsafe fn copy_out(source: *mut u8, destination: &mut [u8]) {
     // in bounds.
     unsafe {
         for (offset, byte) in head.iter_mut().enumerate() {
-            *byte = AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed);
+            byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
         }
         for (word_start, chunk) in shape.word_starts().zip(words.as_chunks_mut::<WORD>().0) {
             let word = AtomicU64::from_ptr(source.add(word_start).cast()).load(Ordering::Relaxed);
-            *chunk = word.to_ne_bytes();
+            *chunk = word.to_ne_bytes().map(MaybeUninit::new);
         }
         for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
-            *byte = AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed);
+            byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
         }
     }
 }
@@ -328,11 +356,20 @@ impl PayloadLease {
         unsafe { LeaseSpan::new(ptr, self.body_len) }
     }
 
-    /// Copies the body into one `Vec` of `len` bytes.
+    /// Copies the body into one `Vec` of `len` bytes. The buffer is allocated without
+    /// zero-filling; `copy_to_uninit` writes every byte before the length is set, and any
+    /// error returns before the buffer is exposed.
     pub fn to_vec(&self) -> Result<Vec<u8>, LeaseError> {
-        let mut bytes = vec![0u8; self.body_len];
+        let mut bytes = Vec::with_capacity(self.body_len);
         if self.body_len != 0 {
-            self.body()?.copy_to(&mut bytes)?;
+            let spare = bytes
+                .spare_capacity_mut()
+                .get_mut(..self.body_len)
+                .ok_or(LeaseError::LengthMismatch)?;
+            self.body()?.copy_to_uninit(spare)?;
+            // SAFETY: `copy_to_uninit` returned `Ok`, so it wrote all `body_len` bytes of the
+            // spare capacity, which `with_capacity` sized to at least `body_len`.
+            unsafe { bytes.set_len(self.body_len) };
         }
         Ok(bytes)
     }
@@ -504,9 +541,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        AccessShape, LeaseError, LeaseSpan, PayloadLease, WORD, copy_in, copy_out, observers,
+        AccessShape, LeaseError, LeaseSpan, PayloadLease, WORD, copy_in, copy_out, copy_out_uninit,
+        observers,
     };
     use crate::backend::retained::Retained;
+    use std::mem::MaybeUninit;
 
     pub(crate) use super::retained_fixture;
 
@@ -657,6 +696,71 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The zero-fill-free copy initializes every destination byte at every source alignment and length: the destination starts uninitialized, so under Miri a byte the copy skipped is an uninitialized read when the result is compared.
+    #[test]
+    fn copy_out_uninit_initializes_every_byte_at_every_alignment_and_length() {
+        use std::sync::atomic::AtomicU8;
+        let source: Vec<u8> = (0..64u8).collect();
+        for shared_shift in 0..16 {
+            for len in 0..40 {
+                let shared: Vec<AtomicU8> = (0..len + shared_shift)
+                    .map(|_| AtomicU8::new(0xff))
+                    .collect();
+                let shared_ptr = shared.as_ptr().cast_mut().cast::<u8>();
+                let mut back: Vec<u8> = Vec::with_capacity(len);
+                // SAFETY: `shared` is live for both calls and no `&[u8]` or `&mut [u8]` is formed
+                // over it; `copy_out_uninit` writes all `len` bytes of the spare capacity before
+                // `set_len` exposes them.
+                unsafe {
+                    copy_in(&source[..len], shared_ptr.add(shared_shift));
+                    copy_out_uninit(
+                        shared_ptr.add(shared_shift),
+                        &mut back.spare_capacity_mut()[..len],
+                    );
+                    back.set_len(len);
+                }
+                assert_eq!(back, source[..len], "shift {shared_shift} len {len}");
+            }
+        }
+    }
+
+    /// `to_vec` returns exactly the body at every length, including empty, through the uninitialized buffer.
+    #[test]
+    fn to_vec_copies_every_body_length_without_a_zero_fill() {
+        let retained = retained_fixture();
+        let body: Vec<u8> = (0..40u8).map(|byte| byte.wrapping_mul(37)).collect();
+        for len in 0..body.len() {
+            let lease = lease_over(&retained, 1, len as u64 + 1, &body[..len]);
+            assert_eq!(lease.to_vec().unwrap(), body[..len], "len {len}");
+            lease.release().unwrap();
+        }
+    }
+
+    /// A destination whose length differs from the span's refuses with `LengthMismatch` before writing any byte, through both copies.
+    #[test]
+    fn a_span_length_mismatch_refuses_before_writing_any_byte() {
+        use std::sync::atomic::AtomicU8;
+        let shared: Vec<AtomicU8> = (0..16).map(AtomicU8::new).collect();
+        // SAFETY: `shared` outlives the span and no `&[u8]` or `&mut [u8]` is formed over it.
+        let span = unsafe { LeaseSpan::new(shared.as_ptr().cast_mut().cast::<u8>(), 16) }.unwrap();
+        for len in [0, 15, 17] {
+            let mut uninit = vec![MaybeUninit::new(0xee_u8); len];
+            assert_eq!(
+                span.copy_to_uninit(&mut uninit),
+                Err(LeaseError::LengthMismatch),
+                "len {len}"
+            );
+            assert!(uninit.iter().all(|byte| {
+                // SAFETY: every byte was initialized to the sentinel and a refused copy
+                // writes none.
+                unsafe { byte.assume_init() == 0xee }
+            }));
+            let mut plain = vec![0xee_u8; len];
+            assert_eq!(span.copy_to(&mut plain), Err(LeaseError::LengthMismatch));
+            assert!(plain.iter().all(|byte| *byte == 0xee));
         }
     }
 
