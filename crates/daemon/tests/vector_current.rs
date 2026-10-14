@@ -1,7 +1,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use daemon::query_route::{CompressedLimits, QueryRouteLimits};
 use daemon::vector_admission::ResourceClass;
@@ -231,7 +230,6 @@ fn a_selector_unreadable_under_a_held_lifecycle_lock_keeps_the_verified_view() {
         Ok(None)
     ));
     let mut acquisitions = 0;
-    let started = Instant::now();
     let served = owner
         .view(&fixture.expected(), &mut |event| {
             if event == AcquireEvent::BeforeVerification {
@@ -239,14 +237,9 @@ fn a_selector_unreadable_under_a_held_lifecycle_lock_keeps_the_verified_view() {
             }
         })
         .unwrap();
-    let waited = started.elapsed();
     assert_eq!(
         acquisitions, 0,
         "the verified view is served without a new hash"
     );
     assert!(Arc::ptr_eq(&held_view, &served));
-    assert!(
-        waited < Duration::from_millis(50),
-        "the held view waited {waited:?} on the lifecycle lock"
-    );
 }

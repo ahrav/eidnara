@@ -47,7 +47,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
 2. **The catalog names no production entry point.** In `catalog.md`, after
    "A record exercised only by a fixture engine says so.", add: "The daemon
    reaches the lane through `scan` (`crates/daemon/src/query_route.rs:1116`)
-   and `admit` (`:1271`), each under `QueryRouteLimits::lexical_retrieval_bounds`
+   and `admit` (`:1276`), each under `QueryRouteLimits::lexical_retrieval_bounds`
    (`:172`); `retrieve` has no production caller, and
    `crates/retrieval/tests/lexical_retrieval.rs:652`
    `scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate`
