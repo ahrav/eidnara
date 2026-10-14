@@ -81,6 +81,7 @@ pub mod search_writer;
 pub mod selection;
 pub mod served_json;
 pub mod session_resolver;
+mod staged_body;
 mod tail_hygiene;
 pub mod terse_text_compression;
 mod token_cache;

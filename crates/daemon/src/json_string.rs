@@ -7,7 +7,7 @@ const HIGHS: u64 = 0x8080_8080_8080_8080;
 /// `\`. A subtraction borrow can also mark bytes above the lowest marked one, so only the lowest
 /// set bit locates an escaped byte exactly.
 #[inline(always)]
-fn escape_marks(word: u64) -> u64 {
+pub(crate) fn escape_marks(word: u64) -> u64 {
     let quote = word ^ (ONES * u64::from(b'"'));
     let backslash = word ^ (ONES * u64::from(b'\\'));
     (word.wrapping_sub(ONES * 0x20)

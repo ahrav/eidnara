@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
+use crate::staged_body::{BoundedSink, Sink, StagedBody};
+
 /// Maximum body size shared with host frame admission.
 pub const MAX_WIRE_BODY_BYTES: usize = host_runtime::MAX_FRAME_BODY_LEN as usize;
 
@@ -27,8 +29,12 @@ pub trait Emit: Send + Sync {
     fn emit(&self, destination: &mut dyn Write) -> Result<(), PreparedOutputError>;
 }
 
+/// `TransformSegments` stores the encoded envelope around its prepared operations.
 struct TransformSegments {
-    envelope: Map<String, Value>,
+    /// `envelope` holds the encoded envelope without the operations value, which belongs at
+    /// `split`, right after the `"operations":` key.
+    envelope: Vec<u8>,
+    split: usize,
     operations: Vec<RecipeSegment>,
 }
 
@@ -43,8 +49,8 @@ pub enum RecipeSegment {
 const INSERT_PREFIX: &[u8] = br#"{"op":"insert","values":["#;
 const INSERT_SUFFIX: &[u8] = b"]}";
 
-/// The staging buffer coalesces small JSON writes to reduce calls to the direct destination's `write`.
-const DIRECT_STAGING_BYTES: usize = 4 * 1024;
+/// Staging bytes for encoding a transform envelope; a larger envelope grows past them.
+const ENVELOPE_BYTES: usize = 4 * 1024;
 
 #[derive(Clone)]
 enum PreparedSegmentSource {
@@ -98,11 +104,17 @@ impl PreparedSegment {
     fn fits_recipe_depth(&self) -> bool {
         let limit = crate::edit_recipe::MAX_JSON_NESTING - 4;
         match &self.source {
-            PreparedSegmentSource::Value(value) => {
-                crate::edit_recipe::validate_json_nesting(value).is_ok_and(|depth| depth <= limit)
-            }
+            PreparedSegmentSource::Value(value) => containers_within(value, limit),
             PreparedSegmentSource::Exact(bytes) => encoded_depth_within(bytes, limit),
             PreparedSegmentSource::Served(message) => message.nesting_depth() <= limit,
+        }
+    }
+
+    fn write_staged<S: Sink>(&self, body: &mut StagedBody<S>) -> io::Result<()> {
+        match &self.source {
+            PreparedSegmentSource::Exact(bytes) => body.bytes(bytes),
+            PreparedSegmentSource::Served(message) => body.bytes(message.canonical_bytes()),
+            PreparedSegmentSource::Value(value) => body.value(value),
         }
     }
 
@@ -122,6 +134,24 @@ impl PreparedSegment {
                 })?,
         }
         Ok(())
+    }
+}
+
+/// Whether `value` nests at most `limit` container levels, the root container being level one.
+/// For any `limit` up to `MAX_JSON_NESTING` this is `validate_json_nesting(value)` succeeding with
+/// at most `limit`, found by a recursion that allocates nothing.
+fn containers_within(value: &Value, limit: usize) -> bool {
+    match value {
+        Value::Array(items) => {
+            limit > 0 && items.iter().all(|item| containers_within(item, limit - 1))
+        }
+        Value::Object(fields) => {
+            limit > 0
+                && fields
+                    .values()
+                    .all(|item| containers_within(item, limit - 1))
+        }
+        _ => true,
     }
 }
 
@@ -207,23 +237,30 @@ impl PreparedOutput {
         envelope: Value,
         operations: Vec<RecipeSegment>,
     ) -> Result<Self, PreparedOutputError> {
-        crate::edit_recipe::validate_json_nesting(&envelope)
-            .map_err(|_| PreparedOutputError::RecipeNestingTooDeep)?;
-        let Value::Object(envelope) = envelope else {
-            return Err(PreparedOutputError::InvalidTransformEnvelope);
+        // An envelope too deep is refused as too deep before its shape is judged.
+        let invalid = |envelope: &Value| {
+            if containers_within(envelope, crate::edit_recipe::MAX_JSON_NESTING) {
+                PreparedOutputError::InvalidTransformEnvelope
+            } else {
+                PreparedOutputError::RecipeNestingTooDeep
+            }
         };
-        if envelope.get("operations") != Some(&Value::Null) {
-            return Err(PreparedOutputError::InvalidTransformEnvelope);
-        }
+        let envelope = match envelope {
+            Value::Object(fields) if fields.get("operations") == Some(&Value::Null) => fields,
+            other => return Err(invalid(&other)),
+        };
         if operations.iter().any(|operation| match operation {
             RecipeSegment::Keep(_) => false,
             RecipeSegment::Insert(values) => values.iter().any(|value| !value.fits_recipe_depth()),
         }) {
             return Err(PreparedOutputError::RecipeNestingTooDeep);
         }
+        // `encode_envelope` refuses an envelope nested too deep while it encodes it.
+        let (encoded, split) = encode_envelope(&envelope)?;
         Ok(Self {
             source: PreparedSource::Transform(Arc::new(TransformSegments {
-                envelope,
+                envelope: encoded,
+                split,
                 operations,
             })),
             #[cfg(test)]
@@ -251,25 +288,33 @@ impl PreparedOutput {
     }
 
     /// Writes this body, measured at `len` bytes, into `destination`; any other length is an error.
+    ///
+    /// An exact body is one write. Every other body is encoded through a staging buffer that
+    /// reaches `destination` in buffer-sized writes.
     pub fn write_measured(
         &self,
         len: usize,
         destination: &mut dyn Write,
     ) -> Result<usize, PreparedOutputError> {
-        let source = match &self.source {
-            PreparedSource::Json(value) => MeasuredSource::Json(value),
+        match &self.source {
             PreparedSource::Exact(bytes) => {
-                // An exact body is one write, so it reaches the destination unstaged.
                 let source = MeasuredSource::Exact(bytes);
-                return MeasuredOutput { source, len }.write_to(&mut { destination });
+                MeasuredOutput { source, len }.write_to(&mut { destination })
             }
-            PreparedSource::Transform(segments) => MeasuredSource::Transform(segments),
-            PreparedSource::Emit(body) => MeasuredSource::Emit(body.as_ref()),
-        };
-        let mut staged = io::BufWriter::with_capacity(DIRECT_STAGING_BYTES, destination);
-        let written = MeasuredOutput { source, len }.write_to(&mut staged)?;
-        staged.flush()?;
-        Ok(written)
+            PreparedSource::Json(value) => write_staged_body(len, destination, |body| {
+                body.value(value).map_err(PreparedOutputError::Write)
+            }),
+            PreparedSource::Transform(segments) => write_staged_body(len, destination, |body| {
+                write_transform_envelope(segments, body, |body, segment| {
+                    segment
+                        .write_staged(body)
+                        .map_err(PreparedOutputError::Write)
+                })
+            }),
+            PreparedSource::Emit(emitted) => {
+                write_staged_body(len, destination, |body| emitted.emit(body))
+            }
+        }
     }
 
     /// Measures this immutable source exactly before output reservation.
@@ -391,14 +436,7 @@ impl MeasuredOutput<'_> {
 
     /// Writes into a caller-reserved destination and verifies exact length.
     pub fn write_to<W: Write>(&self, destination: &mut W) -> Result<usize, PreparedOutputError> {
-        #[cfg(feature = "test-support")]
-        guard_calls::WRITTEN.with(|calls| calls.set(calls.get() + 1));
-        #[cfg(feature = "test-support")]
-        guard_calls::ON_WRITE.with(|hook| {
-            if let Some(hook) = &*hook.borrow() {
-                hook();
-            }
-        });
+        count_write();
         let mut destination = BoundedWriter::new(destination, self.len);
         match &self.source {
             MeasuredSource::Json(value) => {
@@ -424,6 +462,38 @@ impl MeasuredOutput<'_> {
         }
         Ok(written)
     }
+}
+
+/// Writes a body of `len` measured bytes through a staging buffer into `destination`; any other
+/// length is an error.
+fn write_staged_body(
+    len: usize,
+    destination: &mut dyn Write,
+    write: impl FnOnce(&mut StagedBody<BoundedSink<'_>>) -> Result<(), PreparedOutputError>,
+) -> Result<usize, PreparedOutputError> {
+    count_write();
+    let mut body = StagedBody::new(BoundedSink::new(destination, len), len);
+    write(&mut body)?;
+    let written = body.finish()?.written();
+    if written != len {
+        return Err(PreparedOutputError::LengthMismatch {
+            measured: len,
+            written,
+        });
+    }
+    Ok(written)
+}
+
+/// Counts one body write for `guard_calls` and runs its write hook.
+fn count_write() {
+    #[cfg(feature = "test-support")]
+    guard_calls::WRITTEN.with(|calls| calls.set(calls.get() + 1));
+    #[cfg(feature = "test-support")]
+    guard_calls::ON_WRITE.with(|hook| {
+        if let Some(hook) = &*hook.borrow() {
+            hook();
+        }
+    });
 }
 
 /// Per-thread guard call counts; a test reads them to observe how many times
@@ -589,41 +659,51 @@ fn write_transform_envelope<W: Write>(
     destination: &mut W,
     mut write_segment: impl FnMut(&mut W, &PreparedSegment) -> Result<(), PreparedOutputError>,
 ) -> Result<(), PreparedOutputError> {
-    destination.write_all(b"{")?;
-    for (index, (key, value)) in segments.envelope.iter().enumerate() {
-        if index > 0 {
+    let (head, tail) = segments.envelope.split_at(segments.split);
+    destination.write_all(head)?;
+    destination.write_all(b"[")?;
+    for (operation_index, operation) in segments.operations.iter().enumerate() {
+        if operation_index > 0 {
             destination.write_all(b",")?;
         }
-        serde_json::to_writer(&mut *destination, key).map_err(PreparedOutputError::Serialize)?;
-        destination.write_all(b":")?;
-        if key == "operations" {
-            destination.write_all(b"[")?;
-            for (operation_index, operation) in segments.operations.iter().enumerate() {
-                if operation_index > 0 {
-                    destination.write_all(b",")?;
-                }
-                match operation {
-                    RecipeSegment::Keep(segment) => write_segment(destination, segment)?,
-                    RecipeSegment::Insert(values) => {
-                        destination.write_all(INSERT_PREFIX)?;
-                        for (value_index, value) in values.iter().enumerate() {
-                            if value_index > 0 {
-                                destination.write_all(b",")?;
-                            }
-                            write_segment(destination, value)?;
-                        }
-                        destination.write_all(INSERT_SUFFIX)?;
+        match operation {
+            RecipeSegment::Keep(segment) => write_segment(destination, segment)?,
+            RecipeSegment::Insert(values) => {
+                destination.write_all(INSERT_PREFIX)?;
+                for (value_index, value) in values.iter().enumerate() {
+                    if value_index > 0 {
+                        destination.write_all(b",")?;
                     }
+                    write_segment(destination, value)?;
                 }
+                destination.write_all(INSERT_SUFFIX)?;
             }
-            destination.write_all(b"]")?;
-        } else {
-            serde_json::to_writer(&mut *destination, value)
-                .map_err(PreparedOutputError::Serialize)?;
         }
     }
-    destination.write_all(b"}")?;
+    destination.write_all(b"]")?;
+    destination.write_all(tail)?;
     Ok(())
+}
+
+/// The split at `operations` lets `write_transform_envelope` splice prepared operations into the serialized envelope.
+fn encode_envelope(envelope: &Map<String, Value>) -> Result<(Vec<u8>, usize), PreparedOutputError> {
+    let mut encoded = StagedBody::new(Vec::new(), ENVELOPE_BYTES);
+    let mut split = 0;
+    encoded.byte(b'{')?;
+    for (index, (key, value)) in envelope.iter().enumerate() {
+        if index > 0 {
+            encoded.byte(b',')?;
+        }
+        encoded.string(key)?;
+        encoded.byte(b':')?;
+        if key == "operations" {
+            split = encoded.written();
+        } else if !encoded.value_within(value, crate::edit_recipe::MAX_JSON_NESTING - 1)? {
+            return Err(PreparedOutputError::RecipeNestingTooDeep);
+        }
+    }
+    encoded.byte(b'}')?;
+    Ok((encoded.into_bytes()?, split))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1040,14 +1120,14 @@ mod tests {
         let owned = owned_fragments(&output);
         let len = owned.bytes.len();
         assert!(
-            len > 4 * DIRECT_STAGING_BYTES,
+            len > 2 * crate::staged_body::STAGE_BYTES,
             "the body spans several staging buffers"
         );
 
         let mut direct = RecordingDestination::default();
         assert_eq!(output.write_measured(len, &mut direct).unwrap(), len);
         assert_eq!(direct.bytes, owned.bytes);
-        let staged_bound = 2 * len.div_ceil(DIRECT_STAGING_BYTES);
+        let staged_bound = 2 * len.div_ceil(crate::staged_body::STAGE_BYTES);
         assert!(
             direct.writes <= staged_bound && owned.writes > 8 * staged_bound,
             "{} staged writes and {} serializer writes for {len} bytes",
@@ -1081,5 +1161,143 @@ mod tests {
             Err(PreparedOutputError::LengthMismatch { measured, written })
                 if measured == len + 1 && written == len
         ));
+    }
+
+    fn nested(levels: usize, leaf: Value) -> Value {
+        (0..levels).fold(leaf, |inner, level| {
+            if level % 2 == 0 {
+                json!([1, inner, "x"])
+            } else {
+                json!({"a": null, "b": inner})
+            }
+        })
+    }
+
+    /// The recursive container count agrees with `validate_json_nesting` on both sides of every limit, through the error at the nesting maximum.
+    #[test]
+    fn the_container_count_agrees_with_the_nesting_validator() {
+        let max = crate::edit_recipe::MAX_JSON_NESTING;
+        for levels in [
+            0,
+            1,
+            2,
+            3,
+            7,
+            max - 5,
+            max - 4,
+            max - 3,
+            max - 1,
+            max,
+            max + 1,
+            max + 2,
+        ] {
+            for leaf in [json!(null), json!([]), json!({}), json!("s")] {
+                let value = nested(levels, leaf);
+                let validated = crate::edit_recipe::validate_json_nesting(&value);
+                let limits = [
+                    0,
+                    1,
+                    2,
+                    3,
+                    levels.saturating_sub(1),
+                    levels,
+                    levels + 1,
+                    max - 4,
+                    max,
+                ];
+                for limit in limits.into_iter().filter(|limit| *limit <= max) {
+                    assert_eq!(
+                        containers_within(&value, limit),
+                        validated.as_ref().is_ok_and(|depth| *depth <= limit),
+                        "{levels} levels against limit {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_container_count_agrees_with_the_validator_on_any_value(value in json_value(), limit in 0usize..8) {
+            let validated = crate::edit_recipe::validate_json_nesting(&value);
+            proptest::prop_assert_eq!(
+                containers_within(&value, limit),
+                validated.as_ref().is_ok_and(|depth| *depth <= limit)
+            );
+        }
+    }
+
+    /// A transform body equals `serde_json` of the whole response wherever `operations` sorts among the envelope's keys, including an envelope larger than its staging buffer.
+    #[test]
+    fn a_transform_body_is_the_serialized_response_wherever_its_operations_sort() {
+        let note = "note \"quoted\"\n".repeat(2 * ENVELOPE_BYTES / 10);
+        for envelope in [
+            json!({"operations": null}),
+            json!({"operations": null, "z": 1}),
+            json!({"a": "x", "operations": null}),
+            json!({"a": note, "operations": null, "z": [1.5, -2, {"k": note}]}),
+        ] {
+            let operations = vec![
+                RecipeSegment::Keep(PreparedSegment::exact(Arc::from(
+                    &br#"{"count":2,"op":"keep"}"#[..],
+                ))),
+                RecipeSegment::Insert(vec![PreparedSegment::value(
+                    Arc::new(json!({"role": "user", "text": "hi\n"})),
+                    serialized_len(&json!({"role": "user", "text": "hi\n"})),
+                )]),
+            ];
+            let mut whole = envelope.clone();
+            whole["operations"] = json!([
+                {"op": "keep", "count": 2},
+                {"op": "insert", "values": [{"role": "user", "text": "hi\n"}]},
+            ]);
+            let expected = serde_json::to_vec(&whole).unwrap();
+            let output = PreparedOutput::transform_recipe(envelope, operations).unwrap();
+            let measured = output.measure().unwrap();
+            assert_eq!(measured.len(), expected.len());
+            let mut owned = Vec::new();
+            measured.write_to(&mut owned).unwrap();
+            assert_eq!(owned, expected);
+            let mut direct = Vec::new();
+            assert_eq!(
+                output.write_measured(expected.len(), &mut direct).unwrap(),
+                expected.len()
+            );
+            assert_eq!(direct, expected);
+        }
+    }
+
+    /// An envelope nested past the limit is refused as too deep whatever its shape, and a shallow envelope without a null `operations` is refused as invalid.
+    #[test]
+    fn an_envelope_is_refused_as_too_deep_before_its_shape_is_judged() {
+        let max = crate::edit_recipe::MAX_JSON_NESTING;
+        let refusal = |envelope: Value| {
+            PreparedOutput::transform_recipe(envelope, Vec::new())
+                .err()
+                .map(|error| error.to_string())
+        };
+        let too_deep = PreparedOutputError::RecipeNestingTooDeep.to_string();
+        let invalid = PreparedOutputError::InvalidTransformEnvelope.to_string();
+        let fits = nested(max - 1, json!(null));
+        let deep = nested(max, json!(null));
+        assert_eq!(
+            refusal(json!({"operations": null, "z": fits.clone()})),
+            None
+        );
+        assert_eq!(
+            refusal(json!({"operations": null, "z": deep.clone()})),
+            Some(too_deep.clone())
+        );
+        assert_eq!(
+            refusal(json!({"operations": [], "z": deep.clone()})),
+            Some(too_deep.clone())
+        );
+        assert_eq!(refusal(nested(max + 1, json!(null))), Some(too_deep));
+        assert_eq!(
+            refusal(json!({"operations": [], "z": fits})),
+            Some(invalid.clone())
+        );
+        assert_eq!(refusal(json!({"z": 1})), Some(invalid.clone()));
+        assert_eq!(refusal(json!([null])), Some(invalid));
     }
 }
