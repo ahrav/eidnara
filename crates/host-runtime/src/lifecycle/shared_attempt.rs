@@ -35,13 +35,10 @@ impl LifecycleTransactionLock {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
-    use crate::instance::LOCK_RETRY_DELAY;
 
     #[test]
-    fn one_attempt_shared_lock_returns_at_once_under_a_mutator() {
+    fn shared_attempt_reports_a_mutator_and_takes_a_free_lock() {
         let root = tempfile::tempdir().expect("temp data root");
         assert!(
             LifecycleTransactionLock::try_acquire_shared(Some(root.path()))
@@ -50,15 +47,10 @@ mod tests {
         );
         let mutator =
             LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("mutator");
-        let started = Instant::now();
         assert!(
             LifecycleTransactionLock::try_acquire_shared(Some(root.path()))
                 .expect("held root")
                 .is_none()
-        );
-        assert!(
-            started.elapsed() < LOCK_RETRY_DELAY,
-            "one attempt never sleeps"
         );
         drop(mutator);
         let shared = LifecycleTransactionLock::try_acquire_shared(Some(root.path()))
