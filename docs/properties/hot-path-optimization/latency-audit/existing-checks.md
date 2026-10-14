@@ -452,7 +452,7 @@ would change.
 | [`ingest_route_accepts_a_payload_at_the_artifact_cap`][t-route-cap] | The daemon route at and over `MAX_PAYLOAD_BYTES`. | unaudited |
 | [`orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects`][t-orphan] | Usage counts objects written while no store is open; `warn` at 80 percent. | unaudited |
 | [`facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled`][t-cancel] | Facts read a held count without polling cancellation; with no count the walk polls before every entry. | unaudited |
-| [`ingestion_and_reclaim_keep_the_count_without_walking_the_object_tree`][t-no-walk] | Ingests, refusals, facts, and the ingest after a reclaim take no walk; open takes two and maintenance one. | unaudited |
+| [`ingestion_and_reclaim_keep_the_count_without_walking_the_object_tree`][t-no-walk] | Ingests, refusals, facts, and the ingest after a reclaim take no walk; a clean open takes one and maintenance one. | unaudited |
 | [`deduplicated_bytes_add_zero_at_exactly_the_cap`][t-usage-dedup] | A present digest is admitted at the cap and adds zero. | unaudited |
 | [`a_refused_ingest_leaves_no_reservation_and_no_object`][t-usage-refused] | A `Capacity` refusal leaves no reservation row and no object. | unaudited |
 | [`failed_reference_cleanup_subtracts_the_bytes_it_published`][t-usage-cleanup] | The `-cleanup` marker: the walk drops between `AfterPublish` and return, and usage equals the walk. | unaudited |
@@ -463,6 +463,8 @@ would change.
 | [`a_batch_counts_each_distinct_payload_once_and_a_refused_batch_subtracts_it`][t-usage-batch] | A batch with a duplicate adds each distinct payload once on a non-empty store; a refused batch nets zero. | unaudited |
 | [`a_removal_larger_than_the_count_fails_the_next_admission_closed`][t-usage-underflow] | An object grown outside the store underflows the count at purge; usage equals the walk and the next ingest is `IngestionFailClosed`. | unaudited |
 | [`a_restore_reconciles_the_count_it_held_and_keeps_admission_open`][t-usage-restore] | Restore recovery reconciles once against the held count; usage equals the walk and admission stays open. | unaudited |
+| [`a_walk_counts_only_regular_files_at_both_levels`][t-usage-file-set] | The fallback walk and the census at open both count a top-level file and a shard object and skip symlinks and nested directories. | unaudited |
+| [`the_open_census_sums_every_shard_when_shards_outnumber_its_workers`][t-usage-census] | With 256 shards and up to 64 census workers, the census at open, a maintenance reconciliation, and the fallback walk each equal the independent sum; open takes one walk. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
 | [`recover_twice`][t-recover-twice] | A second recovery changes nothing. | unaudited |
 | [`return_value_fault_table_latches_eio_and_never_publishes_a_reference`][t-faults] | Six ingest fault points. | unaudited |
@@ -758,12 +760,14 @@ not a claim that no related check exists anywhere in the repository.
 [t-usage-refused]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L177
 [t-usage-cleanup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L193
 [t-usage-recovery]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L219
-[t-usage-paths]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L255
-[t-usage-added]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L304
-[t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L322
-[t-usage-batch]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L334
-[t-usage-underflow]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L367
-[t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L388
+[t-usage-paths]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L260
+[t-usage-added]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L309
+[t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L327
+[t-usage-batch]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L339
+[t-usage-underflow]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L372
+[t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L393
+[t-usage-file-set]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L421
+[t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L448
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426

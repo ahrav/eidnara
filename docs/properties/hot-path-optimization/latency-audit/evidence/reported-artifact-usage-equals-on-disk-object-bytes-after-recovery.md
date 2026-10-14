@@ -157,11 +157,51 @@ sources because only one exists.
   controls, run locally and reverted: dropping the unlink subtraction fails six tests, dropping the publication
   addition fails nine, dropping the drift latch fails both drift tests,
   dropping the underflow latch fails the underflow test, and dropping the
-  batch publication addition fails the batch test. Open pays two walks and
-  each maintenance pass one, under the writer lock.
+  batch publication addition fails the batch test. A clean open takes one
+  walk and each maintenance pass one, as the next entry describes.
 - Missing evidence: None.
 - Conclusion: resolved with answer - yes, at every quiescent point the tests
   reach.
+
+### Q: What does the census cost at open, and does a concurrent census keep the count equal to the walk?
+
+- Sources examined: the [open census][open-census],
+  [`seed_artifact_usage`][usage-seed], the [census thread][usage-census],
+  [`regular_file_bytes_concurrently`][walk-concurrent], the
+  [usage tests][t-usage], and a local probe (release build, a store of
+  100,000 objects in 256 shards, database on tmpfs and objects on XFS over
+  EBS, interleaved against the parent commit; uncommitted probe numbers,
+  not approved bench evidence).
+- Findings: Each object costs one `statat`. Single-threaded, that is about
+  2.1 us per object warm on the probe host, whose syscall path carries audit
+  and SELinux hooks, and one device read per inode cluster cold (about
+  5,500 reads for the store, at about 610 us each on EBS). The census now
+  divides the shard directories among up to 64 threads, a count sized for
+  reads in flight, and at open it runs on its own thread beside the database
+  open. Until `open` returns, the opening thread is the store's only user, so
+  the census counts the tree the writer lock would have seen, and the seed settles it through the same path as a
+  reconciliation: a count held and disagreeing latches, an exhaustion
+  leaves the count unknown, and any other failure latches. A failure other
+  than exhaustion from any worker outranks an exhaustion from another. The
+  cancellable fallback walk the sampler takes with no count held stays on
+  the caller's thread and polls before every entry as before. Probe: warm
+  open fell from about 186 ms to about 31 ms and cold open from about
+  3,030 ms to about 131 ms on 32 processors (about 836 ms to 222 ms on
+  four processors against the 16-worker intermediate); the fallback walk,
+  ingest, and the held-count read stayed within noise. On one processor a
+  warm open of a 4,000-object store pays about 3 ms more for the thread
+  starts. The census threads and their 16 KiB directory buffers exist only
+  while the walk runs, so the retained-resident total is unchanged. Negative
+  controls, run locally and reverted: dropping the workers' sums, dropping
+  the calling thread's share, skipping every other shard, and dropping
+  top-level files each fail
+  `the_open_census_sums_every_shard_when_shards_outnumber_its_workers`
+  with other usage tests.
+- Missing evidence: Measurements on local NVMe and on hosts without audit;
+  the probe host is the only one measured.
+- Conclusion: resolved with answer - the concurrent census counts the same
+  file set as the walk it replaces and settles it through the same latch, so
+  every equality the usage tests assert still holds.
 
 [ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
@@ -193,11 +233,15 @@ sources because only one exists.
 [usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
 [usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
 [usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L48-L73
-[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L81-L95
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L81-L121
 [usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L99-L107
-[open-seed]: ../../../../../crates/kernel/src/open.rs#L431
-[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L432
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L459-L464
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
-[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1525-L1579
+[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1520-L1684
+[walk-concurrent]: ../../../../../crates/kernel/src/cas/ingest.rs#L1542-L1594
+[open-census]: ../../../../../crates/kernel/src/open.rs#L319
+[usage-seed]: ../../../../../crates/kernel/src/cas/usage.rs#L88-L108
+[usage-census]: ../../../../../crates/kernel/src/cas/usage.rs#L169-L190
 [t-oracle-head]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382

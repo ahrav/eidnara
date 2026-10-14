@@ -1990,9 +1990,18 @@ unknown and latches. A reconciliation that finds drift latches and replaces
 the count with the walk, so admission stays refused while the sampler reports
 the bytes on disk; only a new store admits again. In production the
 reconciliation runs at open and at restore, because the daemon calls neither
-maintenance nor deletion. Open pays two walks, one before and one after
-startup recovery, and each maintenance pass holds the writer lock for one
-walk.
+maintenance nor deletion. A clean open walks once: the
+[census][usage-census] starts on a thread of its own once the layout and any
+interrupted restore are settled ([`:319`][open-census]), runs beside the
+database open, and [seeds the count][usage-seed] before startup recovery;
+until `open` returns, the opening thread is the store's only user, so that
+walk counts the tree the writer lock would have seen. Open walks again after
+recovery only when recovery changed the count. Every uncancellable walk
+divides the shard directories among up to [64 threads][walk-workers]
+([`regular_file_bytes_concurrently`][walk-concurrent]); the count it settles
+is the same sum, and a failure other than exhaustion outranks an exhaustion
+from another worker, so a walk that would have latched still latches. Each
+maintenance pass holds the writer lock for one walk.
 The [restore path][restore] runs recovery and its reconciliation against the
 count it held; tests writing [directly to disk][t-orphan] do so before the
 store opens. The health sampler reads the count without the writer lock
@@ -3167,7 +3176,7 @@ evaluation of this area and its disposition are recorded in
 [cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1062
 [stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1498-L1500
 [walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1525
-[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1582
+[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1702
 [startup]: ../../../../crates/kernel/src/cas/gc.rs#L102
 [startup-unreachable]: ../../../../crates/kernel/src/cas/gc.rs#L109-L136
 [reclaim-cand]: ../../../../crates/kernel/src/cas/gc.rs#L239
@@ -3179,8 +3188,8 @@ evaluation of this area and its disposition are recorded in
 [cap-default]: ../../../../crates/kernel/src/cas/mod.rs#L24
 [cap-error]: ../../../../crates/kernel/src/cas/mod.rs#L318-L325
 [latch]: ../../../../crates/kernel/src/cas/mod.rs#L628
-[recover]: ../../../../crates/kernel/src/open.rs#L449-L454
-[lock-writer]: ../../../../crates/kernel/src/open.rs#L465-L474
+[recover]: ../../../../crates/kernel/src/open.rs#L459-L464
+[lock-writer]: ../../../../crates/kernel/src/open.rs#L476-L485
 [facts]: ../../../../crates/kernel/src/facts.rs#L145
 [maintenance]: ../../../../crates/kernel/src/retention.rs#L197
 [restore]: ../../../../crates/kernel/src/backup.rs#L422-L424
@@ -3193,9 +3202,14 @@ evaluation of this area and its disposition are recorded in
 [usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L25-L32
 [usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L36-L40
 [usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L48-L73
-[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L81-L95
-[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L99-L107
-[open-seed]: ../../../../crates/kernel/src/open.rs#L431
+[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L81-L121
+[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L125-L133
+[open-seed]: ../../../../crates/kernel/src/open.rs#L432
+[open-census]: ../../../../crates/kernel/src/open.rs#L319
+[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L88-L108
+[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L169-L190
+[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1542-L1594
+[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1687
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
 
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
