@@ -93,7 +93,7 @@ sources because only one exists.
   nothing to drift from. Three actions are available in the code shape:
   refuse ingest, latch CAS ingestion closed, or adopt the walk value.
 - Missing evidence: A design decision.
-- Conclusion: needs human input.
+- Conclusion: needs human input. Superseded by the decision entry below.
 
 ### Q: Which file set does a counter follow: the walk's or `scan_objects`'s?
 
@@ -105,7 +105,8 @@ sources because only one exists.
   cap but is never a GC candidate; [`assert_semantic_oracle`][t-oracle] flags
   such entries as anomalies.
 - Missing evidence: A decision on which definition a counter follows.
-- Conclusion: needs human input.
+- Conclusion: needs human input. Superseded by the decision entry below:
+  the count follows the walk's file set.
 
 ### Q: Where does the count live, and what happens on drift? (decision at the usage-count head)
 
@@ -122,18 +123,20 @@ sources because only one exists.
   Each object unlink goes through [`unlink_counted_object`][usage-unlink],
   which subtracts the `st_size` read before the unlink once the durable
   unlink succeeds; a failed unlink leaves the count unknown, and a removal
-  larger than the count latches. [`reconcile_artifact_usage`][usage-reconcile]
-  walks under the writer lock at the end of every recovery (open and
-  restore) and every maintenance pass. With no count it seeds one. With a
+  larger than the count leaves it unknown and latches.
+  [`reconcile_artifact_usage`][usage-reconcile] walks under the writer lock
+  at the end of every recovery (open and restore) and every maintenance
+  pass. With no count it seeds one. With a
   count it compares, and a disagreement latches the CAS fail-closed state
-  and keeps the count. The drift action is the latch: the next admission is
+  and replaces the count with the walk, so the health sampler reports the
+  bytes on disk. The drift action is the latch: the next admission is
   refused with `IngestionFailClosed`, and only a new store, which re-seeds
   from the tree, admits again. The walk follows
-  [`regular_file_bytes`][walk-head]'s file set, so a stray root-level file counts
-  and its later appearance or disappearance is drift. The count adds 16
-  bytes of process memory and replaces the cached `Option<u64>` and
-  generation the store already held, so the declared retained-resident
-  total is unchanged.
+  [`regular_file_bytes`][walk-head]'s file set, so a stray root-level file
+  counts and its later appearance or disappearance is drift. The count is a
+  `Mutex<Option<u64>>` of about 24 bytes and replaces the cached
+  `Option<u64>` and generation the store already held, so the declared
+  retained-resident total is unchanged.
 - Missing evidence: None for the decision. Drift between a restore's
   install and its reconciliation is detected only at that reconciliation.
 - Conclusion: resolved with answer - a writer-lock count seeded by the open
@@ -149,9 +152,13 @@ sources because only one exists.
   refusal, cleanup, an orphan publish, startup recovery, reclaim, purge, a
   failed unlink, and its retry, and they assert that a file added or removed
   outside the store makes the next maintenance pass latch so the next ingest
-  is `IngestionFailClosed`. Negative controls, run locally and reverted:
-  dropping the unlink subtraction fails six tests, dropping the publication
-  addition fails nine, and dropping the drift latch fails both drift tests.
+  is `IngestionFailClosed`. A batch publish, a refused batch, an
+  underflowing purge, and a restore are compared the same way. Negative
+  controls, run locally and reverted: dropping the unlink subtraction fails six tests, dropping the publication
+  addition fails nine, dropping the drift latch fails both drift tests,
+  dropping the underflow latch fails the underflow test, and dropping the
+  batch publication addition fails the batch test. Open pays two walks and
+  each maintenance pass one, under the writer lock.
 - Missing evidence: None.
 - Conclusion: resolved with answer - yes, at every quiescent point the tests
   reach.
@@ -185,10 +192,10 @@ sources because only one exists.
 [t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
 [usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
 [usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L46-L73
-[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L79-L98
-[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L101-L109
-[open-seed]: ../../../../../crates/kernel/src/open.rs#L434
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L48-L73
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L81-L95
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L99-L107
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L431
 [recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs

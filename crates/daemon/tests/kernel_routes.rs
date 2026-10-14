@@ -669,11 +669,16 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
     assert!(kernel["artifact_cap_bytes"].as_u64().unwrap() > 0);
     assert_eq!(kernel["retained_outbox_rows"], 0);
 
-    // The artifact walk descends every shard below the held `objects` descriptor,
-    // so a shard it cannot open fails the sample.
+    // With no held usage count the sample walks every shard below the held
+    // `objects` descriptor, so a shard it cannot open fails the sample.
     let shard = kernel_root(&daemon.descriptor).join("artifacts/objects/zz");
     fs::create_dir(&shard).unwrap();
     fs::set_permissions(&shard, fs::Permissions::from_mode(0o000)).unwrap();
+    daemon
+        .handler
+        .kernel_store_for_test()
+        .unwrap()
+        .forget_artifact_usage_for_test();
     let failed_at = now_ms();
     daemon
         .handler

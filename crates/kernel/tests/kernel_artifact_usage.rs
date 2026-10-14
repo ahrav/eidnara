@@ -9,12 +9,14 @@
 #![cfg(feature = "test-support")]
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactErrorKind,
-    ArtifactGcFault, ArtifactIngestFault, ArtifactIngestHook, ArtifactIngestRequest, CommitIntent,
-    DomainSpec, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
+    ArtifactGcFault, ArtifactIngestFault, ArtifactIngestHook, ArtifactIngestRequest, BackupRequest,
+    CommitIntent, DomainSpec, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -207,7 +209,7 @@ fn failed_reference_cleanup_subtracts_the_bytes_it_published() {
         .unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::ReferenceCommit);
     let removed = published.unwrap() - walked_bytes(root.path());
-    assert!(removed > 0, "{CLEANUP_MARKER}");
+    assert_eq!(removed, 6, "{CLEANUP_MARKER}");
     assert_usage_matches_walk(&store, root.path(), "cleanup");
     store.ingest_artifact(request("fits", b"abcdef")).unwrap();
     assert_usage_matches_walk(&store, root.path(), "ingest after cleanup");
@@ -241,7 +243,7 @@ fn an_unrecovered_publish_counts_until_startup_recovery_removes_it() {
     let before = walked_bytes(root.path());
     let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 8).unwrap();
     let removed = before - walked_bytes(root.path());
-    assert!(removed > 0, "{RECOVERY_MARKER}");
+    assert_eq!(removed, 6, "{RECOVERY_MARKER}");
     assert_usage_matches_walk(&store, root.path(), "startup recovery");
     // Admission stays open only if the walk after recovery matched the count
     // recovery kept.
@@ -265,14 +267,14 @@ fn reclaim_purge_and_a_retried_unlink_subtract_the_bytes_they_remove() {
     invalidate(root.path(), &reclaimed.evidence_id);
     let before = walked_bytes(root.path());
     store.run_staging_maintenance(15 * DAY_MS).unwrap();
-    assert!(before - walked_bytes(root.path()) > 0, "{RECLAIM_MARKER}");
+    assert_eq!(before - walked_bytes(root.path()), 4, "{RECLAIM_MARKER}");
     assert_usage_matches_walk(&store, root.path(), "reclaim");
 
     let before = walked_bytes(root.path());
     store
         .delete_artifact(purge("secret", &purged.digest))
         .unwrap();
-    assert!(before - walked_bytes(root.path()) > 0, "{PURGE_MARKER}");
+    assert_eq!(before - walked_bytes(root.path()), 6, "{PURGE_MARKER}");
     assert_usage_matches_walk(&store, root.path(), "purge");
 
     invalidate(root.path(), &retried.evidence_id);
@@ -292,7 +294,7 @@ fn reclaim_purge_and_a_retried_unlink_subtract_the_bytes_they_remove() {
     // The failed unlink latched the fail-closed state, so a fresh store retries.
     let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
     store.run_staging_maintenance(15 * DAY_MS).unwrap();
-    assert!(before - walked_bytes(root.path()) > 0, "{RETRY_MARKER}");
+    assert_eq!(before - walked_bytes(root.path()), 5, "{RETRY_MARKER}");
     assert_usage_matches_walk(&store, root.path(), "retried unlink");
     store.ingest_artifact(request("after", b"after")).unwrap();
     assert_usage_matches_walk(&store, root.path(), "ingest after every decrement");
@@ -326,4 +328,86 @@ fn bytes_removed_outside_the_store_fail_the_next_admission_closed() {
     store.run_staging_maintenance(0).unwrap();
     let error = store.ingest_artifact(request("two", b"56")).unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+}
+
+#[test]
+fn a_batch_counts_each_distinct_payload_once_and_a_refused_batch_subtracts_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    store.ingest_artifact(request("single", b"single")).unwrap();
+    store
+        .ingest_exact_artifacts_with(
+            intent("batch", b"batch"),
+            vec![
+                request("first", b"first"),
+                request("second", b"second"),
+                request("first-again", b"first"),
+            ],
+            None,
+            |_, _| Ok("batched".to_string()),
+        )
+        .unwrap();
+    assert_eq!(reported(&store), 17);
+    assert_usage_matches_walk(&store, root.path(), "batch publish");
+
+    let refused = store.ingest_exact_artifacts_with(
+        intent("refused", b"refused"),
+        vec![request("third", b"third"), request("held", b"single")],
+        None,
+        |_, _| Err(kernel::KernelError::Conflict),
+    );
+    assert_eq!(refused.unwrap_err(), kernel::KernelError::Conflict);
+    assert_eq!(reported(&store), 17);
+    assert_usage_matches_walk(&store, root.path(), "refused batch");
+    store.ingest_artifact(request("after", b"after")).unwrap();
+}
+
+#[test]
+fn a_removal_larger_than_the_count_fails_the_next_admission_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    let handle = store.ingest_artifact(request("grown", b"1234")).unwrap();
+    // Growing the object outside the store makes its unlink remove more bytes
+    // than the store ever counted.
+    let path = object_path(root.path(), &handle.digest);
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&path, permissions).unwrap();
+    fs::write(&path, b"1234 and more bytes").unwrap();
+    store
+        .delete_artifact(purge("grown", &handle.digest))
+        .unwrap();
+    assert_usage_matches_walk(&store, root.path(), "purge after growth");
+    let error = store.ingest_artifact(request("next", b"56")).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+}
+
+#[test]
+fn a_restore_reconciles_the_count_it_held_and_keeps_admission_open() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    fs::set_permissions(destination.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    store.ingest_artifact(request("kept", b"kept")).unwrap();
+    let backup = store
+        .backup(BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    store.ingest_artifact(request("later", b"later")).unwrap();
+    let walks = store.artifact_census_walks_for_test();
+    store.restore(&backup.destination_path).unwrap();
+    assert_eq!(
+        store.artifact_census_walks_for_test(),
+        walks + 1,
+        "restore recovery reconciles once"
+    );
+    assert_usage_matches_walk(&store, root.path(), "restore");
+    store.ingest_artifact(request("after", b"after")).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "ingest after restore");
 }

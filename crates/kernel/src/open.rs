@@ -151,7 +151,7 @@ pub struct KernelStore {
     #[cfg(feature = "test-support")]
     pub(super) staged_artifacts: std::sync::atomic::AtomicUsize,
     pub(super) artifact_cap: u64,
-    /// Bytes below `objects`, seeded by the walk after startup recovery and kept
+    /// Bytes below `objects`, seeded by the walk before startup recovery and kept
     /// current under the writer lock by every publication and unlink. `None`
     /// until a walk succeeds and after an unlink whose outcome is unknown.
     pub(super) artifact_usage: Mutex<Option<u64>>,
@@ -428,10 +428,10 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
+        store.reconcile_artifact_usage();
         // A purge unlink that cannot complete keeps its pending row for maintenance
         // to retry; refusing to open over it would take the whole store offline
         // for one object, so the count is not an open failure.
-        store.reconcile_artifact_usage();
         store.recover_interrupted_work()?;
         Ok(store)
     }

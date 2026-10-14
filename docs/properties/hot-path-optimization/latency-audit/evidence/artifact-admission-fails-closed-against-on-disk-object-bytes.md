@@ -136,10 +136,10 @@ or a refusal after an unrecovered orphan publish.
 [t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3600-L3629
 [usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
 [usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L46-L73
-[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L79-L98
-[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L101-L109
-[open-seed]: ../../../../../crates/kernel/src/open.rs#L434
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L48-L73
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L81-L95
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L99-L107
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L431
 [recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs

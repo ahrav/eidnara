@@ -597,6 +597,7 @@ impl KernelStore {
             return Ok(());
         };
         self.unlink_counted_object(&shard, &digest[2..])
+            .map(drop)
             .map_err(|error| {
                 self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
             })

@@ -460,6 +460,9 @@ would change.
 | [`reclaim_purge_and_a_retried_unlink_subtract_the_bytes_they_remove`][t-usage-paths] | The `-reclaim`, `-purge`, and `-retry` markers, with usage equal to the walk after each path and after a failed unlink. | unaudited |
 | [`bytes_added_outside_the_store_fail_the_next_admission_closed`][t-usage-added] | A stray file under `objects` makes maintenance latch; the next ingest is `IngestionFailClosed`; a reopen re-seeds. | unaudited |
 | [`bytes_removed_outside_the_store_fail_the_next_admission_closed`][t-usage-removed] | An object removed outside the store makes maintenance latch; the next ingest is `IngestionFailClosed`. | unaudited |
+| [`a_batch_counts_each_distinct_payload_once_and_a_refused_batch_subtracts_it`][t-usage-batch] | A batch with a duplicate adds each distinct payload once on a non-empty store; a refused batch nets zero. | unaudited |
+| [`a_removal_larger_than_the_count_fails_the_next_admission_closed`][t-usage-underflow] | An object grown outside the store underflows the count at purge; usage equals the walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`a_restore_reconciles_the_count_it_held_and_keeps_admission_open`][t-usage-restore] | Restore recovery reconciles once against the held count; usage equals the walk and admission stays open. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
 | [`recover_twice`][t-recover-twice] | A second recovery changes nothing. | unaudited |
 | [`return_value_fault_table_latches_eio_and_never_publishes_a_reference`][t-faults] | Six ingest fault points. | unaudited |
@@ -471,7 +474,8 @@ None found: any daemon caller of `run_staging_maintenance` or
 `delete_artifact`, so the GC and purge decrement paths and the maintenance
 reconciliation run only in kernel tests and benches; a test that the health
 sampler's lock-free count read and `check_budget`'s locked read agree under
-concurrent ingest; a restore that finds drift.
+concurrent ingest; a restore that finds drift; a durable unlink whose
+directory sync fails, which leaves the count unknown.
 
 ## Wildcard and cross-cutting
 
@@ -750,13 +754,16 @@ not a claim that no related check exists anywhere in the repository.
 [t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
 [t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L584
 [t-no-walk]: ../../../../crates/kernel/tests/kernel_gc.rs#L557
-[t-usage-dedup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L161
-[t-usage-refused]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L175
-[t-usage-cleanup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L191
-[t-usage-recovery]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L217
-[t-usage-paths]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L253
-[t-usage-added]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L302
-[t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L320
+[t-usage-dedup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L163
+[t-usage-refused]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L177
+[t-usage-cleanup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L193
+[t-usage-recovery]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L219
+[t-usage-paths]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L255
+[t-usage-added]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L304
+[t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L322
+[t-usage-batch]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L334
+[t-usage-underflow]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L367
+[t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L388
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426

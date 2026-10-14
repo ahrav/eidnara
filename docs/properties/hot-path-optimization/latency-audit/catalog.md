@@ -1962,8 +1962,9 @@ is a format break, so the durable counter the specification named is
 replaced by a count the [open walk][open-seed] seeds before startup
 recovery. [`reconcile_artifact_usage`][usage-reconcile] re-walks the tree at
 the end of every recovery and every [maintenance pass][maintenance]; with a
-count held, a walk that disagrees latches the [fail-closed state][latch] and
-leaves the count unchanged, so the next admission is refused. `always`
+count held, a walk that disagrees latches the [fail-closed state][latch], so
+drift is detected at the next reconciliation and the admission after it is
+refused. `always`
 because the [usage tests][t-usage] and the [fault-injection
 oracle][t-oracle] assert exactly this equality.
 Fault/timing angle: Every path that changes on-disk object bytes is a
@@ -1984,7 +1985,14 @@ reservation that [`prepare_startup_cas_recovery`][startup] promotes and
 [`run_artifact_recovery`][recovery] unlinks against that count; a crash after
 an unlink and before its commit leaves a row without bytes that recovery
 retires ([`:109-136`][startup-unreachable]). A failed unlink leaves the count
-unknown, so the next reader walks; a removal larger than the count latches.
+unknown, so the next reader walks; a removal larger than the count leaves it
+unknown and latches. A reconciliation that finds drift latches and replaces
+the count with the walk, so admission stays refused while the sampler reports
+the bytes on disk; only a new store admits again. In production the
+reconciliation runs at open and at restore, because the daemon calls neither
+maintenance nor deletion. Open pays two walks, one before and one after
+startup recovery, and each maintenance pass holds the writer lock for one
+walk.
 The [restore path][restore] runs recovery and its reconciliation against the
 count it held; tests writing [directly to disk][t-orphan] do so before the
 store opens. The health sampler reads the count without the writer lock
@@ -3184,10 +3192,10 @@ evaluation of this area and its disposition are recorded in
 [t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
 [usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L25-L32
 [usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L46-L73
-[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L79-L98
-[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L101-L109
-[open-seed]: ../../../../crates/kernel/src/open.rs#L434
+[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L48-L73
+[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L81-L95
+[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L99-L107
+[open-seed]: ../../../../crates/kernel/src/open.rs#L431
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
 
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518

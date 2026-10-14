@@ -453,8 +453,8 @@ impl KernelStore {
         if !rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
             return Err(self.latch_gc_failure());
         }
-        let byte_length = u64::try_from(stat.st_size).map_err(|_| self.latch_gc_failure())?;
-        self.unlink_counted_object(&shard, &digest[2..])
+        let byte_length = self
+            .unlink_counted_object(&shard, &digest[2..])
             .map_err(|error| self.map_gc_storage_error(error))?;
         Ok((true, byte_length))
     }

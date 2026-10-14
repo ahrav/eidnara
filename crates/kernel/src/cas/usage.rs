@@ -39,43 +39,45 @@ impl KernelStore {
         }
     }
 
-    /// Durably unlinks the object `name` in `shard` and subtracts the bytes the
-    /// walk counted for it. The caller holds the writer lock. An unlink that
-    /// fails leaves the count unknown, so the next reader walks; a removal
-    /// larger than the count is drift and latches the fail-closed state.
+    /// Durably unlinks the object `name` in `shard`, subtracts the bytes the
+    /// walk counted for it, and returns them. The caller holds the writer
+    /// lock. An unlink that fails, or a size the stat cannot report, leaves the
+    /// count unknown, so the next reader walks; a removal larger than the count
+    /// is drift, which leaves the count unknown and latches the fail-closed
+    /// state.
     pub(super) fn unlink_counted_object(
         &self,
         shard: &File,
         name: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<u64, StorageError> {
         let removed = match rfs::statat(shard, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if rfs::FileType::from_raw_mode(stat.st_mode).is_file() => {
-                Some(u64::try_from(stat.st_size).unwrap_or(0))
+                u64::try_from(stat.st_size).ok()
             }
             Ok(_) | Err(rustix::io::Errno::NOENT) => Some(0),
             Err(_) => None,
         };
         let unlinked = durable_unlink(shard, name);
         let mut usage = self.counted_usage();
-        match (unlinked.is_ok(), removed, *usage) {
-            (true, Some(removed), Some(bytes)) => match bytes.checked_sub(removed) {
+        let Some(bytes) = *usage else {
+            return unlinked.map(|()| removed.unwrap_or(0));
+        };
+        *usage = None;
+        if let (Ok(()), Some(removed)) = (&unlinked, removed) {
+            match bytes.checked_sub(removed) {
                 Some(remaining) => *usage = Some(remaining),
-                None => {
-                    drop(usage);
-                    self.latch_cas_failure();
-                }
-            },
-            (_, _, None) => {}
-            _ => *usage = None,
+                None => self.latch_cas_failure(),
+            }
         }
-        unlinked
+        unlinked.map(|()| removed.unwrap_or(0))
     }
 
     /// Re-walks the tree under the writer lock and compares the walk with the
     /// count. With no count held the walk becomes the count. A disagreement is
-    /// drift: the count stays as it was and the fail-closed state latches. A
-    /// walk that fails for a reason other than exhaustion latches it too; an
-    /// exhausted walk leaves the count as it was for the next reader.
+    /// drift: the fail-closed state latches and the walk replaces the count,
+    /// so admission stays refused while the health sampler reports the bytes
+    /// on disk. A walk that fails for a reason other than exhaustion latches
+    /// too; an exhausted walk leaves the count as it was for the next reader.
     pub(crate) fn reconcile_artifact_usage(&self) {
         let Ok(_writer) = self.lock_writer() else {
             return;
@@ -86,14 +88,10 @@ impl KernelStore {
             Err(StorageError::Other(_)) => return self.latch_cas_failure(),
         };
         let mut usage = self.counted_usage();
-        match *usage {
-            None => *usage = Some(walked),
-            Some(bytes) if bytes == walked => {}
-            Some(_) => {
-                drop(usage);
-                self.latch_cas_failure();
-            }
+        if usage.is_some_and(|bytes| bytes != walked) {
+            self.latch_cas_failure();
         }
+        *usage = Some(walked);
     }
 
     /// The usage the health sampler reports: the count when one is held, and
