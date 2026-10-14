@@ -55,6 +55,19 @@ function expectDenseOnly(result: string, objectId: string, content: string): voi
     expect(row?.body).toBe(content);
 }
 
+/** A memory the exact lane served: the identifier alone ranks it through the exact lane, and beside prose the exact lane ranks it with whatever lanes the prose feeds. */
+function expectExactRow(result: string, objectId: string, content: string, mention: boolean): void {
+    expect(result).not.toContain(FALLBACK);
+    const row = rowFor(result, objectId);
+    expect(row, result).not.toBeNull();
+    expect(row?.header).toMatch(
+        mention
+            ? /^\[1\] \[memory\] .* match=fused lanes=exact(?:,(?:lexical|dense))* provenance=unknown(?:\s|$)/
+            : /^\[1\] \[memory\] .* match=fused lanes=exact provenance=unknown(?:\s|$)/,
+    );
+    expect(row?.body).toBe(content);
+}
+
 let piCallCounter = 0;
 
 async function piToolCall(
@@ -120,7 +133,7 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
     }, 120_000);
 
     it(
-        "ranks memories from before and after activation through each plugin's dense lane",
+        "ranks memories from before and after activation through each plugin's dense and exact lanes",
         async () => {
             for (const memory of [BEFORE, AFTER]) {
                 const shared = [...words(memory.query)].filter((word) =>
@@ -191,6 +204,19 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
                     await searchUntilRanked(search, AFTER.query, after),
                     after,
                     AFTER.content,
+                );
+                // A bare memory identifier is a whole-request selector the daemon resolves through its exact lane; beside prose it is a mention the hybrid answer still ranks.
+                expectExactRow(
+                    await searchUntilRanked(search, after, after),
+                    after,
+                    AFTER.content,
+                    false,
+                );
+                expectExactRow(
+                    await searchUntilRanked(search, `id:${after} ${AFTER.query}`, after),
+                    after,
+                    AFTER.content,
+                    true,
                 );
             }
         },

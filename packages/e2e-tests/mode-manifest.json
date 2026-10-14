@@ -104,7 +104,7 @@
         {
             "path": "tests/payload-fused-search.test.ts",
             "tier": "pi-rust",
-            "rationale": "OpenCode and the Pi RPC process dial the daemon of the built payload package that EIDNARA_E2E_PAYLOAD_DIR names: before admission both eidnara_search tools label the snapshot fallback, and after the fixture admission pair is installed both rank a memory created before activation and one created after it through the fused route's dense lane for queries whose words are disjoint from theirs; the suite skips when EIDNARA_E2E_PAYLOAD_DIR is unset and fails when the payload, OpenCode, or Pi is missing",
+            "rationale": "OpenCode and the Pi RPC process dial the daemon of the built payload package that EIDNARA_E2E_PAYLOAD_DIR names: before admission both eidnara_search tools label the snapshot fallback, and after the fixture admission pair is installed both rank a memory created before activation and one created after it through the fused route's dense lane for queries whose words are disjoint from theirs, and rank the later memory through the exact lane for its bare identifier and for that identifier beside prose; the suite skips when EIDNARA_E2E_PAYLOAD_DIR is unset and fails when the payload, OpenCode, or Pi is missing",
             "contract_refs": [
                 "SB-P33",
                 "SB-P35"

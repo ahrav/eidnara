@@ -645,3 +645,54 @@ fn raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring
         absent_before
     );
 }
+
+/// A direct answer serves one lane's ranking as it stands. Under a positive weight for that lane, every `k` gives the same entries, positions, score bits, contributions, and undeclared lanes as fusing that lane alone; a zero weight scores every entry `+0.0`, which fusion orders by identifier and the direct answer keeps in lane order.
+#[test]
+fn a_direct_answer_equals_fusing_its_lane_alone() {
+    let mut runner = runner();
+    runner
+        .run(
+            &(exact_hits(), lexical_hits(), dense_hits(), weights()),
+            |(exact_hits, lexical_hits, dense_hits, (weights, k))| {
+                let parameters = FusionParameters::new(weights_of(weights), k).unwrap();
+                for ranking in [
+                    lane(Lane::Exact, exact_hits.clone()),
+                    lane(Lane::Lexical, lexical_hits.clone()),
+                    lane(Lane::Dense, dense_hits.clone()),
+                ] {
+                    let direct = Fused::direct(&ranking, &parameters);
+                    if parameters.weight(ranking.lane()) == 0.0 {
+                        let positions: Vec<usize> = ranking
+                            .entries()
+                            .iter()
+                            .map(|e| e.position().get())
+                            .collect();
+                        prop_assert_eq!(
+                            order(&direct),
+                            ranking
+                                .entries()
+                                .iter()
+                                .map(|e| *e.occurrence())
+                                .zip(positions)
+                                .collect::<Vec<_>>()
+                        );
+                        continue;
+                    }
+                    let fused = fuse(
+                        DeclaredLanes::admit([ranking.clone()]).unwrap(),
+                        &parameters,
+                        UNBOUNDED,
+                    )
+                    .unwrap();
+                    prop_assert_eq!(snapshot(&direct), snapshot(&fused));
+                    prop_assert_eq!(direct.entries(), fused.entries());
+                    prop_assert_eq!(
+                        direct.undeclared_lanes().collect::<Vec<_>>(),
+                        fused.undeclared_lanes().collect::<Vec<_>>()
+                    );
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+}

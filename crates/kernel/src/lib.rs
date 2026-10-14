@@ -85,7 +85,7 @@ pub use claim_facts::{
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
-    CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
+    CommitReadTarget, CommitSpan, CompleteCommit, IdentifiedCommitReadTarget, PageEnd,
 };
 pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
 pub use current_input::{

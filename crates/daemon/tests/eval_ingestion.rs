@@ -20,7 +20,7 @@ use daemon::harness_sources::{
     AdapterRefusal, Harness, MAX_REVISION_LEAD_MS, PublishError, Published, SessionIdentity,
     SourcePublisher, SourceUnit, opencode_units,
 };
-use daemon::query_route::{DenseLane, execute};
+use daemon::query_route::{DenseLane, ExactAuthority, execute};
 use daemon::search_catchup::{CatchUpConsumer, EpisodeBounds, SearchCatchUp};
 use daemon::search_projection::SearchProjection;
 use eval_core::{
@@ -645,6 +645,7 @@ fn query_ids(
             project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &limits(),
         budget.shared(),
         query,

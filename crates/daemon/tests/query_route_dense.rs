@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use daemon::query_route::{
     DenseLane, DenseLimits, DenseProducer, DenseRanking, DenseRefusal, DenseRequest,
-    ExhaustiveProducer, LaneStatus, LimitsRefusal, Phase, QueryFailure, QueryOutcome,
-    QueryRouteLimits, Terminal, execute,
+    ExactAuthority, ExhaustiveProducer, LaneStatus, LimitsRefusal, Phase, QueryFailure,
+    QueryOutcome, QueryRouteLimits, Terminal, execute,
 };
 use daemon::request_budget::SharedBudget;
 use kernel::{ArtifactDestination, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
@@ -47,6 +47,7 @@ fn run(
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         limits,
         shared,
         QUERY,
@@ -67,6 +68,7 @@ fn degraded(fixture: &Fixture, shared: &SharedBudget, reason: &'static str) -> Q
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &with_dense(),
         shared,
         QUERY,
@@ -381,6 +383,7 @@ async fn a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_n
                 project: &fixture.project,
                 destination: ArtifactDestination::Local,
             },
+            ExactAuthority::NOT_SOUGHT,
             &with_dense(),
             budget.shared(),
             query,
@@ -422,6 +425,7 @@ async fn a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_n
                 project: &fixture.project,
                 destination: ArtifactDestination::Local,
             },
+            ExactAuthority::NOT_SOUGHT,
             &with_dense(),
             budget.shared(),
             query,
@@ -486,6 +490,7 @@ async fn a_ready_dense_lane_serves_alone_when_the_lexical_lane_refuses_the_prose
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &limits,
         budget.shared(),
         &query,
@@ -527,6 +532,7 @@ async fn a_ready_dense_lane_serves_alone_when_the_lexical_lane_refuses_the_prose
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &limits,
         budget.shared(),
         &query,

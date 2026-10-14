@@ -272,6 +272,24 @@ pub fn page(
     };
     check_budget()?;
     let checkpoint = read_state(conn, context.kernel_incarnation_id)?;
+    page_at(conn, context, query, cursor, checkpoint)
+}
+
+/// [`page`] under `checkpoint`, which the caller read from this transaction's snapshot with the identity checks [`page`] applies.
+pub(crate) fn page_at(
+    conn: &GuardedConn<'_>,
+    context: &LookupContext<'_>,
+    query: &ExactQuery<'_>,
+    cursor: Option<&Cursor>,
+    checkpoint: ProjectionCheckpoint,
+) -> Result<Page, LookupRefusal> {
+    let check_budget = || {
+        context
+            .budget
+            .check()
+            .map_err(|_| LookupRefusal::BudgetExhausted)
+    };
+    check_budget()?;
     let range = query.range();
     if let Some(cursor) = cursor {
         if cursor.range != range || cursor.kernel_incarnation_id != context.kernel_incarnation_id {

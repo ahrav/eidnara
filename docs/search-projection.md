@@ -142,9 +142,9 @@ before it. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
 current epoch, checkpoint, or tip.
 
-Every kernel eligibility batch that `resolve` and `validate_for_use` issue
-runs under the request's `EvalBudget`. A deadline or cancellation that an
-enumeration batch observes stops the attempt as
+Every kernel eligibility batch that `resolve` issues, and the kernel capture
+that `validate_for_use` takes, runs under the request's `EvalBudget`. A
+deadline or cancellation that an enumeration batch observes stops the attempt as
 `Incomplete(BudgetExhausted)`, keeping the verdicts of earlier pages and
 forming no proof. At final use it invalidates the proof as
 `BudgetExhausted`. Under `SqliteStore::with_conn_interruptible`, a stop tied
@@ -160,11 +160,61 @@ admission. A classification change defeats an attempt and a proof with or
 without a tip move: a reclassifying artifact replay commits and moves the tip,
 and an open classification window leaves the snapshot without a reusable
 generation at the same tip.
+One kernel batch judges each page's distinct (object, revision, artifact
+digest) terms once, and every row carrying those terms takes that verdict.
+Final use takes one kernel capture of the database identity, incarnation,
+tip, and classification generation. The proof's occurrences were judged
+eligible at the snapshot the proof records, under the proof's project and
+destination, which final use checks first. A verdict is a function of that
+snapshot's egress state, the project, and the destination, so a capture equal
+to the snapshot validates every occurrence, and any difference invalidates the
+proof as `IncarnationChanged`, `CanonicalChanged`, or `SnapshotChanged`.
 An exact proof records egress
 eligibility only. Surface
 permission and claim state come from claim classification at use, so a
 quarantined or stale claim object can hold an exact proof and still be hidden
 or stale on every surface.
+
+## Exact routing on `retrieval.query`
+
+The route's handler pins a reader, then calls `ExactCertification::issue`
+when the request names an `id:` selector. Only a gate-admitted pin yields a
+`SearchReader`, so only such a reader certifies. Issuance reads the projection
+under the request's budget, so a cancellation or deadline ends its connection
+wait and its statements. With a certification, the
+exact lane resolves each `id:` selector through `retrieval::exact::resolve`
+under the request's one `SharedBudget`, inside the same interruptible
+projection read as the other lanes. Each attempt reads at most
+`exact_page_rows` times `exact_pages` rows and retains at most that many
+rows, capped by the kernel's batch bound and by `response_bytes`. The
+inventory epoch is read from the reader at resolution and again at final use.
+
+Only a whole-request selector whose resolution holds a proof routes directly.
+The route then polls the budget, checks that the reader is still usable (its
+family available and unquarantined, its admission standing), and runs
+`validate_for_use` under that read; the reader is checked once more after
+validation. A proof that passes skips admission, fusion, and fused
+revalidation, and the lexical and dense lanes, which a whole-request selector
+leaves undeclared. `Fused::direct` serves the proof's occurrences in
+exact-lane order under the same `fused_union` and response bounds as a fused
+answer, and claim validation judges them at the response's snapshot. Every
+other resolved request continues through hybrid retrieval: a mention beside
+prose or other selectors, a resolution without a proof, and a proof that
+final use invalidates. The hybrid exact lane ranks every row the resolver
+retained before fusion, the union bound, and revalidation, so a later
+omission belongs to revalidation, claim validation, or the response bounds.
+A refusal on a later selector ends the lane with the rows earlier selectors
+retained. `ExactReport::route` records the route and
+`ExactReport::resolutions` the attempts.
+
+A local bound (`page_bound`, `row_bound`, `retention_bound`) marks the exact
+lane incomplete and the request continues. A budget that ends during
+certification, resolution, final use, or any later phase ends the request as
+`deadline` or `cancelled`; no later lane starts. A reader that issues no
+certificate, a certificate the projection refuses at the first selector, and
+a reader withdrawn before resolution or before final use all route the lane
+to uncertified page reads, which the kernel judges at admission; the request
+continues through hybrid retrieval and its exact work forms no proof.
 
 ## Admission status
 

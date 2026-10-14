@@ -596,6 +596,84 @@ async fn committed_memories_are_served_with_canonical_references_under_productio
     daemon.shutdown().await;
 }
 
+/// AC5 daemon cell: once the running daemon's family certifies its inventory at the tip, a whole-request `id:` selector is answered directly through the real handler, pin, and certificate, while the same identifier mentioned beside prose is resolved and served through hybrid retrieval. Both answers carry only the authored decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_running_daemon_answers_a_certified_explicit_identifier_directly() {
+    use daemon::query_route::{ExactRoute, HybridCause};
+    let daemon = converged_daemon_with(&[("catchup_lag_commits", 1_000)]).await;
+    daemon
+        .handler()
+        .set_query_route_limits(Some(QueryRouteLimits::production()))
+        .unwrap();
+    let created = daemon
+        .commit(
+            "create",
+            vec![json!({"op": "insert_decision", "spec": {
+                "decision_id": "rule-decision",
+                "object_id": "rule",
+                "domain_id": "memory",
+                "decision_kind": "PROJECT_RULES",
+                "payload": {"summary": "Keep the public contract explicit.", "rationale": "because rule"},
+                "source_id": "rule-lineage",
+                "source_revision": 1,
+            }})],
+        )
+        .await;
+    assert_eq!(created["state"]["kind"], "available", "{created}");
+    daemon.handler().resume_claim_sources_for_test();
+    let project = daemon.project().to_owned();
+    let started = Instant::now();
+    let direct = loop {
+        let answer = body(daemon.outcome(request(&project, "id:rule")).await);
+        let routed = daemon.handler().last_exact_route_for_test();
+        // The family serves uncertified until its catch-up covers the commit and the consumer acknowledges it.
+        if routed == Some(ExactRoute::Direct) {
+            break answer;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the family never certified the commit: {routed:?} {answer}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let entries = direct["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "{direct}");
+    for entry in entries {
+        assert_eq!(entry["canonical"]["decision_object_id"], "rule", "{direct}");
+        assert_eq!(entry["canonical"]["source_revision"], 1, "{direct}");
+        assert!(entry["lanes"].get("lexical").is_none(), "{direct}");
+    }
+    assert_eq!(direct["lanes"]["exact"]["status"], "complete");
+    assert_eq!(direct["lanes"]["lexical"]["status"], "undeclared");
+    assert_eq!(direct["lanes"]["dense"]["status"], "undeclared");
+
+    let mixed = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(
+        daemon.handler().last_exact_route_for_test(),
+        Some(ExactRoute::Hybrid(HybridCause::Mention))
+    );
+    for entry in mixed["entries"].as_array().unwrap() {
+        assert_eq!(entry["canonical"]["decision_object_id"], "rule", "{mixed}");
+    }
+    let mixed_ids: Vec<&Value> = mixed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["occurrence_id"])
+        .collect();
+    for entry in entries {
+        assert!(
+            mixed_ids.contains(&&entry["occurrence_id"]),
+            "every directly served occurrence is also served through hybrid retrieval: {mixed}"
+        );
+    }
+    daemon.shutdown().await;
+}
+
 /// The `search_admission` block `session.status` reports.
 async fn search_admission(daemon: &KernelDaemon) -> Value {
     let status = daemon

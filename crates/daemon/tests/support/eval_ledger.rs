@@ -96,7 +96,9 @@ impl LaneView {
     pub fn exact_report(&self) -> Option<&EligibilityReport> {
         match &self.exact.admission {
             ExactAdmission::Judged(report) | ExactAdmission::Moved(report) => Some(report),
-            ExactAdmission::NotJudged | ExactAdmission::KernelError => None,
+            ExactAdmission::NotJudged | ExactAdmission::KernelError | ExactAdmission::Resolved => {
+                None
+            }
         }
     }
 

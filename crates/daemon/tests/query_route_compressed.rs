@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use daemon::query_route::{
-    CompressedLimits, CompressedProducer, DenseLane, DenseLimits, DenseVectors, LaneStatus,
-    LimitsRefusal, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
+    CompressedLimits, CompressedProducer, DenseLane, DenseLimits, DenseVectors, ExactAuthority,
+    LaneStatus, LimitsRefusal, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal,
+    execute,
 };
 use daemon::request_budget::{Exhaustion, RequestBudget};
 use daemon::search_projection::SearchProjectionError;
@@ -150,6 +151,7 @@ fn run_phased(
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &with_dense(k),
         budget.shared(),
         QUERY,

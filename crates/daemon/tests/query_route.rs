@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use daemon::query_route::{
-    DenseLane, LaneStatus, Phase, QueryFailure, QueryRouteLimits, Terminal, execute,
+    DenseLane, ExactAuthority, LaneStatus, Phase, QueryFailure, QueryRouteLimits, Terminal, execute,
 };
 use daemon::search_projection::SearchProjection;
 use kernel::{ArtifactDestination, ProjectScope};
@@ -453,6 +453,7 @@ async fn a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves() {
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &limits(),
         budget.shared(),
         QUERY,
@@ -481,6 +482,7 @@ async fn a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves() {
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        ExactAuthority::NOT_SOUGHT,
         &floor,
         budget.shared(),
         QUERY,
