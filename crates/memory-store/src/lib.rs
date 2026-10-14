@@ -2875,13 +2875,47 @@ struct PreparedFieldScan {
     /// Disposition of each detected span, persisted verbatim into
     /// `scan_detections.action`.
     detection_action: &'static str,
-    owners: Vec<PreparedDomainOwner>,
+    owners: PreparedScanOwners,
+}
+
+/// The durable owners one field scan records.
+#[derive(Debug)]
+enum PreparedScanOwners {
+    /// The first `len` of the write's default owners. The defaults only grow, so the
+    /// prefix keeps naming the owners the write held when the field was prepared.
+    Defaults(usize),
+    /// Owners assigned to this scan alone.
+    Listed(Vec<PreparedDomainOwner>),
+}
+
+impl PreparedScanOwners {
+    fn resolve<'a>(&'a self, defaults: &'a [PreparedDomainOwner]) -> &'a [PreparedDomainOwner] {
+        match self {
+            Self::Defaults(len) => &defaults[..*len],
+            Self::Listed(owners) => owners,
+        }
+    }
+
+    /// Appends `owner`. A prefix that `owner` extends in `defaults` stays a prefix.
+    fn push(&mut self, defaults: &[PreparedDomainOwner], owner: &PreparedDomainOwner) {
+        match self {
+            Self::Defaults(len) if defaults.get(*len) == Some(owner) => *len += 1,
+            Self::Defaults(len) => {
+                let mut owners = defaults[..*len].to_vec();
+                owners.push(owner.clone());
+                *self = Self::Listed(owners);
+            }
+            Self::Listed(owners) => owners.push(owner.clone()),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct PreparedWrite {
     owner_kind: &'static str,
     scans: Vec<PreparedFieldScan>,
+    /// `domain_owners` must remain append-only because [`PreparedScanOwners::Defaults`]
+    /// stores a prefix length into it.
     domain_owners: Vec<PreparedDomainOwner>,
     existing_scan_links: BTreeSet<PreparedExistingScanLink>,
     /// Set by a write whose audit rows may be omitted when every scan preserved an existing
@@ -2955,11 +2989,16 @@ impl PreparedWrite {
             scope_key: scope_key.into(),
             owner_key: owner_key.into(),
         };
-        if !self.domain_owners.contains(&owner) {
-            for scan in self.scans.iter_mut().filter(|scan| scan.owners.is_empty()) {
-                scan.owners.push(owner.clone());
+        if self.domain_owners.contains(&owner) {
+            return;
+        }
+        let index = self.domain_owners.len();
+        self.domain_owners.push(owner);
+        let (defaults, owner) = (&self.domain_owners, &self.domain_owners[index]);
+        for scan in &mut self.scans {
+            if scan.owners.resolve(defaults).is_empty() {
+                scan.owners.push(defaults, owner);
             }
-            self.domain_owners.push(owner);
         }
     }
 
@@ -2979,8 +3018,8 @@ impl PreparedWrite {
             self.domain_owners.push(owner.clone());
         }
         for scan in &mut self.scans[first_scan..] {
-            if !scan.owners.contains(&owner) {
-                scan.owners.push(owner.clone());
+            if !scan.owners.resolve(&self.domain_owners).contains(&owner) {
+                scan.owners.push(&self.domain_owners, &owner);
             }
         }
     }
@@ -3003,7 +3042,7 @@ impl PreparedWrite {
             owner_key: owner_key.into(),
         };
         for scan in &mut self.scans[range] {
-            scan.owners = vec![owner.clone()];
+            scan.owners = PreparedScanOwners::Listed(vec![owner.clone()]);
         }
     }
 
@@ -3013,7 +3052,7 @@ impl PreparedWrite {
         let named = self
             .scans
             .iter()
-            .flat_map(|scan| scan.owners.iter())
+            .flat_map(|scan| scan.owners.resolve(&self.domain_owners))
             .chain(self.existing_scan_links.iter().map(|link| &link.owner));
         for owner in named {
             if !owners.contains(owner) {
@@ -3114,7 +3153,7 @@ impl PreparedWrite {
             field_id,
             detections,
             detection_action: "substitute",
-            owners: self.domain_owners.clone(),
+            owners: PreparedScanOwners::Defaults(self.domain_owners.len()),
         });
     }
 
@@ -3218,7 +3257,7 @@ impl PreparedWrite {
             field_id,
             detections,
             detection_action,
-            owners: self.domain_owners.clone(),
+            owners: PreparedScanOwners::Defaults(self.domain_owners.len()),
         });
         Ok(output)
     }
@@ -3405,7 +3444,8 @@ impl ActiveWriteTransaction<'_> {
              ) VALUES (?1,?2,?3,?4,?5,?6)",
         )?;
         for field in &prepared.scans {
-            if field.owners.is_empty() {
+            let field_owners = field.owners.resolve(&prepared.domain_owners);
+            if field_owners.is_empty() {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                     MemoryStoreError::Serde(format!(
                         "scan field {} has no durable owner",
@@ -3422,7 +3462,7 @@ impl ActiveWriteTransaction<'_> {
                 semantic_digest,
                 i64::try_from(field.detections.len()).unwrap_or(i64::MAX),
             ])?;
-            for owner in &field.owners {
+            for owner in field_owners {
                 let domain_owner_id = domain_owner_ids
                     .iter()
                     .find_map(|(candidate, id)| (candidate == owner).then_some(id))
@@ -33652,6 +33692,7 @@ mod shadow_tests {
                     assert_eq!(scan.detection_action, action);
                     assert_eq!(
                         scan.owners
+                            .resolve(&write.domain_owners)
                             .iter()
                             .map(|owner| owner.owner_key.as_str())
                             .collect::<Vec<_>>(),
@@ -33682,6 +33723,7 @@ mod shadow_tests {
         write.existing_identity("second", "two").unwrap();
         let owner_keys = |scan: &PreparedFieldScan| {
             scan.owners
+                .resolve(&write.domain_owners)
                 .iter()
                 .map(|owner| owner.owner_key.clone())
                 .collect::<Vec<_>>()
@@ -33697,6 +33739,143 @@ mod shadow_tests {
             vec!["pass"],
             "the reassigned owner is not a default owner"
         );
+    }
+
+    /// A scan that records its owners as a prefix of the defaults resolves to the list a
+    /// copy of the defaults would hold after the same owner changes.
+    #[test]
+    fn scan_owners_match_copied_owner_lists_under_every_short_operation_sequence() {
+        #[derive(Default)]
+        struct Model {
+            defaults: Vec<PreparedDomainOwner>,
+            scans: Vec<Vec<PreparedDomainOwner>>,
+            prepared_with: Vec<usize>,
+            links: Vec<PreparedDomainOwner>,
+        }
+        let owner = |scope_kind, scope_key: &str, owner_key: &str| PreparedDomainOwner {
+            scope_kind,
+            scope_key: scope_key.to_owned(),
+            owner_key: owner_key.to_owned(),
+        };
+        let owners = [
+            owner("session", "ses", "a"),
+            owner("session", "ses", "b"),
+            owner("project", "proj", "c"),
+        ];
+        const OPERATIONS: usize = 8;
+        const STEPS: u32 = 5;
+        let apply = |write: &mut PreparedWrite, model: &mut Model, operation: usize| {
+            let last_scan = model.scans.len().saturating_sub(1);
+            let (since, target) = match operation {
+                0 => {
+                    write.record_observed_scan("field", Vec::new());
+                    model.scans.push(model.defaults.clone());
+                    model.prepared_with.push(model.defaults.len());
+                    return;
+                }
+                1 | 2 => {
+                    let target = &owners[operation - 1];
+                    write.domain_owner(target.scope_kind, &*target.scope_key, &*target.owner_key);
+                    if !model.defaults.contains(target) {
+                        for scan in model.scans.iter_mut().filter(|scan| scan.is_empty()) {
+                            scan.push(target.clone());
+                        }
+                        model.defaults.push(target.clone());
+                    }
+                    return;
+                }
+                3 => (0, &owners[2]),
+                4 => (last_scan, &owners[1]),
+                5 => (0, &owners[0]),
+                6 => {
+                    let target = &owners[2];
+                    let range = 0..model.scans.len().min(1);
+                    write.reassign_scans_in(
+                        range.clone(),
+                        target.scope_kind,
+                        &*target.scope_key,
+                        &*target.owner_key,
+                    );
+                    for scan in &mut model.scans[range] {
+                        *scan = vec![target.clone()];
+                    }
+                    return;
+                }
+                _ => {
+                    let target = &owners[1];
+                    write.link_existing_scans(
+                        target.scope_kind,
+                        &*target.scope_key,
+                        &*target.owner_key,
+                        ["scan".to_owned()],
+                    );
+                    if !model.defaults.contains(target) {
+                        model.defaults.push(target.clone());
+                    }
+                    if !model.links.contains(target) {
+                        model.links.push(target.clone());
+                    }
+                    return;
+                }
+            };
+            write.domain_owner_for_scans_since(
+                since,
+                target.scope_kind,
+                &*target.scope_key,
+                &*target.owner_key,
+            );
+            if !model.defaults.contains(target) {
+                model.defaults.push(target.clone());
+            }
+            for scan in &mut model.scans[since..] {
+                if !scan.contains(target) {
+                    scan.push(target.clone());
+                }
+            }
+        };
+        let (mut widened_prefixes, mut listed) = (0, 0);
+        for code in 0..OPERATIONS.pow(STEPS) {
+            let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
+            let mut model = Model::default();
+            let mut rest = code;
+            for _ in 0..STEPS {
+                apply(&mut write, &mut model, rest % OPERATIONS);
+                rest /= OPERATIONS;
+                assert_eq!(write.domain_owners, model.defaults, "sequence {code}");
+                assert_eq!(write.scans.len(), model.scans.len(), "sequence {code}");
+                for ((scan, expected), prepared_with) in write
+                    .scans
+                    .iter()
+                    .zip(&model.scans)
+                    .zip(&model.prepared_with)
+                {
+                    assert_eq!(
+                        scan.owners.resolve(&write.domain_owners),
+                        expected.as_slice(),
+                        "sequence {code}"
+                    );
+                    match scan.owners {
+                        PreparedScanOwners::Defaults(len) if len > *prepared_with => {
+                            widened_prefixes += 1;
+                        }
+                        PreparedScanOwners::Defaults(_) => {}
+                        PreparedScanOwners::Listed(_) => listed += 1,
+                    }
+                }
+                let mut persisted = model.defaults.clone();
+                for named in model.scans.iter().flatten().chain(&model.links) {
+                    if !persisted.contains(named) {
+                        persisted.push(named.clone());
+                    }
+                }
+                assert_eq!(write.persisted_owners(), persisted, "sequence {code}");
+            }
+        }
+        assert!(
+            widened_prefixes > 0,
+            "some prefix grew after its scan was prepared"
+        );
+        assert!(listed > 0, "some scan received its own owner list");
     }
 
     fn apply_state_sync_sections(
