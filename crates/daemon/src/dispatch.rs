@@ -259,7 +259,7 @@ impl PreparedOutput {
             PreparedSource::Transform(segments) => MeasuredSource::Transform(segments),
             PreparedSource::Emit(body) => MeasuredSource::Emit(body.as_ref()),
         };
-        MeasuredOutput { source, len }.write_to(&mut WriteRef(destination))
+        MeasuredOutput { source, len }.write_to(&mut { destination })
     }
 
     /// Measures this immutable source exactly before output reservation.
@@ -355,19 +355,6 @@ impl fmt::Debug for PreparedOutcome {
                 .finish(),
             Self::Streamed => f.write_str("Streamed"),
         }
-    }
-}
-
-/// Adapts a `dyn Write` destination to the sized writer `write_to` takes.
-struct WriteRef<'a>(&'a mut dyn Write);
-
-impl Write for WriteRef<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
     }
 }
 

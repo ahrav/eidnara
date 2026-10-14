@@ -574,7 +574,7 @@ impl StreamSink {
     pub(crate) async fn reserve_direct(
         &self,
         exact_len: usize,
-        serializer: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()> + Send + 'static,
+        serializer: crate::frame_channel::DirectWrite,
     ) -> Result<OutputBuffer, StreamClosed> {
         if exact_len > crate::wire::MAX_BODY_LEN as usize
             || self.cancel.is_cancelled()
@@ -603,7 +603,7 @@ impl StreamSink {
             body: Vec::new(),
             direct: Some(crate::handler::DirectOutput {
                 len: exact_len,
-                serializer: Box::new(serializer),
+                serializer,
             }),
             charge,
             max_len: exact_len,

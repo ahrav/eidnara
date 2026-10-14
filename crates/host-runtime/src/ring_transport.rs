@@ -3610,8 +3610,7 @@ mod tests {
             epoch: 1,
             corr: 4,
         };
-        type Serializer = Box<dyn FnOnce(&mut dyn io::Write) -> io::Result<()> + Send>;
-        let arms: [(&str, Serializer); 5] = [
+        let arms: [(&str, crate::frame_channel::DirectWrite); 5] = [
             ("exact", Box::new(|writer| writer.write_all(b"abc"))),
             ("underfill", Box::new(|writer| writer.write_all(b"ab"))),
             ("overflow", Box::new(|writer| writer.write_all(b"abcd"))),
@@ -3637,6 +3636,12 @@ mod tests {
             let budget = ByteBudget::new(1024);
             let charge = budget.try_charge(charged).unwrap();
             let charged_while = |budget: &ByteBudget| 1024 - budget.available();
+            let during = Arc::new(AtomicU64::new(u64::MAX));
+            let (probe, observed) = (budget.clone(), Arc::clone(&during));
+            let serializer: crate::frame_channel::DirectWrite = Box::new(move |writer| {
+                observed.store((1024 - probe.available()) as u64, Ordering::SeqCst);
+                serializer(writer)
+            });
             let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
             publisher.push(OutboundFrame {
                 bytes: Vec::new(),
@@ -3650,6 +3655,11 @@ mod tests {
             assert_eq!(charged_while(&budget), charged, "{arm}: held while pending");
             drop(held);
             let pumped = publisher.pump(&rings.first);
+            assert_eq!(
+                during.load(Ordering::SeqCst),
+                charged as u64,
+                "{arm}: held while serializing"
+            );
             assert_eq!(
                 charged_while(&budget),
                 0,

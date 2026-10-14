@@ -419,10 +419,11 @@ forcing and observing a failed live read.
 | [`into_parts_returns_the_unused_output_reservation`][t-parts] | The owned charge shrinks to `len + HEADER_LEN`. | unaudited |
 | [`into_parts_never_grows_a_charge_below_the_encoded_size`][t-parts2] | A smaller charge stays unchanged. | unaudited |
 | [`into_parts_does_not_leave_a_large_allocation_behind_a_small_charge`][t-parts3] | `Vec` capacity is at most the charge. | unaudited |
-| `a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure` (`ring_transport.rs`) | The egress charge is body plus header while pending and returns after an exact, underfilled, overfilled, failed, or panicking serializer; failures publish nothing and leave the slot reusable. | unaudited |
+| `a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure` (`ring_transport.rs`) | The egress charge is body plus header while pending and while serializing, and returns after an exact, underfilled, overfilled, failed, or panicking serializer; failures publish nothing and leave the slot reusable. | unaudited |
 | `a_failed_direct_serializer_publishes_nothing_and_returns_its_charge` (`host-runtime/tests/direct_frames.rs`) | Each `direct_fill` fault arm publishes no frame for its correlation and closes the connection; a 40 MiB direct frame on a fresh connection still publishes at the one-frame egress floor. | unaudited |
 | `a_direct_frame_serializes_after_its_handler_has_ended` (`host-runtime/tests/direct_frames.rs`) | A unary direct serializer runs after its handler future ended (T4 marker). | unaudited |
-| `direct_settlement_reserves_the_measured_length_and_writes_the_owned_bytes` (`daemon/src/lib.rs`) | Transform and exact bodies reserve the measured length, write the owned path's bytes, and hold the resident charge until written. | unaudited |
+| `transform_and_exact_bodies_settle_direct_with_the_owned_bytes` (`daemon/src/lib.rs`) | The production settlement branch reserves transform and exact bodies directly with the owned path's bytes; JSON and emitted bodies stay owned. | unaudited |
+| `direct_settlement_reserves_the_measured_length_and_stops_when_cancelled` (`daemon/src/lib.rs`) | A direct settlement reserves the measured length; a cancellation before or after the reservation settles `request_cancelled`. | unaudited |
 
 None found: a test that asserts `arena_reclaimed - punched <
 punch_batch_bytes` as an inequality over a long publish and release sequence,

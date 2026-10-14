@@ -1746,15 +1746,19 @@ Open questions: None.
 ### direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges
 
 Type: safety
-Reachability: default-production - the daemon's `settle_prepared` sends
-every transform and exact-length response through
-`settle_direct_with` and `output_from_writer` when the request's resident
-budget covers the measured length.
+Reachability: default-production - the daemon's `settle_prepared_via` sends
+every transform and exact-length response through `settle_direct_with` and
+`RequestCtx::output_from_direct_write`.
 Status: active
 Exercised: yes - `a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure`
 (in-crate, `ring_transport.rs`) holds the charge at body plus header while the
-frame waits and returns it after an exact, underfilled, overfilled, failed,
-or panicking serializer, with no partial frame and a reusable slot;
+frame waits and while it serializes, and returns it after an exact,
+underfilled, overfilled, failed, or panicking serializer, with no partial
+frame and a reusable slot;
+`transform_and_exact_bodies_settle_direct_with_the_owned_bytes`
+(`daemon/src/lib.rs`) drives the production branch and shows transform and
+exact bodies take the direct reservation with the owned path's bytes while
+JSON and emitted bodies stay owned;
 `a_failed_direct_serializer_publishes_nothing_and_returns_its_charge`
 (`host-runtime/tests/direct_frames.rs`) drives the four fault arms of the
 `direct_fill` fixture through a real host and ring at the one-frame egress
@@ -1815,11 +1819,13 @@ Open questions:
   publication-time mismatch is a writer-integrity fault rather than a
   request-scoped encoding error. A measurement failure still settles the
   request as `encode_failed` before any reservation.
-- Decided: the captured source bytes are charged to the request's resident
-  budget. `settle_direct_with` takes a `try_reserve_resident` charge of the
-  measured length and moves it into the serializer, so it drops when the
-  serializer finishes or when the queued frame drops; a body the resident
-  budget cannot cover settles on the owned path.
+- Decided: the egress charge of the measured length plus header covers the
+  direct frame until commit. The serializer owns the `PreparedOutput`, whose
+  transform segments and exact bytes are immutable shared sources that the
+  owned path's settlement also kept alive until it finished writing; the
+  owned path's body copy of the same length is the allocation the direct
+  path removes. The source drops when the serializer runs or when the queued
+  frame drops.
 - [The host-runtime terminal record][hr-terminal] holds trivially on the
   failure arm because nothing is emitted; the settled `Response` is then
   never delivered, which [its publication-failure record][hr-pubfail]
@@ -1829,8 +1835,8 @@ Open questions:
 
 Type: reachability
 Reachability: default-production - every daemon transform or exact-length
-response on the direct path is queued from `settle` after its handler
-future completes.
+response takes the direct path and is queued from `settle` after its
+handler future completes.
 Status: active
 Exercised: yes - `a_direct_frame_serializes_after_its_handler_has_ended`
 (`host-runtime/tests/direct_frames.rs`) counts a `direct_fill` serializer
