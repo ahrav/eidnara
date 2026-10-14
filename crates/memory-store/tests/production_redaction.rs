@@ -1988,3 +1988,55 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
         .unwrap_err();
     assert!(!error.to_string().contains("compiled-secret"));
 }
+
+/// A note whose earlier fields prepared and whose later identity, oversized content, or content that redaction grows past the bound is refused appends no audit row; the accepted note then persists its redacted content and exactly its own scans, and its stored audit names the detection without the secret.
+#[test]
+fn refused_note_fields_append_no_audit_after_earlier_fields_prepared() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-refusals");
+    let store = MemoryStore::open(&descriptor).unwrap();
+    // The durable text bound `memory_store` applies to every prepared field.
+    let max = 512 * 1024;
+    let secret = "\npassword=hunter-two";
+    let grows = format!("{}{secret}", "x".repeat(max - secret.len()));
+    let oversized = "o".repeat(max + 1);
+    let note = |content: &'static str, anchor: Option<&'static str>| NoteInput {
+        project_path: "project",
+        route_project_root: None,
+        session_id: "session",
+        content,
+        surface_condition: Some("ordinary condition"),
+        anchor_block_id: anchor,
+        now_ms: 1,
+    };
+    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
+    for (case, input) in [
+        (
+            "secret identity",
+            note("clean content", Some("password=anchor-secret")),
+        ),
+        ("oversized content", note(leak(oversized), Some("anchor"))),
+        ("redaction growth", note(leak(grows), Some("anchor"))),
+    ] {
+        assert!(store.insert_note(input).is_err(), "{case}");
+        assert_eq!(
+            scan_audit_counts(temp.path()),
+            ScanAuditCounts::EMPTY,
+            "{case}"
+        );
+    }
+
+    let stored = store
+        .insert_note(note("keep password=content-secret here", Some("anchor")))
+        .unwrap();
+    assert_eq!(stored.content, "keep password=<REDACTED:password> here");
+    let counts = scan_audit_counts(temp.path());
+    assert_eq!(counts.field_scans, 3);
+    assert_eq!(counts.detections, 1);
+    let bytes = store_family_bytes(temp.path(), "<REDACTED:password>");
+    assert!(
+        !bytes
+            .windows("content-secret".len())
+            .any(|window| window == b"content-secret")
+    );
+}

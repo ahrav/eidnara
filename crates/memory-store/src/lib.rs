@@ -2869,7 +2869,9 @@ pub struct NoteInput<'a> {
 #[derive(Debug)]
 struct PreparedFieldScan {
     field_id: &'static str,
-    redaction: Redaction,
+    /// The scan's findings; the redacted text moves into the prepared value, so the scan
+    /// holds no payload.
+    detections: Vec<Detection>,
     /// Disposition of each detected span, persisted verbatim into
     /// `scan_detections.action`.
     detection_action: &'static str,
@@ -3110,10 +3112,7 @@ impl PreparedWrite {
     fn record_observed_scan(&mut self, field_id: &'static str, detections: Vec<Detection>) {
         self.scans.push(PreparedFieldScan {
             field_id,
-            redaction: Redaction {
-                text: String::new(),
-                detections,
-            },
+            detections,
             detection_action: "substitute",
             owners: self.domain_owners.clone(),
         });
@@ -3126,7 +3125,7 @@ impl PreparedWrite {
     fn recorded_detections(&self, field_ids: &[&str]) -> bool {
         self.scans
             .iter()
-            .any(|scan| field_ids.contains(&scan.field_id) && !scan.redaction.detections.is_empty())
+            .any(|scan| field_ids.contains(&scan.field_id) && !scan.detections.is_empty())
     }
 
     fn reject_recorded_identities(&self, field_ids: &[&str]) -> Result<(), MemoryStoreError> {
@@ -3195,8 +3194,9 @@ impl PreparedWrite {
                 RedactionErrorKind::SecretDetected,
             ));
         }
+        let Redaction { text, detections } = redaction;
         let output = match policy {
-            PreparedFieldPolicy::Content => redaction.text.clone(),
+            PreparedFieldPolicy::Content => text,
             PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity => {
                 input.to_owned()
             }
@@ -3212,7 +3212,7 @@ impl PreparedWrite {
         };
         self.scans.push(PreparedFieldScan {
             field_id,
-            redaction,
+            detections,
             detection_action,
             owners: self.domain_owners.clone(),
         });
@@ -3310,9 +3310,10 @@ impl ActiveWriteTransaction<'_> {
         if prepared.scans.is_empty() {
             return Ok(());
         }
-        let preserve_only_and_clean = prepared.scans.iter().all(|scan| {
-            scan.detection_action == "preserve" && scan.redaction.detections.is_empty()
-        });
+        let preserve_only_and_clean = prepared
+            .scans
+            .iter()
+            .all(|scan| scan.detection_action == "preserve" && scan.detections.is_empty());
         if prepared.skip_audit_when_only_clean_identities
             && preserve_only_and_clean
             && prepared.existing_scan_links.is_empty()
@@ -3415,7 +3416,7 @@ impl ActiveWriteTransaction<'_> {
                 DETECTOR_ID,
                 revision,
                 semantic_digest,
-                i64::try_from(field.redaction.detections.len()).unwrap_or(i64::MAX),
+                i64::try_from(field.detections.len()).unwrap_or(i64::MAX),
             ])?;
             for owner in &field.owners {
                 let domain_owner_id = domain_owner_ids
@@ -3436,7 +3437,7 @@ impl ActiveWriteTransaction<'_> {
             }
             // The detector build is recorded once per field scan, so a
             // detection row carries only what varies within one scan.
-            for (ordinal, label) in persisted_detection_labels(&field.redaction.detections)
+            for (ordinal, label) in persisted_detection_labels(&field.detections)
                 .into_iter()
                 .enumerate()
             {
@@ -10196,7 +10197,7 @@ impl MemoryStore {
             }
             let mut insert_refusal = write.scans[first_scan..]
                 .iter()
-                .any(|scan| !scan.redaction.detections.is_empty())
+                .any(|scan| !scan.detections.is_empty())
                 .then_some(MemoryStoreError::Redaction(
                     RedactionErrorKind::SecretDetected,
                 ));
@@ -33552,6 +33553,113 @@ mod shadow_tests {
         let prepared = write.transaction_content("content", &fitting).unwrap();
         assert_eq!(prepared.len(), MAX_DURABLE_TEXT_BYTES);
         assert!(prepared.ends_with("password=<REDACTED:password>"));
+    }
+
+    /// Every policy and layer prepares clean, detected, and boundary inputs to the output an independent redaction gives, and records a scan holding only the findings, action, and owners: neither the secret nor the redacted output stays in scan state, while a legal `ExistingIdentity` output keeps its input. A detected `NewIdentity`, an oversized input, and a redaction that grows past the bound refuse and append no scan, even after an earlier field prepared.
+    #[test]
+    fn prepared_fields_move_their_text_out_and_keep_only_scan_metadata() {
+        const SENTINEL: &str = "password=sentinel-hunter-two";
+        let secret_input = format!("note {SENTINEL} end");
+        let boundary = "b".repeat(MAX_DURABLE_TEXT_BYTES);
+        let growth_secret = "\npassword=hunter-two";
+        let grows = format!(
+            "{}{growth_secret}",
+            "x".repeat(MAX_DURABLE_TEXT_BYTES - growth_secret.len())
+        );
+        let oversized = "o".repeat(MAX_DURABLE_TEXT_BYTES + 1);
+        let layers = [PreparedScanLayer::Durable, PreparedScanLayer::Transaction];
+        let policies = [
+            PreparedFieldPolicy::Content,
+            PreparedFieldPolicy::NewIdentity,
+            PreparedFieldPolicy::ExistingIdentity,
+        ];
+        for layer in layers {
+            let redact = |input: &str| match layer {
+                PreparedScanLayer::Durable => redact_durable_text(input),
+                PreparedScanLayer::Transaction => redact_transaction_durable_text(input),
+            };
+            assert!(
+                !redact(&secret_input).detections.is_empty(),
+                "the sentinel is detected"
+            );
+            assert!(
+                redact(&grows).text.len() > MAX_DURABLE_TEXT_BYTES,
+                "the growth input redacts past the bound"
+            );
+            for policy in policies {
+                let action = match policy {
+                    PreparedFieldPolicy::Content => "substitute",
+                    PreparedFieldPolicy::NewIdentity => "reject",
+                    PreparedFieldPolicy::ExistingIdentity => "preserve",
+                };
+                let label = format!(
+                    "{} {action}",
+                    match layer {
+                        PreparedScanLayer::Durable => "durable",
+                        PreparedScanLayer::Transaction => "transaction",
+                    }
+                );
+                let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
+                write.domain_owner("session", "ses", "owner");
+                write
+                    .prepare_field("earlier", "clean earlier text", layer, policy)
+                    .unwrap();
+                for (case, input) in [
+                    ("clean", "clean value"),
+                    ("detected", secret_input.as_str()),
+                    ("boundary", boundary.as_str()),
+                    ("growth", grows.as_str()),
+                    ("oversized", oversized.as_str()),
+                ] {
+                    let before = write.scans.len();
+                    let independent = redact(input);
+                    let refused = input.len() > MAX_DURABLE_TEXT_BYTES
+                        || (matches!(policy, PreparedFieldPolicy::NewIdentity)
+                            && !independent.detections.is_empty())
+                        || (matches!(policy, PreparedFieldPolicy::Content)
+                            && independent.text.len() > MAX_DURABLE_TEXT_BYTES);
+                    let prepared = write.prepare_field("field", input, layer, policy);
+                    if refused {
+                        assert!(prepared.is_err(), "{label} {case}");
+                        assert_eq!(
+                            write.scans.len(),
+                            before,
+                            "{label} {case}: no scan appended"
+                        );
+                        continue;
+                    }
+                    let output =
+                        prepared.unwrap_or_else(|error| panic!("{label} {case}: {error:?}"));
+                    let expected = match policy {
+                        PreparedFieldPolicy::Content => independent.text.clone(),
+                        PreparedFieldPolicy::NewIdentity
+                        | PreparedFieldPolicy::ExistingIdentity => input.to_owned(),
+                    };
+                    assert_eq!(output, expected, "{label} {case}");
+                    let scan = write.scans.last().unwrap();
+                    assert_eq!(write.scans.len(), before + 1, "{label} {case}");
+                    assert_eq!(scan.field_id, "field");
+                    assert_eq!(scan.detections, independent.detections, "{label} {case}");
+                    assert_eq!(scan.detection_action, action);
+                    assert_eq!(
+                        scan.owners
+                            .iter()
+                            .map(|owner| owner.owner_key.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["owner"]
+                    );
+                }
+                let scan_state = format!("{:?}", write.scans);
+                assert!(
+                    !scan_state.contains("sentinel-hunter-two"),
+                    "{label}: {scan_state}"
+                );
+                assert!(
+                    !scan_state.contains("<REDACTED"),
+                    "{label}: no redacted text is kept"
+                );
+            }
+        }
     }
 
     /// Reassignment changes only the selected scans; a scan prepared afterwards keeps the
