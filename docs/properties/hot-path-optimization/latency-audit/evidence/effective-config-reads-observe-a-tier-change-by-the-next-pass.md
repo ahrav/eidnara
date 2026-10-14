@@ -112,8 +112,12 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
   re-read and re-warned on every load as the doc states. The memo is one
   entry keyed on the identities of the user tier, the project tier (whose
   path names its root), and the guidance override; each identity is the path
-  plus device, inode, length, mtime, and ctime from `stat`. A rewrite always
-  moves the ctime, so the override's change-on-every-read behavior holds.
+  plus device, inode, length, mtime, and ctime from `lstat`, matching the
+  `NOFOLLOW` reads. A rewrite moves the ctime, and a merge is memoized only
+  when every source last changed more than one second before the load, so a
+  second rewrite inside one coarse timestamp tick is still read; the
+  override's change-on-every-read behavior holds. A tier or override whose
+  read failed is never memoized.
   Alternating roots replace the entry, so admitted-tier state for a root is
   read only on a miss, as before. The retained bytes are bounded by
   `MERGED_CONFIG_RETAINED_BYTES_BOUND` (4 MiB), added to
@@ -121,7 +125,9 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 - Payoff: An uncommitted probe timed `effective_with_warnings` on one host,
   release build, `taskset -c 5`, with a user tier naming a 4 KiB guidance
   override and a small project tier, 200 samples of 50 calls, three runs.
-  Before, medians were 54.83-54.96 us; after, 11.70-11.74 us. The p10-p90
+  Before, medians were 54.83-54.96 us; after the review fixes, 11.60-11.61
+  us. The payoff holds while one project root is active; alternating roots
+  replace the one-entry memo on every call. The p10-p90
   ranges do not overlap, so the change stays.
 - Missing evidence: None for this record. A same-ctime rewrite is outside
   the identity and also outside the tier contract at HEAD.
@@ -147,7 +153,7 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 [merge]: ../../../../../crates/daemon/src/config.rs#L716
 [raise-only]: ../../../../../crates/daemon/src/config.rs#L740
 [t-mtime]: ../../../../../crates/daemon/src/config.rs#L2165-L2202
-[memo-head]: ../../../../../crates/daemon/src/config.rs#L312-L369
-[identity-head]: ../../../../../crates/daemon/src/config.rs#L279-L310
-[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L410-L505
-[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2518-L2622
+[memo-head]: ../../../../../crates/daemon/src/config.rs#L339-L432
+[identity-head]: ../../../../../crates/daemon/src/config.rs#L284-L337
+[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L474-L587
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2606-L2795

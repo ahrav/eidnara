@@ -2407,21 +2407,26 @@ Reachability: default-production
 Status: active
 Exercised: yes - [The memo tests][t-memo] edit each tier and rewrite the
 guidance override with its mtime restored between loads, alternate a hostile
-and a quiet project root on one cache, and assert per-key warnings repeat on a
-memo hit; the mtime test and the three raise-only tests still pass.
+and a quiet project root on one cache, serve a rejected user tier's admitted
+fallback from the memo, assert per-key warnings repeat on a memo hit, and
+assert that an unread source or an oversized merge is never memoized; the
+mtime test and the three raise-only tests still pass.
 Guarantee: A config edit takes effect within one pass, as today, and a
 project tier can never gain privilege through a stale or cross-project cache
 entry.
 Check: `always` - After the user tier, the project tier, or the configured
 guidance override file changes on disk, the next [`effective_config`][eff-cfg]
 call for that `project_root` returns the merge of the new contents. The
-[merged memo][memo] records a [`SourceIdentity`][identity] (path, device,
-inode, length, modification time, and change time) for the user tier, the
-project tier, whose path names its root, and the override, and
-[serves][memo-serves] a load only when all of them match a fresh `stat`; any
-rewrite of a file changes its change time, so the override is observed on
-every content change as before, and a tier edit that restores its mtime
-still meets [`read_tier_cached`][tier-cached]'s existing mtime contract.
+[merged memo][memo] records a [`SourceIdentity`][identity] for the user tier,
+the project tier, whose path names its root, and the override: the path and,
+without following a final symlink, its device, inode, length, modification
+time, and change time. It [serves][memo-serves] a load only when all of them
+match a fresh `stat`. A merge is [memoized][memo-store] only when every source
+was read and every source last changed more than
+[`RECENT_CHANGE_MARGIN`][memo-margin] (1 s) before the load began, so a
+rewrite inside one coarse timestamp tick after the memoized read cannot keep
+the stamp. A tier edit that restores its mtime still meets
+[`read_tier_cached`][tier-cached]'s existing mtime contract.
 [`merge_tiers_with_warnings`][merge] including [`ProjectRaiseOnly`][raise-only]
 runs on every miss unchanged, a hit returns the stored merge and warnings, and
 bind-frozen `SessionBinding.config` stays frozen. `always` because
@@ -2432,13 +2437,14 @@ every route bind; the check is on each call, not on each pass.
 Fault/timing angle: A tier edit between two passes; two routes on different
 project roots alternating, which replaces the one-entry memo and re-reads the
 project tier every call because one `ConfigCache` holds one project tier
-([`read_tier_cached`][tier-cached]); the override edited without touching a
-tier. Every identity is taken before its read, so a rewrite racing the read
-leaves an identity the next load does not match. A tier whose read failed is
-never memoized ([`:492`][memo-store]), so a transient failure is retried on
-the next load. The memo is bounded by
+([`read_tier_cached`][tier-cached]), so the payoff holds for one active root;
+the override edited without touching a tier. Every identity is taken before
+its read, so a rewrite racing the read leaves an identity the next load does
+not match. A tier or override whose read failed is never memoized, so a
+transient failure is retried on the next load. The memo is bounded by
 [`MERGED_CONFIG_RETAINED_BYTES_BOUND`][memo-bound], declared in the daemon's
-retained-resident total; a merge estimated above it is served unmemoized.
+retained-resident total; a merge whose allocation estimate exceeds it is
+served unmemoized.
 Required faults and enabling state: A user or project tier rewritten with a
 later mtime; `prompt_surface.guidance_override_path` configured and its file
 rewritten with its mtime restored; two project roots bound at once.
@@ -3286,20 +3292,21 @@ evaluation of this area and its disposition are recorded in
 [call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5362
 [call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5679
 [call-bind]: ../../../../crates/daemon/src/lib.rs#L12427
-[eff-proj]: ../../../../crates/daemon/src/config.rs#L374-L382
+[eff-proj]: ../../../../crates/daemon/src/config.rs#L437-L445
 [eff-warn-doc]: ../../../../crates/daemon/src/config.rs#L266-L267
-[eff-warn]: ../../../../crates/daemon/src/config.rs#L410-L505
+[eff-warn]: ../../../../crates/daemon/src/config.rs#L474-L587
 [eff-clone]: ../../../../crates/daemon/src/config.rs#L288
-[tier-cached]: ../../../../crates/daemon/src/config.rs#L586-L617
-[guidance]: ../../../../crates/daemon/src/config.rs#L650-L707
-[merge]: ../../../../crates/daemon/src/config.rs#L934
-[raise-only]: ../../../../crates/daemon/src/config.rs#L734
-[memo]: ../../../../crates/daemon/src/config.rs#L312-L369
-[memo-serves]: ../../../../crates/daemon/src/config.rs#L326-L333
-[memo-store]: ../../../../crates/daemon/src/config.rs#L492-L503
+[tier-cached]: ../../../../crates/daemon/src/config.rs#L668-L699
+[guidance]: ../../../../crates/daemon/src/config.rs#L732-L789
+[merge]: ../../../../crates/daemon/src/config.rs#L1016
+[raise-only]: ../../../../crates/daemon/src/config.rs#L816
+[memo]: ../../../../crates/daemon/src/config.rs#L339-L432
+[memo-serves]: ../../../../crates/daemon/src/config.rs#L353-L363
+[memo-store]: ../../../../crates/daemon/src/config.rs#L561-L585
 [memo-bound]: ../../../../crates/daemon/src/config.rs#L277
-[identity]: ../../../../crates/daemon/src/config.rs#L279-L310
-[t-memo]: ../../../../crates/daemon/src/config.rs#L2518
+[memo-margin]: ../../../../crates/daemon/src/config.rs#L282
+[identity]: ../../../../crates/daemon/src/config.rs#L284-L337
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2606
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13

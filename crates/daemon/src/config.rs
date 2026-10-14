@@ -274,38 +274,65 @@ const ADMITTED_PROJECT_CAPACITY: usize = 8;
 /// Upper bound on the bytes the merged-config memo retains: two tiers and one
 /// guidance override at their read limits, with room for the derived strings.
 /// A merge whose estimate exceeds it is served without being memoized.
-pub const MERGED_CONFIG_RETAINED_BYTES_BOUND: usize = 4 << 20;
+pub const MERGED_CONFIG_RETAINED_BYTES_BOUND: u64 = 4 << 20;
 
-/// A file the merge read, named by its path and the `stat` fields any rewrite
-/// changes: device, inode, length, and both modification and change times.
+/// A source changed within this long before a load is not memoized: a
+/// filesystem stamps times from a coarse clock, so a second rewrite inside the
+/// same tick could keep every `stat` field the memo compares.
+const RECENT_CHANGE_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The `stat` fields any rewrite, rename, or relink of a path changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+/// A file the merge read, named by its path and the stamp of the entry at that
+/// path. The stamp does not follow a final symlink, as the bounded reads open
+/// with `NOFOLLOW`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceIdentity {
     path: PathBuf,
-    stat: Option<[i64; 7]>,
+    stamp: Option<FileStamp>,
 }
 
 impl SourceIdentity {
     fn of(path: &Path) -> Self {
         use std::os::unix::fs::MetadataExt;
-        let stat = fs::metadata(path).ok().map(|metadata| {
-            [
-                metadata.dev() as i64,
-                metadata.ino() as i64,
-                metadata.len() as i64,
-                metadata.mtime(),
-                metadata.mtime_nsec(),
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-            ]
+        let stamp = fs::symlink_metadata(path).ok().map(|metadata| FileStamp {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            len: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
         });
         Self {
             path: path.to_path_buf(),
-            stat,
+            stamp,
         }
     }
 
     fn is_current(&self) -> bool {
         *self == Self::of(&self.path)
+    }
+
+    /// Whether the entry last changed before `settled_before`, compared in
+    /// whole nanoseconds since the epoch.
+    fn changed_before(&self, settled_before: std::time::SystemTime) -> bool {
+        let Ok(limit) = settled_before.duration_since(std::time::UNIX_EPOCH) else {
+            return false;
+        };
+        let limit = (
+            i64::try_from(limit.as_secs()).unwrap_or(i64::MAX),
+            i64::from(limit.subsec_nanos()),
+        );
+        self.stamp
+            .as_ref()
+            .is_none_or(|stamp| stamp.mtime < limit && stamp.ctime < limit)
     }
 }
 
@@ -323,6 +350,9 @@ struct MergedConfig {
 }
 
 impl MergedConfig {
+    /// The user and project identities come from the load; the guidance
+    /// override is stamped here because its path derives from the memoized
+    /// user tier.
     fn serves(&self, user: Option<&SourceIdentity>, project: &SourceIdentity) -> bool {
         self.user.as_ref() == user
             && self.project == *project
@@ -332,39 +362,72 @@ impl MergedConfig {
                 .is_none_or(SourceIdentity::is_current)
     }
 
-    fn retained_bytes(&self) -> usize {
-        let path = |path: &Path| path.as_os_str().len();
+    /// Bytes the memo holds, counting each heap allocation at its capacity
+    /// rounded up to 16 bytes plus 16 bytes of allocator overhead.
+    fn retained_bytes(&self) -> u64 {
+        fn allocation(capacity: usize) -> usize {
+            if capacity == 0 {
+                0
+            } else {
+                capacity.next_multiple_of(16) + 16
+            }
+        }
+        fn strings(values: &[String]) -> usize {
+            allocation(std::mem::size_of_val(values))
+                + values
+                    .iter()
+                    .map(|value| allocation(value.capacity()))
+                    .sum::<usize>()
+        }
+        let path = |path: &Path| allocation(path.as_os_str().len());
         let identity = |identity: &SourceIdentity| path(&identity.path);
-        let config = &self.effective;
-        std::mem::size_of::<Self>()
+        let DaemonConfig {
+            model_chain,
+            execute_threshold_percentage: _,
+            compaction_enabled: _,
+            memory_enabled: _,
+            memory_auto_capture: _,
+            auto_search: _,
+            terse_text_compression: _,
+            auto_promote: _,
+            user_memory_collection_enabled: _,
+            memory_classifier_review_user_memories_schedule,
+            history_summarizer_context_limit_tokens: _,
+            memory_budget_tokens: _,
+            user_profile_budget_tokens: _,
+            inject_docs: _,
+            temporal_awareness: _,
+            prompt_surface_guidance_override,
+            smart_drops: _,
+            cache_ttl,
+            cache_ttl_by_model,
+            admission,
+            user_config_path,
+        } = &self.effective;
+        let optional = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map_or(0, |value| allocation(value.capacity()))
+        };
+        let bytes = std::mem::size_of::<Self>()
             + self.user.as_ref().map_or(0, identity)
             + identity(&self.project)
             + self.guidance.as_ref().map_or(0, identity)
-            + self.warnings.iter().map(String::capacity).sum::<usize>()
-            + config
-                .model_chain
+            + strings(&self.warnings)
+            + strings(model_chain)
+            + optional(memory_classifier_review_user_memories_schedule)
+            + optional(prompt_surface_guidance_override)
+            + allocation(cache_ttl.capacity())
+            + cache_ttl_by_model
                 .iter()
-                .map(String::capacity)
+                .map(|(model, ttl)| allocation(model.capacity()) + allocation(ttl.capacity()) + 64)
                 .sum::<usize>()
-            + config
-                .memory_classifier_review_user_memories_schedule
-                .as_ref()
-                .map_or(0, String::capacity)
-            + config
-                .prompt_surface_guidance_override
-                .as_ref()
-                .map_or(0, String::capacity)
-            + config.cache_ttl.capacity()
-            + config
-                .cache_ttl_by_model
-                .iter()
-                .map(|(model, ttl)| model.capacity() + ttl.capacity() + 64)
-                .sum::<usize>()
-            + match &config.admission {
+            + match admission {
                 ConfigAdmission::Admitted => 0,
-                ConfigAdmission::Unresolved { reason } => reason.capacity(),
+                ConfigAdmission::Unresolved { reason } => allocation(reason.capacity()),
             }
-            + config.user_config_path.as_deref().map_or(0, path)
+            + user_config_path.as_deref().map_or(0, path);
+        u64::try_from(bytes).unwrap_or(u64::MAX)
     }
 }
 
@@ -406,13 +469,17 @@ impl ConfigCache {
     /// Tier read failures are reported on every load so a long-running daemon keeps
     /// surfacing a config file it cannot use. A load whose sources all keep the
     /// identities the last merge recorded returns that merge and its warnings;
-    /// a tier that could not be read is never memoized, so it is retried.
+    /// a merge with a source that could not be read, or that changed within
+    /// [`RECENT_CHANGE_MARGIN`], is never memoized, so it is read again.
     fn effective_with_warnings(
         &mut self,
         user_path: Option<&Path>,
         project_root: &Path,
     ) -> (DaemonConfig, Vec<String>) {
         let project_path = discover_tier(&project_root.join(".eidnara").join("eidnara"));
+        let settled_before = std::time::SystemTime::now()
+            .checked_sub(RECENT_CHANGE_MARGIN)
+            .unwrap_or(std::time::UNIX_EPOCH);
         let user_identity = user_path.map(SourceIdentity::of);
         let project_identity = SourceIdentity::of(&project_path);
         if let Some(merged) = &self.merged
@@ -478,9 +545,11 @@ impl ConfigCache {
         // The identity is taken before the read, so a rewrite racing the read
         // leaves a stale identity that the next load does not match.
         let guidance = guidance_path.as_deref().map(SourceIdentity::of);
+        let warnings_before_guidance = warnings.len();
         if let Some(guidance_path) = &guidance_path {
             resolve_user_guidance_override(&mut effective, guidance_path, &mut warnings);
         }
+        let guidance_resolved = warnings.len() == warnings_before_guidance;
         let rejections = [user_rejections, project_rejections].concat();
         if !rejections.is_empty() {
             let reason = rejections.join("; ");
@@ -489,7 +558,20 @@ impl ConfigCache {
             ));
             effective.admission = ConfigAdmission::Unresolved { reason };
         }
-        if self.user.warning.is_none() && self.project.warning.is_none() {
+        // A read failure of any source is retried by the next load, and a
+        // source changed within the margin is read again until it settles.
+        let sources_read = user_path.and(self.user.warning.as_ref()).is_none()
+            && self.project.warning.is_none()
+            && guidance_resolved;
+        let settled = [
+            user_identity.as_ref(),
+            Some(&project_identity),
+            guidance.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|identity| identity.changed_before(settled_before));
+        if sources_read && settled {
             let merged = MergedConfig {
                 user: user_identity,
                 project: project_identity,
@@ -2514,6 +2596,12 @@ mod tests {
         restore_mtime(path, mtime + std::time::Duration::from_secs(2));
     }
 
+    /// Waits until every file written so far is outside the recent-change
+    /// margin, so the next load may memoize its merge.
+    fn settle() {
+        std::thread::sleep(RECENT_CHANGE_MARGIN + std::time::Duration::from_millis(100));
+    }
+
     #[test]
     fn the_merged_memo_observes_every_tier_and_override_change_by_the_next_load() {
         let dir = tempfile::tempdir().unwrap();
@@ -2531,9 +2619,14 @@ mod tests {
         .unwrap();
         std::fs::write(&project_file, r#"{ "memory": { "enabled": false } }"#).unwrap();
         let mut cache = ConfigCache::default();
+        let (fresh, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_none(), "sources changed within the margin");
+        settle();
         let (first, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(first, fresh);
         assert_eq!(first.model_chain, vec!["model-a"]);
         assert!(!first.memory_enabled);
+        assert!(cache.merged.is_some());
         let (served, _) = cache.effective_with_warnings(Some(&user), &project);
         assert_eq!(served, first, "unchanged sources serve the memo");
 
@@ -2546,6 +2639,7 @@ mod tests {
             rewritten.prompt_surface_guidance_override.as_deref(),
             Some("## Eidnara\nsecond\n")
         );
+        assert!(cache.merged.is_none());
 
         std::fs::write(&project_file, r#"{ "memory": { "enabled": true } }"#).unwrap();
         advance_mtime(&project_file);
@@ -2588,6 +2682,7 @@ mod tests {
             std::fs::create_dir_all(root.join(".eidnara")).unwrap();
             std::fs::write(root.join(".eidnara/eidnara.jsonc"), body).unwrap();
         }
+        settle();
         let mut cache = ConfigCache::default();
         let (reference, reference_warnings) = merge_tiers_with_warnings(
             Some(&serde_json::from_str(&std::fs::read_to_string(&user).unwrap()).unwrap()),
@@ -2611,6 +2706,7 @@ mod tests {
                 "the project tier cannot set the model"
             );
             assert_eq!(hostile_warnings, reference_warnings);
+            assert!(cache.merged.is_some());
             let (served, served_warnings) = cache.effective_with_warnings(Some(&user), &hostile);
             assert_eq!(served, hostile_config);
             assert_eq!(served_warnings, hostile_warnings, "a memo hit re-emits");
@@ -2622,6 +2718,81 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_user_tier_serves_its_admitted_fallback_from_the_memo() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            &user,
+            r#"{ "history_summarizer": { "model": "admitted/model" } }"#,
+        )
+        .unwrap();
+        let mut cache = ConfigCache::default();
+        cache.effective_with_warnings(Some(&user), &project);
+        std::fs::write(
+            &user,
+            r#"{ "history_summarizer": { "model": "rejected/model", "modle": "typo" } }"#,
+        )
+        .unwrap();
+        // A past mtime still differs from the cached one, and stays outside the margin.
+        restore_mtime(
+            &user,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
+        settle();
+        let (rejected, rejected_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(rejected.model_chain, vec!["admitted/model"]);
+        assert!(matches!(
+            rejected.admission,
+            ConfigAdmission::Unresolved { .. }
+        ));
+        assert!(
+            cache.merged.is_some(),
+            "a rejection is deterministic content"
+        );
+        let (served, served_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(served, rejected);
+        assert_eq!(served_warnings, rejected_warnings);
+    }
+
+    #[test]
+    fn unread_sources_and_oversized_merges_are_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            &user,
+            r#"{ "prompt_surface": { "guidance_override_path": "missing.md" } }"#,
+        )
+        .unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        let (_, warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(warnings[0].contains("could not be read"), "{warnings:?}");
+        assert!(cache.merged.is_none(), "an unread override is read again");
+
+        let models: Vec<String> = (0..90_000).map(|index| format!("m{index}")).collect();
+        std::fs::write(
+            &user,
+            serde_json::json!({ "history_summarizer": { "fallback_models": models } }).to_string(),
+        )
+        .unwrap();
+        settle();
+        let (oversized, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(oversized.model_chain.len(), 90_000);
+        assert!(
+            cache.merged.is_none(),
+            "the estimate exceeds the declared bound"
+        );
+        assert_eq!(
+            cache.effective_with_warnings(Some(&user), &project).0,
+            oversized
+        );
+    }
+
+    #[test]
     fn unreadable_and_malformed_tiers_warn_while_missing_tiers_stay_silent() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.jsonc");
@@ -2629,6 +2800,7 @@ mod tests {
         let project_file = project.join(".eidnara/eidnara.jsonc");
         std::fs::create_dir_all(&project_file).unwrap();
         std::fs::write(&user, r#"{ "memory": { "enabled": false "#).unwrap();
+        settle();
 
         let mut cache = ConfigCache::default();
         let (effective, warnings) = cache.effective_with_warnings(Some(&user), &project);
@@ -2658,6 +2830,7 @@ mod tests {
         // The cached read keeps reporting the failure until the file changes.
         let (_, repeated) = cache.effective_with_warnings(Some(&user), &project);
         assert_eq!(repeated, warnings);
+        assert!(cache.merged.is_none(), "an unreadable tier is read again");
 
         // Repairing the file without moving its mtime is picked up, because a failed
         // read never takes the mtime fast path.
