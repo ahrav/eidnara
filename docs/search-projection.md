@@ -147,7 +147,21 @@ runs under the request's `EvalBudget`. A deadline or cancellation that an
 enumeration batch observes stops the attempt as
 `Incomplete(BudgetExhausted)`, keeping the verdicts of earlier pages and
 forming no proof. At final use it invalidates the proof as
-`BudgetExhausted`. An exact proof records egress eligibility only. Surface
+`BudgetExhausted`. Under `SqliteStore::with_conn_interruptible`, a stop tied
+to the request's budget also interrupts a running exact statement. `resolve`
+classifies that SQLite interruption by error code as the same budget stop:
+`Err(BudgetExhausted)` when it lands in certificate admission or before any
+page completes, and `Incomplete(BudgetExhausted)` with the judged pages kept
+after one. The interrupted page is dropped unjudged. An interrupted final-use
+checkpoint read invalidates the proof as `BudgetExhausted`. Every other engine
+error stays an engine failure whatever the budget:
+`Lookup(Projection(Sqlite))` from a page and `Projection(Sqlite)` from
+admission. A classification change defeats an attempt and a proof with or
+without a tip move: a reclassifying artifact replay commits and moves the tip,
+and an open classification window leaves the snapshot without a reusable
+generation at the same tip.
+An exact proof records egress
+eligibility only. Surface
 permission and claim state come from claim classification at use, so a
 quarantined or stale claim object can hold an exact proof and still be hidden
 or stale on every surface.

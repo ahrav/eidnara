@@ -244,6 +244,18 @@ struct Attempt<'a> {
     resolution: Resolution,
 }
 
+/// Whether `refusal` is SQLite interrupting a projection statement. The
+/// storage progress handler interrupts only when the read's stop fires, and a
+/// caller ties that stop to this request's budget, so the interrupt is the
+/// budget ending.
+fn is_interrupt(refusal: &ResolveRefusal) -> bool {
+    matches!(
+        refusal,
+        ResolveRefusal::Lookup(LookupRefusal::Projection(ProjectionError::Interrupted))
+            | ResolveRefusal::Projection(ProjectionError::Interrupted)
+    )
+}
+
 fn budget_refusal(error: KernelError) -> ResolveRefusal {
     match error {
         KernelError::Deadline => ResolveRefusal::BudgetExhausted,
@@ -251,6 +263,10 @@ fn budget_refusal(error: KernelError) -> ResolveRefusal {
     }
 }
 
+/// Enumerates the request's exact range and judges every row, proving only an
+/// explicit whole-request singleton. Under an interruptible read, the read's
+/// stop must fire only when `budget` ends: an interrupted statement is
+/// reported as `BudgetExhausted`.
 pub fn resolve(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -292,7 +308,13 @@ fn resolve_inner(
         return Err(ResolveRefusal::RetainedOverBound);
     }
     let certificate = request.certificate;
-    admit_certificate(conn, request)?;
+    admit_certificate(conn, request).map_err(|refusal| {
+        if is_interrupt(&refusal) {
+            ResolveRefusal::BudgetExhausted
+        } else {
+            refusal
+        }
+    })?;
     let installed = kernel
         .database_incarnation_id_within_budget(budget)
         .map_err(budget_refusal)?;
@@ -381,10 +403,15 @@ impl Attempt<'_> {
         self.stopped.get_or_insert(reason);
     }
 
+    /// Stops the attempt as budget exhaustion when `refusal` is the budget
+    /// ending: a budget check, a kernel deadline, or SQLite interrupting a
+    /// page statement. Consumed counts cover completed pages only; a page
+    /// whose statement was interrupted is dropped unjudged.
     fn late_failure(&mut self, refusal: ResolveRefusal) -> Result<(), ResolveRefusal> {
         match &refusal {
             ResolveRefusal::Lookup(LookupRefusal::BudgetExhausted)
             | ResolveRefusal::Kernel(KernelError::Deadline) => {}
+            interrupt if is_interrupt(interrupt) => {}
             _ => return Err(refusal),
         }
         if self.resolution.consumed.pages == 0 {
@@ -564,6 +591,9 @@ pub enum ProofInvalidation {
     },
 }
 
+/// Revalidates `proof` for final use at the current authority, projection,
+/// and kernel state. An interrupted checkpoint read, like an ended `budget`,
+/// invalidates the proof as `BudgetExhausted`.
 pub fn validate_for_use(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -607,7 +637,11 @@ fn validate_for_use_inner(
     if authority.inventory_epoch != certificate.inventory_epoch {
         return Ok(Err(ProofInvalidation::InventoryEpochChanged));
     }
-    let checkpoint = read_checkpoint(conn, &certificate.canonical_incarnation_id)?;
+    let checkpoint = match read_checkpoint(conn, &certificate.canonical_incarnation_id) {
+        Ok(checkpoint) => checkpoint,
+        Err(ProjectionError::Interrupted) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
+        Err(error) => return Err(error.into()),
+    };
     if checkpoint.as_ref() != Some(&certificate.projection) {
         return Ok(Err(ProofInvalidation::ProjectionChanged));
     }

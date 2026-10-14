@@ -244,7 +244,10 @@ fn page_sql(has_cursor: bool) -> &'static str {
 }
 
 /// Checks cancellation between SQLite steps and before returning a page.
-/// An in-progress SQLite step is not interrupted.
+/// Under `SqliteStore::with_conn_interruptible`, the request's stop also
+/// interrupts an in-progress step, which surfaces as
+/// `Projection(ProjectionError::Interrupted)`; every other engine failure
+/// surfaces as `Projection(ProjectionError::Sqlite)`, whatever the budget.
 ///
 /// # Errors
 ///
