@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
 
-use super::{DeclaredLanes, Lane, OccurrenceId, RawScore};
+use super::{DeclaredLanes, Lane, LaneRanking, OccurrenceId, RawScore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ParameterRefusal {
@@ -137,6 +137,32 @@ pub struct Fused {
 }
 
 impl Fused {
+    /// `direct` returns one lane's ranking in lane order, with each entry scored by that lane's term. With a positive lane weight, the result equals [`fuse`] over that lane alone.
+    pub fn direct(ranking: &LaneRanking, parameters: &FusionParameters) -> Self {
+        let lane = ranking.lane();
+        let entries = ranking
+            .entries()
+            .iter()
+            .map(|entry| {
+                let mut contributions = [None; Lane::ORDER.len()];
+                contributions[lane.index()] = Some(LaneContribution {
+                    position: entry.position(),
+                    raw_score: entry.raw_score(),
+                });
+                FusedEntry {
+                    occurrence: *entry.occurrence(),
+                    position: entry.position(),
+                    score: parameters.term(lane, entry.position().get()),
+                    contributions,
+                }
+            })
+            .collect();
+        Self {
+            entries,
+            undeclared: Lane::ORDER.map(|declared| declared != lane),
+        }
+    }
+
     pub fn entries(&self) -> &[FusedEntry] {
         &self.entries
     }

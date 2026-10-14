@@ -1186,6 +1186,10 @@ impl SearchReader {
     pub fn consumer(&self) -> &ConsumerBinding {
         &self.family.certificate.intent.consumer
     }
+    /// The gate's admission this reader was pinned under; its token fires when the gate withdraws the evidence.
+    pub fn grant(&self) -> &Admission {
+        &self.grant
+    }
     pub fn handoff(&self) -> &LifecycleIntent {
         &self.family.certificate.intent
     }

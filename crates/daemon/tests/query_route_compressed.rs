@@ -150,6 +150,7 @@ fn run_phased(
             project: &fixture.project,
             destination: ArtifactDestination::Local,
         },
+        None,
         &with_dense(k),
         budget.shared(),
         QUERY,

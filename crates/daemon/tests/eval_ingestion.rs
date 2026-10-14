@@ -645,6 +645,7 @@ fn query_ids(
             project,
             destination: ArtifactDestination::Local,
         },
+        None,
         &limits(),
         budget.shared(),
         query,

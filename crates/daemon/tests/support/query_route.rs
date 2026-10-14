@@ -6,8 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
+use daemon::projection_gates::{Admission, EntryPoint, ProjectionHook};
 use daemon::query_route::{
-    DenseLane, DenseLimits, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, execute,
+    DenseLane, DenseLimits, ExactCertification, Phase, QueryFailure, QueryOutcome,
+    QueryRouteLimits, execute,
 };
 use daemon::request_budget::{RequestBudget, SharedBudget};
 use daemon::search_projection::SearchProjection;
@@ -18,6 +20,7 @@ use kernel::{
     SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourcePageBounds,
     SourceRow,
 };
+use retrieval::batch::read_checkpoint;
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
     row_identities,
@@ -25,7 +28,8 @@ use retrieval::batch::{
 use retrieval::dense::codec;
 use retrieval::eligibility::{Authority, OccurrenceCandidate, live_candidates};
 use retrieval::exact::{
-    ExactQuery, Intent, LookupContext, SelectorBounds, SelectorValue, classify, page,
+    CompletenessCertificate, EXTRACTION_VERSION, ExactQuery, Intent, LookupContext, SelectorBounds,
+    SelectorValue, classify, page,
 };
 use retrieval::fusion::{
     FusionParameters, Lane, LaneHit, LaneRanking, LaneWeights, OccurrenceId, RawScore,
@@ -399,6 +403,57 @@ impl Fixture {
                 project: &self.project,
                 destination: ArtifactDestination::Local,
             },
+            None,
+            limits,
+            shared,
+            query,
+            DenseLane::Undeclared,
+            before_phase,
+        )
+    }
+
+    /// A completeness certificate for the projection's current checkpoint under [`INVENTORY_EPOCH`], as a pinned family at the kernel tip issues one.
+    pub fn certificate(&self) -> CompletenessCertificate {
+        let budget = kernel::applicability::EvalBudget::unbounded();
+        let kernel_incarnation = self
+            .store
+            .capture_commit_read_target_within_budget(&budget)
+            .unwrap()
+            .incarnation;
+        let checkpoint = self
+            .projection
+            .read(|conn| read_checkpoint(conn, &self.kernel_incarnation))
+            .unwrap()
+            .unwrap();
+        CompletenessCertificate {
+            canonical_incarnation_id: self.kernel_incarnation.clone(),
+            kernel_incarnation,
+            inventory_epoch: INVENTORY_EPOCH.to_string(),
+            identity_contract_version: projection_identity(&self.kernel_incarnation)
+                .identity_contract_version,
+            extraction_version: EXTRACTION_VERSION,
+            complete_through_commit_seq: checkpoint.checkpoint_commit_seq,
+            projection: checkpoint,
+        }
+    }
+
+    /// [`Self::run`] with the exact lane resolving under `certification`.
+    pub fn run_certified(
+        &self,
+        limits: &QueryRouteLimits,
+        shared: &SharedBudget,
+        query: &str,
+        certification: ExactCertification<'_>,
+        before_phase: impl FnMut(Phase),
+    ) -> Result<QueryOutcome, QueryFailure> {
+        execute(
+            &self.projection,
+            &self.store,
+            Authority {
+                project: &self.project,
+                destination: ArtifactDestination::Local,
+            },
+            Some(certification),
             limits,
             shared,
             query,
@@ -419,6 +474,7 @@ impl Fixture {
                 project,
                 destination: ArtifactDestination::Local,
             },
+            None,
             &limits(),
             shared,
             QUERY,
@@ -518,6 +574,18 @@ impl Fixture {
                 Ok(ordered.into_iter().map(|(id, _)| id.to_string()).collect())
             })
             .unwrap()
+    }
+}
+
+/// The inventory epoch [`Fixture::certificate`] certifies under.
+pub const INVENTORY_EPOCH: &str = "inventory-query-route";
+
+/// A reader's admission whose withdrawal `token` controls.
+pub fn grant(token: CancellationToken) -> Admission {
+    Admission {
+        hook: ProjectionHook::EmbeddingBootstrap,
+        entry: EntryPoint::Reload,
+        invalidated: token,
     }
 }
 

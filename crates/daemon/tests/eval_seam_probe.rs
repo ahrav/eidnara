@@ -44,7 +44,9 @@ fn every_evaluator_seam_is_reachable_under_all_features() {
     };
     let _ = |report: &ExactReport| match &report.admission {
         ExactAdmission::Judged(report) | ExactAdmission::Moved(report) => report.is_reusable(),
-        ExactAdmission::NotJudged | ExactAdmission::KernelError => report.rows.is_empty(),
+        ExactAdmission::NotJudged | ExactAdmission::KernelError | ExactAdmission::Resolved => {
+            report.rows.is_empty()
+        }
     };
     assert_eq!(
         kernel::MAX_ELIGIBILITY_CANDIDATES,
@@ -69,8 +71,8 @@ fn every_evaluator_seam_is_reachable_under_all_features() {
         eval_core::FAILURE_CLASS_TABLE_DIGEST
     );
     // `execute` and its halves take an `impl FnMut`, so a non-executed call names each.
-    let _ = |p, k, a, l, b, q, d| execute(p, k, a, l, b, q, d, |_| {});
-    let _ = |p, k, a, l, b, q, d| admit_lanes(p, k, a, l, b, q, d, |_| {});
+    let _ = |p, k, a, c, l, b, q, d| execute(p, k, a, c, l, b, q, d, |_| {});
+    let _ = |p, k, a, c, l, b, q, d| admit_lanes(p, k, a, c, l, b, q, d, |_| {});
     let _ = |admitted| select(admitted, |_| {});
     assert_eq!(MAX_REVISION_LEAD_MS, eval_core::MAX_REVISION_LEAD_MS);
 }

@@ -79,6 +79,7 @@ fn drive(
         &fixture.projection,
         &fixture.store,
         authority,
+        None,
         limits,
         budget.shared(),
         query,
@@ -725,6 +726,8 @@ fn an_exact_lane_that_ends_after_reading_leaves_eligibility_unjoinable() {
         view.exact = ExactReport {
             rows: view.exact.rows.clone(),
             admission: ExactAdmission::KernelError,
+            resolutions: Vec::new(),
+            route: view.exact.route.clone(),
         };
         let mut ledger = ChainLedger::default();
         observe_lanes(&mut ledger, &view, &mut Incarnations::default());
@@ -739,6 +742,8 @@ fn an_exact_lane_that_ends_after_reading_leaves_eligibility_unjoinable() {
         unread.exact = ExactReport {
             rows: Vec::new(),
             admission: ExactAdmission::NotJudged,
+            resolutions: Vec::new(),
+            route: unread.exact.route.clone(),
         };
         let mut ledger = ChainLedger::default();
         observe_lanes(&mut ledger, &unread, &mut Incarnations::default());
@@ -772,6 +777,7 @@ fn tap_returns_leave_production_output_byte_equal() {
                 project: &fixture.project,
                 destination: ArtifactDestination::Local,
             },
+            None,
             &limits(),
             budget.shared(),
             QUERY,
