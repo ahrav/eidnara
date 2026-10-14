@@ -458,6 +458,20 @@ const _: () = assert!(PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES <= MAX_DURABL
 pub const PASS_SCHEDULER_TELEMETRY_MAX_BYTES: usize =
     PASS_SCHEDULER_HISTORY_MAX_BYTES + PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES;
 
+/// What opening the store did to `transform_session_roots`, the lineage that authenticates a transform session's project root after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformRootPrune {
+    /// Deleted this many roots idle past the retention window.
+    Pruned(usize),
+    /// The clock read before the epoch or past `i64` milliseconds, so retention kept every root.
+    ClockUnreadable,
+}
+
+/// Milliseconds since the epoch, or `None` for a clock before the epoch or past `i64` milliseconds.
+fn epoch_millis(elapsed: Result<std::time::Duration, std::time::SystemTimeError>) -> Option<i64> {
+    i64::try_from(elapsed.ok()?.as_millis()).ok()
+}
+
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -7552,6 +7566,7 @@ pub struct MemoryStore {
     /// Caller-clock instant at or after which the next capture enqueue prunes expired
     /// terminal identities; starts at zero so the first enqueue after open prunes.
     pub(crate) memory_capture_prune_due_ms: std::sync::atomic::AtomicI64,
+    transform_root_prune: TransformRootPrune,
     #[cfg(any(test, feature = "test-support"))]
     abandon_history_summarizer_hook: AbandonHistorySummarizerHook,
     #[cfg(any(test, feature = "test-support"))]
@@ -8024,7 +8039,7 @@ impl MemoryStore {
             conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
             ConnectionProfile::apply(conn)
         })?;
-        let store = MemoryStore {
+        let mut store = MemoryStore {
             inner,
             connection_profile,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
@@ -8033,6 +8048,7 @@ impl MemoryStore {
             facade_mutation_lock: Mutex::new(()),
             row_memo: Mutex::new(RowMemo::default()),
             memory_capture_prune_due_ms: std::sync::atomic::AtomicI64::new(0),
+            transform_root_prune: TransformRootPrune::Pruned(0),
             #[cfg(any(test, feature = "test-support"))]
             abandon_history_summarizer_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
@@ -8064,22 +8080,56 @@ impl MemoryStore {
             #[cfg(any(test, feature = "test-support"))]
             in_progress_receipts_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
-        store.prune_transform_session_roots()?;
+        store.transform_root_prune = store.prune_transform_session_roots(epoch_millis(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH),
+        ))?;
+        match store.transform_root_prune {
+            TransformRootPrune::Pruned(0) => {}
+            TransformRootPrune::Pruned(rows) => {
+                eprintln!("memory-store: pruned {rows} idle transform session roots at open");
+            }
+            TransformRootPrune::ClockUnreadable => {
+                eprintln!(
+                    "memory-store: kept every transform session root at open: the clock read is unusable"
+                );
+            }
+        }
         store.ensure_memory_reviewer_store_identity(current_time_ms())?;
         store.resume_memory_capture_after_open()?;
         Ok(store)
     }
 
-    fn prune_transform_session_roots(&self) -> Result<(), MemoryStoreError> {
+    /// What opening this store did to `transform_session_roots`.
+    pub fn transform_root_prune(&self) -> TransformRootPrune {
+        self.transform_root_prune
+    }
+
+    /// Deletes roots whose observation and cache activity are both older than the retention window. The window ends at `now_ms` or at the newest root observation or cache activity the store recorded, whichever is earlier, so a clock running ahead of every recorded write prunes only roots idle that long before the store's own latest activity.
+    fn prune_transform_session_roots(
+        &self,
+        now_ms: Option<i64>,
+    ) -> Result<TransformRootPrune, MemoryStoreError> {
         const THIRTY_DAYS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
-        let now_ms = current_time_ms();
+        let Some(now_ms) = now_ms else {
+            return Ok(TransformRootPrune::ClockUnreadable);
+        };
         self.inner
             .with_conn_fenced(|conn| {
+                let newest: Option<i64> = conn.query_row(
+                    "SELECT MAX(at) FROM (
+                         SELECT MAX(observed_at) AS at FROM transform_session_roots
+                         UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+                     )",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let Some(newest) = newest else {
+                    return Ok(TransformRootPrune::Pruned(0));
+                };
                 // Cache rows are retained across session teardown, so row existence is not
-                // activity. Prune lineage only when both the root observation and its cache
-                // activity watermark are older than the inactivity window. This keeps active
-                // sessions alive without depending on a deletion path that does not exist.
-                conn.execute(
+                // activity. A root is pruned only when both its observation and its cache
+                // activity watermark are older than the window.
+                let deleted = conn.execute(
                     "DELETE FROM transform_session_roots AS roots
                       WHERE roots.observed_at < ?1
                         AND NOT EXISTS (
@@ -8087,9 +8137,9 @@ impl MemoryStore {
                              WHERE cache.session_id = roots.session_id
                                AND cache.last_activity_at >= ?1
                         )",
-                    params![now_ms.saturating_sub(THIRTY_DAYS_MS)],
+                    params![now_ms.min(newest).saturating_sub(THIRTY_DAYS_MS)],
                 )?;
-                Ok(())
+                Ok(TransformRootPrune::Pruned(deleted))
             })
             .map_err(Into::into)
     }
@@ -22628,6 +22678,11 @@ mod tests {
         drop(store);
 
         let reopened = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(
+            reopened.transform_root_prune(),
+            TransformRootPrune::Pruned(2),
+            "open prunes the deleted and the idle session's roots"
+        );
         assert!(
             reopened
                 .knows_transform_session_root("refreshed", "/root-a")
@@ -22673,6 +22728,110 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    /// Commits `/root-a` for `session_id` observed at `at_ms`, with the session's cache activity also at `at_ms`.
+    fn root_observed_at(store: &MemoryStore, session_id: &str, at_ms: i64) {
+        let loaded = store.load(session_id).unwrap();
+        store
+            .commit_transform(
+                session_id,
+                TransformCommit {
+                    expected: None,
+                    core: &loaded.core,
+                    meta: &loaded.meta,
+                    consumed_drop_ids: &[],
+                    first_applied_command_ids: &[],
+                    history_segment_max_seq: None,
+                    project_root: Some("/root-a"),
+                    first_divergence: None,
+                    pass: None,
+                    overlays: TransformOverlayBatch {
+                        created_at_ms: at_ms,
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = ?2 WHERE session_id = ?1",
+                    params![session_id, at_ms],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    /// A clock a year ahead of every recorded write prunes only the roots idle for the retention window before the store's newest activity, so live lineage survives; the same store under its own clock prunes the same root.
+    #[test]
+    fn a_clock_ahead_of_every_recorded_write_prunes_only_roots_idle_before_the_newest_activity() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        for clock in [now_ms + 365 * DAY_MS, now_ms] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            root_observed_at(&store, "live", now_ms - DAY_MS);
+            root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+            assert_eq!(
+                store.prune_transform_session_roots(Some(clock)).unwrap(),
+                TransformRootPrune::Pruned(1),
+                "clock {clock}"
+            );
+            assert!(
+                store
+                    .knows_transform_session_root("live", "/root-a")
+                    .unwrap()
+            );
+            assert!(
+                !store
+                    .knows_transform_session_root("stale", "/root-a")
+                    .unwrap()
+            );
+        }
+    }
+
+    /// An unreadable clock keeps every root, whatever its age, and a clock before the epoch or past `i64` milliseconds reads as unreadable rather than as zero or the maximum.
+    #[test]
+    fn an_unreadable_clock_keeps_every_transform_session_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "ancient", 1);
+        assert_eq!(
+            store.prune_transform_session_roots(None).unwrap(),
+            TransformRootPrune::ClockUnreadable
+        );
+        assert!(
+            store
+                .knows_transform_session_root("ancient", "/root-a")
+                .unwrap()
+        );
+
+        let before_epoch = std::time::UNIX_EPOCH
+            .duration_since(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1));
+        assert_eq!(epoch_millis(before_epoch), None);
+        assert_eq!(epoch_millis(Ok(std::time::Duration::MAX)), None);
+        assert_eq!(
+            epoch_millis(Ok(std::time::Duration::from_millis(5))),
+            Some(5)
+        );
+    }
+
+    /// An empty store has no recorded activity to anchor retention and prunes nothing.
+    #[test]
+    fn an_empty_store_prunes_nothing_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(store.transform_root_prune(), TransformRootPrune::Pruned(0));
+        assert_eq!(
+            store.prune_transform_session_roots(Some(i64::MAX)).unwrap(),
+            TransformRootPrune::Pruned(0)
+        );
     }
 
     /// The row stores the canonical root, so the canonical form is what must be scanned. A
