@@ -376,14 +376,22 @@ impl Fixture {
     }
 
     /// Projects every row with a queued embedding job, then completes the jobs whose rows carry a vector.
+    /// A row without a vector leaves its job pending, so the pending bound admits one job for every row the fixture projects.
     pub fn project(&self) {
         let through = self.kernel.tip().unwrap();
-        for rows in self.rows.chunks(batch_bounds().persist.max_records.get()) {
-            self.project_chunk(rows, through);
+        let defaults = batch_bounds();
+        let limits = BatchBounds {
+            max_pending: defaults
+                .max_pending
+                .max(NonZeroUsize::new(self.rows.len()).unwrap_or(defaults.max_pending)),
+            ..defaults
+        };
+        for rows in self.rows.chunks(limits.persist.max_records.get()) {
+            self.project_chunk(rows, through, limits);
         }
     }
 
-    fn project_chunk(&self, rows: &[Row], through: i64) {
+    fn project_chunk(&self, rows: &[Row], through: i64, limits: BatchBounds) {
         let texts: Vec<String> = rows
             .iter()
             .map(|row| format!("text {}", row.object))
@@ -417,7 +425,7 @@ impl Fixture {
         };
         self.store
             .with_conn_fenced(|conn| {
-                apply_batch(conn, &batch, batch_bounds(), through).unwrap();
+                apply_batch(conn, &batch, limits, through).unwrap();
                 for row in rows {
                     if let Some(vector) = &row.vector {
                         conn.execute(

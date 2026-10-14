@@ -67,12 +67,14 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
             "a competing exclusive lock on a pinned generation fails"
         );
     }
-    // Exactly the resident tables are held in the resident pool, and every pinned byte is in the census.
     let resident = resident_bytes(&fixture, &composition.members());
+    let codes = code_bytes(&fixture, &composition.members());
     assert!(resident > 0);
+    assert!(codes > 0);
     let census = fixture.ledger.census();
-    assert_eq!(census.resident, resident);
+    assert_eq!(census.resident, resident + codes);
     assert_eq!(census.held[&ResourceClass::LayerTables], resident);
+    assert_eq!(census.held[&ResourceClass::MappedCodes], codes);
     let mut pinned = composition.members();
     pinned.push(digest.clone());
     assert_eq!(census.pinned, manifest_bytes(&fixture, &pinned));
@@ -967,10 +969,11 @@ fn a_member_corrupted_while_pinned_for_verification_hands_out_no_view_and_recove
     }
     assert!(!try_exclusive(&fixture.generation_dir(&base.digest)));
     let census = fixture.ledger.census();
+    let fallback = std::slice::from_ref(&base.digest);
     assert_eq!(
         census.resident,
-        resident_bytes(&fixture, std::slice::from_ref(&base.digest)),
-        "only the fallback's tables stay reserved"
+        resident_bytes(&fixture, fallback) + code_bytes(&fixture, fallback),
+        "only the fallback's tables and codes stay reserved"
     );
     assert_eq!(
         census.pinned,

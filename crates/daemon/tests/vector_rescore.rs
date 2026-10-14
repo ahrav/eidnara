@@ -1073,13 +1073,8 @@ fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     );
     // A resident limit the view's tables already fill leaves no room for the pool's row buffers.
     let tables = fixture.ledger.census().resident;
-    // One block of decoded codes, one encoded query, and one window per layer; a window this narrow holds every row of its layer.
-    let windows: usize = view
-        .layers()
-        .iter()
-        .map(|layer| layer.occurrence_ids().len())
-        .sum();
-    let code_scratch = ((BLOCK_ROWS + 1) * view.layers().len() + windows) as u64 * 8;
+    // One block of decoded codes and one encoded query per layer; the census already holds the view's mapped codes.
+    let code_scratch = ((BLOCK_ROWS + 1) * view.layers().len()) as u64 * 8;
     fixture.set_limit(RESIDENT_LIMIT, tables + code_scratch);
     let (refused, _) = run(
         &fixture,
@@ -1301,7 +1296,7 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
 }
 
-/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's mapped codes, and the query encoded under that layer's scales.
+/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes and the query encoded under that layer's scales. The layers' mapped codes stay charged to the view.
 #[test]
 fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     let mut fixture = Fixture::new();
@@ -1320,8 +1315,10 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
         .layers()
         .iter()
         .map(|layer| layer.occurrence_ids().len() as u64)
-        .sum();
-    let expected = (BLOCK_ROWS as u64 * layers as u64 + mapped + layers as u64) * dimension;
+        .sum::<u64>()
+        * dimension;
+    assert_eq!(held(&fixture.ledger, ResourceClass::MappedCodes), mapped);
+    let expected = (BLOCK_ROWS as u64 * layers as u64 + layers as u64) * dimension;
     let at_selection = std::cell::Cell::new(None);
     let (outcome, _) = run(
         &fixture,
@@ -1337,9 +1334,87 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     assert_eq!(
         at_selection.get(),
         Some(expected),
-        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the mapped codes, and the encoded query per layer"
+        "scratch held through the scan: {BLOCK_ROWS} decoded rows and the encoded query per layer"
     );
     assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::MappedCodes), mapped);
+    drop(view);
+    assert_eq!(held(&fixture.ledger, ResourceClass::MappedCodes), 0);
+}
+
+/// The resident limit holds the view's tables, its code bytes once, and two scans' own buffers, so it admits both overlapping scans only when they share one charge for the view's code bytes.
+#[test]
+fn scans_in_flight_together_charge_the_view_codes_once() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("gamma", axis(0))], &["beta"], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let dimension = 8u64;
+    let layers = view.layers().len() as u64;
+    let tables = resident_bytes(&fixture, &view.members());
+    let codes: u64 = view
+        .layers()
+        .iter()
+        .map(|layer| layer.occurrence_ids().len() as u64 * dimension)
+        .sum();
+    let scan = (BLOCK_ROWS as u64 + 1) * layers * dimension;
+    let rows = retrieval::dense::codec::row_bytes(8) * 2;
+    fixture.set_limit(RESIDENT_LIMIT, tables + codes + 2 * (scan + rows));
+
+    let expected = fixture.expected();
+    let activation = fixture.activation();
+    let request = CompressedRequest {
+        expected: &expected,
+        query: &axis(0),
+        authority: projection.authority(),
+        capacity: capacity(2, 3),
+        bounds: scan_bounds(),
+        max_entries: NonZeroUsize::new(4096).unwrap(),
+        max_layers: NonZeroUsize::new(8).unwrap(),
+        max_pinned_bytes: u64::MAX,
+        max_read_bytes: u64::MAX,
+        activation: &activation,
+    };
+    let (first, second) = projection
+        .store
+        .with_conn(|conn| {
+            let mut second = None;
+            let first = rank_compressed(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &EvalBudget::unbounded(),
+                &fixture.admission,
+                &mut |event| {
+                    if matches!(event, RescoreEvent::AfterSelection) && second.is_none() {
+                        second = Some(rank_compressed(
+                            &view,
+                            conn,
+                            &projection.kernel,
+                            &request,
+                            &EvalBudget::unbounded(),
+                            &fixture.admission,
+                            &mut |_| {},
+                        ));
+                    }
+                },
+            );
+            Ok((first, second))
+        })
+        .unwrap();
+    let first = first.unwrap();
+    let second = second
+        .expect("the first scan reached its selection")
+        .unwrap();
+    assert_eq!(rescored(&first), rescored(&second));
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::MappedCodes), codes);
 }
 
 /// A cancellation delivered at the walk's final `AfterPage` ends the scan before any mapped code is read for scoring.

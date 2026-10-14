@@ -122,16 +122,18 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
     assert_eq!(published.sequence, 2);
     let view_census = fixture.ledger.census();
     compacted.discard().unwrap();
+    let view_classes = [ResourceClass::LayerTables, ResourceClass::MappedCodes];
+    let view_held: std::collections::BTreeMap<ResourceClass, u64> = view_census
+        .held
+        .iter()
+        .filter(|(class, _)| view_classes.contains(class))
+        .map(|(class, bytes)| (*class, *bytes))
+        .collect();
     assert_eq!(
         fixture.ledger.census(),
         Census {
-            held: view_census
-                .held
-                .iter()
-                .filter(|(class, _)| **class == ResourceClass::LayerTables)
-                .map(|(class, bytes)| (*class, *bytes))
-                .collect(),
-            resident: view_census.held[&ResourceClass::LayerTables],
+            resident: view_held.values().sum(),
+            held: view_held,
             disk: 0,
             pinned: view_census.pinned,
         },

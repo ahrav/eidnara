@@ -91,8 +91,7 @@ impl MappedCodes {
         }
     }
 
-    /// Bytes a scan maps from a whole layer of `declared` rows; the scan's scratch reservation charges them, since mapped pages become resident as the scan reads them, and a shorter file maps fewer.
-    pub(crate) fn mapped_bytes(width: usize, declared: usize) -> u64 {
+    fn mapped_bytes(width: usize, declared: usize) -> u64 {
         (width as u64).saturating_mul(declared as u64)
     }
 }

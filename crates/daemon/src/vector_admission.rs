@@ -54,6 +54,8 @@ indexed_enum! {
         RowBuffers,
         /// A view's identifiers, tombstones, scales, and sidecars.
         LayerTables,
+        /// A view's mapped int8 code files.
+        MappedCodes,
         /// Files being copied into the store.
         Staging,
         /// A compactor's working files.
@@ -78,7 +80,8 @@ impl ResourceClass {
             | Self::Text
             | Self::Scratch
             | Self::RowBuffers
-            | Self::LayerTables => Pool::Resident,
+            | Self::LayerTables
+            | Self::MappedCodes => Pool::Resident,
             Self::Staging | Self::CompactionScratch => Pool::Disk,
         }
     }

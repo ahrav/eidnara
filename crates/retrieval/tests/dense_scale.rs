@@ -2,7 +2,7 @@
 //!
 //! Ignored by default. `EIDNARA_DENSE_SCALE_ROWS` (default 1,000,000), `EIDNARA_DENSE_SCALE_DIMENSION` (768), and `EIDNARA_DENSE_SCALE_QUERIES` (1,000) size the run, and `EIDNARA_DENSE_SCALE_POOL` (256) sets the candidate pool, so a pool of 64 runs the negative control; `EIDNARA_DENSE_SCALE_SAMPLES` names a file, kept outside the repository, for the raw per-query microseconds.
 //!
-//! The corpus is a seeded synthetic workload, not the frozen model corpus the production gate names. The timed span is in-process candidate selection plus rescore over rows held in memory, under test scan bounds; it is a local figure, not the reference-host dense-lane latency. Two copies of the f32 rows stay resident, so a 1M by 768 run holds about 6 GB of rows plus 0.8 GB of codes.
+//! The corpus is a seeded synthetic workload, not the frozen model corpus the production gate names. The timed span is in-process candidate selection plus rescore over rows held in memory, under test scan bounds; it is a local figure, not the reference-host dense-lane latency. One copy of the f32 rows stays resident, in the layer the scan reads, so a 1M by 768 run holds about 3 GB of rows plus 0.8 GB of codes.
 
 mod support;
 

@@ -24,6 +24,12 @@ pub struct CurrentVectors {
     acquiring: Mutex<()>,
 }
 
+enum Held {
+    Serve(Arc<PinnedVectors>),
+    OtherIdentity,
+    Replace,
+}
+
 impl CurrentVectors {
     /// An owner over the store at `root`, charging each view to `ledger` under `grant`.
     pub fn new(
@@ -42,17 +48,17 @@ impl CurrentVectors {
         }
     }
 
-    /// The view callers share. The held view is returned while it is unquarantined, carries `expected`'s identity, and the selector still says what it said at acquisition; a selector that cannot be read within the lifecycle lock's bounded wait also keeps the held view, which stays pinned and verified, and the next call checks again. Otherwise the owner releases its hold and acquires again, reporting each acquisition step to `observe`. Acquisitions serialize, and callers that find a usable view return without waiting on one in progress. Run it on a blocking thread.
+    /// Quarantine, selector mismatch, or selector error releases the owner's hold before acquisition; identity mismatch preserves the hold until acquisition succeeds. Callers must run `view` on a blocking thread.
     ///
     /// # Errors
     ///
-    /// The refusals of [`acquire`]; the owner then holds no view.
+    /// `view` propagates refusals from [`acquire`]. A refusal preserves the owner's hold when the held view passes the quarantine and selector checks but mismatches `expected`; otherwise, the owner releases its hold before acquisition.
     pub fn view(
         &self,
         expected: &ExpectedVectors<'_>,
         observe: &mut dyn FnMut(AcquireEvent),
     ) -> Result<Arc<PinnedVectors>, AcquireRefusal> {
-        if let Some(view) = self.usable(expected) {
+        if let Held::Serve(view) = self.held_for(expected) {
             return Ok(view);
         }
         let _acquiring = self
@@ -60,11 +66,12 @@ impl CurrentVectors {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         // Another caller may have replaced the view while this one waited.
-        if let Some(view) = self.usable(expected) {
-            return Ok(view);
+        match self.held_for(expected) {
+            Held::Serve(view) => return Ok(view),
+            Held::OtherIdentity => {}
+            // The owner's hold goes first, so a replaced view's charges leave the ledger as soon as its last request does.
+            Held::Replace => self.release(),
         }
-        // The owner's hold goes first, so a replaced view's charges leave the ledger as soon as its last request does.
-        self.release();
         let view = acquire(
             self.root.as_deref(),
             expected,
@@ -77,19 +84,26 @@ impl CurrentVectors {
         Ok(view)
     }
 
-    /// The held view when it may still serve `expected`.
-    fn usable(&self, expected: &ExpectedVectors<'_>) -> Option<Arc<PinnedVectors>> {
-        let view = self
+    fn held_for(&self, expected: &ExpectedVectors<'_>) -> Held {
+        let Some(view) = self
             .held
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()?;
-        if view.is_quarantined() || !view.matches(expected) {
-            return None;
+            .clone()
+        else {
+            return Held::Replace;
+        };
+        if view.is_quarantined() {
+            return Held::Replace;
         }
         match view.selector_holds(self.root.as_deref()) {
-            Ok(false) => None,
-            Ok(true) | Err(_) => Some(view),
+            Ok(Some(true) | None) => {}
+            Ok(Some(false)) | Err(_) => return Held::Replace,
+        }
+        if view.matches(expected) {
+            Held::Serve(view)
+        } else {
+            Held::OtherIdentity
         }
     }
 

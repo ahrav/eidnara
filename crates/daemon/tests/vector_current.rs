@@ -1,11 +1,13 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use daemon::query_route::{CompressedLimits, QueryRouteLimits};
 use daemon::vector_admission::ResourceClass;
 use daemon::vector_current::CurrentVectors;
 use daemon::vector_reader::{AcquireEvent, AcquireRefusal};
+use host_runtime::generation::VECTOR_PROFILE_NAME;
 use retrieval::batch::ProjectionCheckpoint;
 use support::vector_reads::*;
 use support::vector_store::Fixture;
@@ -76,7 +78,7 @@ fn the_owner_shares_one_view_until_the_selector_moves() {
 }
 
 #[test]
-fn a_caller_expecting_another_identity_is_refused_and_the_owner_reacquires_for_the_next() {
+fn a_caller_expecting_another_identity_is_refused_and_the_held_view_keeps_serving() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     fixture
@@ -87,13 +89,14 @@ fn a_caller_expecting_another_identity_is_refused_and_the_owner_reacquires_for_t
         owner.view(&fixture.expected(), observe).unwrap()
     });
     assert_eq!(acquisitions, 1);
+    let tables = held(&fixture.ledger, ResourceClass::LayerTables);
 
     let other = ProjectionCheckpoint {
         snapshot_commit_seq: 1,
         checkpoint_commit_seq: 2,
         hold_id: "another-hold".to_owned(),
     };
-    let (refused, _) = counted(&mut fixture, |fixture, observe| {
+    let (refused, acquisitions) = counted(&mut fixture, |fixture, observe| {
         let expected = daemon::vector_generation::ExpectedVectors {
             checkpoint: Some(&other),
             ..fixture.expected()
@@ -104,12 +107,54 @@ fn a_caller_expecting_another_identity_is_refused_and_the_owner_reacquires_for_t
         matches!(refused, Err(AcquireRefusal::Unavailable(_))),
         "{refused:?}"
     );
+    assert_eq!(acquisitions, 1, "the other identity is looked for");
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::LayerTables),
+        tables,
+        "the refused attempt leaves only the held view charged"
+    );
 
     let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
         owner.view(&fixture.expected(), observe).unwrap()
     });
-    assert_eq!(acquisitions, 1, "the refused attempt left no view held");
-    assert!(!Arc::ptr_eq(&held_view, &again));
+    assert_eq!(acquisitions, 0, "the held view survives the refused caller");
+    assert!(Arc::ptr_eq(&held_view, &again));
+}
+
+#[test]
+fn a_selector_the_store_refuses_is_not_served_through() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let (held_view, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    let intact = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
+    fixture.write_selector(VECTOR_PROFILE_NAME, b"{ not a profile");
+
+    let (refused, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe)
+    });
+    assert!(
+        matches!(refused, Err(AcquireRefusal::Store(_))),
+        "{refused:?}"
+    );
+    drop(held_view);
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::LayerTables),
+        0,
+        "the owner let the view go once its selector stopped reading"
+    );
+
+    fixture.write_selector(VECTOR_PROFILE_NAME, &intact);
+    let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(acquisitions, 1);
+    assert_eq!(again.members()[0], base.digest);
 }
 
 #[test]
@@ -181,12 +226,12 @@ fn a_selector_unreadable_under_a_held_lifecycle_lock_keeps_the_verified_view() {
     let (held_view, _) = counted(&mut fixture, |fixture, observe| {
         owner.view(&fixture.expected(), observe).unwrap()
     });
-    // The fixture holds the exclusive transaction here, so reading the selector outlasts the shared lock's bounded wait.
     assert!(matches!(
         held_view.selector_holds(Some(fixture.root.path())),
-        Err(AcquireRefusal::Unprotected(_))
+        Ok(None)
     ));
     let mut acquisitions = 0;
+    let started = Instant::now();
     let served = owner
         .view(&fixture.expected(), &mut |event| {
             if event == AcquireEvent::BeforeVerification {
@@ -194,9 +239,14 @@ fn a_selector_unreadable_under_a_held_lifecycle_lock_keeps_the_verified_view() {
             }
         })
         .unwrap();
+    let waited = started.elapsed();
     assert_eq!(
         acquisitions, 0,
         "the verified view is served without a new hash"
     );
     assert!(Arc::ptr_eq(&held_view, &served));
+    assert!(
+        waited < Duration::from_millis(50),
+        "the held view waited {waited:?} on the lifecycle lock"
+    );
 }

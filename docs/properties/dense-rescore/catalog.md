@@ -385,7 +385,7 @@ Type: safety
 Reachability: test-only - `select_candidates_observed`
 (`crates/retrieval/src/dense/candidates.rs:273`) is called from
 `crates/retrieval/tests/dense_candidates.rs` and from `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:838`); `select_candidates`
+(`crates/daemon/src/vector_reader.rs:846`); `select_candidates`
 (`candidates.rs:263`) is called only by those tests and the ignored scale
 driver `crates/retrieval/tests/dense_scale.rs`. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
@@ -503,7 +503,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:760`) is called by
+(`crates/daemon/src/vector_reader.rs:768`) is called by
 `CompressedProducer::rank` (`crates/daemon/src/query_route.rs:701`), which the
 route builds only after `set_dense_vectors` (`query_route.rs:1883`) installs a
 composition; no production caller installs one at this HEAD.
@@ -747,7 +747,7 @@ Open questions:
   check between the final page and scoring
   (`crates/retrieval/src/dense/oracle.rs:591`), its batch checks, and the
   checks around each original read's observer
-  (`vector_reader.rs:859`, `:868`) (needs human input).
+  (`vector_reader.rs:867`, `:876`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.
@@ -764,7 +764,10 @@ and `a_request_that_ranks_no_dense_lane_holds_no_view` and
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`;
 `vector_rescore.rs` `the_scan_scratch_charges_the_encoded_query_of_every_layer`
-for the payload buffers `Scratch` covers; `query_route_compressed.rs`
+for the payload buffers `Scratch` covers and
+`scans_in_flight_together_charge_the_view_codes_once` for the view's
+`MappedCodes` charge that scans in flight together share;
+`query_route_compressed.rs`
 `draining_work_keeps_its_charges_against_the_next_admission_until_it_finishes`,
 where, with the resident limit set to what one draining request holds, a
 scratch reservation of the drainer's size is refused while it drains and fits
@@ -779,8 +782,9 @@ answers `fused`.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
 setters' locks before the unit is submitted (`query_route.rs:2006-2016`), so the
-unit ranks under a pair the setters checked together and the view's pins and the ranking's `Scratch` and
-`RowBuffers` reservations stay charged until the blocking work returns; a
+unit ranks under a pair the setters checked together and the view's pins, its
+`MappedCodes` charge, and the ranking's `Scratch` and `RowBuffers`
+reservations stay charged until the blocking work returns; a
 cancelled request settles only after that work ends, and every charge is
 released when it does. A request whose embedding is undeclared or unavailable
 holds no clone, so an uninstall while its unit is pending leaves the retired
@@ -894,7 +898,7 @@ Open questions:
   `scan_page_rows`; `max_entries` is first compared with the view's rows inside
   the request's scan. A composition whose entry bound is below its rows
   installs, and every request then reserves `Scratch` and `RowBuffers`
-  (`vector_reader.rs:808`, `:810`) and degrades as `layers`, as
+  (`vector_reader.rs:816`, `:818`) and degrades as `layers`, as
   `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan` shows. This
   conflicts with the Check rationale that a limit every request would refuse
   must never reach a request (needs human input).
@@ -931,8 +935,8 @@ degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
 `reservation`, and a view of another kernel incarnation as `identity`; an
 entry bound of one degrades as `layers` with no row visited and no scratch or
 row-buffer charge left, although the route reserves both
-(`vector_reader.rs:808`, `:810`) before the scan applies the bound
-(`vector_reader.rs:836`), and the bound equal to the view's rows completes;
+(`vector_reader.rs:816`, `:818`) before the scan applies the bound
+(`vector_reader.rs:846`), and the bound equal to the view's rows completes;
 the corruption and the quarantine reasons are those strings. `always` because no
 failure may pass as a successful dense completion.
 Fault/timing angle: Corruption between selection and the reads.

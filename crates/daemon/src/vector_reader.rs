@@ -215,20 +215,14 @@ fn check_declared(index: usize, declared: usize) -> Result<(), RowFault> {
     )))
 }
 
-/// Scan scratch: per layer, one block of decoded codes and the query encoded under the layer's scales, held through the scan, and every layer's mapped codes, whose pages become resident as the scan reads them.
+/// Scan scratch: per layer, one block of decoded codes and the query encoded under the layer's scales, held through the scan. The mapped codes the scan reads belong to the view's `MappedCodes` charge.
 fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
     let dimension = u64::from(view.layout.dimension);
     let layers = view.layers.len() as u64;
-    let mapped: u64 = view
-        .layers
-        .iter()
-        .map(|layer| MappedCodes::mapped_bytes(layer.dimension(), layer.occurrence_ids.len()))
-        .fold(0, u64::saturating_add);
     (retrieval::dense::BLOCK_ROWS as u64)
         .saturating_add(1)
         .saturating_mul(layers)
         .saturating_mul(dimension)
-        .saturating_add(mapped)
 }
 
 impl RowAccess for PinnedLayer {
@@ -251,6 +245,8 @@ pub struct PinnedVectors {
     layout: RowLayout,
     /// The base first, then the deltas in application order.
     layers: Vec<PinnedLayer>,
+    /// Declared after `layers`, so the charge is released after every layer's mapping is dropped.
+    _codes: Reservation,
     _record: ValidatedGeneration,
     resident: Reservation,
     pinned: Pinned,
@@ -307,18 +303,17 @@ impl PinnedVectors {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
     }
 
-    /// Whether the store's selector still says what it said when this view was handed out, read under the lifecycle's shared lock; a view whose selector moved is due to be replaced.
-    ///
-    /// # Errors
-    ///
-    /// No shared protection within the bounded wait, or a store refusal.
-    pub fn selector_holds(&self, root: Option<&Path>) -> Result<bool, AcquireRefusal> {
+    pub fn selector_holds(&self, root: Option<&Path>) -> Result<Option<bool>, AcquireRefusal> {
         let store = GenerationStore::open(root)?;
         let current = {
-            let _protection = protect(root)?;
+            let Some(_protection) = LifecycleTransactionLock::try_acquire_shared(root)
+                .map_err(|error| AcquireRefusal::Unprotected(error.to_string()))?
+            else {
+                return Ok(None);
+            };
             store.read_vector_current()?
         };
-        Ok(self.selector.still_holds(&current, &self.digest))
+        Ok(Some(self.selector.still_holds(&current, &self.digest)))
     }
 
     /// Whether every layer carries the identity `expected` names.
@@ -379,6 +374,7 @@ fn protect(root: Option<&Path>) -> Result<LifecycleTransactionLock, AcquireRefus
 struct Secured {
     pins: Vec<PinnedGeneration>,
     resident: Reservation,
+    codes: Reservation,
     pinned: Pinned,
 }
 
@@ -408,11 +404,13 @@ fn secure(
     let mut pins = Vec::with_capacity(members.len() + 1);
     pins.push(record);
     let mut resident = 0u64;
+    let mut codes = 0u64;
     for member in &members {
         let Ok(pin) = store.pin(member) else {
             return Ok(None);
         };
         resident = resident.saturating_add(vector_generation::resident_bytes(&pin.manifest));
+        codes = codes.saturating_add(vector_generation::code_bytes(&pin.manifest));
         pins.push(pin);
     }
     let pinned = pins
@@ -421,12 +419,14 @@ fn secure(
         .map(|file| file.size)
         .fold(0u64, u64::saturating_add);
     let resident = ledger.reserve(grant, ResourceClass::LayerTables, resident)?;
+    let codes = ledger.reserve(grant, ResourceClass::MappedCodes, codes)?;
     // Recorded before the protection goes, so a prune that takes the exclusive lock next reads back no pin the ledger has not been told about.
     let pinned = ledger.pin(pinned);
     drop(protection);
     Ok(Some(Secured {
         pins,
         resident,
+        codes,
         pinned,
     }))
 }
@@ -525,6 +525,7 @@ fn hand_off(
     let Secured {
         pins,
         resident,
+        codes,
         pinned,
     } = secured;
     drop(pins);
@@ -557,6 +558,7 @@ fn hand_off(
             unit_norm_tolerance: composition.unit_norm_tolerance,
         },
         layers,
+        _codes: codes,
         _record: record,
         resident,
         pinned,
