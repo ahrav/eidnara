@@ -83,32 +83,40 @@ The frozen copy is a test-only function kept because the change replaces
 
 ### Q: Does the field-jumping search match the stepper, and is it worth it? (at the field-jumping head)
 
-- Sources examined: [`next_occurrence`][jump-head],
-  [`advance_while_offset_holds`][advance-head], and the
-  [differential tests][diff-head].
+- Sources examined: [`next_occurrence`][jump-head], the
+  [`CronZone`][zone-head] claims, [`advance_while_offset_holds`][advance-head],
+  and the [differential tests][diff-head].
 - Findings: The search keeps the stepper's first cursor, cap, and
-  unrepresentable-instant `None`, and jumps only over minutes whose civil
-  fields cannot match while the offset holds. Offset probes every hour and a
-  bisection stop each jump at the first minute with another offset. The
-  differential tests agree with the frozen stepper over random expressions in
-  nine zones, both DST edges, Apia's skipped day, seconds-bearing 1900
-  offsets, the full cap for calendar-impossible expressions, and chrono's range
-  edges. Negative controls, run locally and reverted: dropping the offset
-  check fails the transition sweep, and an off-by-one in the midnight or
-  next-minute skip fails four to six tests. Returning the probe instead of the
-  bisected minute survives every test, because no tested transition puts a
-  match within an hour after it inside one jump; the bisection keeps the
-  search exact without that property of the zone data.
+  unrepresentable-instant `None`, and skips only minutes whose civil fields
+  cannot match while the offset holds. Each zone type claims how its offsets
+  change: UTC and fixed offsets never change; IANA zones keep each offset at
+  least an hour, so probes every hour and a bisection stop a skip at the
+  first minute with another offset; `Local` claims the hour bound only when
+  `TZ` is unset or names a zone file, because a POSIX rule in `TZ` can place
+  changes minutes apart, and then the search visits every minute. A review
+  built that counterexample (`TZ="STD0DST,J60/1:10,J60/2:40"`, `15 2 * * *`):
+  an hourly probe at both ends of a 30-minute daylight window jumps past the
+  match. The test zone `DailyDaylight` reproduces it and shows the
+  `Unbounded` claim equals the stepper while an overclaimed `HourApart` does
+  not. `zdump` over tzdata 2026c's 599 zones and a parse of chrono-tz
+  0.10.4's tables put the closest transitions about 6.9 days apart; a review
+  also ran 31 million cases around 42,957 transitions of every chrono-tz zone
+  from 1800 to 2045 with no difference. Negative controls, run locally and
+  reverted: dropping the offset check fails the transition sweep and the
+  shift test, returning the probe instead of the bisected minute fails the
+  shift test, searching an `Unbounded` zone with hourly probes fails the
+  daylight-window test, and an off-by-one in the midnight or next-minute skip
+  fails four to six tests.
 - Payoff: An uncommitted probe on one host, release build, `taskset -c 5`, 21
   start instants per arm, three runs. Medians before then after:
-  `0 0 30 2 *` at the full cap 25.1 ms to 0.34 ms in UTC and 78.4 ms to
-  1.11 ms in New York; `30 2 * * 1` 175-177 us to 2.9 us; `0 9 1 * *`
+  `0 0 30 2 *` at the full cap 25.1 ms to 34.2 us in UTC and 78.4 ms to
+  1.12 ms in New York; `30 2 * * 1` 175-177 us to 2.9 us; `0 9 1 * *`
   1.55-1.58 ms to 23.1 us; `*/15 * * * *` 0.3 us to 0.2 us. The ranges do not
-  overlap for the first four, so the change stays.
-- Missing evidence: A proof that no zone changes its offset and back within
-  one hour; the sweep covers nine zones in two years.
+  overlap for the first four, so the change stays. A `Local` zone from a POSIX
+  rule keeps the stepper's cost.
+- Missing evidence: Custom zone files with offset runs shorter than an hour.
 - Conclusion: resolved with answer - the search matches the stepper on every
-  tested input and cuts the full-cap search by about 70 times.
+  tested input, and every zone claims only the bound its data supports.
 
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
 [parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L125-L145
@@ -123,6 +131,7 @@ The frozen copy is a test-only function kept because the change replaces
 [sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L412-L416
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
-[jump-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L176-L199
-[advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L231-L260
-[diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1641-L1857
+[jump-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L230-L260
+[advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L291-L326
+[diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1782-L2058
+[zone-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L168-L219

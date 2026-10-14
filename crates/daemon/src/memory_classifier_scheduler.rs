@@ -1061,17 +1061,13 @@ mod tests {
         let scheduled = host.scheduled_projects().unwrap();
         assert!(scheduled.iter().any(|project| !project.schedule.is_empty()));
         assert!(scheduler.tick(&host).await.is_empty());
-        let evaluated = scheduler
-            .next_due
-            .get(&("git:a".to_string(), ScheduledTask::ReviewUserMemories))
-            .cloned();
-        assert!(
-            evaluated.as_ref().is_some_and(|(schedule, due_at_ms)| {
-                schedule == "*/15 * * * *" && *due_at_ms != i64::MAX
-            }),
-            "cron-schedule-is-evaluated-for-a-configured-project: {evaluated:?}"
+        assert_eq!(
+            scheduler
+                .next_due
+                .get(&("git:a".to_string(), ScheduledTask::ReviewUserMemories)),
+            Some(&("*/15 * * * *".to_string(), T0 + 15 * MINUTE_MS)),
+            "cron-schedule-is-evaluated-for-a-configured-project"
         );
-        assert_eq!(evaluated.unwrap().1, T0 + 15 * MINUTE_MS);
     }
 
     #[tokio::test]

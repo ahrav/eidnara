@@ -160,25 +160,80 @@ fn matches_day(cron: &ParsedCron, dom_value: u32, dow_value: u32) -> bool {
     }
 }
 
-/// Epoch spacing of the offset probes a jump takes. A jump treats the zone's
-/// offset as constant between two probes that report the same offset, so it
-/// relies on every zone keeping each offset for longer than this between
-/// transitions.
+/// Epoch spacing of the offset probes a jump takes in a zone whose offsets
+/// each last at least this long. Every zone in the IANA time zone database
+/// meets it: its closest pair of transitions is days apart.
 const OFFSET_PROBE_MS: i64 = 60 * MINUTE_MS;
+
+/// What a cron search may assume about how a zone's UTC offset changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetChanges {
+    /// The offset never changes.
+    Never,
+    /// Each offset lasts at least [`OFFSET_PROBE_MS`] before the next change.
+    HourApart,
+    /// Changes may come arbitrarily close together, so the search visits
+    /// every minute.
+    Unbounded,
+}
+
+/// A time zone a cron search can evaluate, with what the search may assume
+/// about its offset changes.
+pub trait CronZone: TimeZone {
+    fn offset_changes(&self) -> OffsetChanges;
+}
+
+impl CronZone for chrono::Utc {
+    fn offset_changes(&self) -> OffsetChanges {
+        OffsetChanges::Never
+    }
+}
+
+impl CronZone for chrono::FixedOffset {
+    fn offset_changes(&self) -> OffsetChanges {
+        OffsetChanges::Never
+    }
+}
+
+impl CronZone for chrono::Local {
+    /// chrono reads the zone from `/etc/localtime` when `TZ` is unset and from
+    /// the zone file `TZ` names when one exists; otherwise it parses `TZ` as a
+    /// POSIX rule, which may place offset changes minutes apart.
+    fn offset_changes(&self) -> OffsetChanges {
+        let Some(value) = std::env::var_os("TZ") else {
+            return OffsetChanges::HourApart;
+        };
+        let name = std::path::Path::new(&value);
+        let name = name.strip_prefix(":").unwrap_or(name);
+        let zone_file = if name.is_absolute() {
+            name.to_path_buf()
+        } else {
+            std::path::Path::new("/usr/share/zoneinfo").join(name)
+        };
+        if !name.as_os_str().is_empty() && zone_file.is_file() {
+            OffsetChanges::HourApart
+        } else {
+            OffsetChanges::Unbounded
+        }
+    }
+}
 
 /// `next_occurrence` returns the first instant strictly after `after_ms` whose local civil time in `tz` matches `cron`.
 /// It visits the same epoch minutes the minute stepper would, but jumps over every
 /// minute whose civil fields cannot match: to the next civil midnight when the date
 /// fails, to the next civil hour when the hour fails, and to the next listed minute
-/// otherwise. Civil time moves with epoch time while the offset holds, so a jump
-/// stops early at the first minute whose offset differs, and the search resumes there.
+/// otherwise. Civil time moves with epoch time while the offset holds, so in a zone
+/// whose offsets last an hour a jump stops early at the first minute whose offset
+/// differs, and the search resumes there; in a zone without that bound the search
+/// steps one minute at a time.
 /// `next_occurrence` returns `None` when no match occurs by `after_ms + min(MAX_SEARCH_MS, max_search_ms)`.
-fn next_occurrence<Tz: TimeZone>(
+fn next_occurrence<Tz: CronZone>(
     cron: &ParsedCron,
     after_ms: i64,
     max_search_ms: i64,
     tz: &Tz,
 ) -> Option<i64> {
+    let changes = tz.offset_changes();
     let mut cursor_ms = after_ms
         .div_euclid(MINUTE_MS)
         .checked_mul(MINUTE_MS)?
@@ -192,8 +247,14 @@ fn next_occurrence<Tz: TimeZone>(
         if skip_minutes == 0 {
             return Some(cursor_ms);
         }
-        let target_ms = cursor_ms.checked_add(skip_minutes * MINUTE_MS)?;
-        cursor_ms = advance_while_offset_holds(tz, cursor_ms, civil.offset().fix(), target_ms);
+        cursor_ms = match changes {
+            OffsetChanges::Never => cursor_ms.checked_add(skip_minutes * MINUTE_MS)?,
+            OffsetChanges::HourApart => {
+                let target_ms = cursor_ms.checked_add(skip_minutes * MINUTE_MS)?;
+                advance_while_offset_holds(tz, cursor_ms, civil.offset().fix(), target_ms)
+            }
+            OffsetChanges::Unbounded => cursor_ms.checked_add(MINUTE_MS)?,
+        };
     }
     None
 }
@@ -225,9 +286,8 @@ fn minutes_until_candidate<Tz: TimeZone>(cron: &ParsedCron, civil: &chrono::Date
 
 /// The first epoch minute in `(from_ms, target_ms]` whose offset differs from
 /// `offset` or that has no civil time, or `target_ms` when none does. Probes
-/// run every [`OFFSET_PROBE_MS`] and at `target_ms`; a probe that reports a
-/// change is narrowed by bisection to the first minute after the last probe
-/// that held.
+/// run every [`OFFSET_PROBE_MS`] and at `target_ms`; because each offset lasts
+/// at least that long, two probes that report `offset` hold it between them.
 fn advance_while_offset_holds<Tz: TimeZone>(
     tz: &Tz,
     from_ms: i64,
@@ -243,24 +303,30 @@ fn advance_while_offset_holds<Tz: TimeZone>(
     while held_ms < target_ms {
         let probe_ms = held_ms.saturating_add(OFFSET_PROBE_MS).min(target_ms);
         if !holds(probe_ms) {
-            let mut changed_ms = probe_ms;
-            while changed_ms - held_ms > MINUTE_MS {
-                let middle_ms = held_ms + (changed_ms - held_ms) / MINUTE_MS / 2 * MINUTE_MS;
-                if holds(middle_ms) {
-                    held_ms = middle_ms;
-                } else {
-                    changed_ms = middle_ms;
-                }
-            }
-            return changed_ms;
+            return first_change_after(held_ms, probe_ms, holds);
         }
         held_ms = probe_ms;
     }
     target_ms
 }
 
+/// Bisects `(held_ms, changed_ms]`, both epoch minutes, to the first minute
+/// where `holds` is false; `holds(held_ms)` is true and `holds(changed_ms)` false.
+fn first_change_after(mut held_ms: i64, mut changed_ms: i64, holds: impl Fn(i64) -> bool) -> i64 {
+    while changed_ms - held_ms > MINUTE_MS {
+        let middle_minutes = (changed_ms - held_ms) / MINUTE_MS / 2;
+        let middle_ms = held_ms + middle_minutes * MINUTE_MS;
+        if holds(middle_ms) {
+            held_ms = middle_ms;
+        } else {
+            changed_ms = middle_ms;
+        }
+    }
+    changed_ms
+}
+
 /// `next_due_at_ms` returns `None` when parsing fails or no occurrence is found within the search cap.
-fn next_due_at_ms<Tz: TimeZone>(
+fn next_due_at_ms<Tz: CronZone>(
     expression: &str,
     after_ms: i64,
     max_search_ms: i64,
@@ -281,7 +347,7 @@ pub fn is_valid_conditional_note_cron(expression: &str) -> bool {
 /// to the parser's own cap; `None` for an invalid expression or one with no
 /// occurrence in that window. Unlike the conditional-note due time this applies no
 /// clamp or jitter, so a scheduler sees the cron instant itself.
-pub fn next_cron_occurrence<Tz: TimeZone>(expression: &str, after_ms: i64, tz: &Tz) -> Option<i64> {
+pub fn next_cron_occurrence<Tz: CronZone>(expression: &str, after_ms: i64, tz: &Tz) -> Option<i64> {
     next_due_at_ms(expression, after_ms, MAX_SEARCH_MS, tz).filter(|&ms| ms != 0)
 }
 
@@ -293,7 +359,7 @@ pub fn next_cron_occurrence<Tz: TimeZone>(expression: &str, after_ms: i64, tz: &
 /// Invalid, empty, or matchless cron expressions use the one-hour default interval.
 /// The interval is clamped to five minutes through 24 hours, then receives stable
 /// note/hash jitter of at most 10 percent or 60 seconds, whichever is smaller.
-pub fn next_conditional_note_check_due_at<Tz: TimeZone>(
+pub fn next_conditional_note_check_due_at<Tz: CronZone>(
     cron: Option<&str>,
     now: i64,
     note_id: i64,
@@ -479,7 +545,7 @@ fn ready_fields(
     state
 }
 
-fn false_fields<Tz: TimeZone>(
+fn false_fields<Tz: CronZone>(
     mut state: ConditionalNoteLifecycleState,
     note_id: i64,
     now: i64,
@@ -498,7 +564,7 @@ fn false_fields<Tz: TimeZone>(
     state
 }
 
-fn reduce_compile<Tz: TimeZone>(
+fn reduce_compile<Tz: CronZone>(
     pre: &ConditionalNoteLifecycleState,
     outcome: &CompileOutcome,
     note_id: i64,
@@ -609,7 +675,7 @@ fn reduce_check_failure(
     next
 }
 
-fn reduce_due<Tz: TimeZone>(
+fn reduce_due<Tz: CronZone>(
     pre: &ConditionalNoteLifecycleState,
     outcome: CheckOutcome,
     note_id: i64,
@@ -643,7 +709,7 @@ fn reduce_due<Tz: TimeZone>(
     }
 }
 
-fn reduce_liveness<Tz: TimeZone>(
+fn reduce_liveness<Tz: CronZone>(
     pre: &ConditionalNoteLifecycleState,
     outcome: CheckOutcome,
     note_id: i64,
@@ -727,7 +793,7 @@ fn reduce_fallback(
 ///
 /// `now` is Unix epoch milliseconds. `surfaced` is true only when this call marks the
 /// note ready.
-pub fn reduce_conditional_note_evaluation<Tz: TimeZone>(
+pub fn reduce_conditional_note_evaluation<Tz: CronZone>(
     pre: &ConditionalNoteLifecycleState,
     outcome: &ConditionalNoteEvaluationOutcome,
     note_id: i64,
@@ -1636,6 +1702,81 @@ mod tests {
 
     const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
 
+    /// Every IANA zone keeps each offset for days, as `OFFSET_PROBE_MS` requires.
+    impl CronZone for ChronoTz {
+        fn offset_changes(&self) -> OffsetChanges {
+            OffsetChanges::HourApart
+        }
+    }
+
+    /// A zone in the shape a POSIX `TZ` rule allows: `shift_seconds` ahead of
+    /// UTC from `start_minute` to `end_minute` (UTC minutes of the day, the
+    /// window wrapping past midnight when `end_minute < start_minute`) every
+    /// day. `changes` is what the zone claims to the search.
+    #[derive(Debug, Clone, Copy)]
+    struct DailyDaylight {
+        start_minute: u32,
+        end_minute: u32,
+        shift_seconds: i32,
+        changes: OffsetChanges,
+    }
+
+    impl DailyDaylight {
+        fn offset_at(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            let minute = utc.hour() * 60 + utc.minute();
+            let inside = if self.start_minute <= self.end_minute {
+                (self.start_minute..self.end_minute).contains(&minute)
+            } else {
+                minute >= self.start_minute || minute < self.end_minute
+            };
+            chrono::FixedOffset::east_opt(if inside { self.shift_seconds } else { 0 }).unwrap()
+        }
+    }
+
+    impl TimeZone for DailyDaylight {
+        type Offset = chrono::FixedOffset;
+
+        fn from_offset(_offset: &chrono::FixedOffset) -> Self {
+            unreachable!("the search never rebuilds a zone from an offset")
+        }
+
+        fn offset_from_local_date(
+            &self,
+            _local: &chrono::NaiveDate,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            chrono::LocalResult::None
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            let standard = chrono::FixedOffset::east_opt(0).unwrap();
+            let daylight = chrono::FixedOffset::east_opt(self.shift_seconds).unwrap();
+            let fits = |offset: chrono::FixedOffset| self.offset_at(&(*local - offset)) == offset;
+            match (fits(standard), fits(daylight)) {
+                (true, true) => chrono::LocalResult::Ambiguous(daylight, standard),
+                (true, false) => chrono::LocalResult::Single(standard),
+                (false, true) => chrono::LocalResult::Single(daylight),
+                (false, false) => chrono::LocalResult::None,
+            }
+        }
+
+        fn offset_from_utc_date(&self, _utc: &chrono::NaiveDate) -> chrono::FixedOffset {
+            chrono::FixedOffset::east_opt(0).unwrap()
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            self.offset_at(utc)
+        }
+    }
+
+    impl CronZone for DailyDaylight {
+        fn offset_changes(&self) -> OffsetChanges {
+            self.changes
+        }
+    }
+
     /// The minute stepper as it read before the field-jumping search replaced
     /// it, kept verbatim as the differential oracle.
     fn frozen_minute_stepper<Tz: TimeZone>(
@@ -1665,7 +1806,8 @@ mod tests {
 
     /// Zones whose transitions stress the jump: DST in both hemispheres, a
     /// 30-minute DST shift, a quarter-hour offset, a skipped calendar day,
-    /// transitions at midnight, and a seconds-bearing historical offset.
+    /// transitions at midnight, a seconds-bearing historical offset, negative
+    /// DST, a two-hour DST shift, and DST suspended for Ramadan.
     const DIFFERENTIAL_ZONES: &[ChronoTz] = &[
         ChronoTz::UTC,
         ChronoTz::America__New_York,
@@ -1676,9 +1818,12 @@ mod tests {
         ChronoTz::America__Sao_Paulo,
         ChronoTz::America__Havana,
         ChronoTz::Europe__Amsterdam,
+        ChronoTz::Europe__Dublin,
+        ChronoTz::Antarctica__Troll,
+        ChronoTz::Africa__Casablanca,
     ];
 
-    fn assert_matches_stepper<Tz: TimeZone>(
+    fn assert_matches_stepper<Tz: CronZone>(
         expression: &str,
         after_ms: i64,
         max_search_ms: i64,
@@ -1736,6 +1881,54 @@ mod tests {
             &ChronoTz::Pacific__Apia,
         );
         assert!(apia.is_some_and(|ms| ms > utc_ms(2012, 12, 1, 0, 0)));
+    }
+
+    #[test]
+    fn a_zone_without_an_hour_between_changes_is_searched_minute_by_minute() {
+        // Daylight runs 02:10 to 02:40 UTC, so 02:15 UTC is 03:15. An hourly
+        // probe at 02:00 and 03:00 sees standard time at both ends and would
+        // jump past it, so the zone must not claim the hour bound.
+        let after_ms = utc_ms(2026, 3, 1, 0, 0);
+        let zone = |changes| DailyDaylight {
+            start_minute: 130,
+            end_minute: 160,
+            shift_seconds: 3600,
+            changes,
+        };
+        let found = assert_matches_stepper(
+            "15 3 * * *",
+            after_ms,
+            DAY_MS,
+            &zone(OffsetChanges::Unbounded),
+        );
+        assert_eq!(found, Some(utc_ms(2026, 3, 1, 2, 15)));
+        let cron = parse_cron("15 3 * * *").unwrap();
+        assert_ne!(
+            next_occurrence(&cron, after_ms, DAY_MS, &zone(OffsetChanges::HourApart)),
+            found
+        );
+    }
+
+    #[test]
+    fn a_jump_across_a_shift_resumes_at_the_first_shifted_minute() {
+        // Daylight starts at 23:50 UTC, moving civil time from 23:50 to 00:20
+        // of the next day, and lasts four hours. From 23:01 the hour fails
+        // until midnight, so the search jumps toward 00:00 civil; the shift
+        // lands civil time at 00:20 first, and 00:25 is the next match.
+        let zone = DailyDaylight {
+            start_minute: 1430,
+            end_minute: 230,
+            shift_seconds: 1800,
+            changes: OffsetChanges::HourApart,
+        };
+        let found = assert_matches_stepper("25 0 * * *", utc_ms(2026, 3, 1, 23, 0), DAY_MS, &zone);
+        assert_eq!(found, Some(utc_ms(2026, 3, 1, 23, 55)));
+        let lord_howe = ChronoTz::Australia__Lord_Howe;
+        for start_hour in 10..16 {
+            let after_ms = utc_ms(2026, 10, 3, start_hour, 7);
+            assert_matches_stepper("*/7 2 4 10 *", after_ms, 2 * DAY_MS, &lord_howe);
+            assert_matches_stepper("31,37 2 * * *", after_ms, 2 * DAY_MS, &lord_howe);
+        }
     }
 
     #[test]
@@ -1819,7 +2012,7 @@ mod tests {
             dom in cron_field(1, 31),
             month in cron_field(1, 12),
             dow in cron_field(0, 7),
-            after_ms in -2_208_988_800_000_i64..4_102_444_800_000,
+            after_ms in -5_364_662_400_000_i64..4_102_444_800_000,
             max_search_ms in 0..=(14 * DAY_MS),
             zone in 0..DIFFERENTIAL_ZONES.len(),
         ) {
@@ -1831,26 +2024,34 @@ mod tests {
 
     #[test]
     fn the_jump_matches_the_stepper_across_every_transition_of_a_zone_year() {
-        // Sweeps each zone across 1900 and 2026 in 12-hour steps with
-        // expressions that sit near transitions, so every transition of those
-        // years lies inside some jump. A day-of-week expression makes the
-        // search jump to midnight across a weekend transition.
+        // Finds each zone's offset changes in 1900, 1916, 1937, and 2026 by an
+        // hourly scan, then starts searches from 30 hours before to 2 hours
+        // after each change with expressions that sit near transitions. A
+        // day-of-week expression makes the search jump to midnight across a
+        // weekend transition.
+        let hour_ms = 60 * MINUTE_MS;
         for zone in DIFFERENTIAL_ZONES {
-            for year in [1900, 2026] {
+            let offset = |ms: i64| zone.timestamp_millis_opt(ms).unwrap().offset().fix();
+            for year in [1900, 1916, 1937, 2026] {
                 let start = utc_ms(year, 1, 1, 0, 0);
-                let mut after_ms = start;
-                while after_ms < start + 366 * DAY_MS {
-                    for expression in [
-                        "0,30 0-3 * * *",
-                        "15 * * * *",
-                        "0 0 * * 0",
-                        "30 0 * * 1",
-                        "0 0 * * 1",
-                        "45 23 * * 6",
-                    ] {
-                        assert_matches_stepper(expression, after_ms, DAY_MS, zone);
+                let changes = (0..366 * 24)
+                    .map(|hour| start + hour * hour_ms)
+                    .filter(|&ms| offset(ms) != offset(ms + hour_ms))
+                    .collect::<Vec<_>>();
+                for change in changes {
+                    for hours_before in -2..=30 {
+                        let after_ms = change - hours_before * hour_ms + 13_000;
+                        for expression in [
+                            "0,30 0-3 * * *",
+                            "15 * * * *",
+                            "0 0 * * 0",
+                            "30 0 * * 1",
+                            "0 0 * * 1",
+                            "45 23 * * 6",
+                        ] {
+                            assert_matches_stepper(expression, after_ms, 2 * DAY_MS, zone);
+                        }
                     }
-                    after_ms += 12 * 60 * MINUTE_MS;
                 }
             }
         }
