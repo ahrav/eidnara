@@ -208,7 +208,7 @@ runs `ClaimMaterializer` (`:551`, the materializer call at `:570`) and grants
 and checks no projection-gate admission before it publishes claim source
 descriptors. Claim validation on the query route is `explicit-config-only`:
 `validate_claims` (`crates/daemon/src/query_route.rs:1712`) runs inside the
-unit that first calls `SearchLifecycleOwner::pin` (`query_route.rs:2021`),
+unit that first calls `SearchLifecycleOwner::pin` (`query_route.rs:2029`),
 which admits `ProjectionHook::EmbeddingBootstrap` through
 `SearchSelection::admit_reader`
 (`crates/daemon/src/search_replacement/selection.rs:430`). That hook needs

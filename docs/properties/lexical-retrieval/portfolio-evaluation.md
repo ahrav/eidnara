@@ -18,7 +18,7 @@ lexical_engine` (`lexical_engine`: 15 passed; `lexical_retrieval`: 36 passed,
 grepped `crates/*/src` for callers of `lexical::retrieve`,
 `retrieve_with_hook_for_test`, `scan`, and `admit` from the lexical module:
 `retrieve` has no production caller; the daemon reaches the lane through
-`scan` (`crates/daemon/src/query_route.rs:1116`) and `admit` (`:1271`), and
+`scan` (`crates/daemon/src/query_route.rs:1116`) and `admit` (`:1276`), and
 `retrieve_with_hook_for_test` is exported only under the `test-support`
 feature (`crates/retrieval/src/lexical/mod.rs:27`). Every `file:line`
 reference in `catalog.md` and `existing-checks.md` was checked with `sed -n`
@@ -205,7 +205,7 @@ absence of `always-or-unreached` is correct.
   constant, or statement. `crates/kernel/src/eligibility.rs:310` is a call
   site, not the definition (refinement 1).
 - Reachability: `scan` and `admit` are called from
-  `crates/daemon/src/query_route.rs:1116` and `:1271`; `retrieve` and
+  `crates/daemon/src/query_route.rs:1116` and `:1276`; `retrieve` and
   `retrieve_with_hook_for_test` have no caller under `crates/*/src`. The
   `default-production` labels on the eight code-path records hold through
   `scan` and `admit`; refinement 3 narrows one, bias 1 and bias 2 question two.

@@ -8,7 +8,8 @@ until blocking work exits and is joined.
 ## Evidence trail
 
 - The route clones `DenseVectors`, which holds the view's `Arc`, before
-  `run_unit` for an `Embedded::Vector` request (`query_route.rs:1997`), and
+  `run_unit` for an `Embedded::Vector` request (`query_route.rs:2017`, the unit
+  at `:2028`), and
   moves it into the unit's closure; an undeclared or unavailable embedding
   takes no clone.
 - `rank_compressed` holds its `Scratch` and `RowBuffers` reservations for the

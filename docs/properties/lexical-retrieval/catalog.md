@@ -15,7 +15,7 @@ admission (`crates/retrieval/src/lexical/retrieve.rs`), the retrieval batch
 adapter over the kernel's eligibility policy
 (`crates/retrieval/src/eligibility.rs`), and the daemon's lexical admission in
 `crates/daemon/src/query_route.rs`. The daemon reaches the lane through `scan`
-(`crates/daemon/src/query_route.rs:1116`) and `admit` (`:1271`), each under
+(`crates/daemon/src/query_route.rs:1116`) and `admit` (`:1276`), each under
 `QueryRouteLimits::lexical_retrieval_bounds` (`:172`); `retrieve` has no
 production caller, and `crates/retrieval/tests/lexical_retrieval.rs:652`
 `scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate`
