@@ -1746,10 +1746,19 @@ Open questions: None.
 ### direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges
 
 Type: safety
-Reachability: test-only
+Reachability: default-production - the daemon's `settle_prepared` sends
+every transform and exact-length response through
+`settle_direct_with` and `output_from_writer` when the request's resident
+budget covers the measured length.
 Status: active
-Exercised: partial - The deadline arm has one in-crate test; underfill,
-overflow, serializer error, panic, and the direct charge lifetime have none.
+Exercised: yes - `a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure`
+(in-crate, `ring_transport.rs`) holds the charge at body plus header while the
+frame waits and returns it after an exact, underfilled, overfilled, failed,
+or panicking serializer, with no partial frame and a reusable slot;
+`a_failed_direct_serializer_publishes_nothing_and_returns_its_charge`
+(`host-runtime/tests/direct_frames.rs`) drives the four fault arms of the
+`direct_fill` fixture through a real host and ring at the one-frame egress
+floor; the deadline arm keeps its in-crate test.
 Guarantee: The direct path never publishes a frame whose body differs from
 its header's declared length, a mid-write failure leaves no hole, partial
 frame, or leaked slot, and deferring serialization releases neither the
@@ -1800,12 +1809,17 @@ Impact: A response that won settlement closes the connection for every
 in-flight request, or source bytes outlive the charge that admitted them.
 Open questions:
 
-- Is a connection close the intended outcome for a serializer failure on a
-  settled response, or must the direct path preserve the owned path's
-  request-scoped `encode_failed` terminal? (needs human input)
-- Which charge class covers the captured source bytes between `handle`
-  returning and `Publisher::try_publish` completing: the egress charge already taken,
-  the request scratch charge, or a new class? (needs human input)
+- Decided: a serializer failure on the direct path closes the connection.
+  The daemon measures every direct body before reserving it, and
+  `write_measured` writes the same immutable source at that length, so a
+  publication-time mismatch is a writer-integrity fault rather than a
+  request-scoped encoding error. A measurement failure still settles the
+  request as `encode_failed` before any reservation.
+- Decided: the captured source bytes are charged to the request's resident
+  budget. `settle_direct_with` takes a `try_reserve_resident` charge of the
+  measured length and moves it into the serializer, so it drops when the
+  serializer finishes or when the queued frame drops; a body the resident
+  budget cannot cover settles on the owned path.
 - [The host-runtime terminal record][hr-terminal] holds trivially on the
   failure arm because nothing is emitted; the settled `Response` is then
   never delivered, which [its publication-failure record][hr-pubfail]
@@ -1814,10 +1828,14 @@ Open questions:
 ### direct-frame-outlives-its-handler-before-publication
 
 Type: reachability
-Reachability: test-only
+Reachability: default-production - every daemon transform or exact-length
+response on the direct path is queued from `settle` after its handler
+future completes.
 Status: active
-Exercised: not yet - No direct frame is queued by any test after its handler
-future ends.
+Exercised: yes - `a_direct_frame_serializes_after_its_handler_has_ended`
+(`host-runtime/tests/direct_frames.rs`) counts a `direct_fill` serializer
+that runs after a drop guard in its handler future has fired, and asserts
+the count is one.
 Guarantee: A direct-serialize campaign reaches the window in which the
 serializer closure is the only owner of the response's source bytes.
 Check: `sometimes` - For some request, an `OutboundFrame` carrying a

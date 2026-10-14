@@ -239,6 +239,29 @@ impl PreparedOutput {
         }
     }
 
+    /// Transform and exact-length bodies are immutable shared sources whose bytes are fixed at preparation, so the transport can serialize them into the frame at publication.
+    pub fn serializes_directly(&self) -> bool {
+        matches!(
+            self.source,
+            PreparedSource::Exact(_) | PreparedSource::Transform(_)
+        )
+    }
+
+    /// Writes this body, measured at `len` bytes, into `destination`; any other length is an error.
+    pub fn write_measured(
+        &self,
+        len: usize,
+        destination: &mut dyn Write,
+    ) -> Result<usize, PreparedOutputError> {
+        let source = match &self.source {
+            PreparedSource::Json(value) => MeasuredSource::Json(value),
+            PreparedSource::Exact(bytes) => MeasuredSource::Exact(bytes),
+            PreparedSource::Transform(segments) => MeasuredSource::Transform(segments),
+            PreparedSource::Emit(body) => MeasuredSource::Emit(body.as_ref()),
+        };
+        MeasuredOutput { source, len }.write_to(&mut WriteRef(destination))
+    }
+
     /// Measures this immutable source exactly before output reservation.
     ///
     /// JSON measurement does not retain encoded bytes because it precedes the host's resident-byte reservation.
@@ -332,6 +355,19 @@ impl fmt::Debug for PreparedOutcome {
                 .finish(),
             Self::Streamed => f.write_str("Streamed"),
         }
+    }
+}
+
+/// Adapts a `dyn Write` destination to the sized writer `write_to` takes.
+struct WriteRef<'a>(&'a mut dyn Write);
+
+impl Write for WriteRef<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
     }
 }
 

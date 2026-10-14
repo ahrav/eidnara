@@ -60,6 +60,7 @@ pub use connection_file::{
 };
 #[cfg(feature = "test-support")]
 pub use control::host_status_response_json;
+pub use frame_channel::DirectWrite;
 pub use handler::{
     BindOutcome, BlockingWorkFailed, CancelSignal, HealthReport, HealthStatus, HostHandler,
     InitError, ManifestSnapshot, OutputBuffer, RequestCtx, RequestOutcome, ResourceDeclaration,

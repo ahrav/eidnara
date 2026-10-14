@@ -102,6 +102,15 @@ pub enum BindPolicy {
     BlockThread(Duration),
 }
 
+/// Marks its handler future ended when the future completes or is dropped.
+struct HandlerEnd(Arc<AtomicBool>);
+
+impl Drop for HandlerEnd {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 struct Inner {
     events: Mutex<Vec<Event>>,
     identities: Mutex<Vec<(RouteHandle, RouteIdentity)>>,
@@ -132,6 +141,8 @@ struct Inner {
     blocking_charge_released: Arc<AtomicUsize>,
     blocking_started_at_route_gone: AtomicUsize,
     blocking_refused: Arc<AtomicUsize>,
+    /// Counts `direct_fill` serializers that ran after their handler future had ended.
+    direct_outlived_handler: Arc<AtomicUsize>,
 }
 
 /// Releases a captured resident charge and counts the release, whichever side drops it.
@@ -192,6 +203,7 @@ impl TestHandler {
                 blocking_charge_released: Arc::new(AtomicUsize::new(0)),
                 blocking_started_at_route_gone: AtomicUsize::new(0),
                 blocking_refused: Arc::new(AtomicUsize::new(0)),
+                direct_outlived_handler: Arc::new(AtomicUsize::new(0)),
             }),
             record_runtime_drop: false,
         }
@@ -237,6 +249,11 @@ impl TestHandler {
 
     pub fn dispatch_count(&self) -> usize {
         self.inner.dispatches.load(Ordering::SeqCst)
+    }
+
+    /// How many `direct_fill` serializers ran after the handler that produced them had ended.
+    pub fn direct_outlived_handler_count(&self) -> usize {
+        self.inner.direct_outlived_handler.load(Ordering::SeqCst)
     }
 
     pub fn output_reservation_count(&self) -> usize {
@@ -492,13 +509,32 @@ impl HostHandler for TestHandler {
             "direct_fill" => {
                 let len = request["bytes"].as_u64().unwrap_or(1) as usize;
                 let value = request["value"].as_u64().unwrap_or(0xa5) as u8;
+                // `fault` makes the serializer write one byte short or long, fail, or panic halfway.
+                let fault = request["fault"].as_str().unwrap_or("none").to_owned();
+                let ended = Arc::new(AtomicBool::new(false));
+                let _handler_end = HandlerEnd(Arc::clone(&ended));
+                let outlived = Arc::clone(&self.inner.direct_outlived_handler);
                 match ctx
                     .output_from_writer(len, move |writer| {
+                        if ended.load(Ordering::SeqCst) {
+                            outlived.fetch_add(1, Ordering::SeqCst);
+                        }
+                        let written = match fault.as_str() {
+                            "underfill" => len - 1,
+                            "overflow" => len + 1,
+                            "error" | "panic" => len / 2,
+                            _ => len,
+                        };
                         let chunk = [value; 1024];
-                        for _ in 0..len / chunk.len() {
+                        for _ in 0..written / chunk.len() {
                             writer.write_all(&chunk)?;
                         }
-                        writer.write_all(&chunk[..len % chunk.len()])
+                        writer.write_all(&chunk[..written % chunk.len()])?;
+                        match fault.as_str() {
+                            "error" => Err(std::io::Error::other("injected serializer failure")),
+                            "panic" => panic!("injected serializer panic"),
+                            _ => Ok(()),
+                        }
                     })
                     .await
                 {

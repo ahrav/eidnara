@@ -3597,6 +3597,80 @@ mod tests {
         assert_eq!(lease.to_vec().unwrap(), b"abc");
     }
 
+    /// T3: a direct frame's egress charge is exactly its body plus header while the frame waits for ring capacity and while it serializes, and returns only once the frame publishes; a serializer that underfills, overfills, fails, or panics publishes nothing and returns the charge.
+    #[test]
+    fn a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure() {
+        const LEN: usize = 3;
+        let charged = LEN + crate::wire::HEADER_LEN;
+        let header = EnvelopeHeader {
+            len: LEN as u32,
+            ty: FrameType::Response,
+            flags: Flags::new(false, Priority::Interactive, true),
+            channel: 7,
+            epoch: 1,
+            corr: 4,
+        };
+        type Serializer = Box<dyn FnOnce(&mut dyn io::Write) -> io::Result<()> + Send>;
+        let arms: [(&str, Serializer); 5] = [
+            ("exact", Box::new(|writer| writer.write_all(b"abc"))),
+            ("underfill", Box::new(|writer| writer.write_all(b"ab"))),
+            ("overflow", Box::new(|writer| writer.write_all(b"abcd"))),
+            (
+                "error",
+                Box::new(|writer| {
+                    writer.write_all(b"a")?;
+                    Err(io::Error::other("injected"))
+                }),
+            ),
+            (
+                "panic",
+                Box::new(|writer| {
+                    writer.write_all(b"a")?;
+                    panic!("injected serializer panic")
+                }),
+            ),
+        ];
+        for (arm, serializer) in arms {
+            let rings = DuplexRing::create(&ring_profile()).unwrap();
+            let consumer = rings.first.attachment().unwrap().attach().unwrap();
+            let held = exhaust_smallest_class(&rings.first, &consumer);
+            let budget = ByteBudget::new(1024);
+            let charge = budget.try_charge(charged).unwrap();
+            let charged_while = |budget: &ByteBudget| 1024 - budget.available();
+            let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+            publisher.push(OutboundFrame {
+                bytes: Vec::new(),
+                tail: Vec::new(),
+                direct: Some(DirectFrame::new(header, LEN, serializer)),
+                charge,
+                written: None,
+                credit: None,
+            });
+            publisher.pump(&rings.first).expect("blocked pump");
+            assert_eq!(charged_while(&budget), charged, "{arm}: held while pending");
+            drop(held);
+            let pumped = publisher.pump(&rings.first);
+            assert_eq!(
+                charged_while(&budget),
+                0,
+                "{arm}: returned after the attempt"
+            );
+            assert!(!publisher.has_pending(), "{arm}");
+            let received = consumer.try_receive().unwrap();
+            if arm == "exact" {
+                pumped.expect("exact publishes");
+                assert_eq!(received.expect("published").to_vec().unwrap(), b"abc");
+            } else {
+                assert!(pumped.is_err(), "{arm}: the failure reaches the endpoint");
+                assert!(received.is_none(), "{arm}: no partial frame is visible");
+                assert!(
+                    rings.first.try_reserve(LEN, header.encode()).is_ok(),
+                    "{arm}: the aborted reservation leaves its slot reusable"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_terminal_credit_returns_with_its_block_not_with_settlement() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
