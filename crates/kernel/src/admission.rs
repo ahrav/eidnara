@@ -3258,7 +3258,7 @@ pub(crate) fn stable_generation(before: u64, after: u64) -> Option<u64> {
     (before == after && before.is_multiple_of(2)).then_some(before)
 }
 
-/// Identifies the state [`KernelStore::egress_candidates`] read.
+/// Identifies the state [`KernelStore::egress_candidates`] read. Every write that changes an egress fact (registry state, admission and serving rows, scope terms, artifact classification, purge tombstones) appends to the commit log or runs inside a classification window, so two equal snapshots of one incarnation describe the same egress facts; eligibility verdict caches and exact final use rely on that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EgressSnapshot {
     /// The commit-log tip the snapshot observed.

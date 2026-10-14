@@ -1336,9 +1336,9 @@ fn final_use_revalidation_defeats_every_later_change() {
     );
 }
 
-/// A restore that completes during the final-use batch invalidates the proof.
+/// A restore that completes after the final-use projection checks and before the final-use capture invalidates the proof.
 #[test]
-fn final_use_refuses_a_restore_that_lands_during_its_kernel_batch() {
+fn final_use_refuses_a_restore_that_lands_before_its_capture() {
     let fixture = Fixture::new();
     fixture.decide("objects", &[ok("obj-1")]);
     let backup_dir = tempfile::tempdir().unwrap();
@@ -1464,9 +1464,9 @@ fn a_certificate_minted_before_an_equal_tip_restore_is_refused() {
     );
 }
 
-/// `validate_for_use` rejects a proof when the budget expires during its kernel batch.
+/// `validate_for_use` rejects a proof when the budget expires before its final-use capture.
 #[test]
-fn final_use_refuses_a_budget_that_expires_after_its_kernel_batch() {
+fn final_use_refuses_a_budget_that_expires_before_its_capture() {
     let fixture = Fixture::new();
     fixture.decide("objects", &[ok("obj-1")]);
     fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);

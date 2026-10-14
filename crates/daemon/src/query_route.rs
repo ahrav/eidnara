@@ -1211,7 +1211,7 @@ impl ResolvedLane {
     }
 }
 
-/// Every `id:` selector's attempt reads at most the lane's page budget, and retains at most the rows those pages hold, up to the kernel batch final use re-judges, and at most the response's bytes.
+/// Every `id:` selector's attempt reads at most the lane's page budget, and retains at most the rows those pages hold, up to one kernel batch, and at most the response's bytes.
 fn resolve_bounds(limits: &QueryRouteLimits) -> ResolveBounds {
     let rows = limits.exact_page_rows.saturating_mul(limits.exact_pages);
     ResolveBounds {

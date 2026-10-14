@@ -142,9 +142,9 @@ before it. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
 current epoch, checkpoint, or tip.
 
-Every kernel eligibility batch that `resolve` and `validate_for_use` issue
-runs under the request's `EvalBudget`. A deadline or cancellation that an
-enumeration batch observes stops the attempt as
+Every kernel eligibility batch that `resolve` issues, and the kernel capture
+that `validate_for_use` takes, runs under the request's `EvalBudget`. A
+deadline or cancellation that an enumeration batch observes stops the attempt as
 `Incomplete(BudgetExhausted)`, keeping the verdicts of earlier pages and
 forming no proof. At final use it invalidates the proof as
 `BudgetExhausted`. Under `SqliteStore::with_conn_interruptible`, a stop tied
@@ -160,6 +160,15 @@ admission. A classification change defeats an attempt and a proof with or
 without a tip move: a reclassifying artifact replay commits and moves the tip,
 and an open classification window leaves the snapshot without a reusable
 generation at the same tip.
+One kernel batch judges each page's distinct (object, revision, artifact
+digest) terms once, and every row carrying those terms takes that verdict.
+Final use takes one kernel capture of the database identity, incarnation,
+tip, and classification generation. The proof's occurrences were judged
+eligible at the snapshot the proof records, under the proof's project and
+destination, which final use checks first. A verdict is a function of that
+snapshot's egress state, the project, and the destination, so a capture equal
+to the snapshot validates every occurrence, and any difference invalidates the
+proof as `IncarnationChanged`, `CanonicalChanged`, or `SnapshotChanged`.
 An exact proof records egress
 eligibility only. Surface
 permission and claim state come from claim classification at use, so a

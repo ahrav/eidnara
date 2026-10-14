@@ -306,8 +306,7 @@ fn resolve_inner(
     if request.bounds.page_rows.get() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(ResolveRefusal::PageOverBound);
     }
-    // Final use re-judges every proof occurrence in one kernel batch, so
-    // retention past the batch bound could mint a proof no use can validate.
+    // Retention stays within one kernel batch, the size of one enumeration judgement.
     if request.bounds.max_retained.get() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(ResolveRefusal::RetainedOverBound);
     }
@@ -606,19 +605,17 @@ pub enum ProofInvalidation {
     InventoryEpochChanged,
     ProjectionChanged,
     IncarnationChanged,
-    CanonicalChanged {
-        proven: i64,
-        current: i64,
-    },
+    CanonicalChanged { proven: i64, current: i64 },
     SnapshotChanged,
-    Rejected {
-        occurrence_id: String,
-        verdict: EligibilityVerdict,
-    },
 }
 
 /// Revalidates `proof` for final use at the current authority, projection,
-/// and kernel state. An interrupted checkpoint read, like an ended `budget`,
+/// and kernel state. One kernel capture is the linearization point: the
+/// database identity, incarnation, tip, and classification generation it reads
+/// must equal the state the proof's occurrences were judged eligible at. An
+/// eligibility verdict is a function of that egress state, so an unchanged
+/// snapshot carries every verdict forward, and any change before the capture
+/// defeats the proof. An interrupted checkpoint read, like an ended `budget`,
 /// invalidates the proof as `BudgetExhausted`.
 pub fn validate_for_use(
     conn: &GuardedConn<'_>,
@@ -630,9 +627,10 @@ pub fn validate_for_use(
     validate_for_use_inner(conn, kernel, proof, authority, budget, || ())
 }
 
-/// `after_judgement` runs after the kernel batch returns and before
-/// `capture_commit_read_target_within_budget` rechecks the budget and kernel
-/// incarnation, allowing tests to change either value in that window.
+/// `before_capture` runs after the projection checks and before
+/// `capture_identified_commit_read_target_within_budget` rechecks the budget,
+/// the kernel identity and incarnation, the tip, and the classification
+/// generation, allowing tests to change any of them in that window.
 #[cfg(feature = "test-support")]
 pub fn validate_for_use_with_hook_for_test(
     conn: &GuardedConn<'_>,
@@ -640,9 +638,9 @@ pub fn validate_for_use_with_hook_for_test(
     proof: &ExactProof,
     authority: Authority<'_>,
     budget: &EvalBudget,
-    after_judgement: impl FnOnce(),
+    before_capture: impl FnOnce(),
 ) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
-    validate_for_use_inner(conn, kernel, proof, authority, budget, after_judgement)
+    validate_for_use_inner(conn, kernel, proof, authority, budget, before_capture)
 }
 
 fn validate_for_use_inner(
@@ -651,7 +649,7 @@ fn validate_for_use_inner(
     proof: &ExactProof,
     authority: Authority<'_>,
     budget: &EvalBudget,
-    after_judgement: impl FnOnce(),
+    before_capture: impl FnOnce(),
 ) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
     if budget.is_exhausted() {
         return Ok(Err(ProofInvalidation::BudgetExhausted));
@@ -676,6 +674,7 @@ fn validate_for_use_inner(
     if checkpoint.as_ref() != Some(&certificate.projection) {
         return Ok(Err(ProofInvalidation::ProjectionChanged));
     }
+    before_capture();
     let identified = match kernel.capture_identified_commit_read_target_within_budget(budget) {
         Ok(identified) => identified,
         Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
@@ -693,36 +692,8 @@ fn validate_for_use_inner(
             current: target.through_commit,
         }));
     }
-    let report = match judge_dispositions_within_budget(
-        kernel,
-        authority.project,
-        authority.destination,
-        &proof.occurrences,
-        budget,
-    ) {
-        Ok(report) => report,
-        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
-        Err(error) => return Err(error.into()),
-    };
-    after_judgement();
-    let after = match kernel.capture_commit_read_target_within_budget(budget) {
-        Ok(target) => target,
-        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
-        Err(error) => return Err(error.into()),
-    };
-    if after.incarnation != proof.kernel.incarnation {
-        return Ok(Err(ProofInvalidation::IncarnationChanged));
-    }
-    if report.snapshot != proof.snapshot {
+    if identified.egress_snapshot() != proof.snapshot {
         return Ok(Err(ProofInvalidation::SnapshotChanged));
-    }
-    for (occurrence, disposition) in proof.occurrences.iter().zip(&report.dispositions) {
-        if let Disposition::PolicyExcluded(verdict) = *disposition {
-            return Ok(Err(ProofInvalidation::Rejected {
-                occurrence_id: occurrence.occurrence_id.clone(),
-                verdict,
-            }));
-        }
     }
     Ok(Ok(()))
 }
