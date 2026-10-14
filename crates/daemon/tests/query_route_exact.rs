@@ -729,7 +729,7 @@ async fn kernel_waits_inside_resolution_and_final_use_end_at_the_request_deadlin
     fixture.daemon.shutdown().await;
 }
 
-/// AC2: downstream bounds apply to the direct and hybrid answers alike. A union bound below the retained rows refuses both; a one-row result bound serves the same first entry from both, marks both truncated, and every omitted retained row stays in the ranking the result bound cut.
+/// AC2: downstream bounds apply to the direct and hybrid answers alike. A union bound below the retained rows refuses both; a one-row result bound serves the same first entry from both, marks both truncated, keeps every projected row retained, and carries the ranking exactly one retained entry past the served row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn downstream_bounds_apply_to_direct_and_hybrid_answers_alike() {
     let fixture = Fixture::build().await;
@@ -777,12 +777,21 @@ async fn downstream_bounds_apply_to_direct_and_hybrid_answers_alike() {
             .iter()
             .map(|entry| entry.occurrence().to_string())
             .collect();
-        for omitted in retained(outcome).difference(&served.iter().cloned().collect()) {
-            assert!(
-                ranked.contains(omitted) || outcome.fused.entries().len() > served.len(),
-                "an omitted row is cut by the result bound: {omitted}"
-            );
-        }
+        assert_eq!(
+            retained(outcome).len(),
+            rows,
+            "the result bound cut the answer, not resolution"
+        );
+        assert_eq!(
+            ranked.len(),
+            served.len() + 1,
+            "the ranking survives one entry past the result bound"
+        );
+        assert!(
+            ranked.is_subset(&retained(outcome)),
+            "the ranking holds only retained rows"
+        );
+        assert!(ranked.contains(&served[0]));
     }
     assert_eq!(entry_ids(&direct.body), entry_ids(&hybrid.body));
     fixture.daemon.shutdown().await;
