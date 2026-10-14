@@ -237,7 +237,7 @@ the [check inventory](existing-checks.md).
 | P1-P4 | default-production | The plugin runs the verdict, mid-turn, paging, and logging steps on every production pass; `deps.client` is the SDK client ([hook.ts][hookclient]). |
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
 | T1-T2 | default-production | [`process_limits`][process-limits] runs at host startup; every inbound frame calls [`to_vec`][to-vec] and every outbound frame calls `copy_in`. |
-| T3-T4 | test-only | [`reserve_direct`][reserve-direct] is reached only through [`output_from_writer`][from-writer], whose sole non-crate caller is a [fixture arm][fixture-arm] no test sends. |
+| T3-T4 | default-production | The daemon's `settle_prepared_via` sends every transform and exact-length response through `settle_direct_with` and `RequestCtx::output_from_direct_write` to [`reserve_direct`][reserve-direct]; the fault arms need the `direct_fill` [fixture arm][fixture-arm], which reaches the same reservation through [`output_from_writer`][from-writer]. |
 | G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget]; GC and purge decrements have no daemon caller. |
 | G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
@@ -249,13 +249,11 @@ the [check inventory](existing-checks.md).
 Transform execution topology is resolved by the host-owned unit runner. W8 and
 W11 retain separate safety and overlap obligations, now with post-commit abort
 evidence. W12 has transform-specific redaction evidence but an unresolved
-kernel-route boundary. T3 and T4 are
-test-only at HEAD because the
-direct path has no production sender; the specification would move them to
-default-production for whichever routes it moves to the direct path,
-transform responses first. T3's check applies unchanged to a
-`MeasuredSource::Json` response, which the owned path serializes twice at
-HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
+kernel-route boundary. T3 and T4 are default-production: the daemon sends
+every transform and exact-length response through the direct path. T3's
+check applies unchanged to a `MeasuredSource::Json` response, which the owned
+path serializes twice at HEAD (`crates/daemon/src/dispatch.rs:132-148`
+measures, `:237-249` writes).
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
 [unit-host-live]: ../../../../crates/host-runtime/src/handler.rs#L606
@@ -1820,8 +1818,11 @@ The reservation, writer, commit, abort, charge, and failure classification
 are source-verified, and the daemon's transform and exact-length responses
 are the production sender.
 Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
-cover the deadline arm, quarantine at ring level, and the owned-arm
-`into_parts` cases; none for the direct arm's charge; all unaudited.
+cover the deadline arm, quarantine at ring level, the owned-arm `into_parts`
+cases, the direct arm's charge through the in-crate hold-or-return test and
+the two daemon charge tests, the four fault arms through the real-host test,
+and the production settlement branch; none for a queued direct frame dropped
+by generation retirement; all unaudited.
 Impact: A response that won settlement closes the connection for every
 in-flight request, or source bytes outlive the charge that admitted them.
 Open questions:
@@ -1878,9 +1879,12 @@ it; a handler that returns immediately after
 [`output_from_writer`][from-writer]; observation of handler completion (the
 joined future) and of the `Publisher::try_publish` commit as separate events.
 Confidence: medium - [Evidence](evidence/direct-frame-outlives-its-handler-before-publication.md).
-The queueing and commit points are source-verified; the direct path is
-reached only through the [fixture arm][fixture-arm] at HEAD.
-Existing check: none found.
+The queueing and commit points are source-verified, and the daemon's
+transform and exact-length responses are the production sender; the marker
+test observes the window through the `direct_fill` fixture arm.
+Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
+list `a_direct_frame_serializes_after_its_handler_has_ended` as the T4
+marker; unaudited.
 Impact: T3's charge clause passes without the window ever opening.
 Open questions: None.
 
@@ -2825,8 +2829,8 @@ oracle. The following notes define the evidence to request, not tickets.
 | [P5][p5] | Sequence deny-then-fail through an SDK fake. |
 | [T1][t1] | Assert the dead-byte inequality over a long publish and release run; decide the deferred bound first. |
 | [T2][t2] | Add a mismatched-span `to_vec` case under Miri. |
-| [T3][t3] | Cover underfill, overflow, error, and panic on the direct path; decide the failure classification and charge class. |
-| [T4][t4] | Hold egress so a direct frame outlives its handler; observe completion and commit separately. |
+| [T3][t3] | Underfill, overflow, error, and panic are covered in-crate and through a real host; the failure classification and charge class are decided. Add a queued direct frame dropped by generation retirement. |
+| [T4][t4] | The marker test observes a serializer that runs after its handler ended. Lengthen the window with held egress when the marker misses it. |
 | [G1][g1] | Dedup at exactly the cap; second ingest before orphan recovery. |
 | [G2][g2] | Keep the walk as the oracle; compare a counter against it at every quiescent point. |
 | [G3][g3] | Record a usage delta per decrement path with bytes at stake. |
