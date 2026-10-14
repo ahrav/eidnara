@@ -92,7 +92,7 @@ every admission batch and before the final re-judgment.
 | `work_counters_report_exact_and_over_bound_work` | `lexical_retrieval.rs:2876` | probes, counted rows, scanned rows, ranked matches, judgments, batches, and `sql_steps` at the bound and one row below it; equal scanned rows and fewer SQL steps under a result cap of one | unaudited |
 | `lexical_scan_p99_at_one_million_occurrences` | `lexical_retrieval.rs:2203` | D26b open-loop p99 at one million occurrences under production bounds; `#[ignore]`, release, D21 host | unaudited |
 | `each_bound_saturates_before_its_protected_work` | `crates/daemon/tests/query_route.rs:320` | each D23 limit refuses or truncates before the work it protects | unaudited |
-| `the_lexical_ranking_bounds_report_every_scope_they_skip` | `query_route.rs:684` | the route reports every skipped scope | unaudited |
+| `the_lexical_ranking_bounds_report_every_scope_they_skip` | `query_route.rs:679` | the route reports every skipped scope | unaudited |
 | `production_limits_are_the_d23_set` | `query_route.rs:532` | the daemon's limits equal D23 | unaudited |
 
 Production counters: `Consumed` in `retrieve.rs`; `vm_steps` (`retrieve.rs:636`)

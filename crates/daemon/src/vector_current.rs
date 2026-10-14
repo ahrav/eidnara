@@ -70,7 +70,7 @@ impl CurrentVectors {
             Held::Serve(view) => return Ok(view),
             Held::OtherIdentity => {}
             // The owner's hold goes first, so a replaced view's charges leave the ledger as soon as its last request does.
-            Held::Replace => self.release(),
+            Held::Replace => self.take_held(),
         }
         let view = acquire(
             self.root.as_deref(),
@@ -128,7 +128,17 @@ impl CurrentVectors {
     }
 
     /// Releases the held view; requests that still hold it keep it until they finish.
+    /// `release` waits for an in-flight acquisition to finish before dropping the owner's hold, so the hold it drops is the latest one.
     pub fn release(&self) {
+        let _acquiring = self
+            .acquiring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.take_held();
+    }
+
+    /// Drops the owner's hold; the caller holds `acquiring`.
+    fn take_held(&self) {
         let retired = self
             .held
             .lock()

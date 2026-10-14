@@ -1,6 +1,8 @@
 mod support;
 
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
 
 use daemon::query_route::{CompressedLimits, QueryRouteLimits};
 use daemon::vector_admission::ResourceClass;
@@ -178,6 +180,48 @@ fn a_released_view_leaves_the_ledger_once_its_last_holder_ends() {
     drop(view);
     assert_eq!(held(&fixture.ledger, ResourceClass::LayerTables), 0);
     assert_eq!(fixture.ledger.census().pinned, 0);
+}
+
+#[test]
+fn a_release_during_an_acquisition_leaves_no_hold_behind() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    fixture.release_transaction();
+    let (hashing_tx, hashing_rx) = mpsc::channel();
+    let (released_tx, released_rx) = mpsc::channel();
+    let expected = fixture.expected();
+    let owner_ref = &owner;
+    let expected_ref = &expected;
+    let view = thread::scope(|scope| {
+        let acquirer = scope.spawn(move || {
+            owner_ref
+                .view(expected_ref, &mut |event| {
+                    if event == AcquireEvent::BeforeVerification {
+                        hashing_tx.send(()).unwrap();
+                        released_rx.recv().unwrap();
+                    }
+                })
+                .unwrap()
+        });
+        hashing_rx.recv().unwrap();
+        let releaser = scope.spawn(|| owner.release());
+        released_tx.send(()).unwrap();
+        releaser.join().unwrap();
+        acquirer.join().unwrap()
+    });
+    let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(
+        acquisitions, 1,
+        "no acquisition publishes a hold after release returns"
+    );
+    assert!(!Arc::ptr_eq(&view, &again));
+    drop(view);
 }
 
 #[test]
