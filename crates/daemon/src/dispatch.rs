@@ -43,6 +43,9 @@ pub enum RecipeSegment {
 const INSERT_PREFIX: &[u8] = br#"{"op":"insert","values":["#;
 const INSERT_SUFFIX: &[u8] = b"]}";
 
+/// The staging buffer coalesces small JSON writes to reduce calls to the direct destination's `write`.
+const DIRECT_STAGING_BYTES: usize = 4 * 1024;
+
 #[derive(Clone)]
 enum PreparedSegmentSource {
     Exact(Arc<[u8]>),
@@ -255,11 +258,18 @@ impl PreparedOutput {
     ) -> Result<usize, PreparedOutputError> {
         let source = match &self.source {
             PreparedSource::Json(value) => MeasuredSource::Json(value),
-            PreparedSource::Exact(bytes) => MeasuredSource::Exact(bytes),
+            PreparedSource::Exact(bytes) => {
+                // An exact body is one write, so it reaches the destination unstaged.
+                let source = MeasuredSource::Exact(bytes);
+                return MeasuredOutput { source, len }.write_to(&mut { destination });
+            }
             PreparedSource::Transform(segments) => MeasuredSource::Transform(segments),
             PreparedSource::Emit(body) => MeasuredSource::Emit(body.as_ref()),
         };
-        MeasuredOutput { source, len }.write_to(&mut { destination })
+        let mut staged = io::BufWriter::with_capacity(DIRECT_STAGING_BYTES, destination);
+        let written = MeasuredOutput { source, len }.write_to(&mut staged)?;
+        staged.flush()?;
+        Ok(written)
     }
 
     /// Measures this immutable source exactly before output reservation.
@@ -654,6 +664,10 @@ impl Write for CountingWriter {
         Ok(bytes.len())
     }
 
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write(bytes).map(drop)
+    }
+
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -677,16 +691,22 @@ impl<'a, W> BoundedWriter<'a, W> {
     fn written(&self) -> usize {
         self.written
     }
-}
 
-impl<W: Write> Write for BoundedWriter<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.max_len - self.written {
+    /// Refuses a write of `len` bytes that would pass the measured length.
+    fn admit(&self, len: usize) -> io::Result<()> {
+        if len > self.max_len - self.written {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
                 "prepared body exceeded measured length",
             ));
         }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for BoundedWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.admit(bytes.len())?;
         let written = self.inner.write(bytes)?;
         if written > bytes.len() {
             return Err(io::Error::new(
@@ -696,6 +716,13 @@ impl<W: Write> Write for BoundedWriter<'_, W> {
         }
         self.written += written;
         Ok(written)
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.admit(bytes.len())?;
+        self.inner.write_all(bytes)?;
+        self.written += bytes.len();
+        Ok(())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -952,5 +979,107 @@ mod tests {
             ),
             "{measured:?} against {serialized:?}"
         );
+    }
+
+    /// Records the bytes and the number of `write` calls a direct destination receives.
+    #[derive(Default)]
+    struct RecordingDestination {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+
+    impl Write for RecordingDestination {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A transform recipe whose inserted values serialize as many small escaped fragments.
+    fn fragmented_transform() -> PreparedOutput {
+        let values = (0..64)
+            .map(|index| {
+                let text = format!("line {index}\n\t\"quoted\" \\path\n").repeat(8);
+                let value = json!({"role": "tool", "content": [{"type": "text", "text": text}]});
+                let len = serialized_len(&value);
+                PreparedSegment::value(Arc::new(value), len)
+            })
+            .collect();
+        PreparedOutput::transform_recipe(
+            json!({"status": "ok", "operations": null, "timings": {"total_ms": 1.5}}),
+            vec![
+                RecipeSegment::Keep(PreparedSegment::exact(Arc::from(
+                    &br#"{"op":"keep","count":2}"#[..],
+                ))),
+                RecipeSegment::Insert(values),
+            ],
+        )
+        .expect("the recipe is valid")
+    }
+
+    /// The bytes the owned path writes for `output`, with the number of writes its serializer issues.
+    fn owned_fragments(output: &PreparedOutput) -> RecordingDestination {
+        let mut owned = RecordingDestination::default();
+        output
+            .measure()
+            .expect("the body measures")
+            .write_to(&mut owned)
+            .expect("the body writes");
+        owned
+    }
+
+    /// A direct destination receives a fragmented transform body in staging-sized writes carrying the owned path's bytes, and an exact body in one write.
+    #[test]
+    fn a_direct_body_reaches_its_destination_in_staged_writes_with_the_owned_bytes() {
+        let output = fragmented_transform();
+        let owned = owned_fragments(&output);
+        let len = owned.bytes.len();
+        assert!(
+            len > 4 * DIRECT_STAGING_BYTES,
+            "the body spans several staging buffers"
+        );
+
+        let mut direct = RecordingDestination::default();
+        assert_eq!(output.write_measured(len, &mut direct).unwrap(), len);
+        assert_eq!(direct.bytes, owned.bytes);
+        let staged_bound = 2 * len.div_ceil(DIRECT_STAGING_BYTES);
+        assert!(
+            direct.writes <= staged_bound && owned.writes > 8 * staged_bound,
+            "{} staged writes and {} serializer writes for {len} bytes",
+            direct.writes,
+            owned.writes
+        );
+
+        let exact = PreparedOutput::cached_bytes(owned.bytes.clone());
+        let mut direct = RecordingDestination::default();
+        assert_eq!(exact.write_measured(len, &mut direct).unwrap(), len);
+        assert_eq!((direct.bytes, direct.writes), (owned.bytes, 1));
+    }
+
+    /// A staged body written at another length is refused, and a short length reaches the destination as at most that many bytes of the body.
+    #[test]
+    fn a_staged_body_written_at_another_length_is_refused() {
+        let output = fragmented_transform();
+        let owned = owned_fragments(&output).bytes;
+        let len = owned.len();
+
+        let mut short = RecordingDestination::default();
+        assert!(matches!(
+            output.write_measured(len - 1, &mut short),
+            Err(PreparedOutputError::Write(_))
+        ));
+        assert!(short.bytes.len() < len && owned.starts_with(&short.bytes));
+
+        let mut long = RecordingDestination::default();
+        assert!(matches!(
+            output.write_measured(len + 1, &mut long),
+            Err(PreparedOutputError::LengthMismatch { measured, written })
+                if measured == len + 1 && written == len
+        ));
     }
 }
