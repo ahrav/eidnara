@@ -96,7 +96,10 @@ impl<'lease> LeaseSpan<'lease> {
 
     /// Copies every byte into `destination`, which must be exactly `len` long, initializing
     /// all of it. A length mismatch returns `Err` before any byte is written.
-    pub fn copy_to_uninit(self, destination: &mut [MaybeUninit<u8>]) -> Result<(), LeaseError> {
+    pub(crate) fn copy_to_uninit(
+        self,
+        destination: &mut [MaybeUninit<u8>],
+    ) -> Result<(), LeaseError> {
         if destination.len() != self.len {
             return Err(LeaseError::LengthMismatch);
         }
@@ -209,7 +212,9 @@ pub(crate) unsafe fn copy_out(source: *mut u8, destination: &mut [u8]) {
 }
 
 /// [`copy_out`] into memory that need not be initialized. Every byte of `destination` is
-/// written, so a caller may treat the whole slice as initialized once the call returns.
+/// written, and only initialized `u8` values are stored, so a caller may treat the whole
+/// slice as initialized once the call returns; `copy_out` relies on this to pass an
+/// initialized slice through.
 ///
 /// # Safety
 /// The source contract of [`copy_out`].
@@ -362,10 +367,8 @@ impl PayloadLease {
     pub fn to_vec(&self) -> Result<Vec<u8>, LeaseError> {
         let mut bytes = Vec::with_capacity(self.body_len);
         if self.body_len != 0 {
-            let spare = bytes
-                .spare_capacity_mut()
-                .get_mut(..self.body_len)
-                .ok_or(LeaseError::LengthMismatch)?;
+            // `with_capacity` reserves at least `body_len` bytes of spare capacity.
+            let spare = &mut bytes.spare_capacity_mut()[..self.body_len];
             self.body()?.copy_to_uninit(spare)?;
             // SAFETY: `copy_to_uninit` returned `Ok`, so it wrote all `body_len` bytes of the
             // spare capacity, which `with_capacity` sized to at least `body_len`.
@@ -699,7 +702,9 @@ mod tests {
         }
     }
 
-    /// The zero-fill-free copy initializes every destination byte at every source alignment and length: the destination starts uninitialized, so under Miri a byte the copy skipped is an uninitialized read when the result is compared.
+    /// The zero-fill-free copy initializes every destination byte at every source alignment
+    /// and length. The destination starts uninitialized, so under Miri a byte the copy
+    /// skipped is an uninitialized read when the result is compared.
     #[test]
     fn copy_out_uninit_initializes_every_byte_at_every_alignment_and_length() {
         use std::sync::atomic::AtomicU8;
@@ -727,7 +732,8 @@ mod tests {
         }
     }
 
-    /// `to_vec` returns exactly the body at every length, including empty, through the uninitialized buffer.
+    /// `to_vec` returns exactly the body at every length, including empty, through the
+    /// uninitialized buffer.
     #[test]
     fn to_vec_copies_every_body_length_without_a_zero_fill() {
         let retained = retained_fixture();
@@ -739,7 +745,8 @@ mod tests {
         }
     }
 
-    /// A destination whose length differs from the span's refuses with `LengthMismatch` before writing any byte, through both copies.
+    /// A destination whose length differs from the span's refuses with `LengthMismatch`
+    /// before writing any byte, through both copies.
     #[test]
     fn a_span_length_mismatch_refuses_before_writing_any_byte() {
         use std::sync::atomic::AtomicU8;

@@ -105,6 +105,33 @@ tracing the initialization clause.
 - Conclusion: resolved with answer - no path at HEAD exposes uninitialized or
   partial bytes; a zero-fill-free replacement must re-establish that per span.
 
+### Q: What does the zero-fill-free `to_vec` rest on, and what did removing the fill buy?
+
+- Sources examined: `to_vec`, `LeaseSpan::copy_to_uninit`, `copy_out`, and
+  `copy_out_uninit` in `crates/shm-transport/src/lease.rs` at `9548fd28d29a`.
+- Findings: `to_vec` reserves `body_len` bytes of capacity, copies into that
+  spare capacity through `copy_to_uninit`, and calls `set_len` only after it
+  returns `Ok`. `copy_to_uninit` refuses a destination of another length
+  before writing. `copy_out_uninit` writes every byte of the range
+  `AccessShape::of` partitions and stores only initialized values, so
+  `copy_out` passes an initialized slice through it. `to_vec` forms one span
+  of exactly `body_len`, so the multi-span mismatch this record anticipated
+  cannot occur through it; the mismatch is witnessed at `copy_to_uninit`.
+  Under Miri, skipping one head byte, one word, or one tail byte in
+  `copy_out_uninit` fails
+  `copy_out_uninit_initializes_every_byte_at_every_alignment_and_length` as an
+  uninitialized read.
+- Payoff: the hardware-envelope and ipc-budget benches were removed from the
+  repository before this change, so an uncommitted probe timed `to_vec` over
+  a real ring on one host, pinned to one CPU, three runs before and three
+  after, back to back. Medians before then after: 64 KiB 2.7 to 2.1-2.3 us,
+  1 MiB 50.3-50.4 to 38.3-38.4 us, 8 MiB 557-633 to 415-486 us, 32 MiB
+  18.9-19.5 to 18.0-18.5 ms; the 64 KiB to 8 MiB p10-p90 ranges do not
+  overlap between the two builds. 4 KiB stayed at 0.2 us.
+- Missing evidence: None for the initialization clause.
+- Conclusion: resolved with answer - the change stays; every exposed byte is
+  written by `copy_out_uninit` before `set_len`.
+
 [agents]: ../../../../../crates/shm-transport/AGENTS.md
 [span-doc]: ../../../../../crates/shm-transport/src/lease.rs#L10-L13
 [span-safety]: ../../../../../crates/shm-transport/src/lease.rs#L25-L33

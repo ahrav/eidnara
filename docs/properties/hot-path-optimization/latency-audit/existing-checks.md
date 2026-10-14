@@ -412,9 +412,9 @@ forcing and observing a failed live read.
 | [`copy_in_then_copy_out_round_trips_at_every_alignment_and_length`][t-roundtrip] | 16 source offsets x 16 shifts x 40 lengths round-trip; bytes before the shift are untouched. | unaudited |
 | [`span_reads_tolerate_a_concurrent_writer`][t-concurrent] | A concurrent same-shape `copy_in` never tears a byte through `read_byte`, `copy_to`, or `checksum`. | unaudited |
 | [`read_byte_agrees_with_copy_to_at_every_alignment`][t-readbyte] | Per-byte and bulk reads agree. | unaudited |
-| `copy_out_uninit_initializes_every_byte_at_every_alignment_and_length` (`lease.rs`, Miri witness) | An uninitialized destination is fully written at 16 shifts x 40 lengths. | unaudited |
-| `to_vec_copies_every_body_length_without_a_zero_fill` (`lease.rs`, Miri witness) | `to_vec` returns the exact body at lengths 0 to 39 through the uninitialized buffer. | unaudited |
-| `a_span_length_mismatch_refuses_before_writing_any_byte` (`lease.rs`, Miri witness) | A destination of another length refuses with `LengthMismatch` and keeps its sentinel bytes, through `copy_to_uninit` and `copy_to`. | unaudited |
+| [`copy_out_uninit_initializes_every_byte_at_every_alignment_and_length`][t-uninit] (Miri witness) | An uninitialized destination is fully written at 16 shifts x 40 lengths. | unaudited |
+| [`to_vec_copies_every_body_length_without_a_zero_fill`][t-to-vec] (Miri witness) | `to_vec` returns the exact body at lengths 0 to 39 through the uninitialized buffer. | unaudited |
+| [`a_span_length_mismatch_refuses_before_writing_any_byte`][t-mismatch] (Miri witness) | A destination of another length refuses with `LengthMismatch` and keeps its sentinel bytes, through `copy_to_uninit` and `copy_to`. | unaudited |
 | [Miri job][ci-miri] | `lease::` and `backend::ring::miri` tests run under Miri; the job fails unless at least one passes. | unaudited |
 | [Valgrind job][ci-valgrind] | `shm-transport --test ring` runs under memcheck. | unaudited |
 | [`a_commit_past_the_write_deadline_is_refused`][t-deadline] | `publish_direct` with a slow serializer publishes nothing. | unaudited |
@@ -722,11 +722,14 @@ not a claim that no related check exists anywhere in the repository.
 [t-fifo]: ../../../../crates/shm-transport/tests/ring.rs#L124
 [t-sparse]: ../../../../crates/shm-transport/tests/ring.rs#L231
 [t-syscall]: ../../../../crates/shm-transport/src/backend/ring.rs#L3086-L3087
-[t-roundtrip]: ../../../../crates/shm-transport/src/lease.rs#L475
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L581
-[t-readbyte]: ../../../../crates/shm-transport/src/lease.rs#L543
-[ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
-[ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
+[t-roundtrip]: ../../../../crates/shm-transport/src/lease.rs#L672
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L847
+[t-readbyte]: ../../../../crates/shm-transport/src/lease.rs#L809
+[t-uninit]: ../../../../crates/shm-transport/src/lease.rs#L709
+[t-to-vec]: ../../../../crates/shm-transport/src/lease.rs#L738
+[t-mismatch]: ../../../../crates/shm-transport/src/lease.rs#L751
+[ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
+[ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
 [t-deadline]: ../../../../crates/host-runtime/src/ring_transport.rs#L1850
 [t-commitq]: ../../../../crates/shm-transport/src/backend/ring.rs#L3199
 [t-parts]: ../../../../crates/host-runtime/src/handler.rs#L1006
