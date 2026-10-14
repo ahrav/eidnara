@@ -270,16 +270,27 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
     let shape = AccessShape::of(destination, source.len());
     let (head, rest) = source.split_at(shape.head);
     let (words, tail) = rest.split_at(shape.words * WORD);
+    let (steps, single_words) = words.as_chunks::<WORD>().0.as_chunks::<WORDS_PER_STEP>();
     // SAFETY: `shape` partitions exactly `[0, source.len())`, which the caller keeps valid for
-    // reads and writes with no Rust reference over it; each word starts at an 8-aligned address
-    // and lies entirely within the range, so every `from_ptr` is aligned and in bounds.
+    // reads and writes with no Rust reference over it. The word region starts at
+    // `destination.add(shape.head)`, an 8-aligned address, and `steps` then `single_words`
+    // cover its `shape.words` words in order, so `word` stays 8-aligned, every `from_ptr` lies
+    // entirely within the range, and `word` ends at most one past it.
     unsafe {
         for (offset, byte) in head.iter().enumerate() {
             AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
         }
-        for (word_start, chunk) in shape.word_starts().zip(words.as_chunks::<WORD>().0) {
-            AtomicU64::from_ptr(destination.add(word_start).cast())
-                .store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
+        let mut word = destination.add(shape.head);
+        for step in steps {
+            for (index, chunk) in step.iter().enumerate() {
+                AtomicU64::from_ptr(word.add(index * WORD).cast())
+                    .store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
+            }
+            word = word.add(WORDS_PER_STEP * WORD);
+        }
+        for chunk in single_words {
+            AtomicU64::from_ptr(word.cast()).store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
+            word = word.add(WORD);
         }
         for (offset, byte) in shape.tail_range().zip(tail.iter()) {
             AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
