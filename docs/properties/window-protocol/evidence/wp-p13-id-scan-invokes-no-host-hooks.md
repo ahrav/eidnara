@@ -117,3 +117,13 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Re-evidence 2026-10-13 (#996)
+
+A recheck over a taped verified prefix walks each member's descriptors with the
+same proxy, accessor, prototype, `toJSON`, and `then` checks. "fails a taped
+recheck without running a hook planted in a prefix member after capture"
+(`transform-capture.test.ts`) plants a trapping proxy, a revoked proxy, an `id`
+accessor, and an inherited `then` and observes zero trap calls; "rejects a hook
+planted in a verified prefix message while the pass awaits the daemon, without
+running it" (`rust-mode-transform.test.ts`) does the same at pass level.

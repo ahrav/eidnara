@@ -3775,10 +3775,19 @@ describe("capture verified against the retained prefix", () => {
         return sessionLogs(spy, sessionId).filter((line) => line.startsWith("rust pass:"));
     }
 
+    /** Whether each pass's capture kept its verified members' tapes. */
+    function tapedFlags(spy: Parameters<typeof sessionLogs>[0], sessionId: string): boolean[] {
+        return sessionLogs(spy, sessionId).flatMap((line) => {
+            const match = /phase=capture .* taped=(true|false)$/.exec(line);
+            return match ? [match[1] === "true"] : [];
+        });
+    }
+
     /** Each pass's count of leading members its capture verified against the retained digest. */
     function verifiedCounts(spy: Parameters<typeof sessionLogs>[0], sessionId: string): number[] {
         return sessionLogs(spy, sessionId).flatMap((line) => {
-            const match = /phase=capture boundary_index=\d+ verified=(\d+)$/.exec(line);
+            const match =
+                /phase=capture boundary_index=\d+ verified=(\d+) taped=(?:true|false)$/.exec(line);
             return match ? [Number(match[1])] : [];
         });
     }
@@ -3831,6 +3840,42 @@ describe("capture verified against the retained prefix", () => {
             expect(sessionLogs(debugSpy, sessionId)).toContain(
                 `rust session ${sessionId} pass declined: source_changed (publish)`,
             );
+        } finally {
+            debugSpy.mockRestore();
+        }
+    });
+
+    it("rejects a hook planted in a verified prefix message while the pass awaits the daemon, without running it", async () => {
+        const sessionId = `rust-delta-capture-mid-pass-hook-${Date.now()}`;
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const history = rowMessages(sessionId, rows);
+        let reads = 0;
+        const { client, bodies } = recordingClient((request, index) => {
+            if (index === 1)
+                Object.defineProperty((history[1] as { info: object }).info, "id", {
+                    enumerable: true,
+                    get: () => {
+                        reads += 1;
+                        return "hooked";
+                    },
+                });
+            return recipeResponse(request, [folded(sessionId)]);
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            await transform.run(sessionId, { messages: [...history] });
+            const output = { messages: [...history] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(bodies[1]?.previous_output_revision).toBeDefined();
+            expect(verifiedCounts(debugSpy, sessionId)).toEqual([0, 3]);
+            expect(tapedFlags(debugSpy, sessionId)).toEqual([false, true]);
+            expect(output.messages).toEqual(history);
+            expect(sessionLogs(debugSpy, sessionId)).toContain(
+                `rust session ${sessionId} pass declined: source_changed (publish)`,
+            );
+            expect(reads).toBe(0);
         } finally {
             debugSpy.mockRestore();
         }

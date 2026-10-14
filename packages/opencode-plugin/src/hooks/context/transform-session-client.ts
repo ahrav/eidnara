@@ -1405,8 +1405,8 @@ export function createTransformSessionClient(
             let messageWireBytes: number[] = [];
             if (previous && prefix) {
                 messageWireBytes = inspect(prefix.count);
-                // A private window's rechecks compare members by identity, so its verified
-                // members keep no tapes.
+                // A public window keeps the verified members' tapes, so its rechecks compare
+                // them instead of hashing the prefix again; a private window rechecks identity.
                 verified = captureHistory(window, lease, prefix, {
                     tapePrefix: source.privateWindow !== true,
                 });
@@ -1430,7 +1430,7 @@ export function createTransformSessionClient(
                 "prefixGuard",
                 prefixGuardStartedAt,
                 timings,
-                `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0}`,
+                `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0} taped=${captured.verifiedTaped === true}`,
             );
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();

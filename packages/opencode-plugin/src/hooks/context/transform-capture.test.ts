@@ -44,6 +44,7 @@ function reserveCapture(messages: unknown): CaptureLease {
 function captureWithLease(messages: unknown, lease: CaptureLease): CapturedMessages {
     const {
         verified: _verified,
+        verifiedTaped: _verifiedTaped,
         history: _history,
         terminal: _terminal,
         boundary: _boundary,
@@ -68,10 +69,12 @@ function messageMatchesContentSnapshot(
     message: unknown,
     snapshot: MessageContentSnapshot,
 ): boolean {
+    // The snapshot comes from another message, so the recheck runs under the full walk budget.
     return capturedMessagesUnchanged([message], {
         ...captureMessages([null]),
         members: [message],
         snapshots: [snapshot],
+        bytes: Number.MAX_SAFE_INTEGER,
     });
 }
 
@@ -313,6 +316,26 @@ describe("referenceable JSON domain guard", () => {
         expect(bare.messageWireBytes[1]).toBe(full.messageWireBytes[1]);
     });
 
+    it("charges each marker, symbol key, and extra key one slot plus its description", () => {
+        const cases: [string, unknown[], number][] = [
+            ["empty object", [{}], 461],
+            ["null-prototype object", [Object.create(null)], 461],
+            ["empty array", [[]], 489],
+            ["symbol key", [{ [Symbol("key")]: 1 }], 541],
+            ["array extra key", [Object.assign([1], { extra: 2 })], 614],
+        ];
+        for (const [name, source, bytes] of cases) {
+            const inspection = inspectReferenceableMessages(source, undefined, 0, false);
+            expect([name, inspection.ok && inspection.estimatedBytes]).toEqual([name, bytes]);
+            const admitted = new TransformCaptureAdmission().admit(name);
+            if (!("lease" in admitted)) throw new Error("unexpected refusal");
+            const reserved = captureReserved(source, admitted.lease);
+            expect([name, reserved?.bytes, reserved?.capture.bytes]).toEqual([name, bytes, bytes]);
+            expect(reserved && capturedMessagesUnchanged(source, reserved.capture)).toBe(true);
+            admitted.lease.release();
+        }
+    });
+
     it("rejects an accessor without invoking it", () => {
         const counter = trapCounter();
         const hooked = message("m1");
@@ -393,6 +416,28 @@ describe("referenceable JSON domain guard", () => {
         const result = inspectReferenceableMessages([{ ...message("m4"), deep }]);
         expect(result.ok).toBe(false);
         if (!result.ok) expect(result.rejection.reason).toBe("depth");
+    });
+
+    it("keeps the ancestor path exact at the depth limit and after leaving a subtree", () => {
+        // The root array and the member count toward the depth limit.
+        const nested = (levels: number): unknown => {
+            let deep: unknown = "leaf";
+            for (let level = 0; level < levels; level += 1) deep = [deep];
+            return deep;
+        };
+        expect(inspectReferenceableMessages([{ deep: nested(255) }]).ok).toBe(true);
+        const past = inspectReferenceableMessages([{ deep: nested(256) }]);
+        expect(past.ok ? undefined : past.rejection.reason).toBe("depth");
+        const shared = { leaf: [1] };
+        const siblings = { left: { inner: shared }, right: { inner: shared }, last: shared };
+        expect(inspectReferenceableMessages([siblings, shared]).ok).toBe(true);
+        const inner: Record<string, unknown> = {};
+        const outer = { inner };
+        inner.back = outer;
+        expect(inspectReferenceableMessages([{ outer }])).toEqual({
+            ok: false,
+            rejection: { reason: "cycle", path: "/0/outer/inner/back" },
+        });
     });
 
     it("reads own data properties without touching accessors or proxies", () => {
@@ -1091,10 +1136,499 @@ describe("digest-verified prefix capture", () => {
         const source = [message("m1"), message("m2")];
         const snapshotOnly = captureMessages(source);
         const withHistory = captureHistory(source);
-        expect(Object.keys(snapshotOnly).sort()).toEqual(["members", "rootSnapshot", "snapshots"]);
+        expect(Object.keys(snapshotOnly).sort()).toEqual([
+            "bytes",
+            "members",
+            "rootSnapshot",
+            "snapshots",
+        ]);
+        expect(snapshotOnly.bytes).toBe(withHistory.bytes);
         expect(snapshotOnly.snapshots).toEqual(withHistory.snapshots);
         expect(snapshotOnly.rootSnapshot).toEqual(withHistory.rootSnapshot);
         expect(capturedMessagesUnchanged(source, snapshotOnly)).toBe(true);
+    });
+});
+
+describe("taped verified prefix", () => {
+    /**
+     * The window a replay pass captures: the earlier pass's members, then one new message. The
+     * digest covers the earlier members before its terminal, whose strings take the pending-unit,
+     * UTF-8, and chunked UTF-16 hash paths, a lone surrogate included.
+     */
+    function replayWindow(): { live: Record<string, unknown>[]; digest: HistoryDigest } {
+        const earlier = [
+            message("m1"),
+            message("m2", "x".repeat(2048)),
+            message("m3", `${"y".repeat(70_000)}\ud800`),
+            message("m4"),
+        ];
+        const digest = captureHistory(earlier).history;
+        captureLease?.release();
+        captureLease = undefined;
+        expect(digest.count).toBe(3);
+        return { live: [...earlier, message("m5")], digest };
+    }
+
+    function ownerOf(maxBytes?: number): TransformCaptureAdmission {
+        return new TransformCaptureAdmission(
+            maxBytes === undefined ? undefined : { maxPasses: 2, maxBytes },
+        );
+    }
+
+    function leaseOf(owner: TransformCaptureAdmission, session = "s"): CaptureLease {
+        const admitted = owner.admit(session);
+        if (!("lease" in admitted)) throw new Error("unexpected refusal");
+        return admitted.lease;
+    }
+
+    function partialCharge(live: unknown, digest: HistoryDigest): number {
+        const inspection = inspectReferenceableMessages(live, undefined, digest.count);
+        if (!inspection.ok) throw new Error("valid source rejected");
+        return inspection.estimatedBytes;
+    }
+
+    /** Charges the partial inspection, then captures with the prefix tapes. */
+    function tapedCapture(
+        live: unknown,
+        digest: HistoryDigest,
+        lease: CaptureLease,
+    ): CapturedHistory | undefined {
+        if (!lease.reserve(partialCharge(live, digest))) throw new Error("root inspection refused");
+        return captureHistoryWithLease(live, lease, digest, { tapePrefix: true });
+    }
+
+    /** A full capture of `live` under its own owner, which it charges in full. */
+    function freshCapture(live: unknown): {
+        owner: TransformCaptureAdmission;
+        lease: CaptureLease;
+        fresh: CapturedHistory;
+    } {
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const inspection = inspectReferenceableMessages(live);
+        if (!inspection.ok || !lease.reserve(inspection.estimatedBytes))
+            throw new Error("full inspection refused");
+        return { owner, lease, fresh: captureHistoryWithLease(live, lease) };
+    }
+
+    it("keeps the verified tapes at the prefix's recorded spend, which a fresh capture charges too", () => {
+        const { live, digest } = replayWindow();
+        const { owner: freshOwner, lease: freshLease, fresh } = freshCapture(live);
+
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const taped = tapedCapture(live, digest, lease);
+        if (!taped) throw new Error("prefix did not verify");
+        expect(taped.verifiedTaped).toBe(true);
+        expect(owner.chargedBytes).toBe(freshOwner.chargedBytes);
+        expect(taped.bytes).toBe(fresh.bytes);
+        expect(taped.snapshots).toEqual(fresh.snapshots);
+        expect(taped.history).toEqual(fresh.history);
+        expect(capturedMessagesUnchanged(live, taped)).toBe(true);
+        // The tapes record the content, so an edit inside the prefix is caught without the digest.
+        (live[1]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(capturedMessagesUnchanged(live, taped)).toBe(false);
+        // A partial comparison still compares every verified member.
+        expect(capturedMessagesUnchanged(live, taped, 0)).toBe(false);
+        freshLease.release();
+        lease.release();
+    });
+
+    it("accepts the exact headroom for the tapes and keeps the digest recheck one byte short", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+
+        const exactOwner = ownerOf(partial + digest.bytes);
+        const exact = leaseOf(exactOwner);
+        expect(tapedCapture(live, digest, exact)?.verifiedTaped).toBe(true);
+        expect(exactOwner.chargedBytes).toBe(partial + digest.bytes);
+        exact.release();
+
+        const shortOwner = ownerOf(partial + digest.bytes - 1);
+        const short = leaseOf(shortOwner);
+        const untaped = tapedCapture(live, digest, short);
+        if (!untaped) throw new Error("prefix did not verify");
+        expect(untaped.verifiedTaped).toBeUndefined();
+        expect(untaped.snapshots.slice(0, digest.count)).toStrictEqual([
+            undefined,
+            undefined,
+            undefined,
+        ]);
+        expect(untaped.snapshots[digest.count]).toBeDefined();
+        expect(shortOwner.chargedBytes).toBe(partial);
+        expect(capturedMessagesUnchanged(live, untaped)).toBe(true);
+        (live[0]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(capturedMessagesUnchanged(live, untaped)).toBe(false);
+        short.release();
+    });
+
+    it("leaves the tapes out when another pass holds the shared headroom", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const other = leaseOf(owner, "other");
+        expect(other.reserve(1)).toBe(true);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        expect(captured?.verifiedTaped).toBeUndefined();
+        expect(owner.chargedBytes).toBe(partial + 1);
+        expect(captured && capturedMessagesUnchanged(live, captured)).toBe(true);
+        other.release();
+        lease.release();
+    });
+
+    it("gives the tapes' hold back to a later reservation of the same pass", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        expect(owner.remainingBytes).toBe(digest.bytes);
+        expect(lease.reserve(digest.bytes)).toBe(true);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(captured.snapshots.slice(0, digest.count)).toStrictEqual([
+            undefined,
+            undefined,
+            undefined,
+        ]);
+        expect(owner.chargedBytes).toBe(partial + digest.bytes);
+        expect(lease.chargedBytes).toBe(partial + digest.bytes);
+        expect(lease.reserve(1)).toBe(false);
+        // The capture rechecks its verified members against the digest from here on, under the
+        // spend its own walk takes beside the digest's.
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        expect(capturedMessagesUnchanged(live, { ...captured, bytes: captured.bytes - 1 })).toBe(
+            false,
+        );
+        (live[1]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+        lease.release();
+        expect(owner.chargedBytes).toBe(0);
+    });
+
+    it("gives the tapes' hold to another pass's reservation, and a hold never takes another", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(2 * partial + digest.bytes);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        const other = leaseOf(owner, "other");
+        // A second pass finds no free headroom for its own tapes and keeps the first pass's.
+        const second = tapedCapture(replayWindow().live, digest, other);
+        expect(second?.verifiedTaped).toBeUndefined();
+        expect(captured.verifiedTaped).toBe(true);
+        expect(owner.chargedBytes).toBe(2 * partial + digest.bytes);
+        // A reservation reclaims the hold.
+        expect(other.reserve(digest.bytes)).toBe(true);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(lease.chargedBytes).toBe(partial);
+        expect(owner.chargedBytes).toBe(2 * partial + digest.bytes);
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        other.release();
+        lease.release();
+        expect(owner.chargedBytes).toBe(0);
+    });
+
+    it("reclaims holds in the order they were taken, and only as many as a reservation needs", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = new TransformCaptureAdmission({
+            maxPasses: 3,
+            maxBytes: 2 * (partial + digest.bytes),
+        });
+        const first = leaseOf(owner, "first");
+        const firstCapture = tapedCapture(live, digest, first);
+        const second = leaseOf(owner, "second");
+        const secondCapture = tapedCapture(replayWindow().live, digest, second);
+        expect(firstCapture?.verifiedTaped).toBe(true);
+        expect(secondCapture?.verifiedTaped).toBe(true);
+        expect(owner.chargedBytes).toBe(2 * (partial + digest.bytes));
+        const third = leaseOf(owner, "third");
+        expect(third.reserve(1)).toBe(true);
+        expect(firstCapture?.verifiedTaped).toBeUndefined();
+        expect(secondCapture?.verifiedTaped).toBe(true);
+        first.release();
+        second.release();
+        third.release();
+        expect(owner.chargedBytes).toBe(0);
+    });
+
+    it("returns a live hold on release or refund without reclaiming its tapes", () => {
+        for (const end of ["release", "refund"] as const) {
+            const { live, digest } = replayWindow();
+            const maxBytes = partialCharge(live, digest) + digest.bytes;
+            const owner = ownerOf(maxBytes);
+            const lease = leaseOf(owner);
+            const captured = tapedCapture(live, digest, lease);
+            if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+            lease[end]();
+            expect(owner.chargedBytes).toBe(0);
+            expect(owner.remainingBytes).toBe(maxBytes);
+            expect(captured.verifiedTaped).toBe(true);
+            const next = end === "refund" ? lease : leaseOf(owner, "next");
+            expect(next.reserve(maxBytes)).toBe(true);
+            expect(owner.chargedBytes).toBe(maxBytes);
+            expect(next.reserve(1)).toBe(false);
+            expect(captured.verifiedTaped).toBe(true);
+            next.release();
+            lease.release();
+            expect(owner.chargedBytes).toBe(0);
+        }
+    });
+
+    it("declines a stale smaller prefix bound and reserves nothing for the prefix", () => {
+        const { live, digest } = replayWindow();
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const stale = { ...digest, bytes: digest.bytes - 1 };
+        expect(tapedCapture(live, stale, lease)).toBeUndefined();
+        expect(owner.chargedBytes).toBe(partialCharge(live, stale));
+        lease.release();
+    });
+
+    it("rechecks under the capture's spend, so growth returns false within the bound", () => {
+        const { live, digest } = replayWindow();
+        const lease = leaseOf(ownerOf());
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured) throw new Error("prefix did not verify");
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        expect(capturedMessagesUnchanged(live, { ...captured, bytes: captured.bytes - 1 })).toBe(
+            false,
+        );
+        const part = (live[1]?.parts as Array<Record<string, unknown>>)[0] as Record<
+            string,
+            unknown
+        >;
+        part.nested = { grown: "y".repeat(1024 * 1024) };
+        expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+        delete part.nested;
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        lease.release();
+    });
+
+    it("tapes symbol-keyed metadata at the fresh spend and catches a swapped key", () => {
+        const key = Symbol("meta");
+        const earlier = [Object.assign(message("m1"), { [key]: "x".repeat(64) }), message("m2")];
+        const digest = captureHistory(earlier).history;
+        captureLease?.release();
+        captureLease = undefined;
+        const live = [...earlier, message("m3")];
+        const { lease: freshLease, fresh } = freshCapture(live);
+        const lease = leaseOf(ownerOf());
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured) throw new Error("prefix did not verify");
+        expect(captured.bytes).toBe(fresh.bytes);
+        expect(captured.snapshots).toEqual(fresh.snapshots);
+        const member = live[0] as Record<PropertyKey, unknown>;
+        const value = member[key];
+        delete member[key];
+        member[Symbol("meta")] = value;
+        expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+        freshLease.release();
+        lease.release();
+    });
+
+    it("fails a taped recheck without running a hook planted in a prefix member after capture", () => {
+        const plants: Array<(member: Record<string, unknown>, trap: () => never) => void> = [
+            (member, trap) => {
+                member.info = new Proxy({}, { get: trap, getOwnPropertyDescriptor: trap });
+            },
+            (member) => {
+                const revocable = Proxy.revocable({}, {});
+                revocable.revoke();
+                member.parts = revocable.proxy;
+            },
+            (member, trap) => {
+                Object.defineProperty(member.info as object, "id", {
+                    get: trap,
+                    enumerable: true,
+                });
+            },
+            (member, trap) => {
+                const key = "then";
+                Object.setPrototypeOf(
+                    member.info as object,
+                    Object.defineProperty({}, key, { get: trap }),
+                );
+            },
+        ];
+        for (const plant of plants) {
+            const { live, digest } = replayWindow();
+            const lease = leaseOf(ownerOf());
+            const captured = tapedCapture(live, digest, lease);
+            if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+            const counter = trapCounter();
+            plant(live[1] as Record<string, unknown>, counter.trap);
+            expect(capturedMessagesUnchanged(live, captured)).toBe(false);
+            expect(counter.count).toBe(0);
+            lease.release();
+        }
+    });
+
+    it("accepts on the taped path exactly what the digest recheck accepts as undefined-valued keys move", () => {
+        const earlier = [
+            Object.assign(message("m1"), { pending: undefined }),
+            message("m2"),
+            message("m3"),
+            message("m4"),
+        ];
+        const digest = captureHistory(earlier).history;
+        captureLease?.release();
+        captureLease = undefined;
+        const live: Record<string, unknown>[] = [...earlier, message("m5")];
+        const tapedLease = leaseOf(ownerOf());
+        const taped = tapedCapture(live, digest, tapedLease);
+        const digestLease = leaseOf(ownerOf());
+        if (!digestLease.reserve(partialCharge(live, digest)))
+            throw new Error("root inspection refused");
+        const untaped = captureHistoryWithLease(live, digestLease, digest);
+        if (!taped?.verifiedTaped || !untaped || untaped.verifiedTaped)
+            throw new Error("unexpected capture shape");
+        const add = (index: number) => () => {
+            (live[index] as Record<string, unknown>).pending = undefined;
+        };
+        const remove = (index: number) => () => {
+            delete live[index]?.pending;
+        };
+        const move = (from: number, to: number) => () => {
+            remove(from)();
+            add(to)();
+        };
+        // The digest covers members 0 to 2 and records their total spend.
+        const cases: [string, () => void, () => void, boolean][] = [
+            ["added to a verified member", add(1), remove(1), false],
+            ["moved between verified members", move(0, 2), move(2, 0), true],
+            ["moved out of the verified members", move(0, 3), move(3, 0), false],
+            ["added to an unverified member", add(4), remove(4), true],
+        ];
+        for (const [name, apply, revert, expected] of cases) {
+            apply();
+            expect([name, capturedMessagesUnchanged(live, untaped)]).toEqual([name, expected]);
+            expect([name, capturedMessagesUnchanged(live, taped)]).toEqual([name, expected]);
+            revert();
+            expect([name, capturedMessagesUnchanged(live, taped)]).toEqual([name, true]);
+            expect([name, capturedMessagesUnchanged(live, untaped)]).toEqual([name, true]);
+        }
+        tapedLease.release();
+        digestLease.release();
+    });
+
+    it("reclaims a tape hold before a reserved capture records into its headroom", () => {
+        const candidate = [message("c1")];
+        const candidateInspection = inspectReferenceableMessages(candidate, undefined, 0, false);
+        if (!candidateInspection.ok) throw new Error("valid source rejected");
+
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const holder = leaseOf(owner);
+        const captured = tapedCapture(live, digest, holder);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        expect(holder.freeBytes).toBe(0);
+        const inner = leaseOf(owner, "other");
+        let tapedAtReserve: boolean | undefined;
+        const lease: CaptureLease = {
+            signal: inner.signal,
+            get chargedBytes() {
+                return inner.chargedBytes;
+            },
+            get remainingBytes() {
+                return inner.remainingBytes;
+            },
+            get freeBytes() {
+                return inner.freeBytes;
+            },
+            reserve: (bytes) => {
+                tapedAtReserve = captured.verifiedTaped === true;
+                return inner.reserve(bytes);
+            },
+            reclaim: (bytes) => inner.reclaim(bytes),
+            reserveReclaimable: (bytes, reclaim) => inner.reserveReclaimable(bytes, reclaim),
+            refund: () => inner.refund(),
+            requestCancel: (reason) => inner.requestCancel(reason),
+            release: () => inner.release(),
+        };
+        const reserved = captureReserved(candidate, lease);
+        expect(reserved?.bytes).toBe(candidateInspection.estimatedBytes);
+        expect(tapedAtReserve).toBe(false);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(owner.chargedBytes).toBe(partial + candidateInspection.estimatedBytes);
+        inner.release();
+        holder.release();
+        expect(owner.chargedBytes).toBe(0);
+
+        const roomy = replayWindow();
+        const roomyOwner = ownerOf(partial + digest.bytes + candidateInspection.estimatedBytes);
+        const roomyHolder = leaseOf(roomyOwner);
+        const roomyCaptured = tapedCapture(roomy.live, roomy.digest, roomyHolder);
+        if (!roomyCaptured?.verifiedTaped) throw new Error("prefix did not tape");
+        const roomyOther = leaseOf(roomyOwner, "other");
+        expect(captureReserved(candidate, roomyOther)?.bytes).toBe(
+            candidateInspection.estimatedBytes,
+        );
+        expect(roomyCaptured.verifiedTaped).toBe(true);
+        roomyOther.release();
+        roomyHolder.release();
+        expect(roomyOwner.chargedBytes).toBe(0);
+    });
+
+    it("fills the capture's own snapshots array with the tapes instead of retaining a second one", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const owner = ownerOf(partial + digest.bytes);
+        const lease = leaseOf(owner);
+        const captured = tapedCapture(live, digest, lease);
+        if (!captured?.verifiedTaped) throw new Error("prefix did not tape");
+        const snapshots = captured.snapshots;
+        expect(snapshots[0]).toBeDefined();
+        expect(lease.reserve(digest.bytes)).toBe(true);
+        expect(captured.verifiedTaped).toBeUndefined();
+        expect(captured.snapshots).toBe(snapshots);
+        expect(snapshots.slice(0, digest.count)).toStrictEqual([undefined, undefined, undefined]);
+        expect(snapshots[digest.count]).toBeDefined();
+        expect(capturedMessagesUnchanged(live, captured)).toBe(true);
+        lease.release();
+    });
+
+    it("keeps the taped flag in an own slot, so an inherited verifiedTaped neither throws nor taints the recheck", () => {
+        const { live, digest } = replayWindow();
+        const partial = partialCharge(live, digest);
+        const saved = Object.getOwnPropertyDescriptor(Object.prototype, "verifiedTaped");
+        const owner = ownerOf();
+        const lease = leaseOf(owner);
+        const shortOwner = ownerOf(partial + digest.bytes - 1);
+        const short = leaseOf(shortOwner);
+        try {
+            // A read-only inherited slot: the strict-mode flag write lands on the own slot.
+            Object.defineProperty(Object.prototype, "verifiedTaped", {
+                value: false,
+                writable: false,
+                configurable: true,
+            });
+            const taped = tapedCapture(live, digest, lease);
+            if (!taped) throw new Error("prefix did not verify");
+            expect(Object.hasOwn(taped, "verifiedTaped")).toBe(true);
+            expect(taped.verifiedTaped).toBe(true);
+            expect(capturedMessagesUnchanged(live, taped)).toBe(true);
+            // The capture's own value selects the recheck path while the inherited one reads true.
+            Object.defineProperty(Object.prototype, "verifiedTaped", {
+                value: true,
+                writable: true,
+                configurable: true,
+            });
+            const untaped = tapedCapture(live, digest, short);
+            if (!untaped) throw new Error("prefix did not verify");
+            expect(Object.hasOwn(untaped, "verifiedTaped")).toBe(true);
+            expect(untaped.verifiedTaped).toBeUndefined();
+            expect(capturedMessagesUnchanged(live, untaped)).toBe(true);
+        } finally {
+            if (saved) Object.defineProperty(Object.prototype, "verifiedTaped", saved);
+            else Reflect.deleteProperty(Object.prototype, "verifiedTaped");
+            lease.release();
+            short.release();
+        }
     });
 });
 
@@ -1673,6 +2207,44 @@ describe("bounded capture sizing", () => {
         expect(reused && capturedMessagesUnchanged(candidate, reused.capture)).toBe(false);
     });
 
+    it("rechecks a compared member as unchanged when an own undefined-valued key appears or moves", () => {
+        const first = message("m1");
+        const second = Object.assign(message("m2"), { pending: undefined });
+        const kept = [first, second, message("m3")];
+        const owner = new TransformCaptureAdmission();
+        const lease = (): CaptureLease => {
+            const admitted = owner.admit("s");
+            if (!("lease" in admitted)) throw new Error("unexpected refusal");
+            return admitted.lease;
+        };
+        const earlier = lease();
+        const previous = captureReserved(kept, earlier);
+        earlier.release();
+        if (!previous) throw new Error("capture refused");
+        const json = JSON.stringify(kept);
+
+        // JSON drops an undefined-valued key, so the served content is the same.
+        (first.info as Record<string, unknown>).finish = undefined;
+        expect(JSON.stringify(kept)).toBe(json);
+        expect(capturedMessagesUnchanged(kept, previous.capture)).toBe(true);
+        delete (first.info as Record<string, unknown>).finish;
+
+        // Moving an undefined-valued key between members preserves their JSON content.
+        delete (second as Record<string, unknown>).pending;
+        (first as Record<string, unknown>).pending = undefined;
+        expect(JSON.stringify(kept)).toBe(json);
+        expect(capturedMessagesUnchanged(kept, previous.capture)).toBe(true);
+        const candidate = [first, kept[2]];
+        const reusing = lease();
+        const reused = captureReserved(candidate, reusing, {
+            values: kept,
+            capture: previous.capture,
+        });
+        expect(reused?.capture.snapshots[0]).toBe(previous.capture.snapshots[0]);
+        expect(reused && capturedMessagesUnchanged(candidate, reused.capture)).toBe(true);
+        reusing.release();
+    });
+
     it("charges root metadata and every root and message tape slot", () => {
         const source = Object.assign([message("m1")], { bookkeeping: { text: "x".repeat(1024) } });
         const base = inspectReferenceableMessages([source[0]]);
@@ -1688,6 +2260,20 @@ describe("bounded capture sizing", () => {
         );
         source.bookkeeping.text = "changed";
         expect(capturedMessagesUnchanged(source, captured)).toBe(false);
+    });
+
+    it("charges a nested array's length before enumerating its keys", () => {
+        const dense = new Array(4096).fill(0);
+        const ownKeys = spyOn(Reflect, "ownKeys");
+        try {
+            expect(() => inspectReferenceableMessages([{ dense }], 1024)).toThrow(
+                CaptureBudgetExceeded,
+            );
+            // The length charge rejects the array before its index names are materialized.
+            expect(ownKeys.mock.calls.some(([target]) => target === dense)).toBe(false);
+        } finally {
+            ownKeys.mockRestore();
+        }
     });
 
     it("charges descriptions of retained symbol keys in root and nested metadata", () => {

@@ -105,3 +105,9 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Re-evidence 2026-10-13 (#996)
+
+The id scan is unchanged by #996; its hostile-slot witness in
+`rust-mode-window.test.ts` passes on the #996 head. The pass-level traversal
+gap recorded in `existing-checks.md` stays open.

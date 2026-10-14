@@ -110,3 +110,15 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Re-evidence 2026-10-13 (#996)
+
+The rechecks compare a public window's verified members against the tapes its
+capture kept, under the capture's spend, and still walk every descriptor.
+`taped verified prefix` in
+`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts` pins the
+fresh-spend charge, the exact-headroom and one-byte-short cases, a stale
+smaller prefix bound, growth that returns false within the spend, symbol
+metadata, and edits caught through the tapes. "rejects a verified prefix
+message edited while the pass awaits the daemon" in `rust-mode-transform.test.ts`
+declines `source_changed (publish)` over a taped prefix with no candidate write.

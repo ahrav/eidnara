@@ -19,6 +19,14 @@ const END_ARRAY = Symbol("end_array");
 const OBJECT = Symbol("object");
 const END_OBJECT = Symbol("end_object");
 const EXTRA_KEY = Symbol("extra_key");
+/** A marker's slot charge, which also covers its description like any symbol's. */
+const markerCharge = (marker: symbol): number =>
+    TAPE_SLOT_BYTES + (marker.description?.length ?? 0) * 2;
+const ARRAY_CHARGE = markerCharge(ARRAY);
+const END_ARRAY_CHARGE = markerCharge(END_ARRAY);
+const OBJECT_CHARGE = markerCharge(OBJECT);
+const END_OBJECT_CHARGE = markerCharge(END_OBJECT);
+const EXTRA_KEY_CHARGE = markerCharge(EXTRA_KEY);
 const ARRAY_METHODS = new Set(Object.getOwnPropertyNames(Array.prototype));
 ARRAY_METHODS.delete("length");
 ARRAY_METHODS.add("then");
@@ -213,6 +221,16 @@ class SourceRejected extends Error {
 }
 const CONTENT_CHANGED = Symbol("content_changed");
 
+interface WalkLimits {
+    /**
+     * Reads of own object keys with `undefined` values, which JSON and the tape both omit, spend
+     * `untapedBytes` under this limit when it is set, and `bytes` when it is unset.
+     */
+    untapedMaxBytes?: number;
+    /** Returns a limit that covers `needed` total spend, or `undefined` when none can. */
+    extend?: (needed: number) => number | undefined;
+}
+
 /**
  * The charge covers retained tape slots and the strings they can keep alive, not engine
  * enumeration, transient descriptors, or RSS. Own-name inspection includes hidden accessors; a
@@ -220,14 +238,16 @@ const CONTENT_CHANGED = Symbol("content_changed");
  */
 class ReferenceableWalk {
     bytes = 0;
+    /** Tracks spend for omitted `undefined`-valued keys when `untapedMaxBytes` is set. */
+    untapedBytes = 0;
     /** Upper bound on the canonical JSON length of the walked values, in two-byte units for strings. */
     wireBytes = 0;
     private field?: (value: SnapshotField) => void;
     /**
-     * The containers on the path to the current one, outermost first. The depth cap bounds the
-     * stack, so a linear cycle scan stays within `MAX_REFERENCEABLE_DEPTH` comparisons.
+     * The objects on the walked path, root first; the null prototype keeps every indexed write an
+     * own property.
      */
-    private readonly ancestors: object[] = [];
+    private readonly ancestors: object[] = Object.setPrototypeOf([], null);
     /**
      * Built-in prototype state the walk checks once: own descriptor reads run no source code, so
      * the state holds for the rest of a synchronous walk.
@@ -238,15 +258,35 @@ class ReferenceableWalk {
 
     /** Only inspection reads `wireBytes`; capture and recheck walks skip the per-unit escape scan. */
     constructor(
-        private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
+        private maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
         private readonly estimateWire = true,
+        private readonly limits: WalkLimits = {},
     ) {}
 
     spend(bytes: number): void {
-        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes) {
-            throw new CaptureBudgetExceeded("source and snapshot walk");
-        }
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes)
+            this.extendFor(bytes);
         this.bytes += bytes;
+    }
+
+    private extendFor(bytes: number): void {
+        const extend = this.limits.extend;
+        const limit =
+            extend && Number.isSafeInteger(bytes) && bytes >= 0
+                ? extend(this.bytes + bytes)
+                : undefined;
+        if (limit === undefined || bytes > limit - this.bytes)
+            throw new CaptureBudgetExceeded("source and snapshot walk");
+        this.maxBytes = limit;
+    }
+
+    private untaped(): void {
+        const limit = this.limits.untapedMaxBytes;
+        if (limit === undefined) return;
+        this.bytes -= TAPE_SLOT_BYTES;
+        if (TAPE_SLOT_BYTES > limit - this.untapedBytes)
+            throw new CaptureBudgetExceeded("undefined-valued key reads");
+        this.untapedBytes += TAPE_SLOT_BYTES;
     }
 
     /** `wireBytes` counts only tokens JSON serialization emits; tape-only markers pass zero. */
@@ -260,6 +300,13 @@ class ReferenceableWalk {
                 TAPE_SLOT_BYTES +
                     (typeof value === "symbol" ? (value.description?.length ?? 0) * 2 : 0),
             );
+        if (wireBytes !== 0) this.wire(wireBytes);
+        this.field?.(value);
+    }
+
+    /** Records a tape marker at its fixed charge. */
+    private marker(value: symbol, charge: number, wireBytes: number): void {
+        this.spend(charge);
         if (wireBytes !== 0) this.wire(wireBytes);
         this.field?.(value);
     }
@@ -325,13 +372,16 @@ class ReferenceableWalk {
         const fields: SnapshotField[] = expected?.fields ?? Object.setPrototypeOf([], null);
         let index = 0;
         const outer = this.field;
-        this.field = (value) => {
-            if (expected) {
-                if (index >= fields.length || !Object.is(value, fields[index]))
-                    throw CONTENT_CHANGED;
-            } else fields[index] = value;
-            index += 1;
-        };
+        this.field = expected
+            ? (value) => {
+                  if (index >= fields.length || !Object.is(value, fields[index]))
+                      throw CONTENT_CHANGED;
+                  index += 1;
+              }
+            : (value) => {
+                  fields[index] = value;
+                  index += 1;
+              };
         try {
             operation();
             if (expected && index !== fields.length) throw CONTENT_CHANGED;
@@ -405,11 +455,10 @@ class ReferenceableWalk {
             !(this.arrayChain ??= Object.getPrototypeOf(Array.prototype) === Object.prototype)
         )
             throw new SourceRejected("prototype", path);
-        const ancestors = this.ancestors;
-        const depth = ancestors.length;
+        const depth = this.ancestors.length;
         if (depth > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
         for (let index = 0; index < depth; index += 1)
-            if (ancestors[index] === value) throw new SourceRejected("cycle", path);
+            if (this.ancestors[index] === value) throw new SourceRejected("cycle", path);
         // The holder chain is the value, then `Array.prototype` for an array, then `Object.prototype` unless the prototype is null.
         this.rejectToJson(value, path);
         if (array && !this.arrayPrototypeToJsonChecked) {
@@ -422,36 +471,39 @@ class ReferenceableWalk {
         }
         const lengthSlot = array ? this.data(value, "length", path) : undefined;
         const length: number = lengthSlot?.value ?? 0;
-        const symbols = Object.getOwnPropertySymbols(value);
-        if (array) {
-            // The declared length is charged before any element read so a huge sparse length fails early.
-            this.spend(length);
-            for (let index = 0; index < symbols.length; index += 1)
-                if (ARRAY_SYMBOLS.includes(symbols[index] as symbol))
+        // The declared length is charged before the key list exists, so a huge array fails before
+        // its index names are materialized.
+        if (array) this.spend(length);
+        // Own keys list every string key before the first symbol, so the symbols are a suffix.
+        const keys = Reflect.ownKeys(value);
+        let names = keys.length;
+        while (names > 0 && typeof keys[names - 1] === "symbol") names -= 1;
+        if (array)
+            for (let index = names; index < keys.length; index += 1)
+                if (ARRAY_SYMBOLS.includes(keys[index] as symbol))
                     throw new SourceRejected("extra_property", path);
-        }
         // Opening and closing brackets; each element or key pays its own separator.
-        this.emit(array ? ARRAY : OBJECT, 1);
+        if (array) this.marker(ARRAY, ARRAY_CHARGE, 1);
+        else this.marker(OBJECT, OBJECT_CHARGE, 1);
         // A null prototype changes what an absent optional field reads as, so the tape records it.
         if (!array) this.scalar(prototype === null);
         if (lengthSlot) {
             this.scalar(length);
             this.attributes(lengthSlot);
         }
-        ancestors.push(value);
+        this.ancestors[depth] = value;
         let count = 0;
         try {
-            for (let index = 0; index < symbols.length; index += 1) {
-                const key = symbols[index] as symbol;
+            for (let at = names; at < keys.length; at += 1) {
+                const key = keys[at] as symbol;
                 const slot = this.data(value, key, path);
-                this.emit(EXTRA_KEY, 0);
+                this.marker(EXTRA_KEY, EXTRA_KEY_CHARGE, 0);
                 this.emit(key, 0);
                 this.attributes(slot);
                 this.walk(slot.value, path);
             }
-            const names = Object.getOwnPropertyNames(value);
-            for (let index = 0; index < names.length; index += 1) {
-                const key = names[index] as string;
+            for (let at = 0; at < names; at += 1) {
+                const key = keys[at] as string;
                 if (array && key === "length") continue;
                 if (array && ARRAY_METHODS.has(key))
                     throw new SourceRejected("extra_property", path);
@@ -461,7 +513,7 @@ class ReferenceableWalk {
                     const index = Number(key);
                     if (Number.isInteger(index) && index >= 0 && String(index) === key)
                         this.data(value, String(count), path, count);
-                    this.emit(EXTRA_KEY, 0);
+                    this.marker(EXTRA_KEY, EXTRA_KEY_CHARGE, 0);
                     this.emit(key, 0);
                     this.attributes(slot);
                     this.walk(slot.value, path, key);
@@ -469,6 +521,7 @@ class ReferenceableWalk {
                 }
                 if (slot.value === undefined) {
                     if (array) throw new SourceRejected("undefined_element", `${path}/${key}`);
+                    this.untaped();
                     continue;
                 }
                 // Object keys render quoted with a colon; array elements pay only their comma.
@@ -480,11 +533,12 @@ class ReferenceableWalk {
                 count += 1;
             }
             if (array && count !== length) this.data(value, String(count), path, count);
-            this.emit(array ? END_ARRAY : END_OBJECT, 1);
+            if (array) this.marker(END_ARRAY, END_ARRAY_CHARGE, 1);
+            else this.marker(END_OBJECT, END_OBJECT_CHARGE, 1);
             this.scalar(count);
             return count;
         } finally {
-            ancestors.length = depth;
+            this.ancestors.length = depth;
         }
     }
 }
@@ -681,38 +735,34 @@ export function historyDigestsEqual(left: HistoryDigest, right: HistoryDigest): 
 
 /**
  * Walks the members of a digested prefix under the prefix's recorded spend, so a changed prefix
- * costs no more than the original. Each walk is standalone; only its spend and hash are kept,
- * and, when the caller asks, the member's tape.
+ * costs no more than the original. Each walk is standalone; its spend and hash are kept, and with
+ * `record` its tape too, in `tapes`, which describe the members only once `matches()` holds.
  */
 class PrefixVerifier {
     private readonly walker: ReferenceableWalk;
     private readonly hasher = new TapeHasher();
+    readonly tapes?: MessageContentSnapshot[];
 
-    constructor(readonly expected: HistoryDigest) {
+    constructor(
+        readonly expected: HistoryDigest,
+        record = false,
+    ) {
         this.walker = new ReferenceableWalk(expected.bytes, false);
+        if (record) this.tapes = [];
     }
 
-    /**
-     * Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. With `tape`,
-     * returns the member's snapshot as an ordinary capture records it.
-     */
-    walk(value: unknown, index: number, tape?: true): MessageContentSnapshot | undefined {
+    /** Throws SourceRejected or CaptureBudgetExceeded when the member cannot match. */
+    walk(value: unknown, index: number): void {
         const before = this.walker.bytes;
-        // Private tapes have no inherited setters. Returned tapes regain the ordinary array API.
-        const fields: SnapshotField[] | undefined = tape && Object.setPrototypeOf([], null);
-        const push = this.hasher.push;
-        this.walker.stream(
-            () => this.walker.walk(value, `/${index}`),
-            fields
-                ? (field) => {
-                      fields[fields.length] = field;
-                      push(field);
-                  }
-                : push,
-        );
-        const bytes = this.walker.bytes - before;
-        this.hasher.end(bytes);
-        return fields && { fields: Object.setPrototypeOf(fields, Array.prototype), bytes };
+        if (this.tapes) {
+            const tape = this.walker.recordOrCompare(() => this.walker.walk(value, `/${index}`));
+            tape.bytes = this.walker.bytes - before;
+            this.hasher.add(tape as TapedMember);
+            defineSlot(this.tapes, this.tapes.length, tape);
+            return;
+        }
+        this.walker.stream(() => this.walker.walk(value, `/${index}`), this.hasher.push);
+        this.hasher.end(this.walker.bytes - before);
     }
 
     matches(): boolean {
@@ -727,15 +777,29 @@ class PrefixVerifier {
 export interface CapturedMessages {
     members: readonly unknown[];
     /**
-     * Members covered by `verified` have a tape only when `verifiedTaped`; without one, their
-     * recheck walks the digest.
+     * Members covered by `verified` have a tape only when `verifiedTaped`; otherwise their recheck
+     * walks the digest.
      */
     snapshots: readonly (MessageContentSnapshot | undefined)[];
     rootSnapshot: MessageContentSnapshot;
     /** The prior digest the leading members matched, when the capture was given one. */
     verified?: HistoryDigest;
-    /** The verified members kept their tapes, charged to the capture's lease. */
-    verifiedTaped?: boolean;
+    /**
+     * The verified members keep the tapes their verification walked, charged at `verified.bytes`
+     * as a hold a short reservation may reclaim, which clears this flag and the tapes on the
+     * capture `captureHistory` returned. A copy of that capture keeps its flag after a reclaim, so
+     * only the returned object is rechecked while the lease lives.
+     */
+    verifiedTaped?: true;
+    /**
+     * The walk's spend on the root and every member, `verified.bytes` included; a recheck of
+     * identical content spends at most this, the digest's own walk taking `verified.bytes` of it.
+     */
+    bytes: number;
+}
+
+interface WalkedMessages extends CapturedMessages {
+    snapshots: (MessageContentSnapshot | undefined)[];
 }
 
 export interface CapturedHistory extends CapturedMessages {
@@ -762,9 +826,16 @@ export function captureReserved(
     unchanged?: { values: readonly unknown[]; capture: CapturedMessages },
 ): { capture: CapturedMessages; bytes: number } | undefined {
     if (lease.signal.aborted) return undefined;
+    // The walk records into free headroom; held headroom is reclaimed only as the walk needs it.
     const walker = new ReferenceableWalk(
-        Math.min(lease.remainingBytes, TRANSFORM_CAPTURE_MAX_BYTES),
+        Math.min(lease.freeBytes, TRANSFORM_CAPTURE_MAX_BYTES),
         false,
+        {
+            extend: (needed) =>
+                needed <= TRANSFORM_CAPTURE_MAX_BYTES && lease.reclaim(needed)
+                    ? Math.min(lease.freeBytes, TRANSFORM_CAPTURE_MAX_BYTES)
+                    : undefined,
+        },
     );
     const reuse = new Map<unknown, MessageContentSnapshot | undefined>();
     for (let index = 0; unchanged && index < unchanged.values.length; index += 1)
@@ -781,11 +852,13 @@ export function captureReserved(
 }
 
 /**
- * With a `prefix`, capture charges the root and members after the prefix and verifies leading
- * members against the digest. With `tapePrefix`, for a capture whose rechecks compare content,
- * and headroom in the lease for the prefix's recorded spend, the verified members also keep their
- * tapes for this pass and that spend is reserved, so a recheck compares tapes. A mismatch, or no
- * member after the prefix, returns `undefined`.
+ * With a `prefix`, capture charges only the root and members after the prefix; it verifies
+ * leading members instead of retaining them. A mismatch, or no member after the prefix, returns
+ * `undefined`. With `tapePrefix` and headroom for the prefix's recorded spend, the verification
+ * also records each leading member's tape; once the digest matches, the capture holds that spend
+ * in the same synchronous section, the exact amount a fresh walk of the unchanged members spends,
+ * and keeps the tapes. The hold is reclaimable, so the tapes never cost a later reservation its
+ * headroom. Without free headroom the capture keeps no tapes, and rechecks walk the digest.
  */
 export function captureHistory(messages: unknown, lease: CaptureLease): CapturedHistory;
 export function captureHistory(
@@ -800,25 +873,17 @@ export function captureHistory(
     prefix?: HistoryDigest,
     options?: { tapePrefix?: boolean },
 ): CapturedHistory | undefined {
-    const verifier = prefix && new PrefixVerifier(prefix);
-    const tapePrefix =
-        prefix !== undefined &&
-        options?.tapePrefix === true &&
-        prefix.bytes <= lease.remainingBytes;
+    // The walk reserves nothing, so the free headroom read here is the headroom the hold meets.
+    const record =
+        prefix !== undefined && options?.tapePrefix === true && lease.freeBytes >= prefix.bytes;
+    const verifier = prefix && new PrefixVerifier(prefix, record);
     const taped: TapedMember[] = [];
-    let captured: CapturedMessages;
+    let captured: WalkedMessages;
     try {
-        captured = walkCapture(messages, lease, { taped, verifier, tapePrefix });
+        captured = walkCapture(messages, lease, { taped, verifier });
     } catch (error) {
         if (error === PREFIX_CHANGED) return undefined;
         throw error;
-    }
-    // The walk and this reservation form one synchronous section, as in `captureReserved`.
-    const verifiedTaped = tapePrefix && lease.reserve(prefix.bytes);
-    if (prefix && !verifiedTaped) {
-        const snapshots = captured.snapshots as (MessageContentSnapshot | undefined)[];
-        for (let index = 0; index < prefix.count; index += 1)
-            defineSlot(snapshots, index, undefined);
     }
     const hasher = verifier?.continueHashing() ?? new TapeHasher();
     for (let index = 0; index < taped.length - 1; index += 1)
@@ -830,22 +895,39 @@ export function captureHistory(
         return alone.digest();
     };
     const boundary = single(taped[0]);
-    return {
+    const history: CapturedHistory = {
         ...captured,
         verified: prefix,
-        ...(verifiedTaped ? { verifiedTaped } : {}),
+        // The own slot keeps flag reads and writes independent of inherited properties.
+        verifiedTaped: undefined,
         history: hasher.digest(),
         terminal: taped.length > 1 ? single(taped[taped.length - 1]) : boundary,
         boundary,
     };
+    const tapes = verifier?.tapes;
+    // The tapes fill the verified slots of the array the walk built, so the hold retains one
+    // snapshots array; a reclaim clears those slots and the flag.
+    const held =
+        tapes !== undefined &&
+        prefix !== undefined &&
+        lease.reserveReclaimable(prefix.bytes, () => {
+            for (let index = 0; index < tapes.length; index += 1)
+                defineSlot(captured.snapshots, index, undefined);
+            history.verifiedTaped = undefined;
+        });
+    if (!held) return history;
+    for (let index = 0; index < tapes.length; index += 1)
+        defineSlot(captured.snapshots, index, tapes[index]);
+    history.verifiedTaped = true;
+    return history;
 }
 
 /** `digest.verifier` validates leading members; a mismatch throws `PREFIX_CHANGED`. */
 function walkCapture(
     messages: unknown,
     lease: CaptureLease,
-    digest: { taped: TapedMember[]; verifier?: PrefixVerifier; tapePrefix?: boolean },
-): CapturedMessages {
+    digest: { taped: TapedMember[]; verifier?: PrefixVerifier },
+): WalkedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
     return walkMembers(
@@ -858,26 +940,24 @@ function walkCapture(
 function walkMembers(
     walker: ReferenceableWalk,
     messages: unknown,
-    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier; tapePrefix?: boolean },
+    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
     reuse?: ReadonlyMap<unknown, MessageContentSnapshot | undefined>,
-): CapturedMessages {
+): WalkedMessages {
     const verifier = digest?.verifier;
     const verifiedCount = verifier?.expected.count ?? 0;
-    const tapePrefix = digest?.tapePrefix === true ? true : undefined;
     const members: unknown[] = [];
     const snapshots: (MessageContentSnapshot | undefined)[] = [];
     const rootSnapshot = walker.recordOrCompare(() => {
         const count = walker.members(messages, (slot, index) => {
             if (verifier && index < verifiedCount) {
-                let snapshot: MessageContentSnapshot | undefined;
                 try {
-                    snapshot = verifier.walk(slot.value, index, tapePrefix);
+                    verifier.walk(slot.value, index);
                 } catch (error) {
                     if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
                         throw PREFIX_CHANGED;
                     throw error;
                 }
-                defineSlot(snapshots, index, snapshot);
+                defineSlot(snapshots, index, undefined);
             } else {
                 if (index === verifiedCount && verifier && !verifier.matches())
                     throw PREFIX_CHANGED;
@@ -899,14 +979,21 @@ function walkMembers(
         });
         if (verifier && count <= verifiedCount) throw PREFIX_CHANGED;
     });
-    return { members, snapshots, rootSnapshot };
+    return {
+        members,
+        snapshots,
+        rootSnapshot,
+        bytes: walker.bytes + (verifier?.expected.bytes ?? 0),
+    };
 }
 
 /**
  * Membership requires own data descriptors. Content edits to members at or past `compared` can
  * pass when those members lie outside the verified prefix and retain their identity and position.
- * Verified members are always compared: against their tapes when the capture kept them, otherwise
- * against the digest.
+ * Every compared member is walked again, descriptors included, under the capture's spend, so
+ * grown content returns `false` within that bound; reads of keys whose `undefined` value JSON
+ * omits spend a separate allowance. A verified member compares against its tape when the capture
+ * kept one, and against the digest otherwise; both require the digest's spend over the prefix.
  */
 export function capturedMessagesUnchanged(
     live: unknown,
@@ -914,12 +1001,20 @@ export function capturedMessagesUnchanged(
     compared: number = captured.members.length,
 ): boolean {
     try {
-        const walker = new ReferenceableWalk(TRANSFORM_CAPTURE_MAX_BYTES, false);
-        const verifiedCount = captured.verified?.count ?? 0;
         const verifier =
-            captured.verified && captured.verifiedTaped !== true
+            captured.verified && !captured.verifiedTaped
                 ? new PrefixVerifier(captured.verified)
                 : undefined;
+        // The digest's walk spends the verified share of the capture's spend on its own walker.
+        const walker = new ReferenceableWalk(
+            Math.min(captured.bytes - (verifier?.expected.bytes ?? 0), TRANSFORM_CAPTURE_MAX_BYTES),
+            false,
+            { untapedMaxBytes: TRANSFORM_CAPTURE_MAX_BYTES },
+        );
+        const verifiedCount = captured.verified?.count ?? 0;
+        // Tape replay validates the verified prefix through snapshot comparisons and matching
+        // captured byte spend.
+        let verifiedSpend = 0;
         walker.recordOrCompare(() => {
             const count = walker.members(live, (slot, index) => {
                 if (
@@ -927,19 +1022,28 @@ export function capturedMessagesUnchanged(
                     !Object.is(slot.value, captured.members[index])
                 )
                     throw CONTENT_CHANGED;
-                if (verifier && index < verifiedCount) {
+                const verifiedMember = index < verifiedCount;
+                if (verifiedMember && verifier) {
                     verifier.walk(slot.value, index);
                     return;
                 }
-                if (index >= compared && index >= verifiedCount) return;
+                if (!verifiedMember && index >= compared) return;
                 // Bounds precede indexing so a short record cannot read an inherited slot.
                 const snapshot =
                     index < captured.snapshots.length ? captured.snapshots[index] : undefined;
                 if (!snapshot) throw CONTENT_CHANGED;
+                if (!verifiedMember) {
+                    walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`), snapshot);
+                    return;
+                }
+                const before = walker.bytes + walker.untapedBytes;
                 walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`), snapshot);
+                verifiedSpend += walker.bytes + walker.untapedBytes - before;
             });
             if (count !== captured.members.length) throw CONTENT_CHANGED;
             if (verifier && !verifier.matches()) throw CONTENT_CHANGED;
+            if (verifiedCount > 0 && !verifier && verifiedSpend !== captured.verified?.bytes)
+                throw CONTENT_CHANGED;
         }, captured.rootSnapshot);
         return true;
     } catch (error) {
@@ -956,19 +1060,46 @@ export function capturedMessagesUnchanged(
 export interface CaptureLease {
     readonly signal: AbortSignal;
     readonly chargedBytes: number;
-    /** Owner-wide headroom shared by every lease, not this lease's own remainder; zero once released. */
+    /**
+     * Owner-wide headroom shared by every lease, reclaimable holds included, not this lease's
+     * own remainder; zero once released.
+     */
     readonly remainingBytes: number;
+    /** Owner-wide headroom no hold occupies, which a new hold draws on; zero once released. */
+    readonly freeBytes: number;
+    /** Reserves `bytes`, reclaiming other holds first when free headroom is short. */
     reserve(bytes: number): boolean;
+    /**
+     * `reclaim` reclaims holds in acquisition order until owner-wide free headroom reaches
+     * `bytes`; when free and held headroom total less than `bytes`, `reclaim` returns `false` and
+     * preserves all holds.
+     */
+    reclaim(bytes: number): boolean;
+    /**
+     * Reserves `bytes` from free headroom as a hold any later reservation of any lease may
+     * reclaim; a reclaim calls `reclaim` synchronously, then returns the bytes. One hold per lease.
+     */
+    reserveReclaimable(bytes: number, reclaim: () => void): boolean;
     /** Returns every byte this lease holds to the owner and keeps the lease live; the caller must hold no charged capture at the call. */
     refund(): void;
     requestCancel(reason: string): void;
     release(): void;
 }
 
+interface ReclaimableHold {
+    readonly bytes: number;
+    readonly reclaim: () => void;
+    /** Takes the hold's bytes off its lease's charge. */
+    readonly returnBytes: () => void;
+}
+
 /** TransformCaptureAdmission permits one live lease per session. */
 export class TransformCaptureAdmission {
     private readonly leases = new Map<string, CaptureLease>();
     private chargedBytesTotal = 0;
+    /** Optional charges, such as a capture's verified tapes, that a short reservation takes back. */
+    private readonly holds = new Map<CaptureLease, ReclaimableHold>();
+    private heldBytes = 0;
     constructor(
         private readonly limits = {
             maxPasses: TRANSFORM_CAPTURE_MAX_PASSES,
@@ -982,8 +1113,32 @@ export class TransformCaptureAdmission {
     get chargedBytes(): number {
         return this.chargedBytesTotal;
     }
+    /** Headroom any reservation can reach: free bytes plus every reclaimable hold. */
     get remainingBytes(): number {
+        return this.freeBytes + this.heldBytes;
+    }
+    private get freeBytes(): number {
         return this.limits.maxBytes - this.chargedBytesTotal;
+    }
+
+    /** Returns `holder`'s hold to free headroom, running its reclaim when `reclaim` is set. */
+    private dropHold(holder: CaptureLease, reclaim: boolean): void {
+        const hold = this.holds.get(holder);
+        if (!hold) return;
+        this.holds.delete(holder);
+        this.heldBytes -= hold.bytes;
+        this.chargedBytesTotal -= hold.bytes;
+        hold.returnBytes();
+        if (reclaim) hold.reclaim();
+    }
+
+    /** Reclaims holds in the order they were taken until `needed` bytes are free. */
+    private reclaimFor(needed: number): void {
+        // Deleting the visited entry leaves a Map's iteration over the remaining entries intact.
+        for (const holder of this.holds.keys()) {
+            if (this.freeBytes >= needed) return;
+            this.dropHold(holder, true);
+        }
     }
 
     admit(
@@ -1009,19 +1164,49 @@ export class TransformCaptureAdmission {
             get remainingBytes() {
                 return released ? 0 : owner.remainingBytes;
             },
+            get freeBytes() {
+                return released ? 0 : owner.freeBytes;
+            },
             reserve(additional) {
-                if (
-                    released ||
-                    !Number.isSafeInteger(additional) ||
-                    additional < 0 ||
-                    additional > owner.remainingBytes
-                )
-                    return false;
+                if (!lease.reclaim(additional)) return false;
                 owner.chargedBytesTotal += additional;
                 bytes += additional;
                 return true;
             },
+            reclaim(needed) {
+                if (
+                    released ||
+                    !Number.isSafeInteger(needed) ||
+                    needed < 0 ||
+                    needed > owner.remainingBytes
+                )
+                    return false;
+                owner.reclaimFor(needed);
+                return true;
+            },
+            reserveReclaimable(additional, reclaim) {
+                if (
+                    released ||
+                    owner.holds.has(lease) ||
+                    !Number.isSafeInteger(additional) ||
+                    additional < 0 ||
+                    additional > owner.freeBytes
+                )
+                    return false;
+                owner.chargedBytesTotal += additional;
+                bytes += additional;
+                owner.heldBytes += additional;
+                owner.holds.set(lease, {
+                    bytes: additional,
+                    reclaim,
+                    returnBytes: () => {
+                        bytes -= additional;
+                    },
+                });
+                return true;
+            },
             refund() {
+                owner.dropHold(lease, false);
                 owner.chargedBytesTotal -= bytes;
                 bytes = 0;
             },
@@ -1031,6 +1216,7 @@ export class TransformCaptureAdmission {
             release() {
                 if (released) return;
                 released = true;
+                owner.dropHold(lease, false);
                 owner.chargedBytesTotal -= bytes;
                 bytes = 0;
                 owner.leases.delete(sessionId);

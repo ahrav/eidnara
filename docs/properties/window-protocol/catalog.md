@@ -1894,3 +1894,19 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Dated note (2026-10-13, #996)
+
+Dated note, 2026-10-13, #996 (spec #988 milestone U6, TP-P11 to TP-P13): a
+public window's capture keeps the tape of each member its retained digest
+verifies, from the walk the digest confirmed, and reserves the prefix's
+recorded spend for those tapes in the same synchronous section; that spend is
+the exact amount a fresh walk of the unchanged members charges. WP-P12's
+wire-build, series-restart, publish, and fail-open rechecks still walk every
+root and member descriptor, with the proxy, accessor, prototype, `toJSON`, and
+`then` checks, and compare verified members against those tapes in place of a
+second digest; each recheck runs under the capture's own spend, so grown
+content returns false within that bound. A refused reservation leaves the
+tapes out and the rechecks compare the digest. Pi's private window rechecks
+member identity as before. WP-P13, WP-P22, and WP-P23 keep their checks; the
+re-evidence is in the dated sections of their evidence files.
