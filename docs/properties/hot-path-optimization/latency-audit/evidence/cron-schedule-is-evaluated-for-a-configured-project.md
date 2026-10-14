@@ -91,6 +91,18 @@ route in `MODULE` authority. No existing test records the marker.
   names; this record supplies the witness rather than the exemption.
 - Conclusion: resolved with answer - constructible; the witness is recorded.
 
+### Q: Is the marker reached? (at the field-jumping head)
+
+- Sources examined: [the marker test][marker-head] and
+  [`due_projects`][due-projects-head].
+- Findings: The test builds a `MODULE`-authority project with a
+  `*/15 * * * *` schedule through the `project` helper, ticks a
+  `ManualClock` scheduler once, and reads the scheduler's `next_due` entry:
+  it holds the schedule and `T0 + 15 min`, an instant other than `i64::MAX`.
+  The assertion message is the constant marker.
+- Missing evidence: None.
+- Conclusion: resolved with answer - the marker fires.
+
 [sched-idle]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L36
 [sched-tick]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L244-L261
 [sched-due-projects]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L265-L296
@@ -110,3 +122,5 @@ route in `MODULE` authority. No existing test records the marker.
 [occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L212-L218
 [note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L228-L239
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
+[marker-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
+[due-projects-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351-L385

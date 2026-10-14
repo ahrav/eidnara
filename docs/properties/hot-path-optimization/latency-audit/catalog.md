@@ -2362,38 +2362,53 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - Vixie semantics, extreme instants, and a fixture-zone
-golden exist; none covers DST or an unsatisfiable expression.
+Exercised: yes - [The differential tests][t-cron-diff] compare the
+field-jumping search with a frozen copy of the minute stepper over random
+expressions, nine zones, and random instants and caps; at spring-forward and
+fall-back instants; at the full cap for calendar-impossible expressions; at a
+cap one minute short of an occurrence; across every transition of 1900 and
+2026 in each zone; and at the edges of chrono's representable range.
 Guarantee: A field-jumping search never fires a schedule at a different
 instant, never fires one the stepper would never fire, and never runs past
 the cap.
 Check: `always` - For every expression [`parse_cron`][parse] accepts, every
-`after_ms`, every `max_search_ms`, and both `Utc` and `Local` across DST
-transitions, a replacement returns the same `Option<i64>` as a frozen
-test-only copy of [`next_occurrence`][stepper] as it reads at HEAD (the
-function itself is replaced by the change and cannot remain the oracle),
-including `None` for
-unsatisfiable-but-valid expressions within the cap and `None` at
-unrepresentable instants; [`next_cron_occurrence`][occurrence] keeps the
-`ms != 0` filter. `always` because the scheduler consumes the value directly
-as its due time.
+`after_ms`, every `max_search_ms`, and every zone, [`next_occurrence`][stepper]
+returns the same `Option<i64>` as the test-only
+[`frozen_minute_stepper`][t-cron-frozen], a verbatim copy of the minute stepper
+it replaced, including `None` for unsatisfiable-but-valid expressions within
+the cap and `None` at unrepresentable instants;
+[`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter. The search
+visits only epoch minutes the stepper visits: from each minute it
+[skips][cron-skip] to the next civil midnight when the date fails, to the next
+civil hour when the hour fails, and to the next listed minute otherwise, and
+[`advance_while_offset_holds`][cron-advance] stops the jump at the first minute
+whose offset differs, found by probes every [`OFFSET_PROBE_MS`][cron-probe]
+(one hour) and bisection. `always` because the scheduler consumes the value
+directly as its due time.
 Fault/timing angle: The stepper evaluates local civil fields for each epoch
 minute, so a spring-forward gap skips that day and a fall-back overlap
-matches the earlier instant; `parse_cron` accepts day-of-month 1..31
-independent of month, so `0 0 30 2 *` is valid and unsatisfiable and pays
-the full [`MAX_SEARCH_MS`][cap] (4 x 366 days) on the scheduler task
-([`next_due`][sched-due]); [`matches_day`][vixie] implements Vixie OR
-semantics.
-Required faults and enabling state: A `Local` zone with DST; expressions such
-as `30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
-`0 0 29 2 *`; `after_ms` at the `i64` extremes.
+matches the earlier instant first; the jump is exact while the offset holds,
+because civil time then moves with epoch time. It treats the offset as held
+between two probes that report the same offset, so it relies on no zone
+changing its offset and changing it back within one hour; the transition
+sweep finds no such window in the nine zones for 1900 and 2026.
+`parse_cron` accepts day-of-month 1..31 independent of month, so
+`0 0 30 2 *` is valid and unsatisfiable and searches the full
+[`MAX_SEARCH_MS`][cap] (4 x 366 days) on the scheduler task
+([`next_due`][sched-due]); the jump reaches the cap with about 35,000 offset
+probes instead of 2.1 million minute evaluations. [`matches_day`][vixie]
+implements Vixie OR semantics.
+Required faults and enabling state: A zone with DST; expressions such as
+`30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
+`0 0 29 2 *`; `after_ms` at the `i64` extremes and at chrono's range edges.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
-The parser, the stepper, the cap, the conditional-note ceiling
-([`:236-239`][note-cap]), and the config acceptance
+The parser, the search, the cap, the conditional-note ceiling
+([`:303-307`][note-cap]), and the config acceptance
 ([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the Vixie test, the extreme-instant test, and the golden; all unaudited.
+list the differential tests, the Vixie test, the extreme-instant test, and
+the golden; all unaudited.
 Impact: A scheduled task fires at the wrong instant or never.
 Open questions:
 
@@ -2723,12 +2738,12 @@ Open questions:
 Type: reachability
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - The scheduler tests drive [`next_due`][sched-due]
-through a [`ScriptedHost`][sched-scripted] with a `*/15 * * * *` project and
-a [`ManualClock`][sched-clock]
-([`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] and its
-siblings); no campaign marker records that a tick evaluated a configured
-cron, and the conditional-note consumer has the fixture-zone golden only.
+Exercised: yes - [`a_tick_evaluates_the_configured_cron_schedule_of_a_module_project`][t-sched-marker]
+reaches the marker: a `ScriptedHost` project in `MODULE` authority with a
+`*/15 * * * *` schedule, ticked on a [`ManualClock`][sched-clock], leaves the
+scheduler's `next_due` entry for that project holding the schedule and an
+instant other than `i64::MAX`; [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron]
+and its siblings drive the same path to a run.
 Guarantee: A schedule-preservation campaign reaches a scheduler tick that
 evaluates a configured cron, so W6's differential runs on instants the
 scheduler consumes rather than on a scheduler that never sees a schedule.
@@ -2760,8 +2775,8 @@ Confidence: high - [Evidence](evidence/cron-schedule-is-evaluated-for-a-configur
 The filter, the `next_due` call sites, the default, and the fixtures are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the scheduler cron test beside the stepper tests; all unaudited; none
-records a marker.
+list the marker test and the scheduler cron test beside the stepper tests;
+all unaudited.
 Impact: W6 passes on a scheduler that never evaluates a schedule.
 Open questions: None.
 
@@ -2863,14 +2878,14 @@ oracle. The following notes define the evidence to request, not tickets.
 | [W3][w3] | Whole-module scan and SOFT/tag/nudge accounting checks exist. Recheck the declared-bytes sum if cache sizing changes. |
 | [W4][w4] | Differential bounded-versus-whole over rules, limits, and edge-margin inputs. |
 | [W5][w5] | Reuse the frozen reference; add a format-change-across-restart case. |
-| [W6][w6] | Differential against the stepper over DST and unsatisfiable expressions. |
+| [W6][w6] | Done: the differential tests compare the field-jumping search with the frozen stepper over DST and unsatisfiable expressions. |
 | [W7][w7] | Done: the memo tests edit tiers and the override between loads and alternate two project roots. |
 | [W8][w8] | Abort between commit and bookkeeping; read the next pass's derived inputs. |
 | [W9][w9] | Frozen direct-estimator reference and threshold comparison exist; preserve them when changing pressure logic. |
 | [W10][w10] | Three active witnesses exist; the dead update-count witness is retired with its disjunct. |
 | [W11][w11] | Trigger an abort through the interleave hook or its successor. |
 | [W12][w12] | Panic with a sentinel inside a `kernel_routes::blocking` closure from a child process; capture stderr and the terminal; repeat on the runtime worker as the control. |
-| [W13][w13] | Give a `ScriptedHost` project a schedule and tick past its instant; record the project, schedule, `now_ms`, and computed instant at the `next_due` call. |
+| [W13][w13] | Done: the marker test ticks a scheduled `ScriptedHost` project and reads the computed instant from the scheduler. |
 
 Timing schedules for C3, T3, T4, W8, and W11 may need
 `/testing:deterministic-simulation-testing` after seam selection. Existing
@@ -3278,11 +3293,11 @@ evaluation of this area and its disposition are recorded in
 [cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
 [parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L125
 [vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L152
-[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L166
-[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L208
-[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L216
-[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L236-L239
-[sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L454
+[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L176
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L276
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L284
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L303-L307
+[sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
 [sched-default]: ../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
 [eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4880-L4889
@@ -3326,13 +3341,19 @@ evaluation of this area and its disposition are recorded in
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38750
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
-[sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L281
-[sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L302
+[sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327
+[sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351
 [sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L72
 [sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L536
 [sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L626
-[sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L462
-[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
+[sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
+[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
+[t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1705-L1857
+[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1641
+[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L203
+[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L231
+[cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L167
 [sched-projects]: ../../../../crates/daemon/src/lib.rs#L14662
 [sched-authority]: ../../../../crates/daemon/src/lib.rs#L14681-L14686
 [sched-filter]: ../../../../crates/daemon/src/lib.rs#L14698-L14711

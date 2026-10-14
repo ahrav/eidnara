@@ -510,9 +510,15 @@ directory sync fails, which leaves the count unknown.
 | [`optimized_matches_frozen_reference`][diff-small] | Small-window byte equality. | unaudited |
 | [`history_summarizer_chunk_golden_fixture_matches_builder`][t-golden] | Chunk output and every truncation case from `testdata/history_summarizer-chunk-golden.json`; each truncation input must exceed its budget before exact output comparison. | unaudited |
 | [`truncation_uses_marker_and_keeps_multibyte_boundaries`][t-marker] | Marker suffix, budget, scalar-boundary prefix. | unaudited |
+| [`the_field_jumping_search_matches_the_frozen_minute_stepper`][t-cron-prop] | Property test: random expressions, nine zones, `after_ms` in 1900..2100, caps up to 14 days; the search equals the frozen stepper. | unaudited |
+| [`a_spring_forward_gap_skips_the_day_and_a_fall_back_overlap_fires_the_earlier_instant`][t-cron-dst] | New York spring gap and both fall-back instants, Lord Howe and Kathmandu offsets, and Apia's skipped day, each equal to the frozen stepper. | unaudited |
+| [`calendar_impossible_expressions_return_none_at_the_search_cap`][t-cron-cap] | `0 0 30 2 *` and `0 0 31 4,6,9,11 *` return `None` at the full cap; February 29 is found; a cap one minute short returns `None`. | unaudited |
+| [`the_jump_matches_the_stepper_across_every_transition_of_a_zone_year`][t-cron-sweep] | Twelve-hour sweep of 1900 and 2026 in nine zones, with day-of-week expressions that jump to midnight across transitions. | unaudited |
+| [`the_jump_matches_the_stepper_at_the_edges_of_the_representable_range`][t-cron-edge] | Chrono's minimum and maximum instants and the `i64` extremes. | unaudited |
 | [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie] | Vixie `*`-prefix semantics. | unaudited |
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes. | unaudited |
 | [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
+| [`a_tick_evaluates_the_configured_cron_schedule_of_a_module_project`][t-sched-marker] | The `cron-schedule-is-evaluated-for-a-configured-project` marker: a tick leaves a `next_due` entry with the schedule and a finite instant. | unaudited |
 | [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] | A `*/15 * * * *` project runs at its instant and not before; the same instant does not run twice. | unaudited |
 | [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; an override rewrite with its mtime restored, a project-tier edit, a user-tier edit, and a removed tier each reach the next load. | unaudited |
 | [`the_merged_memo_reemits_warnings_and_keeps_project_raise_only_rules`][t-memo-raise] | Alternating a hostile and a quiet project root on one cache keeps each root's merge, refuses the hostile tier's raise-only and user-only keys, and repeats the per-key warnings on a memo hit. | unaudited |
@@ -804,6 +810,12 @@ not a claim that no related check exists anywhere in the repository.
 [t-golden]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1773
 [t-marker]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1744
 [t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1585
+[t-cron-prop]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1816
+[t-cron-dst]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1705
+[t-cron-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1742
+[t-cron-sweep]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1833
+[t-cron-edge]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1767
+[t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
 [t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1571
 [t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721

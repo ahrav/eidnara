@@ -4,7 +4,7 @@
 //! supplied timezone's wall clock. Reducers clone input state and return updated
 //! state without I/O.
 
-use chrono::{Datelike, TimeZone, Timelike};
+use chrono::{Datelike, Offset, TimeZone, Timelike};
 use serde::Deserialize;
 
 /// Compiled-check policy version; other versions force recompilation.
@@ -160,8 +160,18 @@ fn matches_day(cron: &ParsedCron, dom_value: u32, dow_value: u32) -> bool {
     }
 }
 
+/// Epoch spacing of the offset probes a jump takes. A jump treats the zone's
+/// offset as constant between two probes that report the same offset, so it
+/// relies on every zone keeping each offset for longer than this between
+/// transitions.
+const OFFSET_PROBE_MS: i64 = 60 * MINUTE_MS;
+
 /// `next_occurrence` returns the first instant strictly after `after_ms` whose local civil time in `tz` matches `cron`.
-/// Evaluating each epoch-minute candidate by local civil fields handles DST transitions.
+/// It visits the same epoch minutes the minute stepper would, but jumps over every
+/// minute whose civil fields cannot match: to the next civil midnight when the date
+/// fails, to the next civil hour when the hour fails, and to the next listed minute
+/// otherwise. Civil time moves with epoch time while the offset holds, so a jump
+/// stops early at the first minute whose offset differs, and the search resumes there.
 /// `next_occurrence` returns `None` when no match occurs by `after_ms + min(MAX_SEARCH_MS, max_search_ms)`.
 fn next_occurrence<Tz: TimeZone>(
     cron: &ParsedCron,
@@ -175,20 +185,78 @@ fn next_occurrence<Tz: TimeZone>(
         .checked_add(MINUTE_MS)?;
     let cap_ms = after_ms.saturating_add(max_search_ms.clamp(0, MAX_SEARCH_MS));
     while cursor_ms <= cap_ms {
-        // Each representable epoch instant maps to one local civil time.
-        // `timestamp_millis_opt` returns no civil time outside chrono's representable date range.
-        // An unrepresentable `cursor_ms` makes `next_occurrence` return `None` rather than panic.
+        // `timestamp_millis_opt` returns no civil time outside chrono's representable
+        // date range; an unrepresentable `cursor_ms` makes the search return `None`.
         let civil = tz.timestamp_millis_opt(cursor_ms).single()?;
-        if mask_has(cron.minute, civil.minute())
-            && mask_has(cron.hour, civil.hour())
-            && mask_has(cron.month, civil.month())
-            && matches_day(cron, civil.day(), civil.weekday().num_days_from_sunday())
-        {
+        let skip_minutes = minutes_until_candidate(cron, &civil);
+        if skip_minutes == 0 {
             return Some(cursor_ms);
         }
-        cursor_ms = cursor_ms.checked_add(MINUTE_MS)?;
+        let target_ms = cursor_ms.checked_add(skip_minutes * MINUTE_MS)?;
+        cursor_ms = advance_while_offset_holds(tz, cursor_ms, civil.offset().fix(), target_ms);
     }
     None
+}
+
+/// Whole minutes from `civil` to the next civil minute that could match `cron`
+/// while the offset holds, or zero when `civil` matches.
+fn minutes_until_candidate<Tz: TimeZone>(cron: &ParsedCron, civil: &chrono::DateTime<Tz>) -> i64 {
+    let minute = civil.minute();
+    let minute_of_day = i64::from(civil.hour() * 60 + minute);
+    if !mask_has(cron.month, civil.month())
+        || !matches_day(cron, civil.day(), civil.weekday().num_days_from_sunday())
+    {
+        return 24 * 60 - minute_of_day;
+    }
+    if !mask_has(cron.hour, civil.hour()) {
+        return 60 - i64::from(minute);
+    }
+    if mask_has(cron.minute, minute) {
+        return 0;
+    }
+    // Bits above 59 are never set, so an empty remainder means the next hour.
+    let later = (cron.minute >> minute) >> 1;
+    if later == 0 {
+        60 - i64::from(minute)
+    } else {
+        i64::from(later.trailing_zeros()) + 1
+    }
+}
+
+/// The first epoch minute in `(from_ms, target_ms]` whose offset differs from
+/// `offset` or that has no civil time, or `target_ms` when none does. Probes
+/// run every [`OFFSET_PROBE_MS`] and at `target_ms`; a probe that reports a
+/// change is narrowed by bisection to the first minute after the last probe
+/// that held.
+fn advance_while_offset_holds<Tz: TimeZone>(
+    tz: &Tz,
+    from_ms: i64,
+    offset: chrono::FixedOffset,
+    target_ms: i64,
+) -> i64 {
+    let holds = |ms: i64| {
+        tz.timestamp_millis_opt(ms)
+            .single()
+            .is_some_and(|civil| civil.offset().fix() == offset)
+    };
+    let mut held_ms = from_ms;
+    while held_ms < target_ms {
+        let probe_ms = held_ms.saturating_add(OFFSET_PROBE_MS).min(target_ms);
+        if !holds(probe_ms) {
+            let mut changed_ms = probe_ms;
+            while changed_ms - held_ms > MINUTE_MS {
+                let middle_ms = held_ms + (changed_ms - held_ms) / MINUTE_MS / 2 * MINUTE_MS;
+                if holds(middle_ms) {
+                    held_ms = middle_ms;
+                } else {
+                    changed_ms = middle_ms;
+                }
+            }
+            return changed_ms;
+        }
+        held_ms = probe_ms;
+    }
+    target_ms
 }
 
 /// `next_due_at_ms` returns `None` when parsing fails or no occurrence is found within the search cap.
@@ -1564,6 +1632,228 @@ mod tests {
             "scalar-counted truncation would exceed the JS bound"
         );
         assert!(reason.is_char_boundary(reason.len()));
+    }
+
+    const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
+
+    /// The minute stepper as it read before the field-jumping search replaced
+    /// it, kept verbatim as the differential oracle.
+    fn frozen_minute_stepper<Tz: TimeZone>(
+        cron: &ParsedCron,
+        after_ms: i64,
+        max_search_ms: i64,
+        tz: &Tz,
+    ) -> Option<i64> {
+        let mut cursor_ms = after_ms
+            .div_euclid(MINUTE_MS)
+            .checked_mul(MINUTE_MS)?
+            .checked_add(MINUTE_MS)?;
+        let cap_ms = after_ms.saturating_add(max_search_ms.clamp(0, MAX_SEARCH_MS));
+        while cursor_ms <= cap_ms {
+            let civil = tz.timestamp_millis_opt(cursor_ms).single()?;
+            if mask_has(cron.minute, civil.minute())
+                && mask_has(cron.hour, civil.hour())
+                && mask_has(cron.month, civil.month())
+                && matches_day(cron, civil.day(), civil.weekday().num_days_from_sunday())
+            {
+                return Some(cursor_ms);
+            }
+            cursor_ms = cursor_ms.checked_add(MINUTE_MS)?;
+        }
+        None
+    }
+
+    /// Zones whose transitions stress the jump: DST in both hemispheres, a
+    /// 30-minute DST shift, a quarter-hour offset, a skipped calendar day,
+    /// transitions at midnight, and a seconds-bearing historical offset.
+    const DIFFERENTIAL_ZONES: &[ChronoTz] = &[
+        ChronoTz::UTC,
+        ChronoTz::America__New_York,
+        ChronoTz::Europe__London,
+        ChronoTz::Australia__Lord_Howe,
+        ChronoTz::Asia__Kathmandu,
+        ChronoTz::Pacific__Apia,
+        ChronoTz::America__Sao_Paulo,
+        ChronoTz::America__Havana,
+        ChronoTz::Europe__Amsterdam,
+    ];
+
+    fn assert_matches_stepper<Tz: TimeZone>(
+        expression: &str,
+        after_ms: i64,
+        max_search_ms: i64,
+        tz: &Tz,
+    ) -> Option<i64> {
+        let cron = parse_cron(expression).unwrap();
+        let expected = frozen_minute_stepper(&cron, after_ms, max_search_ms, tz);
+        assert_eq!(
+            next_occurrence(&cron, after_ms, max_search_ms, tz),
+            expected,
+            "{expression} after {after_ms} within {max_search_ms}"
+        );
+        expected
+    }
+
+    fn utc_ms(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        chrono::Utc
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn a_spring_forward_gap_skips_the_day_and_a_fall_back_overlap_fires_the_earlier_instant() {
+        let new_york = ChronoTz::America__New_York;
+        // 2026-03-08 02:30 does not exist in New York; the next 02:30 is a day later.
+        let spring = assert_matches_stepper(
+            "30 2 * * *",
+            utc_ms(2026, 3, 8, 5, 0),
+            DAY_MS * 3,
+            &new_york,
+        );
+        assert_eq!(spring, Some(utc_ms(2026, 3, 9, 6, 30)));
+        // 2026-11-01 01:30 happens twice; the earlier instant is EDT, 05:30 UTC.
+        let fall =
+            assert_matches_stepper("30 1 * * *", utc_ms(2026, 11, 1, 4, 0), DAY_MS, &new_york);
+        assert_eq!(fall, Some(utc_ms(2026, 11, 1, 5, 30)));
+        // After the earlier instant, the repeated 01:30 EST matches too.
+        let repeat =
+            assert_matches_stepper("30 1 * * *", utc_ms(2026, 11, 1, 5, 30), DAY_MS, &new_york);
+        assert_eq!(repeat, Some(utc_ms(2026, 11, 1, 6, 30)));
+        // Lord Howe moves by 30 minutes and Kathmandu sits at +05:45.
+        for zone in [ChronoTz::Australia__Lord_Howe, ChronoTz::Asia__Kathmandu] {
+            for start in [utc_ms(2026, 4, 4, 0, 0), utc_ms(2026, 10, 3, 0, 0)] {
+                for expression in ["*/7 2 * * *", "45 1,2 * * *", "0 0 * * *"] {
+                    assert_matches_stepper(expression, start, 3 * DAY_MS, &zone);
+                }
+            }
+        }
+        // Apia skipped 2011-12-30 entirely.
+        let apia = assert_matches_stepper(
+            "0 12 30 12 *",
+            utc_ms(2011, 12, 29, 0, 0),
+            400 * DAY_MS,
+            &ChronoTz::Pacific__Apia,
+        );
+        assert!(apia.is_some_and(|ms| ms > utc_ms(2012, 12, 1, 0, 0)));
+    }
+
+    #[test]
+    fn calendar_impossible_expressions_return_none_at_the_search_cap() {
+        let start = utc_ms(2026, 1, 1, 0, 0);
+        for zone in [ChronoTz::UTC, ChronoTz::America__New_York] {
+            for expression in ["0 0 30 2 *", "0 0 31 4,6,9,11 *"] {
+                assert_eq!(
+                    assert_matches_stepper(expression, start, MAX_SEARCH_MS, &zone),
+                    None
+                );
+            }
+        }
+        // February 29 is satisfiable within four years.
+        assert!(assert_matches_stepper("0 0 29 2 *", start, MAX_SEARCH_MS, &chrono::Utc).is_some());
+        // A cap that ends one minute before the occurrence returns none.
+        let next = utc_ms(2026, 1, 1, 0, 5);
+        assert_eq!(
+            assert_matches_stepper("5 0 * * *", start, next - start - MINUTE_MS, &chrono::Utc),
+            None
+        );
+        assert_eq!(
+            assert_matches_stepper("5 0 * * *", start, next - start, &chrono::Utc),
+            Some(next)
+        );
+    }
+
+    #[test]
+    fn the_jump_matches_the_stepper_at_the_edges_of_the_representable_range() {
+        let utc = chrono::Utc;
+        let last = chrono::DateTime::<chrono::Utc>::MAX_UTC.timestamp_millis();
+        let first = chrono::DateTime::<chrono::Utc>::MIN_UTC.timestamp_millis();
+        for after_ms in [
+            last - 3 * DAY_MS,
+            last - 90 * MINUTE_MS,
+            last - MINUTE_MS,
+            last,
+            first - MINUTE_MS,
+            first,
+            first + 5,
+        ] {
+            for expression in ["* * * * *", "0 0 30 2 *", "59 23 31 12 *", "0 * * * *"] {
+                assert_matches_stepper(expression, after_ms, 10 * DAY_MS, &utc);
+                assert_matches_stepper(
+                    expression,
+                    after_ms,
+                    10 * DAY_MS,
+                    &ChronoTz::America__New_York,
+                );
+            }
+        }
+        for after_ms in [i64::MIN, i64::MIN + 1, i64::MAX - MINUTE_MS, i64::MAX] {
+            assert_matches_stepper("* * * * *", after_ms, MAX_SEARCH_MS, &utc);
+        }
+    }
+
+    fn cron_field(min: u64, max: u64) -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let value = min..=max;
+        prop_oneof![
+            Just("*".to_string()),
+            (1..=max.max(1)).prop_map(|step| format!("*/{step}")),
+            value.clone().prop_map(|value| value.to_string()),
+            (value.clone(), value.clone()).prop_map(|(a, b)| format!("{}-{}", a.min(b), a.max(b))),
+            (value.clone(), 1..=max.max(1)).prop_map(|(lo, step)| format!("{lo}/{step}")),
+            proptest::collection::vec(value, 1..4).prop_map(|values| values
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(192))]
+
+        #[test]
+        fn the_field_jumping_search_matches_the_frozen_minute_stepper(
+            minute in cron_field(0, 59),
+            hour in cron_field(0, 23),
+            dom in cron_field(1, 31),
+            month in cron_field(1, 12),
+            dow in cron_field(0, 7),
+            after_ms in -2_208_988_800_000_i64..4_102_444_800_000,
+            max_search_ms in 0..=(14 * DAY_MS),
+            zone in 0..DIFFERENTIAL_ZONES.len(),
+        ) {
+            let expression = format!("{minute} {hour} {dom} {month} {dow}");
+            proptest::prop_assume!(parse_cron(&expression).is_some());
+            assert_matches_stepper(&expression, after_ms, max_search_ms, &DIFFERENTIAL_ZONES[zone]);
+        }
+    }
+
+    #[test]
+    fn the_jump_matches_the_stepper_across_every_transition_of_a_zone_year() {
+        // Sweeps each zone across 1900 and 2026 in 12-hour steps with
+        // expressions that sit near transitions, so every transition of those
+        // years lies inside some jump. A day-of-week expression makes the
+        // search jump to midnight across a weekend transition.
+        for zone in DIFFERENTIAL_ZONES {
+            for year in [1900, 2026] {
+                let start = utc_ms(year, 1, 1, 0, 0);
+                let mut after_ms = start;
+                while after_ms < start + 366 * DAY_MS {
+                    for expression in [
+                        "0,30 0-3 * * *",
+                        "15 * * * *",
+                        "0 0 * * 0",
+                        "30 0 * * 1",
+                        "0 0 * * 1",
+                        "45 23 * * 6",
+                    ] {
+                        assert_matches_stepper(expression, after_ms, DAY_MS, zone);
+                    }
+                    after_ms += 12 * 60 * MINUTE_MS;
+                }
+            }
+        }
     }
 
     #[test]

@@ -1051,6 +1051,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tick_evaluates_the_configured_cron_schedule_of_a_module_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![project(&store, "git:a", "*/15 * * * *")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+
+        let scheduled = host.scheduled_projects().unwrap();
+        assert!(scheduled.iter().any(|project| !project.schedule.is_empty()));
+        assert!(scheduler.tick(&host).await.is_empty());
+        let evaluated = scheduler
+            .next_due
+            .get(&("git:a".to_string(), ScheduledTask::ReviewUserMemories))
+            .cloned();
+        assert!(
+            evaluated.as_ref().is_some_and(|(schedule, due_at_ms)| {
+                schedule == "*/15 * * * *" && *due_at_ms != i64::MAX
+            }),
+            "cron-schedule-is-evaluated-for-a-configured-project: {evaluated:?}"
+        );
+        assert_eq!(evaluated.unwrap().1, T0 + 15 * MINUTE_MS);
+    }
+
+    #[tokio::test]
     async fn missed_slots_are_not_back_filled_and_a_backlog_drains_oldest_first() {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());

@@ -81,6 +81,35 @@ The frozen copy is a test-only function kept because the change replaces
 - Missing evidence: A product decision on config strictness.
 - Conclusion: needs human input.
 
+### Q: Does the field-jumping search match the stepper, and is it worth it? (at the field-jumping head)
+
+- Sources examined: [`next_occurrence`][jump-head],
+  [`advance_while_offset_holds`][advance-head], and the
+  [differential tests][diff-head].
+- Findings: The search keeps the stepper's first cursor, cap, and
+  unrepresentable-instant `None`, and jumps only over minutes whose civil
+  fields cannot match while the offset holds. Offset probes every hour and a
+  bisection stop each jump at the first minute with another offset. The
+  differential tests agree with the frozen stepper over random expressions in
+  nine zones, both DST edges, Apia's skipped day, seconds-bearing 1900
+  offsets, the full cap for calendar-impossible expressions, and chrono's range
+  edges. Negative controls, run locally and reverted: dropping the offset
+  check fails the transition sweep, and an off-by-one in the midnight or
+  next-minute skip fails four to six tests. Returning the probe instead of the
+  bisected minute survives every test, because no tested transition puts a
+  match within an hour after it inside one jump; the bisection keeps the
+  search exact without that property of the zone data.
+- Payoff: An uncommitted probe on one host, release build, `taskset -c 5`, 21
+  start instants per arm, three runs. Medians before then after:
+  `0 0 30 2 *` at the full cap 25.1 ms to 0.34 ms in UTC and 78.4 ms to
+  1.11 ms in New York; `30 2 * * 1` 175-177 us to 2.9 us; `0 9 1 * *`
+  1.55-1.58 ms to 23.1 us; `*/15 * * * *` 0.3 us to 0.2 us. The ranges do not
+  overlap for the first four, so the change stays.
+- Missing evidence: A proof that no zone changes its offset and back within
+  one hour; the sweep covers nine zones in two years.
+- Conclusion: resolved with answer - the search matches the stepper on every
+  tested input and cuts the full-cap search by about 70 times.
+
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
 [parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L125-L145
 [vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L150-L160
@@ -94,3 +123,6 @@ The frozen copy is a test-only function kept because the change replaces
 [sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L412-L416
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
+[jump-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L176-L199
+[advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L231-L260
+[diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1641-L1857
