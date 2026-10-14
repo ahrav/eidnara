@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::sync::Arc;
 
+use host_runtime::wire::ByteCharge;
 use serde_json::{Map, Value};
 
 use crate::staged_body::{BoundedSink, Sink, StagedBody};
@@ -9,11 +10,25 @@ use crate::staged_body::{BoundedSink, Sink, StagedBody};
 /// Maximum body size shared with host frame admission.
 pub const MAX_WIRE_BODY_BYTES: usize = host_runtime::MAX_FRAME_BODY_LEN as usize;
 
-#[derive(Clone)]
 pub struct PreparedOutput {
     source: PreparedSource,
+    /// The output retains shared ownership of resident charges for request bytes held by
+    /// `source`.
+    held: Vec<Arc<[ByteCharge]>>,
     #[cfg(test)]
     encoded_for_test: Arc<std::sync::OnceLock<Vec<u8>>>,
+}
+
+/// Request charges stay with the original response when a clone shares its source.
+impl Clone for PreparedOutput {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            held: Vec::new(),
+            #[cfg(test)]
+            encoded_for_test: Arc::clone(&self.encoded_for_test),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -205,31 +220,28 @@ impl fmt::Debug for PreparedSegment {
 }
 
 impl PreparedOutput {
-    /// JSON measurement does not retain encoded bytes because it precedes host memory reservation.
-    pub fn json(value: Value) -> Self {
+    fn from_source(source: PreparedSource) -> Self {
         Self {
-            source: PreparedSource::Json(Arc::new(value)),
+            source,
+            held: Vec::new(),
             #[cfg(test)]
             encoded_for_test: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// JSON measurement does not retain encoded bytes because it precedes host memory reservation.
+    pub fn json(value: Value) -> Self {
+        Self::from_source(PreparedSource::Json(Arc::new(value)))
     }
 
     /// A typed body that serializes directly, with no intermediate `Value` tree.
     pub fn emit(body: Arc<dyn Emit>) -> Self {
-        Self {
-            source: PreparedSource::Emit(body),
-            #[cfg(test)]
-            encoded_for_test: Arc::new(std::sync::OnceLock::new()),
-        }
+        Self::from_source(PreparedSource::Emit(body))
     }
 
     /// Retains existing encoded bytes without copying them into an output body.
     pub fn cached_bytes(bytes: Vec<u8>) -> Self {
-        Self {
-            source: PreparedSource::Exact(Arc::new(bytes)),
-            #[cfg(test)]
-            encoded_for_test: Arc::new(std::sync::OnceLock::new()),
-        }
+        Self::from_source(PreparedSource::Exact(Arc::new(bytes)))
     }
 
     /// The envelope carries `"operations": null` where the prepared operations are spliced in.
@@ -257,15 +269,13 @@ impl PreparedOutput {
         }
         // `encode_envelope` refuses an envelope nested too deep while it encodes it.
         let (encoded, split) = encode_envelope(&envelope)?;
-        Ok(Self {
-            source: PreparedSource::Transform(Arc::new(TransformSegments {
+        Ok(Self::from_source(PreparedSource::Transform(Arc::new(
+            TransformSegments {
                 envelope: encoded,
                 split,
                 operations,
-            })),
-            #[cfg(test)]
-            encoded_for_test: Arc::new(std::sync::OnceLock::new()),
-        })
+            },
+        ))))
     }
 
     /// The kernel-routes bench reads the JSON body to reject a cell whose route did not answer `available`.
@@ -397,6 +407,22 @@ pub enum PreparedOutcome {
     Response(PreparedOutput),
     Error { code: String, message: String },
     Streamed,
+}
+
+impl PreparedOutcome {
+    /// A response output retains `charges` for its whole lifetime, so request bytes its source
+    /// shares stay accounted for. Any other outcome drops them at once.
+    pub fn holding(self, charges: Arc<[ByteCharge]>) -> Self {
+        match self {
+            Self::Response(mut output) => {
+                if !charges.is_empty() {
+                    output.held.push(charges);
+                }
+                Self::Response(output)
+            }
+            other => other,
+        }
+    }
 }
 
 impl fmt::Debug for PreparedOutcome {

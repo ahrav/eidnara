@@ -22,33 +22,17 @@ const NUMBER_BYTES: usize = 32;
 static ESCAPED: [u64; 256] = escape_table();
 
 const fn escape_table() -> [u64; 256] {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut table = [0u64; 256];
     let mut byte = 0usize;
     while byte < 256 {
-        let short = match byte as u8 {
-            b'"' => b'"',
-            b'\\' => b'\\',
-            0x08 => b'b',
-            b'\t' => b't',
-            b'\n' => b'n',
-            0x0c => b'f',
-            b'\r' => b'r',
-            _ => 0,
-        };
-        table[byte] = if short != 0 {
-            (2 << 56) | ((short as u64) << 8) | b'\\' as u64
-        } else if byte < 0x20 {
-            (6 << 56)
-                | ((HEX[byte & 0x0f] as u64) << 40)
-                | ((HEX[byte >> 4] as u64) << 32)
-                | ((b'0' as u64) << 24)
-                | ((b'0' as u64) << 16)
-                | ((b'u' as u64) << 8)
-                | b'\\' as u64
-        } else {
-            (1 << 56) | byte as u64
-        };
+        let (bytes, len) = crate::json_string::escape(byte as u8);
+        let mut word = (len as u64) << 56;
+        let mut lane = 0;
+        while lane < len {
+            word |= (bytes[lane] as u64) << (8 * lane);
+            lane += 1;
+        }
+        table[byte] = word;
         byte += 1;
     }
     table

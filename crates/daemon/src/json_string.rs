@@ -17,31 +17,43 @@ pub(crate) fn escape_marks(word: u64) -> u64 {
         & HIGHS
 }
 
-/// `push_escape` emits escapes byte-identical to `serde_json`.
-#[inline(always)]
-fn push_escape(out: &mut Vec<u8>, byte: u8) {
+/// `escape` returns the bytes `serde_json` writes for `byte` inside a string, padded to six,
+/// and their count.
+pub(crate) const fn escape(byte: u8) -> ([u8; 6], usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let short = |code: u8| ([b'\\', code, 0, 0, 0, 0], 2);
-    let (escape, len) = match byte {
-        b'"' => short(b'"'),
-        b'\\' => short(b'\\'),
-        0x08 => short(b'b'),
-        b'\t' => short(b't'),
-        b'\n' => short(b'n'),
-        0x0c => short(b'f'),
-        b'\r' => short(b'r'),
-        _ => (
+    let short = match byte {
+        b'"' => b'"',
+        b'\\' => b'\\',
+        0x08 => b'b',
+        b'\t' => b't',
+        b'\n' => b'n',
+        0x0c => b'f',
+        b'\r' => b'r',
+        _ => 0,
+    };
+    if short != 0 {
+        ([b'\\', short, 0, 0, 0, 0], 2)
+    } else if byte < 0x20 {
+        (
             [
                 b'\\',
                 b'u',
                 b'0',
                 b'0',
-                HEX[usize::from(byte >> 4)],
-                HEX[usize::from(byte & 0x0f)],
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 0x0f) as usize],
             ],
             6,
-        ),
-    };
+        )
+    } else {
+        ([byte, 0, 0, 0, 0, 0], 1)
+    }
+}
+
+/// `push_escape` emits escapes byte-identical to `serde_json`.
+#[inline(always)]
+fn push_escape(out: &mut Vec<u8>, byte: u8) {
+    let (escape, len) = escape(byte);
     let kept = out.len() + len;
     out.extend_from_slice(&escape);
     out.truncate(kept);
@@ -94,14 +106,20 @@ pub(crate) fn push_json_string(out: &mut Vec<u8>, value: &str) {
     out.push(b'"');
 }
 
+static ESCAPE_GROWTH: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        table[byte] = (escape(byte as u8).1 - 1) as u8;
+        byte += 1;
+    }
+    table
+};
+
 /// `json_string_len` is the length of `value` as a quoted JSON string, the bytes
 /// [`push_json_string`] appends: a short escape adds one byte and a `\u00XX` escape adds five.
 pub(crate) fn json_string_len(value: &str) -> usize {
-    let escape_growth = |byte: u8| match byte {
-        b'"' | b'\\' | 0x08 | b'\t' | b'\n' | 0x0c | b'\r' => 1,
-        0x00..=0x1f => 5,
-        _ => 0,
-    };
+    let escape_growth = |byte: u8| usize::from(ESCAPE_GROWTH[usize::from(byte)]);
     let bytes = value.as_bytes();
     let mut len = bytes.len() + 2;
     let mut at = 0;
@@ -123,7 +141,21 @@ pub(crate) fn json_string_len(value: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_string_len, push_json_string};
+    use super::{escape, json_string_len, push_json_string};
+
+    #[test]
+    fn every_ascii_byte_escapes_as_serde_json_writes_it() {
+        for byte in 0u8..0x80 {
+            let (escaped, len) = escape(byte);
+            let mut expected = serde_json::to_vec(&char::from(byte).to_string()).unwrap();
+            expected.pop();
+            expected.remove(0);
+            assert_eq!(&escaped[..len], expected.as_slice(), "byte {byte:#04x}");
+        }
+        for byte in 0x80u8..=0xff {
+            assert_eq!(escape(byte), ([byte, 0, 0, 0, 0, 0], 1), "byte {byte:#04x}");
+        }
+    }
 
     fn encoded(value: &str) -> Vec<u8> {
         let mut out = Vec::new();
