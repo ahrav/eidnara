@@ -472,31 +472,31 @@ fn allocate_token<T>(next: &mut u32, in_use: &HashMap<u32, T>) -> Option<u32> {
     None
 }
 
-fn cleanup_env(raw_env: usize) {
-    let raw_env = raw_env as napi::sys::napi_env;
-    let env = Env::from_raw(raw_env);
+/// Runs while the environment is torn down, when JavaScript cannot run and no handle scope
+/// is open, so it makes no N-API call. An alias-free channel says goodbye and drops its
+/// mapping. A channel that still holds an alias cannot detach it here: it is quarantined,
+/// keeps its charge, and is leaked with its mapping, because process exit owns reclamation
+/// of storage a view may still reach.
+fn cleanup_env(_raw_env: usize) {
     REGISTRY.with(|registry| {
         if let Ok(mut registry) = registry.try_borrow_mut() {
             if let Some(mut reactor) = registry.reactor.take() {
                 reactor.shutdown();
             }
             registry.pending.clear();
-            registry.channels.retain(|_, channel| {
-                if close_channel(&env, channel).is_err() {
-                    // Env teardown offers no later retry, so a failed close
-                    // leaves both directions' alias state unknown.
+            for (_, mut channel) in registry.channels.drain() {
+                channel.closed = true;
+                if let Some(mut setup) = channel.setup.take() {
+                    setup::goodbye(&mut setup);
+                }
+                let holds_aliases = !(channel.producers.is_empty()
+                    && channel.active.is_empty()
+                    && channel.stranded.is_empty());
+                if holds_aliases {
                     channel.to_host.enter_quarantine();
                     channel.from_host.enter_quarantine();
+                    std::mem::forget(channel);
                 }
-                // Same retention rule as close: only alias-free channels may
-                // drop their mapping.
-                !(channel.producers.is_empty()
-                    && channel.active.is_empty()
-                    && channel.stranded.is_empty())
-            });
-            for (_, quarantined) in registry.channels.drain() {
-                // Process exit owns uncertain alias reclamation.
-                std::mem::forget(quarantined);
             }
         }
     });

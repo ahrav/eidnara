@@ -167,25 +167,35 @@ pub(crate) fn detach(env: &Env, external: &ExternalRef) -> Result<()> {
             "ArrayBuffer alias state is unknown",
         ));
     }
-    // SAFETY: referenced value is the external ArrayBuffer.
-    check(
-        unsafe { sys::napi_detach_arraybuffer(env.raw(), value) },
-        "ArrayBuffer detachment failed",
-    )?;
-    let mut detached = false;
-    // `arraybuffer` remains valid until `napi_delete_reference` deletes `reference`.
-    check(
-        unsafe { sys::napi_is_detached_arraybuffer(env.raw(), value, &mut detached) },
-        "ArrayBuffer detachment verification failed",
-    )?;
-    if !detached {
-        return Err(Error::new(
-            Status::GenericFailure,
-            "ArrayBuffer detachment verification failed",
-        ));
-    }
+    // A runtime may run the external finalizer inside `napi_detach_arraybuffer` itself (Bun
+    // does), so `released` is set before the call and cleared again on every failure; a
+    // finalizer that runs at any point after a successful detach reads it set.
     external.released.store(true, Ordering::Release);
-    Ok(())
+    let verified = (|| {
+        // SAFETY: referenced value is the external ArrayBuffer.
+        check(
+            unsafe { sys::napi_detach_arraybuffer(env.raw(), value) },
+            "ArrayBuffer detachment failed",
+        )?;
+        let mut detached = false;
+        // `arraybuffer` remains valid until `napi_delete_reference` deletes `reference`.
+        check(
+            unsafe { sys::napi_is_detached_arraybuffer(env.raw(), value, &mut detached) },
+            "ArrayBuffer detachment verification failed",
+        )?;
+        if detached {
+            Ok(())
+        } else {
+            Err(Error::new(
+                Status::GenericFailure,
+                "ArrayBuffer detachment verification failed",
+            ))
+        }
+    })();
+    if verified.is_err() {
+        external.released.store(false, Ordering::Release);
+    }
+    verified
 }
 
 pub(crate) fn delete_ref(env: &Env, external: ExternalRef) -> Result<()> {

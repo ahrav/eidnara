@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { runInNewContext } from "node:vm";
 import { setFlagsFromString } from "node:v8";
+import { Worker } from "node:worker_threads";
 import {
     activeExternalRefs,
     activeNativeChannels,
     estimateTokens,
     NativeChannel,
     NativeStartupError,
+    nativeLeakDiagnostics,
     type NativeDescriptor,
     type NativeReceiveLease,
     probeCapabilities,
@@ -73,6 +75,10 @@ if (result.available) {
     assert.equal(result.cleanupHooks, true);
     runAttachBoundary();
     runNativeLifecycle();
+    runReentrantClose();
+    await runLateFinalizer();
+    await runEnvironmentExit(false);
+    await runEnvironmentExit(true);
 } else {
     assert.ok(result.reason && result.reason.length > 0);
 }
@@ -284,4 +290,95 @@ function runNativeLifecycle(): void {
     leaked.second.forceClose();
     assert.throws(() => fill(leaked.first, 1, 1));
     leaked.first.close();
+}
+
+/** A delivery callback that closes its own channel consumes the delivered lease's return
+ * authority exactly once: the close detaches the alias, and a later release is refused. */
+function runReentrantClose(): void {
+    const pair = NativeChannel.createTestPair();
+    const refs = activeExternalRefs();
+    fill(pair.first, 5, 7);
+    let lease: NativeReceiveLease | undefined;
+    let alias: Uint8Array | undefined;
+    assert.equal(
+        pair.second.drainOne((value) => {
+            lease = value;
+            alias = value.segment(0);
+            assert.equal(alias[0], 7);
+            pair.second.close();
+        }),
+        true,
+    );
+    assert.equal(alias?.byteLength, 0, "native.reentrant_close_from_delivery");
+    assert.equal(activeExternalRefs(), refs);
+    assert.throws(() => lease?.release(), /already released/);
+    assert.equal(activeExternalRefs(), refs);
+    pair.first.close();
+}
+
+/** Views a released lease detached are finalized later by the collector; the finalizer
+ * returns nothing and reports no leak, so every block was returned once, by the release. */
+async function runLateFinalizer(): Promise<void> {
+    const pair = NativeChannel.createTestPair();
+    const leaks = nativeLeakDiagnostics();
+    const refs = activeExternalRefs();
+    const count = pair.smallestClassCount;
+    let collected = 0;
+    const registry = new FinalizationRegistry(() => {
+        collected += 1;
+    });
+    (() => {
+        for (let index = 0; index < count; index++) {
+            fill(pair.first, 1, index);
+            const lease = receive(pair.second);
+            registry.register(lease.segment(0).buffer, index);
+            lease.release();
+        }
+    })();
+    for (let attempt = 0; attempt < 100 && collected < count; attempt++) {
+        forceGc();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(collected, count, "native.late_finalizer_over_released_view");
+    assert.equal(nativeLeakDiagnostics(), leaks);
+    assert.equal(activeExternalRefs(), refs);
+    // The class fills exactly once more: no finalizer returned a block a second time.
+    const held: NativeReceiveLease[] = [];
+    for (let index = 0; index < count; index++) {
+        fill(pair.first, 1, index);
+        held.push(receive(pair.second));
+    }
+    assert.throws(() => fill(pair.first, 1, 1));
+    for (const lease of held) lease.release();
+    pair.first.close();
+    pair.second.close();
+}
+
+/** A worker environment that exits while it holds an alias runs the addon's cleanup hook,
+ * which makes no N-API call: the channel is quarantined with its reference still counted,
+ * and the process and this environment's channels are unaffected. */
+async function runEnvironmentExit(keepAlias: boolean): Promise<void> {
+    const channels = activeNativeChannels();
+    const refs = activeExternalRefs();
+    const worker = new Worker(new URL("./environment-exit-worker.ts", import.meta.url), {
+        workerData: { keepAlias },
+    });
+    const message = new Promise<{ aliasBytes: number }>((resolve) => {
+        worker.once("message", resolve);
+    });
+    const exit = new Promise<number>((resolve) => {
+        worker.once("exit", resolve);
+    });
+    assert.equal((await message).aliasBytes, 5);
+    assert.equal(await exit, 0);
+    assert.equal(activeNativeChannels(), channels);
+    if (keepAlias) {
+        assert.equal(
+            activeExternalRefs(),
+            refs + 1,
+            "native.environment_exit_with_aliases",
+        );
+    } else {
+        assert.equal(activeExternalRefs(), refs);
+    }
 }
