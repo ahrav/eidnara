@@ -1989,50 +1989,101 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
     assert!(!error.to_string().contains("compiled-secret"));
 }
 
-/// A note whose earlier fields prepared and whose later identity, oversized content, or content that redaction grows past the bound is refused appends no audit row; the accepted note then persists its redacted content and exactly its own scans, and its stored audit names the detection without the secret.
+/// Notes whose content prepared before a later field refused, on the durable layer and
+/// inside a facade transaction: a secret anchor identity, an oversized surface condition,
+/// and a surface condition that redaction grows past the bound each append no audit row.
+/// A condition exactly at the bound is accepted, so the bound the cases straddle is the
+/// store's. An accepted note persists its redacted content and exactly its own scans, and
+/// the stored bytes name the detection without the secret.
 #[test]
 fn refused_note_fields_append_no_audit_after_earlier_fields_prepared() {
+    const STORE_UUID: &str = "0123456789abcdef0123456789abcdef";
     let temp = tempfile::tempdir().unwrap();
     let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-refusals");
     let store = MemoryStore::open(&descriptor).unwrap();
-    // The durable text bound `memory_store` applies to every prepared field.
+    store
+        .bind_authority_route(STORE_UUID, "project", "route")
+        .unwrap();
+    let preparing = store
+        .authority_begin_prepare(STORE_UUID, "project", "notes")
+        .unwrap();
+    store
+        .authority_finish_prepare(
+            STORE_UUID,
+            "project",
+            "notes",
+            preparing.generation,
+            "h",
+            "h",
+            true,
+        )
+        .unwrap();
+    // The durable text bound the store applies to every prepared field.
     let max = 512 * 1024;
     let secret = "\npassword=hunter-two";
     let grows = format!("{}{secret}", "x".repeat(max - secret.len()));
     let oversized = "o".repeat(max + 1);
-    let note = |content: &'static str, anchor: Option<&'static str>| NoteInput {
-        project_path: "project",
-        route_project_root: None,
-        session_id: "session",
-        content,
-        surface_condition: Some("ordinary condition"),
-        anchor_block_id: anchor,
-        now_ms: 1,
-    };
-    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
-    for (case, input) in [
-        (
-            "secret identity",
-            note("clean content", Some("password=anchor-secret")),
-        ),
-        ("oversized content", note(leak(oversized), Some("anchor"))),
-        ("redaction growth", note(leak(grows), Some("anchor"))),
-    ] {
-        assert!(store.insert_note(input).is_err(), "{case}");
-        assert_eq!(
-            scan_audit_counts(temp.path()),
-            ScanAuditCounts::EMPTY,
-            "{case}"
+    fn note<'a>(content: &'a str, condition: &'a str, anchor: &'a str) -> NoteInput<'a> {
+        NoteInput {
+            project_path: "project",
+            route_project_root: None,
+            session_id: "session",
+            content,
+            surface_condition: Some(condition),
+            anchor_block_id: Some(anchor),
+            now_ms: 1,
+        }
+    }
+    let cases = [
+        ("secret identity", "ordinary", "password=anchor-secret"),
+        ("oversized condition", oversized.as_str(), "anchor"),
+        ("condition growth", grows.as_str(), "anchor"),
+    ];
+    let before = scan_audit_counts(temp.path());
+    for (case, condition, anchor) in cases {
+        assert!(
+            store
+                .insert_note(note("clean content", condition, anchor))
+                .is_err(),
+            "durable {case}"
         );
+        assert_eq!(scan_audit_counts(temp.path()), before, "durable {case}");
+        let refused = store.with_facade_command(
+            "route",
+            "project",
+            "notes",
+            "scope",
+            "tool",
+            "insert",
+            Some(&format!("insert-{case}")),
+            |txn| {
+                txn.insert_note(note("clean content", condition, anchor))
+                    .map(|note| note.id.to_string().into_bytes())
+            },
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "transaction {case}: {refused:?}"
+        );
+        assert_eq!(scan_audit_counts(temp.path()), before, "transaction {case}");
     }
 
+    let at_bound = "c".repeat(max);
+    store
+        .insert_note(note("bound content", &at_bound, "anchor"))
+        .expect("a condition exactly at the bound is accepted");
+    let bounded = scan_audit_counts(temp.path());
     let stored = store
-        .insert_note(note("keep password=content-secret here", Some("anchor")))
+        .insert_note(note(
+            "keep password=content-secret here",
+            "ordinary",
+            "anchor",
+        ))
         .unwrap();
     assert_eq!(stored.content, "keep password=<REDACTED:password> here");
     let counts = scan_audit_counts(temp.path());
-    assert_eq!(counts.field_scans, 3);
-    assert_eq!(counts.detections, 1);
+    assert_eq!(counts.field_scans - bounded.field_scans, 3);
+    assert_eq!(counts.detections - bounded.detections, 1);
     let bytes = store_family_bytes(temp.path(), "<REDACTED:password>");
     assert!(
         !bytes

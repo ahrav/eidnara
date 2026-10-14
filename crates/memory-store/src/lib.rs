@@ -3185,16 +3185,15 @@ impl PreparedWrite {
         policy: PreparedFieldPolicy,
     ) -> Result<String, MemoryStoreError> {
         ensure_durable_text_bound(input)?;
-        let redaction = match layer {
+        let Redaction { text, detections } = match layer {
             PreparedScanLayer::Durable => redact_durable_text(input),
             PreparedScanLayer::Transaction => redact_transaction_durable_text(input),
         };
-        if matches!(policy, PreparedFieldPolicy::NewIdentity) && !redaction.detections.is_empty() {
+        if matches!(policy, PreparedFieldPolicy::NewIdentity) && !detections.is_empty() {
             return Err(MemoryStoreError::Redaction(
                 RedactionErrorKind::SecretDetected,
             ));
         }
-        let Redaction { text, detections } = redaction;
         let output = match policy {
             PreparedFieldPolicy::Content => text,
             PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity => {
@@ -33555,7 +33554,12 @@ mod shadow_tests {
         assert!(prepared.ends_with("password=<REDACTED:password>"));
     }
 
-    /// Every policy and layer prepares clean, detected, and boundary inputs to the output an independent redaction gives, and records a scan holding only the findings, action, and owners: neither the secret nor the redacted output stays in scan state, while a legal `ExistingIdentity` output keeps its input. A detected `NewIdentity`, an oversized input, and a redaction that grows past the bound refuse and append no scan, even after an earlier field prepared.
+    /// Every policy and layer prepares clean, detected, and boundary inputs to the output an
+    /// independent redaction gives, and records a scan holding only the findings, action,
+    /// and owners. The `<REDACTED` check fails when scan state keeps redacted text, and the
+    /// sentinel check when it keeps the secret; a legal `ExistingIdentity` output keeps its
+    /// input. A detected `NewIdentity`, an oversized input, and a redaction that grows past
+    /// the bound refuse and append no scan, even after an earlier field prepared.
     #[test]
     fn prepared_fields_move_their_text_out_and_keep_only_scan_metadata() {
         const SENTINEL: &str = "password=sentinel-hunter-two";
