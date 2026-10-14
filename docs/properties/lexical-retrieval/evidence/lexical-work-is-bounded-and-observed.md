@@ -161,7 +161,7 @@ row loop ends work at the original deadline, covered by
 ### Q: Does the daemon report `Consumed` past the retrieval crate?
 
 - Sources examined: `admit_lexical` (`crates/daemon/src/query_route.rs:1260`)
-  and its completion match (`:1280`); a grep of `crates/daemon/src` for
+  and its completion match (`:1285`); a grep of `crates/daemon/src` for
   `consumed`.
 - Findings: the route reads `completion`, `reasons`, and `contributions` and
   maps bound reasons to the wire lane status; nothing in the daemon reads

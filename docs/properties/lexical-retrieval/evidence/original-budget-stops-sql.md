@@ -14,17 +14,17 @@ branch. PR #967 lists AC6 as met by existing tests and names
 
 Route-level budget, `crates/daemon/src/query_route.rs`:
 
-- `:1340` `execute` calls `admit_lanes` (`:1365`) then `select` (`:1473`). Both
+- `:1347` `execute` calls `admit_lanes` (`:1372`) then `select` (`:1480`). Both
   take one `&SharedBudget`; no phase derives another.
 - `:473` `check` returns `exhaustion(budget)` (`:466`), which maps
   `Exhaustion::Cancelled` to `Terminal::Cancelled` and a deadline or an
   unclassified stop to `Terminal::Deadline`.
-- `:1383` `projection.read_under(budget, ...)` holds the connection for the
-  exact, lexical, and dense phases. Inside it `:1397` through `:1399` run
+- `:1388` `projection.read_under(budget, ...)` holds the connection for the
+  exact, lexical, and dense phases. Inside it `:1402` through `:1404` run
   `before_phase(Phase::Lexical)`, `check(budget)`, then `lexical_read`
-  (`:1088`), which passes `budget.eval()` into `retrieval::lexical::scan`
+  (`:1093`), which passes `budget.eval()` into `retrieval::lexical::scan`
   and maps `LaneRefusal::Budget` to `exhaustion(budget)`.
-- `:1255` `admit_lexical`, called at `:1401` inside the same closure, judges
+- `:1260` `admit_lexical`, called at `:1406` inside the same closure, judges
   the scanned lane with `budget.eval()` while the connection is held, inside
   the `Phase::Lexical` window.
 - `crates/daemon/src/search_projection.rs:406` `read_under` builds

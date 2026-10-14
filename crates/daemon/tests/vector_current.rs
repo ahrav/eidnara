@@ -3,6 +3,7 @@ mod support;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use daemon::query_route::{CompressedLimits, QueryRouteLimits};
 use daemon::vector_admission::ResourceClass;
@@ -193,10 +194,11 @@ fn a_release_during_an_acquisition_leaves_no_hold_behind() {
     fixture.release_transaction();
     let (hashing_tx, hashing_rx) = mpsc::channel();
     let (released_tx, released_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
     let expected = fixture.expected();
     let owner_ref = &owner;
     let expected_ref = &expected;
-    let view = thread::scope(|scope| {
+    let (view, release_waited) = thread::scope(|scope| {
         let acquirer = scope.spawn(move || {
             owner_ref
                 .view(expected_ref, &mut |event| {
@@ -208,11 +210,19 @@ fn a_release_during_an_acquisition_leaves_no_hold_behind() {
                 .unwrap()
         });
         hashing_rx.recv().unwrap();
-        let releaser = scope.spawn(|| owner.release());
+        let releaser = scope.spawn(move || {
+            owner_ref.release();
+            done_tx.send(()).unwrap();
+        });
+        let release_waited = done_rx.recv_timeout(Duration::from_millis(200)).is_err();
         released_tx.send(()).unwrap();
         releaser.join().unwrap();
-        acquirer.join().unwrap()
+        (acquirer.join().unwrap(), release_waited)
     });
+    assert!(
+        release_waited,
+        "release returned while the acquirer was still hashing"
+    );
     let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
         owner.view(&fixture.expected(), observe).unwrap()
     });

@@ -102,7 +102,7 @@ a value on every statement; no interleaving changes the text the engine sees.
 - Sources examined: `crates/retrieval/tests/lexical_engine.rs:16` and `:180`
   (scratch engine); `crates/retrieval/tests/lexical_retrieval.rs:332`, `:164`,
   and `:596` (projection fixture); `crates/daemon/src/query_route.rs:1093`
-  and `:1110` (daemon call site).
+  and `:1115` (daemon call site).
 - Findings: the engine tests use a scratch in-memory table that shares only
   `fts5_table_args` with the projection. The retrieval test runs the real
   `retrieve` over a projection store opened through `open_store` and a kernel
