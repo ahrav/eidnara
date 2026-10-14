@@ -3369,6 +3369,14 @@ impl ActiveWriteTransaction<'_> {
             )));
         }
         let owners = prepared.persisted_owners();
+        let copies: usize = prepared
+            .scans
+            .iter()
+            .map(|scan| scan.owners.resolve(&prepared.domain_owners).len())
+            .sum();
+        // Each owner may insert a scope row and an owner row; the batch, every scan, and
+        // every copy take one id each.
+        let mut ids = OpaqueIds::new(2 * owners.len() + 1 + prepared.scans.len() + copies)?;
         let mut domain_owner_ids = Vec::with_capacity(owners.len());
         {
             let mut insert_scope = self.tx.prepare_cached(
@@ -3393,31 +3401,16 @@ impl ActiveWriteTransaction<'_> {
                 let private_scope_key = active_scan_private_key(owner.scope_kind, &owner.scope_key);
                 let private_owner_key =
                     active_scan_private_key(prepared.owner_kind, &owner.owner_key);
-                let proposed_scope_id = opaque_id()?;
-                insert_scope.execute(params![
-                    proposed_scope_id,
-                    owner.scope_kind,
-                    private_scope_key
-                ])?;
-                let owner_scope_id: String = select_scope
-                    .query_row(params![owner.scope_kind, private_scope_key], |row| {
-                        row.get(0)
-                    })?;
-                let proposed_owner_id = opaque_id()?;
-                insert_owner.execute(params![
-                    proposed_owner_id,
-                    owner_scope_id,
-                    prepared.owner_kind,
-                    private_owner_key
-                ])?;
-                let domain_owner_id = select_owner.query_row(
-                    params![owner_scope_id, prepared.owner_kind, private_owner_key],
-                    |row| row.get::<_, String>(0),
-                )?;
+                let scope_key = params![owner.scope_kind, private_scope_key];
+                let owner_scope_id =
+                    registered_audit_id(&mut select_scope, &mut insert_scope, scope_key, &mut ids)?;
+                let owner_key = params![owner_scope_id, prepared.owner_kind, private_owner_key];
+                let domain_owner_id =
+                    registered_audit_id(&mut select_owner, &mut insert_owner, owner_key, &mut ids)?;
                 domain_owner_ids.push((owner.clone(), domain_owner_id));
             }
         }
-        let batch_id = opaque_id()?;
+        let batch_id = ids.next_id()?;
         self.tx
             .prepare_cached(
                 "INSERT INTO scan_batches(scan_batch_id,owner_kind,created_at_ms)
@@ -3453,7 +3446,7 @@ impl ActiveWriteTransaction<'_> {
                     )),
                 )));
             }
-            let scan_id = opaque_id()?;
+            let scan_id = ids.next_id()?;
             insert_scan.execute(params![
                 scan_id,
                 batch_id,
@@ -3472,7 +3465,7 @@ impl ActiveWriteTransaction<'_> {
                         )))
                     })?;
                 insert_copy.execute(params![
-                    opaque_id()?,
+                    ids.next_id()?,
                     scan_id,
                     domain_owner_id,
                     prepared.owner_kind,
@@ -3527,6 +3520,29 @@ impl ActiveWriteTransaction<'_> {
     }
 }
 
+/// Returns the stored id for `key`, inserting a row with a fresh id from `ids` when none
+/// exists; `insert` binds that id first and `key` after it. When `INSERT OR IGNORE` skips
+/// insertion, the repeated lookup returns the stored id or fails with `QueryReturnedNoRows`.
+fn registered_audit_id(
+    select: &mut rusqlite::Statement<'_>,
+    insert: &mut rusqlite::Statement<'_>,
+    key: &[&dyn rusqlite::ToSql],
+    ids: &mut OpaqueIds,
+) -> rusqlite::Result<String> {
+    if let Some(id) = select.query_row(key, |row| row.get(0)).optional()? {
+        return Ok(id);
+    }
+    let proposed = ids.next_id()?;
+    let mut row: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(key.len() + 1);
+    row.push(&proposed);
+    row.extend_from_slice(key);
+    if insert.execute(&*row)? == 1 {
+        Ok(proposed)
+    } else {
+        select.query_row(key, |row| row.get(0))
+    }
+}
+
 /// Repeated labels carry no additional type information.
 /// The count a caller needs lives in `field_scans.finding_count`.
 fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
@@ -3548,18 +3564,54 @@ const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 /// Thirty-two lowercase hex characters, the shape every audit identifier column checks: six
 /// bytes of big-endian creation milliseconds, then ten random bytes. The time prefix keeps one
 /// batch's rows on a few index leaves, so writing them and the next pass's retirement dirty
-/// O(rows per leaf) pages instead of one page per row. Generated in Rust so an audit write
-/// spends no statement on an identifier; the per-row link copy below binds the same prefix and
-/// appends SQLite's `randomblob` because it needs one value per selected row.
-fn opaque_id() -> rusqlite::Result<String> {
-    let mut bytes = [0u8; 16];
-    bytes[..6].copy_from_slice(&opaque_id_time_prefix());
-    getrandom::getrandom(&mut bytes[6..]).map_err(|error| {
+/// O(rows per leaf) pages. An audit write binds these identifiers as parameters; the per-row
+/// link copy in `persist_audit` binds the same prefix and appends SQLite's `randomblob` to
+/// generate one value per selected row.
+///
+/// One source serves one audit write and reads the clock once, so every id it mints shares
+/// the write's starting millisecond. Each random read is sorted, so when `expected` covers
+/// every identifier the write mints, each audit index receives that write's keys in
+/// increasing order.
+struct OpaqueIds {
+    prefix: [u8; 6],
+    suffixes: std::vec::IntoIter<[u8; 10]>,
+}
+
+impl OpaqueIds {
+    fn new(expected: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            prefix: opaque_id_time_prefix(),
+            suffixes: sorted_random_suffixes(expected)?.into_iter(),
+        })
+    }
+
+    fn next_id(&mut self) -> rusqlite::Result<String> {
+        let suffix = loop {
+            if let Some(suffix) = self.suffixes.next() {
+                break suffix;
+            }
+            self.suffixes = sorted_random_suffixes(OPAQUE_ID_REFILL)?.into_iter();
+        };
+        let mut bytes = [0u8; 16];
+        bytes[..6].copy_from_slice(&self.prefix);
+        bytes[6..].copy_from_slice(&suffix);
+        Ok(hex_digest(bytes))
+    }
+}
+
+/// Suffixes per extra random read, which keep ids valid when a write mints more than its
+/// `expected` count.
+const OPAQUE_ID_REFILL: usize = 32;
+
+fn sorted_random_suffixes(count: usize) -> rusqlite::Result<Vec<[u8; 10]>> {
+    let mut suffixes = vec![[0u8; 10]; count];
+    getrandom::getrandom(suffixes.as_flattened_mut()).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
             "random source unavailable for an audit identifier: {error}"
         ))))
     })?;
-    Ok(hex_digest(bytes))
+    suffixes.sort_unstable();
+    Ok(suffixes)
 }
 
 fn opaque_id_time_prefix() -> [u8; 6] {
@@ -24909,7 +24961,17 @@ mod tests {
             }
         };
         let before = now();
-        let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
+        let mut source = OpaqueIds::new(3).unwrap();
+        let ids: Vec<String> = (0..2 * OPAQUE_ID_REFILL + 4)
+            .map(|_| source.next_id().unwrap())
+            .collect();
+        assert!(
+            ids[..3].is_sorted(),
+            "one draw hands out increasing identifiers"
+        );
+        for refill in ids[3..3 + 2 * OPAQUE_ID_REFILL].chunks(OPAQUE_ID_REFILL) {
+            assert!(refill.is_sorted(), "each refill draw is sorted");
+        }
         assert_minted_between(&ids, before, now());
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 
@@ -24960,6 +25022,123 @@ mod tests {
             "enabling state: the first write's scan gained a link copy"
         );
         assert_minted_between(&linked, before, after);
+    }
+
+    #[test]
+    fn an_audit_write_inserts_its_keys_in_key_order_and_reuses_registered_owner_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let column = |sql: &str| -> Vec<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        };
+        let write_fields = |owner_key: &str, fields: usize| {
+            let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+            write.domain_owner("session", "ses_order", owner_key);
+            for field in 0..fields {
+                write
+                    .content("content", &format!("plain text {field}"))
+                    .unwrap();
+            }
+            let second_owner = fields / 2;
+            write.domain_owner_for_scans_since(second_owner, "project", "proj_order", owner_key);
+            write
+                .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+                .unwrap();
+        };
+        write_fields("first", 70);
+        let scans = column("SELECT scan_id FROM field_scans ORDER BY rowid");
+        let copies = column("SELECT owner_copy_id FROM scan_owner_copies ORDER BY rowid");
+        let copied_scans = column("SELECT scan_id FROM scan_owner_copies ORDER BY rowid");
+        assert_eq!((scans.len(), copies.len()), (70, 105));
+        for ids in [&scans, &copies, &copied_scans] {
+            assert!(ids.is_sorted(), "{ids:?}");
+        }
+        let owner_rows = || {
+            column(
+                "SELECT (SELECT COUNT(*) FROM scan_owner_scopes) || ':' ||
+                        (SELECT COUNT(*) FROM scan_domain_owners)",
+            )
+        };
+        let owner_ids = || {
+            column(
+                "SELECT owner_scope_id || ':' || domain_owner_id FROM scan_domain_owners ORDER BY rowid",
+            )
+        };
+        assert_eq!(owner_rows(), ["2:2"]);
+        let registered = owner_ids();
+        write_fields("first", 3);
+        assert_eq!(owner_rows(), ["2:2"], "registered rows are reused");
+        assert_eq!(owner_ids(), registered);
+        let reused = column(
+            "SELECT DISTINCT domain_owner_id FROM scan_owner_copies
+              WHERE scan_id IN (SELECT scan_id FROM field_scans ORDER BY rowid DESC LIMIT 3)
+              ORDER BY domain_owner_id",
+        );
+        let mut expected_owners: Vec<String> = registered
+            .iter()
+            .map(|ids| ids.split_once(':').unwrap().1.to_owned())
+            .collect();
+        expected_owners.sort();
+        assert_eq!(
+            reused, expected_owners,
+            "the second write's copies name the stored owners"
+        );
+        write_fields("second", 3);
+        assert_eq!(
+            owner_rows(),
+            ["2:4"],
+            "a new owner joins the existing scopes"
+        );
+    }
+
+    #[test]
+    fn a_refused_owner_insert_fails_the_lookup_and_an_existing_row_draws_no_id() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE owners(
+                 id TEXT PRIMARY KEY,
+                 key TEXT NOT NULL UNIQUE CHECK (length(key) = 4)
+             );
+             INSERT INTO owners VALUES ('stored-id', 'kept');",
+        )
+        .unwrap();
+        let mut select = conn
+            .prepare("SELECT id FROM owners WHERE key = ?1")
+            .unwrap();
+        let mut insert = conn
+            .prepare("INSERT OR IGNORE INTO owners(id, key) VALUES (?1, ?2)")
+            .unwrap();
+        let mut ids = OpaqueIds::new(1).unwrap();
+        assert_eq!(
+            registered_audit_id(&mut select, &mut insert, params!["kept"], &mut ids).unwrap(),
+            "stored-id"
+        );
+        assert_eq!(ids.suffixes.len(), 1, "a stored row draws no id");
+        let fresh =
+            registered_audit_id(&mut select, &mut insert, params!["knew"], &mut ids).unwrap();
+        assert_eq!(ids.suffixes.len(), 0);
+        assert_eq!(
+            fresh.len(),
+            32,
+            "the one expected id went to the missing row"
+        );
+        assert!(matches!(
+            registered_audit_id(&mut select, &mut insert, params!["rejected"], &mut ids),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM owners", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
     }
 
     #[test]
