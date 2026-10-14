@@ -20,6 +20,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -291,6 +292,19 @@ struct FileStamp {
     ctime: (i64, i64),
 }
 
+impl FileStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            len: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
 /// A file the merge read, named by its path and the stamp of the entry at that
 /// path. The stamp does not follow a final symlink, as the bounded reads open
 /// with `NOFOLLOW`.
@@ -302,22 +316,27 @@ struct SourceIdentity {
 
 impl SourceIdentity {
     fn of(path: &Path) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        let stamp = fs::symlink_metadata(path).ok().map(|metadata| FileStamp {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            len: metadata.len(),
-            mtime: (metadata.mtime(), metadata.mtime_nsec()),
-            ctime: (metadata.ctime(), metadata.ctime_nsec()),
-        });
-        Self {
-            path: path.to_path_buf(),
-            stamp,
-        }
+        Self::lstat(path.to_path_buf()).0
+    }
+
+    /// The identity of `path` and whether `path` exists as [`Path::exists`]
+    /// reports it, following a final symlink; only a symlink costs a second
+    /// `stat`.
+    fn lstat(path: PathBuf) -> (Self, bool) {
+        let metadata = fs::symlink_metadata(&path).ok();
+        let exists = metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.is_symlink() || path.exists());
+        let stamp = metadata.as_ref().map(FileStamp::of);
+        (Self { path, stamp }, exists)
     }
 
     fn is_current(&self) -> bool {
-        *self == Self::of(&self.path)
+        self.stamp
+            == fs::symlink_metadata(&self.path)
+                .ok()
+                .as_ref()
+                .map(FileStamp::of)
     }
 
     /// Whether the entry last changed before `settled_before`, compared in
@@ -345,7 +364,7 @@ struct MergedConfig {
     user: Option<SourceIdentity>,
     project: SourceIdentity,
     guidance: Option<SourceIdentity>,
-    effective: DaemonConfig,
+    effective: Arc<DaemonConfig>,
     warnings: Vec<String>,
 }
 
@@ -403,13 +422,14 @@ impl MergedConfig {
             cache_ttl_by_model,
             admission,
             user_config_path,
-        } = &self.effective;
+        } = &*self.effective;
         let optional = |value: &Option<String>| {
             value
                 .as_ref()
                 .map_or(0, |value| allocation(value.capacity()))
         };
         let bytes = std::mem::size_of::<Self>()
+            + allocation(std::mem::size_of::<DaemonConfig>() + 2 * std::mem::size_of::<usize>())
             + self.user.as_ref().map_or(0, identity)
             + identity(&self.project)
             + self.guidance.as_ref().map_or(0, identity)
@@ -434,7 +454,7 @@ impl MergedConfig {
 impl ConfigCache {
     /// Loads user config from the platform path and project config below `project_root`.
     /// Warnings go to stderr.
-    pub fn effective_for_project(&mut self, project_root: &Path) -> DaemonConfig {
+    pub fn effective_for_project(&mut self, project_root: &Path) -> Arc<DaemonConfig> {
         let (effective, warnings) = self.effective_for_env(
             std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
             std::env::var("HOME").ok().as_deref(),
@@ -460,10 +480,20 @@ impl ConfigCache {
         xdg_config_home: Option<&str>,
         home: Option<&str>,
         project_root: &Path,
+    ) -> (Arc<DaemonConfig>, Vec<String>) {
+        let user = user_config_base_from(xdg_config_home, home).map(discover_tier);
+        self.effective_from_sources(user, project_root)
+    }
+
+    #[cfg(test)]
+    fn effective_with_warnings(
+        &mut self,
+        user_path: Option<&Path>,
+        project_root: &Path,
     ) -> (DaemonConfig, Vec<String>) {
-        let user_path =
-            user_config_base_from(xdg_config_home, home).map(|base| discover_tier(&base));
-        self.effective_with_warnings(user_path.as_deref(), project_root)
+        let (effective, warnings) =
+            self.effective_from_sources(user_path.map(SourceIdentity::of), project_root);
+        (Arc::unwrap_or_clone(effective), warnings)
     }
 
     /// Tier read failures are reported on every load so a long-running daemon keeps
@@ -471,28 +501,29 @@ impl ConfigCache {
     /// identities the last merge recorded returns that merge and its warnings;
     /// a merge with a source that could not be read, or that changed within
     /// [`RECENT_CHANGE_MARGIN`], is never memoized, so it is read again.
-    fn effective_with_warnings(
+    fn effective_from_sources(
         &mut self,
-        user_path: Option<&Path>,
+        user_identity: Option<SourceIdentity>,
         project_root: &Path,
-    ) -> (DaemonConfig, Vec<String>) {
-        let project_path = discover_tier(&project_root.join(".eidnara").join("eidnara"));
+    ) -> (Arc<DaemonConfig>, Vec<String>) {
+        let project_identity = discover_tier(project_root.join(".eidnara/eidnara"));
         let settled_before = std::time::SystemTime::now()
             .checked_sub(RECENT_CHANGE_MARGIN)
             .unwrap_or(std::time::UNIX_EPOCH);
-        let user_identity = user_path.map(SourceIdentity::of);
-        let project_identity = SourceIdentity::of(&project_path);
+        let user_path = user_identity
+            .as_ref()
+            .map(|identity| identity.path.as_path());
         if let Some(merged) = &self.merged
             && merged.serves(user_identity.as_ref(), &project_identity)
         {
-            return (merged.effective.clone(), merged.warnings.clone());
+            return (Arc::clone(&merged.effective), merged.warnings.clone());
         }
         self.merged = None;
         let user = match user_path {
             Some(user_path) => read_tier_cached(&mut self.user, user_path.to_path_buf()),
             None => None,
         };
-        let project = read_tier_cached(&mut self.project, project_path);
+        let project = read_tier_cached(&mut self.project, project_identity.path.clone());
         let mut user_rejections: Vec<String> = user_path
             .and(self.user.warning.clone())
             .into_iter()
@@ -571,12 +602,13 @@ impl ConfigCache {
         .into_iter()
         .flatten()
         .all(|identity| identity.changed_before(settled_before));
+        let effective = Arc::new(effective);
         if sources_read && settled {
             let merged = MergedConfig {
                 user: user_identity,
                 project: project_identity,
                 guidance,
-                effective: effective.clone(),
+                effective: Arc::clone(&effective),
                 warnings: warnings.clone(),
             };
             if merged.retained_bytes() <= MERGED_CONFIG_RETAINED_BYTES_BOUND {
@@ -589,29 +621,28 @@ impl ConfigCache {
 
 /// A CWD-relative fallback would let the untrusted project tree supply user-tier-only keys, so empty and relative values yield no user tier.
 fn user_config_base_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
-    let absolute = |value: Option<&str>| {
+    fn absolute(value: Option<&str>) -> Option<&Path> {
         value
             .filter(|v| !v.is_empty() && Path::new(v).is_absolute())
-            .map(PathBuf::from)
-    };
-    if let Some(xdg) = absolute(xdg_config_home) {
-        return Some(xdg.join("eidnara").join("eidnara"));
+            .map(Path::new)
     }
-    Some(
-        absolute(home)?
-            .join(".config")
-            .join("eidnara")
-            .join("eidnara"),
-    )
+    if let Some(xdg) = absolute(xdg_config_home) {
+        return Some(xdg.join("eidnara/eidnara"));
+    }
+    Some(absolute(home)?.join(".config/eidnara/eidnara"))
 }
 
-fn discover_tier(base: &Path) -> PathBuf {
-    let jsonc = base.with_extension("jsonc");
-    if jsonc.exists() {
+/// `base` ends in a name without an extension, so appending `.jsonc` names the
+/// same path as `with_extension("jsonc")`.
+fn discover_tier(base: PathBuf) -> SourceIdentity {
+    let mut jsonc = base.into_os_string();
+    jsonc.push(".jsonc");
+    let (jsonc, exists) = SourceIdentity::lstat(jsonc.into());
+    if exists {
         return jsonc;
     }
-    let json = base.with_extension("json");
-    if json.exists() { json } else { jsonc }
+    let (json, exists) = SourceIdentity::lstat(jsonc.path.with_extension("json"));
+    if exists { json } else { jsonc }
 }
 
 /// Largest config tier file read. A project controls its own `.eidnara`
@@ -2532,6 +2563,31 @@ mod tests {
         assert!(!effective.memory_enabled);
     }
 
+    #[test]
+    fn tier_discovery_follows_a_final_symlink_as_path_exists_does_and_stamps_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("eidnara");
+        let jsonc = dir.path().join("eidnara.jsonc");
+        let json = dir.path().join("eidnara.json");
+        let target = dir.path().join("target.jsonc");
+        std::fs::write(&json, "{}").unwrap();
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), &jsonc).unwrap();
+        assert_eq!(discover_tier(base.clone()), SourceIdentity::of(&json));
+
+        std::fs::remove_file(&jsonc).unwrap();
+        std::os::unix::fs::symlink(&target, &jsonc).unwrap();
+        let linked = discover_tier(base.clone());
+        assert_eq!(linked, SourceIdentity::of(&jsonc));
+        assert_ne!(linked.stamp, SourceIdentity::of(&target).stamp);
+
+        std::fs::remove_file(&jsonc).unwrap();
+        std::fs::remove_file(&json).unwrap();
+        let absent = discover_tier(base);
+        assert_eq!(absent.path, jsonc);
+        assert_eq!(absent.stamp, None);
+    }
+
     /// The four built-in guidance assets must each carry exactly one section marker,
     /// the same rule `resolve_user_guidance_override` applies to an override.
     #[test]
@@ -2793,6 +2849,22 @@ mod tests {
     }
 
     #[test]
+    fn a_memo_hit_shares_the_memoized_config_of_the_discovered_user_tier() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user = home.path().join("eidnara/eidnara.jsonc");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        let (first, _) = cache.effective_for_env(home.path().to_str(), None, project.path());
+        let (served, _) = cache.effective_for_env(home.path().to_str(), None, project.path());
+        assert!(Arc::ptr_eq(&first, &served), "a hit clones no config");
+        assert_eq!(served.model_chain, vec!["model-a"]);
+        assert_eq!(served.user_config_path.as_deref(), Some(user.as_path()));
+    }
+
+    #[test]
     fn unreadable_and_malformed_tiers_warn_while_missing_tiers_stay_silent() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.jsonc");
@@ -2934,7 +3006,9 @@ mod fold_authority_parity {
     }
 
     fn load(home: &Path, project: &Path) -> (DaemonConfig, Vec<String>) {
-        ConfigCache::default().effective_for_env(home.to_str(), None, project)
+        let (config, warnings) =
+            ConfigCache::default().effective_for_env(home.to_str(), None, project);
+        (Arc::unwrap_or_clone(config), warnings)
     }
 
     fn load_row(row: &Value) -> (Outcome, Vec<String>) {
@@ -2982,7 +3056,7 @@ mod fold_authority_parity {
         let row = row("a mixed-type fallback array is unresolved");
         let (home, project) = materialize(&row);
         let parsed = |base: PathBuf| {
-            let text = std::fs::read_to_string(discover_tier(&base)).ok()?;
+            let text = std::fs::read_to_string(discover_tier(base).path).ok()?;
             serde_json::from_str::<Value>(&strip_jsonc(&text)).ok()
         };
         let (config, _) = merge_tiers_with_warnings(
@@ -3026,7 +3100,9 @@ mod fold_authority_parity {
                 std::fs::write(&user, text).unwrap();
                 filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(mtime, 0))
                     .unwrap();
-                cache.effective_for_env(home.path().to_str(), None, project.path())
+                let (config, warnings) =
+                    cache.effective_for_env(home.path().to_str(), None, project.path());
+                (Arc::unwrap_or_clone(config), warnings)
             };
 
             let (never_admitted, _) = load(rejected_text, 1_000);
