@@ -12,9 +12,14 @@
 CREATE TABLE cache_state (
             session_id   TEXT PRIMARY KEY,
             row_version  INTEGER NOT NULL,
-            last_activity_at INTEGER NOT NULL DEFAULT 0, -- precedes the text columns, so a read of it touches no overflow page
             core_state   TEXT NOT NULL,
-            meta         TEXT NOT NULL);
+            meta         TEXT NOT NULL
+        , last_activity_at INTEGER NOT NULL DEFAULT 0);
+
+-- The open-time transform-root retention reads the newest cache activity from
+-- this index, so it reads no cache_state row and no core_state or meta page.
+CREATE INDEX cache_state_by_activity
+    ON cache_state (last_activity_at);
 
 -- The ordered block identity vector of each producer message id a session's
 -- transform has recorded, as a JSON array of `BlockIdentity`. It lives beside
@@ -710,15 +715,72 @@ BEGIN
            reject_transaction_text(NEW.credential_id);
 END;
 
+-- `session_activity_at` copies the `last_activity_at` of the session's
+-- cache_state row and is NULL while the session has none; the triggers below
+-- keep the copy equal to the cache row through every insert, update, rename,
+-- and delete of either table. A root is retained until the later of its
+-- observation and that activity, and the open-time retention deletes the roots
+-- whose retention ends before its window by one range of the index below.
 CREATE TABLE transform_session_roots (
             session_id  TEXT NOT NULL,
             project_root TEXT NOT NULL,
             observed_at INTEGER NOT NULL,
+            session_activity_at INTEGER,
             PRIMARY KEY(session_id, project_root)
-        );
+        ) WITHOUT ROWID;
 
-CREATE INDEX idx_transform_session_roots_observed
-            ON transform_session_roots(observed_at);
+CREATE INDEX transform_session_roots_by_retention
+            ON transform_session_roots(MAX(observed_at, COALESCE(session_activity_at, observed_at)));
+
+CREATE TRIGGER transform_session_roots_copy_activity_on_insert
+AFTER INSERT ON transform_session_roots
+BEGIN
+    UPDATE transform_session_roots
+       SET session_activity_at = (
+           SELECT last_activity_at FROM cache_state WHERE session_id = NEW.session_id)
+     WHERE session_id = NEW.session_id AND project_root = NEW.project_root;
+END;
+
+CREATE TRIGGER transform_session_roots_copy_activity_on_rename
+AFTER UPDATE OF session_id ON transform_session_roots
+BEGIN
+    UPDATE transform_session_roots
+       SET session_activity_at = (
+           SELECT last_activity_at FROM cache_state WHERE session_id = NEW.session_id)
+     WHERE session_id = NEW.session_id AND project_root = NEW.project_root;
+END;
+
+CREATE TRIGGER cache_state_activity_to_roots_on_insert
+AFTER INSERT ON cache_state
+BEGIN
+    UPDATE transform_session_roots SET session_activity_at = NEW.last_activity_at
+     WHERE session_id = NEW.session_id;
+END;
+
+CREATE TRIGGER cache_state_activity_to_roots_on_update
+AFTER UPDATE OF last_activity_at ON cache_state
+WHEN OLD.session_id IS NEW.session_id
+BEGIN
+    UPDATE transform_session_roots SET session_activity_at = NEW.last_activity_at
+     WHERE session_id = NEW.session_id;
+END;
+
+CREATE TRIGGER cache_state_activity_to_roots_on_rename
+AFTER UPDATE OF session_id ON cache_state
+WHEN OLD.session_id IS NOT NEW.session_id
+BEGIN
+    UPDATE transform_session_roots SET session_activity_at = NULL
+     WHERE session_id = OLD.session_id;
+    UPDATE transform_session_roots SET session_activity_at = NEW.last_activity_at
+     WHERE session_id = NEW.session_id;
+END;
+
+CREATE TRIGGER cache_state_activity_to_roots_on_delete
+AFTER DELETE ON cache_state
+BEGIN
+    UPDATE transform_session_roots SET session_activity_at = NULL
+     WHERE session_id = OLD.session_id;
+END;
 
 CREATE TRIGGER notes_facade_authority_insert
         BEFORE INSERT ON notes

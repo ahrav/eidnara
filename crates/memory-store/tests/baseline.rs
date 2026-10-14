@@ -12,6 +12,7 @@ use storage::{INFRASTRUCTURE_TABLES, STORE_BASELINE, StoreError, schema_inventor
 /// table, index, or trigger fails here by name, independently of the digest.
 const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "block_identities_by_scan_version"),
+    ("index", "cache_state_by_activity"),
     ("index", "covered_system_messages_by_scan_version"),
     ("index", "idx_authority_project"),
     ("index", "idx_authority_route_bindings_authority"),
@@ -49,12 +50,12 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_scan_owner_copies_domain_owner"),
     ("index", "idx_scan_owner_copies_scan"),
     ("index", "idx_temporal_marks_session_created"),
-    ("index", "idx_transform_session_roots_observed"),
     ("index", "idx_user_hints_session_created"),
     ("index", "idx_user_memories_status"),
     ("index", "idx_user_memory_candidates_session"),
     ("index", "idx_workspace_member_unique"),
     ("index", "idx_wrapup_commands_session_created"),
+    ("index", "transform_session_roots_by_retention"),
     ("table", "authority"),
     ("table", "authority_route_bindings"),
     ("table", "authority_seed_rows"),
@@ -106,6 +107,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "workspace_members"),
     ("table", "workspaces"),
     ("table", "wrapup_commands"),
+    ("trigger", "cache_state_activity_to_roots_on_delete"),
+    ("trigger", "cache_state_activity_to_roots_on_insert"),
+    ("trigger", "cache_state_activity_to_roots_on_rename"),
+    ("trigger", "cache_state_activity_to_roots_on_update"),
     ("trigger", "chunk_transcripts_total_delete"),
     ("trigger", "chunk_transcripts_total_insert"),
     ("trigger", "chunk_transcripts_total_update"),
@@ -142,6 +147,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "notes_ownership_delete"),
     ("trigger", "notes_ownership_insert"),
     ("trigger", "notes_ownership_update"),
+    ("trigger", "transform_session_roots_copy_activity_on_insert"),
+    ("trigger", "transform_session_roots_copy_activity_on_rename"),
 ];
 
 /// The objects `storage::open_sqlite` installs ahead of the consumer's baseline,
@@ -456,8 +463,8 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
     );
 }
 
-/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It stores
-/// `cache_state.last_activity_at` after the text columns.
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds no
+/// `cache_state_by_activity` index.
 const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
     "45baed0c314ba5d29d925f063ff5caa5e5260bc81240acdd4deee0f622885f36";
@@ -485,30 +492,5 @@ fn a_store_created_under_the_prior_baseline_refuses_to_open_untouched() {
     assert_eq!(
         std::fs::read(dir.path().join("memory.sqlite")).unwrap(),
         before
-    );
-}
-
-/// `cache_state.last_activity_at` precedes the unbounded `core_state` and `meta` text, so the
-/// open-time retention scan reads it from each row's first page and walks no overflow chain.
-#[test]
-fn cache_state_stores_last_activity_at_ahead_of_its_text_columns() {
-    let dir = tempfile::tempdir().unwrap();
-    drop(MemoryStore::open_for_test(dir.path(), "eidnara-test"));
-    let columns: Vec<String> = inspect(dir.path())
-        .prepare("SELECT name FROM pragma_table_info('cache_state') ORDER BY cid")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert_eq!(
-        columns,
-        [
-            "session_id",
-            "row_version",
-            "last_activity_at",
-            "core_state",
-            "meta"
-        ]
     );
 }

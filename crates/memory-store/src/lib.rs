@@ -470,6 +470,16 @@ pub enum TransformRootPrune {
     ClockDisagrees { now_ms: i64, newest_ms: i64 },
 }
 
+/// The newest recorded write anchors the pruning clock check: pruning retains every root when that timestamp exceeds `now_ms` or precedes it by more than one retention window.
+const NEWEST_RECORDED_WRITE_SQL: &str = "SELECT MAX(at) FROM (
+     SELECT MAX(MAX(observed_at, COALESCE(session_activity_at, observed_at))) AS at
+       FROM transform_session_roots
+     UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+ )";
+
+const PRUNE_IDLE_TRANSFORM_ROOTS_SQL: &str = "DELETE FROM transform_session_roots
+  WHERE MAX(observed_at, COALESCE(session_activity_at, observed_at)) < ?1";
+
 /// Milliseconds since the epoch, or `None` for a clock before the epoch or past `i64` milliseconds.
 fn epoch_millis(elapsed: Result<std::time::Duration, std::time::SystemTimeError>) -> Option<i64> {
     i64::try_from(elapsed.ok()?.as_millis()).ok()
@@ -8116,7 +8126,7 @@ impl MemoryStore {
         self.transform_root_prune
     }
 
-    /// Deletes roots whose observation and cache activity are both older than the retention window ending at `now_ms`. The store's newest recorded root observation or cache activity checks the clock: when that write is later than `now_ms`, or more than one window before it, retention keeps every root. A dormant store therefore prunes at the first open after new activity, and a clock that jumps ahead at open deletes nothing. `cache_state` stores `last_activity_at` ahead of its text columns, so the newest-activity scan and the per-root probe read each row's first page and no `core_state` or `meta` overflow page.
+    /// Retention deletes roots whose observation and cache activity both precede the 30-day window ending at `now_ms`. Retention keeps every root when `now_ms` is unreadable, or when the newest recorded root observation or cache activity is later than `now_ms` or more than 30 days before it.
     fn prune_transform_session_roots(
         &self,
         now_ms: Option<i64>,
@@ -8127,30 +8137,16 @@ impl MemoryStore {
         };
         self.inner
             .with_conn_fenced(|conn| {
-                let newest: Option<i64> = conn.query_row(
-                    "SELECT MAX(at) FROM (
-                         SELECT MAX(observed_at) AS at FROM transform_session_roots
-                         UNION ALL SELECT MAX(last_activity_at) FROM cache_state
-                     )",
-                    [],
-                    |row| row.get(0),
-                )?;
+                let newest: Option<i64> =
+                    conn.query_row(NEWEST_RECORDED_WRITE_SQL, [], |row| row.get(0))?;
                 let Some(newest_ms) = newest else {
                     return Ok(TransformRootPrune::Pruned(0));
                 };
                 if newest_ms > now_ms || now_ms.saturating_sub(newest_ms) > RETENTION_MS {
                     return Ok(TransformRootPrune::ClockDisagrees { now_ms, newest_ms });
                 }
-                // Cache rows are retained across session teardown, so row existence is not
-                // activity.
                 let deleted = conn.execute(
-                    "DELETE FROM transform_session_roots AS roots
-                      WHERE roots.observed_at < ?1
-                        AND NOT EXISTS (
-                            SELECT 1 FROM cache_state AS cache
-                             WHERE cache.session_id = roots.session_id
-                               AND cache.last_activity_at >= ?1
-                        )",
+                    PRUNE_IDLE_TRANSFORM_ROOTS_SQL,
                     params![now_ms - RETENTION_MS],
                 )?;
                 Ok(TransformRootPrune::Pruned(deleted))
@@ -22917,6 +22913,189 @@ mod tests {
             store.prune_transform_session_roots(Some(i64::MAX)).unwrap(),
             TransformRootPrune::Pruned(0)
         );
+    }
+
+    #[test]
+    fn a_cache_row_with_a_null_session_id_leaves_stale_roots_to_the_prune() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "live", now_ms - DAY_MS);
+        root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                     VALUES (NULL, 1, '{}', '{}', ?1)",
+                    params![now_ms - DAY_MS],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(1)
+        );
+        assert!(
+            !store
+                .knows_transform_session_root("stale", "/root-a")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn the_transform_root_prune_reads_only_its_two_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let plan = |sql: &str| -> Vec<String> {
+            store
+                .inner
+                .with_conn_unfenced(|conn| {
+                    let mut explain = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let cutoff = vec![0_i64; explain.parameter_count()];
+                    explain
+                        .query_map(rusqlite::params_from_iter(cutoff), |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect()
+                })
+                .unwrap()
+        };
+        let reads = |steps: &[String]| -> Vec<String> {
+            steps
+                .iter()
+                .filter(|step| step.contains("SEARCH") || step.contains("SCAN"))
+                .filter(|step| !step.contains("subquery"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            reads(&plan(NEWEST_RECORDED_WRITE_SQL)),
+            [
+                "SEARCH transform_session_roots USING COVERING INDEX transform_session_roots_by_retention",
+                "SEARCH cache_state USING COVERING INDEX cache_state_by_activity",
+            ]
+        );
+        assert_eq!(
+            reads(&plan(PRUNE_IDLE_TRANSFORM_ROOTS_SQL)),
+            [
+                "SEARCH transform_session_roots USING INDEX transform_session_roots_by_retention (<expr><?)"
+            ]
+        );
+    }
+
+    #[test]
+    fn root_retention_tracks_cache_activity_through_every_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let session = |n: u64| (n < 7).then(|| format!("s{n}"));
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                for _ in 0..2000 {
+                    let (a, b, at) = (next(8), next(8), next(100) as i64);
+                    let root = format!("/r{}", next(3));
+                    match next(9) {
+                        0 => conn.execute(
+                            "INSERT OR IGNORE INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)",
+                            params![session(a), at],
+                        )?,
+                        1 => conn.execute(
+                            "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)
+                             ON CONFLICT(session_id) DO UPDATE SET last_activity_at = excluded.last_activity_at",
+                            params![session(a), at],
+                        )?,
+                        2 => conn.execute(
+                            "UPDATE OR IGNORE cache_state SET session_id = ?2 WHERE session_id IS ?1",
+                            params![session(a), session(b)],
+                        )?,
+                        3 => conn.execute(
+                            "DELETE FROM cache_state WHERE session_id IS ?1",
+                            params![session(a)],
+                        )?,
+                        4 => conn.execute(
+                            "INSERT INTO transform_session_roots (session_id, project_root, observed_at)
+                             VALUES (?1, ?2, ?3)
+                             ON CONFLICT(session_id, project_root) DO UPDATE SET observed_at = excluded.observed_at",
+                            params![format!("s{a}"), root, at],
+                        )?,
+                        5 => conn.execute(
+                            "INSERT OR REPLACE INTO transform_session_roots (session_id, project_root, observed_at)
+                             VALUES (?1, ?2, ?3)",
+                            params![format!("s{a}"), root, at],
+                        )?,
+                        6 => conn.execute(
+                            "UPDATE OR IGNORE transform_session_roots SET session_id = ?2 WHERE session_id = ?1",
+                            params![format!("s{a}"), format!("s{b}")],
+                        )?,
+                        7 => conn.execute(
+                            "DELETE FROM transform_session_roots WHERE session_id = ?1 AND project_root = ?2",
+                            params![format!("s{a}"), root],
+                        )?,
+                        _ => conn.execute(
+                            "INSERT OR REPLACE INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)",
+                            params![session(a), at],
+                        )?,
+                    };
+                    let stale: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM transform_session_roots AS roots
+                          WHERE roots.session_activity_at IS NOT (
+                              SELECT cache.last_activity_at FROM cache_state AS cache
+                               WHERE cache.session_id = roots.session_id)",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(stale, 0);
+                    let newest = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, Option<i64>>(0));
+                    assert_eq!(
+                        newest(NEWEST_RECORDED_WRITE_SQL)?,
+                        newest(
+                            "SELECT MAX(at) FROM (
+                                 SELECT MAX(observed_at) AS at FROM transform_session_roots
+                                 UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+                             )"
+                        )?
+                    );
+                    let cutoff = next(110) as i64;
+                    let selected = |sql: &str| -> rusqlite::Result<Vec<(String, String)>> {
+                        conn.prepare(sql)?
+                            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
+                            .collect()
+                    };
+                    assert_eq!(
+                        selected(
+                            "SELECT session_id, project_root FROM transform_session_roots
+                              WHERE MAX(observed_at, COALESCE(session_activity_at, observed_at)) < ?1
+                              ORDER BY 1, 2"
+                        )?,
+                        selected(
+                            "SELECT session_id, project_root FROM transform_session_roots AS roots
+                              WHERE roots.observed_at < ?1
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM cache_state AS cache
+                                     WHERE cache.session_id = roots.session_id
+                                       AND cache.last_activity_at >= ?1)
+                              ORDER BY 1, 2"
+                        )?,
+                        "cutoff {cutoff}"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     /// The row stores the canonical root, so the canonical form is what must be scanned. A
