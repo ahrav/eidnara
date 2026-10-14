@@ -179,7 +179,9 @@ or stale on every surface.
 
 The route's handler pins a reader, then calls `ExactCertification::issue`
 when the request names an `id:` selector. Only a gate-admitted pin yields a
-`SearchReader`, so only such a reader certifies. With a certification, the
+`SearchReader`, so only such a reader certifies. Issuance reads the projection
+under the request's budget, so a cancellation or deadline ends its connection
+wait and its statements. With a certification, the
 exact lane resolves each `id:` selector through `retrieval::exact::resolve`
 under the request's one `SharedBudget`, inside the same interruptible
 projection read as the other lanes. Each attempt reads at most
