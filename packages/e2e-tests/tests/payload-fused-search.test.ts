@@ -48,7 +48,10 @@ function expectDenseOnly(result: string, objectId: string, content: string): voi
     expect(result).not.toContain(FALLBACK);
     const row = rowFor(result, objectId);
     expect(row, result).not.toBeNull();
-    expect(row?.header).toMatch(/^\[1\] \[memory\] .* match=fused lanes=dense(?:\s|$)/);
+    // A memory written through the plugin carries no causal record, so its served claim reports the Unknown class.
+    expect(row?.header).toMatch(
+        /^\[1\] \[memory\] .* match=fused lanes=dense provenance=unknown(?:\s|$)/,
+    );
     expect(row?.body).toBe(content);
 }
 

@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use super::projection_gate::{identity, passing_evaluator};
 use daemon::projection_gates::{
-    Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
+    ActivationGrant, Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity,
+    ProjectionHook,
 };
 use daemon::vector_admission::Ledger;
 use daemon::vector_composition::{
@@ -18,7 +19,8 @@ use daemon::vector_composition::{
 };
 use daemon::vector_generation::{ExpectedVectors, Staging, VerifiedVectors, build, stage, verify};
 use host_runtime::generation::{
-    GENERATIONS_DIR_NAME, GenerationStore, MEMBERS_FILE_NAME, SourceSpec, StageMeta, WireMembers,
+    CurrentProfile, GENERATIONS_DIR_NAME, GenerationStore, MEMBERS_FILE_NAME, SourceSpec,
+    StageMeta, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::ProjectionIdentity;
@@ -90,8 +92,27 @@ pub fn export(seed: u8, checkpoint: i64) -> LiveRows {
     }
 }
 
+/// The directory a fixture's store lives in: a temporary directory it owns and removes, or one another process left behind.
+pub struct Root {
+    path: PathBuf,
+    dir: Option<tempfile::TempDir>,
+}
+
+impl Root {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Leaves the directory in place when the fixture drops, so another process can reopen the store.
+    pub fn keep(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = dir.keep();
+        }
+    }
+}
+
 pub struct Fixture {
-    pub root: tempfile::TempDir,
+    pub root: Root,
     pub store: GenerationStore,
     /// The exclusive lifecycle transaction the fixture stages and publishes under; `release_transaction` gives it up so a reader's shared protection can be taken.
     pub tx: Option<LifecycleTransactionLock>,
@@ -130,7 +151,28 @@ impl Fixture {
 
     /// A lifecycle store whose gate, ledger, and layers all carry `identity` and `generation`, so its compositions serve a projection built under them.
     pub fn for_projection(identity: ProjectionIdentity, generation: VectorGeneration) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root {
+            path: dir.path().to_owned(),
+            dir: Some(dir),
+        };
+        Self::at(root, identity, generation)
+    }
+
+    /// The fixture's identity over a store another process left at `root`, with a fresh gate, admission, and ledger as a restarted daemon builds them; the caller removes `root`.
+    pub fn reopen(root: &std::path::Path) -> Self {
+        let identity = identity(KERNEL, DIMENSION);
+        Self::at(
+            Root {
+                path: root.to_owned(),
+                dir: None,
+            },
+            identity,
+            generation(),
+        )
+    }
+
+    fn at(root: Root, identity: ProjectionIdentity, generation: VectorGeneration) -> Self {
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
         let gate = Arc::new(HookGate::closed());
@@ -182,6 +224,11 @@ impl Fixture {
             Some(LifecycleTransactionLock::acquire_exclusive(Some(self.root.path())).unwrap());
     }
 
+    /// The gate's compressed activation under the passing evaluator; [`Self::set_limit`] reinstalls the evaluator and withdraws it.
+    pub fn activation(&self) -> ActivationGrant {
+        self.gate.admit_compressed_activation().unwrap()
+    }
+
     pub fn expected(&self) -> ExpectedVectors<'_> {
         ExpectedVectors {
             generation: &self.generation,
@@ -202,14 +249,24 @@ impl Fixture {
     }
 
     pub fn staging(&self) -> Staging<'_> {
+        self.staging_on(&self.store, self.transaction(), &self.protected)
+    }
+
+    /// A stager over `store` under `transaction`, with this fixture's gate, admission, identity, and ledger, for a store reopened on a fresh handle.
+    pub fn staging_on<'a>(
+        &'a self,
+        store: &'a GenerationStore,
+        transaction: &'a LifecycleTransactionLock,
+        protected: &'a BTreeSet<String>,
+    ) -> Staging<'a> {
         Staging {
-            store: &self.store,
-            transaction: self.transaction(),
+            store,
+            transaction,
             gate: &self.gate,
             admission: &self.admission,
             identity: &self.identity,
             ledger: &self.ledger,
-            protected: &self.protected,
+            protected,
         }
     }
 
@@ -252,10 +309,23 @@ impl Fixture {
         })
     }
 
+    /// The digest the vector selector names now: the predecessor a writer composing from the current selection hands to `publish`.
+    pub fn predecessor(&self) -> Option<String> {
+        match self.store.read_vector_current().unwrap() {
+            CurrentProfile::Current(digest) => Some(digest),
+            CurrentProfile::Absent | CurrentProfile::Quarantined => None,
+        }
+    }
+
     pub fn publish(&self, composition: &Composition) -> Result<String, CompositionRefusal> {
-        publish(composition, &self.staging(), &self.work_dir(), &mut |_| {
-            Ok(())
-        })
+        publish(
+            composition,
+            self.predecessor().as_deref(),
+            &self.staging(),
+            Some(&self.activation()),
+            &self.work_dir(),
+            &mut |_| Ok(()),
+        )
         .map_err(|failure| failure.refusal)
     }
 
@@ -376,4 +446,9 @@ impl Fixture {
             .stage(&sources, &template.stage_meta(), &BTreeSet::new())
             .unwrap()
     }
+}
+
+/// The inode of the directory at `dir`, which changes only when another directory takes its name.
+pub fn occupant_inode(dir: &std::path::Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&fs::metadata(dir).unwrap())
 }

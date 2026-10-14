@@ -40,3 +40,19 @@ None.
 - Findings: `k` 64 and a pool of 256 are named there; RP2.9 approval is Q6.
 - Missing evidence: owner approval.
 - Conclusion: unresolved, needs Q6 owner approval.
+
+### Q: Does installation check the entry bound?
+
+- Sources examined: `check_pair` (`crates/daemon/src/query_route.rs:753`),
+  `CompressedLimits::capacity` (`query_route.rs:618`), `rank_compressed`
+  (`crates/daemon/src/vector_reader.rs:876`, `:878`, `:900`), and
+  `crates/daemon/tests/query_route_compressed.rs`
+  `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`.
+- Findings: installation checks `k`, the alpha policy, `candidates`, and
+  `scan_page_rows`. `max_entries` reaches the resolver inside the request's
+  scan, after `Scratch` and `RowBuffers` are reserved, so a composition whose
+  entry bound is below its rows installs and every request degrades as
+  `layers`.
+- Missing evidence: an owner decision on whether installation refuses an
+  entry bound below the view's rows.
+- Conclusion: needs human input.

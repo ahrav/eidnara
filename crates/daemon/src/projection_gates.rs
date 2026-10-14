@@ -686,10 +686,17 @@ pub struct Admission {
     pub invalidated: CancellationToken,
 }
 
-/// A grant to use or publish compressed vector layers in production; `invalidated` fires when the gate's manifest or identity changes after the grant.
+/// A grant to use or publish compressed vector layers in production; `invalidated` fires when this process's gate is reinstalled, renewed with a changed verdict or binding, closed, or disabled, or when a later admission through it reads a durable stop record; [`ActivationGrant::is_revoked`] reads only the token. Only [`HookGate::admit_compressed_activation`] issues one, so installing compressed vectors or publishing a new compressed base, a compaction included, requires the gate's activation verdict.
 #[derive(Debug, Clone)]
 pub struct ActivationGrant {
-    pub invalidated: CancellationToken,
+    invalidated: CancellationToken,
+}
+
+impl ActivationGrant {
+    /// Whether the gate withdrew the grant after issuing it.
+    pub fn is_revoked(&self) -> bool {
+        self.invalidated.is_cancelled()
+    }
 }
 
 /// Outcome of a [`ProjectionAdmission::refresh`](crate::projection_admission::ProjectionAdmission::refresh) for existing grants.
@@ -1013,6 +1020,8 @@ struct GateState {
     evaluator: Option<EvidenceEvaluator>,
     /// `evaluator`'s [`EvidenceEvaluator::judge`] verdict for each hook, in [`ProjectionHook::ALL`] order, judged when `evaluator` is set. A verdict depends on the evaluator alone, so it holds until the evaluator is replaced.
     verdicts: Vec<Result<(), Denial>>,
+    /// Activation admissions reuse this [`EvidenceEvaluator::judge_compressed_activation`] verdict until `evaluator` is replaced.
+    activation: Result<(), Denial>,
     /// What admissions keep between them to read the control record.
     control_cache: crate::projection_lifecycle::ControlCache,
     disabled: bool,
@@ -1023,6 +1032,11 @@ struct GateState {
 impl GateState {
     fn set_evaluator(&mut self, evaluator: Option<EvidenceEvaluator>) {
         self.verdicts = evaluator.as_ref().map_or_else(Vec::new, judge_all);
+        self.activation = evaluator
+            .as_ref()
+            .map_or(Err(Denial::NoManifest), |evaluator| {
+                evaluator.judge_compressed_activation()
+            });
         self.evaluator = evaluator;
     }
 
@@ -1046,6 +1060,8 @@ impl GateState {
 /// The shared gate every hook consults. It starts closed. `close`, and `renew` when its evidence withdraws a hook, cancel the previous grant's token before the new state is visible, and a group of hooks is judged under one state, so no grant spans two manifests.
 pub struct HookGate {
     state: Mutex<GateState>,
+    /// Advances under the `state` lock after every change to the evaluator, the verdicts, or the latch, so a [`VectorJudgment`] formed at one value describes the state until the next.
+    epoch: std::sync::atomic::AtomicU64,
     data_home: Option<PathBuf>,
     /// The lifecycle control directory under `data_home` and its record's path, which every admission reads.
     control: Option<(PathBuf, PathBuf)>,
@@ -1076,9 +1092,11 @@ impl HookGate {
         Self {
             data_home: None,
             control: None,
+            epoch: std::sync::atomic::AtomicU64::new(1),
             state: Mutex::new(GateState {
                 evaluator: None,
                 verdicts: Vec::new(),
+                activation: Err(Denial::NoManifest),
                 control_cache: Default::default(),
                 disabled: false,
                 invalidated: CancellationToken::new(),
@@ -1101,6 +1119,7 @@ impl HookGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let verdicts = judge_all(&evaluator);
+        let activation = evaluator.judge_compressed_activation();
         let renewal = if state.disabled {
             Renewal::Disabled
         } else if state.evaluator.as_ref().is_none_or(|old| {
@@ -1111,9 +1130,8 @@ impl HookGate {
                     .iter()
                     .zip(&verdicts)
                     .all(|(old, new)| old.is_err() || new.is_ok())
-                && (old.judge_compressed_activation().is_err()
-                    || (evaluator.judge_compressed_activation().is_ok()
-                        && old.binding == evaluator.binding))
+                && (state.activation.is_err()
+                    || (activation.is_ok() && old.binding == evaluator.binding))
         }) {
             Renewal::Kept
         } else {
@@ -1122,6 +1140,8 @@ impl HookGate {
         };
         state.evaluator = Some(evaluator);
         state.verdicts = verdicts;
+        state.activation = activation;
+        self.advance();
         renewal
     }
 
@@ -1141,6 +1161,7 @@ impl HookGate {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.disabled = true;
         state.invalidated.cancel();
+        self.advance();
     }
 
     /// Consults the durable record before an admission. A `Disabled` record, or one that was read and refused, latches the gate closed; a record that could not be read denies only this call, since the next lifecycle open or write repairs it and no durable stop exists.
@@ -1156,6 +1177,7 @@ impl HookGate {
         if stop && let Some(state) = state {
             state.disabled = true;
             state.invalidated.cancel();
+            self.advance();
         }
         Ok(())
     }
@@ -1187,6 +1209,7 @@ impl HookGate {
         persist()?;
         state.invalidate_grants();
         state.disabled = false;
+        self.advance();
         Ok(())
     }
 
@@ -1246,6 +1269,13 @@ impl HookGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.invalidate_grants();
         state.set_evaluator(evaluator);
+        self.advance();
+    }
+
+    /// Called with the `state` lock held, after the change it publishes.
+    fn advance(&self) {
+        self.epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Every request judged so far, oldest first.
@@ -1380,8 +1410,10 @@ impl HookGate {
         if state.disabled {
             return Err(Denial::RecoveryRequired);
         }
-        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
-        evaluator.judge_compressed_activation()?;
+        if state.evaluator.is_none() {
+            return Err(Denial::NoManifest);
+        }
+        state.activation.clone()?;
         Ok(ActivationGrant {
             invalidated: state.invalidated.clone(),
         })
@@ -1436,6 +1468,84 @@ impl HookGate {
         state.verdict(grant.hook)?;
         requested_within(evaluator, requested)
     }
+
+    /// [`Self::check_limits`] of one [`VECTOR_LIMITS`] charge, judged through `judgment`, which the caller keeps across calls for `expected`. The gate's lock is taken only when its state changed since `judgment` was formed or when the charge is refused for a reason other than the grant's token or the limit itself, so every refusal is the one `check_limits` gives.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check_limits`].
+    pub(crate) fn check_vector_limit(
+        &self,
+        judgment: &mut VectorJudgment,
+        grant: &Admission,
+        expected: &InvalidationIdentity,
+        limit: &str,
+        observed: u64,
+    ) -> Result<(), Denial> {
+        let epoch = self.epoch.load(std::sync::atomic::Ordering::Acquire);
+        if judgment.epoch != epoch {
+            *judgment = self.judge_vector(expected);
+        }
+        let hook = ProjectionHook::ALL
+            .iter()
+            .position(|known| *known == grant.hook);
+        let index = VECTOR_LIMITS.iter().position(|name| *name == limit);
+        if let (Some(hook), Some(index)) = (hook, index)
+            && judgment.admitted & (1 << hook) != 0
+            && let Some(max) = judgment.limits[index]
+            && !self.state.is_poisoned()
+        {
+            if grant.invalidated.is_cancelled() {
+                return Err(Denial::Invalidated);
+            }
+            if observed > max {
+                return Err(Denial::LimitExceeded {
+                    limit: limit.to_owned(),
+                    observed,
+                    max,
+                });
+            }
+            return Ok(());
+        }
+        self.check_limits(grant, expected, &[(limit, observed)])
+    }
+
+    fn judge_vector(&self, expected: &InvalidationIdentity) -> VectorJudgment {
+        let Ok(state) = self.state.lock() else {
+            return VectorJudgment::default();
+        };
+        let epoch = self.epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let Some(evaluator) = state
+            .evaluator
+            .as_ref()
+            .filter(|evaluator| !state.disabled && evaluator.current == *expected)
+        else {
+            return VectorJudgment {
+                epoch,
+                ..VectorJudgment::default()
+            };
+        };
+        let admitted = ProjectionHook::ALL
+            .iter()
+            .enumerate()
+            .filter(|(_, hook)| state.verdict(**hook).is_ok())
+            .fold(0u16, |bits, (index, _)| bits | (1 << index));
+        VectorJudgment {
+            epoch,
+            admitted,
+            limits: VECTOR_LIMITS.map(|name| evaluator.limit(name).ok()),
+        }
+    }
+}
+
+/// Every state check [`HookGate::check_limits`] makes for one identity under one gate epoch: which hooks pass and each [`VECTOR_LIMITS`] value. The grant's token and the charge are judged on each call.
+#[derive(Debug, Default)]
+pub(crate) struct VectorJudgment {
+    /// Zero before the first judgment; the gate's epoch starts at one.
+    epoch: u64,
+    /// Bit `i` is set when hook `ProjectionHook::ALL[i]` passes every state check for the identity.
+    admitted: u16,
+    limits: [Option<u64>; VECTOR_LIMITS.len()],
 }
 
 /// Requires each requested charge to fit its manifest limit.

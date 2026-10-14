@@ -225,12 +225,12 @@ impl ServedMessage {
     /// Reuse a projected block's retained hash only when its complete identity matches.
     ///
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
-    /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
+    /// Overlaid, reduced, and rewritten blocks hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
         // The canonicalizer may hand back its growth buffer with spare capacity;
         // converting to the exact-size `Arc` first keeps that slack from outliving
-        // the block-receipt serialization below.
-        let canonical = crate::served_json::canonical_message(&message)
+        // the block receipts below.
+        let (canonical, block_ranges) = crate::served_json::canonical_message_with_blocks(&message)
             .expect("CK wire message values must always serialize");
         let nesting_depth = canonical.nesting_depth;
         let canonical_bytes: Arc<[u8]> = Arc::from(canonical.bytes);
@@ -265,11 +265,19 @@ impl ServedMessage {
                 if let Some(fp) = reused {
                     return fp;
                 }
+                if let Some(range) = block_ranges
+                    .as_ref()
+                    .and_then(|ranges| ranges.get(served_index))
+                {
+                    let serialized = &canonical_bytes[range.clone()];
+                    return (wire::fingerprint_bytes(serialized), serialized.len());
+                }
                 let serialized = crate::served_json::canonical_block_bytes(block)
                     .expect("CK wire blocks must always have a JSON representation");
                 (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
+        drop(block_ranges);
         let message = Arc::new(message);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
         let retained_bytes =
@@ -10714,8 +10722,8 @@ fn apply_surface_strips(
                     && image_block_is_large(&block.wire))
                     || (request_accepts_empty_content(req)
                         && core.frozen_units.iter().any(|unit| {
-                            unit.key == format!("{RED_KEY_PREFIX}{}", block.id())
-                                && unit.kind == "image"
+                            unit.kind == "image"
+                                && unit.key.strip_prefix(RED_KEY_PREFIX) == Some(block.id())
                         })))
                 || (request_accepts_empty_content(req) && is_structural_noise(&block.wire));
         if should_strip {
@@ -11676,6 +11684,13 @@ fn build_output(
     })
 }
 
+/// A served message in output order: built, or rendered and waiting for its canonical bytes and
+/// fingerprints, which the output computes for every rendered message together.
+enum ServedSlot<'a> {
+    Ready(ServedMessage),
+    Rendered(WireMessage, Option<&'a [&'a FlatBlock]>),
+}
+
 // Provider and durable-watermark arguments stay explicit: they differ across replay paths.
 #[allow(clippy::too_many_arguments)]
 fn build_output_with_tags(
@@ -11693,7 +11708,7 @@ fn build_output_with_tags(
 ) -> Result<BuiltOutput, TransformError> {
     let build_output_started_at = Instant::now();
     let mut build_timings = BuildOutputTimings::default();
-    let mut out = Vec::with_capacity(4 + req.messages.len());
+    let mut out: Vec<ServedSlot<'_>> = Vec::with_capacity(4 + req.messages.len());
     let frozen_unit_index_started_at = Instant::now();
     let frozen_units = if use_frozen_unit_index {
         FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units))
@@ -11707,14 +11722,14 @@ fn build_output_with_tags(
 
     if !req.is_subagent {
         if let Some(unit) = frozen_units.by_key("m0") {
-            out.push(ServedMessage::from_message(synthetic_m0_message(
-                unit.frozen_payload.clone(),
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
+                synthetic_m0_message(unit.frozen_payload.clone()),
             )));
         }
         if let Some(unit) = frozen_units.by_key("m1") {
-            out.push(ServedMessage::from_message(
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
                 WireMessage::synthetic_user_text(unit.frozen_payload.clone()),
-            ));
+            )));
         }
     }
 
@@ -11771,7 +11786,9 @@ fn build_output_with_tags(
     {
         for message in [&pair.assistant_msg, &pair.tool_msg] {
             prev_assistant = message.role == "assistant";
-            out.push(ServedMessage::from_message(message.clone()));
+            out.push(ServedSlot::Ready(ServedMessage::from_message(
+                message.clone(),
+            )));
         }
     }
 
@@ -11960,10 +11977,13 @@ fn build_output_with_tags(
                     &mut rendered,
                 );
             }
-            ServedMessage::from_message_reusing(rendered, (!blocks.is_empty()).then_some(blocks))
+            rendered
         };
         prev_assistant = served.role == "assistant";
-        out.push(served);
+        out.push(ServedSlot::Rendered(
+            served,
+            (!blocks.is_empty()).then_some(blocks),
+        ));
 
         if synthetic_todo_enabled
             && !inserted_synthetic_todo
@@ -11974,12 +11994,21 @@ fn build_output_with_tags(
         {
             for message in [&pair.assistant_msg, &pair.tool_msg] {
                 prev_assistant = message.role == "assistant";
-                out.push(ServedMessage::from_message(message.clone()));
+                out.push(ServedSlot::Ready(ServedMessage::from_message(
+                    message.clone(),
+                )));
             }
             inserted_synthetic_todo = true;
         }
     }
 
+    // Each served message's canonical bytes and block fingerprints depend on that message alone.
+    let mut out = crate::parallel_map::map_with(out, |(), slot| match slot {
+        ServedSlot::Ready(served) => served,
+        ServedSlot::Rendered(message, blocks) => {
+            ServedMessage::from_message_reusing(message, blocks)
+        }
+    });
     build_timings.tail_loop = elapsed_ms(tail_loop_started_at);
     if synthetic_todo_enabled
         && let Some(pair) = &meta.synthetic_todo
@@ -12149,7 +12178,10 @@ pub(crate) fn clear_served_native_reasoning(
     watermark: u64,
     mid_turn: bool,
 ) -> usize {
-    let mut shared: Vec<Arc<Value>> = native_messages.iter().cloned().map(Arc::new).collect();
+    let mut shared = native_messages
+        .iter_mut()
+        .map(|message| Arc::new(std::mem::take(message)))
+        .collect::<Vec<_>>();
     let cleared = clear_served_native_reasoning_with_tags(
         profile,
         provider_accepts_empty_content,
@@ -12168,11 +12200,11 @@ pub(crate) fn clear_served_native_reasoning(
 
 // Ingress/tag ownership prevents the codec's latest-assistant shortcut from restoring old reasoning.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_with_tags(
+pub(crate) fn clear_served_native_reasoning_with_tags<M: std::borrow::Borrow<WireMessage>>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Arc<Value>],
-    served_messages: &[WireMessage],
+    served_messages: &[M],
     ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     _mid_turn: bool,
@@ -12184,10 +12216,25 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     {
         return 0;
     }
+    let clears = |part: &Value| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
+            && (part.get("thinking").is_some() || part.get("text").is_some())
+            && !is_empty_reasoning_sentinel(part)
+    };
+    let clearable = |message: &Arc<Value>| {
+        (message.get("parts").and_then(Value::as_array))
+            .is_some_and(|parts| parts.iter().any(clears))
+    };
+    if !native_messages.iter().any(clearable) {
+        return 0;
+    }
 
     let served_ids = served_messages
         .iter()
-        .filter(|message| !message.meta.synthetic && message.role == "assistant")
+        .map(std::borrow::Borrow::borrow)
+        .filter(|message: &&WireMessage| !message.meta.synthetic && message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
     if served_ids.is_empty() {
@@ -12208,8 +12255,18 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
         }
     }
 
+    let clears = |part: &Value| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
+            && (part.get("thinking").is_some() || part.get("text").is_some())
+            && !is_empty_reasoning_sentinel(part)
+    };
     let mut cleared = 0;
     for shared_message in native_messages {
+        if !clearable(shared_message) {
+            continue;
+        }
         let raw_message: &Value = shared_message;
         let info = raw_message.get("info").unwrap_or(raw_message);
         let Some(mid) = info
@@ -12229,20 +12286,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
         };
         let age_number = tag_numbers.get(mid).copied().unwrap_or(ordinal);
         if age_number > watermark || newest_assistant_mid == Some(mid) {
-            continue;
-        }
-
-        let clears = |part: &Value| {
-            part.get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|part_type| matches!(part_type, "reasoning" | "thinking"))
-                && (part.get("thinking").is_some() || part.get("text").is_some())
-                && !is_empty_reasoning_sentinel(part)
-        };
-        let Some(parts) = raw_message.get("parts").and_then(Value::as_array) else {
-            continue;
-        };
-        if !parts.iter().any(clears) {
             continue;
         }
         // The message may share its value with the request's input, so the clear writes a

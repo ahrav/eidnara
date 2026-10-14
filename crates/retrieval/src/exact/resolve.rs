@@ -200,8 +200,6 @@ pub enum ResolveRefusal {
     PageOverBound,
     #[error("max retained exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate bound")]
     RetainedOverBound,
-    #[error("the kernel returned {verdicts} verdicts for {candidates} candidates")]
-    VerdictMismatch { candidates: usize, verdicts: usize },
     #[error(transparent)]
     Certificate(#[from] CertificateRefusal),
     #[error(transparent)]
@@ -435,12 +433,6 @@ impl Attempt<'_> {
             self.request.authority.destination,
             &candidates,
         )?;
-        if report.occurrences.len() != live.len() {
-            return Err(ResolveRefusal::VerdictMismatch {
-                candidates: live.len(),
-                verdicts: report.occurrences.len(),
-            });
-        }
         self.resolution.consumed.validated += candidates.len();
         if report.incarnation != self.initial.incarnation {
             self.disqualify(Disqualification::SnapshotChanged);

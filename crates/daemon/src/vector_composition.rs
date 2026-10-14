@@ -1,6 +1,6 @@
 //! Publishes and recovers one complete vector composition: one base layer plus bounded, ordered delta layers, named together by an immutable composition generation the vector selector points at.
 //!
-//! Publication stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
+//! Publication names the selection it was composed from and refuses unless the selector still names it, so a delta published by another writer in between is never dropped. It stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
 //! How far an attempt got is tracked as a ladder of separate facts; an unknown outcome is settled by reading the selector back and comparing digests, never by treating an error as a rollback.
 //! Recovery takes the selected composition when it verifies; otherwise it examines the other compositions newest first under a bound and takes the first whose every member verifies, reporting the selector as stale rather than silently repointing it.
 
@@ -10,12 +10,12 @@ use std::path::Path;
 
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
-    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET,
-    ValidatedGeneration, WireMembers,
+    MEMBERS_FILE_NAME, ManifestFile, PendingGeneration, ProfileEvent, StageMeta, StreamedFile,
+    VECTOR_SELECTION_TARGET, ValidatedGeneration, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
-use crate::projection_gates::Denial;
+use crate::projection_gates::{ActivationGrant, Denial};
 use crate::vector_generation::{
     ExpectedVectors, Staging, VectorIdentity, VectorRefusal, VerifiedVectors, sha256_hex, verify,
     write_new,
@@ -127,6 +127,13 @@ pub enum CompositionRefusal {
     MemberIdentity { digest: String, field: &'static str },
     #[error("sequence {sequence} does not exceed the selected composition's {selected}")]
     Sequence { sequence: u64, selected: u64 },
+    #[error("the composition extends {expected:?}, but the selector names {selected:?}")]
+    Predecessor {
+        expected: Option<String>,
+        selected: Option<String>,
+    },
+    #[error("publication requires the exclusive lifecycle transaction")]
+    SharedTransaction,
     #[error("the composition is not a vector composition: {0}")]
     NotComposition(&'static str),
     #[error("member {digest}: {refusal}")]
@@ -138,6 +145,9 @@ pub enum CompositionRefusal {
     Stage(VectorRefusal),
     #[error("delta admission: {0}")]
     Deltas(Denial),
+    /// The composition's base is not the selected composition's base, and no live compressed activation grant came with it; nothing is staged.
+    #[error("a new compressed base needs a live activation grant")]
+    BaseUnactivated,
     #[error("the lifecycle store refused: {0}")]
     Store(String),
     #[error(
@@ -264,29 +274,55 @@ pub struct PublishFailure {
 }
 
 /// Stages `composition` through `staging` and points the vector selector at it. `observer` sees every selector event after this function has recorded it. A composition whose sequence does not exceed the selected composition's is refused, so two publishers under the same lock cannot reorder the namespace.
+/// `predecessor` is the digest the vector selector named when the caller read the selection it composed from, or `None` when nothing was selected. Publication refuses with [`CompositionRefusal::Predecessor`] before staging unless the selector still names it, so a composition built from a stale selection cannot replace a newer one and drop its deltas.
+///
+/// The predecessor check and the selector rename are atomic only under the exclusive lifecycle transaction of the store `staging` writes to: a shared `staging.transaction` is refused with [`CompositionRefusal::SharedTransaction`] before any read. The caller acquires that transaction on the same lifecycle root as `staging.store`; the lock does not record its root.
+///
+/// A composition whose base differs from the selected composition's base, or that is published with no composition selected, publishes a full-corpus compressed base, so it needs a live `activation` grant from [`crate::projection_gates::HookGate::admit_compressed_activation`]. A composition on the selected base adds or replaces only deltas and publishes with or without one. The grant is checked once, before delta admission and staging; a withdrawal after that check leaves this attempt running to its outcome, and readers still need their own live grant to rank the result.
 ///
 /// # Errors
 ///
 /// A failure carries how far the attempt is known to have gone; a failure at or after `Acknowledged` is an unknown outcome the caller settles with [`reconcile`].
 pub fn publish(
     composition: &Composition,
+    predecessor: Option<&str>,
     staging: &Staging<'_>,
+    activation: Option<&ActivationGrant>,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
 ) -> Result<String, Box<PublishFailure>> {
     let mut progress = Progress::NotStaged;
     let fail = |progress: Progress, refusal| Box::new(PublishFailure { progress, refusal });
-    if let Some(selected) =
-        selected_sequence(staging.store).map_err(|refusal| fail(progress, refusal))?
-        && composition.sequence <= selected
+    if !staging.transaction.is_exclusive() {
+        return Err(fail(progress, CompositionRefusal::SharedTransaction));
+    }
+    let (selected_digest, selected) =
+        selection(staging.store).map_err(|refusal| fail(progress, refusal))?;
+    if let Some(selected) = &selected
+        && composition.sequence <= selected.sequence
     {
         return Err(fail(
             progress,
             CompositionRefusal::Sequence {
                 sequence: composition.sequence,
-                selected,
+                selected: selected.sequence,
             },
         ));
+    }
+    if selected_digest.as_deref() != predecessor {
+        return Err(fail(
+            progress,
+            CompositionRefusal::Predecessor {
+                expected: predecessor.map(str::to_owned),
+                selected: selected_digest,
+            },
+        ));
+    }
+    let new_base = selected
+        .as_ref()
+        .is_none_or(|selected| selected.base != composition.base);
+    if new_base && activation.is_none_or(ActivationGrant::is_revoked) {
+        return Err(fail(progress, CompositionRefusal::BaseUnactivated));
     }
     staging
         .ledger
@@ -322,7 +358,11 @@ pub fn publish(
             match event {
                 ProfileEvent::AfterRename => progress = Progress::Acknowledged,
                 ProfileEvent::AfterDirectorySync => progress = Progress::Durable,
-                ProfileEvent::BeforeRename | ProfileEvent::BeforeDirectorySync => {}
+                ProfileEvent::BeforeTempWrite
+                | ProfileEvent::BeforeTempSync
+                | ProfileEvent::AfterTempSync
+                | ProfileEvent::BeforeRename
+                | ProfileEvent::BeforeDirectorySync => {}
             }
             observer(event)
         });
@@ -332,19 +372,71 @@ pub fn publish(
     }
 }
 
-/// Returns the selected composition's sequence, or `None` when no composition is selected or its record fails validation.
+/// Returns the digest the vector selector names and the selected composition's record; the record is `None` when no composition is selected or its record fails validation.
 ///
 /// # Errors
 ///
 /// Returns `Quarantined` when the selector is quarantined or the selected record has an unknown schema.
-fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, CompositionRefusal> {
+fn selection(
+    store: &GenerationStore,
+) -> Result<(Option<String>, Option<Composition>), CompositionRefusal> {
     match store.read_vector_current()? {
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
-        CurrentProfile::Absent => Ok(None),
-        CurrentProfile::Current(digest) => Ok(record(store, &digest)?
-            .filter(|_| store.validate(&digest).is_ok())
-            .map(|record| record.sequence)),
+        CurrentProfile::Absent => Ok((None, None)),
+        CurrentProfile::Current(digest) => {
+            let selected = selected_record(store, &digest)?;
+            Ok((Some(digest), selected))
+        }
     }
+}
+
+/// Metadata decoding uses bytes from streams accepted by `pending.finish(streams)`.
+fn selected_record(
+    store: &GenerationStore,
+    digest: &str,
+) -> Result<Option<Composition>, CompositionRefusal> {
+    let manifest = match store.manifest(digest) {
+        Ok(manifest) => manifest,
+        Err(GenerationError::UnsupportedStateSchema) => {
+            return Err(CompositionRefusal::Quarantined);
+        }
+        Err(_) => return Ok(None),
+    };
+    if !is_bounded_record(&manifest) {
+        return record(store, digest).map(|_| None);
+    }
+    let Ok(mut pending) = store.validate_streaming_all(digest) else {
+        return record(store, digest).map(|_| None);
+    };
+    let mut streams = Vec::with_capacity(2);
+    let composition = read_stream(&mut pending, COMPOSITION_FILE, &mut streams);
+    let members = read_stream(&mut pending, MEMBERS_FILE_NAME, &mut streams);
+    let Ok(generation) = pending.finish(streams) else {
+        return record(store, digest).map(|_| None);
+    };
+    let Some(bytes) = composition else {
+        return Ok(None);
+    };
+    if let Some(members) = members {
+        check_members_schema(&members)?;
+    }
+    match decode_record(&generation.manifest, &bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(CompositionRefusal::Quarantined) => Err(CompositionRefusal::Quarantined),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The stream remains in `streams` for [`PendingGeneration::finish`] even when `read_rest` fails.
+fn read_stream(
+    pending: &mut PendingGeneration,
+    rel_path: &str,
+    streams: &mut Vec<StreamedFile>,
+) -> Option<Vec<u8>> {
+    let mut stream = pending.stream(rel_path).ok()?;
+    let bytes = stream.read_rest().ok();
+    streams.push(stream);
+    bytes
 }
 
 /// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
@@ -476,15 +568,26 @@ pub fn verify_composition(
 
 /// Reads the manifest before any listed file is hashed or held in memory, so an oversized record is refused by its declared size.
 fn check_record_size(store: &GenerationStore, digest: &str) -> Result<(), CompositionRefusal> {
-    if store
-        .manifest(digest)?
-        .files
-        .iter()
-        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
-    {
+    if exceeds_metadata_cap(&store.manifest(digest)?) {
         return Err(CompositionRefusal::NotComposition("record size"));
     }
     Ok(())
+}
+
+fn exceeds_metadata_cap(manifest: &GenerationManifest) -> bool {
+    manifest
+        .files
+        .iter()
+        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
+}
+
+/// The files a composition record lists: [`COMPOSITION_FILE`] and [`MEMBERS_FILE_NAME`].
+const RECORD_FILES: usize = 2;
+
+fn is_bounded_record(manifest: &GenerationManifest) -> bool {
+    manifest.target == VECTOR_SELECTION_TARGET
+        && manifest.files.len() <= RECORD_FILES
+        && !exceeds_metadata_cap(manifest)
 }
 
 /// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.

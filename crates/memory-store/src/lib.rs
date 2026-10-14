@@ -11484,11 +11484,11 @@ impl MemoryStore {
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             // Read the current row_version inside the fenced txn; NO_ROW when absent.
-            let current: i64 = tx.query_row(
-                "SELECT COALESCE((SELECT row_version FROM cache_state WHERE session_id = ?1), ?2)",
-                params![session_id, NO_ROW],
-                |r| r.get(0),
-            )?;
+            let current: i64 = tx
+                .prepare_cached(
+                    "SELECT COALESCE((SELECT row_version FROM cache_state WHERE session_id = ?1), ?2)",
+                )?
+                .query_row(params![session_id, NO_ROW], |r| r.get(0))?;
 
             let cas_ok = match expected {
                 None => current == NO_ROW,
@@ -11535,7 +11535,7 @@ impl MemoryStore {
                 )?;
             }
             // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
                   VALUES (?1, ?2, ?3, ?4, ?5)
                   ON CONFLICT(session_id) DO UPDATE SET
@@ -11543,8 +11543,14 @@ impl MemoryStore {
                       core_state  = excluded.core_state,
                       meta        = excluded.meta,
                       last_activity_at = excluded.last_activity_at",
-                params![session_id, next as i64, core_json, meta_json, current_time_ms()],
-            )?;
+            )?
+            .execute(params![
+                session_id,
+                next as i64,
+                core_json,
+                meta_json,
+                current_time_ms()
+            ])?;
             if clear_identities {
                 delete_block_identities(tx, session_id)?;
             }
@@ -11561,7 +11567,7 @@ impl MemoryStore {
             }
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO pass_trace (
                      session_id,
                      last_received_at_ms,
@@ -11630,15 +11636,15 @@ impl MemoryStore {
                                   '$[#]', json(?6)
                               )
                       END",
-                 params![
-                     session_id,
-                     first_divergence,
-                     divergence_pass_id,
-                     divergence_at_ms,
-                     scheduler_observation_json,
-                     scheduler_interesting_json
-                 ],
-            )?;
+            )?
+            .execute(params![
+                session_id,
+                first_divergence,
+                divergence_pass_id,
+                divergence_at_ms,
+                scheduler_observation_json,
+                scheduler_interesting_json
+            ])?;
             let mut evictions: Vec<(&[&str], usize)> = Vec::with_capacity(2);
             if scheduler_observation_json.is_some() {
                 evictions.push((OBSERVATION_RING_FIELDS, PASS_TRACE_HISTORY_RING_LEN - 1));
@@ -11653,12 +11659,12 @@ impl MemoryStore {
                 evict_interesting_ring_receipts(tx, session_id)?;
             }
             if let Some(project_root) = canonical_project_root.as_deref() {
-                let stored: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM transform_session_roots
+                let stored: bool = tx
+                    .prepare_cached(
+                        "SELECT EXISTS(SELECT 1 FROM transform_session_roots
                                     WHERE session_id = ?1 AND project_root = ?2)",
-                    params![session_id, project_root],
-                    |row| row.get(0),
-                )?;
+                    )?
+                    .query_row(params![session_id, project_root], |row| row.get(0))?;
                 if let (false, Some(root_scan)) = (stored, root_scan) {
                     coordinated.prepared.borrow_mut().reassign_scans_in(
                         root_scan..root_scan + 1,
@@ -11669,14 +11675,14 @@ impl MemoryStore {
                 }
                 // Durable root lineage is committed with the cache CAS, so a restart cannot
                 // authenticate a root that never produced the accepted session state.
-                tx.execute(
-                     "INSERT INTO transform_session_roots(
+                tx.prepare_cached(
+                    "INSERT INTO transform_session_roots(
                          session_id, project_root, observed_at
                      ) VALUES (?1, ?2, ?3)
                      ON CONFLICT(session_id, project_root) DO UPDATE SET
                          observed_at = excluded.observed_at",
-                    params![session_id, project_root, created_at_ms],
-                )?;
+                )?
+                .execute(params![session_id, project_root, created_at_ms])?;
             }
 
             for input in &tag_mints {
@@ -11716,11 +11722,8 @@ impl MemoryStore {
             }
 
             let previous_frontier = tx
-                .query_row(
-                    "SELECT max_seen_ordinal FROM overlay_frontiers WHERE session_id = ?1",
-                    params![session_id],
-                    |row| row.get::<_, i64>(0),
-                )
+                .prepare_cached("SELECT max_seen_ordinal FROM overlay_frontiers WHERE session_id = ?1")?
+                .query_row(params![session_id], |row| row.get::<_, i64>(0))
                 .optional()?;
             for (ordinal, mark) in &temporal_marks {
                 if previous_frontier.is_none_or(|frontier| *ordinal > frontier) {
@@ -11769,13 +11772,13 @@ impl MemoryStore {
                 )?;
             }
             if let Some(max_seen_ordinal) = max_seen_ordinal {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO overlay_frontiers (session_id, max_seen_ordinal)
                      VALUES (?1, ?2)
                      ON CONFLICT(session_id) DO UPDATE SET
                          max_seen_ordinal = MAX(max_seen_ordinal, excluded.max_seen_ordinal)",
-                    params![session_id, max_seen_ordinal],
-                )?;
+                )?
+                .execute(params![session_id, max_seen_ordinal])?;
             }
 
             for command_id in first_applied_command_ids {

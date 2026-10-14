@@ -391,10 +391,14 @@ class ReferenceableWalk {
         }
     }
 
+    /** The three attribute scalars of one descriptor, charged together. */
     private attributes(slot: PropertyDescriptor): void {
-        this.scalar(slot.enumerable === true);
-        this.scalar(slot.writable === true);
-        this.scalar(slot.configurable === true);
+        this.spend(3 * TAPE_SLOT_BYTES);
+        const field = this.field;
+        if (!field) return;
+        field(slot.enumerable === true);
+        field(slot.writable === true);
+        field(slot.configurable === true);
     }
 
     /**

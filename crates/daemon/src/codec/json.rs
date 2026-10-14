@@ -75,8 +75,13 @@ pub(crate) fn synth_tool_id(
     tool_name: &str,
     input: &Value,
 ) -> String {
-    format!(
-        "synth-tool-{ordinal}-{part_index}-{tool_name}-{}",
-        stable_hash_prefix(input, 12)
-    )
+    use std::fmt::Write;
+    const PREFIX: &str = "synth-tool-";
+    // Two decimal integers of at most 20 digits each and three separators.
+    const FIXED: usize = PREFIX.len() + 2 * 20 + 3;
+    let hash = stable_hash_prefix(input, 12);
+    // The capacity bound keeps formatting within the initial allocation.
+    let mut id = String::with_capacity(FIXED + tool_name.len() + hash.len());
+    let _ = write!(id, "{PREFIX}{ordinal}-{part_index}-{tool_name}-{hash}");
+    id
 }

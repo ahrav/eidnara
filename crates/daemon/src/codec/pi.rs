@@ -236,6 +236,7 @@ fn decode_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiDecline>
                 stable_key: None,
                 blocks: block_metas,
                 decoded: Vec::new(),
+                folded_native_indices: Vec::new(),
             },
         );
     }
@@ -326,13 +327,11 @@ fn bash_execution_text(message: &Value) -> String {
     let field = |key| message.get(key).and_then(Value::as_str);
     let command = field("command").unwrap_or_default();
     let output = field("output").filter(|output| !output.is_empty());
-    let exit_code = message.get("exitCode").and_then(Value::as_i64);
+    let exit_code = message.get("exitCode").and_then(js_nonzero_integer_text);
     let status = if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
         Some("\n\n(command cancelled)".to_string())
     } else {
-        exit_code
-            .filter(|code| *code != 0)
-            .map(|code| format!("\n\nCommand exited with code {code}"))
+        exit_code.map(|code| format!("\n\nCommand exited with code {code}"))
     };
     let path = (message.get("truncated").and_then(Value::as_bool) == Some(true))
         .then(|| field("fullOutputPath"))
@@ -351,6 +350,23 @@ fn bash_execution_text(message: &Value) -> String {
         pieces.extend(["\n\n[Output truncated. Full output: ", path, "]"]);
     }
     pieces.concat()
+}
+
+/// Pi's `${exitCode}` uses JavaScript number formatting: JavaScript reads every JSON number as
+/// an f64 and writes an integer in decimal notation when its absolute value is below `1e21` and
+/// in exponent notation (`1e+21`) otherwise.
+fn js_nonzero_integer_text(value: &Value) -> Option<String> {
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 || number == 0.0 {
+        return None;
+    }
+    if number.abs() < 1e21 {
+        return Some(format!("{number}"));
+    }
+    let exponent = format!("{number:e}");
+    let (mantissa, exponent) = exponent.split_once('e')?;
+    let sign = if exponent.starts_with('-') { "" } else { "+" };
+    Some(format!("{mantissa}e{sign}{exponent}"))
 }
 
 /// Encodes canonical messages as Pi rows, reusing the window's rows matched by mid.
@@ -1178,20 +1194,14 @@ fn encode_with_meta(
     if replays_retained_row(msg, block_metas, decoded) {
         return Some(Arc::clone(raw));
     }
-    let mut matched_metas =
-        match_block_metas(msg.content(), block_metas, block_matches_meta, decoded);
+    let mut matched_metas = match_block_metas(
+        msg.content(),
+        block_metas,
+        block_matches_meta,
+        decoded,
+        None,
+    );
     matched_metas.pair_in_place_edits(msg.content(), block_metas, block_matches_meta);
-    let unchanged = msg.content().len() == block_metas.len()
-        && msg
-            .content()
-            .iter()
-            .zip(&matched_metas.by_block)
-            .all(|(block, matched)| {
-                matched.is_some_and(|meta| decoded_matches(decoded, block, meta))
-            });
-    if unchanged {
-        return Some(Arc::clone(raw));
-    }
     if msg.content().is_empty() {
         return None;
     }
@@ -1318,7 +1328,7 @@ fn update_pi_message_content(
             if let Some(part_index) = block_meta.and_then(|block_meta| block_meta.native_index)
                 && let Some(part) = parts.get_mut(part_index)
             {
-                if block_meta.is_some_and(|meta| decoded_matches(decoded, block, meta)) {
+                if block_meta.is_some_and(|meta| decoded_matches(decoded, None, block, meta)) {
                     continue;
                 }
                 if !matches!(
@@ -1344,7 +1354,7 @@ fn update_pi_message_content(
             .and_then(|block_meta| block_meta.native_index)
             .filter(|part_index| *part_index < native_parts.len());
         if let Some(part_index) = part_index
-            && !block_meta.is_some_and(|meta| decoded_matches(decoded, block, meta))
+            && !block_meta.is_some_and(|meta| decoded_matches(decoded, None, block, meta))
             && !matches!(
                 block.kind(),
                 BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
@@ -2350,6 +2360,39 @@ mod tests {
             })
             .collect();
         assert_eq!(Value::Array(window), fixture["expected"]);
+    }
+
+    /// Expected statuses follow JavaScript's `Number.isInteger(exitCode) && exitCode !== 0`
+    /// predicate and `${exitCode}` formatting.
+    #[test]
+    fn a_bash_exit_code_reads_as_the_javascript_number_it_is() {
+        for (literal, expected) in [
+            ("255", Some("255")),
+            ("-1", Some("-1")),
+            ("9007199254740993", Some("9007199254740992")),
+            ("10000000000000000000", Some("10000000000000000000")),
+            ("18446744073709552000", Some("18446744073709552000")),
+            ("1e21", Some("1e+21")),
+            ("-1e21", Some("-1e+21")),
+            ("1.5e22", Some("1.5e+22")),
+            ("2.0", Some("2")),
+            ("0", None),
+            ("-0.0", None),
+            ("2.5", None),
+            ("null", None),
+            ("\"2\"", None),
+        ] {
+            let message: Value =
+                serde_json::from_str(&format!(r#"{{"command":"c","exitCode":{literal}}}"#))
+                    .unwrap();
+            let text = bash_execution_text(&message);
+            let status = expected.map(|code| format!("\n\nCommand exited with code {code}"));
+            assert_eq!(
+                text,
+                format!("Ran `c`\n(no output){}", status.unwrap_or_default()),
+                "{literal}"
+            );
+        }
     }
 
     #[test]

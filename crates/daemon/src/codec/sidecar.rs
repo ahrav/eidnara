@@ -6,7 +6,7 @@
 //! `MAX_ALIGNMENT_CELLS`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -66,10 +66,15 @@ impl DecodeSidecar {
 
     /// Inserts or replaces message metadata while preserving first-seen order.
     pub fn remember_message(&mut self, mid: String, meta: HarnessMessageMeta) {
-        if !self.messages.contains_key(&mid) {
-            self.order.push(mid.clone());
+        match self.messages.entry(mid) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                self.order.push(entry.key().clone());
+                entry.insert(Arc::new(meta));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(Arc::new(meta));
+            }
         }
-        self.messages.insert(mid, Arc::new(meta));
     }
 
     pub fn message_by_mid(&self, mid: &str) -> Option<&HarnessMessageMeta> {
@@ -100,6 +105,11 @@ pub struct HarnessMessageMeta {
     /// The Pi codec keeps it empty and hands each encode the blocks it decodes from the row.
     #[serde(default)]
     pub decoded: Vec<WireBlock>,
+    /// Indices of tool parts whose call id an earlier part already emitted and whose status
+    /// carries only the call. The encoder drops these parts, so each served call id names one
+    /// tool part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_native_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,12 +124,13 @@ pub struct BlockMeta {
     pub item_id: Option<String>,
 }
 
-/// Order-preserving block-to-metadata alignment and native-part retention sets.
+/// `MatchedBlockMetas` pairs blocks with metadata in order and tracks native parts eligible
+/// for removal.
 pub(crate) struct MatchedBlockMetas<'a> {
     pub(crate) by_block: Vec<Option<&'a BlockMeta>>,
-    retained_native_indices: BTreeSet<usize>,
-    decoded_native_indices: BTreeSet<usize>,
+    unretained_native_parts: Vec<bool>,
     decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
 }
 
 impl MatchedBlockMetas<'_> {
@@ -131,7 +142,18 @@ impl MatchedBlockMetas<'_> {
         block_index: usize,
         meta: &BlockMeta,
     ) -> bool {
-        decoded_matches(self.decoded, &blocks[block_index], meta)
+        decoded_matches(self.decoded, self.native, &blocks[block_index], meta)
+    }
+
+    /// Marks `native_indices` for removal by [`Self::remove_unretained_native_parts`]. A folded
+    /// part is decoded by no block of its own, so its envelope rebuilds without it.
+    pub(crate) fn fold_native_parts(&mut self, native_indices: &[usize]) {
+        for &native_index in native_indices {
+            if self.unretained_native_parts.len() <= native_index {
+                self.unretained_native_parts.resize(native_index + 1, false);
+            }
+            self.unretained_native_parts[native_index] = true;
+        }
     }
 
     /// Removes native parts whose decoded blocks were removed.
@@ -143,8 +165,11 @@ impl MatchedBlockMetas<'_> {
             .into_iter()
             .enumerate()
             .filter_map(|(native_index, part)| {
-                let decoded_block_was_removed = self.decoded_native_indices.contains(&native_index)
-                    && !self.retained_native_indices.contains(&native_index);
+                let decoded_block_was_removed = self
+                    .unretained_native_parts
+                    .get(native_index)
+                    .copied()
+                    .unwrap_or(false);
                 (!decoded_block_was_removed).then_some(part)
             })
             .collect()
@@ -186,8 +211,11 @@ impl<'a> MatchedBlockMetas<'a> {
             if in_place {
                 for (block, meta) in run_blocks.zip(run_metas) {
                     self.by_block[block] = Some(&metas[meta]);
-                    if let Some(native_index) = metas[meta].native_index {
-                        self.retained_native_indices.insert(native_index);
+                    if let Some(unretained) = metas[meta]
+                        .native_index
+                        .and_then(|native_index| self.unretained_native_parts.get_mut(native_index))
+                    {
+                        *unretained = false;
                     }
                 }
             }
@@ -233,21 +261,82 @@ pub fn decoded_block_fingerprint_for_test(block: &WireBlock) -> String {
 pub const BLOCK_IDENTITY_NAMESPACE_FOR_TEST: &str = BLOCK_IDENTITY_NAMESPACE;
 
 pub(crate) fn equals_decoded_block(block: &WireBlock, decoded: &WireBlock) -> bool {
+    block.kind() == decoded.kind() && same_extras(block, decoded)
+}
+
+fn same_extras(block: &WireBlock, decoded: &WireBlock) -> bool {
     fn content(block: &WireBlock) -> impl Iterator<Item = (&String, &BTreeMap<String, Value>)> {
         block
             .provider_extras
             .iter()
             .filter(|(namespace, _)| namespace.as_str() != BLOCK_IDENTITY_NAMESPACE)
     }
-    block.kind() == decoded.kind() && content(block).eq(content(decoded))
+    content(block).eq(content(decoded))
 }
 
 /// Whether `block` is the decoded block `meta` names in `decoded`, compared by canonical
-/// content; a meta naming no decoded block matches nothing.
-pub(crate) fn decoded_matches(decoded: &[WireBlock], block: &WireBlock, meta: &BlockMeta) -> bool {
-    decoded
-        .get(meta.block_index)
-        .is_some_and(|decoded| same_decoded_content(block, decoded))
+/// content.
+pub(crate) fn decoded_matches(
+    decoded: &[WireBlock],
+    native: Option<&Value>,
+    block: &WireBlock,
+    meta: &BlockMeta,
+) -> bool {
+    decoded_content(decoded, native, meta).is_some_and(|content| content.matches(block))
+}
+
+#[derive(Clone, Copy)]
+struct DecodedContent<'a> {
+    decoded: &'a WireBlock,
+    native_text: Option<&'a str>,
+}
+
+fn decoded_content<'a>(
+    decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
+    meta: &BlockMeta,
+) -> Option<DecodedContent<'a>> {
+    let decoded = decoded.get(meta.block_index)?;
+    Some(DecodedContent {
+        decoded,
+        native_text: native_text(native, decoded, meta),
+    })
+}
+
+impl DecodedContent<'_> {
+    fn matches(self, block: &WireBlock) -> bool {
+        #[cfg(test)]
+        CONTENT_COMPARISONS.with(|comparisons| comparisons.set(comparisons.get() + 1));
+        let decoded = self.decoded;
+        match self.native_text {
+            Some(text) => {
+                matches!(block.kind(), BlockKind::Text { text: served } if served == text)
+                    && same_extras(block, decoded)
+                    && (!holds_float_zero(block)
+                        || canonical_text(block) == canonical_text(&native_block(decoded, text)))
+            }
+            None => same_decoded_content(block, decoded),
+        }
+    }
+}
+
+fn native_text<'a>(
+    native: Option<&'a Value>,
+    decoded: &WireBlock,
+    meta: &BlockMeta,
+) -> Option<&'a str> {
+    if !matches!(decoded.kind(), BlockKind::Text { .. }) {
+        return None;
+    }
+    let part = native?.get("parts")?.get(meta.native_index?)?;
+    Some(part.get("text").and_then(Value::as_str).unwrap_or_default())
+}
+
+fn native_block(decoded: &WireBlock, text: &str) -> WireBlock {
+    let kind = BlockKind::Text {
+        text: text.to_owned(),
+    };
+    WireBlock::with_provider_extras(kind, decoded.provider_extras.clone())
 }
 
 /// Whether two blocks have equal canonical text, decided without serializing them where the
@@ -324,19 +413,118 @@ pub(crate) fn holds_float_zero(block: &WireBlock) -> bool {
     kind || extras(&block.provider_extras)
 }
 
-fn alignment_candidate(
-    block: &WireBlock,
-    block_index: usize,
-    meta: &BlockMeta,
-    kind_matches: bool,
+/// Content equality is transitive, so metas equal to the same block share a class.
+fn alignment_candidates(
+    blocks: &[WireBlock],
+    metas: &[BlockMeta],
+    matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &[WireBlock],
-) -> bool {
-    if kind_matches && decoded_matches(decoded, block, meta) {
-        return true;
+    native: Option<&Value>,
+) -> Vec<bool> {
+    let columns = metas.len();
+    let mut candidates = vec![false; blocks.len() * columns];
+    let cached: Vec<Option<DecodedContent<'_>>> = if blocks.len() > 1 {
+        metas
+            .iter()
+            .map(|meta| decoded_content(decoded, native, meta))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let content_of = |meta_index: usize, meta: &BlockMeta| match cached.get(meta_index) {
+        Some(content) => *content,
+        None => decoded_content(decoded, native, meta),
+    };
+    // Every class is a single meta until a block equals two metas, so rows compare directly
+    // until then and the forest is built after that block's row.
+    let mut classes: Option<ContentClasses> = None;
+    for (block_index, block) in blocks.iter().enumerate() {
+        let row = &mut candidates[block_index * columns..][..columns];
+        let mut first_equal = None;
+        if let Some(classes) = &mut classes {
+            classes.verdicts.fill(None);
+            for (meta_index, meta) in metas.iter().enumerate() {
+                if !matches(block, meta) {
+                    continue;
+                }
+                row[meta_index] = match content_of(meta_index, meta) {
+                    None => block_index == meta.block_index,
+                    Some(content) => {
+                        let root = classes.root(meta_index);
+                        let equal =
+                            *classes.verdicts[root].get_or_insert_with(|| content.matches(block));
+                        if equal {
+                            match first_equal {
+                                Some(class) if class != root => classes.join(root, class),
+                                _ => first_equal = Some(root),
+                            }
+                        }
+                        equal
+                    }
+                };
+            }
+            continue;
+        }
+        let mut also_equal = Vec::new();
+        for (meta_index, meta) in metas.iter().enumerate() {
+            if !matches(block, meta) {
+                continue;
+            }
+            row[meta_index] = match content_of(meta_index, meta) {
+                None => block_index == meta.block_index,
+                Some(content) => {
+                    let equal = content.matches(block);
+                    if equal {
+                        match first_equal {
+                            Some(_) => also_equal.push(meta_index),
+                            None => first_equal = Some(meta_index),
+                        }
+                    }
+                    equal
+                }
+            };
+        }
+        if let Some(first) = first_equal
+            && !also_equal.is_empty()
+        {
+            let classes = classes.insert(ContentClasses::new(columns));
+            for other in also_equal {
+                classes.parent[other] = first;
+            }
+        }
     }
-    // A meta naming no decoded block pairs by position alone: an unchanged block index and a
-    // matching kind, with no scan of nearby same-kind blocks.
-    decoded.get(meta.block_index).is_none() && block_index == meta.block_index && kind_matches
+    candidates
+}
+
+/// A union-find forest over a message's metas, one tree per content class, with the current
+/// block's verdict for each class at its root.
+struct ContentClasses {
+    parent: Vec<usize>,
+    verdicts: Vec<Option<bool>>,
+}
+
+impl ContentClasses {
+    fn new(metas: usize) -> Self {
+        Self {
+            parent: (0..metas).collect(),
+            verdicts: vec![None; metas],
+        }
+    }
+
+    fn root(&mut self, mut index: usize) -> usize {
+        while self.parent[index] != index {
+            self.parent[index] = self.parent[self.parent[index]];
+            index = self.parent[index];
+        }
+        index
+    }
+
+    /// Joins the class rooted at `root` into the class rooted at `into`, both of which the
+    /// current block equals.
+    fn join(&mut self, root: usize, into: usize) {
+        self.parent[root] = into;
+        self.verdicts[into] = Some(true);
+    }
 }
 
 /// Largest `blocks * metas` product the optimal alignment may allocate matrices for.
@@ -359,25 +547,36 @@ pub(crate) fn match_block_metas<'a>(
     metas: &'a [BlockMeta],
     mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
 ) -> MatchedBlockMetas<'a> {
     let cells = blocks.len().saturating_mul(metas.len());
     let by_block = if cells > MAX_ALIGNMENT_CELLS {
-        greedy_block_metas(blocks, metas, &mut matches, decoded)
+        greedy_block_metas(blocks, metas, &mut matches, decoded, native)
     } else {
-        optimal_block_metas(blocks, metas, &mut matches, decoded)
+        optimal_block_metas(blocks, metas, &mut matches, decoded, native)
     };
 
-    let retained_native_indices = by_block
+    let native_parts = metas
+        .iter()
+        .filter_map(|meta| meta.native_index)
+        .max()
+        .map_or(0, |last| last + 1);
+    let mut unretained_native_parts = vec![false; native_parts];
+    for native_index in metas.iter().filter_map(|meta| meta.native_index) {
+        unretained_native_parts[native_index] = true;
+    }
+    for native_index in by_block
         .iter()
         .filter_map(|meta| meta.and_then(|meta| meta.native_index))
-        .collect();
-    let decoded_native_indices = metas.iter().filter_map(|meta| meta.native_index).collect();
+    {
+        unretained_native_parts[native_index] = false;
+    }
 
     MatchedBlockMetas {
         by_block,
-        retained_native_indices,
-        decoded_native_indices,
+        unretained_native_parts,
         decoded,
+        native,
     }
 }
 
@@ -386,6 +585,7 @@ fn greedy_block_metas<'a>(
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> Vec<Option<&'a BlockMeta>> {
     // Every candidate pairing is reachable through one of two keys, so indexing the metas
     // once keeps each block to a few lookups instead of a rescan of the remaining suffix. A
@@ -396,7 +596,10 @@ fn greedy_block_metas<'a>(
     for (meta_index, meta) in metas.iter().enumerate() {
         match decoded.get(meta.block_index) {
             Some(decoded) => by_text
-                .entry(canonical_text(decoded))
+                .entry(match native_text(native, decoded, meta) {
+                    Some(text) => canonical_text(&native_block(decoded, text)),
+                    None => canonical_text(decoded),
+                })
                 .or_default()
                 .push(meta_index),
             None => by_block_index
@@ -444,41 +647,38 @@ fn optimal_block_metas<'a>(
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
     decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> Vec<Option<&'a BlockMeta>> {
-    let mut candidates = vec![vec![false; metas.len()]; blocks.len()];
-    for (block_index, block) in blocks.iter().enumerate() {
-        for (meta_index, meta) in metas.iter().enumerate() {
-            let kind_matches = matches(block, meta);
-            candidates[block_index][meta_index] =
-                alignment_candidate(block, block_index, meta, kind_matches, decoded);
-        }
-    }
+    let (rows, columns) = (blocks.len(), metas.len());
+    let candidates = alignment_candidates(blocks, metas, matches, decoded, native);
 
     // The LCS-style walk preserves native order and avoids same-kind adjacency matching.
-    let mut scores = vec![vec![0usize; metas.len() + 1]; blocks.len() + 1];
-    for block_index in (0..blocks.len()).rev() {
-        for meta_index in (0..metas.len()).rev() {
-            let mut best =
-                scores[block_index + 1][meta_index].max(scores[block_index][meta_index + 1]);
-            if candidates[block_index][meta_index] {
-                best = best.max(scores[block_index + 1][meta_index + 1] + 1);
+    let width = columns + 1;
+    let mut scores = vec![0usize; (rows + 1) * width];
+    for block_index in (0..rows).rev() {
+        for meta_index in (0..columns).rev() {
+            let cell = block_index * width + meta_index;
+            let mut best = scores[cell + width].max(scores[cell + 1]);
+            if candidates[block_index * columns + meta_index] {
+                best = best.max(scores[cell + width + 1] + 1);
             }
-            scores[block_index][meta_index] = best;
+            scores[cell] = best;
         }
     }
 
-    let mut by_block = vec![None; blocks.len()];
+    let mut by_block = vec![None; rows];
     let (mut block_index, mut meta_index) = (0, 0);
-    while block_index < blocks.len() && meta_index < metas.len() {
-        if candidates[block_index][meta_index]
-            && scores[block_index + 1][meta_index + 1] + 1 == scores[block_index][meta_index]
+    while block_index < rows && meta_index < columns {
+        let cell = block_index * width + meta_index;
+        if candidates[block_index * columns + meta_index]
+            && scores[cell + width + 1] + 1 == scores[cell]
         {
             by_block[block_index] = Some(&metas[meta_index]);
             block_index += 1;
             meta_index += 1;
             continue;
         }
-        if scores[block_index + 1][meta_index] >= scores[block_index][meta_index + 1] {
+        if scores[cell + width] >= scores[cell + 1] {
             block_index += 1;
         } else {
             meta_index += 1;
@@ -530,6 +730,16 @@ fn count_digest() {
 #[cfg(test)]
 pub(crate) fn codec_digests() -> usize {
     CODEC_DIGESTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTENT_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn content_comparisons() -> usize {
+    CONTENT_COMPARISONS.with(std::cell::Cell::get)
 }
 
 /// Feeds every byte written to it into its digest.
@@ -789,9 +999,10 @@ mod tests {
         served[3] = call(3, -0.0);
         served.remove(10);
         let kind = |_: &WireBlock, meta: &BlockMeta| meta.kind == "tool_call";
-        let greedy = match_block_metas(&served, &metas, kind, &decoded);
+        let greedy = match_block_metas(&served, &metas, kind, &decoded, None);
         let small = 40;
-        let optimal = match_block_metas(&served[..small], &metas[..small + 1], kind, &decoded);
+        let optimal =
+            match_block_metas(&served[..small], &metas[..small + 1], kind, &decoded, None);
         for matched in [&greedy.by_block[..small], &optimal.by_block[..]] {
             let paired: Vec<Option<usize>> = matched
                 .iter()
@@ -814,6 +1025,148 @@ mod tests {
     }
 
     #[test]
+    fn memoized_candidates_equal_the_per_cell_candidates() {
+        let zeroed = |text: &str, zero: f64| {
+            let mut block = text_block(text);
+            block
+                .provider_extras
+                .entry("opencode".into())
+                .or_default()
+                .insert("metadata".into(), serde_json::json!({ "z": zero }));
+            block
+        };
+        let call = |id: &str, zero: f64| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                input: serde_json::json!({ "offset": zero }),
+                provider_executed: false,
+            })
+        };
+        let pool = [
+            text_block("a"),
+            text_block("b"),
+            text_block(""),
+            codec_namespaced("a"),
+            zeroed("a", 0.0),
+            zeroed("a", -0.0),
+            call("c", 0.0),
+            call("c", -0.0),
+            call("d", 0.0),
+        ];
+        let kind_of = |block: &WireBlock| match block.kind() {
+            BlockKind::ToolCall { .. } => "tool_call",
+            _ => "text",
+        };
+        let mut state = 0x9e37_79b9_u64;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % bound
+        };
+        let mut compared = 0;
+        for _ in 0..400 {
+            let decoded: Vec<WireBlock> = (0..next(8))
+                .map(|_| pool[next(pool.len())].clone())
+                .collect();
+            let served: Vec<WireBlock> = (0..next(10))
+                .map(|_| pool[next(pool.len())].clone())
+                .collect();
+            let metas: Vec<BlockMeta> = (0..next(10))
+                .map(|_| {
+                    let block_index = next(decoded.len() + 2);
+                    BlockMeta {
+                        kind: decoded
+                            .get(block_index)
+                            .map_or(["text", "tool_call"][next(2)], kind_of)
+                            .into(),
+                        native_index: (next(4) != 0).then_some(block_index),
+                        ..text_meta(block_index)
+                    }
+                })
+                .collect();
+            let native = serde_json::json!({
+                "parts": decoded.iter().map(|block| match block.kind() {
+                    BlockKind::Text { text } => serde_json::json!({ "type": "text", "text": text }),
+                    _ => serde_json::json!({ "type": "tool" }),
+                }).collect::<Vec<_>>()
+            });
+            let emptied: Vec<WireBlock> = decoded
+                .iter()
+                .map(|block| match block.kind() {
+                    BlockKind::Text { .. } => WireBlock::with_provider_extras(
+                        BlockKind::Text {
+                            text: String::new(),
+                        },
+                        block.provider_extras.clone(),
+                    ),
+                    _ => block.clone(),
+                })
+                .collect();
+            let mut kind = |block: &WireBlock, meta: &BlockMeta| kind_of(block) == meta.kind;
+            for (decoded, native) in [
+                (decoded.as_slice(), None),
+                (emptied.as_slice(), Some(&native)),
+            ] {
+                let memoized = alignment_candidates(&served, &metas, &mut kind, decoded, native);
+                let per_cell: Vec<bool> = served
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(block_index, block)| {
+                        metas.iter().map(move |meta| {
+                            kind_of(block) == meta.kind
+                                && match decoded.get(meta.block_index) {
+                                    Some(_) => decoded_matches(decoded, native, block, meta),
+                                    None => block_index == meta.block_index,
+                                }
+                        })
+                    })
+                    .collect();
+                assert_eq!(memoized, per_cell, "{served:?} {metas:?} {decoded:?}");
+                compared += per_cell.iter().filter(|candidate| **candidate).count();
+            }
+        }
+        assert!(compared > 500, "{compared}");
+    }
+
+    #[test]
+    fn identical_blocks_align_with_comparisons_linear_in_the_message() {
+        let count = 200;
+        assert!(count * count <= MAX_ALIGNMENT_CELLS);
+        let padding = "x".repeat(4 * 1024);
+        let zeroed = |text: &str| {
+            let mut block = text_block(text);
+            block
+                .provider_extras
+                .entry("opencode".into())
+                .or_default()
+                .insert("metadata".into(), serde_json::json!({ "z": 0.0 }));
+            block
+        };
+        let served: Vec<WireBlock> = (0..count).map(|_| zeroed(&padding)).collect();
+        let metas: Vec<BlockMeta> = (0..count).map(text_meta).collect();
+        // The attach sidecar decodes text parts with empty text and reads it from the native part.
+        let attach_decoded: Vec<WireBlock> = (0..count).map(|_| zeroed("")).collect();
+        let native = serde_json::json!({
+            "parts": vec![serde_json::json!({ "type": "text", "text": padding }); count]
+        });
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        for (decoded, native) in [
+            (served.as_slice(), None),
+            (attach_decoded.as_slice(), Some(&native)),
+        ] {
+            let before = content_comparisons();
+            let matched = match_block_metas(&served, &metas, text, decoded, native);
+            let comparisons = content_comparisons() - before;
+            assert!(comparisons <= 2 * count, "{comparisons} comparisons");
+            for (index, meta) in matched.by_block.iter().enumerate() {
+                assert_eq!(meta.map(|meta| meta.block_index), Some(index));
+            }
+        }
+    }
+
+    #[test]
     fn oversized_alignment_takes_the_linear_memory_path_and_keeps_positional_pairs() {
         // 1,100 x 1,100 exceeds MAX_ALIGNMENT_CELLS; the optimal path would allocate over
         // 1.2M score cells. The greedy walk must still pair every positional match in order.
@@ -823,7 +1176,7 @@ mod tests {
             .map(|index| text_block(&format!("block {index}")))
             .collect::<Vec<_>>();
         let metas = (0..count).map(text_meta).collect::<Vec<_>>();
-        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text", &[]);
+        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text", &[], None);
         for (index, meta) in matched.by_block.iter().enumerate() {
             assert_eq!(
                 meta.map(|meta| meta.block_index),
@@ -831,7 +1184,7 @@ mod tests {
                 "block {index} must pair with its positional meta"
             );
         }
-        assert_eq!(matched.retained_native_indices.len(), count);
+        assert_eq!(matched.unretained_native_parts, vec![false; count]);
     }
 
     /// Every SHA-256 the codecs take runs in [`stable_hash_prefix`] or the test-only
@@ -910,7 +1263,7 @@ mod tests {
         let metas: Vec<BlockMeta> = (0..3).map(text_meta).collect();
         let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
         let paired = |blocks: &[WireBlock]| {
-            let mut matched = match_block_metas(blocks, &metas, text, &decoded);
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded, None);
             matched.pair_in_place_edits(blocks, &metas, text);
             let by_block = matched
                 .by_block
@@ -939,11 +1292,66 @@ mod tests {
     }
 
     #[test]
+    fn unretained_native_parts_are_exactly_the_named_parts_no_block_pairs_with() {
+        let decoded = ["a", "b", "c", "d"].map(text_block);
+        let metas = vec![
+            BlockMeta {
+                native_index: Some(1),
+                ..text_meta(0)
+            },
+            BlockMeta {
+                native_index: None,
+                ..text_meta(1)
+            },
+            BlockMeta {
+                native_index: Some(3),
+                ..text_meta(2)
+            },
+            BlockMeta {
+                native_index: Some(3),
+                ..text_meta(3)
+            },
+        ];
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        let kept = |blocks: &[WireBlock]| {
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded, None);
+            matched.pair_in_place_edits(blocks, &metas, text);
+            matched.remove_unretained_native_parts(vec![0, 1, 2, 3, 4])
+        };
+        assert_eq!(kept(&decoded), [0, 1, 2, 3, 4]);
+        assert_eq!(
+            kept(&[]),
+            [0, 2, 4],
+            "parts no meta names stay, past the last named index too"
+        );
+        assert_eq!(kept(&[text_block("a")]), [0, 1, 2, 4]);
+        assert_eq!(
+            kept(&[text_block("d")]),
+            [0, 2, 3, 4],
+            "either meta naming a shared part retains it"
+        );
+        let edited = ["§0§ a", "§1§ b", "c", "d"].map(text_block);
+        assert_eq!(
+            kept(&edited),
+            [0, 1, 2, 3, 4],
+            "in-place edits retain their parts"
+        );
+        let deleted = ["§1§ b", "c", "d"].map(text_block);
+        assert_eq!(kept(&deleted), [0, 2, 3, 4]);
+    }
+
+    #[test]
     fn greedy_alignment_never_reuses_a_meta_and_preserves_order() {
         let blocks = vec![text_block("a"), text_block("b"), text_block("c")];
         // Only block 1 has a positional meta; blocks 0 and 2 have none.
         let metas = vec![text_meta(1)];
-        let by_block = greedy_block_metas(&blocks, &metas, &mut |_, meta| meta.kind == "text", &[]);
+        let by_block = greedy_block_metas(
+            &blocks,
+            &metas,
+            &mut |_, meta| meta.kind == "text",
+            &[],
+            None,
+        );
         assert_eq!(by_block[0].map(|meta| meta.block_index), None);
         assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
         assert_eq!(by_block[2].map(|meta| meta.block_index), None);
@@ -966,6 +1374,7 @@ mod tests {
             &metas,
             &mut |_, meta| meta.kind == "text",
             &decoded,
+            None,
         );
         let paired: Vec<Option<usize>> = by_block
             .iter()

@@ -12,10 +12,10 @@ use daemon::vector_admission::{
     Census, DELTA_LIMIT, DISK_LIMIT, Ledger, Pool, RESIDENT_LIMIT, Refusal, ResourceClass,
 };
 use daemon::vector_composition::{CompositionRefusal, Progress, publish};
-use daemon::vector_generation::{ROWS_FILE, VectorRefusal, build, stage};
+use daemon::vector_generation::{ROWS_FILE, VectorRefusal, build, stage, stage_observed};
 use host_runtime::generation::PruneReport;
 use support::projection_gate::{identity, passing_evaluator};
-use support::vector_store::{Fixture, export};
+use support::vector_store::{Fixture, export, occupant_inode};
 
 const DIMENSION: u32 = 8;
 
@@ -259,22 +259,35 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
         compaction,
         Err(Refusal::Denied(Denial::LimitExceeded { .. }))
     ));
-    // Restaging a manifest the store already holds still copies the inventory into a staging temp before the store finds its occupant, so the copy needs room in the pool even though the store publishes nothing twice and its total is unchanged afterwards.
+    // Restaging a manifest the store already holds confirms the valid occupant in place. It adds no bytes, so it succeeds with the disk pool at the store's total and even below it, where a second copy could not be reserved, and the store keeps the one directory.
     let settled = Ledger::store_bytes(&fixture.store).unwrap();
-    fixture.set_limit(DISK_LIMIT, settled + staged_bytes - 1);
-    assert_eq!(
-        stage(&built, &fixture.staging()).unwrap_err(),
-        VectorRefusal::Reservation(exceeded(
-            DISK_LIMIT,
-            settled + staged_bytes,
-            settled + staged_bytes - 1
-        )),
-        "the retry's copy is charged like a first staging"
+    let before = occupant_inode(&fixture.generation_dir(&digest));
+    for limit in [settled, settled - 1] {
+        fixture.set_limit(DISK_LIMIT, limit);
+        assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
+        assert_eq!(Ledger::store_bytes(&fixture.store).unwrap(), settled);
+        assert_eq!(
+            occupant_inode(&fixture.generation_dir(&digest)),
+            before,
+            "the confirmed generation is the one publication of its bytes"
+        );
+    }
+    // The staged-bytes admission precedes the confirmation: a denied retry fires no store event and leaves the store as it was.
+    fixture.set_limit(DISK_LIMIT, u64::MAX);
+    let inventory: u64 = manifest.files.iter().map(|f| f.size).sum();
+    fixture.set_limit("capture_disk_bytes", inventory - 1);
+    let mut events = Vec::new();
+    let denied = stage_observed(&built, &fixture.staging(), &mut |event| {
+        events.push(event);
+        Ok(())
+    });
+    assert!(
+        matches!(denied, Err(VectorRefusal::Admission(_))),
+        "{denied:?}"
     );
-    fixture.set_limit(DISK_LIMIT, settled + staged_bytes);
-    assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
+    assert!(events.is_empty(), "a denied admission confirms nothing");
     assert_eq!(Ledger::store_bytes(&fixture.store).unwrap(), settled);
-    assert_eq!(held(&fixture.ledger, ResourceClass::Staging), 0);
+    fixture.set_limit("capture_disk_bytes", u64::MAX);
 
     // A readable manifest over a corrupt payload triggers an exchange repair, so staging reserves `staged_bytes` before replacing the occupant.
     fixture.corrupt(&digest, ROWS_FILE);
@@ -324,7 +337,9 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
     let composition = fixture.compose(1, &base, &[one, two]).unwrap();
     let failure = publish(
         &composition,
+        fixture.predecessor().as_deref(),
         &fixture.staging(),
+        Some(&fixture.activation()),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -341,6 +356,182 @@ fn delta_admission_uses_the_gate_and_a_refused_publication_stages_nothing() {
     assert_eq!(fixture.generations(), before);
     let within = fixture.compose(1, &base, &[fixture.layer(4, 16)]).unwrap();
     assert!(fixture.publish(&within).is_ok(), "the exact bound admits");
+    assert_eq!(fixture.ledger.census(), Census::default());
+}
+
+/// A grant from `other` stays live across changes to `gate`, so each refusal below comes from `gate`'s own state on the reservation right after the change.
+#[test]
+fn every_gate_change_reaches_the_next_reservation_under_a_grant_the_change_did_not_cancel() {
+    let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
+    let (other, _) = ledger_with(RESIDENT_LIMIT, 100);
+    let grant = admit(&other);
+    drop(ledger.reserve(&grant, ResourceClass::Text, 60).unwrap());
+    ledger.admit_deltas(&grant, 2).unwrap();
+
+    let identity = identity("test-incarnation", DIMENSION);
+    let mut lowered = passing_evaluator(&identity, 0, &ProjectionHook::ALL);
+    lowered
+        .manifest
+        .limits
+        .insert(RESIDENT_LIMIT.to_owned(), 50);
+    lowered.manifest.limits.insert(DELTA_LIMIT.to_owned(), 1);
+    gate.install(lowered);
+    assert!(!grant.invalidated.is_cancelled());
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 60).unwrap_err(),
+        exceeded(RESIDENT_LIMIT, 60, 50),
+        "the reinstalled limit judges the next reservation"
+    );
+    assert_eq!(
+        ledger.admit_deltas(&grant, 2).unwrap_err(),
+        Denial::LimitExceeded {
+            limit: DELTA_LIMIT.to_owned(),
+            observed: 2,
+            max: 1
+        }
+    );
+    drop(ledger.reserve(&grant, ResourceClass::Text, 50).unwrap());
+
+    gate.close();
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::NoManifest)
+    );
+    assert_eq!(
+        ledger.admit_deltas(&grant, 0).unwrap_err(),
+        Denial::NoManifest
+    );
+
+    let mut renamed = passing_evaluator(&identity, 0, &ProjectionHook::ALL);
+    renamed.current.embedding_model = "another-model".to_owned();
+    gate.install(renamed);
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::EvidenceIdentity),
+        "an evaluator for another identity refuses the ledger's"
+    );
+    assert_eq!(ledger.census(), Census::default());
+}
+
+#[test]
+fn a_zero_byte_static_charge_still_charges_once_and_refusals_keep_their_order() {
+    let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
+    let grant = admit(&gate);
+    let model = ledger
+        .reserve(&grant, ResourceClass::ModelMemory, 0)
+        .unwrap();
+    let text = ledger.reserve(&grant, ResourceClass::Text, 1).unwrap();
+    assert_eq!(
+        ledger.census().held.get(&ResourceClass::ModelMemory),
+        Some(&0),
+        "a zero-byte reservation still charges its class"
+    );
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::ModelMemory, 0)
+            .unwrap_err(),
+        Refusal::AlreadyCharged {
+            class: ResourceClass::ModelMemory
+        }
+    );
+
+    // The ledger refuses a double charge and an overflow before it consults the gate, so a cancelled grant sees those refusals first.
+    grant.invalidated.cancel();
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::ModelMemory, 1)
+            .unwrap_err(),
+        Refusal::AlreadyCharged {
+            class: ResourceClass::ModelMemory
+        }
+    );
+    assert_eq!(
+        ledger
+            .reserve(&grant, ResourceClass::Text, u64::MAX)
+            .unwrap_err(),
+        Refusal::Overflow {
+            pool: Pool::Resident
+        }
+    );
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::Invalidated)
+    );
+    drop((model, text));
+    assert_eq!(ledger.census(), Census::default());
+}
+
+const CLASSES: [ResourceClass; 9] = [
+    ResourceClass::ModelMemory,
+    ResourceClass::TokenizerCache,
+    ResourceClass::SqliteCache,
+    ResourceClass::Text,
+    ResourceClass::Scratch,
+    ResourceClass::RowBuffers,
+    ResourceClass::LayerTables,
+    ResourceClass::Staging,
+    ResourceClass::CompactionScratch,
+];
+
+/// The match is exhaustive, so a class added to the enum fails to compile here until it is named, next to `CLASSES`.
+fn named(class: ResourceClass) -> bool {
+    match class {
+        ResourceClass::ModelMemory
+        | ResourceClass::TokenizerCache
+        | ResourceClass::SqliteCache
+        | ResourceClass::Text
+        | ResourceClass::Scratch
+        | ResourceClass::RowBuffers
+        | ResourceClass::LayerTables
+        | ResourceClass::Staging
+        | ResourceClass::CompactionScratch => CLASSES.contains(&class),
+    }
+}
+
+#[test]
+fn every_class_reserves_into_its_own_census_slot_and_pool_and_releases_by_drop() {
+    let fixture = Fixture::new();
+    let mut reservations = Vec::new();
+    let mut expected = Census::default();
+    // Each class charges a distinct power of two, so a charge landing in another class's slot or pool changes the census.
+    for (index, class) in CLASSES.into_iter().enumerate() {
+        assert!(named(class), "{class:?} is listed in CLASSES");
+        let bytes = 1u64 << index;
+        let reservation = match class.pool() {
+            Pool::Resident => fixture.ledger.reserve(&fixture.admission, class, bytes),
+            Pool::Disk => {
+                fixture
+                    .ledger
+                    .reserve_disk(&fixture.admission, class, bytes, &fixture.store)
+            }
+        }
+        .unwrap_or_else(|refusal| panic!("{class:?} reserves: {refusal}"));
+        match class.pool() {
+            Pool::Resident => expected.resident += bytes,
+            Pool::Disk => expected.disk += bytes,
+        }
+        expected.held.insert(class, bytes);
+        assert_eq!(
+            fixture.ledger.census(),
+            expected,
+            "after charging {class:?}"
+        );
+        reservations.push(reservation);
+    }
+    for reservation in reservations {
+        let class = reservation.class();
+        match class.pool() {
+            Pool::Resident => expected.resident -= reservation.bytes(),
+            Pool::Disk => expected.disk -= reservation.bytes(),
+        }
+        expected.held.remove(&class);
+        drop(reservation);
+        assert_eq!(
+            fixture.ledger.census(),
+            expected,
+            "after releasing {class:?}"
+        );
+    }
     assert_eq!(fixture.ledger.census(), Census::default());
 }
 

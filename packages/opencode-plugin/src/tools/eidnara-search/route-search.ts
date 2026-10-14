@@ -7,6 +7,7 @@ import {
     type MemoryState,
     type ReadRow,
     ROUTE_LANES,
+    type RouteCausality,
     type RouteLane,
     renderToolStateText,
     unavailable,
@@ -46,6 +47,7 @@ interface RankedDecision {
     lanes: Set<RouteLane>;
     labeled: boolean;
     conflicting: boolean;
+    causality: RouteCausality;
 }
 
 function refusedState(state: MemoryState): RouteSearch {
@@ -106,7 +108,9 @@ export async function searchThroughRoute(args: {
         if (known) {
             for (const lane of entry.lanes) known.lanes.add(lane);
             known.labeled ||= reference.visibility === "labeled";
-            known.conflicting ||= known.revision !== reference.source_revision;
+            known.conflicting ||=
+                known.revision !== reference.source_revision ||
+                known.causality !== reference.causality;
             continue;
         }
         decisions.set(reference.decision_object_id, {
@@ -115,6 +119,7 @@ export async function searchThroughRoute(args: {
             lanes: new Set(entry.lanes),
             labeled: reference.visibility === "labeled",
             conflicting: false,
+            causality: reference.causality,
         });
     }
     const selected = [...decisions.values()].slice(0, args.limit);
@@ -159,6 +164,7 @@ export async function searchThroughRoute(args: {
             ...result,
             lanes: ROUTE_LANES.filter((lane) => decision.lanes.has(lane)),
             ...(decision.labeled ? { policyLabel: "labeled" } : {}),
+            provenance: decision.causality,
         });
     }
     if (stale.length > 0) {

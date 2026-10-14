@@ -94,9 +94,36 @@ pub(crate) fn push_json_string(out: &mut Vec<u8>, value: &str) {
     out.push(b'"');
 }
 
+/// `json_string_len` is the length of `value` as a quoted JSON string, the bytes
+/// [`push_json_string`] appends: a short escape adds one byte and a `\u00XX` escape adds five.
+pub(crate) fn json_string_len(value: &str) -> usize {
+    let escape_growth = |byte: u8| match byte {
+        b'"' | b'\\' | 0x08 | b'\t' | b'\n' | 0x0c | b'\r' => 1,
+        0x00..=0x1f => 5,
+        _ => 0,
+    };
+    let bytes = value.as_bytes();
+    let mut len = bytes.len() + 2;
+    let mut at = 0;
+    while let Some(chunk) = bytes.get(at..at + 8) {
+        let marks = escape_marks(u64::from_le_bytes(chunk.try_into().unwrap_or_default()));
+        if marks == 0 {
+            at += 8;
+            continue;
+        }
+        at += (marks.trailing_zeros() / 8) as usize;
+        len += escape_growth(bytes[at]);
+        at += 1;
+    }
+    len + bytes[at..]
+        .iter()
+        .map(|&byte| escape_growth(byte))
+        .sum::<usize>()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::push_json_string;
+    use super::{json_string_len, push_json_string};
 
     fn encoded(value: &str) -> Vec<u8> {
         let mut out = Vec::new();
@@ -165,6 +192,44 @@ mod tests {
                 serde_json::to_vec(value).unwrap(),
                 "{value:?}"
             );
+        }
+    }
+
+    /// The length counts every byte below 0x800 and an escape at every offset of a clean run,
+    /// on both sides of each eight-byte boundary, as serde_json writes them.
+    #[test]
+    fn the_string_length_is_the_serde_json_length() {
+        let all: String = (0u32..0x800).filter_map(char::from_u32).collect();
+        for skip in 0..64 {
+            for take in 0..40 {
+                let value: String = all.chars().skip(skip).take(take).collect();
+                assert_eq!(
+                    json_string_len(&value),
+                    serde_json::to_vec(&value).unwrap().len(),
+                    "{value:?}"
+                );
+            }
+        }
+        let escaped = [
+            '\0', '\u{1f}', '\u{8}', '\t', '\n', '\u{c}', '\r', '"', '\\', '\u{7f}',
+        ];
+        for len in 0..48 {
+            let clean = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP"[..len].to_owned();
+            for first in 0..len {
+                for &byte in &escaped {
+                    let mut value = clean.clone();
+                    value.replace_range(first..=first, &byte.to_string());
+                    for second in first..len {
+                        let mut pair = value.clone();
+                        pair.replace_range(second..=second, "\n");
+                        assert_eq!(
+                            json_string_len(&pair),
+                            serde_json::to_vec(&pair).unwrap().len(),
+                            "{pair:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

@@ -24,3 +24,5 @@ A cancelled episode at every boundary.
 ## Investigation log
 
 No open questions at authoring time.
+
+`crates/daemon/tests/claim_sources.rs` `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger` cancels catch-up of a claim correction commit at the hold extension, the staged and released local transaction, and the acknowledgement request, then replays to the target.

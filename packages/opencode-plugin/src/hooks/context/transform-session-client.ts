@@ -1652,7 +1652,14 @@ export function createTransformSessionClient(
                 sessionLog.warn(sessionId, "rust transform response boundary is malformed");
             captureResponseTelemetry(response);
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
-            const applyStartedAt = performance.now();
+            // The apply stage runs in laps around the publish recheck, which the prefix guard
+            // times, so the two stages stay disjoint.
+            let applyLapFrom: number | undefined = performance.now();
+            const applyLap = (extra?: string): void => {
+                if (applyLapFrom === undefined) return;
+                logStage(sessionId, "apply", applyLapFrom, timings, extra);
+                applyLapFrom = undefined;
+            };
             try {
                 // Previous outputs may share objects with an earlier host array, not this pass's input.
                 if (
@@ -1718,13 +1725,13 @@ export function createTransformSessionClient(
                 }
                 // Final synchronous guards, after the last read of host values: ownership, source
                 // membership and content, and the host container contract.
+                applyLap();
                 recheckCapture("publish");
+                applyLapFrom = performance.now();
                 const publishRejection = source.publicationRejection(candidate.length);
                 if (publishRejection !== null) {
                     throw new PassDeclined(sessionId, "host_container", publishRejection);
                 }
-                logStage(sessionId, "apply", applyStartedAt, timings);
-                const applyReplaceStartedAt = performance.now();
                 // Publication and state promotion are synchronous from here to the lease release.
                 const failure = source.publish(candidate, messages, boundaryIndex);
                 if (failure)
@@ -1753,9 +1760,9 @@ export function createTransformSessionClient(
                 state.consecutiveFailures = 0;
                 deliveries.applied = appliedDeliveryPassIds;
                 deliveries.outcome = { kind: "applied", boundary: nextBoundary };
-                logStage(sessionId, "apply", applyReplaceStartedAt, timings);
+                applyLap();
             } catch (error) {
-                logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
+                applyLap("failed=true");
                 throw error;
             }
             appliedAt = performance.now();

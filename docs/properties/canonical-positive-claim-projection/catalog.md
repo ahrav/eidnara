@@ -20,11 +20,15 @@ and harness delivery are not yet wired; their records say so.
 
 ## Reachability classes
 
-- `default-production`: reached by the kernel store API with no configuration.
-  The claim facts reader and the causality writer are library calls; no daemon
-  route calls them yet, so a production request cannot reach them today. Every
-  record below is therefore `test-only` until a caller lands.
-- `test-only`: constructed only by `crates/kernel/tests/kernel_claim_facts.rs`.
+Each record states its own class and the evidence for it.
+
+- `default-production`: reached by the daemon with no configuration.
+- `explicit-config-only`: reached by the daemon only after an owner installs a
+  search admission manifest and campaign evidence
+  (`crates/daemon/src/projection_admission.rs:220`) that admit the hooks the
+  path takes.
+- `test-only`: constructed only by tests under `crates/kernel/tests/` and
+  `crates/daemon/tests/`.
 
 ## Index
 
@@ -78,9 +82,26 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: partial - the kernel reader is compared with the writer's reported
-admission and with the serving route at one snapshot; comparison of projected
-rows against this reader at a fenced export snapshot belongs to the
-materialization ticket.
+admission and with the serving route at one snapshot.
+`crates/daemon/tests/claim_sources.rs`
+`the_export_at_a_held_snapshot_matches_the_ledger_and_ignores_later_writes`
+compares the claim rows exported under a hold at S with the seeds' ledger
+(class, identity field, object, revision, representation, text, domain, and
+scope), shows every row was created at or before S, re-exports S
+byte-identically after a correction, a retirement, a quarantine, and a new
+decision are committed and materialized, and shows a released hold refuses
+the export. The classifier's revisioned facts (maturity, disposition, taint,
+visibility, supporting authority, causality) are compared with S by the
+kernel reader tests, and
+`claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes`
+reads them at S for the rows a projection bootstrapped at S holds: the
+registry object, revision, domain, decision kind, scope, own-admission
+disposition and classes, causality, and occurrence set match the seeds'
+ledger, every admission and descriptor commit is at or before S, the
+occurrences name exactly the projected rows, and the same read after a
+correction and a quarantine returns equal claims while the tip read shows
+both changes. Maturity, visibility, sensitivity, and supporting authority are
+compared field by field only in the kernel reader test.
 Guarantee: Every revisioned field `claim_facts_as_of` returns for a claim at
 snapshot S (registry, decision, own and lineage admission rows, occurrences,
 causality) equals the stored canonical row at S, and a later commit does not
@@ -106,13 +127,15 @@ Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot` in
 `crates/kernel/tests/kernel_claim_facts.rs` writes through the public API and
 compares field by field, and `served_facts_follow_the_cited_evidence_class_read_today`
 rereads S after tightening.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs` - `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`, `served_facts_follow_the_cited_evidence_class_read_today`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs` - `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`, `served_facts_follow_the_cited_evidence_class_read_today`; `crates/daemon/tests/claim_sources.rs` - `claim_facts_for_rows_projected_at_s_match_the_seed_ledger_despite_later_writes`; status unaudited.
 Impact: a projection built from drifting facts serves approval or maturity the
 kernel never granted; a cache or fenced comparison that treats `served` as
 fixed at S misses a later tightening.
 Open questions:
-- The fenced export comparison at S is the materialization ticket's oracle; this
-  record covers the reader only.
+- No test compares the facts at S with an independent query of the canonical
+  tables at S, which the Check requires: the projected-row test predicts them
+  from the seeds, and the kernel reader test compares them with the writer's
+  returned admission, the serving route's `visible_as_of`, and literal values.
 
 ### canonical-provenance-survives-approved-write-read-path
 
@@ -146,8 +169,19 @@ Reachability: test-only
 Status: active
 Exercised: partial - the reader refuses a request over `max_claims` before any
 row is read; a second record for one subject and an over-bound parent list
-poison the commit so nothing of it lands. Projection-side whole-commit refusal
-belongs to the materialization ticket.
+poison the commit so nothing of it lands. On the projection side, a claim
+commit that exceeds the catch-up payload allowance, or whose descriptor
+ordinals are no longer contiguous, is refused whole before any projection
+write: rows, tombstones, and pending jobs are unchanged, and neither the
+search consumer's acknowledgement nor the projection checkpoint covers the
+refused commit; the repaired commit then applies to exactly the successor's
+ledger. Malformed required fields and conflicting facts inside a readable
+claim commit are refused by the kernel reader tests, not yet through
+catch-up. The claim
+materializer's `PublicationRefused` exclusion is a different consumer's
+decision: it publishes no descriptor for a revision the artifact store always
+refuses, so the search catch-up has no commit to refuse and its checkpoint
+rule is unchanged.
 Guarantee: Exceeding a declared bound produces a refusal with no partial
 effect: no rows read for a refused request, no rows written for a refused
 commit.
@@ -160,7 +194,7 @@ derivation naming `MAX_DERIVATION_PARENTS + 1` parents.
 Confidence: medium - [evidence](evidence/claim-capacity-failure-is-atomic.md).
 Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`
 and the `too-many` case of `derived_reinjection_rests_on_exact_live_parents`.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; `crates/kernel/tests/kernel_claim_causality.rs`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; `crates/kernel/tests/kernel_claim_causality.rs`; `crates/daemon/tests/claim_sources.rs` - `a_refused_claim_commit_leaves_rows_jobs_and_both_checkpoints_until_it_is_repaired`; status unaudited.
 Impact: a partially applied over-limit request leaves the store or its readers
 with an inventory that never corresponds to one bound.
 Open questions: None.
@@ -168,23 +202,51 @@ Open questions: None.
 ### claim-enablement-requires-approved-evidence
 
 Type: safety
-Reachability: test-only
+Reachability: default-production - the search maintenance loop calls
+`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2216`), which
+runs `ClaimMaterializer` (`:551`, the materializer call at `:570`) and grants
+and checks no projection-gate admission before it publishes claim source
+descriptors. Claim validation on the query route is `explicit-config-only`:
+`validate_claims` (`crates/daemon/src/query_route.rs:1707`) runs inside the
+unit that first calls `SearchLifecycleOwner::pin` (`query_route.rs:2016`),
+which admits `ProjectionHook::EmbeddingBootstrap` through
+`SearchSelection::admit_reader`
+(`crates/daemon/src/search_replacement/selection.rs:430`). That hook needs
+`CanonicalClaims` coverage (`crates/daemon/src/projection_gates.rs:80-84`) and
+opens only under an installed search admission. `validate_claims` reads the
+kernel's claim facts through `retrieval::claims::judge_selected_for_surface`
+(`query_route.rs:1747`; `crates/retrieval/src/claims.rs:476`), which calls
+`KernelStore::judge_surface_eligibility_with_selected_claims`
+(`claims.rs:516`); `read_selected_claims` (`claims.rs:441`) reads only the
+projection rows.
 Status: active
-Exercised: not yet - no enablement gate exists in the kernel; the reader and
-writer are library calls with no production caller.
+Exercised: not yet - no test asserts that claim projection or delivery stops
+without an admitted claim hook, because no such hook exists.
 Guarantee: No production path enables claim projection or delivery without the
 approved RP2.9 limits and evidence the specification requires.
-Check: `unreachable` - a production route that calls `claim_facts_as_of` or
-`record_claim_causality` without an admitted `projection_gates` hook must not
-exist.
+Check: `unreachable` - a production route that publishes claim source
+descriptors, reads claim facts, or records claim causality without an admitted
+`projection_gates` hook must not exist. The claim slice above is such a route.
+The query route admits `EmbeddingBootstrap` before it reads claim facts; it has
+no claim-specific hook. The check fails at this HEAD: claim publication runs in
+production with no projection-gate admission and no approved RP2.9 limits, and
+claim validation runs only under the generic `EmbeddingBootstrap` admission,
+which approves no claim-specific limits or evidence.
 Fault/timing angle: none.
-Required faults and enabling state: a daemon caller wired to these APIs.
-Confidence: low - [evidence](evidence/claim-enablement-requires-approved-evidence.md).
-Verified by search: no caller outside `crates/kernel` at authoring time.
+Required faults and enabling state: the default-production claim slice above;
+for the query route, an installed search admission that admits
+`EmbeddingBootstrap`.
+Confidence: medium - [evidence](evidence/claim-enablement-requires-approved-evidence.md).
+Verified by search at this HEAD: `ClaimMaterializer::new` and
+`judge_selected_for_surface` have the callers named above;
+`record_claim_causality` has no daemon caller.
 Existing check: none.
 Impact: unapproved capacity or evidence reaches users.
 Open questions:
-- Which `ProjectionHook` variant will gate claim retrieval? (needs human input)
+- Which `ProjectionHook` variant gates claim projection and retrieval, whether
+  the generic `EmbeddingBootstrap` admission on the query route satisfies this
+  record, and whether the running claim slice must stop until a claim hook
+  exists? (needs human input)
 
 ### claim-export-predecode-bounds
 
@@ -295,8 +357,18 @@ Status: active
 Exercised: partial - a stored admission enum or sensitivity class this build
 cannot interpret makes `claim_facts_as_of` fail with `MalformedRequiredField`
 for the whole request, and a decision row that disagrees with its registry row
-fails with `CorruptCanonicalRow`; checkpoint quarantine belongs to the
-materialization ticket.
+fails with `CorruptCanonicalRow`. Through the projection,
+`crates/daemon/tests/claim_sources.rs`
+`an_uninterpretable_canonical_maturity_refuses_classification_instead_of_defaulting`
+rewrites a projected claim's admission maturity to a value no build reads, and
+`classify_live_claims` refuses the batch rather than returning the claim as
+Current. Through catch-up,
+`a_corrupt_projection_or_a_foreign_identity_stops_claim_catch_up_without_acknowledging`
+deletes the projected occurrences of a claim whose correction awaits
+catch-up: the episode quarantines the projection as `Integrity`, leaves the
+rows and the acknowledgement at S, and a later episode runs no work; a
+consumer naming another kernel incarnation blocks as `ProjectionIdentity`
+without quarantine, and the real consumer then reaches the target.
 Guarantee: A required claim field that does not decode is an explicit error,
 never a default that implies approval, and never a silently skipped claim.
 Check: `always` - `Err(MalformedRequiredField)` when any required enum or
@@ -539,7 +611,18 @@ fact combination under `Unknown`, `DirectObservation`, and
 `DerivedReinjection` and asserts equal states; `classify` takes no causal
 class by signature; the daemon test classifies the caught-up projection,
 records a `DirectObservation` on the successor, classifies again, and asserts
-the two maps are equal.
+the two maps are equal. At the route, `crates/daemon/tests/query_route.rs`
+`served_claims_report_their_causal_class_without_changing_the_ranking` serves
+every claim with `canonical.causality` `unknown`, records a
+`DirectObservation` for one decision, and shows that decision's entries report
+`direct_observation` while every fused position and score stays bit-equal; the
+OpenCode and Pi `eidnara_search` tools render the class as `provenance=` and
+keep the route's order (`route-search.test.ts`). Through real hosts,
+`packages/e2e-tests/tests/payload-fused-search.test.ts` writes a memory
+through each of the OpenCode and Pi plugins against a built payload and finds
+it ranked first by OpenCode's and Pi's `eidnara_search` tool output with
+`provenance=unknown`; a `DirectObservation` delivered through a real host is
+not exercised, because no production writer records one.
 Guarantee: The causal class of a claim never changes its candidate state, and
 no field of a candidate carries a score, boost, corroboration count, or
 suppression flag derived from it.
@@ -575,11 +658,26 @@ Open questions: None.
 ### claim-local-commit-before-ack
 
 Type: safety
-Reachability: test-only
+Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
+(`crates/daemon/src/search_lifecycle_owner.rs:1129`) runs
+`SearchCatchUp::run_episode` (`:1173`) over the claim commits the claim slice
+publishes, after an installed search admission admits `EmbeddingBootstrap`
+and `GitDurableRows` (`:1148-1154`).
 Status: active
-Exercised: partial - claim rows travel through the RP2.1 shared catch-up,
-whose existing checks release the local transaction before acknowledgement;
-no claim-specific crash cut was added.
+Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
+`claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
+kills a child process inside catch-up of a claim correction commit at
+`LocalStaged`, `LocalReleased`, and `Acknowledged`, then reopens twice: the
+live occurrence ids equal the seed ledger of the original claim after the
+staged cut and of the successor after the later cuts, where the original's
+occurrences are tombstoned; the local checkpoint is S or the target
+accordingly; the acknowledgement stays at S until the acknowledged cut and
+never exceeds the local checkpoint; and an episode in the reopened
+incarnation refuses the crashed hold with `BindingMismatch` or, after the
+acknowledged cut, reaches the target applying nothing, leaving that state
+unchanged. The materializer's own acknowledgement is faulted only in process
+through `EpisodeFault`; its kernel commit and release have no cut. The kill is
+process-restart evidence, not power loss.
 Guarantee: Claim rows, tombstones, checkpoint, and pending work are committed
 locally and the transaction released before the kernel consumer is
 acknowledged.
@@ -588,7 +686,7 @@ acknowledgement, as the RP2.1 harness asserts.
 Fault/timing angle: the window between local commit and acknowledgement.
 Required faults and enabling state: a process kill between the two.
 Confidence: medium - [evidence](evidence/claim-local-commit-before-ack.md).
-Existing check: `crates/daemon/tests/search_catchup.rs` - `crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_early`, `released_before_every_acknowledgement`; status unaudited.
+Existing check: `crates/daemon/tests/search_catchup.rs` - `crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_early`, `released_before_every_acknowledgement`; `crates/daemon/tests/claim_sources.rs` - `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`; status unaudited.
 Impact: an acknowledgement ahead of durable local progress loses rows on restart.
 Open questions: None.
 
@@ -669,11 +767,20 @@ Open questions: None.
 ### claim-cancellation-preserves-durable-work
 
 Type: safety
-Reachability: test-only
+Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
+(`crates/daemon/src/search_lifecycle_owner.rs:1129`) runs claim catch-up under
+a budget linked to the caller's (`:1172`) and cancels the episode when an
+admission grant is invalidated (`:1180-1182`), after an installed search
+admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1148-1154`).
 Status: active
-Exercised: not yet at the claim level - the shared catch-up's cancellation
-checks cover the mechanism; request-level cancellation belongs to the delivery
-ticket.
+Exercised: partial -
+`cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`
+cancels catch-up of a claim correction commit at the hold extension, the
+staged and released local transaction, and the acknowledgement request: each
+ends `Cancelled`, the acknowledgement stays at S, nothing is quarantined, the
+live occurrence ids equal the original claim's seed ledger before the local
+commit and the successor's after it, and a fresh episode then reaches the
+target with the successor's ledger. Request-level cancellation belongs to the delivery ticket.
 Guarantee: Cancelling a claim episode at any write boundary neither
 acknowledges unapplied work nor loses work already committed locally.
 Check: `always` - after cancellation the local prefix and the kernel checkpoint
@@ -681,7 +788,7 @@ are unchanged from the last completed boundary.
 Fault/timing angle: cancellation at each `EpisodeEvent` boundary.
 Required faults and enabling state: a cancelled episode at every boundary.
 Confidence: medium - [evidence](evidence/claim-cancellation-preserves-durable-work.md).
-Existing check: `crates/daemon/tests/search_catchup.rs` - `cancellation_at_write_boundaries_never_quarantines_or_acknowledges`, `cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix`; status unaudited.
+Existing check: `crates/daemon/tests/search_catchup.rs` - `cancellation_at_write_boundaries_never_quarantines_or_acknowledges`, `cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix`; `crates/daemon/tests/claim_sources.rs` - `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`; status unaudited.
 Impact: a cancelled request drops durable rows or acknowledges work it never applied.
 Open questions: None.
 

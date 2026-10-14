@@ -1515,12 +1515,12 @@ Open questions:
 > both the optimal and the greedy regimes, and the Pi codec, sidecar pairing,
 > and unmatched-tool classification read origin from that alignment. A
 > caller-supplied `_eidnara_codec` namespace is ignored by equality and by
-> encode. The clauses below describe the removed stamp and are kept for
-> traceability.
+> encode. The record is invalidated: its guarantee and check name the removed
+> stamp, and the clauses below are kept as history for traceability.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
 Exercised: not yet - `codec/sidecar.rs` has three direct `#[test]` functions
 (`codec/sidecar.rs:487-557`), all of which exercise `match_block_metas` and
 `greedy_block_metas` pairing. None constructs a caller-supplied stamp or two

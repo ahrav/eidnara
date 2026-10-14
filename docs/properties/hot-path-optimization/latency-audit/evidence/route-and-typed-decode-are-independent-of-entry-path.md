@@ -421,3 +421,15 @@ string value, and a duplicate top-level key on a native window, take the tree
 lane, each with the tree entry's outcome. With the token check removed, that
 test and the entry differential both fail, so the strict decode is what keeps
 those shapes off the direct lane.
+
+## Entry scan re-evidence, 2026-10-13 (#994)
+
+For a body the entry scan answers for, the lane probe comes from the scan and
+equals `lane_probe` on it: the same `method` and `kind` reading, the same
+page-field detection, and the last value of a repeated key.
+`the_entry_scan_reproduces_the_reference_entry_on_the_corpora` checks this for
+every frozen and supplementary corpus body, and
+`request_byte_cap_widens_for_transform_class_only` checks the cap's reading of
+the same probe on every body over the facade cap. The entry differential, the decode
+differential, and `native_and_token_bodies_reach_the_tree_outcome_on_their_lanes`
+pass unchanged, and the direct-lane set is still the pinned eleven bodies.

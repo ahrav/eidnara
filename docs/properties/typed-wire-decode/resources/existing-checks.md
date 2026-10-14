@@ -88,12 +88,12 @@ All locations in this table are `crates/daemon/src/metered_decode.rs` or
 
 | Location and test | Condition or message | Status |
 | --- | --- | --- |
-| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:103` `parse_charge_covers_dense_native_typed_decode_peak` | Combined Value parse plus conversion peak <= footprint; direct <= tree; metered ignored nodes covered. | unaudited |
-| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:179` `parse_charge_covers_escaped_text_direct_decode_peak` | Direct plain/escaped text peak <= footprint; no tree text case. | unaudited |
-| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:202` `byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation` | Sub-cap 900 KiB escaped key accepted with peak < half key bytes. | unaudited |
-| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:238` `a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string` | 4 MiB escaped text, drained reserve, peak <64 KiB and `queue_full`. | unaudited |
-| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:285` `a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped` | 64 KiB partial reserve, peak <64 KiB and `queue_full`. | unaudited |
-| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:311` `a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key` | Sub-cap long-key entry, peak <64 KiB and `queue_full`. | unaudited |
+| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:108` `parse_charge_covers_dense_native_typed_decode_peak` | Combined Value parse plus conversion peak <= footprint; direct <= tree; metered ignored nodes covered. | unaudited |
+| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:184` `parse_charge_covers_escaped_text_direct_decode_peak` | Direct plain/escaped text peak <= footprint; no tree text case. | unaudited |
+| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:207` `byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation` | Sub-cap 900 KiB escaped key accepted with peak < half key bytes. | unaudited |
+| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:262` `a_held_pool_stops_the_direct_lane_decode_before_it_unescapes_a_large_string` | 4 MiB escaped text, drained reserve, peak <64 KiB and `queue_full`. | unaudited |
+| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:327` `a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped` | 64 KiB partial reserve, peak <64 KiB and `queue_full`. | unaudited |
+| `crates/daemon/tests/parse_charge_covers_typed_decode.rs:353` `a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key` | Sub-cap long-key entry, peak <64 KiB and `queue_full`. | unaudited |
 | `crates/daemon/tests/served_json_passthrough_allocations.rs:68` `passthrough_shell_canonicalization_allocates_independently_of_key_count` | Canonical bytes equal independent Value serialization; per-block event growth <=8 for serialization. | unaudited |
 
 The two binaries require `test-support`. `Unmetered` and `Granting` in the
