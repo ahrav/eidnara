@@ -3196,6 +3196,11 @@ impl PreparedWrite {
         }
         let output = match policy {
             PreparedFieldPolicy::Content => text,
+            PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity
+                if text == input =>
+            {
+                text
+            }
             PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity => {
                 input.to_owned()
             }
