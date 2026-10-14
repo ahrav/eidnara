@@ -2170,13 +2170,15 @@ fn an_engine_failure_while_the_budget_ends_stays_an_engine_failure() {
                     | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
                 move |_| -> rusqlite::Result<i64> {
                     end.store(true, Ordering::Relaxed);
-                    Err(rusqlite::Error::UserFunctionError("injected engine failure".into()))
+                    Err(rusqlite::Error::UserFunctionError(
+                        "injected engine failure".into(),
+                    ))
                 },
             )?;
             conn.execute_batch(
                 "ALTER TABLE exact_associations RENAME TO original_associations;
                  CREATE VIEW exact_associations AS SELECT family,namespace,key,occurrence_id,
-                     target_id,extraction_version,fail_lookup(created_commit_seq) AS created_commit_seq
+                     extraction_version,fail_lookup(created_commit_seq) AS created_commit_seq
                  FROM original_associations;",
             )
         })
