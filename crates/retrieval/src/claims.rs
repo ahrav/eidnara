@@ -631,13 +631,11 @@ fn guarded_rows(
 ) -> Result<(Vec<ClaimCandidateRow>, kernel::CommitReadTarget), ClaimCandidateError> {
     let (identity, checkpoint) =
         read_identity_and_checkpoint(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
-    let entry = kernel
-        .capture_commit_read_target_within_budget(budget)
+    let identified = kernel
+        .capture_identified_commit_read_target_within_budget(budget)
         .map_err(ClaimFactsError::from)?;
-    let database = kernel
-        .database_incarnation_id_within_budget(budget)
-        .map_err(ClaimFactsError::from)?;
-    if identity.kernel_incarnation_id != database {
+    let entry = identified.target;
+    if identity.kernel_incarnation_id != identified.database_incarnation_id {
         return Err(ClaimCandidateError::ForeignKernel {
             kernel_incarnation_id: identity.kernel_incarnation_id,
         });

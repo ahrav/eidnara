@@ -2497,3 +2497,210 @@ fn an_interrupted_admission_or_final_use_read_is_budget_exhaustion() {
         Err(ProofInvalidation::BudgetExhausted)
     );
 }
+
+/// Judges `candidates` one kernel batch each, independently of the adapter's batching.
+fn judged_alone(
+    fixture: &Fixture,
+    candidates: &[retrieval::eligibility::OccurrenceCandidate],
+) -> Vec<EligibilityVerdict> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let batch = fixture
+                .kernel
+                .judge_eligibility(
+                    &fixture.project,
+                    ArtifactDestination::Local,
+                    std::slice::from_ref(&candidate.candidate),
+                )
+                .unwrap();
+            assert_eq!(batch.verdicts.len(), 1);
+            batch.verdicts[0]
+        })
+        .collect()
+}
+
+#[test]
+fn equal_kernel_terms_share_one_verdict_and_every_differing_term_is_judged_on_its_own() {
+    use kernel::KernelError;
+    use kernel::source_identity::OccurrenceClass;
+    use retrieval::eligibility::{
+        Disposition, OccurrenceCandidate, judge_dispositions_within_budget,
+        judge_occurrences_within_budget,
+    };
+
+    let fixture = Fixture::new();
+    fixture.decide(
+        "objects",
+        &[
+            ok("obj-1"),
+            ok("obj-2"),
+            ("elsewhere", Some(SCOPE_B), Sensitivity::Normal, true),
+        ],
+    );
+    let other_digest = "1".repeat(64);
+    let terms: [(&str, &str, i64, &str); 8] = [
+        ("occ-a", "obj-1", 1, DIGEST),
+        ("occ-b", "obj-1", 1, DIGEST),
+        ("occ-c", "obj-1", 2, DIGEST),
+        ("occ-d", "obj-1", 1, &other_digest),
+        ("occ-e", "elsewhere", 1, DIGEST),
+        ("occ-f", "obj-1", 1, DIGEST),
+        ("occ-g", "obj-2", 1, DIGEST),
+        ("occ-b", "obj-1", 1, DIGEST),
+    ];
+    let candidates: Vec<OccurrenceCandidate> = terms
+        .iter()
+        .map(|(occurrence, object, revision, digest)| {
+            OccurrenceCandidate::new(
+                occurrence.to_string(),
+                OccurrenceClass::CanonicalClaims,
+                object.to_string(),
+                *revision,
+                digest.to_string(),
+            )
+        })
+        .collect();
+    let oracle = judged_alone(&fixture, &candidates);
+    assert_eq!(oracle[0], EligibilityVerdict::Ok);
+    assert_eq!(
+        oracle[2],
+        EligibilityVerdict::Stale,
+        "another revision of an eligible object borrows no authorization"
+    );
+    assert_eq!(oracle[4], EligibilityVerdict::WrongScope);
+
+    let budget = EvalBudget::unbounded();
+    let report = judge_occurrences_within_budget(
+        &fixture.kernel,
+        &fixture.project,
+        ArtifactDestination::Local,
+        &candidates,
+        &budget,
+    )
+    .unwrap();
+    assert_eq!(report.occurrences.len(), candidates.len());
+    for ((judged, candidate), verdict) in report.occurrences.iter().zip(&candidates).zip(&oracle) {
+        assert_eq!(judged.occurrence_id, candidate.occurrence_id);
+        assert_eq!(judged.class, candidate.class);
+        assert_eq!(judged.disposition, Disposition::from(*verdict));
+    }
+    let dispositions = judge_dispositions_within_budget(
+        &fixture.kernel,
+        &fixture.project,
+        ArtifactDestination::Local,
+        &candidates,
+        &budget,
+    )
+    .unwrap();
+    assert_eq!(dispositions.snapshot, report.snapshot);
+    assert_eq!(dispositions.incarnation, report.incarnation);
+    assert_eq!(
+        dispositions.dispositions,
+        oracle
+            .iter()
+            .copied()
+            .map(Disposition::from)
+            .collect::<Vec<_>>()
+    );
+
+    let at_bound = vec![candidates[0].clone(); MAX_ELIGIBILITY_CANDIDATES];
+    let judged = judge_dispositions_within_budget(
+        &fixture.kernel,
+        &fixture.project,
+        ArtifactDestination::Local,
+        &at_bound,
+        &budget,
+    )
+    .unwrap();
+    assert_eq!(judged.dispositions.len(), MAX_ELIGIBILITY_CANDIDATES);
+    assert!(
+        judged
+            .dispositions
+            .iter()
+            .all(|disposition| *disposition == Disposition::Eligible)
+    );
+    let over = vec![candidates[0].clone(); MAX_ELIGIBILITY_CANDIDATES + 1];
+    assert_eq!(
+        judge_occurrences_within_budget(
+            &fixture.kernel,
+            &fixture.project,
+            ArtifactDestination::Local,
+            &over,
+            &budget,
+        )
+        .unwrap_err(),
+        KernelError::InvalidInput,
+        "duplicates count against the kernel's batch bound"
+    );
+    assert_eq!(
+        judge_dispositions_within_budget(
+            &fixture.kernel,
+            &fixture.project,
+            ArtifactDestination::Local,
+            &over,
+            &budget,
+        )
+        .unwrap_err(),
+        KernelError::InvalidInput
+    );
+}
+
+#[test]
+fn a_projection_under_another_analysis_identity_refuses_at_its_first_page() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let healthy = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert!(healthy.proof.is_some(), "the unaltered projection proves");
+
+    fixture
+        .store
+        .with_conn_unfenced(|conn| {
+            conn.execute(
+                "UPDATE projection_identity SET analysis_identity='another-analysis'",
+                [],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture
+            .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+            .unwrap_err(),
+        ResolveRefusal::Lookup(LookupRefusal::SchemaMismatch),
+        "the admitted snapshot's analysis identity refuses the first page"
+    );
+    let context = LookupContext {
+        kernel_incarnation_id: &fixture.incarnation,
+        page_rows: NonZeroUsize::new(2).unwrap(),
+        budget: &budget,
+    };
+    assert_eq!(
+        fixture
+            .store
+            .with_conn(|conn| Ok(page(conn, &context, &object_query("obj-1"), None)))
+            .unwrap()
+            .unwrap_err(),
+        LookupRefusal::SchemaMismatch,
+        "a direct page read refuses the same snapshot alike"
+    );
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        fixture
+            .resolve(
+                object_query("obj-1"),
+                true,
+                &certificate,
+                bounds(),
+                &cancelled
+            )
+            .unwrap_err(),
+        ResolveRefusal::BudgetExhausted
+    );
+}
