@@ -19,7 +19,8 @@ use retrieval::exact::{
     Authority, CertificateRefusal, CompletenessCertificate, Completion, Disqualification,
     ExactProof, ExactQuery, HexPrefix, IncompleteReason, LookupRefusal, ObjectFormat,
     ProofInvalidation, RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest,
-    ShaPrefixQuery, resolve, validate_for_use, validate_for_use_with_hook_for_test,
+    ShaPrefixQuery, resolve, resolve_with_hook_for_test, validate_for_use,
+    validate_for_use_with_hook_for_test,
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
@@ -1459,7 +1460,7 @@ fn a_certificate_minted_before_an_equal_tip_restore_is_refused() {
 
 /// `validate_for_use` rejects a proof when the budget expires during its kernel batch.
 #[test]
-fn final_use_refuses_a_budget_that_expires_inside_the_kernel_batch() {
+fn final_use_refuses_a_budget_that_expires_after_its_kernel_batch() {
     let fixture = Fixture::new();
     fixture.decide("objects", &[ok("obj-1")]);
     fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
@@ -1495,6 +1496,87 @@ fn final_use_refuses_a_budget_that_expires_inside_the_kernel_batch() {
         .unwrap()
         .unwrap();
     assert_eq!(outcome, Err(ProofInvalidation::BudgetExhausted));
+}
+
+#[test]
+fn a_budget_expiring_inside_an_enumeration_kernel_batch_stops_with_progress_and_no_proof() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(
+        &[
+            claim("obj-1", 1, "decision_summary"),
+            claim("obj-1", 1, "rationale"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let one_row = ResolveBounds {
+        page_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    // The hook expires the budget after the page read passes its own budget check, so only the kernel batch can observe it.
+    let run = |cancel_on_batch: Option<usize>| {
+        let budget = EvalBudget::unbounded();
+        let batches = std::cell::Cell::new(0);
+        let hook = || {
+            batches.set(batches.get() + 1);
+            if Some(batches.get()) == cancel_on_batch {
+                budget.cancel();
+            }
+        };
+        let request = ResolveRequest {
+            query: object_query("obj-1"),
+            intent: RequestIntent::WholeRequest,
+            certificate: &certificate,
+            authority: Authority {
+                project: &fixture.project,
+                destination: ArtifactDestination::Local,
+                inventory_epoch: EPOCH,
+            },
+            bounds: one_row,
+        };
+        fixture
+            .store
+            .with_conn(|conn| {
+                Ok(resolve_with_hook_for_test(
+                    conn,
+                    &fixture.kernel,
+                    &request,
+                    &budget,
+                    &hook,
+                ))
+            })
+            .unwrap()
+    };
+
+    let healthy = run(None).unwrap();
+    assert_eq!(healthy.completion, Completion::Complete);
+    assert_eq!(healthy.retained.len(), 2);
+    assert!(healthy.proof.is_some(), "the uncancelled control proves");
+
+    let second = run(Some(2)).unwrap();
+    assert_eq!(
+        second.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert_eq!(second.retained.len(), 1, "the first page's verdict is kept");
+    assert_eq!(second.consumed.validated, 1);
+    assert_eq!(
+        second.consumed.pages, 2,
+        "the kernel batch stopped, not a later page read"
+    );
+    assert!(second.proof.is_none());
+
+    let first = run(Some(1)).unwrap();
+    assert_eq!(
+        first.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted),
+        "a read page whose batch never judged it is incomplete, never a match or absence"
+    );
+    assert!(first.retained.is_empty());
+    assert_eq!(first.consumed.validated, 0);
+    assert_eq!(first.consumed.pages, 1);
+    assert!(first.proof.is_none());
 }
 
 #[test]

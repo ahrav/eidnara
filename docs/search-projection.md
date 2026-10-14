@@ -142,6 +142,16 @@ before it. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
 current epoch, checkpoint, or tip.
 
+Every kernel eligibility batch that `resolve` and `validate_for_use` issue
+runs under the request's `EvalBudget`. A deadline or cancellation that an
+enumeration batch observes stops the attempt as
+`Incomplete(BudgetExhausted)`, keeping the verdicts of earlier pages and
+forming no proof. At final use it invalidates the proof as
+`BudgetExhausted`. An exact proof records egress eligibility only. Surface
+permission and claim state come from claim classification at use, so a
+quarantined or stale claim object can hold an exact proof and still be hidden
+or stale on every surface.
+
 ## Admission status
 
 `session.status` carries a `search_admission` block whenever the daemon runs a

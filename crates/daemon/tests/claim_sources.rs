@@ -38,6 +38,10 @@ use retrieval::claims::{
     SurfaceValidation, UseDenial, UseVerdict, classify_live_claims, judge_selected_for_surface,
     read_selected_claims, validate_for_surface,
 };
+use retrieval::exact::{
+    Authority, CompletenessCertificate, Completion, Disqualification, EXTRACTION_VERSION,
+    ExactQuery, RequestIntent, Resolution, ResolveBounds, ResolveRequest, resolve,
+};
 use retrieval::{PersistBounds, ProjectionError, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -1796,7 +1800,135 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
         live_rows(rebuilt_dir.path()).len(),
         live_rows(dir.path()).len()
     );
+
+    // Exact resolution agrees across both projections once each is certified at the tip, and matches the occurrences the seeds alone predict.
+    let through = corpus.kernel.tip().unwrap();
+    corpus
+        .kernel
+        .extend_source_hold(&corpus.binding(), &hold.hold_id, through, hold_admission())
+        .unwrap();
+    let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
+    corpus.apply(&projection, &hold, &delta, through);
+    let predicted = |seed: Seed<'_>| -> BTreeSet<String> {
+        seed.ledger()
+            .0
+            .iter()
+            .map(Expected::occurrence_id)
+            .collect()
+    };
+    for (object, seed) in [("rule-v2", successor), ("quiet", quiet), ("aging", aging)] {
+        let incremental = resolve_exact(&projection, &corpus, object);
+        let fresh = resolve_exact(&rebuilt, &corpus, object);
+        assert_eq!(
+            exact_outcome(&incremental),
+            exact_outcome(&fresh),
+            "{object}"
+        );
+        assert_eq!(
+            exact_outcome(&fresh),
+            (Completion::Complete, None, true, predicted(seed)),
+            "{object} is egress-eligible"
+        );
+    }
+    // Corrected and retired objects keep tombstoned rows only on the incremental projection; neither projection proves or retains them.
+    for object in ["rule", "anti"] {
+        let (completion, disqualified, proven, retained) =
+            exact_outcome(&resolve_exact(&projection, &corpus, object));
+        assert_eq!(completion, Completion::Complete, "{object}");
+        assert!(
+            matches!(disqualified, Some(Disqualification::Tombstoned(_))),
+            "{object}: {disqualified:?}"
+        );
+        assert!(!proven && retained.is_empty(), "{object}");
+        let rebuilt_outcome = exact_outcome(&resolve_exact(&rebuilt, &corpus, object));
+        assert_eq!(
+            rebuilt_outcome,
+            (Completion::NoMatch, None, false, BTreeSet::new()),
+            "{object}"
+        );
+    }
+    for target in [&projection, &rebuilt] {
+        assert_eq!(
+            exact_outcome(&resolve_exact(target, &corpus, "absent")),
+            (Completion::NoMatch, None, false, BTreeSet::new())
+        );
+        // The quarantined and stale objects hold egress proofs, yet surface validation still denies them by claim state.
+        let (_, explicit) = validate(target, &corpus, Surface::ExplicitSearch);
+        let verdicts = verdicts_by_object(&explicit);
+        assert_eq!(
+            verdicts["quiet"],
+            UseVerdict::Denied(UseDenial::State(CandidateState::Hidden))
+        );
+        assert_eq!(
+            verdicts["aging"],
+            UseVerdict::Denied(UseDenial::State(CandidateState::Stale))
+        );
+    }
 }
+
+/// Resolves the whole-request exact query for `object` on `projection`, certified at its own checkpoint, under the corpus project.
+fn resolve_exact(projection: &SearchProjection, corpus: &Corpus, object: &str) -> Resolution {
+    let budget = EvalBudget::unbounded();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let canonical_incarnation_id = corpus.kernel_incarnation_id();
+    let kernel_incarnation = corpus
+        .kernel
+        .capture_commit_read_target_within_budget(&budget)
+        .unwrap()
+        .incarnation;
+    projection
+        .read(|conn| {
+            let checkpoint = read_checkpoint(conn, &canonical_incarnation_id)?.unwrap();
+            let certificate = CompletenessCertificate {
+                canonical_incarnation_id: canonical_incarnation_id.clone(),
+                kernel_incarnation,
+                inventory_epoch: EXACT_EPOCH.to_string(),
+                identity_contract_version: "search-projection-identity-v3".to_string(),
+                extraction_version: EXTRACTION_VERSION,
+                complete_through_commit_seq: checkpoint.checkpoint_commit_seq,
+                projection: checkpoint,
+            };
+            let request = ResolveRequest {
+                query: ExactQuery::CanonicalObject(object.as_bytes()),
+                intent: RequestIntent::WholeRequest,
+                certificate: &certificate,
+                authority: Authority {
+                    project: &project,
+                    destination: ArtifactDestination::Local,
+                    inventory_epoch: EXACT_EPOCH,
+                },
+                bounds: EXACT_BOUNDS,
+            };
+            Ok(resolve(conn, &corpus.kernel, &request, &budget).unwrap())
+        })
+        .unwrap()
+}
+
+/// The attempt's completion and first disqualification, whether it proved, and the occurrences it retained after kernel judgement.
+fn exact_outcome(
+    resolution: &Resolution,
+) -> (Completion, Option<Disqualification>, bool, BTreeSet<String>) {
+    (
+        resolution.completion,
+        resolution.disqualified,
+        resolution.proof.is_some(),
+        resolution
+            .retained
+            .iter()
+            .map(|row| row.occurrence_id.clone())
+            .collect(),
+    )
+}
+
+const EXACT_EPOCH: &str = "inventory-epoch-1";
+
+const EXACT_BOUNDS: ResolveBounds = ResolveBounds {
+    page_rows: NonZeroUsize::new(2).unwrap(),
+    max_pages: NonZeroUsize::new(16).unwrap(),
+    max_rows: NonZeroUsize::new(32).unwrap(),
+    max_retained: NonZeroUsize::new(8).unwrap(),
+    max_retained_bytes: NonZeroUsize::new(64 * 1024).unwrap(),
+};
 
 fn validate_scoped(
     projection: &SearchProjection,
