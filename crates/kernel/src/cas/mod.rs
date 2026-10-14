@@ -7,13 +7,7 @@ mod deletion;
 pub(super) mod gc;
 mod ingest;
 mod read;
-
-/// The cached byte count below the artifact `objects` directory. `generation` advances at every unlink, so a walk that started before one discards its total.
-#[derive(Debug, Default)]
-pub(crate) struct ArtifactUsage {
-    pub(crate) generation: u64,
-    pub(crate) bytes: Option<u64>,
-}
+mod usage;
 
 use std::fmt;
 use std::fs::File;

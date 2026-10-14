@@ -596,10 +596,10 @@ impl KernelStore {
         else {
             return Ok(());
         };
-        self.forget_artifact_usage();
-        durable_unlink(&shard, &digest[2..]).map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
-        })
+        self.unlink_counted_object(&shard, &digest[2..])
+            .map_err(|error| {
+                self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
+            })
     }
 
     fn unlink_digest_temps(&self, digest: &str) -> Result<(), ArtifactError> {

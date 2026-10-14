@@ -554,35 +554,34 @@ fn reclaim_frees_capacity_for_next_write() {
 }
 
 #[test]
-fn ingestion_counts_the_object_tree_once_until_an_object_is_removed() {
+fn ingestion_and_reclaim_keep_the_count_without_walking_the_object_tree() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 6).unwrap();
     seed_domain(&store);
     let walks = || store.artifact_census_walks_for_test();
+    let opened = walks();
+    assert_eq!(opened, 2, "open walks before and after startup recovery");
     let first = store.ingest_artifact(request("one", b"12")).unwrap();
     store.ingest_artifact(request("two", b"34")).unwrap();
     store.ingest_artifact(request("two-again", b"34")).unwrap();
-    assert_eq!(walks(), 1, "later ingests reuse the counted usage");
     let error = store.ingest_artifact(request("over", b"5678")).unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::Capacity);
     assert_eq!(error.usage(), Some(4));
-    assert_eq!(walks(), 1);
+    assert_eq!(store.artifact_budget_facts().unwrap().usage_bytes, 4);
+    assert_eq!(walks(), opened, "admission and facts read the count");
 
     invalidate(root.path(), &first.evidence_id, 0);
     store.run_staging_maintenance(15 * DAY_MS).unwrap();
+    assert_eq!(walks(), opened + 1, "maintenance reconciles with one walk");
     store.ingest_artifact(request("three", b"5678")).unwrap();
-    assert_eq!(
-        walks(),
-        2,
-        "a reclaimed object makes the next ingest count again"
-    );
+    assert_eq!(walks(), opened + 1, "the reclaim subtracted its bytes");
     assert_eq!(store.artifact_budget_facts().unwrap().usage_bytes, 6);
     let error = store.ingest_artifact(request("full", b"9")).unwrap_err();
     assert_eq!(error.usage(), Some(6));
 }
 
 #[test]
-fn facts_unless_abandons_the_artifact_walk_once_cancelled() {
+fn facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
@@ -592,9 +591,14 @@ fn facts_unless_abandons_the_artifact_walk_once_cancelled() {
     let complete = store.facts_unless(1, &|| false).unwrap().unwrap();
     assert_eq!(complete.artifact_budget.usage_bytes, 6);
     assert_eq!(complete, store.facts(1).unwrap());
+    // A held count is read without a walk, so cancellation is never polled.
+    let held = store.facts_unless(1, &|| true).unwrap().unwrap();
+    assert_eq!(held.artifact_budget.usage_bytes, 6);
 
-    // The walk polls before every entry at both levels, so a cancellation
-    // raised after the first poll still ends the walk without a total.
+    // Without a count the sampler walks, polling before every entry at both
+    // levels, so a cancellation raised after the first poll still ends the
+    // walk without a total.
+    store.forget_artifact_usage_for_test();
     let polls = std::cell::Cell::new(0_u32);
     let cancelled = || {
         polls.set(polls.get() + 1);
@@ -609,7 +613,15 @@ fn facts_unless_abandons_the_artifact_walk_once_cancelled() {
         polls.set(polls.get() + 1);
         false
     };
-    assert!(store.facts_unless(1, &counting).unwrap().is_some());
+    assert_eq!(
+        store
+            .facts_unless(1, &counting)
+            .unwrap()
+            .unwrap()
+            .artifact_budget
+            .usage_bytes,
+        6
+    );
     assert!(
         polls.get() >= 4,
         "only {} polls for two shards",
@@ -621,7 +633,7 @@ fn facts_unless_abandons_the_artifact_walk_once_cancelled() {
 #[test]
 fn orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects() {
     let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 10).unwrap();
+    drop(KernelStore::open_with_artifact_cap_for_test(root.path(), 10).unwrap());
     let fresh_digest = "a".repeat(64);
     let old_digest = "b".repeat(64);
     for (digest, bytes) in [
@@ -636,6 +648,8 @@ fn orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects() {
         .unwrap()
         .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
         .unwrap();
+    // Objects placed while no store is open are counted by the next open's walk.
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 10).unwrap();
 
     let facts = store.facts(2 * HOUR_MS).unwrap();
     assert_eq!(facts.artifact_budget.usage_bytes, 8);

@@ -151,8 +151,10 @@ pub struct KernelStore {
     #[cfg(feature = "test-support")]
     pub(super) staged_artifacts: std::sync::atomic::AtomicUsize,
     pub(super) artifact_cap: u64,
-    /// Bytes below `objects` as counted under the writer lock, kept current by every publication and forgotten by every unlink, so ingestion walks the tree only after a removal or at the first ingest since open.
-    pub(super) artifact_usage: Mutex<crate::cas::ArtifactUsage>,
+    /// Bytes below `objects`, seeded by the walk after startup recovery and kept
+    /// current under the writer lock by every publication and unlink. `None`
+    /// until a walk succeeds and after an unlink whose outcome is unknown.
+    pub(super) artifact_usage: Mutex<Option<u64>>,
     #[cfg(feature = "test-support")]
     pub(super) artifact_census_walks: std::sync::atomic::AtomicUsize,
     /// The store root and the artifact tree's `objects` and `tmp` children,
@@ -406,7 +408,7 @@ impl KernelStore {
             #[cfg(feature = "test-support")]
             staged_artifacts: std::sync::atomic::AtomicUsize::new(0),
             artifact_cap,
-            artifact_usage: Mutex::new(crate::cas::ArtifactUsage::default()),
+            artifact_usage: Mutex::new(None),
             #[cfg(feature = "test-support")]
             artifact_census_walks: std::sync::atomic::AtomicUsize::new(0),
             root_directory,
@@ -429,6 +431,7 @@ impl KernelStore {
         // A purge unlink that cannot complete keeps its pending row for maintenance
         // to retry; refusing to open over it would take the whole store offline
         // for one object, so the count is not an open failure.
+        store.reconcile_artifact_usage();
         store.recover_interrupted_work()?;
         Ok(store)
     }
@@ -437,14 +440,17 @@ impl KernelStore {
     /// now serves: expired staging leases, abandoned ingestion reservations, and
     /// purges that committed but never unlinked their bytes. Runs when a store
     /// opens and again after a restore installs a different database, since the
-    /// restored history carries its own interrupted work. Returns how many
+    /// restored history carries its own interrupted work. Then reconciles the
+    /// counted artifact usage with a walk of the object tree. Returns how many
     /// pending purge unlinks could not be completed.
     ///
     /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
     /// explicit call, so opening a store is not a destructive act.
     pub(super) fn recover_interrupted_work(&self) -> Result<usize, KernelError> {
         self.abandon_expired_staging_runs(crate::current_time_ms())?;
-        self.run_artifact_recovery(crate::current_time_ms())
+        let unfinished_purges = self.run_artifact_recovery(crate::current_time_ms())?;
+        self.reconcile_artifact_usage();
+        Ok(unfinished_purges)
     }
 
     /// Returns the lease epoch stamped into writer-fence transactions.

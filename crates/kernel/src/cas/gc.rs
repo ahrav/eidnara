@@ -13,7 +13,7 @@ use rustix::fs::{self as rfs, AtFlags};
 
 use super::ingest::is_dot_entry;
 use super::is_artifact_digest;
-use crate::durable_fs::{StorageError, durable_unlink};
+use crate::durable_fs::StorageError;
 use crate::envelope::check_fence;
 use crate::{KernelError, KernelStore};
 
@@ -454,8 +454,8 @@ impl KernelStore {
             return Err(self.latch_gc_failure());
         }
         let byte_length = u64::try_from(stat.st_size).map_err(|_| self.latch_gc_failure())?;
-        self.forget_artifact_usage();
-        durable_unlink(&shard, &digest[2..]).map_err(|error| self.map_gc_storage_error(error))?;
+        self.unlink_counted_object(&shard, &digest[2..])
+            .map_err(|error| self.map_gc_storage_error(error))?;
         Ok((true, byte_length))
     }
 
@@ -716,14 +716,4 @@ fn stat_modified_ms(stat: &rfs::Stat) -> Option<i64> {
     let seconds = i128::from(stat.st_mtime);
     let nanos = i128::from(stat.st_mtime_nsec);
     i64::try_from(seconds * 1_000 + nanos / 1_000_000).ok()
-}
-
-/// Returns total bytes occupied by regular files under the artifact object
-/// tree, or `None` once `cancelled` returns true.
-pub(crate) fn object_usage(
-    store: &KernelStore,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Option<u64>, KernelError> {
-    super::ingest::regular_file_bytes(&store.objects_directory, cancelled)
-        .map_err(|_| KernelError::Io)
 }
