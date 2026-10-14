@@ -6,7 +6,7 @@
 //! single tool-part representation.
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 
 use crate::injection::SYNTHETIC_TIMESTAMP;
-use crate::served_json::CanonicalScratch;
 use crate::wire::{
     BlockKind, HarnessMeta, IngressMessage, MediaBlock, MessageOrigin, OpaqueBlock, OutputKind,
     ProviderExtras, ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
@@ -22,9 +21,7 @@ use crate::wire::{
 
 use super::sidecar::{
     BlockMeta, DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary, HarnessMessageMeta,
-    MatchedBlockMetas, MetaContent, decoded_block_fingerprint_in, is_synthetic_part,
-    json_holds_float_zero, match_block_metas_by, meta_for_ck, stable_hash_prefix,
-    stamp_block_identity,
+    is_synthetic_part, match_block_metas, meta_for_ck, stable_hash_prefix,
 };
 
 pub type MessageV2Json = Value;
@@ -37,28 +34,40 @@ pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessa
     decode_opencode_shared(&shared)
 }
 
-#[cfg(test)]
-pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
-    decode_window(messages, Retain::Stamped)
-}
-
 /// Decodes shared messages.
 ///
 /// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
 /// clone, so callers that already share values pay no deep copy. A message's
 /// ordinal is its window position, `index + 1` with saturating arithmetic. The last compaction part becomes the extracted boundary and is
 /// omitted from CK content. Unknown parts remain opaque. A creation time no `i64` holds is
-/// left unset. The sidecar remembers what `retain` names: with [`Retain::Stamped`], each block
-/// meta carries its decoded block's content fingerprint and each decoded block carries its
-/// origin and that fingerprint; with [`Retain::Decoded`], block metas carry no fingerprint and
-/// blocks carry no stamp.
-fn decode_window(messages: &[Arc<Value>], retain: Retain) -> DecodedHarnessMessages {
+/// left unset.
+#[cfg(test)]
+pub(crate) fn decode_opencode_shared(messages: &[Arc<Value>]) -> DecodedHarnessMessages {
+    decode_window_rows(messages, Decode::MessagesAndSidecar)
+}
+
+/// The sidecar native attach encodes against: each message's envelope, block metas, and decoded
+/// blocks, with no CK messages built.
+pub(crate) fn decode_opencode_sidecar(messages: &[Arc<Value>]) -> DecodeSidecar {
+    decode_window_rows(messages, Decode::Sidecar).sidecar
+}
+
+fn decode_window_rows(messages: &[Arc<Value>], decode: Decode) -> DecodedHarnessMessages {
     let rows = messages
         .iter()
         .enumerate()
         .map(|(index, message)| (window_position(index), message));
-    let Ok(decoded) = decode_rows(rows, retain, |time| Ok::<_, Infallible>(time.as_i64()));
+    let Ok(decoded) = decode_rows(rows, decode, |time| Ok::<_, Infallible>(time.as_i64()));
     decoded
+}
+
+/// What a decode builds: the CK window alone, the sidecar alone, or both.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Decode {
+    Window,
+    Sidecar,
+    #[cfg(test)]
+    MessagesAndSidecar,
 }
 
 /// Derives the CK window the OpenCode plugin encodes from the native window `messages`.
@@ -77,7 +86,7 @@ pub(crate) fn derive_opencode_window(
         .enumerate()
         .filter(|(_, message)| !is_compaction_summary(message))
         .map(|(index, message)| (window_position(index), message));
-    let decoded = decode_rows(rows, Retain::Window, |time| {
+    let decoded = decode_rows(rows, Decode::Window, |time| {
         <i64 as serde::Deserialize>::deserialize(time).map(Some)
     })?;
     Ok(decoded.messages)
@@ -124,44 +133,24 @@ fn created_at<E>(
     found.map_or(Ok(None), read)
 }
 
-/// What a decode remembers beside the messages it decodes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Retain {
-    /// No sidecar: the messages carry no ordinal and no block identity, as the plugin sends them.
-    Window,
-    /// Every message and block in the sidecar, each block's meta fingerprinted and each decoded
-    /// block stamped with its identity; a message's ordinal is its position.
-    #[cfg(test)]
-    Stamped,
-    /// Every message and block in the sidecar with no fingerprint and no stamp; a message's
-    /// ordinal is its position, and its decoded blocks are the content its metas compare with.
-    Decoded,
-}
-
-impl Retain {
-    /// Whether each block's meta is fingerprinted and each decoded block stamped.
-    const fn stamps(self) -> bool {
-        match self {
-            #[cfg(test)]
-            Self::Stamped => true,
-            Self::Window | Self::Decoded => false,
-        }
-    }
-}
-
-/// Decodes `(window position, message)` rows, remembering what `retain` names.
+/// Decodes `(window position, message)` rows. With a sidecar, every message is remembered in it
+/// with its block metas and decoded blocks, and a message's ordinal is its position; the CK
+/// window alone carries no ordinal, as the plugin sends it.
 fn decode_rows<'a, E>(
     rows: impl Iterator<Item = (u64, &'a Arc<Value>)>,
-    retain: Retain,
+    decode: Decode,
     mut read_time: impl FnMut(&Value) -> Result<Option<i64>, E>,
 ) -> Result<DecodedHarnessMessages, E> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
 
-    let mut decoded = Vec::with_capacity(rows.size_hint().0);
+    let mut decoded = Vec::with_capacity(match decode {
+        Decode::Sidecar => 0,
+        _ => rows.size_hint().0,
+    });
     let mut boundary = None;
     // A call id the window already carries contributes only its result, as the plugin encodes it.
     let mut emitted_calls = HashSet::new();
-    let mut scratch = CanonicalScratch::default();
+    let retain_sidecar = decode != Decode::Window;
 
     for (ordinal, raw_message) in rows {
         let info = message_info(raw_message);
@@ -174,15 +163,13 @@ fn decode_rows<'a, E>(
         let role = string_field(info, "role")
             .or_else(|| string_field(raw_message, "role"))
             .unwrap_or_else(|| "user".to_string());
-        let origin = opencode_origin(info).or_else(|| opencode_origin(raw_message));
-        let created_at_ms = created_at(info, &mut read_time)?;
         let parts = raw_message
             .get("parts")
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
 
-        let mut blocks = DecodedBlocks::new(retain, parts.len(), &mut scratch);
+        let mut blocks = Blocks::new(retain_sidecar, parts.len());
 
         for (part_index, part) in parts.iter().enumerate() {
             let part_type = part
@@ -191,7 +178,10 @@ fn decode_rows<'a, E>(
                 .unwrap_or("unknown");
             match part_type {
                 "text" if part.get("ignored") != Some(&Value::Bool(true)) => {
-                    let text = string_field(part, "text").unwrap_or_default();
+                    let text = (decode != Decode::Sidecar)
+                        .then(|| string_field(part, "text"))
+                        .flatten()
+                        .unwrap_or_default();
                     let block = block_with_extras(BlockKind::Text { text }, part);
                     blocks.push(block, part_index, part, "text");
                 }
@@ -254,29 +244,38 @@ fn decode_rows<'a, E>(
             }
         }
 
-        let synthetic = is_synthetic_message(parts);
         let (content, block_metas, folded) = blocks.finish();
-        let recorded_ordinal = (retain != Retain::Window).then_some(ordinal);
-        let ck = WireMessage::from_parts(
-            role.clone(),
-            content,
-            origin,
-            ProviderExtras::new(),
-            HarnessMeta {
-                harness_id: Some(mid.clone()),
-                ordinal: recorded_ordinal,
-                synthetic,
-                summary: info.get("summary") == Some(&Value::Bool(true)),
-                errored: info.get("error").is_some_and(|error| !error.is_null()),
-                finish: string_field(info, "finish"),
-                created_at_ms,
-            },
-        );
-        decoded.push(IngressMessage {
-            mid: mid.clone(),
-            ordinal: recorded_ordinal.unwrap_or_default(),
-            ck,
-        });
+        let decoded_blocks = if decode == Decode::Sidecar {
+            content
+        } else {
+            let decoded_blocks = if retain_sidecar {
+                content.clone()
+            } else {
+                Vec::new()
+            };
+            let recorded_ordinal = retain_sidecar.then_some(ordinal);
+            let ck = WireMessage::from_parts(
+                role.clone(),
+                content,
+                opencode_origin(info).or_else(|| opencode_origin(raw_message)),
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.clone()),
+                    ordinal: recorded_ordinal,
+                    synthetic: is_synthetic_message(parts),
+                    summary: info.get("summary") == Some(&Value::Bool(true)),
+                    errored: info.get("error").is_some_and(|error| !error.is_null()),
+                    finish: string_field(info, "finish"),
+                    created_at_ms: created_at(info, &mut read_time)?,
+                },
+            );
+            decoded.push(IngressMessage {
+                mid: mid.clone(),
+                ordinal: recorded_ordinal.unwrap_or_default(),
+                ck,
+            });
+            decoded_blocks
+        };
         if let Some(block_metas) = block_metas {
             sidecar.remember_message(
                 mid.clone(),
@@ -287,6 +286,7 @@ fn decode_rows<'a, E>(
                     raw: Arc::clone(raw_message),
                     stable_key: Some(stable_key),
                     blocks: block_metas,
+                    decoded: decoded_blocks,
                     folded_native_indices: folded,
                 },
             );
@@ -300,113 +300,100 @@ fn decode_rows<'a, E>(
     })
 }
 
-#[cfg(test)]
 /// Encodes CK messages and reuses retained native envelopes when available.
 ///
 /// `mutation_exempt_mid` selects one retained message for exact raw replay.
 /// In debug builds, encoding panics if two emitted tool parts share a call ID.
-pub fn encode_opencode(
+#[cfg(test)]
+pub(crate) fn encode_opencode(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
-    let messages = messages.iter().collect::<Vec<_>>();
     owned(match mutation_exempt_mid {
-        Some(mid) => encode_opencode_impl(&messages, sidecar, None, None, false, &[mid]),
-        None => encode_opencode_impl(&messages, sidecar, None, None, false, &[]),
+        Some(mid) => encode_opencode_impl(messages, sidecar, None, false, &[mid]),
+        None => encode_opencode_impl(messages, sidecar, None, false, &[]),
     })
 }
 
-#[cfg(test)]
 /// Encodes CK messages with a session ID for new synthetic user messages.
 ///
 /// `session_id` applies only to newly created synthetic user messages.
 /// Retained raw values preserve provider fields that CK does not model.
 /// The decoder retains compaction parts to replay untouched ingress.
-pub fn encode_opencode_with_session(
+#[cfg(test)]
+pub(crate) fn encode_opencode_with_session(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     session_id: Option<&str>,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<MessageV2Json> {
-    let messages = messages.iter().collect::<Vec<_>>();
     owned(match mutation_exempt_mid {
-        Some(mid) => encode_opencode_impl(&messages, sidecar, None, session_id, true, &[mid]),
-        None => encode_opencode_impl(&messages, sidecar, None, session_id, true, &[]),
+        Some(mid) => encode_opencode_impl(messages, sidecar, session_id, true, &[mid]),
+        None => encode_opencode_impl(messages, sidecar, session_id, true, &[]),
     })
 }
 
 #[cfg(test)]
-pub fn encode_opencode_with_session_exemptions(
+pub(crate) fn encode_opencode_with_session_exemptions(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
 ) -> Vec<MessageV2Json> {
-    owned(encode_opencode_impl(
-        &messages.iter().collect::<Vec<_>>(),
+    owned(encode_opencode_shared(
+        messages,
         sidecar,
-        None,
         session_id,
-        true,
         mutation_exempt_mids,
     ))
 }
 
-#[cfg(test)]
-/// The encoded messages as owned values; a replayed envelope is copied out of its sidecar.
-fn owned(encoded: Vec<Arc<MessageV2Json>>) -> Vec<MessageV2Json> {
-    encoded.into_iter().map(Arc::unwrap_or_clone).collect()
-}
-
-/// Encodes CK messages served from the native window `native`, reusing each retained envelope
-/// as [`encode_opencode_with_session_exemptions`] does over a fingerprinted sidecar of `native`.
-///
-/// The window is decoded once with no fingerprint and no stamp, and each served block is
-/// compared with the block its meta decoded. Equal decoded content is equal fingerprints, so
-/// the alignment and every replay match the fingerprinted encode's. A message that encodes to
-/// its retained envelope is that envelope, shared with `native`.
-pub(crate) fn encode_opencode_window(
-    messages: &[&WireMessage],
-    native: &[Arc<Value>],
+/// Encodes CK messages onto their retained native envelopes, replaying each mutation-exempt
+/// message's envelope whole. A message whose envelope the encode leaves unchanged is that
+/// envelope's `Arc`, so the output shares it with the input window.
+pub(crate) fn encode_opencode_shared<M: Borrow<WireMessage>>(
+    messages: &[M],
+    sidecar: &DecodeSidecar,
     session_id: Option<&str>,
     mutation_exempt_mids: &[&str],
 ) -> Vec<Arc<MessageV2Json>> {
-    let decoded = decode_window(native, Retain::Decoded);
-    encode_opencode_impl(
-        messages,
-        &decoded.sidecar,
-        Some(&decoded.messages),
-        session_id,
-        true,
-        mutation_exempt_mids,
-    )
+    encode_opencode_impl(messages, sidecar, session_id, true, mutation_exempt_mids)
 }
 
-/// One encoded output message: a pair rendered as one tool part, or one message to encode
-/// against its retained metadata, which depends on that message alone.
+/// One encoded output message: a pair rendered as one tool part, a fresh message with no
+/// retained envelope, or one message to encode against its retained metadata, which depends on
+/// that message alone.
 enum EncodeUnit<'a> {
     Rendered(MessageV2Json),
-    Single(&'a WireMessage, usize),
+    Fresh(&'a WireMessage),
+    Retained(&'a WireMessage, &'a HarnessMessageMeta),
 }
 
-/// `decoded`, when present, holds the messages `sidecar` was decoded with in decode order, and
-/// each meta's content is read from the message at its ordinal; otherwise from its fingerprint.
 /// Each unit encodes on its own, so the units run on the bounded pool.
-fn encode_opencode_impl(
-    messages: &[&WireMessage],
+fn encode_opencode_impl<M: Borrow<WireMessage>>(
+    messages: &[M],
     sidecar: &DecodeSidecar,
-    decoded: Option<&[IngressMessage]>,
     session_id: Option<&str>,
     preserve_compaction: bool,
     mutation_exempt_mids: &[&str],
 ) -> Vec<Arc<MessageV2Json>> {
     let mut units = Vec::with_capacity(messages.len());
     let mut index = 0;
+    // `looked_up` caches metadata for the message at `index` from the preceding iteration.
+    let mut looked_up = None;
     while index < messages.len() {
-        if let Some(&next) = messages.get(index + 1) {
-            if let Some(part) = render_synthetic_todo_pair(messages[index], next) {
-                let info = synthetic_message_info(messages[index], session_id);
+        let msg: &WireMessage = messages[index].borrow();
+        let next: Option<&WireMessage> = messages.get(index + 1).map(Borrow::borrow);
+        // Decoded messages retain their harness IDs for metadata rebinding.
+        // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
+        // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
+        let meta = looked_up
+            .take()
+            .unwrap_or_else(|| meta_for_ck(sidecar, msg, index));
+        if let Some(next) = next {
+            if let Some(part) = render_synthetic_todo_pair(msg, next) {
+                let info = synthetic_message_info(msg, session_id);
                 units.push(EncodeUnit::Rendered(json!({
                     "info": info,
                     "parts": [part],
@@ -414,41 +401,41 @@ fn encode_opencode_impl(
                 index += 2;
                 continue;
             }
-            let call_is_fresh = meta_for_ck(sidecar, messages[index], index).is_none();
-            let result_is_fresh = meta_for_ck(sidecar, next, index + 1).is_none();
-            if call_is_fresh
-                && result_is_fresh
-                && let Some(part) = render_adjacent_tool_pair(messages[index], next)
+            let next_meta = meta_for_ck(sidecar, next, index + 1);
+            if meta.is_none()
+                && next_meta.is_none()
+                && let Some(part) = render_adjacent_tool_pair(msg, next)
             {
-                let mut message = encode_new_message(messages[index], session_id);
+                let mut message = encode_new_message(msg, session_id);
                 set_value(&mut message, "parts", Value::Array(vec![part]));
                 units.push(EncodeUnit::Rendered(message));
                 index += 2;
                 continue;
             }
+            looked_up = Some(next_meta);
         }
-        units.push(EncodeUnit::Single(messages[index], index));
+        units.push(match meta {
+            Some(meta) => EncodeUnit::Retained(msg, meta),
+            None => EncodeUnit::Fresh(msg),
+        });
         index += 1;
     }
     let encoded = crate::parallel_map::map_with(units, |(), unit| match unit {
         EncodeUnit::Rendered(message) => Arc::new(message),
-        EncodeUnit::Single(msg, index) => {
-            // Decoded messages retain their harness IDs for metadata rebinding.
-            // A positional synthetic fallback may attach an input nudge envelope to a fresh module-authored message.
-            // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
-            match meta_for_ck(sidecar, msg, index) {
-                Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
-                    Arc::clone(&meta.raw)
-                }
-                Some(meta) => {
-                    encode_with_meta(msg, meta, meta_content(decoded, meta), preserve_compaction)
-                }
-                None => Arc::new(encode_new_message(msg, session_id)),
-            }
+        EncodeUnit::Fresh(msg) => Arc::new(encode_new_message(msg, session_id)),
+        EncodeUnit::Retained(_, meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
+            Arc::clone(&meta.raw)
         }
+        EncodeUnit::Retained(msg, meta) => encode_with_meta(msg, meta, preserve_compaction),
     });
     assert_unique_tool_use_ids(encoded.iter().map(Arc::as_ref));
     encoded
+}
+
+/// The owned values of an encode, for callers that edit them.
+#[cfg(test)]
+fn owned(encoded: Vec<Arc<MessageV2Json>>) -> Vec<MessageV2Json> {
+    encoded.into_iter().map(Arc::unwrap_or_clone).collect()
 }
 
 fn duplicate_tool_use_locations<'a>(
@@ -476,11 +463,13 @@ fn duplicate_tool_use_locations<'a>(
 }
 
 fn assert_unique_tool_use_ids<'a>(messages: impl IntoIterator<Item = &'a MessageV2Json>) {
-    let duplicates = duplicate_tool_use_locations(messages);
-    debug_assert!(
-        duplicates.is_empty(),
-        "OpenCode serialization produced duplicate tool_use ids: {duplicates:?}"
-    );
+    if cfg!(debug_assertions) {
+        let duplicates = duplicate_tool_use_locations(messages);
+        assert!(
+            duplicates.is_empty(),
+            "OpenCode serialization produced duplicate tool_use ids: {duplicates:?}"
+        );
+    }
 }
 
 fn decode_tool_part<'a>(
@@ -488,7 +477,7 @@ fn decode_tool_part<'a>(
     part_index: usize,
     part: &'a Value,
     emitted_calls: &mut HashSet<Cow<'a, str>>,
-    blocks: &mut DecodedBlocks<'_>,
+    blocks: &mut Blocks,
 ) {
     let tool_name = tool_name(part);
     let input = part
@@ -543,32 +532,25 @@ fn decode_tool_part<'a>(
     }
 }
 
-/// One message's decoded blocks and, when the sidecar is retained, each block's meta. A stamped
-/// sidecar fingerprints each block through the decode's shared serialization buffers and stamps
-/// the block with its origin and that fingerprint, which its meta also carries. `folded` lists
-/// the parts whose content an earlier block holds.
-struct DecodedBlocks<'s> {
+/// One message's decoded blocks and, when the sidecar is retained, each block's meta. `folded`
+/// lists the parts whose content an earlier block holds.
+struct Blocks {
     content: Vec<WireBlock>,
     metas: Option<Vec<BlockMeta>>,
     folded: Vec<usize>,
-    stamp: bool,
-    scratch: &'s mut CanonicalScratch,
 }
 
-impl<'s> DecodedBlocks<'s> {
-    fn new(retain: Retain, parts: usize, scratch: &'s mut CanonicalScratch) -> Self {
+impl Blocks {
+    fn new(retain_sidecar: bool, parts: usize) -> Self {
         Self {
             content: Vec::with_capacity(parts),
-            metas: (retain != Retain::Window).then(|| Vec::with_capacity(parts)),
+            metas: retain_sidecar.then(|| Vec::with_capacity(parts)),
             folded: Vec::new(),
-            stamp: retain.stamps(),
-            scratch,
         }
     }
 
     /// Appends `block`, decoded from the native part `raw` at `part_index`; with a retained
-    /// sidecar its meta is recorded under `kind`, named by the part's own `id` or `callID`, and
-    /// a stamped sidecar fingerprints the meta and stamps the block with its identity.
+    /// sidecar its meta is recorded under `kind`, named by the part's own `id` or `callID`.
     fn push(&mut self, block: WireBlock, part_index: usize, raw: &Value, kind: &str) {
         let native_id = ["id", "callID"]
             .into_iter()
@@ -579,25 +561,18 @@ impl<'s> DecodedBlocks<'s> {
     /// As [`Self::push`], with the meta named by `native_id`.
     fn push_with_native_id(
         &mut self,
-        mut block: WireBlock,
+        block: WireBlock,
         part_index: usize,
         kind: &str,
         native_id: Option<&str>,
     ) {
-        let block_index = self.content.len();
         if let Some(metas) = &mut self.metas {
-            let content_fingerprint = self.stamp.then(|| {
-                let fingerprint = decoded_block_fingerprint_in(self.scratch, &block);
-                stamp_block_identity(&mut block, block_index, part_index, &fingerprint);
-                fingerprint
-            });
             metas.push(BlockMeta {
-                block_index,
+                block_index: self.content.len(),
                 kind: kind.to_string(),
                 native_index: Some(part_index),
                 native_id: native_id.map(str::to_string),
                 item_id: None,
-                content_fingerprint,
             });
         }
         self.content.push(block);
@@ -734,103 +709,58 @@ fn tool_output_from_part(part: &Value, is_error: bool, output_text: String) -> T
     })
 }
 
-/// Where `meta`'s blocks read their pre-mutation content: the message `decoded` holds at the
-/// meta's ordinal, else the metas' fingerprints.
-fn meta_content<'a>(
-    decoded: Option<&'a [IngressMessage]>,
-    meta: &HarnessMessageMeta,
-) -> MetaContent<'a> {
-    let position = usize::try_from(meta.ordinal)
-        .ok()
-        .and_then(|ordinal| ordinal.checked_sub(1));
-    decoded
-        .zip(position)
-        .and_then(|(decoded, position)| decoded.get(position))
-        .filter(|message| message.mid == meta.mid)
-        .map_or(MetaContent::Fingerprint, |message| {
-            MetaContent::Decoded(message.ck.content())
-        })
-}
-
+/// Encodes `msg` over its retained envelope. A message whose every block is its decoded block,
+/// in order, under an envelope that already names it with its role, is the envelope itself:
+/// the retained `Arc`, with no copy.
 fn encode_with_meta(
     msg: &WireMessage,
     meta: &HarnessMessageMeta,
-    content: MetaContent<'_>,
     preserve_compaction: bool,
 ) -> Arc<Value> {
-    let mut matched_metas =
-        match_block_metas_by(msg.content(), &meta.blocks, block_matches_meta, content);
-    matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
-    // A folded part is decoded by no block of its own, so its envelope rebuilds without it.
-    matched_metas.fold_native_parts(&meta.folded_native_indices);
-    if replays_retained_envelope(msg, meta, &matched_metas, preserve_compaction) {
+    let matched_metas = align_with_meta(msg, meta);
+    if envelope_is_unchanged(msg, meta, &matched_metas, preserve_compaction) {
         return Arc::clone(&meta.raw);
     }
-    Arc::new(rebuild_with_meta(
-        msg,
-        meta,
-        &matched_metas,
-        preserve_compaction,
-    ))
+    render_with_meta(msg, meta, &matched_metas, preserve_compaction)
 }
 
-/// Whether [`rebuild_with_meta`] gives `meta.raw` unchanged: the envelope names its id and the
-/// served role, every served block is paired with an unchanged native part, every decoded part
-/// stays, and no compaction part leaves.
-fn replays_retained_envelope(
+/// Pairs `msg`'s blocks with `meta`'s block metas by canonical content, then pairs the runs
+/// of edited blocks between matches in place.
+fn align_with_meta<'a>(
     msg: &WireMessage,
-    meta: &HarnessMessageMeta,
-    matched_metas: &MatchedBlockMetas<'_>,
-    preserve_compaction: bool,
-) -> bool {
-    let Some(envelope) = meta.raw.as_object() else {
-        return false;
-    };
-    let Some(parts) = envelope.get("parts").and_then(Value::as_array) else {
-        return false;
-    };
-    let names_id_and_role = envelope
-        .get("info")
-        .and_then(Value::as_object)
-        .is_some_and(|info| {
-            info.contains_key("id")
-                && info.get("role").and_then(Value::as_str) == Some(msg.role.as_str())
-        });
-    let keeps_compaction = preserve_compaction
-        || !parts
-            .iter()
-            .any(|part| part.get("type").and_then(Value::as_str) == Some("compaction"));
-    names_id_and_role
-        && keeps_compaction
-        && matched_metas.retains_every_decoded_part()
-        && matched_metas
-            .by_block
-            .iter()
-            .enumerate()
-            .all(|(block_index, block_meta)| {
-                block_meta.is_some_and(|block_meta| {
-                    block_meta
-                        .native_index
-                        .is_some_and(|native_index| native_index < parts.len())
-                        && matched_metas.block_is_unchanged(msg.content(), block_index, block_meta)
-                })
-            })
+    meta: &'a HarnessMessageMeta,
+) -> super::sidecar::MatchedBlockMetas<'a> {
+    let mut matched_metas = match_block_metas(
+        msg.content(),
+        &meta.blocks,
+        block_matches_meta,
+        &meta.decoded,
+        Some(&meta.raw),
+    );
+    matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
+    matched_metas.fold_native_parts(&meta.folded_native_indices);
+    matched_metas
 }
 
-/// `meta.raw` with each native part updated from the served block paired with it, unpaired
-/// served blocks rendered as new parts, and parts whose decoded blocks were removed dropped.
-fn rebuild_with_meta(
+/// Renders `msg` onto its retained envelope part by part: unchanged blocks keep their native
+/// parts, edited blocks update theirs, and fresh blocks append. An envelope equal to the
+/// retained one is the retained `Arc`.
+fn render_with_meta(
     msg: &WireMessage,
     meta: &HarnessMessageMeta,
-    matched_metas: &MatchedBlockMetas<'_>,
+    matched_metas: &super::sidecar::MatchedBlockMetas<'_>,
     preserve_compaction: bool,
-) -> Value {
-    let mut raw = meta.raw.as_ref().clone();
-    let mut parts = raw
-        .get_mut("parts")
-        .and_then(Value::as_array_mut)
-        .map(std::mem::take)
-        .unwrap_or_default();
+) -> Arc<Value> {
+    // Native parts stay borrowed until an update copies them or the finished render keeps them.
+    let mut parts: Vec<Cow<'_, Value>> = meta
+        .raw
+        .get("parts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(Cow::Borrowed)
+        .collect();
 
     let mut block_index = 0;
     while block_index < msg.content().len() {
@@ -859,7 +789,7 @@ fn rebuild_with_meta(
                     if !arc_meta.is_some_and(|meta| {
                         matched_metas.block_is_unchanged(msg.content(), arc_index, meta)
                     }) {
-                        update_part_from_block(part, &msg.content()[arc_index]);
+                        update_native_part(part, &msg.content()[arc_index]);
                     }
                 }
                 block_index += 2;
@@ -870,7 +800,7 @@ fn rebuild_with_meta(
                 // The paired call and result blocks must retain one `callID`.
                 // The paired blocks must retain one `callID` even when no renderer-transition marker exists.
                 // OpenCode matches call and result shells by their shared `callID`.
-                parts.push(render_tool_pair_as_part(block, result));
+                parts.push(Cow::Owned(render_tool_pair_as_part(block, result)));
                 block_index += 2;
                 continue;
             }
@@ -891,12 +821,12 @@ fn rebuild_with_meta(
                 block.kind(),
                 BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             ) {
-                update_part_from_block(part, block);
+                update_native_part(part, block);
             }
             block_index += 1;
             continue;
         }
-        parts.push(render_block_as_part(block));
+        parts.push(Cow::Owned(render_block_as_part(block)));
         block_index += 1;
     }
 
@@ -904,29 +834,117 @@ fn rebuild_with_meta(
     if !preserve_compaction {
         parts.retain(|part| part.get("type").and_then(Value::as_str) != Some("compaction"));
     }
+    let parts = parts.into_iter().map(Cow::into_owned).collect::<Vec<_>>();
 
-    if let Some(obj) = raw.as_object_mut() {
-        obj.insert("parts".to_string(), Value::Array(parts));
-        let info = obj.entry("info").or_insert_with(|| json!({}));
-        if let Some(info_obj) = info.as_object_mut() {
-            info_obj
-                .entry("id".to_string())
-                .or_insert_with(|| Value::String(meta.mid.clone()));
-            info_obj.insert("role".to_string(), Value::String(msg.role.clone()));
+    let raw = match meta.raw.as_ref() {
+        Value::Object(fields) => {
+            let mut obj = fields
+                .iter()
+                .filter(|(key, _)| key.as_str() != "parts")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Map<_, _>>();
+            obj.insert("parts".to_string(), Value::Array(parts));
+            if !obj.contains_key("info") {
+                obj.insert("info".to_string(), json!({}));
+            }
+            if let Some(info_obj) = obj.get_mut("info").and_then(Value::as_object_mut) {
+                if !info_obj.contains_key("id") {
+                    info_obj.insert("id".to_string(), Value::String(meta.mid.clone()));
+                }
+                if info_obj.get("role").and_then(Value::as_str) != Some(msg.role.as_str()) {
+                    info_obj.insert("role".to_string(), Value::String(msg.role.clone()));
+                }
+            }
+            Value::Object(obj)
         }
-    } else {
-        raw = json!({
+        _ => json!({
             "info": { "id": meta.mid, "role": msg.role },
             "parts": parts,
-        });
-    }
-    // JSON value equality treats `0.0` and `-0.0` as equal although they serialize apart, so
-    // returning `meta.raw` for an equal envelope preserves the original float-zero signs.
-    if json_holds_float_zero(&meta.raw) && raw == *meta.raw {
-        meta.raw.as_ref().clone()
+        }),
+    };
+    // An equal envelope is the retained one. JSON value equality treats `0.0` and `-0.0` as
+    // equal although they serialize apart, so returning `meta.raw` also keeps the original
+    // float-zero signs.
+    if raw == *meta.raw {
+        Arc::clone(&meta.raw)
     } else {
-        raw
+        Arc::new(raw)
     }
+}
+
+fn update_native_part(part: &mut Cow<'_, Value>, block: &WireBlock) {
+    if let Cow::Borrowed(native) = *part {
+        *part = Cow::Owned(part_for_update(native, block));
+    }
+    update_part_from_block(part.to_mut(), block);
+}
+
+fn part_for_update(part: &Value, block: &WireBlock) -> Value {
+    let Value::Object(fields) = part else {
+        return Value::Null;
+    };
+    let (written, state_written): (&[&str], &[&str]) = match block.kind() {
+        BlockKind::Text { .. }
+        | BlockKind::Reasoning { .. }
+        | BlockKind::RedactedReasoning { .. } => (&["type", "text"], &[]),
+        BlockKind::ToolCall { .. } => (&["type", "callID", "tool"], &["input"]),
+        BlockKind::ToolResult { .. } => (
+            &["type", "callID", "tool"],
+            &["status", "output", "error", "attachments"],
+        ),
+        BlockKind::Media(_) | BlockKind::Opaque(_) => return Value::Null,
+    };
+    let kept = |key: &String, written: &[&str]| !written.contains(&key.as_str());
+    Value::Object(
+        fields
+            .iter()
+            .filter(|(key, _)| kept(key, written))
+            .map(|(key, value)| {
+                let value = match value {
+                    Value::Object(state) if key == "state" => Value::Object(
+                        state
+                            .iter()
+                            .filter(|(key, _)| kept(key, state_written))
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    ),
+                    value => value.clone(),
+                };
+                (key.clone(), value)
+            })
+            .collect(),
+    )
+}
+
+/// Whether encoding `msg` over `meta` would leave its envelope as retained: every served block
+/// paired, in order, with the meta at its own position and equal to its decoded block, every
+/// meta paired, compaction parts kept, a `parts` array, and an `info` that already holds the
+/// message's id and role. Acceptance implies [`render_with_meta`] returns the retained `Arc`;
+/// `the_unchanged_envelope_shortcut_agrees_with_the_full_render` holds the two together.
+fn envelope_is_unchanged(
+    msg: &WireMessage,
+    meta: &HarnessMessageMeta,
+    matched_metas: &super::sidecar::MatchedBlockMetas<'_>,
+    preserve_compaction: bool,
+) -> bool {
+    let blocks = msg.content();
+    let info = meta.raw.get("info");
+    preserve_compaction
+        && meta.folded_native_indices.is_empty()
+        && blocks.len() == meta.blocks.len()
+        && meta.raw.get("parts").is_some_and(Value::is_array)
+        && info.and_then(|info| info.get("id")).is_some()
+        && info
+            .and_then(|info| info.get("role"))
+            .and_then(Value::as_str)
+            == Some(&msg.role)
+        && (0..blocks.len()).all(|index| {
+            matched_metas.by_block[index].is_some_and(|paired| {
+                std::ptr::eq(paired, &meta.blocks[index])
+                    && paired.native_index.is_some()
+                    && matched_metas.block_is_unchanged(blocks, index, paired)
+            })
+        })
 }
 
 fn block_matches_meta(block: &WireBlock, meta: &BlockMeta) -> bool {
@@ -1417,6 +1435,189 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[test]
+    fn the_attach_sidecar_is_the_full_decode_sidecar() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut windows: Vec<Vec<Arc<Value>>> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(golden["cases"].as_array().unwrap())
+            .map(native_window)
+            .collect();
+        let edges: Vec<Arc<Value>> = [
+            json!({ "info": { "id": "dup", "role": "user" },
+                    "parts": [{ "type": "text", "text": "first" }] }),
+            json!({ "info": { "role": "assistant" },
+                    "parts": [{ "type": "text", "text": "anonymous" }] }),
+            json!({ "info": { "id": "dup", "role": "assistant" },
+                    "parts": [{ "type": "text", "text": "second" }] }),
+            json!({ "info": { "id": "compacted", "role": "user", "time": { "created": 1.5 } },
+                    "parts": [{ "type": "compaction" }, { "type": "text", "text": "y" }] }),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let sidecar = decode_opencode_sidecar(&edges);
+        assert_eq!(sidecar.order.len(), 3);
+        assert_eq!(sidecar.order[0], "dup");
+        assert_eq!(sidecar.message_by_mid("dup").unwrap().role, "assistant");
+        windows.push(edges);
+        for window in &windows {
+            let mut full = decode_opencode_shared(window).sidecar;
+            for meta in full.messages.values_mut() {
+                let HarnessMessageMeta {
+                    raw,
+                    blocks,
+                    decoded,
+                    ..
+                } = Arc::make_mut(meta);
+                for block_meta in blocks.iter() {
+                    if let BlockKind::Text { text } = decoded[block_meta.block_index].kind_mut() {
+                        let part = &raw["parts"][block_meta.native_index.unwrap()];
+                        assert_eq!(part["text"].as_str().unwrap_or_default(), text);
+                        text.clear();
+                    }
+                }
+            }
+            assert_eq!(decode_opencode_sidecar(window), full);
+        }
+        assert!(windows.len() > 2);
+    }
+
+    #[test]
+    fn the_attach_sidecar_encodes_the_full_decode_sidecar_bytes() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut windows: Vec<Vec<Arc<Value>>> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| IDENTIFIED_WINDOWS.contains(&case["name"].as_str().unwrap()))
+            .chain(golden["cases"].as_array().unwrap())
+            .map(native_window)
+            .collect();
+        let signed =
+            |sign: f64| json!({ "type": "text", "text": "z", "metadata": { "z": sign * 0.0 } });
+        let wide: Vec<Value> = (0..1_100)
+            .map(|index| json!({ "type": "text", "text": format!("w{}", index % 7) }))
+            .collect();
+        windows.push(
+            [
+                json!({ "info": { "id": "signed", "role": "user" },
+                        "parts": [signed(1.0), signed(-1.0), { "type": "text" }] }),
+                json!({ "info": { "id": "wide", "role": "assistant" }, "parts": wide }),
+            ]
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
+        );
+        let mut encoded_variants = 0;
+        let mut compared_blocks = 0;
+        for window in &windows {
+            let full = decode_opencode_shared(window);
+            let attach = decode_opencode_sidecar(window);
+            let served: Vec<WireMessage> = full
+                .messages
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect();
+            let mut variants = vec![served.clone()];
+            for (index, message) in served.iter().enumerate() {
+                for edit in 0..4 {
+                    let mut edited = served.clone();
+                    let content = edited[index].content_mut();
+                    match edit {
+                        0 => content.iter_mut().for_each(|block| {
+                            if let BlockKind::Text { text } = block.kind_mut() {
+                                text.push('x');
+                            }
+                        }),
+                        1 if content
+                            .iter()
+                            .all(|block| matches!(block.kind(), BlockKind::Text { .. })) =>
+                        {
+                            content.reverse()
+                        }
+                        2 if content.first().is_some_and(|block| {
+                            matches!(block.kind(), BlockKind::Text { .. })
+                        }) =>
+                        {
+                            drop(content.remove(0))
+                        }
+                        3 => content.iter_mut().for_each(|block| {
+                            if let Some(namespace) = block.provider_extras.get_mut(HARNESS)
+                                && let Some(metadata) = namespace.get_mut("metadata")
+                                && metadata.get("z").is_some()
+                            {
+                                metadata["z"] = json!(-metadata["z"].as_f64().unwrap());
+                            }
+                        }),
+                        _ => continue,
+                    }
+                    if edited[index] != *message || edit == 3 {
+                        variants.push(edited);
+                    }
+                }
+            }
+            for variant in &variants {
+                for (index, msg) in variant.iter().enumerate() {
+                    let (Some(by_decoded), Some(by_native)) = (
+                        meta_for_ck(&full.sidecar, msg, index),
+                        meta_for_ck(&attach, msg, index),
+                    ) else {
+                        continue;
+                    };
+                    let content = msg.content();
+                    let oracle = match_block_metas(
+                        content,
+                        &by_decoded.blocks,
+                        block_matches_meta,
+                        &by_decoded.decoded,
+                        None,
+                    );
+                    let elided = align_with_meta(msg, by_native);
+                    let mut oracle = oracle;
+                    oracle.pair_in_place_edits(content, &by_decoded.blocks, block_matches_meta);
+                    for block_index in 0..content.len() {
+                        let pairs = (oracle.by_block[block_index], elided.by_block[block_index]);
+                        assert_eq!(
+                            pairs.0.map(|meta| meta.block_index),
+                            pairs.1.map(|meta| meta.block_index)
+                        );
+                        if let (Some(decoded), Some(native)) = pairs {
+                            assert_eq!(
+                                oracle.block_is_unchanged(content, block_index, decoded),
+                                elided.block_is_unchanged(content, block_index, native)
+                            );
+                            compared_blocks += 1;
+                        }
+                    }
+                }
+                let by_full = encode_opencode_shared(variant, &full.sidecar, None, &[]);
+                let by_attach = encode_opencode_shared(variant, &attach, None, &[]);
+                assert_eq!(by_full.len(), by_attach.len());
+                for (full, attach) in by_full.iter().zip(&by_attach) {
+                    assert_eq!(
+                        serde_json::to_vec(full).unwrap(),
+                        serde_json::to_vec(attach).unwrap()
+                    );
+                    let input =
+                        |value: &Arc<Value>| window.iter().any(|raw| Arc::ptr_eq(raw, value));
+                    assert_eq!(input(full), input(attach));
+                }
+                encoded_variants += 1;
+            }
+        }
+        assert!(encoded_variants > 100, "{encoded_variants}");
+        assert!(compared_blocks > 1_000, "{compared_blocks}");
+    }
+
     /// The corpus windows whose every message is an object carrying `info.id` and whose call
     /// ids are unique.
     const IDENTIFIED_WINDOWS: [&str; 7] = [
@@ -1513,134 +1714,6 @@ pub(crate) mod tests {
         // Only `summary: true` with `finish: "stop"` marks a compaction summary.
         for mid in ["msg_s7", "msg_s8", "msg_s9", "msg_s10"] {
             assert_eq!(meta(mid).finish.as_deref(), Some("stop"), "{mid}");
-        }
-    }
-
-    #[test]
-    fn a_replayed_envelope_is_the_envelope_the_rebuild_gives() {
-        let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
-        let mut replayed = 0;
-        for case in fixture["cases"].as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let window = native_window(case);
-            let stamped = decode_opencode_shared(&window);
-            let plugin: Vec<WireMessage> = derive_opencode_window(&window)
-                .unwrap()
-                .into_iter()
-                .map(|message| message.ck)
-                .collect();
-            let variant = |edit: &dyn Fn(&mut WireMessage)| -> Vec<WireMessage> {
-                let mut messages = plugin.clone();
-                messages.iter_mut().for_each(edit);
-                messages
-            };
-            let variants = [
-                plugin.clone(),
-                variant(&|message| message.role = "user".to_string()),
-                variant(&|message| drop(message.content_mut().pop())),
-                variant(&|message| {
-                    if let Some(block) = message.content_mut().first_mut()
-                        && let BlockKind::Text { text } = block.kind_mut()
-                    {
-                        text.push_str(" edited");
-                    }
-                }),
-            ];
-            for messages in &variants {
-                for (index, msg) in messages.iter().enumerate() {
-                    let Some(meta) = meta_for_ck(&stamped.sidecar, msg, index) else {
-                        continue;
-                    };
-                    let mut matched = match_block_metas_by(
-                        msg.content(),
-                        &meta.blocks,
-                        block_matches_meta,
-                        MetaContent::Fingerprint,
-                    );
-                    matched.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
-                    matched.fold_native_parts(&meta.folded_native_indices);
-                    for preserve_compaction in [true, false] {
-                        if replays_retained_envelope(msg, meta, &matched, preserve_compaction) {
-                            replayed += 1;
-                            assert_eq!(
-                                rebuild_with_meta(msg, meta, &matched, preserve_compaction),
-                                *meta.raw,
-                                "{name} message {index}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        assert!(replayed > 0);
-    }
-
-    #[test]
-    fn the_window_encode_matches_the_fingerprinted_encode() {
-        let fixture: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
-        for case in fixture["cases"].as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let window = native_window(case);
-            let stamped = decode_opencode_shared(&window);
-            let ck = |messages: &[IngressMessage]| -> Vec<WireMessage> {
-                messages.iter().map(|message| message.ck.clone()).collect()
-            };
-            let plugin = ck(&derive_opencode_window(&window).unwrap());
-            let edited = |edit: &dyn Fn(&mut Vec<WireBlock>)| -> Vec<WireMessage> {
-                let mut messages = plugin.clone();
-                for message in &mut messages {
-                    edit(message.content_mut());
-                }
-                messages
-            };
-            let served = [
-                plugin.clone(),
-                ck(&stamped.messages),
-                edited(&|blocks| {
-                    if let Some(block) = blocks.first_mut()
-                        && let BlockKind::Text { text } = block.kind_mut()
-                    {
-                        text.push_str(" edited");
-                    }
-                }),
-                edited(&|blocks| drop(blocks.pop())),
-                edited(&|blocks| {
-                    blocks.push(WireBlock::bare(BlockKind::Text {
-                        text: "appended".to_string(),
-                    }));
-                }),
-                edited(&Vec::clear),
-                plugin.iter().skip(1).cloned().collect(),
-            ];
-            for (variant, messages) in served.iter().enumerate() {
-                let exempt = messages
-                    .first()
-                    .and_then(|message| message.meta.harness_id.as_deref());
-                for exemptions in [&[][..], &[exempt.unwrap_or_default()][..]] {
-                    // A served CK that repeats a call id fails the encoders' debug check alike.
-                    let encode = |by_window: bool| {
-                        std::panic::catch_unwind(|| {
-                            if by_window {
-                                owned(encode_opencode_window(
-                                    &messages.iter().collect::<Vec<_>>(),
-                                    &window,
-                                    Some("s"),
-                                    exemptions,
-                                ))
-                            } else {
-                                encode_opencode_with_session_exemptions(
-                                    messages,
-                                    &stamped.sidecar,
-                                    Some("s"),
-                                    exemptions,
-                                )
-                            }
-                        })
-                        .ok()
-                    };
-                    assert_eq!(encode(true), encode(false), "{name} variant {variant}");
-                }
-            }
         }
     }
 
@@ -1896,8 +1969,10 @@ pub(crate) mod tests {
         );
     }
 
+    /// An edited block beside a deleted sibling has no native part its content or position
+    /// names, so it renders as a fresh part; the unedited neighbor keeps its native extras.
     #[test]
-    fn mutated_survivor_keeps_its_own_native_extras_after_sibling_deletion() {
+    fn an_edited_survivor_beside_a_deletion_renders_as_a_fresh_part() {
         let raw = vec![json!({
             "info": { "id": "mutated-adjacent-text", "role": "assistant" },
             "parts": [
@@ -1919,7 +1994,7 @@ pub(crate) mod tests {
             encoded[0]["parts"],
             json!([
                 { "type": "text", "text": "A", "vendorPart": "A" },
-                { "type": "text", "text": "§3§ SURVIVE", "vendorPart": "survive" }
+                { "type": "text", "text": "§3§ SURVIVE" }
             ])
         );
     }
@@ -2004,11 +2079,17 @@ pub(crate) mod tests {
             let decoded = decode_opencode(&raw);
             let messages: Vec<_> = decoded.messages.iter().map(|m| m.ck.clone()).collect();
             assert_eq!(encode_opencode(&messages, &decoded.sidecar, None), expected);
-            // The window encode rebuilds the envelope with the folded part omitted.
+            // The attach encode renders the envelope with the folded part omitted, so the
+            // unchanged-envelope shortcut declines the message that carries one.
             let window = raw.iter().cloned().map(Arc::new).collect::<Vec<_>>();
             let served = messages.iter().collect::<Vec<_>>();
             assert_eq!(
-                owned(encode_opencode_window(&served, &window, None, &[])),
+                owned(encode_opencode_shared(
+                    &served,
+                    &decode_opencode_sidecar(&window),
+                    None,
+                    &[]
+                )),
                 expected
             );
         }
@@ -2244,10 +2325,10 @@ pub(crate) mod tests {
         })];
         let decoded = decode_opencode(&raw);
         let mut message = decoded.messages[0].ck.clone();
+        // The served envelope equals the native one as a JSON value, so the host receives its
+        // own message back, signs included; an envelope that differs anywhere else renders the
+        // served numbers.
         for block in message.content_mut() {
-            block
-                .provider_extras
-                .remove(crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE);
             if let BlockKind::ToolCall { input, .. } = block.kind_mut() {
                 *input = json!({ "offset": 0.0 });
             }
@@ -2258,6 +2339,253 @@ pub(crate) mod tests {
             serde_json::to_string(&served[0]).unwrap(),
             serde_json::to_string(&raw[0]).unwrap()
         );
+    }
+
+    /// The unchanged-envelope shortcut returns the retained envelope only where the full render
+    /// returns it: over the parity corpus, the golden windows, and envelopes the shortcut must
+    /// decline, under unchanged, re-roled, and dropped-block encodes with and without
+    /// compaction parts, every message the shortcut accepts renders to its retained `Arc`.
+    #[test]
+    fn the_unchanged_envelope_shortcut_agrees_with_the_full_render() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut windows: Vec<Vec<Arc<Value>>> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(golden["cases"].as_array().unwrap())
+            .map(native_window)
+            .collect();
+        windows.push(
+            [
+                json!({ "info": { "id": "no-parts", "role": "user" } }),
+                json!({ "info": { "id": "text-parts", "role": "user" }, "parts": "text" }),
+                json!({ "id": "outer", "info": { "role": "user" },
+                        "parts": [{ "type": "text", "text": "x" }] }),
+                json!({ "info": { "id": "compacted", "role": "user" },
+                        "parts": [{ "type": "compaction" }, { "type": "text", "text": "y" }] }),
+            ]
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
+        );
+        let edges = decode_opencode_shared(windows.last().unwrap());
+        for message in &edges.messages {
+            let meta = edges.sidecar.message_by_mid(&message.mid).unwrap();
+            let matched = align_with_meta(&message.ck, meta);
+            // A compaction part leaves the envelope only when compaction parts are dropped.
+            let preserve_compaction = message.mid != "compacted";
+            assert!(
+                !envelope_is_unchanged(&message.ck, meta, &matched, preserve_compaction),
+                "{}",
+                message.mid
+            );
+        }
+        let (mut accepted, mut declined) = (0, 0);
+        for window in &windows {
+            let decoded = decode_opencode_shared(window);
+            for message in &decoded.messages {
+                let meta = decoded.sidecar.message_by_mid(&message.mid).unwrap();
+                let mut variants = vec![message.ck.clone()];
+                let mut re_roled = message.ck.clone();
+                re_roled.role = if re_roled.role == "user" {
+                    "assistant"
+                } else {
+                    "user"
+                }
+                .into();
+                variants.push(re_roled);
+                if !message.ck.content().is_empty() {
+                    let mut dropped = message.ck.clone();
+                    dropped.content_mut().remove(0);
+                    variants.push(dropped);
+                }
+                for msg in &variants {
+                    for preserve_compaction in [true, false] {
+                        let matched = align_with_meta(msg, meta);
+                        if !envelope_is_unchanged(msg, meta, &matched, preserve_compaction) {
+                            declined += 1;
+                            continue;
+                        }
+                        accepted += 1;
+                        let full = render_with_meta(msg, meta, &matched, preserve_compaction);
+                        assert!(Arc::ptr_eq(&full, &meta.raw), "{}", message.mid);
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0 && declined > 0, "{accepted} {declined}");
+
+        let no_parts = decode_opencode(&[json!({ "info": { "id": "no-parts", "role": "user" } })]);
+        let encoded = encode_opencode_shared(
+            &[no_parts.messages[0].ck.clone()],
+            &no_parts.sidecar,
+            None,
+            &[],
+        );
+        assert_eq!(
+            *encoded[0],
+            json!({ "info": { "id": "no-parts", "role": "user" }, "parts": [] })
+        );
+    }
+
+    #[test]
+    fn a_partial_part_copy_updates_to_the_bytes_of_a_full_copy() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
+                .unwrap();
+        let mut parts: Vec<Value> = parity["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(golden["cases"].as_array().unwrap())
+            .flat_map(native_window)
+            .filter_map(|message| message.get("parts").and_then(Value::as_array).cloned())
+            .flatten()
+            .collect();
+        parts.extend([
+            json!("text"),
+            json!(null),
+            json!({ "type": "text", "text": "t", "metadata": { "k": -0.0 }, "id": "p" }),
+            json!({ "type": "tool", "callID": "c", "tool": "read", "state": "done" }),
+            json!({ "type": "tool", "callID": "c", "tool": "read", "metadata": 3,
+                    "state": { "status": "error", "error": "e", "input": { "n": 0.0 },
+                               "attachments": [{ "type": "file", "mime": "text/plain" }],
+                               "title": "kept", "time": { "start": 1 } } }),
+            json!({ "type": "tool", "callID": "c", "tool": "read",
+                    "state": { "status": "completed", "output": "o", "input": {} } }),
+        ]);
+        let mut blocks: Vec<WireBlock> = decode_opencode(
+            &parity["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(golden["cases"].as_array().unwrap())
+                .flat_map(native_window)
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
+        )
+        .messages
+        .into_iter()
+        .flat_map(|message| message.ck.content().to_vec())
+        .collect();
+        let attachment = ResultBlock {
+            kind: ResultBlockKind::Text { text: "a".into() },
+            provider_extras: ProviderExtras::new(),
+        };
+        blocks.extend([
+            WireBlock::bare(BlockKind::Text {
+                text: "edited".into(),
+            }),
+            WireBlock::with_provider_extras(
+                BlockKind::Text {
+                    text: "edited".into(),
+                },
+                ProviderExtras::from([(
+                    HARNESS.to_string(),
+                    BTreeMap::from([("metadata".to_string(), json!({ "m": 1 }))]),
+                )]),
+            ),
+            WireBlock::bare(BlockKind::Reasoning {
+                text: "r".into(),
+                signature: Some("s".into()),
+            }),
+            WireBlock::bare(BlockKind::RedactedReasoning { data: "d".into() }),
+            WireBlock::bare(BlockKind::ToolCall {
+                id: "c2".into(),
+                name: "write".into(),
+                input: json!({ "path": "p" }),
+                provider_executed: true,
+            }),
+            WireBlock::bare(BlockKind::ToolResult {
+                id: "c2".into(),
+                tool_name: "write".into(),
+                output: ToolOutput::bare(OutputKind::ErrorText { text: "bad".into() }),
+                provider_executed: false,
+            }),
+            WireBlock::bare(BlockKind::ToolResult {
+                id: "c2".into(),
+                tool_name: "write".into(),
+                output: ToolOutput::bare(OutputKind::Content {
+                    blocks: vec![attachment],
+                }),
+                provider_executed: false,
+            }),
+        ]);
+        let mut kinds = HashSet::new();
+        for part in &parts {
+            for block in &blocks {
+                kinds.insert(std::mem::discriminant(block.kind()));
+                let mut full = part.clone();
+                update_part_from_block(&mut full, block);
+                let mut partial = part_for_update(part, block);
+                update_part_from_block(&mut partial, block);
+                assert_eq!(
+                    serde_json::to_vec(&partial).unwrap(),
+                    serde_json::to_vec(&full).unwrap(),
+                    "part {part} under block {block:?}"
+                );
+            }
+        }
+        assert_eq!(kinds.len(), 7, "every block kind updates a part");
+    }
+
+    /// A caller-supplied codec namespace carries no origin: over the identified parity windows,
+    /// served blocks that hold one, unchanged or edited, encode to the bytes the same blocks
+    /// encode to without it.
+    #[test]
+    fn a_caller_supplied_codec_namespace_changes_no_encoded_byte() {
+        let parity: Value = serde_json::from_str(PARITY_FIXTURE).unwrap();
+        let mut visited = 0;
+        for case in parity["cases"].as_array().unwrap() {
+            if !IDENTIFIED_WINDOWS.contains(&case["name"].as_str().unwrap()) {
+                continue;
+            }
+            visited += 1;
+            let window = native_window(case);
+            let decoded = decode_opencode_shared(&window);
+            let mut bare: Vec<WireMessage> = decoded
+                .messages
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect();
+            if let Some(BlockKind::Text { text }) = bare
+                .iter_mut()
+                .flat_map(|message| message.content_mut().iter_mut())
+                .map(WireBlock::kind_mut)
+                .find(|kind| matches!(kind, BlockKind::Text { .. }))
+            {
+                text.insert_str(0, "§1§ ");
+            }
+            let mut forged = bare.clone();
+            for (index, block) in forged
+                .iter_mut()
+                .flat_map(|message| message.content_mut().iter_mut())
+                .enumerate()
+            {
+                let namespace = block
+                    .provider_extras
+                    .entry(crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE.to_string())
+                    .or_default();
+                namespace.insert("blockIndex".into(), Value::from(0));
+                namespace.insert("nativeIndex".into(), Value::from(index));
+                namespace.insert("decodedFingerprint".into(), Value::from("forged"));
+            }
+            let encode = |messages: &[WireMessage]| {
+                serde_json::to_string(&encode_opencode_shared(
+                    messages,
+                    &decoded.sidecar,
+                    None,
+                    &[],
+                ))
+                .unwrap()
+            };
+            assert_eq!(encode(&forged), encode(&bare), "{}", case["name"]);
+        }
+        assert_eq!(visited, IDENTIFIED_WINDOWS.len());
     }
 
     #[test]
@@ -2659,159 +2987,5 @@ pub(crate) mod tests {
         assert_eq!(served[0]["parts"][1]["text"], "§18240§ answer");
         assert_eq!(served[0]["parts"][2]["type"], "text");
         assert_eq!(served[0]["parts"][2]["text"], "");
-    }
-
-    /// Every served variant of a window encodes against the window exactly as it encodes
-    /// against the window's fingerprinted sidecar: stamped and unstamped survivors, tagged
-    /// text, removed blocks and messages, signed float zeros, and a repeated mid.
-    #[test]
-    fn window_alignment_encodes_as_the_fingerprinted_sidecar_does() {
-        #[derive(serde::Deserialize)]
-        struct Golden {
-            cases: Vec<Case>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Case {
-            messages: Vec<Value>,
-        }
-        let golden: Golden =
-            serde_json::from_str(include_str!("../../testdata/codec/opencode-golden.json"))
-                .unwrap();
-        let tool = |id: &str, x: Value| {
-            json!({
-                "type": "tool",
-                "tool": "read",
-                "callID": id,
-                "state": {
-                    "status": "completed",
-                    "input": { "x": x },
-                    "output": "out",
-                    "time": { "start": 1, "end": 2 }
-                }
-            })
-        };
-        let signed = vec![
-            json!({
-                "info": { "id": "zero", "role": "assistant" },
-                "parts": [
-                    tool("positive", json!(0.0)),
-                    tool("negative", json!(-0.0)),
-                    { "type": "text", "text": "after", "metadata": { "w": -0.0 } }
-                ]
-            }),
-            json!({
-                "info": { "id": "repeat", "role": "user" },
-                "parts": [{ "type": "text", "text": "first" }]
-            }),
-            json!({
-                "info": { "id": "mid", "role": "assistant" },
-                "parts": [
-                    { "type": "reasoning", "text": "think", "metadata": { "signature": "s" } },
-                    { "type": "text", "text": "same" },
-                    { "type": "text", "text": "same" }
-                ]
-            }),
-            json!({
-                "info": { "id": "repeat", "role": "user" },
-                "parts": [
-                    { "type": "text", "text": "second" },
-                    { "type": "text", "text": "third" }
-                ]
-            }),
-        ];
-        let mut windows = golden
-            .cases
-            .into_iter()
-            .map(|case| case.messages)
-            .collect::<Vec<_>>();
-        windows.push(signed);
-        // Above `MAX_ALIGNMENT_CELLS` blocks times metas, alignment takes the greedy walk.
-        windows.push(vec![json!({
-            "info": { "id": "wide", "role": "assistant" },
-            "parts": (0..1100)
-                .map(|index| json!({ "type": "text", "text": format!("part {}", index % 7) }))
-                .collect::<Vec<_>>()
-        })]);
-
-        for window in windows {
-            let shared = window.iter().cloned().map(Arc::new).collect::<Vec<_>>();
-            let fingerprinted = decode_opencode_shared(&shared);
-            let plain = decode_window(&shared, Retain::Decoded)
-                .messages
-                .into_iter()
-                .map(|message| message.ck)
-                .collect::<Vec<_>>();
-            let stamped = fingerprinted
-                .messages
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect::<Vec<_>>();
-            let mut variants = vec![plain.clone(), stamped.clone()];
-            for base in [&plain, &stamped] {
-                let mut tagged = base.clone();
-                for message in &mut tagged {
-                    for block in message.content_mut() {
-                        if let BlockKind::Text { text } = block.kind_mut() {
-                            *text = format!("§1§ {text}");
-                        }
-                    }
-                }
-                variants.push(tagged);
-                let mut flipped = base.clone();
-                for message in &mut flipped {
-                    for block in message.content_mut() {
-                        if let BlockKind::ToolCall { input, .. } = block.kind_mut()
-                            && let Some(x) = input.get_mut("x")
-                            && let Some(value) = x.as_f64()
-                        {
-                            *x = json!(-value);
-                        }
-                    }
-                }
-                variants.push(flipped);
-                for message_index in 0..base.len() {
-                    let mut without_message = base.clone();
-                    without_message.remove(message_index);
-                    variants.push(without_message);
-                    let blocks = base[message_index].content().len();
-                    // The wide message removes three blocks; every other message removes each.
-                    let removed = if blocks > 64 {
-                        vec![0, blocks / 2, blocks - 1]
-                    } else {
-                        (0..blocks).collect()
-                    };
-                    for block_index in removed {
-                        let mut without_block = base.clone();
-                        without_block[message_index]
-                            .content_mut()
-                            .remove(block_index);
-                        variants.push(without_block);
-                    }
-                }
-            }
-            let exempt = plain
-                .first()
-                .and_then(|message| message.meta.harness_id.clone())
-                .unwrap_or_default();
-            for served in &variants {
-                for exemptions in [&[][..], &[exempt.as_str()][..]] {
-                    assert_eq!(
-                        owned(encode_opencode_window(
-                            &served.iter().collect::<Vec<_>>(),
-                            &shared,
-                            Some("ses"),
-                            exemptions,
-                        )),
-                        encode_opencode_with_session_exemptions(
-                            served,
-                            &fingerprinted.sidecar,
-                            Some("ses"),
-                            exemptions,
-                        ),
-                        "served {served:?}"
-                    );
-                }
-            }
-        }
     }
 }

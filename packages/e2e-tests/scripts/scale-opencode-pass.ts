@@ -26,6 +26,7 @@ const { values: flags } = parseArgs({
         tiers: { type: "string", default: "10k,s3_100k,s4_1m" },
         samples: { type: "string", default: "330" },
         window: { type: "string", default: "300" },
+        mix: { type: "string", default: "text_only" },
         seed: { type: "string", default: "847" },
     },
 });
@@ -53,6 +54,9 @@ if (!Number.isSafeInteger(samples) || samples < 2) throw new Error("--samples mu
 if (!Number.isSafeInteger(windowSize) || windowSize < 4 || windowSize % 2 !== 0)
     throw new Error("--window must be an even count of at least 4");
 if (!Number.isSafeInteger(bootstrapSeed)) throw new Error("--seed must be a whole number");
+const mix = flags.mix as string;
+if (mix !== "text_only" && mix !== "tool_heavy")
+    throw new Error("--mix must be text_only or tool_heavy");
 
 interface PluginUnderTest {
     createRustModeTransform: (
@@ -120,10 +124,37 @@ function hostArray(sessionId: string, covered: number, window: number): unknown[
                 time: { created: 1_700_000_000_000 + ordinal },
                 ...(user ? {} : { providerID: "anthropic", modelID: "claude-sonnet-4-5" }),
             },
-            parts: [{ id: `p${ordinal}`, type: "text", text: `${ordinal} ${WINDOW_TEXT}` }],
+            parts:
+                mix === "tool_heavy" && !user
+                    ? toolTurn(ordinal)
+                    : [{ id: `p${ordinal}`, type: "text", text: `${ordinal} ${WINDOW_TEXT}` }],
         };
     }
     return messages;
+}
+
+/**
+ * A tool-heavy assistant turn: a short text part beside a completed tool call whose output
+ * carries the window's text, so the message keeps the text-only window's size.
+ */
+function toolTurn(ordinal: number): unknown[] {
+    return [
+        { id: `p${ordinal}`, type: "text", text: `${ordinal} reading src/${ordinal}.ts` },
+        {
+            id: `p${ordinal}-tool`,
+            type: "tool",
+            callID: `call-${ordinal}`,
+            tool: "read",
+            state: {
+                status: "completed",
+                input: { filePath: `src/${ordinal}.ts`, offset: 0, limit: 2_000 },
+                output: `${ordinal} ${WINDOW_TEXT}`,
+                title: `src/${ordinal}.ts`,
+                metadata: { truncated: false },
+                time: { start: 1_700_000_000_000 + ordinal, end: 1_700_000_000_001 + ordinal },
+            },
+        },
+    ];
 }
 
 interface PassObservation {
@@ -276,7 +307,7 @@ writeFileSync(
             },
             host: hostManifest(),
             open_loop: null,
-            cohort: { window: windowSize },
+            cohort: { window: windowSize, mix },
             seed: bootstrapSeed,
         },
         null,

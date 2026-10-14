@@ -88,8 +88,33 @@ fn native_records(case: &str, source: &str, field: &str) -> Vec<Arc<Value>> {
         .collect()
 }
 
+/// The CK the corpus was recorded from: each block carries the codec namespace, with its block
+/// index, native part index, and canonical fingerprint, as the native decode wrote it when the
+/// recordings were made. Coverage and token budgets were recorded over those bytes, so the
+/// replay rebuilds them.
 fn decoded(records: &[Arc<Value>]) -> Vec<IngressMessage> {
-    crate::codec::opencode::decode_opencode_shared(records).messages
+    let decoded = crate::codec::opencode::decode_opencode_shared(records);
+    decoded
+        .messages
+        .into_iter()
+        .map(|mut message| {
+            let metas = &decoded.sidecar.messages[&message.mid].blocks;
+            for (index, block) in message.ck.content_mut().iter_mut().enumerate() {
+                let fingerprint = crate::codec::sidecar::decoded_block_fingerprint(block);
+                let namespace = block
+                    .provider_extras
+                    .entry(crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE.to_string())
+                    .or_default();
+                namespace.insert("blockIndex".to_string(), Value::from(index));
+                namespace.insert(
+                    "nativeIndex".to_string(),
+                    Value::from(metas[index].native_index.unwrap_or_default()),
+                );
+                namespace.insert("decodedFingerprint".to_string(), Value::String(fingerprint));
+            }
+            message
+        })
+        .collect()
 }
 
 fn source_ingress(case: &Case, source: &Source) -> Vec<IngressMessage> {

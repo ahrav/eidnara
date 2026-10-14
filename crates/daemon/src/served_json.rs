@@ -1199,18 +1199,6 @@ pub(crate) fn canonical_block_text(
     Ok(text)
 }
 
-/// [`canonical_block_bytes`] encoded through `scratch` and borrowed from it until its next use.
-pub(crate) fn canonical_block_in<'s>(
-    scratch: &'s mut CanonicalScratch,
-    block: &memory_store::WireBlock,
-) -> serde_json::Result<&'s str> {
-    Ok(if encode_block_into(scratch, block)? {
-        &scratch.sorted
-    } else {
-        &scratch.encoder.text
-    })
-}
-
 /// Encodes `block` into `scratch`; returns whether the canonical text is the reordered copy in
 /// `scratch.sorted` rather than the serialization buffer itself.
 fn encode_block_into(
@@ -1293,14 +1281,6 @@ pub(crate) struct CanonicalScratch {
     encoder: Encoder,
     /// The reordered copy of a disordered document.
     sorted: String,
-}
-
-impl CanonicalScratch {
-    /// Frees each buffer whose capacity exceeds [`RETAINED_SCRATCH_BYTES`].
-    pub(crate) fn release_oversized(&mut self) {
-        release_oversized(&mut self.encoder.text);
-        release_oversized(&mut self.sorted);
-    }
 }
 
 /// Returns the serialization buffer itself when every object is already in

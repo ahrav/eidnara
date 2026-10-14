@@ -1,19 +1,17 @@
 //! Lossless sidecar metadata for decoding and re-encoding harness messages.
 //!
-//! Decoding stamps native origins and content fingerprints onto wire blocks. Encoding
-//! aligns surviving blocks to native metadata with an order-preserving maximum-score
-//! walk, preferring exact origin matches over fingerprint-only matches.
+//! Decoding records each native message's envelope, block metadata, and decoded blocks.
+//! Encoding aligns surviving blocks to that metadata by canonical content with an
+//! order-preserving maximum-match walk, or a forward greedy walk above
+//! `MAX_ALIGNMENT_CELLS`.
 
 use std::borrow::Cow;
-use std::cell::{Cell, OnceCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-use crate::served_json::CanonicalScratch;
 
 use crate::wire::{
     BlockKind, IngressMessage, MediaBlock, OpaqueBlock, OutputKind, ProviderExtras,
@@ -68,10 +66,15 @@ impl DecodeSidecar {
 
     /// Inserts or replaces message metadata while preserving first-seen order.
     pub fn remember_message(&mut self, mid: String, meta: HarnessMessageMeta) {
-        if !self.messages.contains_key(&mid) {
-            self.order.push(mid.clone());
+        match self.messages.entry(mid) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                self.order.push(entry.key().clone());
+                entry.insert(Arc::new(meta));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(Arc::new(meta));
+            }
         }
-        self.messages.insert(mid, Arc::new(meta));
     }
 
     pub fn message_by_mid(&self, mid: &str) -> Option<&HarnessMessageMeta> {
@@ -97,6 +100,11 @@ pub struct HarnessMessageMeta {
     pub stable_key: Option<String>,
     #[serde(default)]
     pub blocks: Vec<BlockMeta>,
+    /// The message's decoded blocks in decode order, which each block meta's `block_index`
+    /// indexes; alignment compares served blocks against them. The OpenCode sidecar fills it.
+    /// The Pi codec keeps it empty and hands each encode the blocks it decodes from the row.
+    #[serde(default)]
+    pub decoded: Vec<WireBlock>,
     /// Indices of tool parts whose call id an earlier part already emitted and whose status
     /// carries only the call. The encoder drops these parts, so each served call id names one
     /// tool part.
@@ -114,47 +122,38 @@ pub struct BlockMeta {
     pub native_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_fingerprint: Option<String>,
 }
 
-/// Order-preserving block-to-metadata alignment and native-part retention sets.
+/// `MatchedBlockMetas` pairs blocks with metadata in order and tracks native parts eligible
+/// for removal.
 pub(crate) struct MatchedBlockMetas<'a> {
     pub(crate) by_block: Vec<Option<&'a BlockMeta>>,
-    retained_native_indices: BTreeSet<usize>,
-    decoded_native_indices: BTreeSet<usize>,
-    block_fingerprints: Vec<OnceCell<String>>,
-    content: MetaContent<'a>,
+    unretained_native_parts: Vec<bool>,
+    decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
 }
 
 impl MatchedBlockMetas<'_> {
-    /// Whether `blocks[block_index]` equals `meta`'s pre-mutation content, read from the basis
-    /// the alignment was built with. `blocks` must be the slice used to build this alignment.
+    /// Whether `blocks[block_index]` is the decoded block `meta` names, compared by canonical
+    /// content; `blocks` must be the slice used to build this alignment.
     pub(crate) fn block_is_unchanged(
         &self,
         blocks: &[WireBlock],
         block_index: usize,
         meta: &BlockMeta,
     ) -> bool {
-        debug_assert_eq!(blocks.len(), self.block_fingerprints.len());
-        self.content.matches_memoized(
-            &blocks[block_index],
-            &self.block_fingerprints[block_index],
-            meta,
-        )
+        decoded_matches(self.decoded, self.native, &blocks[block_index], meta)
     }
 
-    /// Whether every native part a decoded block came from is paired with a block, so
-    /// [`Self::remove_unretained_native_parts`] keeps every part.
-    pub(crate) fn retains_every_decoded_part(&self) -> bool {
-        self.decoded_native_indices
-            .is_subset(&self.retained_native_indices)
-    }
-
-    /// Adds `native_indices` to the decoded set that [`Self::remove_unretained_native_parts`]
-    /// and [`Self::retains_every_decoded_part`] check.
+    /// Marks `native_indices` for removal by [`Self::remove_unretained_native_parts`]. A folded
+    /// part is decoded by no block of its own, so its envelope rebuilds without it.
     pub(crate) fn fold_native_parts(&mut self, native_indices: &[usize]) {
-        self.decoded_native_indices.extend(native_indices);
+        for &native_index in native_indices {
+            if self.unretained_native_parts.len() <= native_index {
+                self.unretained_native_parts.resize(native_index + 1, false);
+            }
+            self.unretained_native_parts[native_index] = true;
+        }
     }
 
     /// Removes native parts whose decoded blocks were removed.
@@ -166,8 +165,11 @@ impl MatchedBlockMetas<'_> {
             .into_iter()
             .enumerate()
             .filter_map(|(native_index, part)| {
-                let decoded_block_was_removed = self.decoded_native_indices.contains(&native_index)
-                    && !self.retained_native_indices.contains(&native_index);
+                let decoded_block_was_removed = self
+                    .unretained_native_parts
+                    .get(native_index)
+                    .copied()
+                    .unwrap_or(false);
                 (!decoded_block_was_removed).then_some(part)
             })
             .collect()
@@ -205,15 +207,15 @@ impl<'a> MatchedBlockMetas<'a> {
                 && run_blocks
                     .clone()
                     .zip(run_metas.clone())
-                    .all(|(block, meta)| {
-                        !has_stamped_block_identity(&blocks[block])
-                            && matches(&blocks[block], &metas[meta])
-                    });
+                    .all(|(block, meta)| matches(&blocks[block], &metas[meta]));
             if in_place {
                 for (block, meta) in run_blocks.zip(run_metas) {
                     self.by_block[block] = Some(&metas[meta]);
-                    if let Some(native_index) = metas[meta].native_index {
-                        self.retained_native_indices.insert(native_index);
+                    if let Some(unretained) = metas[meta]
+                        .native_index
+                        .and_then(|native_index| self.unretained_native_parts.get_mut(native_index))
+                    {
+                        *unretained = false;
                     }
                 }
             }
@@ -223,41 +225,13 @@ impl<'a> MatchedBlockMetas<'a> {
     }
 }
 
+/// A provider-extras namespace no decoded block carries, excluded from content comparison so
+/// a block carrying it compares by its content alone.
 pub(crate) const BLOCK_IDENTITY_NAMESPACE: &str = "_eidnara_codec";
-const BLOCK_INDEX_KEY: &str = "blockIndex";
-const NATIVE_INDEX_KEY: &str = "nativeIndex";
-const FINGERPRINT_KEY: &str = "decodedFingerprint";
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct AlignmentScore {
-    origin_matches: usize,
-    total_matches: usize,
-}
-
-impl AlignmentScore {
-    fn with_match(self, origin_match: bool) -> Self {
-        Self {
-            origin_matches: self.origin_matches + usize::from(origin_match),
-            total_matches: self.total_matches + 1,
-        }
-    }
-}
-
-/// Hashes decoded content after removing codec-owned identity metadata. The
-/// digest is the hex SHA-256 of the block's canonical bytes; a block that cannot
-/// serialize hashes the JSON text `null`.
-pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
-    decoded_block_fingerprint_in(&mut CanonicalScratch::default(), block)
-}
-
-/// [`decoded_block_fingerprint`] encoded through `scratch`, so a run of blocks reuses one set of
-/// serialization buffers.
-pub(crate) fn decoded_block_fingerprint_in(
-    scratch: &mut CanonicalScratch,
-    block: &WireBlock,
-) -> String {
-    #[cfg(test)]
-    tests::count_content_read();
+/// The block's canonical bytes with the codec namespace removed, the text both alignment
+/// regimes compare; a block that cannot serialize reads as the JSON text `null`.
+fn canonical_text(block: &WireBlock) -> String {
     let canonical = if block.provider_extras.contains_key(BLOCK_IDENTITY_NAMESPACE) {
         let mut canonical = block.clone();
         canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
@@ -265,11 +239,16 @@ pub(crate) fn decoded_block_fingerprint_in(
     } else {
         Cow::Borrowed(block)
     };
-    let digest = match crate::served_json::canonical_block_in(scratch, &canonical) {
-        Ok(text) => Sha256::digest(text),
-        Err(_) => Sha256::digest(b"null"),
-    };
-    scratch.release_oversized();
+    crate::served_json::canonical_block_bytes(&canonical).unwrap_or_else(|_| "null".to_string())
+}
+
+/// The hex SHA-256 of a block's canonical text, the fingerprint the alignment's content
+/// equality is pinned against in tests.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
+    #[cfg(test)]
+    count_digest();
+    let digest = Sha256::digest(canonical_text(block).as_bytes());
     hex_prefix(&digest, digest.len())
 }
 
@@ -281,186 +260,99 @@ pub fn decoded_block_fingerprint_for_test(block: &WireBlock) -> String {
 #[cfg(feature = "test-support")]
 pub const BLOCK_IDENTITY_NAMESPACE_FOR_TEST: &str = BLOCK_IDENTITY_NAMESPACE;
 
-/// Stores a block's decoded origin and pre-mutation fingerprint in provider extras.
-pub(crate) fn stamp_block_identity(
-    block: &mut WireBlock,
-    block_index: usize,
-    native_index: usize,
-    fingerprint: &str,
-) {
-    let identity = block
-        .provider_extras
-        .entry(BLOCK_IDENTITY_NAMESPACE.to_string())
-        .or_default();
-    identity.insert(BLOCK_INDEX_KEY.to_string(), Value::from(block_index));
-    identity.insert(NATIVE_INDEX_KEY.to_string(), Value::from(native_index));
-    identity.insert(
-        FINGERPRINT_KEY.to_string(),
-        Value::String(fingerprint.to_string()),
-    );
-}
-
-fn stamped_block_identity(block: &WireBlock) -> Option<(usize, usize, &str)> {
-    let identity = block.provider_extras.get(BLOCK_IDENTITY_NAMESPACE)?;
-    let block_index = identity.get(BLOCK_INDEX_KEY)?.as_u64()?.try_into().ok()?;
-    let native_index = identity.get(NATIVE_INDEX_KEY)?.as_u64()?.try_into().ok()?;
-    let fingerprint = identity.get(FINGERPRINT_KEY)?.as_str()?;
-    Some((block_index, native_index, fingerprint))
-}
-
-/// True when a decoded block retains its exact native-part origin.
-pub(crate) fn has_stamped_block_identity(block: &WireBlock) -> bool {
-    stamped_block_identity(block).is_some()
-}
-
 pub(crate) fn equals_decoded_block(block: &WireBlock, decoded: &WireBlock) -> bool {
-    #[cfg(test)]
-    tests::count_content_read();
+    block.kind() == decoded.kind() && same_extras(block, decoded)
+}
+
+fn same_extras(block: &WireBlock, decoded: &WireBlock) -> bool {
     fn content(block: &WireBlock) -> impl Iterator<Item = (&String, &BTreeMap<String, Value>)> {
         block
             .provider_extras
             .iter()
             .filter(|(namespace, _)| namespace.as_str() != BLOCK_IDENTITY_NAMESPACE)
     }
-    block.kind() == decoded.kind() && content(block).eq(content(decoded))
+    content(block).eq(content(decoded))
 }
 
-pub(crate) fn block_is_unchanged(block: &WireBlock, meta: &BlockMeta) -> bool {
-    MetaContent::Fingerprint.matches(block, meta)
+/// Whether `block` is the decoded block `meta` names in `decoded`, compared by canonical
+/// content.
+pub(crate) fn decoded_matches(
+    decoded: &[WireBlock],
+    native: Option<&Value>,
+    block: &WireBlock,
+    meta: &BlockMeta,
+) -> bool {
+    decoded_content(decoded, native, meta).is_some_and(|content| content.matches(block))
 }
 
-/// Where alignment reads a meta's pre-mutation content.
 #[derive(Clone, Copy)]
-pub(crate) enum MetaContent<'a> {
-    /// The meta's `content_fingerprint`.
-    Fingerprint,
-    /// The meta's `content_fingerprint` when it has one, else the decoded block at its
-    /// `block_index`. A block matches that decoded block exactly when their decoded
-    /// fingerprints are equal, so this basis aligns as fingerprinting every meta first would.
-    Decoded(&'a [WireBlock]),
+struct DecodedContent<'a> {
+    decoded: &'a WireBlock,
+    native_text: Option<&'a str>,
 }
 
-impl<'a> MetaContent<'a> {
-    fn decoded(self, meta: &BlockMeta) -> Option<&'a WireBlock> {
-        match self {
-            Self::Fingerprint => None,
-            Self::Decoded(decoded) => decoded.get(meta.block_index),
-        }
-    }
+fn decoded_content<'a>(
+    decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
+    meta: &BlockMeta,
+) -> Option<DecodedContent<'a>> {
+    let decoded = decoded.get(meta.block_index)?;
+    Some(DecodedContent {
+        decoded,
+        native_text: native_text(native, decoded, meta),
+    })
+}
 
-    fn has_content(self, meta: &BlockMeta) -> bool {
-        meta.content_fingerprint.is_some() || self.decoded(meta).is_some()
-    }
-
-    /// Whether `block`'s decoded fingerprint equals the meta's content fingerprint.
-    pub(crate) fn matches(self, block: &WireBlock, meta: &BlockMeta) -> bool {
-        self.matches_memoized(block, &OnceCell::new(), meta)
-    }
-
-    fn matches_memoized(
-        self,
-        block: &WireBlock,
-        fingerprint: &OnceCell<String>,
-        meta: &BlockMeta,
-    ) -> bool {
-        match &meta.content_fingerprint {
-            Some(expected) => memoized_fingerprint(fingerprint, block) == expected,
-            None => self
-                .decoded(meta)
-                .is_some_and(|decoded| same_decoded_content(block, decoded)),
+impl DecodedContent<'_> {
+    fn matches(self, block: &WireBlock) -> bool {
+        #[cfg(test)]
+        CONTENT_COMPARISONS.with(|comparisons| comparisons.set(comparisons.get() + 1));
+        let decoded = self.decoded;
+        match self.native_text {
+            Some(text) => {
+                matches!(block.kind(), BlockKind::Text { text: served } if served == text)
+                    && same_extras(block, decoded)
+                    && (!holds_float_zero(block)
+                        || canonical_text(block) == canonical_text(&native_block(decoded, text)))
+            }
+            None => same_decoded_content(block, decoded),
         }
     }
 }
 
-const STRUCTURAL_COMPARISONS_PER_SIDE: usize = 32;
-
-struct MetaBasis<'a, 'm> {
-    content: MetaContent<'a>,
-    metas: &'m [BlockMeta],
-    fingerprints: Vec<OnceCell<String>>,
-    meta_comparisons: Vec<Cell<usize>>,
-    block_comparisons: Vec<Cell<usize>>,
+fn native_text<'a>(
+    native: Option<&'a Value>,
+    decoded: &WireBlock,
+    meta: &BlockMeta,
+) -> Option<&'a str> {
+    if !matches!(decoded.kind(), BlockKind::Text { .. }) {
+        return None;
+    }
+    let part = native?.get("parts")?.get(meta.native_index?)?;
+    Some(part.get("text").and_then(Value::as_str).unwrap_or_default())
 }
 
-impl<'a, 'm> MetaBasis<'a, 'm> {
-    fn new(content: MetaContent<'a>, metas: &'m [BlockMeta], blocks: usize) -> Self {
-        Self {
-            content,
-            metas,
-            fingerprints: vec![OnceCell::new(); metas.len()],
-            meta_comparisons: vec![Cell::new(0); metas.len()],
-            block_comparisons: vec![Cell::new(0); blocks],
-        }
-    }
-
-    fn has_content(&self, meta_index: usize) -> bool {
-        self.content.has_content(&self.metas[meta_index])
-    }
-
-    fn fingerprint(&self, meta_index: usize) -> Option<&str> {
-        let meta = &self.metas[meta_index];
-        match &meta.content_fingerprint {
-            Some(fingerprint) => Some(fingerprint),
-            None => self
-                .content
-                .decoded(meta)
-                .map(|decoded| memoized_fingerprint(&self.fingerprints[meta_index], decoded)),
-        }
-    }
-
-    fn matches(
-        &self,
-        block: &WireBlock,
-        block_index: usize,
-        fingerprint: &OnceCell<String>,
-        meta_index: usize,
-    ) -> bool {
-        let meta = &self.metas[meta_index];
-        let Some(decoded) = meta
-            .content_fingerprint
-            .is_none()
-            .then(|| self.content.decoded(meta))
-            .flatten()
-        else {
-            return self
-                .fingerprint(meta_index)
-                .is_some_and(|expected| memoized_fingerprint(fingerprint, block) == expected);
-        };
-        let (block_used, meta_used) = (
-            &self.block_comparisons[block_index],
-            &self.meta_comparisons[meta_index],
-        );
-        if block_used.get().max(meta_used.get()) >= STRUCTURAL_COMPARISONS_PER_SIDE {
-            let decoded_fingerprint = memoized_fingerprint(&self.fingerprints[meta_index], decoded);
-            return memoized_fingerprint(fingerprint, block) == decoded_fingerprint;
-        }
-        block_used.set(block_used.get() + 1);
-        meta_used.set(meta_used.get() + 1);
-        equals_decoded_block(block, decoded)
-            && (!holds_float_zero(block)
-                || memoized_fingerprint(fingerprint, block)
-                    == memoized_fingerprint(&self.fingerprints[meta_index], decoded))
-    }
+fn native_block(decoded: &WireBlock, text: &str) -> WireBlock {
+    let kind = BlockKind::Text {
+        text: text.to_owned(),
+    };
+    WireBlock::with_provider_extras(kind, decoded.provider_extras.clone())
 }
 
-fn memoized_fingerprint<'c>(cell: &'c OnceCell<String>, block: &WireBlock) -> &'c str {
-    cell.get_or_init(|| decoded_block_fingerprint(block))
-}
-
-/// Whether two blocks have equal decoded fingerprints, decided without serializing them.
+/// Whether two blocks have equal canonical text, decided without serializing them where the
+/// structure decides it.
 ///
 /// Canonical block serialization is injective, and structurally equal blocks serialize to the
 /// same bytes unless a float zero is `0.0` on one side and `-0.0` on the other: those compare
-/// equal and serialize apart. Equal blocks that hold a float zero therefore compare by
-/// fingerprint.
+/// equal and serialize apart. Equal blocks that hold a float zero therefore compare by their
+/// canonical text, so signed zeros stay distinct.
 pub(crate) fn same_decoded_content(block: &WireBlock, decoded: &WireBlock) -> bool {
     equals_decoded_block(block, decoded)
-        && (!holds_float_zero(block)
-            || decoded_block_fingerprint(block) == decoded_block_fingerprint(decoded))
+        && (!holds_float_zero(block) || canonical_text(block) == canonical_text(decoded))
 }
 
 /// Whether `json` or any value nested in it is a float zero of either sign.
-pub(crate) fn json_holds_float_zero(json: &Value) -> bool {
+fn json_holds_float_zero(json: &Value) -> bool {
     match json {
         Value::Number(number) => number.is_f64() && number.as_f64() == Some(0.0),
         Value::Array(items) => items.iter().any(json_holds_float_zero),
@@ -521,103 +413,193 @@ pub(crate) fn holds_float_zero(block: &WireBlock) -> bool {
     kind || extras(&block.provider_extras)
 }
 
-fn alignment_candidate(
-    block: &WireBlock,
-    block_index: usize,
-    block_fingerprint: &OnceCell<String>,
-    basis: &MetaBasis<'_, '_>,
-    meta_index: usize,
-    kind_matches: bool,
-) -> Option<bool> {
-    let meta = &basis.metas[meta_index];
-    if let Some((origin_block_index, origin_native_index, fingerprint)) =
-        stamped_block_identity(block)
-    {
-        let origin_matches = origin_block_index == meta.block_index
-            && Some(origin_native_index) == meta.native_index
-            && basis.fingerprint(meta_index) == Some(fingerprint);
-        return origin_matches.then_some(true);
+/// Content equality is transitive, so metas equal to the same block share a class.
+fn alignment_candidates(
+    blocks: &[WireBlock],
+    metas: &[BlockMeta],
+    matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
+    decoded: &[WireBlock],
+    native: Option<&Value>,
+) -> Vec<bool> {
+    let columns = metas.len();
+    let mut candidates = vec![false; blocks.len() * columns];
+    let cached: Vec<Option<DecodedContent<'_>>> = if blocks.len() > 1 {
+        metas
+            .iter()
+            .map(|meta| decoded_content(decoded, native, meta))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let content_of = |meta_index: usize, meta: &BlockMeta| match cached.get(meta_index) {
+        Some(content) => *content,
+        None => decoded_content(decoded, native, meta),
+    };
+    // Every class is a single meta until a block equals two metas, so rows compare directly
+    // until then and the forest is built after that block's row.
+    let mut classes: Option<ContentClasses> = None;
+    for (block_index, block) in blocks.iter().enumerate() {
+        let row = &mut candidates[block_index * columns..][..columns];
+        let mut first_equal = None;
+        if let Some(classes) = &mut classes {
+            classes.verdicts.fill(None);
+            for (meta_index, meta) in metas.iter().enumerate() {
+                if !matches(block, meta) {
+                    continue;
+                }
+                row[meta_index] = match content_of(meta_index, meta) {
+                    None => block_index == meta.block_index,
+                    Some(content) => {
+                        let root = classes.root(meta_index);
+                        let equal =
+                            *classes.verdicts[root].get_or_insert_with(|| content.matches(block));
+                        if equal {
+                            match first_equal {
+                                Some(class) if class != root => classes.join(root, class),
+                                _ => first_equal = Some(root),
+                            }
+                        }
+                        equal
+                    }
+                };
+            }
+            continue;
+        }
+        let mut also_equal = Vec::new();
+        for (meta_index, meta) in metas.iter().enumerate() {
+            if !matches(block, meta) {
+                continue;
+            }
+            row[meta_index] = match content_of(meta_index, meta) {
+                None => block_index == meta.block_index,
+                Some(content) => {
+                    let equal = content.matches(block);
+                    if equal {
+                        match first_equal {
+                            Some(_) => also_equal.push(meta_index),
+                            None => first_equal = Some(meta_index),
+                        }
+                    }
+                    equal
+                }
+            };
+        }
+        if let Some(first) = first_equal
+            && !also_equal.is_empty()
+        {
+            let classes = classes.insert(ContentClasses::new(columns));
+            for other in also_equal {
+                classes.parent[other] = first;
+            }
+        }
+    }
+    candidates
+}
+
+/// A union-find forest over a message's metas, one tree per content class, with the current
+/// block's verdict for each class at its root.
+struct ContentClasses {
+    parent: Vec<usize>,
+    verdicts: Vec<Option<bool>>,
+}
+
+impl ContentClasses {
+    fn new(metas: usize) -> Self {
+        Self {
+            parent: (0..metas).collect(),
+            verdicts: vec![None; metas],
+        }
     }
 
-    if kind_matches && basis.matches(block, block_index, block_fingerprint, meta_index) {
-        return Some(false);
+    fn root(&mut self, mut index: usize) -> usize {
+        while self.parent[index] != index {
+            self.parent[index] = self.parent[self.parent[index]];
+            index = self.parent[index];
+        }
+        index
     }
 
-    // Position-only matching for fingerprintless sidecars requires an unchanged block index and does not scan nearby same-kind blocks.
-    (!basis.has_content(meta_index) && block_index == meta.block_index && kind_matches)
-        .then_some(false)
+    /// Joins the class rooted at `root` into the class rooted at `into`, both of which the
+    /// current block equals.
+    fn join(&mut self, root: usize, into: usize) {
+        self.parent[root] = into;
+        self.verdicts[into] = Some(true);
+    }
 }
 
 /// Largest `blocks * metas` product the optimal alignment may allocate matrices for.
 ///
-/// The score matrix costs two words per cell, so this caps it near 16 MiB; a single message
-/// with thousands of blocks on both sides exceeds it and takes the linear-memory greedy path.
-const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
+/// The score matrix costs one word per cell, so this caps it near 8 MiB; a single message
+/// with thousands of blocks on both sides exceeds it and takes the greedy path, whose memory
+/// is linear in the message's canonical bytes.
+pub(crate) const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
 
-/// Aligns like [`match_block_metas_by`], reading each meta's content from its fingerprint.
-#[cfg(test)]
+/// Aligns blocks with metadata without reordering either sequence, comparing each block with
+/// the decoded block a meta names by canonical content.
+///
+/// Dynamic programming maximizes the number of matches. Each block and metadata row appears
+/// in at most one pair. Time and memory are `O(blocks * metas)` up to
+/// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
+/// first unpaired candidate, indexing the metas by their decoded blocks' canonical text, so
+/// its memory is linear in the message's canonical bytes; it trades optimality for that bound.
 pub(crate) fn match_block_metas<'a>(
     blocks: &[WireBlock],
     metas: &'a [BlockMeta],
-    matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
-) -> MatchedBlockMetas<'a> {
-    match_block_metas_by(blocks, metas, matches, MetaContent::Fingerprint)
-}
-
-/// Aligns blocks with metadata without reordering either sequence, reading each meta's
-/// content from `content`.
-///
-/// Exact stamped origins score above fingerprint-only or positional matches. Dynamic
-/// programming maximizes origin matches first and total matches second. Each block and
-/// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)` up to
-/// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
-/// first unpaired candidate at `O(blocks + metas)` memory, trading optimality for a bound.
-pub(crate) fn match_block_metas_by<'a>(
-    blocks: &[WireBlock],
-    metas: &'a [BlockMeta],
     mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
-    content: MetaContent<'a>,
+    decoded: &'a [WireBlock],
+    native: Option<&'a Value>,
 ) -> MatchedBlockMetas<'a> {
-    let block_fingerprints = vec![OnceCell::new(); blocks.len()];
-    let basis = MetaBasis::new(content, metas, blocks.len());
     let cells = blocks.len().saturating_mul(metas.len());
     let by_block = if cells > MAX_ALIGNMENT_CELLS {
-        greedy_block_metas(blocks, &block_fingerprints, &basis, &mut matches)
+        greedy_block_metas(blocks, metas, &mut matches, decoded, native)
     } else {
-        optimal_block_metas(blocks, &block_fingerprints, &basis, &mut matches)
+        optimal_block_metas(blocks, metas, &mut matches, decoded, native)
     };
 
-    let retained_native_indices = by_block
+    let native_parts = metas
+        .iter()
+        .filter_map(|meta| meta.native_index)
+        .max()
+        .map_or(0, |last| last + 1);
+    let mut unretained_native_parts = vec![false; native_parts];
+    for native_index in metas.iter().filter_map(|meta| meta.native_index) {
+        unretained_native_parts[native_index] = true;
+    }
+    for native_index in by_block
         .iter()
         .filter_map(|meta| meta.and_then(|meta| meta.native_index))
-        .collect();
-    let decoded_native_indices = metas.iter().filter_map(|meta| meta.native_index).collect();
+    {
+        unretained_native_parts[native_index] = false;
+    }
 
     MatchedBlockMetas {
         by_block,
-        retained_native_indices,
-        decoded_native_indices,
-        block_fingerprints,
-        content,
+        unretained_native_parts,
+        decoded,
+        native,
     }
 }
 
 fn greedy_block_metas<'a>(
     blocks: &[WireBlock],
-    block_fingerprints: &[OnceCell<String>],
-    basis: &MetaBasis<'_, 'a>,
+    metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
+    decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> Vec<Option<&'a BlockMeta>> {
-    let metas = basis.metas;
-    // Every candidate pairing is reachable through one of three keys, so indexing the metas
-    // once keeps each block to a handful of lookups instead of a rescan of the remaining
-    // suffix, and each block is fingerprinted at most once.
-    let mut by_fingerprint: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    // Every candidate pairing is reachable through one of two keys, so indexing the metas
+    // once keeps each block to a few lookups instead of a rescan of the remaining suffix. A
+    // meta with a decoded block is keyed by that block's canonical text, which a block's own
+    // canonical text equals exactly when the two have the same content.
+    let mut by_text: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut by_block_index: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (meta_index, meta) in metas.iter().enumerate() {
-        match basis.fingerprint(meta_index) {
-            Some(fingerprint) => by_fingerprint
-                .entry(fingerprint)
+        match decoded.get(meta.block_index) {
+            Some(decoded) => by_text
+                .entry(match native_text(native, decoded, meta) {
+                    Some(text) => canonical_text(&native_block(decoded, text)),
+                    None => canonical_text(decoded),
+                })
                 .or_default()
                 .push(meta_index),
             None => by_block_index
@@ -642,38 +624,16 @@ fn greedy_block_metas<'a>(
     let mut by_block = vec![None; blocks.len()];
     let mut meta_cursor = 0;
     for (block_index, block) in blocks.iter().enumerate() {
-        let paired = if let Some((_, _, fingerprint)) = stamped_block_identity(block) {
-            first_at_or_after(
-                by_fingerprint.get(fingerprint),
-                meta_cursor,
-                &mut |meta_index| {
-                    alignment_candidate(
-                        block,
-                        block_index,
-                        &block_fingerprints[block_index],
-                        basis,
-                        meta_index,
-                        matches(block, &metas[meta_index]),
-                    )
-                    .is_some()
-                },
-            )
-        } else {
-            let fingerprint = memoized_fingerprint(&block_fingerprints[block_index], block);
-            let mut kind_matches = |meta_index: usize| matches(block, &metas[meta_index]);
-            first_at_or_after(
-                by_fingerprint.get(fingerprint),
-                meta_cursor,
-                &mut kind_matches,
-            )
-            .or_else(|| {
+        let text = canonical_text(block);
+        let mut kind_matches = |meta_index: usize| matches(block, &metas[meta_index]);
+        let paired =
+            first_at_or_after(by_text.get(&text), meta_cursor, &mut kind_matches).or_else(|| {
                 first_at_or_after(
                     by_block_index.get(&block_index),
                     meta_cursor,
                     &mut kind_matches,
                 )
-            })
-        };
+            });
         if let Some(meta_index) = paired {
             by_block[block_index] = Some(&metas[meta_index]);
             meta_cursor = meta_index + 1;
@@ -684,54 +644,41 @@ fn greedy_block_metas<'a>(
 
 fn optimal_block_metas<'a>(
     blocks: &[WireBlock],
-    block_fingerprints: &[OnceCell<String>],
-    basis: &MetaBasis<'_, 'a>,
+    metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
+    decoded: &[WireBlock],
+    native: Option<&Value>,
 ) -> Vec<Option<&'a BlockMeta>> {
-    let metas = basis.metas;
-    let mut candidates = vec![vec![None; metas.len()]; blocks.len()];
-    for (block_index, block) in blocks.iter().enumerate() {
-        for (meta_index, meta) in metas.iter().enumerate() {
-            let kind_matches = matches(block, meta);
-            candidates[block_index][meta_index] = alignment_candidate(
-                block,
-                block_index,
-                &block_fingerprints[block_index],
-                basis,
-                meta_index,
-                kind_matches,
-            );
-        }
-    }
+    let (rows, columns) = (blocks.len(), metas.len());
+    let candidates = alignment_candidates(blocks, metas, matches, decoded, native);
 
-    // Origin indexes are stamped onto decoded blocks and survive reductions, overlays, and deletion compaction in WireBlock::provider_extras.
-    // Each origin index stores the pre-mutation decoded fingerprint.
-    // Pre-mutation fingerprints align mutated survivors with their native metadata; the LCS-style walk preserves native order and avoids same-kind adjacency matching.
-    let mut scores = vec![vec![AlignmentScore::default(); metas.len() + 1]; blocks.len() + 1];
-    for block_index in (0..blocks.len()).rev() {
-        for meta_index in (0..metas.len()).rev() {
-            let mut best =
-                scores[block_index + 1][meta_index].max(scores[block_index][meta_index + 1]);
-            if let Some(origin_match) = candidates[block_index][meta_index] {
-                best = best.max(scores[block_index + 1][meta_index + 1].with_match(origin_match));
+    // The LCS-style walk preserves native order and avoids same-kind adjacency matching.
+    let width = columns + 1;
+    let mut scores = vec![0usize; (rows + 1) * width];
+    for block_index in (0..rows).rev() {
+        for meta_index in (0..columns).rev() {
+            let cell = block_index * width + meta_index;
+            let mut best = scores[cell + width].max(scores[cell + 1]);
+            if candidates[block_index * columns + meta_index] {
+                best = best.max(scores[cell + width + 1] + 1);
             }
-            scores[block_index][meta_index] = best;
+            scores[cell] = best;
         }
     }
 
-    let mut by_block = vec![None; blocks.len()];
+    let mut by_block = vec![None; rows];
     let (mut block_index, mut meta_index) = (0, 0);
-    while block_index < blocks.len() && meta_index < metas.len() {
-        if let Some(origin_match) = candidates[block_index][meta_index] {
-            let matched_score = scores[block_index + 1][meta_index + 1].with_match(origin_match);
-            if matched_score == scores[block_index][meta_index] {
-                by_block[block_index] = Some(&metas[meta_index]);
-                block_index += 1;
-                meta_index += 1;
-                continue;
-            }
+    while block_index < rows && meta_index < columns {
+        let cell = block_index * width + meta_index;
+        if candidates[block_index * columns + meta_index]
+            && scores[cell + width + 1] + 1 == scores[cell]
+        {
+            by_block[block_index] = Some(&metas[meta_index]);
+            block_index += 1;
+            meta_index += 1;
+            continue;
         }
-        if scores[block_index + 1][meta_index] >= scores[block_index][meta_index + 1] {
+        if scores[cell + width] >= scores[cell + 1] {
             block_index += 1;
         } else {
             meta_index += 1;
@@ -743,9 +690,16 @@ fn optimal_block_metas<'a>(
 
 /// Returns up to `chars` lowercase hexadecimal characters from serialized JSON's SHA-256 digest.
 ///
+/// The codecs digest only identities: a message id for a native message that carries none
+/// (`opencode-hash-…`, `opencode-<role hash>`, Pi row ids) and a synthetic tool id
+/// (`synth_tool_id`) for a call without one. These ids persist in session state,
+/// so their spelling is stable. Block alignment compares canonical text and takes no digest.
+///
 /// Serialization failure hashes an empty byte sequence. Requests above 64 characters
 /// return the full 64-character digest.
 pub fn stable_hash_prefix(value: &Value, chars: usize) -> String {
+    #[cfg(test)]
+    count_digest();
     // The compact bytes stream into the digest, so hashing allocates nothing in proportion to
     // the value, whose escapes can make its encoding several times its retained size.
     let mut hasher = DigestWriter(Sha256::new());
@@ -757,6 +711,35 @@ pub fn stable_hash_prefix(value: &Value, chars: usize) -> String {
         .chars()
         .take(chars)
         .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// SHA-256 digests the codecs have taken on this thread: identities through
+    /// [`stable_hash_prefix`] and test fingerprints through [`decoded_block_fingerprint`],
+    /// the two functions that digest anything.
+    static CODEC_DIGESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_digest() {
+    CODEC_DIGESTS.with(|digests| digests.set(digests.get() + 1));
+}
+
+/// The SHA-256 digests the codecs have taken on this thread so far.
+#[cfg(test)]
+pub(crate) fn codec_digests() -> usize {
+    CODEC_DIGESTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTENT_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn content_comparisons() -> usize {
+    CONTENT_COMPARISONS.with(std::cell::Cell::get)
 }
 
 /// Feeds every byte written to it into its digest.
@@ -818,145 +801,6 @@ mod tests {
     use super::*;
     use crate::wire::BlockKind;
 
-    thread_local! {
-        static CONTENT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
-    pub(super) fn count_content_read() {
-        CONTENT_READS.with(|reads| reads.set(reads.get() + 1));
-    }
-
-    fn content_reads(run: impl FnOnce()) -> usize {
-        let before = CONTENT_READS.with(std::cell::Cell::get);
-        run();
-        CONTENT_READS.with(std::cell::Cell::get) - before
-    }
-
-    #[test]
-    fn decoded_alignment_reads_each_block_a_bounded_number_of_times() {
-        const N: usize = 256;
-        for metadata in [
-            serde_json::json!({ "n": 1 }),
-            serde_json::json!({ "n": 0.0 }),
-        ] {
-            let mut block = text_block(&"same text ".repeat(64));
-            block
-                .provider_extras
-                .entry("opencode".into())
-                .or_default()
-                .insert("metadata".into(), metadata.clone());
-            let blocks = vec![block; N];
-            let decoded = blocks.clone();
-            let metas: Vec<BlockMeta> = (0..N).map(text_meta).collect();
-            let mut matched = None;
-            let reads = content_reads(|| {
-                matched = Some(match_block_metas_by(
-                    &blocks,
-                    &metas,
-                    |_, meta| meta.kind == "text",
-                    MetaContent::Decoded(&decoded),
-                ));
-            });
-            let matched = matched.unwrap();
-            for (index, meta) in matched.by_block.iter().enumerate() {
-                assert_eq!(meta.map(|meta| meta.block_index), Some(index), "{metadata}");
-            }
-            assert!(
-                reads <= (STRUCTURAL_COMPARISONS_PER_SIDE + 1) * (blocks.len() + metas.len()),
-                "{metadata}: {reads} content reads aligning {N} blocks with {N} metas"
-            );
-        }
-    }
-
-    #[test]
-    fn same_decoded_content_is_fingerprint_equality() {
-        let call = |input: Value, provider_executed| {
-            WireBlock::bare(BlockKind::ToolCall {
-                id: "call".into(),
-                name: "read".into(),
-                input,
-                provider_executed,
-            })
-        };
-        let mut stamped = text_block("a");
-        stamp_block_identity(&mut stamped, 0, 0, "fingerprint");
-        let mut extras = text_block("a");
-        extras
-            .provider_extras
-            .entry("pi".into())
-            .or_default()
-            .insert("textSignature".into(), Value::from("s"));
-        let mut empty_namespace = text_block("a");
-        empty_namespace
-            .provider_extras
-            .entry("pi".into())
-            .or_default();
-        let blocks = [
-            text_block("a"),
-            text_block("b"),
-            stamped,
-            extras,
-            empty_namespace,
-            call(serde_json::json!({ "n": 1 }), false),
-            call(serde_json::json!({ "n": 1.0 }), false),
-            call(serde_json::json!({ "n": 0.0 }), false),
-            call(serde_json::json!({ "n": -0.0 }), false),
-            call(serde_json::json!({ "n": 1 }), true),
-            call(serde_json::json!([1, 2]), false),
-            call(serde_json::json!([2, 1]), false),
-        ];
-        for block in &blocks {
-            for other in &blocks {
-                assert_eq!(
-                    same_decoded_content(block, other),
-                    decoded_block_fingerprint(block) == decoded_block_fingerprint(other),
-                    "{block:?} vs {other:?}"
-                );
-            }
-        }
-    }
-
-    /// One scratch carried across a decode's blocks fingerprints each block as the SHA-256 of the
-    /// canonical producer's bytes, whatever the blocks before it held: reordered and already ordered
-    /// documents, a stamped block, and a block larger than the scratch keeps.
-    #[test]
-    fn a_reused_scratch_fingerprints_the_canonical_producer_bytes() {
-        let call = |input: Value| {
-            WireBlock::bare(BlockKind::ToolCall {
-                id: "call".into(),
-                name: "read".into(),
-                input,
-                provider_executed: false,
-            })
-        };
-        let opaque = WireBlock::bare(BlockKind::Opaque(OpaqueBlock {
-            source: serde_json::json!({ "type": "harness", "harness": "opencode" }),
-            kind: "step-finish".into(),
-            raw: serde_json::json!({ "type": "step-finish", "tokens": { "input": 2, "cache": { "read": 1 } } }),
-            arc: None,
-        }));
-        let mut stamped = call(serde_json::json!({ "z": [1, { "y": 2, "x": 3 }], "a": "\n" }));
-        stamp_block_identity(&mut stamped, 1, 2, "fingerprint");
-        let blocks = [
-            text_block("small"),
-            call(serde_json::json!({ "z": 1, "a": { "c": 2, "b": 3 } })),
-            opaque,
-            stamped,
-            text_block(&"x".repeat(3 << 20)),
-            text_block("small again"),
-            call(serde_json::json!({})),
-        ];
-        let mut scratch = CanonicalScratch::default();
-        for block in &blocks {
-            let mut unstamped = block.clone();
-            unstamped.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
-            let bytes = crate::served_json::canonical_block_bytes(&unstamped).unwrap();
-            let expected = hex_prefix(&Sha256::digest(bytes), 32);
-            assert_eq!(decoded_block_fingerprint_in(&mut scratch, block), expected);
-            assert_eq!(decoded_block_fingerprint(block), expected);
-        }
-    }
-
     fn text_block(text: &str) -> WireBlock {
         WireBlock::bare(BlockKind::Text {
             text: text.to_string(),
@@ -975,31 +819,93 @@ mod tests {
             native_index: Some(block_index),
             native_id: None,
             item_id: None,
-            content_fingerprint: None,
         }
     }
 
-    /// The fingerprint excludes exactly the codec namespace: stamps never change it,
-    /// other provider namespaces always do, and a serialization failure hashes `null`.
+    fn codec_namespaced(text: &str) -> WireBlock {
+        let mut block = text_block(text);
+        block
+            .provider_extras
+            .entry(BLOCK_IDENTITY_NAMESPACE.into())
+            .or_default()
+            .insert("blockIndex".into(), Value::from(7));
+        block
+    }
+
+    /// The structural comparison is the fingerprint pin: two blocks have the same decoded
+    /// content exactly when their canonical fingerprints agree, signed zeros and int/float
+    /// variants included, and the codec namespace excluded.
+    #[test]
+    fn same_decoded_content_is_fingerprint_equality() {
+        let call = |input: Value, provider_executed| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                input,
+                provider_executed,
+            })
+        };
+        let mut extras = text_block("a");
+        extras
+            .provider_extras
+            .entry("pi".into())
+            .or_default()
+            .insert("textSignature".into(), Value::from("s"));
+        let mut empty_namespace = text_block("a");
+        empty_namespace
+            .provider_extras
+            .entry("pi".into())
+            .or_default();
+        let mut nested_zero_extras = text_block("a");
+        nested_zero_extras
+            .provider_extras
+            .entry("opencode".into())
+            .or_default()
+            .insert("metadata".into(), serde_json::json!({ "z": [-0.0] }));
+        let blocks = [
+            text_block("a"),
+            text_block("b"),
+            codec_namespaced("a"),
+            extras,
+            empty_namespace,
+            nested_zero_extras,
+            call(serde_json::json!({ "n": 1 }), false),
+            call(serde_json::json!({ "n": 1.0 }), false),
+            call(serde_json::json!({ "n": 0.0 }), false),
+            call(serde_json::json!({ "n": -0.0 }), false),
+            call(serde_json::json!({ "n": { "deep": [0.0, 1] } }), false),
+            call(serde_json::json!({ "n": { "deep": [-0.0, 1] } }), false),
+            call(serde_json::json!({ "n": 1 }), true),
+            call(serde_json::json!([1, 2]), false),
+            call(serde_json::json!([2, 1]), false),
+        ];
+        // Literal anchors: a float zero and its opposite sign are other content, nested too.
+        assert!(!same_decoded_content(&blocks[8], &blocks[9]));
+        assert!(!same_decoded_content(&blocks[10], &blocks[11]));
+        assert!(same_decoded_content(&blocks[0], &blocks[2]));
+        for block in &blocks {
+            for other in &blocks {
+                assert_eq!(
+                    same_decoded_content(block, other),
+                    decoded_block_fingerprint(block) == decoded_block_fingerprint(other),
+                    "{block:?} vs {other:?}"
+                );
+            }
+        }
+    }
+
+    /// The fingerprint excludes exactly the codec namespace: the namespace never changes it,
+    /// other provider namespaces always do.
     #[test]
     fn decoded_fingerprint_ignores_only_the_codec_namespace() {
-        let mut block = WireBlock::bare(BlockKind::Text {
-            text: "hello".into(),
-        });
+        let block = text_block("hello");
         let bare = decoded_block_fingerprint(&block);
         assert_eq!(
             bare,
             stable_hash(&serde_json::to_value(&block).unwrap()),
             "typed serialization and canonical bytes agree for a plain block"
         );
-        stamp_block_identity(&mut block, 3, 7, "fp-1");
-        assert_eq!(decoded_block_fingerprint(&block), bare);
-        stamp_block_identity(&mut block, 4, 8, "fp-2");
-        assert_eq!(
-            decoded_block_fingerprint(&block),
-            bare,
-            "a changed stamp is still excluded"
-        );
+        assert_eq!(decoded_block_fingerprint(&codec_namespaced("hello")), bare);
 
         let mut with_opencode = block.clone();
         with_opencode
@@ -1019,7 +925,7 @@ mod tests {
         assert_ne!(pi, bare);
         assert_ne!(opencode, pi, "provider namespaces are significant");
 
-        // A typed tool block omits its false flag, so it hashes like an ingress block
+        // A typed tool block omits its false flag, so it compares like an ingress block
         // whose emitter never sent the field.
         let typed = WireBlock::bare(BlockKind::ToolCall {
             id: "c".into(),
@@ -1035,28 +941,24 @@ mod tests {
             decoded_block_fingerprint(&typed),
             decoded_block_fingerprint(&ingress)
         );
-
-        let null = stable_hash(&Value::Null);
-        assert_ne!(bare, null);
+        assert!(same_decoded_content(&typed, &ingress));
     }
 
     #[test]
-    fn decoded_block_equality_ignores_only_the_codec_namespace_and_agrees_with_the_fingerprint() {
-        let mut decoded = WireBlock::bare(BlockKind::Text {
-            text: "hello".into(),
-        });
+    fn decoded_block_equality_ignores_only_the_codec_namespace() {
+        let mut decoded = text_block("hello");
         decoded
             .provider_extras
             .entry("pi".into())
             .or_default()
             .insert("textSignature".into(), Value::from("sig"));
         let plain = decoded.clone();
-        stamp_block_identity(&mut decoded, 0, 0, "fp");
+        decoded
+            .provider_extras
+            .entry(BLOCK_IDENTITY_NAMESPACE.into())
+            .or_default()
+            .insert("blockIndex".into(), Value::from(0));
         assert!(equals_decoded_block(&plain, &decoded));
-        assert_eq!(
-            decoded_block_fingerprint(&plain),
-            decoded_block_fingerprint(&decoded)
-        );
 
         let mut other_extras = plain.clone();
         other_extras
@@ -1071,6 +973,199 @@ mod tests {
         assert!(!equals_decoded_block(&text_block("other"), &decoded));
     }
 
+    /// Both regimes pair a served block with the meta whose decoded block has its content; the
+    /// greedy walk above the cell bound pairs what the optimal walk pairs on an in-order
+    /// window, including a float zero whose sign differs, which pairs with nothing.
+    #[test]
+    fn both_alignment_regimes_pair_by_canonical_content() {
+        let count = 1_100;
+        assert!(count * count > MAX_ALIGNMENT_CELLS);
+        let call = |index: usize, zero: f64| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: format!("call-{index}"),
+                name: "read".into(),
+                input: serde_json::json!({ "offset": zero, "index": index }),
+                provider_executed: false,
+            })
+        };
+        let decoded: Vec<WireBlock> = (0..count).map(|index| call(index, 0.0)).collect();
+        let metas: Vec<BlockMeta> = (0..count)
+            .map(|index| BlockMeta {
+                kind: "tool_call".into(),
+                ..text_meta(index)
+            })
+            .collect();
+        let mut served = decoded.clone();
+        served[3] = call(3, -0.0);
+        served.remove(10);
+        let kind = |_: &WireBlock, meta: &BlockMeta| meta.kind == "tool_call";
+        let greedy = match_block_metas(&served, &metas, kind, &decoded, None);
+        let small = 40;
+        let optimal =
+            match_block_metas(&served[..small], &metas[..small + 1], kind, &decoded, None);
+        for matched in [&greedy.by_block[..small], &optimal.by_block[..]] {
+            let paired: Vec<Option<usize>> = matched
+                .iter()
+                .map(|meta| meta.map(|meta| meta.block_index))
+                .collect();
+            assert_eq!(paired[2], Some(2));
+            assert_eq!(
+                paired[3], None,
+                "a float zero of the other sign is other content"
+            );
+            assert_eq!(paired[9], Some(9));
+            assert_eq!(
+                paired[10],
+                Some(11),
+                "a deleted block shifts its successors"
+            );
+        }
+        assert!(greedy.block_is_unchanged(&served, 2, &metas[2]));
+        assert!(!greedy.block_is_unchanged(&served, 3, &metas[3]));
+    }
+
+    #[test]
+    fn memoized_candidates_equal_the_per_cell_candidates() {
+        let zeroed = |text: &str, zero: f64| {
+            let mut block = text_block(text);
+            block
+                .provider_extras
+                .entry("opencode".into())
+                .or_default()
+                .insert("metadata".into(), serde_json::json!({ "z": zero }));
+            block
+        };
+        let call = |id: &str, zero: f64| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                input: serde_json::json!({ "offset": zero }),
+                provider_executed: false,
+            })
+        };
+        let pool = [
+            text_block("a"),
+            text_block("b"),
+            text_block(""),
+            codec_namespaced("a"),
+            zeroed("a", 0.0),
+            zeroed("a", -0.0),
+            call("c", 0.0),
+            call("c", -0.0),
+            call("d", 0.0),
+        ];
+        let kind_of = |block: &WireBlock| match block.kind() {
+            BlockKind::ToolCall { .. } => "tool_call",
+            _ => "text",
+        };
+        let mut state = 0x9e37_79b9_u64;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % bound
+        };
+        let mut compared = 0;
+        for _ in 0..400 {
+            let decoded: Vec<WireBlock> = (0..next(8))
+                .map(|_| pool[next(pool.len())].clone())
+                .collect();
+            let served: Vec<WireBlock> = (0..next(10))
+                .map(|_| pool[next(pool.len())].clone())
+                .collect();
+            let metas: Vec<BlockMeta> = (0..next(10))
+                .map(|_| {
+                    let block_index = next(decoded.len() + 2);
+                    BlockMeta {
+                        kind: decoded
+                            .get(block_index)
+                            .map_or(["text", "tool_call"][next(2)], kind_of)
+                            .into(),
+                        native_index: (next(4) != 0).then_some(block_index),
+                        ..text_meta(block_index)
+                    }
+                })
+                .collect();
+            let native = serde_json::json!({
+                "parts": decoded.iter().map(|block| match block.kind() {
+                    BlockKind::Text { text } => serde_json::json!({ "type": "text", "text": text }),
+                    _ => serde_json::json!({ "type": "tool" }),
+                }).collect::<Vec<_>>()
+            });
+            let emptied: Vec<WireBlock> = decoded
+                .iter()
+                .map(|block| match block.kind() {
+                    BlockKind::Text { .. } => WireBlock::with_provider_extras(
+                        BlockKind::Text {
+                            text: String::new(),
+                        },
+                        block.provider_extras.clone(),
+                    ),
+                    _ => block.clone(),
+                })
+                .collect();
+            let mut kind = |block: &WireBlock, meta: &BlockMeta| kind_of(block) == meta.kind;
+            for (decoded, native) in [
+                (decoded.as_slice(), None),
+                (emptied.as_slice(), Some(&native)),
+            ] {
+                let memoized = alignment_candidates(&served, &metas, &mut kind, decoded, native);
+                let per_cell: Vec<bool> = served
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(block_index, block)| {
+                        metas.iter().map(move |meta| {
+                            kind_of(block) == meta.kind
+                                && match decoded.get(meta.block_index) {
+                                    Some(_) => decoded_matches(decoded, native, block, meta),
+                                    None => block_index == meta.block_index,
+                                }
+                        })
+                    })
+                    .collect();
+                assert_eq!(memoized, per_cell, "{served:?} {metas:?} {decoded:?}");
+                compared += per_cell.iter().filter(|candidate| **candidate).count();
+            }
+        }
+        assert!(compared > 500, "{compared}");
+    }
+
+    #[test]
+    fn identical_blocks_align_with_comparisons_linear_in_the_message() {
+        let count = 200;
+        assert!(count * count <= MAX_ALIGNMENT_CELLS);
+        let padding = "x".repeat(4 * 1024);
+        let zeroed = |text: &str| {
+            let mut block = text_block(text);
+            block
+                .provider_extras
+                .entry("opencode".into())
+                .or_default()
+                .insert("metadata".into(), serde_json::json!({ "z": 0.0 }));
+            block
+        };
+        let served: Vec<WireBlock> = (0..count).map(|_| zeroed(&padding)).collect();
+        let metas: Vec<BlockMeta> = (0..count).map(text_meta).collect();
+        // The attach sidecar decodes text parts with empty text and reads it from the native part.
+        let attach_decoded: Vec<WireBlock> = (0..count).map(|_| zeroed("")).collect();
+        let native = serde_json::json!({
+            "parts": vec![serde_json::json!({ "type": "text", "text": padding }); count]
+        });
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        for (decoded, native) in [
+            (served.as_slice(), None),
+            (attach_decoded.as_slice(), Some(&native)),
+        ] {
+            let before = content_comparisons();
+            let matched = match_block_metas(&served, &metas, text, decoded, native);
+            let comparisons = content_comparisons() - before;
+            assert!(comparisons <= 2 * count, "{comparisons} comparisons");
+            for (index, meta) in matched.by_block.iter().enumerate() {
+                assert_eq!(meta.map(|meta| meta.block_index), Some(index));
+            }
+        }
+    }
+
     #[test]
     fn oversized_alignment_takes_the_linear_memory_path_and_keeps_positional_pairs() {
         // 1,100 x 1,100 exceeds MAX_ALIGNMENT_CELLS; the optimal path would allocate over
@@ -1081,7 +1176,7 @@ mod tests {
             .map(|index| text_block(&format!("block {index}")))
             .collect::<Vec<_>>();
         let metas = (0..count).map(text_meta).collect::<Vec<_>>();
-        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text");
+        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text", &[], None);
         for (index, meta) in matched.by_block.iter().enumerate() {
             assert_eq!(
                 meta.map(|meta| meta.block_index),
@@ -1089,7 +1184,61 @@ mod tests {
                 "block {index} must pair with its positional meta"
             );
         }
-        assert_eq!(matched.retained_native_indices.len(), count);
+        assert_eq!(matched.unretained_native_parts, vec![false; count]);
+    }
+
+    /// Every SHA-256 the codecs take runs in [`stable_hash_prefix`] or the test-only
+    /// [`decoded_block_fingerprint`], the two functions [`codec_digests`] counts, so a digest
+    /// added anywhere else in the codecs fails here before a counting test could miss it.
+    #[test]
+    fn every_codec_digest_runs_in_a_counted_function() {
+        fn production(source: &str) -> &str {
+            source
+                .split_once("#[cfg(test)]\nmod tests {")
+                .or_else(|| source.split_once("#[cfg(test)]\npub(crate) mod tests {"))
+                .map_or(source, |(production, _)| production)
+        }
+        for source in [
+            include_str!("json.rs"),
+            include_str!("mod.rs"),
+            include_str!("opencode.rs"),
+            include_str!("pi.rs"),
+        ] {
+            let source = production(source);
+            for digest in [
+                "Sha256",
+                "sha2",
+                "Digest",
+                "fingerprint(",
+                "block_identity_digest",
+            ] {
+                assert!(!source.contains(digest), "{digest}");
+            }
+        }
+        let sidecar = production(include_str!("sidecar.rs"));
+        let digesting: Vec<&str> = sidecar
+            .split("\n")
+            .filter(|line| line.contains("Sha256::"))
+            .collect();
+        assert_eq!(
+            digesting,
+            [
+                "    let digest = Sha256::digest(canonical_text(block).as_bytes());",
+                "    let mut hasher = DigestWriter(Sha256::new());",
+                "        Err(_) => Sha256::digest([]),",
+            ]
+        );
+        for (function, count_first) in [
+            (
+                "pub(crate) fn decoded_block_fingerprint(",
+                "count_digest();",
+            ),
+            ("pub fn stable_hash_prefix(", "count_digest();"),
+        ] {
+            let body = sidecar.split_once(function).unwrap().1;
+            let counted = body.find(count_first).unwrap();
+            assert!(counted < body.find("Sha256::").unwrap(), "{function}");
+        }
     }
 
     #[test]
@@ -1109,53 +1258,12 @@ mod tests {
     }
 
     #[test]
-    fn alignment_unchanged_check_agrees_with_the_unmemoized_check() {
-        let fingerprinted = |block_index: usize, text: &str| BlockMeta {
-            content_fingerprint: Some(decoded_block_fingerprint(&text_block(text))),
-            ..text_meta(block_index)
-        };
-        let metas = vec![fingerprinted(0, "a"), fingerprinted(1, "b"), text_meta(2)];
-        let mut stamped = text_block("a");
-        stamp_block_identity(
-            &mut stamped,
-            0,
-            0,
-            &decoded_block_fingerprint(&text_block("a")),
-        );
-        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
-        for blocks in [
-            vec![text_block("a"), text_block("b"), text_block("c")],
-            vec![stamped, text_block("§1§ b"), text_block("c")],
-            vec![text_block("b"), text_block("a")],
-        ] {
-            let mut matched = match_block_metas(&blocks, &metas, text);
-            matched.pair_in_place_edits(&blocks, &metas, text);
-            for (block_index, block) in blocks.iter().enumerate() {
-                for meta in &metas {
-                    assert_eq!(
-                        matched.block_is_unchanged(&blocks, block_index, meta),
-                        block_is_unchanged(block, meta),
-                        "block {block_index} {block:?} vs meta {meta:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn in_place_edit_pairing_restores_equal_runs_and_leaves_ambiguous_runs() {
-        let originals = ["a", "b", "c"].map(text_block);
-        let metas: Vec<BlockMeta> = originals
-            .iter()
-            .enumerate()
-            .map(|(index, block)| BlockMeta {
-                content_fingerprint: Some(decoded_block_fingerprint(block)),
-                ..text_meta(index)
-            })
-            .collect();
+        let decoded = ["a", "b", "c"].map(text_block);
+        let metas: Vec<BlockMeta> = (0..3).map(text_meta).collect();
         let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
         let paired = |blocks: &[WireBlock]| {
-            let mut matched = match_block_metas(blocks, &metas, text);
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded, None);
             matched.pair_in_place_edits(blocks, &metas, text);
             let by_block = matched
                 .by_block
@@ -1181,11 +1289,55 @@ mod tests {
 
         let deleted_and_edited = [text_block("§1§ b"), text_block("c")];
         assert_eq!(paired(&deleted_and_edited), (vec![None, Some(2)], vec![2]));
+    }
 
-        let mut foreign = text_block("§1§ b");
-        stamp_block_identity(&mut foreign, 7, 7, "elsewhere");
-        let stamped = [text_block("a"), foreign, text_block("c")];
-        assert_eq!(paired(&stamped), (vec![Some(0), None, Some(2)], vec![0, 2]));
+    #[test]
+    fn unretained_native_parts_are_exactly_the_named_parts_no_block_pairs_with() {
+        let decoded = ["a", "b", "c", "d"].map(text_block);
+        let metas = vec![
+            BlockMeta {
+                native_index: Some(1),
+                ..text_meta(0)
+            },
+            BlockMeta {
+                native_index: None,
+                ..text_meta(1)
+            },
+            BlockMeta {
+                native_index: Some(3),
+                ..text_meta(2)
+            },
+            BlockMeta {
+                native_index: Some(3),
+                ..text_meta(3)
+            },
+        ];
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        let kept = |blocks: &[WireBlock]| {
+            let mut matched = match_block_metas(blocks, &metas, text, &decoded, None);
+            matched.pair_in_place_edits(blocks, &metas, text);
+            matched.remove_unretained_native_parts(vec![0, 1, 2, 3, 4])
+        };
+        assert_eq!(kept(&decoded), [0, 1, 2, 3, 4]);
+        assert_eq!(
+            kept(&[]),
+            [0, 2, 4],
+            "parts no meta names stay, past the last named index too"
+        );
+        assert_eq!(kept(&[text_block("a")]), [0, 1, 2, 4]);
+        assert_eq!(
+            kept(&[text_block("d")]),
+            [0, 2, 3, 4],
+            "either meta naming a shared part retains it"
+        );
+        let edited = ["§0§ a", "§1§ b", "c", "d"].map(text_block);
+        assert_eq!(
+            kept(&edited),
+            [0, 1, 2, 3, 4],
+            "in-place edits retain their parts"
+        );
+        let deleted = ["§1§ b", "c", "d"].map(text_block);
+        assert_eq!(kept(&deleted), [0, 2, 3, 4]);
     }
 
     #[test]
@@ -1195,9 +1347,10 @@ mod tests {
         let metas = vec![text_meta(1)];
         let by_block = greedy_block_metas(
             &blocks,
-            &vec![OnceCell::new(); blocks.len()],
-            &MetaBasis::new(MetaContent::Fingerprint, &metas, blocks.len()),
+            &metas,
             &mut |_, meta| meta.kind == "text",
+            &[],
+            None,
         );
         assert_eq!(by_block[0].map(|meta| meta.block_index), None);
         assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
@@ -1205,52 +1358,28 @@ mod tests {
     }
 
     #[test]
-    fn greedy_alignment_pairs_fingerprinted_metas_through_the_fingerprint_index() {
-        // Two fingerprinted metas describe blocks that now sit after the positional ones; an
-        // index-only walk would never reach them, and the fingerprint index must, in order and
+    fn greedy_alignment_pairs_decoded_metas_through_the_content_index() {
+        // Two metas describe decoded blocks that now sit after the positional ones; an
+        // index-only walk would never reach them, and the content index must, in order and
         // without reusing a meta for the duplicate trailing copy.
-        let moved = [text_block("moved a"), text_block("moved b")];
-        let mut metas = (0..2).map(text_meta).collect::<Vec<_>>();
-        for block in &moved {
-            metas.push(BlockMeta {
-                block_index: 0,
-                content_fingerprint: Some(decoded_block_fingerprint(block)),
-                ..text_meta(0)
-            });
-        }
+        let decoded = [text_block("moved a"), text_block("moved b")];
+        let mut metas = vec![text_meta(2), text_meta(3)];
+        metas.extend([text_meta(0), text_meta(1)]);
         let mut blocks = vec![text_block("block 0"), text_block("block 1")];
-        blocks.extend(moved.iter().cloned());
+        blocks.extend(decoded.iter().cloned());
         blocks.push(text_block("moved a"));
 
         let by_block = greedy_block_metas(
             &blocks,
-            &vec![OnceCell::new(); blocks.len()],
-            &MetaBasis::new(MetaContent::Fingerprint, &metas, blocks.len()),
+            &metas,
             &mut |_, meta| meta.kind == "text",
+            &decoded,
+            None,
         );
-        assert_eq!(by_block[0].map(|meta| meta.block_index), Some(0));
-        assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
-        assert_eq!(
-            by_block[2].and_then(|meta| meta.content_fingerprint.as_deref()),
-            Some(decoded_block_fingerprint(&moved[0]).as_str())
-        );
-        assert_eq!(
-            by_block[3].and_then(|meta| meta.content_fingerprint.as_deref()),
-            Some(decoded_block_fingerprint(&moved[1]).as_str())
-        );
-        assert!(by_block[4].is_none(), "a meta pairs with at most one block");
-
-        // Fingerprinted metas ahead of the positional ones fall behind the cursor once the
-        // positional blocks pair, so the moved blocks find nothing: the walk never revisits.
-        metas.rotate_left(2);
-        let by_block = greedy_block_metas(
-            &blocks,
-            &vec![OnceCell::new(); blocks.len()],
-            &MetaBasis::new(MetaContent::Fingerprint, &metas, blocks.len()),
-            &mut |_, meta| meta.kind == "text",
-        );
-        assert_eq!(by_block[0].map(|meta| meta.block_index), Some(0));
-        assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
-        assert!(by_block[2..].iter().all(Option::is_none));
+        let paired: Vec<Option<usize>> = by_block
+            .iter()
+            .map(|meta| meta.map(|meta| meta.block_index))
+            .collect();
+        assert_eq!(paired, [None, None, Some(0), Some(1), None]);
     }
 }

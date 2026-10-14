@@ -1,5 +1,22 @@
 # Hot-path latency audit supplement
 
+> Dated note, 2026-10-13, #995 (spec #988 milestone U5, Q10/Q11): native attach
+> aligns served blocks with decoded blocks by canonical-text equality in both
+> alignment regimes, with signed zeros distinct, and takes no served-block
+> SHA-256. A message whose served content equals its native message as a JSON
+> value, float-zero signs aside, is the retained OpenCode envelope or Pi row,
+> native signs included, as on the base; every other message renders the served
+> numbers in the parts the renderer rewrites, while a reasoning block paired
+> with its native part keeps that part's bytes, signature included, on both
+> codecs, as on the base (`value_equal_envelope_keeps_native_float_zero_signs`,
+> `native_attach_takes_no_block_digest_in_either_alignment_regime`). The codecs
+> digest only message and synthetic-tool identities through
+> `stable_hash_prefix`. An unchanged OpenCode message encodes to its retained
+> input `Arc<Value>`, so the recipe keeps it by pointer, and reasoning clearing
+> writes a private successor through copy-on-write. B1 is re-evidenced in the
+> dated section of its evidence file. B3 stays invalidated: the tag baseline
+> cache it names is deleted.
+
 > Dated note, 2026-10-13, #994: one entry scan, `ingress_scan::scan`, answers
 > the byte cap's probe, the footprint floor, the unescape charge, and the lane
 > probe for a body over the facade cap or one that spells `transform`, when the

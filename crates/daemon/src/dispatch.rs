@@ -471,15 +471,13 @@ pub(crate) fn measure_serialize<T: serde::Serialize + ?Sized>(
 
 /// Measures a JSON value's exact encoded length without retaining the bytes.
 ///
-/// Serialization stops when encoded output exceeds `MAX_WIRE_BODY_BYTES`.
+/// A structural count equals the serializer's byte count. A value past `MAX_WIRE_BODY_BYTES`
+/// is measured by the serializer, which reports `BodyTooLarge` or `LengthOverflow`.
 pub(crate) fn measure_json(value: &Value) -> Result<usize, PreparedOutputError> {
-    if let Some(len) = compact_json_len(value).filter(|len| *len <= MAX_WIRE_BODY_BYTES) {
-        return Ok(len);
+    match compact_json_len(value) {
+        Some(len) if len <= MAX_WIRE_BODY_BYTES => Ok(len),
+        _ => measure_serialize(value),
     }
-    let mut writer = CountingWriter::default();
-    let result = serde_json::to_writer(&mut writer, value).map_err(PreparedOutputError::Serialize);
-    let writer = finish_count(writer, result)?;
-    Ok(writer.len)
 }
 
 /// Returns the byte length of `serde_json::to_vec(value)` when the count fits in `usize`.
@@ -686,6 +684,7 @@ impl<W: Write> Write for BoundedWriter<'_, W> {
 mod tests {
     use super::*;
     use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
+    use serde_json::json;
 
     #[test]
     fn a_json_value_over_the_limit_is_refused_at_the_serializer_length() {
@@ -822,5 +821,113 @@ mod tests {
             ),
             Err(PreparedOutputError::RecipeNestingTooDeep)
         ));
+    }
+
+    fn serialized_len(value: &Value) -> usize {
+        serde_json::to_vec(value)
+            .expect("a JSON value serializes")
+            .len()
+    }
+
+    fn assert_measured_as_serialized(value: &Value) {
+        let expected = serialized_len(value);
+        assert_eq!(compact_json_len(value), Some(expected), "{value}");
+        assert_eq!(measure_json(value).unwrap(), expected, "{value}");
+    }
+
+    #[test]
+    fn structural_length_equals_the_serialized_length_for_every_escape_and_scalar() {
+        let every_ascii_byte: String = (0u8..=0x7f).map(char::from).collect();
+        let mut values = vec![
+            json!(null),
+            json!(true),
+            json!(false),
+            json!(""),
+            json!([]),
+            json!({}),
+            json!(every_ascii_byte),
+            json!("\u{e9}\u{e8}\u{ea} \u{2028}\u{2029} \u{1f600} \u{7f}"),
+            json!({"\u{0}key\"\\": ["\u{1f}", "\u{8}\u{9}\u{a}\u{b}\u{c}\u{d}"]}),
+            json!([
+                0,
+                1,
+                -1,
+                u64::MAX,
+                i64::MIN,
+                0.0,
+                -0.0,
+                1.5,
+                -2.25e-7,
+                1e21,
+                1e300
+            ]),
+            json!([f64::MAX, f64::MIN_POSITIVE, 5e-324, 123_456_789.012_345_68]),
+            json!({"info": {"id": "m1", "time": {"created": 1_700_000_000_001_u64}}, "parts": [{"type": "text", "text": "x".repeat(5 * 1024)}]}),
+        ];
+        // These cases exercise escape counting around 64-byte chunk boundaries.
+        for len in [0, 1, 63, 64, 65, 127, 128, 129, 200] {
+            for offset in [0, 31, 62, 63, 64, 65, 127, 128] {
+                for escape in ['"', '\\', '\n', '\u{1}', '\u{1f}'] {
+                    let mut text = "a".repeat(len);
+                    if offset <= len {
+                        text.insert(offset, escape);
+                    }
+                    values.push(json!(text));
+                }
+            }
+        }
+        for value in &values {
+            assert_measured_as_serialized(value);
+        }
+    }
+
+    fn escaped_json_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::from),
+            any::<u64>().prop_map(Value::from),
+            any::<f64>().prop_map(|number| json!(number)),
+            any::<String>().prop_map(Value::String),
+            "[\\x00-\\x7f]{0,150}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(4, 48, 6, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+                proptest::collection::btree_map(any::<String>(), inner, 0..6)
+                    .prop_map(|fields| Value::Object(fields.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn structural_length_equals_the_serialized_length(value in escaped_json_value()) {
+            proptest::prop_assert_eq!(compact_json_len(&value), Some(serialized_len(&value)));
+            proptest::prop_assert_eq!(measure_json(&value).unwrap(), serialized_len(&value));
+        }
+    }
+
+    #[test]
+    fn the_cap_boundary_measures_as_the_serializer_measures() {
+        let at_cap = Value::String("x".repeat(MAX_WIRE_BODY_BYTES - 2));
+        assert_eq!(measure_json(&at_cap).unwrap(), MAX_WIRE_BODY_BYTES);
+        assert_eq!(measure_serialize(&at_cap).unwrap(), MAX_WIRE_BODY_BYTES);
+
+        let past_cap = Value::String("x".repeat(MAX_WIRE_BODY_BYTES - 1));
+        assert_eq!(compact_json_len(&past_cap), Some(MAX_WIRE_BODY_BYTES + 1));
+        let measured = measure_json(&past_cap);
+        let serialized = measure_serialize(&past_cap);
+        assert!(
+            matches!(
+                (&measured, &serialized),
+                (
+                    Err(PreparedOutputError::BodyTooLarge { len, max: MAX_WIRE_BODY_BYTES }),
+                    Err(PreparedOutputError::BodyTooLarge { len: serialized_len, .. }),
+                ) if len == serialized_len && *len > MAX_WIRE_BODY_BYTES
+            ),
+            "{measured:?} against {serialized:?}"
+        );
     }
 }

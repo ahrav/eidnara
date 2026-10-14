@@ -183,8 +183,8 @@ pub use scale::{
     HistogramBucket, HostManifest, MIN_RATIO_SESSIONS, OpenLoopCounts, PassOutcome, PassRow,
     RATIO_GATE, RATIO_REPLICATES, RatioClaim, RatioWithheld, RefusalRate, RefusalReason,
     SCALE_REPORT_SCHEMA, ScaleHarness, ScaleInputs, ScaleReport, ScaleReportError, ScaleTier,
-    SessionSummary, StageSummary, StateSummary, TierRatio, TierSummary, WindowCohort, bucket_index,
-    bucket_upper_bound, parse_pass_row, parse_scale_report,
+    SessionSummary, StageSummary, StateSummary, TierRatio, TierSummary, WindowCohort, WindowMix,
+    bucket_index, bucket_upper_bound, parse_pass_row, parse_scale_report,
 };
 pub use shrink::{
     CandidateRecord, CandidateVerdict, Element, FailurePredicate, History,

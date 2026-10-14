@@ -1300,7 +1300,17 @@ stage and never add into a total median. Each tier names the served-window
 cohorts of its completed passes (`windows`: each distinct `window_messages` and
 `window_blocks` with its pass count), and the report carries the driver's
 qualified workload as `cohort.window`, the host messages each pass carries past
-its boundary.
+its boundary, and `cohort.mix`, the content those messages carry: `text_only`
+for one text part per message, `tool_heavy` for text beside tool calls and their
+results. The OpenCode driver takes `--mix text_only` (the default) or
+`--mix tool_heavy`, which gives each window assistant a short text part beside a
+completed `read` tool part whose output carries the window text; the Pi tier
+interleaves text, tool calls, tool results, and shell runs and labels itself
+`tool_heavy`. A manifest without `mix` predates the label: the OpenCode driver
+ran text only and the Pi tier ran its interleaved window. The `scale-report`
+dispatch input `scale_mix` passes the OpenCode mix to both arms. A report that
+carries `mix` parses only with an `eval_runner` from the same commit as its
+writer or a later one, which the dispatched job uses for both arms.
 
 A non-control tier carries a ratio claim only with at least three sessions in
 the tier and in the 10k control and at least `P99_MIN_RUNS` uncensored steady
