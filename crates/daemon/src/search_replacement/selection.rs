@@ -12,7 +12,7 @@ use host_runtime::generation::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
-use retrieval::batch::{VectorGeneration, read_checkpoint};
+use retrieval::batch::{VectorGeneration, read_checkpoint, read_identity_and_checkpoint};
 use retrieval::coverage::{
     CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active_visiting,
     verify_pages,
@@ -1268,8 +1268,13 @@ impl SearchReader {
             return Err(ProjectionError::IdentityMismatch.into());
         }
         let checkpoint = self
-            .read(budget, |conn| {
-                read_checkpoint(conn, &seed.kernel_incarnation_id)
+            .read(budget, |conn| match read_identity_and_checkpoint(conn)? {
+                Some((identity, checkpoint))
+                    if identity.kernel_incarnation_id == seed.kernel_incarnation_id =>
+                {
+                    Ok(checkpoint)
+                }
+                _ => Err(ProjectionError::IdentityMismatch),
             })?
             .ok_or(BuildError::Invalid("the family has no applied prefix"))?;
         let complete_through = checkpoint.checkpoint_commit_seq;

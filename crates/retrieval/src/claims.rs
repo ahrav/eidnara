@@ -29,11 +29,11 @@ use kernel::{
 use rusqlite::params;
 use storage::GuardedConn;
 
-use crate::batch::read_checkpoint;
+use crate::batch::read_identity_and_checkpoint;
 use crate::exact::association::derived_target;
 use crate::exact::selector::Family;
 use crate::exact::{CANONICAL_OBJECT_NAMESPACE, Coverage, EXTRACTION_VERSION, coverage};
-use crate::{ProjectionError, decode_span, read_identity};
+use crate::{ProjectionError, decode_span};
 
 /// Variant order is precedence order: restrictive states sort first, so a
 /// classified claim is never more visible than the kernel's serving view of the
@@ -629,7 +629,8 @@ fn guarded_rows(
     bounds: ClaimCandidateBounds,
     read_rows: impl FnOnce(&GuardedConn<'_>) -> Result<Vec<ClaimCandidateRow>, ProjectionError>,
 ) -> Result<(Vec<ClaimCandidateRow>, kernel::CommitReadTarget), ClaimCandidateError> {
-    let identity = read_identity(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
+    let (identity, checkpoint) =
+        read_identity_and_checkpoint(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
     let entry = kernel
         .capture_commit_read_target_within_budget(budget)
         .map_err(ClaimFactsError::from)?;
@@ -641,7 +642,7 @@ fn guarded_rows(
             kernel_incarnation_id: identity.kernel_incarnation_id,
         });
     }
-    let checkpoint = read_checkpoint(conn, &database)?.ok_or(ClaimCandidateError::NoCheckpoint)?;
+    let checkpoint = checkpoint.ok_or(ClaimCandidateError::NoCheckpoint)?;
     let rows = read_rows(conn)?;
     if distinct_objects(&rows).len() > bounds.facts.max_claims.get() {
         return Err(ClaimFactsError::TooManyClaims.into());

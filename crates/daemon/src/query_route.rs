@@ -1818,7 +1818,7 @@ pub fn admit_lanes<'a>(
 
     // An uncertified exact lane runs only projection statements while the connection is held and takes its kernel readers after it is released; a certified one judges each page it resolves and validates a proof for final use under the connection. The lexical lane reads each candidate's occurrence row just before the kernel judges it, and the dense oracle judges each page it scores, so both read the kernel under the connection.
     let read = projection.read_under(budget, |conn| {
-        let Some(identity) = retrieval::read_identity(conn)? else {
+        let Some((identity, _)) = retrieval::batch::read_identity_and_checkpoint(conn)? else {
             return Ok(Err(QueryFailure::Unavailable("no_identity")));
         };
         let mut phases = || -> Result<Scanned, QueryFailure> {

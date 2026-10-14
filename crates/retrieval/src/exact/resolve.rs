@@ -9,13 +9,13 @@ use kernel::{
 };
 use storage::GuardedConn;
 
-use crate::batch::{ProjectionCheckpoint, read_checkpoint};
+use crate::batch::{ProjectionCheckpoint, read_identity_and_checkpoint};
 use crate::eligibility::{Disposition, OccurrenceCandidate, judge_occurrences_within_budget};
 use crate::exact::association::EXTRACTION_VERSION;
 use crate::exact::lookup::{
     AssociationRow, Cursor, ExactQuery, LookupContext, LookupRefusal, page,
 };
-use crate::{ProjectionError, TombstoneReason, read_identity};
+use crate::{ProjectionError, TombstoneReason};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletenessCertificate {
@@ -376,15 +376,15 @@ fn admit_certificate(
         }
         .into());
     }
-    let identity = read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
+    let (identity, checkpoint) =
+        read_identity_and_checkpoint(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
     if identity.kernel_incarnation_id != certificate.canonical_incarnation_id {
         return Err(CertificateRefusal::IncarnationMismatch.into());
     }
     if identity.identity_contract_version != certificate.identity_contract_version {
         return Err(CertificateRefusal::IdentityContract.into());
     }
-    let checkpoint = read_checkpoint(conn, &certificate.canonical_incarnation_id)?
-        .ok_or(LookupRefusal::NoCheckpoint)?;
+    let checkpoint = checkpoint.ok_or(LookupRefusal::NoCheckpoint)?;
     if checkpoint != certificate.projection {
         return Err(CertificateRefusal::ProjectionMismatch.into());
     }
@@ -637,8 +637,13 @@ fn validate_for_use_inner(
     if authority.inventory_epoch != certificate.inventory_epoch {
         return Ok(Err(ProofInvalidation::InventoryEpochChanged));
     }
-    let checkpoint = match read_checkpoint(conn, &certificate.canonical_incarnation_id) {
-        Ok(checkpoint) => checkpoint,
+    let checkpoint = match read_identity_and_checkpoint(conn) {
+        Ok(Some((identity, checkpoint)))
+            if identity.kernel_incarnation_id == certificate.canonical_incarnation_id =>
+        {
+            checkpoint
+        }
+        Ok(_) => return Err(ProjectionError::IdentityMismatch.into()),
         Err(ProjectionError::Interrupted) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
         Err(error) => return Err(error.into()),
     };
