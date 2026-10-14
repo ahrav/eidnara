@@ -450,8 +450,16 @@ would change.
 | [`reclaim_frees_capacity_for_next_write`][t-reclaim] | GC reclaim lowers usage so the next ingest fits. | unaudited |
 | [`payload_limit_is_inclusive_at_the_artifact_cap`][t-payload] | 64 MiB is accepted; 64 MiB + 1 is refused with no reservation or temp. | unaudited |
 | [`ingest_route_accepts_a_payload_at_the_artifact_cap`][t-route-cap] | The daemon route at and over `MAX_PAYLOAD_BYTES`. | unaudited |
-| [`orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects`][t-orphan] | Usage is read from objects written outside the store; `warn` at 80 percent. | unaudited |
-| [`facts_unless_abandons_the_artifact_walk_once_cancelled`][t-cancel] | The walk polls cancellation before every entry. | unaudited |
+| [`orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects`][t-orphan] | Usage counts objects written while no store is open; `warn` at 80 percent. | unaudited |
+| [`facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled`][t-cancel] | Facts read a held count without polling cancellation; with no count the walk polls before every entry. | unaudited |
+| [`ingestion_and_reclaim_keep_the_count_without_walking_the_object_tree`][t-no-walk] | Ingests, refusals, facts, and the ingest after a reclaim take no walk; open takes two and maintenance one. | unaudited |
+| [`deduplicated_bytes_add_zero_at_exactly_the_cap`][t-usage-dedup] | A present digest is admitted at the cap and adds zero. | unaudited |
+| [`a_refused_ingest_leaves_no_reservation_and_no_object`][t-usage-refused] | A `Capacity` refusal leaves no reservation row and no object. | unaudited |
+| [`failed_reference_cleanup_subtracts_the_bytes_it_published`][t-usage-cleanup] | The `-cleanup` marker: the walk drops between `AfterPublish` and return, and usage equals the walk. | unaudited |
+| [`an_unrecovered_publish_counts_until_startup_recovery_removes_it`][t-usage-recovery] | An orphan publish counts against the cap; the `-recovery` marker fires at reopen and admission stays open. | unaudited |
+| [`reclaim_purge_and_a_retried_unlink_subtract_the_bytes_they_remove`][t-usage-paths] | The `-reclaim`, `-purge`, and `-retry` markers, with usage equal to the walk after each path and after a failed unlink. | unaudited |
+| [`bytes_added_outside_the_store_fail_the_next_admission_closed`][t-usage-added] | A stray file under `objects` makes maintenance latch; the next ingest is `IngestionFailClosed`; a reopen re-seeds. | unaudited |
+| [`bytes_removed_outside_the_store_fail_the_next_admission_closed`][t-usage-removed] | An object removed outside the store makes maintenance latch; the next ingest is `IngestionFailClosed`. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
 | [`recover_twice`][t-recover-twice] | A second recovery changes nothing. | unaudited |
 | [`return_value_fault_table_latches_eio_and_never_publishes_a_reference`][t-faults] | Six ingest fault points. | unaudited |
@@ -459,14 +467,11 @@ would change.
 | [`crash_windows_recover_idempotently_and_match_no_crash_execution`][t-crash] | SIGKILL children at reservation, ingest, and purge barriers. | unaudited |
 | [`startup_retires_a_live_reservation_whose_bytes_are_already_gone`][t-gone] | Recovery deletes a reservation with no bytes. | unaudited |
 
-None found: a test that dedup at exactly the cap is admitted, or that a
-second ingest before recovery of an orphan publish is refused; a comparison
-of two independent usage sources, because only the walk exists; any daemon
-caller of `run_staging_maintenance` or `delete_artifact`, so the GC and purge
-decrement paths run only in kernel tests and benches; a test that the health
-sampler's lock-free walk and `check_budget`'s locked walk agree, or that the
-sampler's 300 s staleness bound is reached by a slow walk; a per-path usage
-delta in any fault table.
+None found: any daemon caller of `run_staging_maintenance` or
+`delete_artifact`, so the GC and purge decrement paths and the maintenance
+reconciliation run only in kernel tests and benches; a test that the health
+sampler's lock-free count read and `check_budget`'s locked read agree under
+concurrent ingest; a restore that finds drift.
 
 ## Wildcard and cross-cutting
 
@@ -742,8 +747,16 @@ not a claim that no related check exists anywhere in the repository.
 [t-reclaim]: ../../../../crates/kernel/tests/kernel_gc.rs#L536
 [t-payload]: ../../../../crates/kernel/tests/kernel_cas.rs#L214
 [t-route-cap]: ../../../../crates/daemon/tests/kernel_routes.rs#L3601
-[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L594
-[t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L557
+[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
+[t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L584
+[t-no-walk]: ../../../../crates/kernel/tests/kernel_gc.rs#L557
+[t-usage-dedup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L161
+[t-usage-refused]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L175
+[t-usage-cleanup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L191
+[t-usage-recovery]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L217
+[t-usage-paths]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L253
+[t-usage-added]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L302
+[t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L320
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426

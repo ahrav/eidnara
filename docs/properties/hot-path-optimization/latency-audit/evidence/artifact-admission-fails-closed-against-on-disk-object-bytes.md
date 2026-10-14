@@ -93,6 +93,21 @@ or a refusal after an unrecovered orphan publish.
 - Missing evidence: A stated policy on the retry class.
 - Conclusion: needs human input.
 
+### Q: Does admission still fail closed once it reads a count instead of walking?
+
+- Sources examined: [`check_budget`][check-budget-head], the
+  [writer-lock count][usage-count], and the [usage tests][t-usage].
+- Findings: `check_budget` reads the count under the writer lock and keeps
+  the `object_is_present` dedup and the `Capacity` refusal. The usage tests
+  admit a present digest at exactly the cap with zero added, refuse a
+  two-byte ingest against `cap - 1` with no reservation row and no object,
+  and refuse an ingest that fits only if an unrecovered orphan publish is
+  ignored. A count a reconciliation walk contradicted latches the CAS state,
+  and the next ingest is refused with `IngestionFailClosed`.
+- Missing evidence: None.
+- Conclusion: resolved with answer - the refusal points and codes are
+  unchanged; the count replaces the walk as the admitted usage.
+
 [ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L361-L663
 [staged]: ../../../../../crates/kernel/src/cas/ingest.rs#L38-L56
 [ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L379-L405
@@ -119,3 +134,13 @@ or a refusal after an unrecovered orphan publish.
 [t-payload]: ../../../../../crates/kernel/tests/kernel_cas.rs#L214-L234
 [t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
 [t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3600-L3629
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L46-L73
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L79-L98
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L101-L109
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L434
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
+[maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
+[t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[check-budget-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L950-L965

@@ -107,6 +107,21 @@ enumerating the paths.
 - Conclusion: resolved with answer - the five paths are complete for
   `objects` bytes; temp unlinks are outside the counted set.
 
+### Q: Does every decrement path fire its marker with bytes at stake?
+
+- Sources examined: the [usage tests][t-usage] and
+  [`unlink_counted_object`][usage-unlink].
+- Findings: Each marker is an assertion message on a non-zero difference
+  between two independent `std::fs` walks: `-cleanup` between the
+  `AfterPublish` hook and the return of an `AfterEvents` ingest; `-recovery`
+  across the reopen after a writer stopped at `AfterPublish`; `-reclaim`
+  across a maintenance pass after an invalidation past the grace; `-purge`
+  across `delete_artifact` with `Purge`; and `-retry` across the maintenance
+  pass on a fresh store after `ArtifactGcFault::Unlink` failed a candidate.
+  All five fire, and the reported usage equals the walk after each.
+- Missing evidence: None.
+- Conclusion: resolved with answer - all five markers fire.
+
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
 [ingest-postpublish]: ../../../../../crates/kernel/src/cas/ingest.rs#L528-L572
 [ingest-commit-fail]: ../../../../../crates/kernel/src/cas/ingest.rs#L645-L652
@@ -130,3 +145,12 @@ enumerating the paths.
 [t-crash-point]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L34
 [t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
 [t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L46-L73
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L79-L98
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L101-L109
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L434
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
+[maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
+[t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs

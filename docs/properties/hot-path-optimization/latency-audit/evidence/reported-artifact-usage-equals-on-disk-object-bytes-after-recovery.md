@@ -107,6 +107,55 @@ sources because only one exists.
 - Missing evidence: A decision on which definition a counter follows.
 - Conclusion: needs human input.
 
+### Q: Where does the count live, and what happens on drift? (decision at the usage-count head)
+
+- Sources examined: [`usage.rs`][usage-count], the [open seed][open-seed],
+  [`recover_interrupted_work`][recover-reconcile], the
+  [maintenance pass][maintenance-reconcile], and the
+  [usage tests][t-usage].
+- Findings: The kernel store has no spare mutable column, and a new table or
+  column is a format break, so the specification's durable counter updated in
+  the same transaction is replaced by a process-local count. The count is an
+  `Option<u64>` under its own mutex and is changed only while the writer lock
+  is held. The open walk seeds it before startup recovery. Each publication
+  adds the published length ([`count_published_artifact`][usage-publish]).
+  Each object unlink goes through [`unlink_counted_object`][usage-unlink],
+  which subtracts the `st_size` read before the unlink once the durable
+  unlink succeeds; a failed unlink leaves the count unknown, and a removal
+  larger than the count latches. [`reconcile_artifact_usage`][usage-reconcile]
+  walks under the writer lock at the end of every recovery (open and
+  restore) and every maintenance pass. With no count it seeds one. With a
+  count it compares, and a disagreement latches the CAS fail-closed state
+  and keeps the count. The drift action is the latch: the next admission is
+  refused with `IngestionFailClosed`, and only a new store, which re-seeds
+  from the tree, admits again. The walk follows
+  [`regular_file_bytes`][walk-head]'s file set, so a stray root-level file counts
+  and its later appearance or disappearance is drift. The count adds 16
+  bytes of process memory and replaces the cached `Option<u64>` and
+  generation the store already held, so the declared retained-resident
+  total is unchanged.
+- Missing evidence: None for the decision. Drift between a restore's
+  install and its reconciliation is detected only at that reconciliation.
+- Conclusion: resolved with answer - a writer-lock count seeded by the open
+  walk, reconciled by recovery and maintenance walks, and latched closed on
+  disagreement.
+
+### Q: Does the count equal the walk on every path?
+
+- Sources examined: the [usage tests][t-usage] and
+  [`assert_semantic_oracle`][t-oracle-head].
+- Findings: The usage tests compare `artifact_budget_facts().usage_bytes`
+  with an independent `std::fs` walk after publish, dedup at the cap,
+  refusal, cleanup, an orphan publish, startup recovery, reclaim, purge, a
+  failed unlink, and its retry, and they assert that a file added or removed
+  outside the store makes the next maintenance pass latch so the next ingest
+  is `IngestionFailClosed`. Negative controls, run locally and reverted:
+  dropping the unlink subtraction fails six tests, dropping the publication
+  addition fails nine, and dropping the drift latch fails both drift tests.
+- Missing evidence: None.
+- Conclusion: resolved with answer - yes, at every quiescent point the tests
+  reach.
+
 [ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
 [ingest-commit]: ../../../../../crates/kernel/src/cas/ingest.rs#L580-L595
@@ -134,3 +183,14 @@ sources because only one exists.
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
 [t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
 [t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L46-L73
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L79-L98
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L101-L109
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L434
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
+[maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
+[t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1525-L1579
+[t-oracle-head]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
