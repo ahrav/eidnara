@@ -458,6 +458,52 @@ const _: () = assert!(PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES <= MAX_DURABL
 pub const PASS_SCHEDULER_TELEMETRY_MAX_BYTES: usize =
     PASS_SCHEDULER_HISTORY_MAX_BYTES + PASS_SCHEDULER_INTERESTING_HISTORY_MAX_BYTES;
 
+/// What opening the store did to `transform_session_roots`, the lineage that authenticates a transform session's project root after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransformRootPrune {
+    /// Deleted this many roots idle past the retention window.
+    Pruned(usize),
+    /// The clock read before the epoch or past `i64` milliseconds, so retention kept every root.
+    ClockUnreadable,
+    /// The clock read and the store's newest recorded write disagree: the newest write is later than the clock, or the clock is more than one retention window past it. Retention kept every root, since either reading could be the wrong one.
+    ClockDisagrees { now_ms: i64, newest_ms: i64 },
+}
+
+/// The newest recorded write anchors the pruning clock check: pruning retains every root when that timestamp exceeds `now_ms` or precedes it by more than one retention window.
+const NEWEST_RECORDED_WRITE_SQL: &str = "SELECT MAX(at) FROM (
+     SELECT MAX(MAX(observed_at, COALESCE(session_activity_at, observed_at))) AS at
+       FROM transform_session_roots
+     UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+ )";
+
+const PRUNE_IDLE_TRANSFORM_ROOTS_SQL: &str = "DELETE FROM transform_session_roots
+  WHERE MAX(observed_at, COALESCE(session_activity_at, observed_at)) < ?1";
+
+/// Milliseconds since the epoch, or `None` for a clock before the epoch or past `i64` milliseconds.
+fn epoch_millis(elapsed: Result<std::time::Duration, std::time::SystemTimeError>) -> Option<i64> {
+    i64::try_from(elapsed.ok()?.as_millis()).ok()
+}
+
+fn log_transform_root_prune(prune: TransformRootPrune) {
+    match prune {
+        TransformRootPrune::Pruned(0) => {}
+        TransformRootPrune::Pruned(rows) => {
+            eprintln!("memory-store: pruned {rows} idle transform session roots at open");
+        }
+        TransformRootPrune::ClockUnreadable => {
+            eprintln!(
+                "memory-store: kept every transform session root at open: the clock read is unusable"
+            );
+        }
+        TransformRootPrune::ClockDisagrees { now_ms, newest_ms } => {
+            eprintln!(
+                "memory-store: kept every transform session root at open: the clock reads {now_ms} ms and the newest recorded write {newest_ms} ms"
+            );
+        }
+    }
+}
+
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -7552,6 +7598,7 @@ pub struct MemoryStore {
     /// Caller-clock instant at or after which the next capture enqueue prunes expired
     /// terminal identities; starts at zero so the first enqueue after open prunes.
     pub(crate) memory_capture_prune_due_ms: std::sync::atomic::AtomicI64,
+    transform_root_prune: TransformRootPrune,
     #[cfg(any(test, feature = "test-support"))]
     abandon_history_summarizer_hook: AbandonHistorySummarizerHook,
     #[cfg(any(test, feature = "test-support"))]
@@ -8024,7 +8071,7 @@ impl MemoryStore {
             conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
             ConnectionProfile::apply(conn)
         })?;
-        let store = MemoryStore {
+        let mut store = MemoryStore {
             inner,
             connection_profile,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
@@ -8033,6 +8080,7 @@ impl MemoryStore {
             facade_mutation_lock: Mutex::new(()),
             row_memo: Mutex::new(RowMemo::default()),
             memory_capture_prune_due_ms: std::sync::atomic::AtomicI64::new(0),
+            transform_root_prune: TransformRootPrune::Pruned(0),
             #[cfg(any(test, feature = "test-support"))]
             abandon_history_summarizer_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
@@ -8064,32 +8112,44 @@ impl MemoryStore {
             #[cfg(any(test, feature = "test-support"))]
             in_progress_receipts_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
-        store.prune_transform_session_roots()?;
+        store.transform_root_prune = store.prune_transform_session_roots(epoch_millis(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH),
+        ))?;
+        log_transform_root_prune(store.transform_root_prune);
         store.ensure_memory_reviewer_store_identity(current_time_ms())?;
         store.resume_memory_capture_after_open()?;
         Ok(store)
     }
 
-    fn prune_transform_session_roots(&self) -> Result<(), MemoryStoreError> {
-        const THIRTY_DAYS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
-        let now_ms = current_time_ms();
+    /// What opening this store did to `transform_session_roots`.
+    pub fn transform_root_prune(&self) -> TransformRootPrune {
+        self.transform_root_prune
+    }
+
+    /// Retention deletes roots whose observation and cache activity both precede the 30-day window ending at `now_ms`. Retention keeps every root when `now_ms` is unreadable, or when the newest recorded root observation or cache activity is later than `now_ms` or more than 30 days before it.
+    fn prune_transform_session_roots(
+        &self,
+        now_ms: Option<i64>,
+    ) -> Result<TransformRootPrune, MemoryStoreError> {
+        const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+        let Some(now_ms) = now_ms else {
+            return Ok(TransformRootPrune::ClockUnreadable);
+        };
         self.inner
             .with_conn_fenced(|conn| {
-                // Cache rows are retained across session teardown, so row existence is not
-                // activity. Prune lineage only when both the root observation and its cache
-                // activity watermark are older than the inactivity window. This keeps active
-                // sessions alive without depending on a deletion path that does not exist.
-                conn.execute(
-                    "DELETE FROM transform_session_roots AS roots
-                      WHERE roots.observed_at < ?1
-                        AND NOT EXISTS (
-                            SELECT 1 FROM cache_state AS cache
-                             WHERE cache.session_id = roots.session_id
-                               AND cache.last_activity_at >= ?1
-                        )",
-                    params![now_ms.saturating_sub(THIRTY_DAYS_MS)],
+                let newest: Option<i64> =
+                    conn.query_row(NEWEST_RECORDED_WRITE_SQL, [], |row| row.get(0))?;
+                let Some(newest_ms) = newest else {
+                    return Ok(TransformRootPrune::Pruned(0));
+                };
+                if newest_ms > now_ms || now_ms.saturating_sub(newest_ms) > RETENTION_MS {
+                    return Ok(TransformRootPrune::ClockDisagrees { now_ms, newest_ms });
+                }
+                let deleted = conn.execute(
+                    PRUNE_IDLE_TRANSFORM_ROOTS_SQL,
+                    params![now_ms - RETENTION_MS],
                 )?;
-                Ok(())
+                Ok(TransformRootPrune::Pruned(deleted))
             })
             .map_err(Into::into)
     }
@@ -22628,6 +22688,11 @@ mod tests {
         drop(store);
 
         let reopened = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(
+            reopened.transform_root_prune(),
+            TransformRootPrune::Pruned(2),
+            "open prunes the deleted and the idle session's roots"
+        );
         assert!(
             reopened
                 .knows_transform_session_root("refreshed", "/root-a")
@@ -22673,6 +22738,364 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    /// Commits `/root-a` for `session_id` observed at `at_ms`, with the session's cache activity also at `at_ms`.
+    fn root_observed_at(store: &MemoryStore, session_id: &str, at_ms: i64) {
+        let loaded = store.load(session_id).unwrap();
+        store
+            .commit_transform(
+                session_id,
+                TransformCommit {
+                    expected: None,
+                    core: &loaded.core,
+                    meta: &loaded.meta,
+                    consumed_drop_ids: &[],
+                    first_applied_command_ids: &[],
+                    history_segment_max_seq: None,
+                    project_root: Some("/root-a"),
+                    first_divergence: None,
+                    pass: None,
+                    overlays: TransformOverlayBatch {
+                        created_at_ms: at_ms,
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = ?2 WHERE session_id = ?1",
+                    params![session_id, at_ms],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    /// Under a clock that agrees with the store's newest write, a root observed exactly one window ago is kept even with older cache activity, one observed a millisecond earlier is pruned, and a stale observation whose cache activity sits exactly at the cutoff is kept.
+    #[test]
+    fn an_agreeing_clock_prunes_roots_idle_past_the_window_and_keeps_its_boundary() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        let cutoff = now_ms - 30 * DAY_MS;
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "live", now_ms - DAY_MS);
+        root_observed_at(&store, "at-cutoff", cutoff);
+        root_observed_at(&store, "past-cutoff", cutoff - 1);
+        root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+        root_observed_at(&store, "active-at-cutoff", now_ms - 40 * DAY_MS);
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = ?1 WHERE session_id = 'active-at-cutoff'",
+                    params![cutoff],
+                )?;
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = ?1 WHERE session_id = 'at-cutoff'",
+                    params![cutoff - 1],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(2)
+        );
+        for (session, kept) in [
+            ("live", true),
+            ("at-cutoff", true),
+            ("active-at-cutoff", true),
+            ("past-cutoff", false),
+            ("stale", false),
+        ] {
+            assert_eq!(
+                store
+                    .knows_transform_session_root(session, "/root-a")
+                    .unwrap(),
+                kept,
+                "{session}"
+            );
+        }
+    }
+
+    /// A clock that disagrees with the store's newest write keeps every root: a clock a year ahead at open, a clock behind a write recorded under an earlier fast clock, and a clock more than one window past a dormant store's last write. The same rows under an agreeing clock prune the stale root.
+    #[test]
+    fn a_clock_that_disagrees_with_the_newest_recorded_write_keeps_every_root() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        let keeps_all = |rows: &[(&str, i64)], clock: i64| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            for (session, at) in rows {
+                root_observed_at(&store, session, *at);
+            }
+            let newest_ms = rows.iter().map(|(_, at)| *at).max().unwrap();
+            assert_eq!(
+                store.prune_transform_session_roots(Some(clock)).unwrap(),
+                TransformRootPrune::ClockDisagrees {
+                    now_ms: clock,
+                    newest_ms
+                },
+                "{rows:?} at {clock}"
+            );
+            for (session, _) in rows {
+                assert!(
+                    store
+                        .knows_transform_session_root(session, "/root-a")
+                        .unwrap()
+                );
+            }
+        };
+        let rows = [("live", now_ms - DAY_MS), ("stale", now_ms - 40 * DAY_MS)];
+        keeps_all(&rows, now_ms + 365 * DAY_MS);
+        keeps_all(
+            &[
+                ("live", now_ms - DAY_MS),
+                ("fast-write", now_ms + 365 * DAY_MS),
+            ],
+            now_ms,
+        );
+        keeps_all(&rows, now_ms + 60 * DAY_MS);
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        for (session, at) in rows {
+            root_observed_at(&store, session, at);
+        }
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(1)
+        );
+    }
+
+    /// An unreadable clock keeps every root, whatever its age, and a clock before the epoch or past `i64` milliseconds reads as unreadable rather than as zero or the maximum.
+    #[test]
+    fn an_unreadable_clock_keeps_every_transform_session_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "ancient", 1);
+        assert_eq!(
+            store.prune_transform_session_roots(None).unwrap(),
+            TransformRootPrune::ClockUnreadable
+        );
+        assert!(
+            store
+                .knows_transform_session_root("ancient", "/root-a")
+                .unwrap()
+        );
+
+        let before_epoch = std::time::UNIX_EPOCH
+            .duration_since(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1));
+        assert_eq!(epoch_millis(before_epoch), None);
+        assert_eq!(epoch_millis(Ok(std::time::Duration::MAX)), None);
+        assert_eq!(
+            epoch_millis(Ok(std::time::Duration::from_millis(5))),
+            Some(5)
+        );
+    }
+
+    /// An empty store has no recorded activity to anchor retention and prunes nothing.
+    #[test]
+    fn an_empty_store_prunes_nothing_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(store.transform_root_prune(), TransformRootPrune::Pruned(0));
+        assert_eq!(
+            store.prune_transform_session_roots(Some(i64::MAX)).unwrap(),
+            TransformRootPrune::Pruned(0)
+        );
+    }
+
+    #[test]
+    fn a_cache_row_with_a_null_session_id_leaves_stale_roots_to_the_prune() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "live", now_ms - DAY_MS);
+        root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                     VALUES (NULL, 1, '{}', '{}', ?1)",
+                    params![now_ms - DAY_MS],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(1)
+        );
+        assert!(
+            !store
+                .knows_transform_session_root("stale", "/root-a")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn the_transform_root_prune_reads_only_its_two_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let plan = |sql: &str| -> Vec<String> {
+            store
+                .inner
+                .with_conn_unfenced(|conn| {
+                    let mut explain = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let cutoff = vec![0_i64; explain.parameter_count()];
+                    explain
+                        .query_map(rusqlite::params_from_iter(cutoff), |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect()
+                })
+                .unwrap()
+        };
+        let reads = |steps: &[String]| -> Vec<String> {
+            steps
+                .iter()
+                .filter(|step| step.contains("SEARCH") || step.contains("SCAN"))
+                .filter(|step| !step.contains("subquery"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            reads(&plan(NEWEST_RECORDED_WRITE_SQL)),
+            [
+                "SEARCH transform_session_roots USING COVERING INDEX transform_session_roots_by_retention",
+                "SEARCH cache_state USING COVERING INDEX cache_state_by_activity",
+            ]
+        );
+        assert_eq!(
+            reads(&plan(PRUNE_IDLE_TRANSFORM_ROOTS_SQL)),
+            [
+                "SEARCH transform_session_roots USING INDEX transform_session_roots_by_retention (<expr><?)"
+            ]
+        );
+    }
+
+    #[test]
+    fn root_retention_tracks_cache_activity_through_every_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let session = |n: u64| (n < 7).then(|| format!("s{n}"));
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                for _ in 0..2000 {
+                    let (a, b, at) = (next(8), next(8), next(100) as i64);
+                    let root = format!("/r{}", next(3));
+                    match next(9) {
+                        0 => conn.execute(
+                            "INSERT OR IGNORE INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)",
+                            params![session(a), at],
+                        )?,
+                        1 => conn.execute(
+                            "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)
+                             ON CONFLICT(session_id) DO UPDATE SET last_activity_at = excluded.last_activity_at",
+                            params![session(a), at],
+                        )?,
+                        2 => conn.execute(
+                            "UPDATE OR IGNORE cache_state SET session_id = ?2 WHERE session_id IS ?1",
+                            params![session(a), session(b)],
+                        )?,
+                        3 => conn.execute(
+                            "DELETE FROM cache_state WHERE session_id IS ?1",
+                            params![session(a)],
+                        )?,
+                        4 => conn.execute(
+                            "INSERT INTO transform_session_roots (session_id, project_root, observed_at)
+                             VALUES (?1, ?2, ?3)
+                             ON CONFLICT(session_id, project_root) DO UPDATE SET observed_at = excluded.observed_at",
+                            params![format!("s{a}"), root, at],
+                        )?,
+                        5 => conn.execute(
+                            "INSERT OR REPLACE INTO transform_session_roots (session_id, project_root, observed_at)
+                             VALUES (?1, ?2, ?3)",
+                            params![format!("s{a}"), root, at],
+                        )?,
+                        6 => conn.execute(
+                            "UPDATE OR IGNORE transform_session_roots SET session_id = ?2 WHERE session_id = ?1",
+                            params![format!("s{a}"), format!("s{b}")],
+                        )?,
+                        7 => conn.execute(
+                            "DELETE FROM transform_session_roots WHERE session_id = ?1 AND project_root = ?2",
+                            params![format!("s{a}"), root],
+                        )?,
+                        _ => conn.execute(
+                            "INSERT OR REPLACE INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)",
+                            params![session(a), at],
+                        )?,
+                    };
+                    let stale: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM transform_session_roots AS roots
+                          WHERE roots.session_activity_at IS NOT (
+                              SELECT cache.last_activity_at FROM cache_state AS cache
+                               WHERE cache.session_id = roots.session_id)",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(stale, 0);
+                    let newest = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, Option<i64>>(0));
+                    assert_eq!(
+                        newest(NEWEST_RECORDED_WRITE_SQL)?,
+                        newest(
+                            "SELECT MAX(at) FROM (
+                                 SELECT MAX(observed_at) AS at FROM transform_session_roots
+                                 UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+                             )"
+                        )?
+                    );
+                    let cutoff = next(110) as i64;
+                    let selected = |sql: &str| -> rusqlite::Result<Vec<(String, String)>> {
+                        conn.prepare(sql)?
+                            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
+                            .collect()
+                    };
+                    assert_eq!(
+                        selected(
+                            "SELECT session_id, project_root FROM transform_session_roots
+                              WHERE MAX(observed_at, COALESCE(session_activity_at, observed_at)) < ?1
+                              ORDER BY 1, 2"
+                        )?,
+                        selected(
+                            "SELECT session_id, project_root FROM transform_session_roots AS roots
+                              WHERE roots.observed_at < ?1
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM cache_state AS cache
+                                     WHERE cache.session_id = roots.session_id
+                                       AND cache.last_activity_at >= ?1)
+                              ORDER BY 1, 2"
+                        )?,
+                        "cutoff {cutoff}"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     /// The row stores the canonical root, so the canonical form is what must be scanned. A

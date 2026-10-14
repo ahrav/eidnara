@@ -266,7 +266,20 @@ Clustered:
   `refuse_pre_cutover_store(&inner)?` at `lib.rs:4873` and
   `inner.migrate(NS, MIGRATIONS)?` at `lib.rs:4874`, then
   `store.repair_note_artifacts_v51()?` and
-  `store.prune_transform_session_roots()?` at the end of the constructor. The
+  `store.prune_transform_session_roots(..)?` at the end of the constructor. The
+  prune reports a `TransformRootPrune`: it keeps every root when the clock read
+  is unusable or disagrees with the store's newest recorded write (later than
+  the clock, or more than one retention window before it), which
+  `a_clock_that_disagrees_with_the_newest_recorded_write_keeps_every_root`,
+  `an_agreeing_clock_prunes_roots_idle_past_the_window_and_keeps_its_boundary`,
+  and `an_unreadable_clock_keeps_every_transform_session_root` (unaudited)
+  check. Each root keeps a trigger-maintained copy of its session's cache
+  activity, `session_activity_at`, and the prune deletes one range of
+  `transform_session_roots_by_retention`;
+  `root_retention_tracks_cache_activity_through_every_write` (unaudited) checks
+  the copy and the deleted set against the window predicate under random
+  writes, and `the_transform_root_prune_reads_only_its_two_indexes` (unaudited)
+  pins the query plans. The
   refusal at `lib.rs:1375-1385` is asymmetric: it errors on `recorded <
   OLDEST_ADOPTABLE_MIGRATION_VERSION` and falls through to `_ => Ok(())` for
   everything else, and `OLDEST_ADOPTABLE_MIGRATION_VERSION` is
