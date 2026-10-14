@@ -103,7 +103,7 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 ### Q: How does the merged memo keep warnings and tier changes? (decision at the memo head)
 
 - Sources examined: the [memo][memo-head], [`SourceIdentity`][identity-head],
-  [`effective_with_warnings`][eff-warn-head], and the [memo tests][t-memo-head].
+  [`effective_from_sources`][eff-warn-head], and the [memo tests][t-memo-head].
 - Findings: The daemon maintainer's decisions are to keep per-load warning
   re-emission and to keep the history_summarizer reading a fresh merge per
   pass rather than the bind-frozen config. The memo therefore stores the
@@ -117,11 +117,18 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
   when every source last changed more than one second before the load, so a
   second rewrite inside one coarse timestamp tick is still read; the
   override's change-on-every-read behavior holds. A tier or override whose
-  read failed is never memoized.
+  read failed is never memoized. A tier is also memoized only when its
+  `lstat` stamp and the followed `stat` in `read_tier_cached` agree on
+  whether the file exists. A dangling final symlink keeps its own stamp when
+  its target is created, and a file created or removed between the stamp and
+  the read would key the merge on an entry it did not read; both disagree on
+  presence and are read again.
   Alternating roots replace the entry, so admitted-tier state for a root is
   read only on a miss, as before. The retained bytes are bounded by
   `MERGED_CONFIG_RETAINED_BYTES_BOUND` (4 MiB), added to
-  `DECLARED_RETAINED_RESIDENT_BYTES`.
+  `DECLARED_RETAINED_RESIDENT_BYTES`. The estimate counts each vector at its
+  capacity, because deduplicating the model chain shortens it in place and
+  keeps its buffer.
 - Payoff: An uncommitted probe timed `effective_with_warnings` on one host,
   release build, `taskset -c 5`, with a user tier naming a 4 KiB guidance
   override and a small project tier, 200 samples of 50 calls, three runs.
@@ -153,7 +160,7 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 [merge]: ../../../../../crates/daemon/src/config.rs#L716
 [raise-only]: ../../../../../crates/daemon/src/config.rs#L740
 [t-mtime]: ../../../../../crates/daemon/src/config.rs#L2165-L2202
-[memo-head]: ../../../../../crates/daemon/src/config.rs#L339-L432
-[identity-head]: ../../../../../crates/daemon/src/config.rs#L284-L337
-[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L474-L587
-[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2606-L2795
+[memo-head]: ../../../../../crates/daemon/src/config.rs#L366-L460
+[identity-head]: ../../../../../crates/daemon/src/config.rs#L308-L364
+[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L507-L633
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2674-L2935

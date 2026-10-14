@@ -339,6 +339,14 @@ impl SourceIdentity {
                 .map(FileStamp::of)
     }
 
+    /// This stamp comes from `lstat`, while [`read_tier_cached`] records the
+    /// mtime from `stat`, which follows a final symlink. Presence differs for
+    /// a dangling link and for a file created or removed between the two
+    /// calls.
+    fn describes(&self, tier: &TierConfig) -> bool {
+        tier.warning.is_none() && self.stamp.is_some() == tier.mtime.is_some()
+    }
+
     /// Whether the entry last changed before `settled_before`, compared in
     /// whole nanoseconds since the epoch.
     fn changed_before(&self, settled_before: std::time::SystemTime) -> bool {
@@ -391,8 +399,8 @@ impl MergedConfig {
                 capacity.next_multiple_of(16) + 16
             }
         }
-        fn strings(values: &[String]) -> usize {
-            allocation(std::mem::size_of_val(values))
+        fn strings(values: &Vec<String>) -> usize {
+            allocation(values.capacity() * std::mem::size_of::<String>())
                 + values
                     .iter()
                     .map(|value| allocation(value.capacity()))
@@ -591,9 +599,14 @@ impl ConfigCache {
         }
         // A read failure of any source is retried by the next load, and a
         // source changed within the margin is read again until it settles.
-        let sources_read = user_path.and(self.user.warning.as_ref()).is_none()
-            && self.project.warning.is_none()
-            && guidance_resolved;
+        let sources_read = user_identity
+            .as_ref()
+            .is_none_or(|identity| identity.describes(&self.user))
+            && project_identity.describes(&self.project)
+            && guidance_resolved
+            && guidance
+                .as_ref()
+                .is_none_or(|identity| identity.stamp.is_some());
         let settled = [
             user_identity.as_ref(),
             Some(&project_identity),
@@ -2846,6 +2859,63 @@ mod tests {
             cache.effective_with_warnings(Some(&user), &project).0,
             oversized
         );
+
+        // Deduplication shortens the chain in place and keeps its buffer, so a
+        // tier within `MAX_CONFIG_TIER_BYTES` of repeated models retains more
+        // than `MERGED_CONFIG_RETAINED_BYTES_BOUND`.
+        let repeats = vec!["a"; 200_000];
+        let text =
+            serde_json::json!({ "history_summarizer": { "fallback_models": repeats } }).to_string();
+        assert!(text.len() as u64 <= MAX_CONFIG_TIER_BYTES);
+        std::fs::write(&user, text).unwrap();
+        settle();
+        let (deduplicated, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(deduplicated.model_chain, vec!["a"]);
+        assert!(
+            cache.merged.is_none(),
+            "the estimate counts the chain's retained capacity"
+        );
+    }
+
+    #[test]
+    fn a_tier_whose_entry_is_a_final_symlink_is_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        let tier = project.join(".eidnara/eidnara.jsonc");
+        std::fs::create_dir_all(project.join(".eidnara")).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        let mut cache = ConfigCache::default();
+        cache.effective_with_warnings(Some(&user), &project);
+
+        // `lstat` stamps the dangling link itself, while the tier cache's
+        // `stat` follows it and returns `ENOENT`.
+        std::os::unix::fs::symlink("generated.jsonc", &tier).unwrap();
+        settle();
+        let (dangling, dangling_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(matches!(dangling.admission, ConfigAdmission::Admitted));
+        assert!(dangling_warnings.is_empty(), "{dangling_warnings:?}");
+        assert!(cache.merged.is_none(), "the link's stamp describes no read");
+
+        // Creating the target keeps the link's own stamp; the read refuses the
+        // final symlink, so the load warns and is unresolved.
+        std::fs::write(
+            project.join(".eidnara/generated.jsonc"),
+            r#"{ "memory": { "enabled": false } }"#,
+        )
+        .unwrap();
+        let (linked, linked_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            matches!(linked.admission, ConfigAdmission::Unresolved { .. }),
+            "{linked_warnings:?}"
+        );
+        assert!(
+            linked_warnings
+                .iter()
+                .any(|warning| warning.contains("could not be read")),
+            "{linked_warnings:?}"
+        );
+        assert!(cache.merged.is_none());
     }
 
     #[test]
