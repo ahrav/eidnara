@@ -148,6 +148,8 @@ impl fmt::Debug for LeaseSpan<'_> {
 
 const WORD: usize = size_of::<u64>();
 
+const WORDS_PER_STEP: usize = 4;
+
 /// Per-byte atomic access width for a shared-memory range.
 ///
 /// `AccessShape` depends on the absolute address and length alone, so two parties touching the
@@ -222,17 +224,33 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
     let shape = AccessShape::of(source, destination.len());
     let (head, rest) = destination.split_at_mut(shape.head);
     let (words, tail) = rest.split_at_mut(shape.words * WORD);
+    let (steps, single_words) = words
+        .as_chunks_mut::<WORD>()
+        .0
+        .as_chunks_mut::<WORDS_PER_STEP>();
     // SAFETY: `shape` partitions exactly `[0, destination.len())`, which the caller keeps
-    // valid for reads and writes with no Rust reference over it; each word starts at an
-    // 8-aligned address and lies entirely within the range, so every `from_ptr` is aligned and
-    // in bounds.
+    // valid for reads and writes with no Rust reference over it. The word region starts at
+    // `source.add(shape.head)`, an 8-aligned address, and `steps` then `single_words` cover
+    // its `shape.words` words in order, so `word` stays 8-aligned, every `from_ptr` lies
+    // entirely within the range, and `word` ends at most one past it.
     unsafe {
         for (offset, byte) in head.iter_mut().enumerate() {
             byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
         }
-        for (word_start, chunk) in shape.word_starts().zip(words.as_chunks_mut::<WORD>().0) {
-            let word = AtomicU64::from_ptr(source.add(word_start).cast()).load(Ordering::Relaxed);
-            *chunk = word.to_ne_bytes().map(MaybeUninit::new);
+        let mut word = source.add(shape.head);
+        for step in steps {
+            let loaded: [u64; WORDS_PER_STEP] = std::array::from_fn(|index| {
+                AtomicU64::from_ptr(word.add(index * WORD).cast()).load(Ordering::Relaxed)
+            });
+            for (chunk, value) in step.iter_mut().zip(loaded) {
+                *chunk = value.to_ne_bytes().map(MaybeUninit::new);
+            }
+            word = word.add(WORDS_PER_STEP * WORD);
+        }
+        for chunk in single_words {
+            let value = AtomicU64::from_ptr(word.cast()).load(Ordering::Relaxed);
+            *chunk = value.to_ne_bytes().map(MaybeUninit::new);
+            word = word.add(WORD);
         }
         for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
             byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
@@ -544,11 +562,16 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        AccessShape, LeaseError, LeaseSpan, PayloadLease, WORD, copy_in, copy_out, copy_out_uninit,
-        observers,
+        AccessShape, LeaseError, LeaseSpan, PayloadLease, WORD, WORDS_PER_STEP, copy_in, copy_out,
+        copy_out_uninit, observers,
     };
     use crate::backend::retained::Retained;
     use std::mem::MaybeUninit;
+
+    /// Copy lengths below this reach two full word steps followed by up to three single words
+    /// at every shift. The uninitialized copy test round-trips each length through `copy_in`
+    /// and `copy_out_uninit`, so it covers every loop of both kernels.
+    const COPY_LENGTHS: usize = (2 * WORDS_PER_STEP + 4) * WORD;
 
     pub(crate) use super::retained_fixture;
 
@@ -708,9 +731,9 @@ mod tests {
     #[test]
     fn copy_out_uninit_initializes_every_byte_at_every_alignment_and_length() {
         use std::sync::atomic::AtomicU8;
-        let source: Vec<u8> = (0..64u8).collect();
+        let source: Vec<u8> = (0..128u8).collect();
         for shared_shift in 0..16 {
-            for len in 0..40 {
+            for len in 0..COPY_LENGTHS {
                 let shared: Vec<AtomicU8> = (0..len + shared_shift)
                     .map(|_| AtomicU8::new(0xff))
                     .collect();
@@ -737,7 +760,9 @@ mod tests {
     #[test]
     fn to_vec_copies_every_body_length_without_a_zero_fill() {
         let retained = retained_fixture();
-        let body: Vec<u8> = (0..40u8).map(|byte| byte.wrapping_mul(37)).collect();
+        let body: Vec<u8> = (0..COPY_LENGTHS as u8)
+            .map(|byte| byte.wrapping_mul(37))
+            .collect();
         for len in 0..body.len() {
             let lease = lease_over(&retained, 1, len as u64 + 1, &body[..len]);
             assert_eq!(lease.to_vec().unwrap(), body[..len], "len {len}");
