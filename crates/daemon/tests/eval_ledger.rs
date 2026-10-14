@@ -11,8 +11,8 @@ use std::num::NonZeroUsize;
 
 use daemon::packing::{ClaudeTokens, PreparationRefusal};
 use daemon::query_route::{
-    DenseLane, ExactAdmission, ExactReport, ExhaustiveProducer, LaneStatus, Phase, QueryFailure,
-    QueryOutcome, QueryRouteLimits, admit_lanes, execute, select,
+    DenseLane, ExactAdmission, ExactAuthority, ExactReport, ExhaustiveProducer, LaneStatus, Phase,
+    QueryFailure, QueryOutcome, QueryRouteLimits, admit_lanes, execute, select,
 };
 use eval_core::{
     ChainStage, Completed, Coverage, CoverageError, LedgerError, MARKERS,
@@ -79,7 +79,7 @@ fn drive(
         &fixture.projection,
         &fixture.store,
         authority,
-        None,
+        ExactAuthority::NOT_SOUGHT,
         limits,
         budget.shared(),
         query,
@@ -777,7 +777,7 @@ fn tap_returns_leave_production_output_byte_equal() {
                 project: &fixture.project,
                 destination: ArtifactDestination::Local,
             },
-            None,
+            ExactAuthority::NOT_SOUGHT,
             &limits(),
             budget.shared(),
             QUERY,

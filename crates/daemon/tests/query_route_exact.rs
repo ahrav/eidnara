@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use daemon::query_route::{
     ExactAdmission, ExactCertification, ExactRoute, HybridCause, LaneStatus, Phase, QueryFailure,
-    QueryOutcome, Terminal,
+    QueryOutcome, Terminal, Uncertified,
 };
 use retrieval::exact::{CertificateRefusal, Completion, Disqualification, ProofInvalidation};
 use retrieval::fusion::Lane;
 use serde_json::Value;
 use support::query_route::{
-    ALL_PHASES, Fixture, INVENTORY_EPOCH, QUERY, entry_ids, grant, limits, request_budget,
+    ALL_PHASES, Fixture, QUERY, entry_ids, fixed_epoch, grant, limits, request_budget,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -114,7 +114,7 @@ async fn a_healthy_explicit_proof_is_answered_directly_and_still_validated() {
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission),
             |phase| phases.push(phase),
         )
         .unwrap();
@@ -163,7 +163,7 @@ async fn a_healthy_explicit_proof_is_answered_directly_and_still_validated() {
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission)
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission)
                 .forcing_hybrid_for_test(),
             |phase| forced_phases.push(phase),
         )
@@ -185,7 +185,8 @@ async fn direct_and_forced_hybrid_executions_agree_on_the_target_and_provenance(
     let admission = grant(CancellationToken::new());
     let (_token, budget) = request_budget(10_000);
     let run = |forced: bool| {
-        let certification = ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission);
+        let certification =
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission);
         fixture
             .run_certified(
                 &limits(),
@@ -238,7 +239,7 @@ async fn every_unproven_request_hands_its_retained_rows_to_hybrid_retrieval() {
     let certificate = fixture.certificate();
     let admission = grant(CancellationToken::new());
     let (_token, budget) = request_budget(10_000);
-    let certified = || ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission);
+    let certified = || ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission);
 
     let mixed = fixture
         .run_certified(&limits(), budget.shared(), QUERY, certified(), |_| {})
@@ -305,7 +306,7 @@ async fn every_unproven_request_hands_its_retained_rows_to_hybrid_retrieval() {
     fixture.daemon.shutdown().await;
 }
 
-/// AC2: a moved kernel tip and a non-OK verdict disqualify the attempt from a direct answer; the eligible rows the resolver still retains are served through hybrid retrieval, and a row revalidation drops is attributed to the revalidation report.
+/// AC2: a moved kernel tip and a non-OK verdict disqualify the attempt from a direct answer; every row the resolver retains reaches fusion, and only eligible rows are served.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_authority_and_non_ok_rows_never_answer_directly() {
     let fixture = Fixture::build().await;
@@ -319,7 +320,7 @@ async fn stale_authority_and_non_ok_rows_never_answer_directly() {
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission),
             |_| {},
         )
         .unwrap();
@@ -344,7 +345,7 @@ async fn stale_authority_and_non_ok_rows_never_answer_directly() {
             &limits(),
             budget.shared(),
             "id:other",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission),
             |_| {},
         )
         .unwrap();
@@ -362,9 +363,7 @@ async fn stale_authority_and_non_ok_rows_never_answer_directly() {
         "the retired decision's rows are judged non-OK: {observations:?}"
     );
     assert_eq!(observations.eligible, retained(&retired).len());
-    for id in exact_fused(&retired) {
-        assert!(retained(&retired).contains(&id));
-    }
+    assert_eq!(exact_fused(&retired), retained(&retired));
     assert!(
         entry_ids(&retired.body).is_empty(),
         "no retired row is served: {}",
@@ -373,7 +372,7 @@ async fn stale_authority_and_non_ok_rows_never_answer_directly() {
     fixture.daemon.shutdown().await;
 }
 
-/// AC4: a certificate the projection refuses, a missing certificate, a withdrawn admission, and a final-use invalidation each form no direct answer, and the request is still served from the same rows; a healthy admitted control reaches the direct answer.
+/// AC4: a certificate the projection refuses, a missing certificate, an admission withdrawn before resolution or before final use, an inventory epoch that moves before final use, and a canonical change before final use each form no direct answer, and the request is still served from the same rows; a healthy admitted control reaches the direct answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refused_or_withdrawn_authority_falls_back_and_a_healthy_control_answers_directly() {
     let fixture = Fixture::build().await;
@@ -383,7 +382,10 @@ async fn refused_or_withdrawn_authority_falls_back_and_a_healthy_control_answers
     let baseline = fixture
         .run(&limits(), budget.shared(), "id:rule", |_| {})
         .unwrap();
-    assert_eq!(baseline.exact.route, ExactRoute::Uncertified(None));
+    assert_eq!(
+        baseline.exact.route,
+        ExactRoute::Uncertified(Uncertified::NotSought)
+    );
     let served = entry_ids(&baseline.body);
     assert!(!served.is_empty());
 
@@ -392,7 +394,7 @@ async fn refused_or_withdrawn_authority_falls_back_and_a_healthy_control_answers
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &healthy),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &healthy),
             |_| {},
         )
         .unwrap();
@@ -404,13 +406,19 @@ async fn refused_or_withdrawn_authority_falls_back_and_a_healthy_control_answers
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, "inventory-other", &healthy),
+            ExactCertification::for_test(
+                certificate.clone(),
+                &|| "inventory-other".to_string(),
+                &healthy,
+            ),
             |_| {},
         )
         .unwrap();
     assert!(matches!(
         other_epoch.exact.route,
-        ExactRoute::Uncertified(Some(CertificateRefusal::InventoryEpochMismatch { .. }))
+        ExactRoute::Uncertified(Uncertified::Refused(
+            CertificateRefusal::InventoryEpochMismatch { .. }
+        ))
     ));
     assert_eq!(entry_ids(&other_epoch.body), served);
 
@@ -421,34 +429,83 @@ async fn refused_or_withdrawn_authority_falls_back_and_a_healthy_control_answers
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&stale, INVENTORY_EPOCH, &healthy),
+            ExactCertification::for_test(stale.clone(), &fixed_epoch, &healthy),
             |_| {},
         )
         .unwrap();
     assert!(matches!(
         mismatched.exact.route,
-        ExactRoute::Uncertified(Some(_))
+        ExactRoute::Uncertified(Uncertified::Refused(_))
     ));
     assert_eq!(entry_ids(&mismatched.body), served);
 
+    // A withdrawn admission admits no exact work: before resolution the lane reads pages, and at final use the resolution is discarded for page reads.
     let withdrawn = CancellationToken::new();
-    let revoked_grant = grant(withdrawn.clone());
-    let revoke = || withdrawn.cancel();
+    withdrawn.cancel();
+    let revoked_grant = grant(withdrawn);
+    let unresolved = fixture
+        .run_certified(
+            &limits(),
+            budget.shared(),
+            "id:rule",
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &revoked_grant),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        unresolved.exact.route,
+        ExactRoute::Uncertified(Uncertified::Withdrawn)
+    );
+    assert!(unresolved.exact.resolutions.is_empty());
+    assert_ne!(unresolved.exact.admission, ExactAdmission::Resolved);
+    assert_eq!(entry_ids(&unresolved.body), served);
+    let withdrawing = CancellationToken::new();
+    let late_grant = grant(withdrawing.clone());
+    let revoke = || withdrawing.cancel();
     let revoked = fixture
         .run_certified(
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &revoked_grant)
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &late_grant)
                 .before_final_use_for_test(&revoke),
             |_| {},
         )
         .unwrap();
     assert_eq!(
         revoked.exact.route,
-        ExactRoute::Hybrid(HybridCause::Revoked)
+        ExactRoute::Uncertified(Uncertified::Withdrawn)
     );
+    assert_ne!(revoked.exact.admission, ExactAdmission::Resolved);
     assert_eq!(entry_ids(&revoked.body), served);
+
+    // The inventory epoch is read again at final use, so a lease change after resolution invalidates the proof.
+    let moved = std::cell::Cell::new(false);
+    let moving_epoch = || {
+        if moved.get() {
+            "inventory-moved".to_string()
+        } else {
+            fixed_epoch()
+        }
+    };
+    let move_epoch = || moved.set(true);
+    let epoch_changed = fixture
+        .run_certified(
+            &limits(),
+            budget.shared(),
+            "id:rule",
+            ExactCertification::for_test(certificate.clone(), &moving_epoch, &healthy)
+                .before_final_use_for_test(&move_epoch),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        epoch_changed.exact.route,
+        ExactRoute::Hybrid(HybridCause::FinalUse(
+            ProofInvalidation::InventoryEpochChanged
+        ))
+    );
+    assert_eq!(entry_ids(&epoch_changed.body), served);
 
     let commit = || fixture.move_kernel_snapshot();
     let invalidated = fixture
@@ -456,7 +513,7 @@ async fn refused_or_withdrawn_authority_falls_back_and_a_healthy_control_answers
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &healthy)
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &healthy)
                 .before_final_use_for_test(&commit),
             |_| {},
         )
@@ -489,7 +546,7 @@ async fn the_original_budget_ends_a_direct_or_resolved_request_at_every_stage() 
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission),
             |phase| {
                 reached.push(phase);
                 if phase == target {
@@ -511,7 +568,7 @@ async fn the_original_budget_ends_a_direct_or_resolved_request_at_every_stage() 
             &limits(),
             budget.shared(),
             "id:rule",
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission),
             |phase| {
                 reached.push(phase);
                 if phase == target {
@@ -534,7 +591,7 @@ async fn the_original_budget_ends_a_direct_or_resolved_request_at_every_stage() 
         &limits(),
         budget.shared(),
         "id:rule",
-        ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission)
+        ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission)
             .before_final_use_for_test(&cancel),
         |phase| reached.push(phase),
     );
@@ -552,7 +609,7 @@ async fn the_original_budget_ends_a_direct_or_resolved_request_at_every_stage() 
             &limits(),
             budget.shared(),
             QUERY,
-            ExactCertification::new(&certificate, INVENTORY_EPOCH, &admission),
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission),
             |phase| {
                 reached.push(phase);
                 if phase == target {
@@ -571,5 +628,124 @@ async fn the_original_budget_ends_a_direct_or_resolved_request_at_every_stage() 
             "no lane continues after the global stop: {reached:?}"
         );
     }
+    fixture.daemon.shutdown().await;
+}
+
+/// AC3: resolution and final use wait on the kernel only until the request's own deadline. With every kernel reader held well past that deadline, a direct request ends `deadline` near the deadline instead of when the hold ends, both when the hold covers resolution and when it starts at final use; a stage running under a renewed or unbounded budget would wait out the hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kernel_waits_inside_resolution_and_final_use_end_at_the_request_deadline() {
+    const HOLD: Duration = Duration::from_secs(4);
+    const BUDGET_MS: u64 = 800;
+    let fixture = Fixture::build().await;
+    let certificate = fixture.certificate();
+    let admission = grant(CancellationToken::new());
+    let holders = std::sync::Mutex::new(Vec::new());
+    let hold_readers = || {
+        let held = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let holder = std::sync::Arc::clone(&held);
+        let store = std::sync::Arc::clone(&fixture.store);
+        holders.lock().unwrap().push(std::thread::spawn(move || {
+            store.hold_readers_for_test(&holder, HOLD)
+        }));
+        held.wait();
+    };
+    for stage in ["resolution", "final use"] {
+        let (_token, budget) = request_budget(BUDGET_MS);
+        let started = std::time::Instant::now();
+        let mut reached = Vec::new();
+        let at_final_use = || {
+            if stage == "final use" {
+                hold_readers();
+            }
+        };
+        let outcome = fixture.run_certified(
+            &limits(),
+            budget.shared(),
+            "id:rule",
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission)
+                .before_final_use_for_test(&at_final_use),
+            |phase| {
+                reached.push(phase);
+                if phase == Phase::Exact && stage == "resolution" {
+                    hold_readers();
+                }
+            },
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            outcome.err(),
+            Some(QueryFailure::Terminal(Terminal::Deadline)),
+            "{stage}"
+        );
+        assert_eq!(reached, vec![Phase::Probes, Phase::Exact], "{stage}");
+        assert!(
+            elapsed < HOLD - Duration::from_secs(1),
+            "{stage} waited {elapsed:?}, past its {BUDGET_MS} ms deadline"
+        );
+        let held: Vec<_> = holders.lock().unwrap().drain(..).collect();
+        assert_eq!(held.len(), 1, "{stage} held the readers once");
+        for holder in held {
+            holder.join().unwrap();
+        }
+    }
+    fixture.daemon.shutdown().await;
+}
+
+/// AC2: downstream bounds apply to the direct and hybrid answers alike. A union bound below the retained rows refuses both; a one-row result bound serves the same first entry from both, marks both truncated, and every omitted retained row stays in the ranking the result bound cut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downstream_bounds_apply_to_direct_and_hybrid_answers_alike() {
+    let fixture = Fixture::build().await;
+    let certificate = fixture.certificate();
+    let admission = grant(CancellationToken::new());
+    let (_token, budget) = request_budget(10_000);
+    let run = |limits: &daemon::query_route::QueryRouteLimits, forced: bool| {
+        let certification =
+            ExactCertification::for_test(certificate.clone(), &fixed_epoch, &admission);
+        fixture.run_certified(
+            limits,
+            budget.shared(),
+            "id:rule",
+            if forced {
+                certification.forcing_hybrid_for_test()
+            } else {
+                certification
+            },
+            |_| {},
+        )
+    };
+    let rows = projected(&fixture, "rule").len();
+    assert!(rows >= 2);
+    let mut union = limits();
+    union.fused_union = NonZeroUsize::new(rows - 1).unwrap();
+    for forced in [false, true] {
+        assert_eq!(
+            run(&union, forced).err(),
+            Some(QueryFailure::Unavailable("fused_union")),
+            "forced hybrid: {forced}"
+        );
+    }
+    let mut one = limits();
+    one.result_rows = NonZeroUsize::new(1).unwrap();
+    let direct = run(&one, false).unwrap();
+    let hybrid = run(&one, true).unwrap();
+    assert_eq!(direct.exact.route, ExactRoute::Direct);
+    for outcome in [&direct, &hybrid] {
+        assert_eq!(outcome.body["truncated"], true);
+        let served = entry_ids(&outcome.body);
+        assert_eq!(served.len(), 1);
+        let ranked: BTreeSet<String> = outcome
+            .fused
+            .entries()
+            .iter()
+            .map(|entry| entry.occurrence().to_string())
+            .collect();
+        for omitted in retained(outcome).difference(&served.iter().cloned().collect()) {
+            assert!(
+                ranked.contains(omitted) || outcome.fused.entries().len() > served.len(),
+                "an omitted row is cut by the result bound: {omitted}"
+            );
+        }
+    }
+    assert_eq!(entry_ids(&direct.body), entry_ids(&hybrid.body));
     fixture.daemon.shutdown().await;
 }

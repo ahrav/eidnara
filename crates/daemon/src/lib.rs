@@ -2784,9 +2784,9 @@ pub struct HandlerCore {
     capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
     #[cfg(any(test, feature = "test-support"))]
     query_embedder_override: Mutex<Option<Arc<dyn query_route::QueryEmbedder>>>,
-    /// The exact route of every `retrieval.query` answer, oldest first.
+    /// The exact route of the latest `retrieval.query` answer.
     #[cfg(any(test, feature = "test-support"))]
-    exact_routes: Arc<Mutex<Vec<query_route::ExactRoute>>>,
+    last_exact_route: Arc<Mutex<Option<query_route::ExactRoute>>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     /// Test-side mirror of a client: full input arrays and applied outputs per session, so wire
@@ -3782,7 +3782,7 @@ impl Handler {
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
-            exact_routes: Arc::default(),
+            last_exact_route: Arc::default(),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4296,7 +4296,7 @@ impl Handler {
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
-            exact_routes: Arc::default(),
+            last_exact_route: Arc::default(),
             guidance_now_ms: Mutex::new(None),
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),

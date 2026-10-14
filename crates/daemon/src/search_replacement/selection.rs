@@ -1186,10 +1186,6 @@ impl SearchReader {
     pub fn consumer(&self) -> &ConsumerBinding {
         &self.family.certificate.intent.consumer
     }
-    /// The gate's admission this reader was pinned under; its token fires when the gate withdraws the evidence.
-    pub fn grant(&self) -> &Admission {
-        &self.grant
-    }
     pub fn handoff(&self) -> &LifecycleIntent {
         &self.family.certificate.intent
     }
@@ -1198,19 +1194,23 @@ impl SearchReader {
         &self.family.projection
     }
 
+    /// Whether the family is still available and unquarantined and the gate still stands behind this reader's admission.
+    pub fn usable(&self) -> bool {
+        !self
+            .family
+            .unavailable
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !self.grant.invalidated.is_cancelled()
+            && self.family.projection.quarantine().is_none()
+    }
+
     /// Local observations do not authorize egress; `authorize` rechecks canonical eligibility at use.
     pub fn read<T>(
         &self,
         budget: &EvalBudget,
         read: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, BuildError> {
-        if self
-            .family
-            .unavailable
-            .load(std::sync::atomic::Ordering::Acquire)
-            || self.grant.invalidated.is_cancelled()
-            || self.family.projection.quarantine().is_some()
-        {
+        if !self.usable() {
             return Err(BuildError::Invalid("pinned read unavailable"));
         }
         Ok(self

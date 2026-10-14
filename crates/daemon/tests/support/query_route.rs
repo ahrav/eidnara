@@ -8,7 +8,7 @@ use std::time::Duration;
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
 use daemon::projection_gates::{Admission, EntryPoint, ProjectionHook};
 use daemon::query_route::{
-    DenseLane, DenseLimits, ExactCertification, Phase, QueryFailure, QueryOutcome,
+    DenseLane, DenseLimits, ExactAuthority, ExactCertification, Phase, QueryFailure, QueryOutcome,
     QueryRouteLimits, execute,
 };
 use daemon::request_budget::{RequestBudget, SharedBudget};
@@ -403,7 +403,7 @@ impl Fixture {
                 project: &self.project,
                 destination: ArtifactDestination::Local,
             },
-            None,
+            ExactAuthority::NOT_SOUGHT,
             limits,
             shared,
             query,
@@ -453,7 +453,7 @@ impl Fixture {
                 project: &self.project,
                 destination: ArtifactDestination::Local,
             },
-            Some(certification),
+            ExactAuthority::Certified(&certification),
             limits,
             shared,
             query,
@@ -474,7 +474,7 @@ impl Fixture {
                 project,
                 destination: ArtifactDestination::Local,
             },
-            None,
+            ExactAuthority::NOT_SOUGHT,
             &limits(),
             shared,
             QUERY,
@@ -579,6 +579,11 @@ impl Fixture {
 
 /// The inventory epoch [`Fixture::certificate`] certifies under.
 pub const INVENTORY_EPOCH: &str = "inventory-query-route";
+
+/// The current inventory epoch a fixture certification reads: always [`INVENTORY_EPOCH`].
+pub fn fixed_epoch() -> String {
+    INVENTORY_EPOCH.to_string()
+}
 
 /// A reader's admission whose withdrawal `token` controls.
 pub fn grant(token: CancellationToken) -> Admission {

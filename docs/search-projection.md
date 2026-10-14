@@ -168,35 +168,42 @@ or stale on every surface.
 
 ## Exact routing on `retrieval.query`
 
-The route's handler pins a reader, then asks it for a completeness
-certificate when the request names an `id:` selector. With a certificate,
-the exact lane resolves each `id:` selector through `retrieval::exact::resolve`
+The route's handler pins a reader, then calls `ExactCertification::issue`
+when the request names an `id:` selector. Only a gate-admitted pin yields a
+`SearchReader`, so only such a reader certifies. With a certification, the
+exact lane resolves each `id:` selector through `retrieval::exact::resolve`
 under the request's one `SharedBudget`, inside the same interruptible
 projection read as the other lanes. Each attempt reads at most
 `exact_page_rows` times `exact_pages` rows and retains at most that many
-rows, capped by the kernel's batch bound and by `response_bytes`.
+rows, capped by the kernel's batch bound and by `response_bytes`. The
+inventory epoch is read from the reader at resolution and again at final use.
 
 Only a whole-request selector whose resolution holds a proof routes directly.
-The route then checks the reader's admission, polls the budget, and runs
-`validate_for_use` under that read. A proof that passes skips the lexical
-lane, the dense lane, admission, fusion, and fused revalidation;
-`Fused::direct` serves the proof's occurrences in exact-lane order, and claim
-validation and response bounds apply to them as to a fused answer. Every
+The route then polls the budget, checks that the reader is still usable (its
+family available and unquarantined, its admission standing), and runs
+`validate_for_use` under that read; the reader is checked once more after
+validation. A proof that passes skips admission, fusion, and fused
+revalidation, and the lexical and dense lanes, which a whole-request selector
+leaves undeclared. `Fused::direct` serves the proof's occurrences in
+exact-lane order under the same `fused_union` and response bounds as a fused
+answer, and claim validation judges them at the response's snapshot. Every
 other resolved request continues through hybrid retrieval: a mention beside
-prose or other selectors, a resolution without a proof, a withdrawn admission,
-and a proof that final use invalidates. The hybrid exact lane ranks every row
-the resolver retained before fusion, the union bound, and revalidation, so a
-later omission belongs to revalidation, claim validation, or the response
-bounds. `ExactReport::route` records the route and `ExactReport::resolutions`
-the attempts.
+prose or other selectors, a resolution without a proof, and a proof that
+final use invalidates. The hybrid exact lane ranks every row the resolver
+retained before fusion, the union bound, and revalidation, so a later
+omission belongs to revalidation, claim validation, or the response bounds.
+A refusal on a later selector ends the lane with the rows earlier selectors
+retained. `ExactReport::route` records the route and
+`ExactReport::resolutions` the attempts.
 
 A local bound (`page_bound`, `row_bound`, `retention_bound`) marks the exact
 lane incomplete and the request continues. A budget that ends during
-resolution, during final use, or at any later phase ends the request as
-`deadline` or `cancelled`; no later lane starts. A changed kernel incarnation
-makes the exact lane unavailable. Without a certificate, or when the
-projection refuses one, the lane reads exact pages uncertified, the kernel
-judges them at admission, and the request continues through hybrid retrieval.
+certification, resolution, final use, or any later phase ends the request as
+`deadline` or `cancelled`; no later lane starts. A reader that issues no
+certificate, a certificate the projection refuses at the first selector, and
+a reader withdrawn before resolution or before final use all route the lane
+to uncertified page reads, which the kernel judges at admission; the request
+continues through hybrid retrieval and its exact work forms no proof.
 
 ## Admission status
 

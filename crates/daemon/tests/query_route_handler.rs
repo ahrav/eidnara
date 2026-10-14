@@ -625,7 +625,7 @@ async fn a_running_daemon_answers_a_certified_explicit_identifier_directly() {
     let started = Instant::now();
     let direct = loop {
         let answer = body(daemon.outcome(request(&project, "id:rule")).await);
-        let routed = daemon.handler().exact_routes_for_test().last().cloned();
+        let routed = daemon.handler().last_exact_route_for_test();
         // The family serves uncertified until its catch-up covers the commit and the consumer acknowledges it.
         if routed == Some(ExactRoute::Direct) {
             break answer;
@@ -653,8 +653,8 @@ async fn a_running_daemon_answers_a_certified_explicit_identifier_directly() {
             .await,
     );
     assert_eq!(
-        daemon.handler().exact_routes_for_test().last(),
-        Some(&ExactRoute::Hybrid(HybridCause::Mention))
+        daemon.handler().last_exact_route_for_test(),
+        Some(ExactRoute::Hybrid(HybridCause::Mention))
     );
     for entry in mixed["entries"].as_array().unwrap() {
         assert_eq!(entry["canonical"]["decision_object_id"], "rule", "{mixed}");

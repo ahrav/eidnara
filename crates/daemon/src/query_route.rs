@@ -61,6 +61,8 @@ use crate::request_budget::{
 };
 use crate::search_lifecycle_owner::SearchLifecycleOwner;
 use crate::search_projection::{SearchProjection, SearchProjectionError};
+use crate::search_replacement::BuildError;
+use crate::search_replacement::selection::SearchReader;
 use crate::transform_unit::{UnitOutcome, UnitRunner};
 use crate::vector_generation::ExpectedVectors;
 use crate::vector_reader::{
@@ -376,12 +378,25 @@ pub struct ExactReport {
 pub enum ExactRoute {
     /// The request named no `id:` selector.
     Undeclared,
-    /// The lane read pages with no completeness certificate, or with one the projection refused, so it formed no proof.
-    Uncertified(Option<CertificateRefusal>),
+    /// The lane read pages uncertified, so it formed no proof.
+    Uncertified(Uncertified),
     /// The resolver ran and the request continued through hybrid retrieval.
     Hybrid(HybridCause),
-    /// A whole-request proof passed final use; lexical, dense, and fusion never ran.
+    /// A whole-request proof passed final use; admission, fusion, and fused revalidation never ran.
     Direct,
+}
+
+/// Why the exact lane read pages uncertified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Uncertified {
+    /// The caller sought no certificate.
+    NotSought,
+    /// The pinned reader issued no certificate; the reason is the reader's refusal.
+    Withheld(String),
+    /// The projection refused the certificate before the first selector resolved.
+    Refused(CertificateRefusal),
+    /// The reader's admission or family was withdrawn before final use, so the resolution is discarded.
+    Withdrawn,
 }
 
 /// Why a resolved request continued through hybrid retrieval.
@@ -391,12 +406,8 @@ pub enum HybridCause {
     Mention,
     /// The resolution formed no proof; its completion, disqualification, and observed targets say why.
     Unproven,
-    /// The reader's admission was withdrawn before final use.
-    Revoked,
     /// Final use invalidated the proof.
     FinalUse(ProofInvalidation),
-    /// Final use failed in the engine or the kernel.
-    FinalUseFailed,
     /// A test redirected a proven request through hybrid retrieval.
     Forced,
 }
@@ -417,31 +428,67 @@ pub enum ExactAdmission {
     Resolved,
 }
 
-/// The completeness certificate a pinned family issued, the inventory epoch it names, and the reader's admission. The exact lane resolves `id:` selectors only under a certification; without one it reads pages and no request skips hybrid retrieval.
-#[derive(Clone, Copy)]
+/// Selects how [`execute`] runs the exact lane: uncertified page reads, or resolution under a certification.
+pub enum ExactAuthority<'a> {
+    Uncertified(Uncertified),
+    Certified(&'a ExactCertification<'a>),
+}
+
+impl ExactAuthority<'_> {
+    pub const NOT_SOUGHT: Self = Self::Uncertified(Uncertified::NotSought);
+}
+
+/// Who vouches for a certification at resolution and again at final use.
+enum Grantor<'a> {
+    Reader {
+        reader: &'a SearchReader,
+        kernel: &'a KernelStore,
+    },
+    #[cfg(any(test, feature = "test-support"))]
+    Fixed {
+        epoch: &'a dyn Fn() -> String,
+        grant: &'a Admission,
+    },
+}
+
+/// A completeness certificate and the pinned reader that issued it. The exact lane resolves `id:` selectors only under a certification; the inventory epoch and the reader's admission are read again at resolution and at final use.
 pub struct ExactCertification<'a> {
-    certificate: &'a CompletenessCertificate,
-    inventory_epoch: &'a str,
-    grant: &'a Admission,
-    #[cfg(any(test, feature = "test-support"))]
+    certificate: CompletenessCertificate,
+    grantor: Grantor<'a>,
     forced_hybrid: bool,
-    #[cfg(any(test, feature = "test-support"))]
     before_final_use: Option<&'a dyn Fn()>,
 }
 
 impl<'a> ExactCertification<'a> {
-    pub fn new(
-        certificate: &'a CompletenessCertificate,
-        inventory_epoch: &'a str,
+    /// Certifies `reader`'s family for one request; only a gate-admitted pin yields a reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reader's refusal to certify its inventory.
+    pub fn issue(
+        reader: &'a SearchReader,
+        kernel: &'a KernelStore,
+        budget: &EvalBudget,
+    ) -> Result<Self, BuildError> {
+        Ok(Self {
+            certificate: reader.completeness_certificate(kernel, budget)?,
+            grantor: Grantor::Reader { reader, kernel },
+            forced_hybrid: false,
+            before_final_use: None,
+        })
+    }
+
+    /// A certification over a fixture projection: `epoch` supplies the current inventory epoch each time it is read, and `grant` the admission.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(
+        certificate: CompletenessCertificate,
+        epoch: &'a dyn Fn() -> String,
         grant: &'a Admission,
     ) -> Self {
         Self {
             certificate,
-            inventory_epoch,
-            grant,
-            #[cfg(any(test, feature = "test-support"))]
+            grantor: Grantor::Fixed { epoch, grant },
             forced_hybrid: false,
-            #[cfg(any(test, feature = "test-support"))]
             before_final_use: None,
         }
     }
@@ -453,16 +500,6 @@ impl<'a> ExactCertification<'a> {
         self
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    fn final_use_hook(&self) {
-        if let Some(hook) = self.before_final_use {
-            hook();
-        }
-    }
-
-    #[cfg(not(any(test, feature = "test-support")))]
-    fn final_use_hook(&self) {}
-
     /// Routes a proven request through hybrid retrieval, so a test compares the two routes in separate executions.
     #[cfg(any(test, feature = "test-support"))]
     pub fn forcing_hybrid_for_test(mut self) -> Self {
@@ -470,21 +507,20 @@ impl<'a> ExactCertification<'a> {
         self
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    fn forced_hybrid(&self) -> bool {
-        self.forced_hybrid
+    fn epoch(&self) -> String {
+        match &self.grantor {
+            Grantor::Reader { reader, kernel } => reader.inventory_epoch(kernel),
+            #[cfg(any(test, feature = "test-support"))]
+            Grantor::Fixed { epoch, .. } => epoch(),
+        }
     }
 
-    #[cfg(not(any(test, feature = "test-support")))]
-    fn forced_hybrid(&self) -> bool {
-        false
-    }
-
-    fn authority(&self, authority: Authority<'a>) -> retrieval::exact::Authority<'a> {
-        retrieval::exact::Authority {
-            project: authority.project,
-            destination: authority.destination,
-            inventory_epoch: self.inventory_epoch,
+    /// Whether the reader's admission and family still stand.
+    fn usable(&self) -> bool {
+        match &self.grantor {
+            Grantor::Reader { reader, .. } => reader.usable(),
+            #[cfg(any(test, feature = "test-support"))]
+            Grantor::Fixed { grant, .. } => !grant.invalidated.is_cancelled(),
         }
     }
 }
@@ -1157,18 +1193,6 @@ enum ExactRead {
     Resolved(ResolvedLane),
 }
 
-impl ExactRead {
-    fn undeclared(&self) -> bool {
-        matches!(
-            self,
-            Self::Pages {
-                read: LaneRead::Ended(LaneStatus::Undeclared),
-                ..
-            }
-        )
-    }
-}
-
 struct ResolvedLane {
     hits: Vec<ScopedHit>,
     status: LaneStatus,
@@ -1177,13 +1201,13 @@ struct ResolvedLane {
 }
 
 impl ResolvedLane {
-    fn ended(status: LaneStatus, resolutions: Vec<Resolution>) -> Self {
-        Self {
-            hits: Vec::new(),
-            status,
-            resolutions,
-            route: ExactRoute::Hybrid(HybridCause::Unproven),
-        }
+    /// Ends the lane at `reason`, keeping the rows earlier selectors retained.
+    fn stop(&mut self, reason: &'static str) {
+        self.status = if self.hits.is_empty() {
+            LaneStatus::Unavailable(reason)
+        } else {
+            LaneStatus::incomplete(reason)
+        };
     }
 }
 
@@ -1200,16 +1224,21 @@ fn resolve_bounds(limits: &QueryRouteLimits) -> ResolveBounds {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What the exact lane reads under: the projection connection, the kernel, and the request's authority, limits, and budget.
+#[derive(Clone, Copy)]
+struct ExactScope<'a> {
+    conn: &'a GuardedConn<'a>,
+    kernel: &'a KernelStore,
+    authority: Authority<'a>,
+    limits: &'a QueryRouteLimits,
+    budget: &'a SharedBudget,
+}
+
 fn exact_lane(
-    conn: &GuardedConn<'_>,
-    kernel: &KernelStore,
+    scope: ExactScope<'_>,
     kernel_incarnation_id: &str,
-    authority: Authority<'_>,
-    certification: Option<ExactCertification<'_>>,
+    exact: &ExactAuthority<'_>,
     intent: &Intent,
-    limits: &QueryRouteLimits,
-    budget: &SharedBudget,
 ) -> Result<ExactRead, QueryFailure> {
     let object_ids = object_ids(intent);
     if object_ids.is_empty() {
@@ -1218,98 +1247,104 @@ fn exact_lane(
             route: ExactRoute::Undeclared,
         });
     }
-    if object_ids.len() > limits.probes.get() {
+    if object_ids.len() > scope.limits.probes.get() {
         return Err(QueryFailure::InvalidQuery(format!(
             "{} selectors exceed the {} probe bound",
             object_ids.len(),
-            limits.probes
+            scope.limits.probes
         )));
     }
-    let refused = match certification {
-        Some(certification) => {
-            match resolve_lane(
-                conn,
-                kernel,
-                authority,
-                certification,
-                intent,
-                &object_ids,
-                limits,
-                budget,
-            )? {
-                Ok(lane) => return Ok(ExactRead::Resolved(lane)),
-                Err(refusal) => Some(refusal),
+    let uncertified = match exact {
+        ExactAuthority::Uncertified(uncertified) => uncertified.clone(),
+        ExactAuthority::Certified(certification) if !certification.usable() => {
+            Uncertified::Withdrawn
+        }
+        ExactAuthority::Certified(certification) => {
+            let lane = resolve_lane(scope, certification, intent, &object_ids)?;
+            match lane.route {
+                ExactRoute::Uncertified(uncertified) => uncertified,
+                _ => return Ok(ExactRead::Resolved(lane)),
             }
         }
-        None => None,
     };
     Ok(ExactRead::Pages {
-        read: exact_read(conn, kernel_incarnation_id, &object_ids, limits, budget)?,
-        route: ExactRoute::Uncertified(refused),
+        read: exact_read(
+            scope.conn,
+            kernel_incarnation_id,
+            &object_ids,
+            scope.limits,
+            scope.budget,
+        )?,
+        route: ExactRoute::Uncertified(uncertified),
     })
 }
 
-/// Resolves each `id:` selector under one certification, then routes the request: only a whole-request proof that passes final use skips hybrid retrieval. A certificate the projection refuses ends resolution so the lane reads pages instead.
-#[allow(clippy::too_many_arguments)]
+/// Resolves each `id:` selector under one certification, then routes the request. A refusal on a later selector ends the lane with the rows earlier selectors retained; a certificate refused at the first selector, or an admission withdrawn before final use, routes the lane to uncertified page reads.
 fn resolve_lane(
-    conn: &GuardedConn<'_>,
-    kernel: &KernelStore,
-    authority: Authority<'_>,
-    certification: ExactCertification<'_>,
+    scope: ExactScope<'_>,
+    certification: &ExactCertification<'_>,
     intent: &Intent,
     object_ids: &[&str],
-    limits: &QueryRouteLimits,
-    budget: &SharedBudget,
-) -> Result<Result<ResolvedLane, CertificateRefusal>, QueryFailure> {
+) -> Result<ResolvedLane, QueryFailure> {
+    let budget = scope.budget;
     let whole = matches!(intent, Intent::Direct(_));
-    let mut lane = ResolvedLane::ended(LaneStatus::Complete, Vec::new());
+    let intent = if whole {
+        RequestIntent::WholeRequest
+    } else {
+        RequestIntent::Mention
+    };
+    let bounds = resolve_bounds(scope.limits);
+    let epoch = certification.epoch();
+    let authority = retrieval::exact::Authority {
+        project: scope.authority.project,
+        destination: scope.authority.destination,
+        inventory_epoch: &epoch,
+    };
+    let mut lane = ResolvedLane {
+        hits: Vec::new(),
+        status: LaneStatus::Complete,
+        resolutions: Vec::new(),
+        route: ExactRoute::Hybrid(HybridCause::Unproven),
+    };
     for object_id in object_ids {
         let request = ResolveRequest {
             query: ExactQuery::CanonicalObject(object_id.as_bytes()),
-            intent: if whole {
-                RequestIntent::WholeRequest
-            } else {
-                RequestIntent::Mention
-            },
-            certificate: certification.certificate,
-            authority: certification.authority(authority),
-            bounds: resolve_bounds(limits),
+            intent,
+            certificate: &certification.certificate,
+            authority,
+            bounds,
         };
-        let unavailable = |reason, resolutions| {
-            Ok(Ok(ResolvedLane::ended(
-                LaneStatus::Unavailable(reason),
-                resolutions,
-            )))
-        };
-        let resolution = match resolve(conn, kernel, &request, budget.eval()) {
+        let resolution = match resolve(scope.conn, scope.kernel, &request, budget.eval()) {
             Ok(resolution) => resolution,
             Err(ResolveRefusal::BudgetExhausted) => return Err(exhaustion(budget).into()),
-            Err(ResolveRefusal::Certificate(refusal)) => return Ok(Err(refusal)),
-            Err(ResolveRefusal::Lookup(refusal)) => {
-                return match lookup_refusal(&refusal) {
-                    LaneRefusal::Budget => Err(exhaustion(budget).into()),
-                    LaneRefusal::Reason(reason) => unavailable(reason, lane.resolutions),
-                };
+            Err(ResolveRefusal::Certificate(refusal)) if lane.resolutions.is_empty() => {
+                lane.route = ExactRoute::Uncertified(Uncertified::Refused(refusal));
+                return Ok(lane);
             }
-            Err(ResolveRefusal::Projection(error)) => {
-                return unavailable(projection_reason(&error), lane.resolutions);
-            }
-            Err(ResolveRefusal::Kernel(KernelError::Deadline)) => {
-                return Err(exhaustion(budget).into());
-            }
-            Err(ResolveRefusal::Kernel(_)) => return unavailable("kernel", lane.resolutions),
-            Err(ResolveRefusal::PageOverBound | ResolveRefusal::RetainedOverBound) => {
-                return unavailable("exact_bound", lane.resolutions);
+            Err(refusal) => {
+                lane.stop(match &refusal {
+                    ResolveRefusal::Lookup(refusal) => match lookup_refusal(refusal) {
+                        LaneRefusal::Budget => return Err(exhaustion(budget).into()),
+                        LaneRefusal::Reason(reason) => reason,
+                    },
+                    ResolveRefusal::Projection(error) => projection_reason(error),
+                    ResolveRefusal::Certificate(_) => "certificate",
+                    ResolveRefusal::Kernel(_) => "kernel",
+                    ResolveRefusal::BudgetExhausted
+                    | ResolveRefusal::PageOverBound
+                    | ResolveRefusal::RetainedOverBound => "exact_bound",
+                });
+                break;
             }
         };
-        let reason = match resolution.completion {
+        let retained = Arc::clone(&resolution.retained);
+        let stop = match resolution.completion {
             ExactCompletion::Complete | ExactCompletion::NoMatch => None,
             ExactCompletion::Incomplete(ExactIncompleteReason::BudgetExhausted) => {
                 return Err(exhaustion(budget).into());
             }
             ExactCompletion::Incomplete(ExactIncompleteReason::KernelIncarnationChanged) => {
-                lane.resolutions.push(resolution);
-                return unavailable("kernel_incarnation_changed", lane.resolutions);
+                Some("kernel_incarnation_changed")
             }
             ExactCompletion::Incomplete(ExactIncompleteReason::RowBound) => Some("row_bound"),
             ExactCompletion::Incomplete(ExactIncompleteReason::PageBound) => Some("page_bound"),
@@ -1317,66 +1352,73 @@ fn resolve_lane(
                 Some("retention_bound")
             }
         };
-        if let Some(reason) = reason
+        lane.resolutions.push(resolution);
+        let mut identity = false;
+        for row in retained.iter() {
+            match hit(&row.occurrence_id, RawScore::Exact) {
+                Ok(hit) => lane.hits.push(ScopedHit {
+                    hit,
+                    candidate: row_candidate(row),
+                }),
+                Err(_) => identity = true,
+            }
+        }
+        if identity {
+            lane.stop("identity");
+            break;
+        }
+        if let Some(reason) = stop
             && lane.status == LaneStatus::Complete
         {
             lane.status = LaneStatus::incomplete(reason);
         }
-        for row in resolution.retained.iter() {
-            let Ok(hit) = hit(&row.occurrence_id, RawScore::Exact) else {
-                lane.resolutions.push(resolution);
-                return unavailable("identity", lane.resolutions);
-            };
-            lane.hits.push(ScopedHit {
-                hit,
-                candidate: row_candidate(row),
-            });
-        }
-        lane.resolutions.push(resolution);
     }
-    lane.route = route(conn, kernel, authority, certification, whole, &lane, budget)?;
-    Ok(Ok(lane))
+    lane.route = match (whole, lane.resolutions.as_slice()) {
+        (false, _) => ExactRoute::Hybrid(HybridCause::Mention),
+        (true, [resolution]) => route(scope, certification, resolution)?,
+        (true, _) => ExactRoute::Hybrid(HybridCause::Unproven),
+    };
+    Ok(lane)
 }
 
-/// The request's route after resolution. A whole-request proof is validated for final use under the same read, the authorization linearization point of a direct answer.
+/// The route of a whole-request resolution. Final use runs under the lane's read, after the admission check and a budget poll; it is the authorization linearization point of a direct answer.
 fn route(
-    conn: &GuardedConn<'_>,
-    kernel: &KernelStore,
-    authority: Authority<'_>,
-    certification: ExactCertification<'_>,
-    whole: bool,
-    lane: &ResolvedLane,
-    budget: &SharedBudget,
+    scope: ExactScope<'_>,
+    certification: &ExactCertification<'_>,
+    resolution: &Resolution,
 ) -> Result<ExactRoute, QueryFailure> {
-    if !whole {
-        return Ok(ExactRoute::Hybrid(HybridCause::Mention));
-    }
-    let [resolution] = lane.resolutions.as_slice() else {
-        return Ok(ExactRoute::Hybrid(HybridCause::Unproven));
-    };
     let Some(proof) = &resolution.proof else {
         return Ok(ExactRoute::Hybrid(HybridCause::Unproven));
     };
-    if certification.forced_hybrid() {
+    if certification.forced_hybrid {
         return Ok(ExactRoute::Hybrid(HybridCause::Forced));
     }
-    certification.final_use_hook();
-    check(budget)?;
-    if certification.grant.invalidated.is_cancelled() {
-        return Ok(ExactRoute::Hybrid(HybridCause::Revoked));
+    if let Some(hook) = certification.before_final_use {
+        hook();
     }
+    check(scope.budget)?;
+    if !certification.usable() {
+        return Ok(ExactRoute::Uncertified(Uncertified::Withdrawn));
+    }
+    let epoch = certification.epoch();
+    let authority = retrieval::exact::Authority {
+        project: scope.authority.project,
+        destination: scope.authority.destination,
+        inventory_epoch: &epoch,
+    };
     match validate_for_use(
-        conn,
-        kernel,
+        scope.conn,
+        scope.kernel,
         proof,
-        certification.authority(authority),
-        budget.eval(),
+        authority,
+        scope.budget.eval(),
     ) {
-        Ok(Ok(())) => Ok(ExactRoute::Direct),
-        Ok(Err(ProofInvalidation::BudgetExhausted)) => Err(exhaustion(budget).into()),
+        Ok(Ok(())) if certification.usable() => Ok(ExactRoute::Direct),
+        Ok(Ok(())) => Ok(ExactRoute::Uncertified(Uncertified::Withdrawn)),
+        Ok(Err(ProofInvalidation::BudgetExhausted)) => Err(exhaustion(scope.budget).into()),
         Ok(Err(invalidation)) => Ok(ExactRoute::Hybrid(HybridCause::FinalUse(invalidation))),
-        Err(_) if budget.is_exhausted() => Err(exhaustion(budget).into()),
-        Err(_) => Ok(ExactRoute::Hybrid(HybridCause::FinalUseFailed)),
+        Err(_) if scope.budget.is_exhausted() => Err(exhaustion(scope.budget).into()),
+        Err(_) => Err(QueryFailure::Unavailable("exact_final_use")),
     }
 }
 
@@ -1608,20 +1650,19 @@ fn admit_exact(
     ))
 }
 
-/// The resolver judged every retained row, so a resolved lane takes no further admission: a hybrid lane ranks every retained row before any downstream bound, and a direct lane hands its rows to the answer unfused.
+/// The resolver judged every retained row, so a resolved lane takes no further admission and ranks every retained row before any downstream bound.
 fn admit_resolved(
     lane: ResolvedLane,
     terms: &mut BTreeMap<OccurrenceId, OccurrenceCandidate>,
-) -> (LaneOutput, ExactReport, Option<LaneRanking>) {
+) -> (LaneOutput, ExactReport) {
     let ResolvedLane {
         hits,
         status,
         resolutions,
         route,
     } = lane;
-    let rows = hits.iter().map(|scoped| scoped.candidate.clone()).collect();
     let report = ExactReport {
-        rows,
+        rows: hits.iter().map(|scoped| scoped.candidate.clone()).collect(),
         admission: ExactAdmission::Resolved,
         resolutions,
         route,
@@ -1633,7 +1674,6 @@ fn admit_resolved(
                 status,
             },
             report,
-            None,
         );
     }
     let mut ranked = Vec::with_capacity(hits.len());
@@ -1641,19 +1681,7 @@ fn admit_resolved(
         terms.insert(scoped.hit.occurrence, scoped.candidate);
         ranked.push(scoped.hit);
     }
-    let output = LaneOutput::ranked(Lane::Exact, ranked, status);
-    if report.route != ExactRoute::Direct {
-        return (output, report, None);
-    }
-    let LaneOutput { ranking, status } = output;
-    (
-        LaneOutput {
-            ranking: None,
-            status,
-        },
-        report,
-        ranking,
-    )
+    (LaneOutput::ranked(Lane::Exact, ranked, status), report)
 }
 
 fn admit_lexical(
@@ -1726,8 +1754,8 @@ struct Scanned {
 pub struct Admitted<'a> {
     pub statuses: [LaneStatus; Lane::ORDER.len()],
     lanes: DeclaredLanes,
-    /// The proven exact ranking a direct answer serves; `lanes` is then empty.
-    direct: Option<LaneRanking>,
+    /// The answer serves `lanes`' exact ranking directly; no other lane is declared.
+    direct: bool,
     pub exact: ExactReport,
     terms: BTreeMap<OccurrenceId, OccurrenceCandidate>,
     projection: &'a SearchProjection,
@@ -1741,11 +1769,6 @@ impl Admitted<'_> {
     pub fn lanes(&self) -> &DeclaredLanes {
         &self.lanes
     }
-
-    /// Whether the answer serves the exact proof directly, skipping fusion.
-    pub fn is_direct(&self) -> bool {
-        self.direct.is_some()
-    }
 }
 
 /// [`admit_lanes`] then [`select`]; the handler and the evaluator share this one path.
@@ -1754,7 +1777,7 @@ pub fn execute(
     projection: &SearchProjection,
     kernel: &KernelStore,
     authority: Authority<'_>,
-    certification: Option<ExactCertification<'_>>,
+    exact: ExactAuthority<'_>,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
     query: &str,
@@ -1765,7 +1788,7 @@ pub fn execute(
         projection,
         kernel,
         authority,
-        certification,
+        exact,
         limits,
         budget,
         query,
@@ -1781,7 +1804,7 @@ pub fn admit_lanes<'a>(
     projection: &'a SearchProjection,
     kernel: &'a KernelStore,
     authority: Authority<'a>,
-    certification: Option<ExactCertification<'_>>,
+    exact: ExactAuthority<'_>,
     limits: &'a QueryRouteLimits,
     budget: &'a SharedBudget,
     query: &str,
@@ -1801,16 +1824,14 @@ pub fn admit_lanes<'a>(
         let mut phases = || -> Result<Scanned, QueryFailure> {
             before_phase(Phase::Exact);
             check(budget)?;
-            let exact = exact_lane(
+            let scope = ExactScope {
                 conn,
                 kernel,
-                &identity.kernel_incarnation_id,
                 authority,
-                certification,
-                &intent,
                 limits,
                 budget,
-            )?;
+            };
+            let exact = exact_lane(scope, &identity.kernel_incarnation_id, &exact, &intent)?;
             if matches!(&exact, ExactRead::Resolved(lane) if lane.route == ExactRoute::Direct) {
                 return Ok(Scanned {
                     exact,
@@ -1850,8 +1871,13 @@ pub fn admit_lanes<'a>(
         candidates: dense_candidates,
     } = scanned.dense;
     let (lexical, lexical_terms) = scanned.lexical;
-    if scanned.exact.undeclared()
-        && lexical.status == LaneStatus::Undeclared
+    if matches!(
+        &scanned.exact,
+        ExactRead::Pages {
+            route: ExactRoute::Undeclared,
+            ..
+        }
+    ) && lexical.status == LaneStatus::Undeclared
         && dense.status == LaneStatus::Undeclared
     {
         return Err(QueryFailure::InvalidQuery(
@@ -1860,30 +1886,25 @@ pub fn admit_lanes<'a>(
     }
 
     let mut terms: BTreeMap<OccurrenceId, OccurrenceCandidate> = BTreeMap::new();
-    let (exact, exact_report, direct) = match scanned.exact {
+    let (exact, exact_report) = match scanned.exact {
         ExactRead::Resolved(lane) if lane.route == ExactRoute::Direct => {
             admit_resolved(lane, &mut terms)
         }
-        exact => {
+        ExactRead::Resolved(lane) => {
             before_phase(Phase::Admission);
             check(budget)?;
-            match exact {
-                ExactRead::Pages { read, route } => {
-                    let (output, report) =
-                        admit_exact(kernel, authority, limits, budget, read, route, &mut terms)?;
-                    (output, report, None)
-                }
-                ExactRead::Resolved(lane) => admit_resolved(lane, &mut terms),
-            }
+            admit_resolved(lane, &mut terms)
+        }
+        ExactRead::Pages { read, route } => {
+            before_phase(Phase::Admission);
+            check(budget)?;
+            admit_exact(kernel, authority, limits, budget, read, route, &mut terms)?
         }
     };
+    let direct = exact_report.route == ExactRoute::Direct;
     terms.extend(lexical_terms);
     terms.extend(dense_candidates);
-    if direct.is_none()
-        && exact.ranking.is_none()
-        && lexical.ranking.is_none()
-        && dense.ranking.is_none()
-    {
+    if exact.ranking.is_none() && lexical.ranking.is_none() && dense.ranking.is_none() {
         return Err(QueryFailure::Unavailable("no_lane"));
     }
     let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
@@ -1931,8 +1952,11 @@ pub fn select(
         budget,
     } = admitted;
     // A direct answer's occurrences passed final use when the exact lane routed it; claim validation below judges them again at the response's snapshot.
-    let (fused, revalidation) = match direct {
-        Some(ranking) => (Fused::direct(&ranking, &limits.fusion), None),
+    let (fused, revalidation) = match lanes.lane(Lane::Exact).filter(|_| direct) {
+        Some(ranking) if ranking.entries().len() > limits.fused_union.get() => {
+            return Err(QueryFailure::Unavailable("fused_union"));
+        }
+        Some(ranking) => (Fused::direct(ranking, &limits.fusion), None),
         None => fuse_and_revalidate(
             lanes,
             &terms,
@@ -2495,7 +2519,7 @@ impl HandlerCore {
             Embedded::Undeclared | Embedded::Unavailable(_) => (limits, None),
         };
         #[cfg(any(test, feature = "test-support"))]
-        let exact_routes = Arc::clone(&self.exact_routes);
+        let last_exact_route = Arc::clone(&self.last_exact_route);
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {
                 Ok(reader) => reader,
@@ -2526,17 +2550,18 @@ impl HandlerCore {
                 (Embedded::Undeclared, _) | (Embedded::Vector(_), None) => DenseLane::Undeclared,
             };
             // A family that cannot certify its inventory for this request leaves the exact lane uncertified; the request is still served.
-            let certificate = names_object
-                .then(|| reader.completeness_certificate(&store, shared.eval()).ok())
-                .flatten();
-            let inventory_epoch = certificate.as_ref().map(|_| reader.inventory_epoch(&store));
             let certification =
-                certificate
-                    .as_ref()
-                    .zip(inventory_epoch.as_deref())
-                    .map(|(certificate, epoch)| {
-                        ExactCertification::new(certificate, epoch, reader.grant())
-                    });
+                names_object.then(|| ExactCertification::issue(&reader, &store, shared.eval()));
+            let exact = match &certification {
+                None => ExactAuthority::NOT_SOUGHT,
+                Some(Ok(certification)) => ExactAuthority::Certified(certification),
+                Some(Err(_)) if shared.is_exhausted() => {
+                    return UnitOutcome::Terminal(terminal_response(exhaustion(&shared)));
+                }
+                Some(Err(error)) => {
+                    ExactAuthority::Uncertified(Uncertified::Withheld(error.to_string()))
+                }
+            };
             let outcome = execute(
                 reader.projection(),
                 &store,
@@ -2544,7 +2569,7 @@ impl HandlerCore {
                     project: project.scope(),
                     destination,
                 },
-                certification,
+                exact,
                 &limits,
                 &shared,
                 &query,
@@ -2553,10 +2578,10 @@ impl HandlerCore {
             );
             #[cfg(any(test, feature = "test-support"))]
             if let Ok(outcome) = &outcome {
-                exact_routes
+                *last_exact_route
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(outcome.exact.route.clone());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(outcome.exact.route.clone());
             }
             UnitOutcome::Terminal(match outcome {
                 Ok(outcome) => PreparedOutcome::Response(PreparedOutput::json(outcome.body)),
@@ -2590,10 +2615,10 @@ impl HandlerCore {
         Arc::new(lifecycle.embeddings().clone())
     }
 
-    /// The exact route of every `retrieval.query` answer served so far, oldest first.
+    /// The exact route of the latest `retrieval.query` answer served.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn exact_routes_for_test(&self) -> Vec<ExactRoute> {
-        self.exact_routes
+    pub fn last_exact_route_for_test(&self) -> Option<ExactRoute> {
+        self.last_exact_route
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()

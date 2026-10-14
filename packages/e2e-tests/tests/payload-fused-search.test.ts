@@ -206,7 +206,12 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
                     AFTER.content,
                 );
                 // A bare memory identifier is a whole-request selector the daemon resolves through its exact lane; beside prose it is a mention the hybrid answer still ranks.
-                expectExactRow(await searchUntilRanked(search, after, after), after, AFTER.content, false);
+                expectExactRow(
+                    await searchUntilRanked(search, after, after),
+                    after,
+                    AFTER.content,
+                    false,
+                );
                 expectExactRow(
                     await searchUntilRanked(search, `id:${after} ${AFTER.query}`, after),
                     after,
