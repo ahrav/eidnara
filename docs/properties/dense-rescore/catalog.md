@@ -781,7 +781,7 @@ returns, the ledger is empty only after, and the released request still
 answers `fused`.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken with the route limits under both
-setters' locks before the unit is submitted (`query_route.rs:2006-2016`), so the
+setters' locks before the unit is submitted (`query_route.rs:2006-2017`), so the
 unit ranks under a pair the setters checked together and the view's pins, its
 `MappedCodes` charge, and the ranking's `Scratch` and `RowBuffers`
 reservations stay charged until the blocking work returns; a
