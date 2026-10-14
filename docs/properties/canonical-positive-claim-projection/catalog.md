@@ -207,15 +207,15 @@ Reachability: default-production - the search maintenance loop calls
 runs `ClaimMaterializer` (`:551`, the materializer call at `:570`) and grants
 and checks no projection-gate admission before it publishes claim source
 descriptors. Claim validation on the query route is `explicit-config-only`:
-`validate_claims` (`crates/daemon/src/query_route.rs:1707`) runs inside the
-unit that first calls `SearchLifecycleOwner::pin` (`query_route.rs:2016`),
+`validate_claims` (`crates/daemon/src/query_route.rs:1712`) runs inside the
+unit that first calls `SearchLifecycleOwner::pin` (`query_route.rs:2029`),
 which admits `ProjectionHook::EmbeddingBootstrap` through
 `SearchSelection::admit_reader`
 (`crates/daemon/src/search_replacement/selection.rs:430`). That hook needs
 `CanonicalClaims` coverage (`crates/daemon/src/projection_gates.rs:80-84`) and
 opens only under an installed search admission. `validate_claims` reads the
 kernel's claim facts through `retrieval::claims::judge_selected_for_surface`
-(`query_route.rs:1747`; `crates/retrieval/src/claims.rs:476`), which calls
+(`query_route.rs:1752`; `crates/retrieval/src/claims.rs:476`), which calls
 `KernelStore::judge_surface_eligibility_with_selected_claims`
 (`claims.rs:516`); `read_selected_claims` (`claims.rs:441`) reads only the
 projection rows.

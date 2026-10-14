@@ -461,7 +461,7 @@ fn a_zero_byte_static_charge_still_charges_once_and_refusals_keep_their_order() 
     assert_eq!(ledger.census(), Census::default());
 }
 
-const CLASSES: [ResourceClass; 9] = [
+const CLASSES: [ResourceClass; 10] = [
     ResourceClass::ModelMemory,
     ResourceClass::TokenizerCache,
     ResourceClass::SqliteCache,
@@ -469,6 +469,7 @@ const CLASSES: [ResourceClass; 9] = [
     ResourceClass::Scratch,
     ResourceClass::RowBuffers,
     ResourceClass::LayerTables,
+    ResourceClass::MappedCodes,
     ResourceClass::Staging,
     ResourceClass::CompactionScratch,
 ];
@@ -483,6 +484,7 @@ fn named(class: ResourceClass) -> bool {
         | ResourceClass::Scratch
         | ResourceClass::RowBuffers
         | ResourceClass::LayerTables
+        | ResourceClass::MappedCodes
         | ResourceClass::Staging
         | ResourceClass::CompactionScratch => CLASSES.contains(&class),
     }

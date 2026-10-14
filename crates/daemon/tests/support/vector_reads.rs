@@ -211,6 +211,15 @@ pub fn resident_bytes(fixture: &Fixture, members: &[String]) -> u64 {
         .sum()
 }
 
+pub fn code_bytes(fixture: &Fixture, members: &[String]) -> u64 {
+    members
+        .iter()
+        .map(|digest| {
+            daemon::vector_generation::code_bytes(&fixture.store.manifest(digest).unwrap())
+        })
+        .sum()
+}
+
 /// Every manifest byte of `digests`, from the store rather than the reader.
 pub fn manifest_bytes(fixture: &Fixture, digests: &[String]) -> u64 {
     digests

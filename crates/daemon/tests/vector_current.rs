@@ -1,0 +1,299 @@
+mod support;
+
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use daemon::query_route::{CompressedLimits, QueryRouteLimits};
+use daemon::vector_admission::ResourceClass;
+use daemon::vector_current::CurrentVectors;
+use daemon::vector_reader::{AcquireEvent, AcquireRefusal};
+use host_runtime::generation::VECTOR_PROFILE_NAME;
+use retrieval::batch::ProjectionCheckpoint;
+use support::vector_reads::*;
+use support::vector_store::Fixture;
+
+fn owner(fixture: &Fixture) -> CurrentVectors {
+    CurrentVectors::new(
+        Some(fixture.root.path().to_path_buf()),
+        bounds(),
+        Arc::clone(&fixture.ledger),
+        fixture.admission.clone(),
+    )
+}
+
+/// Runs `step` with the fixture's exclusive transaction released, as the reader requires, and counts the acquisitions it starts.
+fn counted<T>(
+    fixture: &mut Fixture,
+    step: impl FnOnce(&Fixture, &mut dyn FnMut(AcquireEvent)) -> T,
+) -> (T, usize) {
+    fixture.release_transaction();
+    let mut acquisitions = 0;
+    let out = step(fixture, &mut |event| {
+        if event == AcquireEvent::BeforeVerification {
+            acquisitions += 1;
+        }
+    });
+    fixture.reacquire_transaction();
+    (out, acquisitions)
+}
+
+#[test]
+fn the_owner_shares_one_view_until_the_selector_moves() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+
+    let ((first, second), acquisitions) = counted(&mut fixture, |fixture, observe| {
+        let expected = fixture.expected();
+        let first = owner.view(&expected, observe).unwrap();
+        let second = owner.view(&expected, observe).unwrap();
+        (first, second)
+    });
+    assert_eq!(
+        acquisitions, 1,
+        "the second caller shares the verified view"
+    );
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(first.members()[0], base.digest);
+
+    let (_, replacement) = publish_replacement(&fixture, &corpus(), 2);
+    let (third, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(
+        acquisitions, 1,
+        "the moved selector forces a new acquisition"
+    );
+    assert!(!Arc::ptr_eq(&first, &third));
+    assert_eq!(third.members()[0], replacement.digest);
+    assert_eq!(first.members()[0], base.digest, "the old view stays whole");
+    let (fourth, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(acquisitions, 0);
+    assert!(Arc::ptr_eq(&third, &fourth));
+}
+
+#[test]
+fn a_caller_expecting_another_identity_is_refused_and_the_held_view_keeps_serving() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let (held_view, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(acquisitions, 1);
+    let tables = held(&fixture.ledger, ResourceClass::LayerTables);
+
+    let other = ProjectionCheckpoint {
+        snapshot_commit_seq: 1,
+        checkpoint_commit_seq: 2,
+        hold_id: "another-hold".to_owned(),
+    };
+    let (refused, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        let expected = daemon::vector_generation::ExpectedVectors {
+            checkpoint: Some(&other),
+            ..fixture.expected()
+        };
+        owner.view(&expected, observe)
+    });
+    assert!(
+        matches!(refused, Err(AcquireRefusal::Unavailable(_))),
+        "{refused:?}"
+    );
+    assert_eq!(acquisitions, 1, "the other identity is looked for");
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::LayerTables),
+        tables,
+        "the refused attempt leaves only the held view charged"
+    );
+
+    let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(acquisitions, 0, "the held view survives the refused caller");
+    assert!(Arc::ptr_eq(&held_view, &again));
+}
+
+#[test]
+fn a_selector_the_store_refuses_is_not_served_through() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let (held_view, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    let intact = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
+    fixture.write_selector(VECTOR_PROFILE_NAME, b"{ not a profile");
+
+    let (refused, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe)
+    });
+    assert!(
+        matches!(refused, Err(AcquireRefusal::Store(_))),
+        "{refused:?}"
+    );
+    drop(held_view);
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::LayerTables),
+        0,
+        "the owner let the view go once its selector stopped reading"
+    );
+
+    fixture.write_selector(VECTOR_PROFILE_NAME, &intact);
+    let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(acquisitions, 1);
+    assert_eq!(again.members()[0], base.digest);
+}
+
+#[test]
+fn a_released_view_leaves_the_ledger_once_its_last_holder_ends() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let (view, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    let tables = held(&fixture.ledger, ResourceClass::LayerTables);
+    assert!(tables > 0);
+    owner.release();
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::LayerTables),
+        tables,
+        "a request still holding the view keeps its charge"
+    );
+    drop(view);
+    assert_eq!(held(&fixture.ledger, ResourceClass::LayerTables), 0);
+    assert_eq!(fixture.ledger.census().pinned, 0);
+}
+
+#[test]
+fn a_release_during_an_acquisition_leaves_no_hold_behind() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    fixture.release_transaction();
+    let (hashing_tx, hashing_rx) = mpsc::channel();
+    let (released_tx, released_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let expected = fixture.expected();
+    let owner_ref = &owner;
+    let expected_ref = &expected;
+    let (view, release_waited) = thread::scope(|scope| {
+        let acquirer = scope.spawn(move || {
+            owner_ref
+                .view(expected_ref, &mut |event| {
+                    if event == AcquireEvent::BeforeVerification {
+                        hashing_tx.send(()).unwrap();
+                        released_rx.recv().unwrap();
+                    }
+                })
+                .unwrap()
+        });
+        hashing_rx.recv().unwrap();
+        let releaser = scope.spawn(move || {
+            owner_ref.release();
+            done_tx.send(()).unwrap();
+        });
+        let release_waited = done_rx.recv_timeout(Duration::from_millis(200)).is_err();
+        released_tx.send(()).unwrap();
+        releaser.join().unwrap();
+        (acquirer.join().unwrap(), release_waited)
+    });
+    assert!(
+        release_waited,
+        "release returned while the acquirer was still hashing"
+    );
+    let (again, acquisitions) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert_eq!(
+        acquisitions, 1,
+        "no acquisition publishes a hold after release returns"
+    );
+    assert!(!Arc::ptr_eq(&view, &again));
+    drop(view);
+}
+
+#[test]
+fn the_production_compressed_bounds_give_the_route_a_pool_of_256_for_its_64() {
+    let route = QueryRouteLimits::production();
+    let dense = route.dense.expect("production declares the dense lane");
+    assert_eq!(dense.k.get(), 64);
+    let capacity = CompressedLimits::production().capacity(&dense).unwrap();
+    assert_eq!(capacity.candidates().get(), 256);
+    assert_eq!(capacity.k().get(), 64);
+}
+
+#[test]
+fn the_route_vectors_rank_through_the_shared_view() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let ((vectors, view), acquisitions) = counted(&mut fixture, |fixture, observe| {
+        let expected = fixture.expected();
+        let view = owner.view(&expected, observe).unwrap();
+        let vectors = owner
+            .dense_vectors(
+                &expected,
+                fixture.activation(),
+                CompressedLimits::production(),
+            )
+            .unwrap();
+        (vectors, view)
+    });
+    assert_eq!(acquisitions, 1, "the route vectors reuse the held view");
+    assert!(Arc::ptr_eq(vectors.view(), &view));
+}
+
+#[test]
+fn a_selector_unreadable_under_a_held_lifecycle_lock_keeps_the_verified_view() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let owner = owner(&fixture);
+    let (held_view, _) = counted(&mut fixture, |fixture, observe| {
+        owner.view(&fixture.expected(), observe).unwrap()
+    });
+    assert!(matches!(
+        held_view.selector_holds(Some(fixture.root.path())),
+        Ok(None)
+    ));
+    let mut acquisitions = 0;
+    let served = owner
+        .view(&fixture.expected(), &mut |event| {
+            if event == AcquireEvent::BeforeVerification {
+                acquisitions += 1;
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        acquisitions, 0,
+        "the verified view is served without a new hash"
+    );
+    assert!(Arc::ptr_eq(&held_view, &served));
+}

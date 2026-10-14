@@ -2,7 +2,7 @@
 //!
 //! Ignored by default. `EIDNARA_DENSE_SCALE_ROWS` (default 1,000,000), `EIDNARA_DENSE_SCALE_DIMENSION` (768), and `EIDNARA_DENSE_SCALE_QUERIES` (1,000) size the run, and `EIDNARA_DENSE_SCALE_POOL` (256) sets the candidate pool, so a pool of 64 runs the negative control; `EIDNARA_DENSE_SCALE_SAMPLES` names a file, kept outside the repository, for the raw per-query microseconds.
 //!
-//! The corpus is a seeded synthetic workload, not the frozen model corpus the production gate names. The timed span is in-process candidate selection plus rescore over rows held in memory, under test scan bounds; it is a local figure, not the reference-host dense-lane latency. Two copies of the f32 rows stay resident, so a 1M by 768 run holds about 6 GB of rows plus 0.8 GB of codes.
+//! The corpus is a seeded synthetic workload, not the frozen model corpus the production gate names. The timed span is in-process candidate selection plus rescore over rows held in memory, under test scan bounds; it is a local figure, not the reference-host dense-lane latency. One copy of the f32 rows stays resident, in the layer the scan reads, so a 1M by 768 run holds about 3 GB of rows plus 0.8 GB of codes.
 
 mod support;
 
@@ -126,19 +126,21 @@ fn compressed_top64_matches_the_f64_oracle_for_at_least_99_percent_of_queries() 
     let pool_size = setting("EIDNARA_DENSE_SCALE_POOL", 256);
     assert!(query_count > 0, "the run needs queries");
     assert!(
-        pool_size >= K && rows >= pool_size,
-        "the corpus fills the pool"
+        (K..=kernel::MAX_ELIGIBILITY_CANDIDATES).contains(&pool_size) && rows >= pool_size,
+        "the pool holds at least {K} and at most one kernel batch, and the corpus fills it"
     );
+    assert!(dimension > 0, "rows need at least one coordinate");
     let started = Instant::now();
     let vectors = corpus(rows, dimension);
     let queries = queries(&vectors, query_count);
     let objects: Vec<String> = (0..rows).map(|index| format!("dense-{index:07}")).collect();
     let object_refs: Vec<&str> = objects.iter().map(String::as_str).collect();
-    // Each projected row carries its vector, so its embedding job is complete and every row counts toward dense coverage.
     let projected: Vec<Row> = objects
         .iter()
-        .zip(&vectors)
-        .map(|(object, vector)| Row::claim(object, vector.clone()))
+        .map(|object| Row {
+            vector: None,
+            ..Row::claim(object, Vec::new())
+        })
         .collect();
     let width = u32::try_from(dimension).unwrap();
     let fixture = Fixture::with_dimension(&object_refs, &object_refs, projected, width);

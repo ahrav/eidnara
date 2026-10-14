@@ -1,8 +1,7 @@
 //! Reads a vector composition through pinned files. Acquisition takes the lifecycle's shared protection only around manifest reads: it observes the selector, pins the candidate record and every member it names with shared locks, and reserves the bytes the view keeps resident and records the bytes it pins on disk in the ledger, then releases the protection before verification hashes the members under the pins alone; it keeps the row and code artifacts open on the descriptors verification hashed them through and re-reads the selector under the protection once more before handoff. A failure anywhere returns nothing, and the pins, descriptors, and reservations go with it.
-//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec. The candidate scan reads a layer's int8 codes through that layer's `CodeWindow` and scores only the rows the resolver names, under the layer's own scales. Positioned reads after acquisition rely on the hashes verification checked: pins protect lifetime, and the cooperative-file threat model assumes same-user files stay unchanged after verification.
+//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec. The candidate scan reads a layer's int8 codes through the read-only mapping of that layer's code file the pinned layer holds (`vector_mapped`) and scores only the rows the resolver names, under the layer's own scales. Positioned reads and mappings after acquisition rely on the hashes verification checked: pins protect lifetime, and the cooperative-file threat model assumes same-user files stay unchanged after verification.
 //! A caller runs the ranking through the request's blocking seam with the view moved into the work, so the view lives until the physical read returns whatever happens to the caller.
 
-use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::num::NonZeroUsize;
@@ -21,10 +20,10 @@ use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::codec::{self, ARTIFACT_HEADER_BYTES, RowLayout};
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
-    CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, Layer,
-    LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, OracleRefusal,
-    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, Window,
-    WinnerRow, rank_layers, rescore_pool, select_candidates_observed,
+    CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, Layer, LayerCodes,
+    LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, OracleRefusal, Precedence,
+    RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, Window, WinnerRow,
+    rank_layers, rescore_pool, select_candidates_observed,
 };
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
@@ -35,6 +34,7 @@ use crate::vector_composition::{self, Candidate, SelectorState, Unavailable, Ver
 use crate::vector_generation::{
     self, ExpectedVectors, VectorRefusal, VectorSidecar, VerifiedVectors,
 };
+use crate::vector_mapped::MappedCodes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderBounds {
@@ -79,7 +79,7 @@ impl From<GenerationError> for AcquireRefusal {
     }
 }
 
-/// One member's open artifacts and resident tables; the layer keeps its shared lock through `_generation`.
+/// One member's open artifacts, resident tables, and code mapping; the layer keeps its shared lock through `_generation`.
 pub struct PinnedLayer {
     pub digest: String,
     pub sidecar: VectorSidecar,
@@ -90,6 +90,7 @@ pub struct PinnedLayer {
     tombstones: Vec<String>,
     rows: File,
     codes: File,
+    mapped: MappedCodes,
     _generation: ValidatedGeneration,
 }
 
@@ -123,6 +124,11 @@ impl PinnedLayer {
                 delta_ordinal: ordinal,
             },
             checkpoint: sidecar.checkpoint(),
+            mapped: MappedCodes::map(
+                &codes,
+                sidecar.vector_dimension as usize,
+                occurrence_ids.len(),
+            ),
             digest,
             sidecar,
             scales,
@@ -209,109 +215,13 @@ fn check_declared(index: usize, declared: usize) -> Result<(), RowFault> {
     )))
 }
 
-/// The byte budget of one layer's scan window; a window holds one row even when that row is wider.
-const CODE_WINDOW_BYTES: usize = 64 * 1024;
-
-/// One layer's codes for one candidate scan: `declared` rows of `width` bytes each, from offset 0 of `codes`. A row outside the held window refills the window with the run of declared rows that starts at that row, so later rows inside the run are served without another read.
-struct CodeWindow<'a> {
-    codes: &'a File,
-    width: usize,
-    declared: usize,
-    /// The per-fill row limit: what [`CODE_WINDOW_BYTES`] holds, one row when a row is wider, capped at the layer's declared rows. A failed window read drops it to one row for the rest of the scan.
-    capacity: Cell<usize>,
-    held: RefCell<HeldCodes>,
-}
-
-/// Raw codes of rows `first..first + rows`.
-#[derive(Default)]
-struct HeldCodes {
-    first: usize,
-    rows: usize,
-    bytes: Vec<u8>,
-}
-
-impl<'a> CodeWindow<'a> {
-    fn new(codes: &'a File, width: usize, declared: usize) -> Self {
-        Self {
-            codes,
-            width,
-            declared,
-            capacity: Cell::new(window_rows(width, declared)),
-            held: RefCell::default(),
-        }
-    }
-
-    fn of(layer: &'a PinnedLayer) -> Self {
-        Self::new(&layer.codes, layer.dimension(), layer.occurrence_ids.len())
-    }
-
-    /// A window that fails to read whole falls back to the requested row alone, so a file cut short or a failed sector past that row classifies exactly as a single-row read does. Later fills read one row each, so the failing span is not read again for every row before it.
-    fn fill(&self, held: &mut HeldCodes, index: usize) -> Result<(), RowFault> {
-        check_declared(index, self.declared)?;
-        let width = self.width;
-        let rows = self.capacity.get().min(self.declared - index);
-        let offset = index as u64 * width as u64;
-        held.rows = 0;
-        held.bytes.resize(rows * width, 0);
-        let read = self.codes.read_exact_at(&mut held.bytes, offset);
-        let rows = match read {
-            Ok(()) => rows,
-            Err(error) if rows == 1 => return Err(read_fault(index, &error)),
-            Err(_) => {
-                self.capacity.set(1);
-                held.bytes.truncate(width);
-                self.codes
-                    .read_exact_at(&mut held.bytes, offset)
-                    .map_err(|error| read_fault(index, &error))?;
-                1
-            }
-        };
-        held.first = index;
-        held.rows = rows;
-        Ok(())
-    }
-}
-
-impl CodeAccess for CodeWindow<'_> {
-    fn row_count(&self) -> usize {
-        self.declared
-    }
-
-    /// The candidate scan checks the dimension and the reserved code.
-    fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault> {
-        let mut held = self.held.borrow_mut();
-        if !(held.first..held.first + held.rows).contains(&index) {
-            self.fill(&mut held, index)?;
-        }
-        let width = self.width;
-        let start = (index - held.first) * width;
-        into.clear();
-        into.extend(
-            held.bytes[start..start + width]
-                .iter()
-                .map(|byte| *byte as i8),
-        );
-        Ok(())
-    }
-}
-
-fn window_rows(width: usize, declared: usize) -> usize {
-    (CODE_WINDOW_BYTES / width.max(1)).max(1).min(declared)
-}
-
-/// Scan scratch: per layer, one block of decoded codes and the query encoded under the layer's scales, held through the scan, and every layer's window of raw codes.
+/// Scan scratch: per layer, one block of decoded codes and the query encoded under the layer's scales, held through the scan. The mapped codes the scan reads belong to the view's `MappedCodes` charge.
 fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
     let dimension = u64::from(view.layout.dimension);
     let layers = view.layers.len() as u64;
-    let windows: u64 = view
-        .layers
-        .iter()
-        .map(|layer| window_rows(layer.dimension(), layer.occurrence_ids.len()) as u64)
-        .sum();
     (retrieval::dense::BLOCK_ROWS as u64)
         .saturating_add(1)
         .saturating_mul(layers)
-        .saturating_add(windows)
         .saturating_mul(dimension)
 }
 
@@ -330,9 +240,13 @@ impl RowAccess for PinnedLayer {
 /// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident and pinned bytes reserved until the view is dropped. Acquire a view once and share it; acquisition hashes every member, holding its pins but not the lifecycle lock while it does.
 pub struct PinnedVectors {
     digest: String,
+    /// What acquisition observed the selector naming when it handed this view out.
+    selector: SelectorState,
     layout: RowLayout,
     /// The base first, then the deltas in application order.
     layers: Vec<PinnedLayer>,
+    /// Declared after `layers`, so the charge is released after every layer's mapping is dropped.
+    _codes: Reservation,
     _record: ValidatedGeneration,
     resident: Reservation,
     pinned: Pinned,
@@ -389,6 +303,24 @@ impl PinnedVectors {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
     }
 
+    pub fn selector_holds(&self, root: Option<&Path>) -> Result<Option<bool>, AcquireRefusal> {
+        let store = GenerationStore::open(root)?;
+        let current = {
+            let Some(_protection) = LifecycleTransactionLock::try_acquire_shared(root)
+                .map_err(|error| AcquireRefusal::Unprotected(error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            store.read_vector_current()?
+        };
+        Ok(Some(self.selector.still_holds(&current, &self.digest)))
+    }
+
+    /// Whether every layer carries the identity `expected` names.
+    pub fn matches(&self, expected: &ExpectedVectors<'_>) -> bool {
+        check_view(self, expected).is_ok()
+    }
+
     pub fn is_quarantined(&self) -> bool {
         self.quarantined.load(Ordering::Relaxed)
     }
@@ -442,6 +374,7 @@ fn protect(root: Option<&Path>) -> Result<LifecycleTransactionLock, AcquireRefus
 struct Secured {
     pins: Vec<PinnedGeneration>,
     resident: Reservation,
+    codes: Reservation,
     pinned: Pinned,
 }
 
@@ -471,11 +404,13 @@ fn secure(
     let mut pins = Vec::with_capacity(members.len() + 1);
     pins.push(record);
     let mut resident = 0u64;
+    let mut codes = 0u64;
     for member in &members {
         let Ok(pin) = store.pin(member) else {
             return Ok(None);
         };
         resident = resident.saturating_add(vector_generation::resident_bytes(&pin.manifest));
+        codes = codes.saturating_add(vector_generation::code_bytes(&pin.manifest));
         pins.push(pin);
     }
     let pinned = pins
@@ -484,12 +419,14 @@ fn secure(
         .map(|file| file.size)
         .fold(0u64, u64::saturating_add);
     let resident = ledger.reserve(grant, ResourceClass::LayerTables, resident)?;
+    let codes = ledger.reserve(grant, ResourceClass::MappedCodes, codes)?;
     // Recorded before the protection goes, so a prune that takes the exclusive lock next reads back no pin the ledger has not been told about.
     let pinned = ledger.pin(pinned);
     drop(protection);
     Ok(Some(Secured {
         pins,
         resident,
+        codes,
         pinned,
     }))
 }
@@ -588,6 +525,7 @@ fn hand_off(
     let Secured {
         pins,
         resident,
+        codes,
         pinned,
     } = secured;
     drop(pins);
@@ -612,6 +550,7 @@ fn hand_off(
         });
     }
     Ok(Arc::new(PinnedVectors {
+        selector,
         digest,
         layout: RowLayout {
             dimension: composition.vector_dimension,
@@ -619,6 +558,7 @@ fn hand_off(
             unit_norm_tolerance: composition.unit_norm_tolerance,
         },
         layers,
+        _codes: codes,
         _record: record,
         resident,
         pinned,
@@ -877,14 +817,18 @@ pub fn rank_compressed(
     // The rescore reads one row at a time: its raw bytes and its decoded coordinates.
     let _rows = reserve(ResourceClass::RowBuffers, row_bytes.saturating_mul(2))?;
     let layers = view.resolver_layers();
-    let windows: Vec<CodeWindow<'_>> = view.layers.iter().map(CodeWindow::of).collect();
+    let remapped: Vec<Option<MappedCodes>> = view
+        .layers
+        .iter()
+        .map(|layer| layer.mapped.remap_if_stale(&layer.codes))
+        .collect();
     let codes: Vec<LayerCodes<'_>> = view
         .layers
         .iter()
-        .zip(&windows)
-        .map(|(layer, window)| LayerCodes {
+        .zip(&remapped)
+        .map(|(layer, remapped)| LayerCodes {
             scales: &layer.scales,
-            codes: window,
+            codes: remapped.as_ref().unwrap_or(&layer.mapped),
         })
         .collect();
     let query = CandidateQuery {
@@ -1021,61 +965,6 @@ mod tests {
         }
         let eio = std::io::Error::from_raw_os_error(5);
         assert!(matches!(read_fault(3, &eio), RowFault::Unavailable(_)));
-    }
-
-    const WIDTH: usize = 4;
-    const DECLARED: usize = 5;
-
-    fn all_codes() -> Vec<u8> {
-        (0..DECLARED * WIDTH).map(|byte| byte as u8).collect()
-    }
-
-    fn row_codes(codes: &[u8], row: usize) -> Vec<i8> {
-        codes[row * WIDTH..(row + 1) * WIDTH]
-            .iter()
-            .map(|byte| *byte as i8)
-            .collect()
-    }
-
-    /// A whole file fills one window with every declared row, so later rows are served without another read.
-    #[test]
-    fn a_whole_code_file_fills_one_window_with_every_declared_row() {
-        let codes = all_codes();
-        let file = tempfile::tempfile().unwrap();
-        file.write_all_at(&codes, 0).unwrap();
-        let window = CodeWindow::new(&file, WIDTH, DECLARED);
-        let mut into = Vec::new();
-        for row in 0..DECLARED {
-            window.codes_into(row, &mut into).unwrap();
-            assert_eq!(into, row_codes(&codes, row), "row {row}");
-            assert_eq!(window.held.borrow().first, 0, "row {row} refilled");
-            assert_eq!(window.held.borrow().rows, DECLARED);
-        }
-    }
-
-    /// After a window read fails, every later fill of the scan reads one row, so a failing span past the requested row is not read again for each row before it.
-    /// The missing rows are restored after the first fill: a retried window read would then succeed and hold every remaining row, which makes the retry observable.
-    #[test]
-    fn a_failed_window_read_is_not_retried_for_the_rows_after_it() {
-        let codes = all_codes();
-        let file = tempfile::tempfile().unwrap();
-        file.write_all_at(&codes[..2 * WIDTH], 0).unwrap();
-        let window = CodeWindow::new(&file, WIDTH, DECLARED);
-        let mut into = Vec::new();
-        window.codes_into(0, &mut into).unwrap();
-        assert_eq!(into, row_codes(&codes, 0));
-        assert_eq!(window.held.borrow().rows, 1);
-        file.write_all_at(&codes[2 * WIDTH..], (2 * WIDTH) as u64)
-            .unwrap();
-        for row in 1..DECLARED {
-            window.codes_into(row, &mut into).unwrap();
-            assert_eq!(into, row_codes(&codes, row), "row {row}");
-            assert_eq!(
-                window.held.borrow().rows,
-                1,
-                "row {row} retried the full window"
-            );
-        }
     }
 
     /// A failed read leaves the view usable; missing or malformed rows or codes quarantine it.

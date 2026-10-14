@@ -810,6 +810,14 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
         })
 }
 
+pub fn code_bytes(manifest: &GenerationManifest) -> u64 {
+    manifest
+        .files
+        .iter()
+        .filter(|file| file.path == CODES_FILE)
+        .fold(0u64, |total, file| total.saturating_add(file.size))
+}
+
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
 /// Verification streams the row and code artifacts one chunk of rows at a time in one pass that calibrates the rows and compares the stored codes with the rows encoded under the stored scales, then requires the stored scales to be the calibration, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store checks each file's inventory entry, mode, and size, and verification reads each file once through a stream that hashes the bytes it returns; the store finishes every hash before any refusal about meaning is returned, so a file whose bytes diverge from the manifest refuses as the store refuses it, and the bound limits memory, not I/O.
 ///

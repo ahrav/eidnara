@@ -43,9 +43,9 @@ None.
 
 ### Q: Does installation check the entry bound?
 
-- Sources examined: `check_pair` (`crates/daemon/src/query_route.rs:753`),
+- Sources examined: `check_pair` (`crates/daemon/src/query_route.rs:758`),
   `CompressedLimits::capacity` (`query_route.rs:618`), `rank_compressed`
-  (`crates/daemon/src/vector_reader.rs:876`, `:878`, `:900`), and
+  (`crates/daemon/src/vector_reader.rs:816`, `:818`, `:846`), and
   `crates/daemon/tests/query_route_compressed.rs`
   `an_entry_bound_below_the_view_degrades_the_lane_before_a_scan`.
 - Findings: installation checks `k`, the alpha policy, `candidates`, and

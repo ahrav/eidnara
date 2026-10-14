@@ -25,7 +25,7 @@ R-sized state; zero K does no work.
   `DenseCapacity` (`Alpha`, or `OverCap` of 128 against 64), and a producer
   carrying each returns the `capacity` lane reason with no observed scan
   window. `CompressedProducer::rank` returns that reason from its first check
-  (`crates/daemon/src/query_route.rs:704-707`), before `rank_compressed`
+  (`crates/daemon/src/query_route.rs:709-712`), before `rank_compressed`
   reserves `Scratch` and `RowBuffers`. The route's `DenseLimits.k` is a
   `NonZeroUsize`, so a zero `K` stops at the type.
 

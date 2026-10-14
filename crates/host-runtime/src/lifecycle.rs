@@ -1062,7 +1062,7 @@ impl Drop for CommitOnAck {
         }
     }
 }
-
+mod shared_attempt;
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -733,7 +733,7 @@ fn lock_instance(dir: &OwnedFd, dir_path: &Path) -> Result<(), InstanceError> {
     }
 }
 
-fn flock_nonblocking(
+pub(crate) fn flock_nonblocking(
     dir: &OwnedFd,
     dir_path: &Path,
     op: &'static str,
