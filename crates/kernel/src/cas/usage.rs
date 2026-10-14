@@ -13,7 +13,7 @@ use std::fs::File;
 
 use rustix::fs::{self as rfs, AtFlags};
 
-use super::ingest::regular_file_bytes;
+use super::ingest::{regular_file_bytes, regular_file_bytes_concurrently};
 use crate::durable_fs::{StorageError, durable_unlink};
 use crate::{KernelError, KernelStore};
 
@@ -82,7 +82,33 @@ impl KernelStore {
         let Ok(_writer) = self.lock_writer() else {
             return;
         };
-        let walked = match self.walk_artifact_usage() {
+        self.settle_census(self.walk_artifact_usage());
+    }
+
+    /// [`reconcile_artifact_usage`](Self::reconcile_artifact_usage) with the
+    /// walk `census` took while the store was opening. Until `open` returns,
+    /// the opening thread is the store's only user, so that walk counts the
+    /// tree the writer lock would have seen. A census whose thread could not be
+    /// started walks here instead.
+    pub(crate) fn seed_artifact_usage(&self, mut census: ArtifactCensus) {
+        let Ok(_writer) = self.lock_writer() else {
+            return;
+        };
+        let walked = match census.0.take() {
+            Some(walk) => {
+                #[cfg(feature = "test-support")]
+                self.artifact_census_walks
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                walk.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            }
+            None => self.walk_artifact_usage(),
+        };
+        self.settle_census(walked);
+    }
+
+    fn settle_census(&self, walked: Result<u64, StorageError>) {
+        let walked = match walked {
             Ok(walked) => walked,
             Err(StorageError::Exhausted(_)) => return,
             Err(StorageError::Other(_)) => return self.latch_cas_failure(),
@@ -130,13 +156,35 @@ impl KernelStore {
         #[cfg(feature = "test-support")]
         self.artifact_census_walks
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(regular_file_bytes(&self.objects_directory, &|| false)?
-            .expect("an uncancellable walk completes"))
+        regular_file_bytes_concurrently(&self.objects_directory)
     }
 
     fn counted_usage(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
         self.artifact_usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The census `open` starts on a thread of its own once the layout and any
+/// interrupted restore are settled, so the walk overlaps the database open.
+/// Dropping it joins the walk.
+pub(crate) struct ArtifactCensus(Option<std::thread::JoinHandle<Result<u64, StorageError>>>);
+
+impl ArtifactCensus {
+    pub(crate) fn start(objects: &File) -> Self {
+        Self(objects.try_clone().ok().and_then(|objects| {
+            std::thread::Builder::new()
+                .spawn(move || regular_file_bytes_concurrently(&objects))
+                .ok()
+        }))
+    }
+}
+
+impl Drop for ArtifactCensus {
+    fn drop(&mut self) {
+        if let Some(walk) = self.0.take() {
+            let _ = walk.join();
+        }
     }
 }

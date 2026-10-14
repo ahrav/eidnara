@@ -462,6 +462,7 @@ pub use gc::ArtifactGcResult;
 pub(crate) use gc::ObjectPresence;
 pub(crate) use ingest::is_exact_retention;
 pub(crate) use read::egress_facts_tx;
+pub(crate) use usage::ArtifactCensus;
 
 impl fmt::Debug for ArtifactError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

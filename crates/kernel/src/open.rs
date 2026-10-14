@@ -316,6 +316,7 @@ impl KernelStore {
         } else {
             super::backup::reap_orphan_restore_recovery(&db_path, &root_directory)?;
         }
+        let census = super::cas::ArtifactCensus::start(&artifact_directories.objects);
 
         // The database is opened by pathname below, so the root is checked once
         // more before the pathname is used for anything that could write.
@@ -428,7 +429,7 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
-        store.reconcile_artifact_usage();
+        store.seed_artifact_usage(census);
         let seeded_walk = store.held_artifact_usage();
         // A purge unlink that cannot complete keeps its pending row for maintenance
         // to retry; refusing to open over it would take the whole store offline

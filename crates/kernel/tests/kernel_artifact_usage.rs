@@ -437,4 +437,41 @@ fn a_walk_counts_only_regular_files_at_both_levels() {
     store.forget_artifact_usage_for_test();
     assert_eq!(reported(&store), 7, "the object and the top-level file");
     assert_usage_matches_walk(&store, root.path(), "non-regular entries");
+    drop(store);
+
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    assert_eq!(reported(&store), 7, "the census at open");
+    assert_usage_matches_walk(&store, root.path(), "census at open");
+}
+
+#[test]
+fn the_open_census_sums_every_shard_when_shards_outnumber_its_workers() {
+    let root = tempfile::tempdir().unwrap();
+    drop(KernelStore::open(root.path()).unwrap());
+    let objects = root.path().join("artifacts/objects");
+    let mut expected = 0_u64;
+    for index in 0..600_u64 {
+        let shard = objects.join(format!("{:02x}", index % 256));
+        if !shard.exists() {
+            fs::create_dir(&shard).unwrap();
+        }
+        let bytes = vec![b'x'; usize::try_from(index % 97 + 1).unwrap()];
+        fs::write(shard.join(format!("{index:062x}")), &bytes).unwrap();
+        expected += bytes.len() as u64;
+    }
+    fs::write(objects.join("stray"), b"top").unwrap();
+    expected += 3;
+    assert_eq!(walked_bytes(root.path()), expected);
+
+    let store = KernelStore::open(root.path()).unwrap();
+    assert_eq!(
+        store.artifact_census_walks_for_test(),
+        1,
+        "one census at open"
+    );
+    assert_eq!(reported(&store), expected, "every shard counted once");
+    store.run_staging_maintenance(0).unwrap();
+    assert_eq!(reported(&store), expected, "reconciliation agrees");
+    store.forget_artifact_usage_for_test();
+    assert_eq!(reported(&store), expected, "the fallback walk agrees");
 }

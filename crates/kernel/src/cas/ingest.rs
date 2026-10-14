@@ -1526,9 +1526,83 @@ pub(super) fn regular_file_bytes(
     objects: &File,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<u64>, StorageError> {
-    let mut bytes = 0_u64;
-    let mut top_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+    let Some((mut bytes, shards)) = top_level_entries(objects, cancelled)? else {
+        return Ok(None);
+    };
     let mut shard_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+    for shard in &shards {
+        let Some(shard_bytes) = shard_bytes(objects, shard, &mut shard_buffer, cancelled)? else {
+            return Ok(None);
+        };
+        bytes = bytes.saturating_add(shard_bytes);
+    }
+    Ok(Some(bytes))
+}
+
+/// [`regular_file_bytes`] without cancellation, with the shard directories
+/// divided among up to [`MAX_WALK_WORKERS`] threads.
+///
+/// Each object costs one `statat`, whose latency is a metadata lookup when the
+/// inode is cached and a device read when it is not; the workers overlap those
+/// latencies. The worker count is sized for reads in flight: a walk of an
+/// uncached tree waits on the device, and workers beyond the processor count
+/// keep more reads queued. A failure other than exhaustion outranks an
+/// exhaustion, because only the former latches the store.
+pub(super) fn regular_file_bytes_concurrently(objects: &File) -> Result<u64, StorageError> {
+    let (mut bytes, shards) =
+        top_level_entries(objects, &|| false)?.expect("an uncancellable walk completes");
+    let next_shard = std::sync::atomic::AtomicUsize::new(0);
+    let walk_shards = || -> Result<u64, StorageError> {
+        let mut buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+        let mut bytes = 0_u64;
+        while let Some(shard) =
+            shards.get(next_shard.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        {
+            let shard_bytes = shard_bytes(objects, shard, &mut buffer, &|| false)?
+                .expect("an uncancellable walk completes");
+            bytes = bytes.saturating_add(shard_bytes);
+        }
+        Ok(bytes)
+    };
+    let workers = MAX_WALK_WORKERS.min(shards.len());
+    let results = std::thread::scope(|scope| {
+        // A helper whose thread cannot be created leaves its shards to the others.
+        let helpers: Vec<_> = (1..workers)
+            .filter_map(|_| {
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, walk_shards)
+                    .ok()
+            })
+            .collect();
+        let mut results = vec![walk_shards()];
+        results.extend(helpers.into_iter().map(|helper| {
+            helper
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }));
+        results
+    });
+    let mut exhausted = None;
+    for result in results {
+        match result {
+            Ok(shard_bytes) => bytes = bytes.saturating_add(shard_bytes),
+            Err(error @ StorageError::Other(_)) => return Err(error),
+            Err(error) => exhausted = exhausted.or(Some(error)),
+        }
+    }
+    exhausted.map_or(Ok(bytes), Err)
+}
+
+/// The regular-file bytes directly below `objects` and the names of its shard
+/// directories, polling `cancelled` before every entry; `None` once it returns
+/// true.
+fn top_level_entries(
+    objects: &File,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<(u64, Vec<std::ffi::CString>)>, StorageError> {
+    let mut bytes = 0_u64;
+    let mut shards = Vec::new();
+    let mut top_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
     // Reading a directory advances its descriptor's offset, so the walk reads a
     // descriptor of its own and concurrent walks of `objects` stay independent.
     let top = open_shard_nofollow(objects, c".")?;
@@ -1561,39 +1635,56 @@ pub(super) fn regular_file_bytes(
             }
             _ => continue,
         }
-        let shard = match open_shard_nofollow(objects, name) {
-            Ok(shard) => shard,
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => return Err(error),
+        shards.push(name.to_owned());
+    }
+    Ok(Some((bytes, shards)))
+}
+
+/// Sums regular-file sizes in the shard `name` below `objects`, polling
+/// `cancelled` before every entry; `None` once it returns true. A shard removed
+/// before it opens holds zero bytes.
+fn shard_bytes(
+    objects: &File,
+    name: &std::ffi::CStr,
+    buffer: &mut Vec<u8>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<u64>, StorageError> {
+    let shard = match open_shard_nofollow(objects, name) {
+        Ok(shard) => shard,
+        Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(0));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = 0_u64;
+    let mut entries = rfs::RawDir::new(&shard, buffer.spare_capacity_mut());
+    while let Some(entry) = next_dir_entry(&mut entries)? {
+        if cancelled() {
+            return Ok(None);
+        }
+        let name = entry.file_name();
+        if is_dot_entry(name)
+            || !matches!(
+                entry.file_type(),
+                rfs::FileType::RegularFile | rfs::FileType::Unknown
+            )
+        {
+            continue;
+        }
+        let stat = match rfs::statat(&shard, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(error) => return Err(classify_errno(error)),
         };
-        let mut shard_entries = rfs::RawDir::new(&shard, shard_buffer.spare_capacity_mut());
-        while let Some(shard_entry) = next_dir_entry(&mut shard_entries)? {
-            if cancelled() {
-                return Ok(None);
-            }
-            let shard_name = shard_entry.file_name();
-            if is_dot_entry(shard_name)
-                || !matches!(
-                    shard_entry.file_type(),
-                    rfs::FileType::RegularFile | rfs::FileType::Unknown
-                )
-            {
-                continue;
-            }
-            let shard_stat = match rfs::statat(&shard, shard_name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(shard_stat) => shard_stat,
-                Err(rustix::io::Errno::NOENT) => continue,
-                Err(error) => return Err(classify_errno(error)),
-            };
-            if rfs::FileType::from_raw_mode(shard_stat.st_mode).is_file() {
-                bytes = bytes.saturating_add(stat_bytes(&shard_stat));
-            }
+        if rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
+            bytes = bytes.saturating_add(stat_bytes(&stat));
         }
     }
     Ok(Some(bytes))
 }
+
+/// Threads the uncancellable census walks on at most, the caller included.
+const MAX_WALK_WORKERS: usize = 64;
 
 const WALK_BUFFER_BYTES: usize = 16 * 1024;
 
