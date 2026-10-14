@@ -7,9 +7,10 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use daemon::query_route::{
-    ExactAdmission, ExactCertification, ExactRoute, HybridCause, LaneStatus, Phase, QueryFailure,
-    QueryOutcome, Terminal, Uncertified,
+    ExactAdmission, ExactCertification, ExactRoute, HybridCause, LaneStatus, LimitsRefusal, Phase,
+    QueryFailure, QueryOutcome, Terminal, Uncertified,
 };
+use kernel::MAX_ELIGIBILITY_CANDIDATES;
 use retrieval::exact::{CertificateRefusal, Completion, Disqualification, ProofInvalidation};
 use retrieval::fusion::Lane;
 use serde_json::Value;
@@ -303,6 +304,43 @@ async fn every_unproven_request_hands_its_retained_rows_to_hybrid_retrieval() {
     assert_eq!(retained(&incomplete).len(), 1);
     assert_eq!(exact_fused(&incomplete), retained(&incomplete));
     assert_eq!(incomplete.body["degraded"], true);
+    fixture.daemon.shutdown().await;
+}
+
+/// The certified resolver requires each exact page to fit in one kernel eligibility batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exact_page_larger_than_one_kernel_batch_is_refused_at_installation() {
+    let fixture = Fixture::build().await;
+    let certificate = fixture.certificate();
+    let admission = grant(CancellationToken::new());
+    let (_token, budget) = request_budget(10_000);
+
+    let mut boundary = limits();
+    boundary.exact_page_rows = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap();
+    assert_eq!(boundary.validate(), Ok(()));
+    let direct = fixture
+        .run_certified(
+            &boundary,
+            budget.shared(),
+            "id:rule",
+            ExactCertification::for_test(certificate, &fixed_epoch, &admission),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(direct.exact.route, ExactRoute::Direct);
+    assert_eq!(
+        entry_ids(&direct.body).into_iter().collect::<BTreeSet<_>>(),
+        projected(&fixture, "rule")
+    );
+
+    let mut over = limits();
+    over.exact_page_rows = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES + 1).unwrap();
+    assert_eq!(
+        over.validate(),
+        Err(LimitsRefusal::ExactPageRows {
+            value: MAX_ELIGIBILITY_CANDIDATES + 1
+        })
+    );
     fixture.daemon.shutdown().await;
 }
 

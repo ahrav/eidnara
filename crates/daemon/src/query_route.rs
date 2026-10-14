@@ -85,6 +85,10 @@ pub enum LimitsRefusal {
         "lexical_accepted {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
     )]
     LexicalAccepted { value: usize },
+    #[error(
+        "exact_page_rows {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
+    )]
+    ExactPageRows { value: usize },
     #[error("response_bytes {value} cannot hold the {floor}-byte empty fused envelope")]
     ResponseBytes { value: usize, floor: usize },
     #[error("response_bytes {value} exceeds the {max}-byte wire body the host can send")]
@@ -204,6 +208,11 @@ impl QueryRouteLimits {
         if self.lexical_accepted.get() > MAX_ELIGIBILITY_CANDIDATES {
             return Err(LimitsRefusal::LexicalAccepted {
                 value: self.lexical_accepted.get(),
+            });
+        }
+        if self.exact_page_rows.get() > MAX_ELIGIBILITY_CANDIDATES {
+            return Err(LimitsRefusal::ExactPageRows {
+                value: self.exact_page_rows.get(),
             });
         }
         let floor = Self::response_floor();
