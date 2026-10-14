@@ -252,8 +252,10 @@ evidence. W12 has transform-specific redaction evidence but an unresolved
 kernel-route boundary. T3 and T4 are default-production: the daemon sends
 every transform and exact-length response through the direct path. T3's
 check applies unchanged to a `MeasuredSource::Json` response, which the owned
-path serializes twice at HEAD (`crates/daemon/src/dispatch.rs:132-148`
-measures, `:237-249` writes).
+path measures structurally (`measure_json`,
+`crates/daemon/src/dispatch.rs:605-610`) and serializes once into the
+reserved body (`MeasuredOutput::write_to`, `:464-480`); the serializer-based
+count runs only for a value past the wire cap.
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
 [unit-host-live]: ../../../../crates/host-runtime/src/handler.rs#L606
@@ -1800,14 +1802,24 @@ reported through `Publisher::try_publish` as
 [`ReadClose::Corrupt("shared-memory publish failed")`][publish-fail], which
 closes the whole connection, while the owned path turns the same failure into
 a request-scoped `encode_failed` terminal in
-[`settle_prepared_with`][settle-with]. A body failure (serializer `Err`,
-panic, or a written length other than `body_len`) also increments
+[`settle_prepared_with`][settle-with]. The connection close is the decided
+classification: the daemon measures every direct body before reserving it,
+and `write_measured` writes the same immutable source at that length, so a
+publication-time mismatch is a writer-integrity fault rather than a
+request-scoped encoding error; a measurement failure still settles the
+request as `encode_failed` before any reservation. A body failure (serializer
+`Err`, panic, or a written length other than `body_len`) also increments
 `direct_serialize_failure.observed` in `host.status`; a refused commit leaves
-it unchanged. On the direct path the closure holds the source tree after `handle`
-returns; the response output carries the decode's scratch charges
-(`PreparedOutcome::holding`), so they release when the serializer runs or the
-queued frame drops. A cancelled or retired generation drops the queued frame
-with its closure and releases both.
+it unchanged. Two charges cover a direct frame until commit. The egress
+charge of the measured length plus header covers the ring bytes. The decode's
+scratch charges cover the source: the pass shares its charges with the
+response through `PreparedOutcome::holding`, and `handle` hands any charges
+left in its meter to the response the same way. The serializer owns the
+`PreparedOutput` and its held charges, so both drop when the serializer runs
+or when the queued frame drops; a cancelled or retired generation drops the
+queued frame with its closure and releases both. A clone of the output, such
+as the completed-page replay copy, starts with an empty charge list, and its
+retaining cache charges it against the completed-response budget.
 Required faults and enabling state: A serializer that writes `body_len - 1`,
 `body_len + 1`, returns `Err` after some bytes, or panics; a body wrapping
 the arena end; a deadline expiring during serialization; a direct response
@@ -1825,27 +1837,11 @@ and the production settlement branch; none for a queued direct frame dropped
 by generation retirement; all unaudited.
 Impact: A response that won settlement closes the connection for every
 in-flight request, or source bytes outlive the charge that admitted them.
-Open questions:
-
-- Decided: a serializer failure on the direct path closes the connection.
-  The daemon measures every direct body before reserving it, and
-  `write_measured` writes the same immutable source at that length, so a
-  publication-time mismatch is a writer-integrity fault rather than a
-  request-scoped encoding error. A measurement failure still settles the
-  request as `encode_failed` before any reservation.
-- Decided: two charges cover a direct frame until commit. The egress charge
-  of the measured length plus header covers the ring bytes. The decode's
-  scratch charges cover the source: the pass shares its charges with the
-  response through `PreparedOutcome::holding`, and `handle` hands any charges
-  left in its meter to the response the same way. The serializer owns the
-  `PreparedOutput` and its held charges, so both drop when the serializer
-  runs or when the queued frame drops. A clone of the output, such as the
-  completed-page replay copy, starts with an empty charge list, and its
-  retaining cache charges it against the completed-response budget.
-- [The host-runtime terminal record][hr-terminal] holds trivially on the
-  failure arm because nothing is emitted; the settled `Response` is then
-  never delivered, which [its publication-failure record][hr-pubfail]
-  already covers for owned frames.
+[The host-runtime terminal record][hr-terminal] holds trivially on the
+failure arm because nothing is emitted; the settled `Response` is then never
+delivered, which [its publication-failure record][hr-pubfail] already covers
+for owned frames.
+Open questions: None.
 
 ### direct-frame-outlives-its-handler-before-publication
 
