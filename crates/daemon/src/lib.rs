@@ -2562,7 +2562,8 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
-    + memory_capture::RETAINED_BYTES_BOUND;
+    + memory_capture::RETAINED_BYTES_BOUND
+    + config::MERGED_CONFIG_RETAINED_BYTES_BOUND as u64;
 
 const NATIVE_OUTPUT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const NATIVE_OUTPUT_ENTRY_BUDGET_BYTES: usize = 64 * 1024 * 1024;

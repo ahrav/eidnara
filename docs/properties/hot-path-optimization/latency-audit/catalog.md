@@ -2405,53 +2405,56 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - The mtime cache and the three raise-only tests exist;
-none covers override staleness or two project roots sharing one cache.
+Exercised: yes - [The memo tests][t-memo] edit each tier and rewrite the
+guidance override with its mtime restored between loads, alternate a hostile
+and a quiet project root on one cache, and assert per-key warnings repeat on a
+memo hit; the mtime test and the three raise-only tests still pass.
 Guarantee: A config edit takes effect within one pass, as today, and a
 project tier can never gain privilege through a stale or cross-project cache
 entry.
 Check: `always` - After the user tier, the project tier, or the configured
-guidance override file changes on disk (mtime advance for the tiers; any
-content change for the override, which HEAD re-reads on every call), the
-next [`effective_config`][eff-cfg] call for that `project_root` returns the
-merge of the new contents; a cache is keyed by `(user_path, project_root)`
-and mtimes; [`merge_tiers_with_warnings`][merge] including
-[`ProjectRaiseOnly`][raise-only] is applied to the fresh contents unchanged;
-and bind-frozen `SessionBinding.config` stays frozen. `always` because
+guidance override file changes on disk, the next [`effective_config`][eff-cfg]
+call for that `project_root` returns the merge of the new contents. The
+[merged memo][memo] records a [`SourceIdentity`][identity] (path, device,
+inode, length, modification time, and change time) for the user tier, the
+project tier, whose path names its root, and the override, and
+[serves][memo-serves] a load only when all of them match a fresh `stat`; any
+rewrite of a file changes its change time, so the override is observed on
+every content change as before, and a tier edit that restores its mtime
+still meets [`read_tier_cached`][tier-cached]'s existing mtime contract.
+[`merge_tiers_with_warnings`][merge] including [`ProjectRaiseOnly`][raise-only]
+runs on every miss unchanged, a hit returns the stored merge and warnings, and
+bind-frozen `SessionBinding.config` stays frozen. `always` because
 [`prepare_history_summarizer_fire`][call-fire] calls it on every non-subagent pass
 whose state load succeeds, has no `pending_rewrite`, and has no live
-history_summarizer completion pending (`lib.rs:8462-8474`, `:5287-5325`), and
-[`bind`][call-bind] calls it on every route bind; the check is on each call,
-not on each pass.
+history_summarizer completion pending, and [`bind`][call-bind] calls it on
+every route bind; the check is on each call, not on each pass.
 Fault/timing angle: A tier edit between two passes; two routes on different
-project roots alternating, which re-reads the file every call because one
-`ConfigCache` holds one project tier ([`read_tier_cached`][tier-cached]);
-the override edited without touching a tier
-([`resolve_user_guidance_override`][guidance] does a full read per call with
-no mtime gate). The staleness contract at HEAD already ignores a same-mtime
-edit.
+project roots alternating, which replaces the one-entry memo and re-reads the
+project tier every call because one `ConfigCache` holds one project tier
+([`read_tier_cached`][tier-cached]); the override edited without touching a
+tier. Every identity is taken before its read, so a rewrite racing the read
+leaves an identity the next load does not match. A tier whose read failed is
+never memoized ([`:492`][memo-store]), so a transient failure is retried on
+the next load. The memo is bounded by
+[`MERGED_CONFIG_RETAINED_BYTES_BOUND`][memo-bound], declared in the daemon's
+retained-resident total; a merge estimated above it is served unmemoized.
 Required faults and enabling state: A user or project tier rewritten with a
 later mtime; `prompt_surface.guidance_override_path` configured and its file
-edited; two project roots bound at once.
+rewritten with its mtime restored; two project roots bound at once.
 Confidence: high - [Evidence](evidence/effective-config-reads-observe-a-tier-change-by-the-next-pass.md).
-[`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn]
-with its deep clone at [`:288`][eff-clone], the per-pass callers
-([`:5064`][call-reattach], [`:5325`][call-fire-caller], [`:5642`][call-wrapup]), and
-the bind freeze ([`:12363`][call-bind], [binding doc][binding-doc]) are
-source-verified.
+[`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn],
+the memo, the per-pass callers ([`:5101`][call-reattach],
+[`:5362`][call-fire-caller], [`:5679`][call-wrapup]), and the bind freeze
+([`:12427`][call-bind], [binding doc][binding-doc]) are source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the mtime test and the three privilege tests; all unaudited. Unit tests
-built with `fixed_config` (`lib.rs:4119`, returned at `:4813-4815`) bypass the
-cache and cannot exercise this record.
+list the memo tests, the mtime test, and the three privilege tests; all
+unaudited. Unit tests built with `fixed_config` (`lib.rs:4119`, returned at
+[`effective_config`][eff-cfg]) bypass the cache and cannot exercise this
+record.
 Impact: An edit is ignored for the life of the daemon, or a project tier
 reads another project's cached values.
-Open questions:
-
-- The doc at [config.rs:266-267][eff-warn-doc] says tier read failures are
-  reported on every load so a long-running daemon keeps surfacing them; a
-  merged cache silences the repeat. Keep that behavior? (needs human input)
-- Should the history_summarizer read the bind-frozen config, removing the per-pass
-  merge entirely? (needs human input)
+Open questions: None.
 
 ### committed-transform-bookkeeping-is-applied-or-recomputed
 
@@ -2855,7 +2858,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [W4][w4] | Differential bounded-versus-whole over rules, limits, and edge-margin inputs. |
 | [W5][w5] | Reuse the frozen reference; add a format-change-across-restart case. |
 | [W6][w6] | Differential against the stepper over DST and unsatisfiable expressions. |
-| [W7][w7] | Edit tiers and the override between passes; alternate two project roots. |
+| [W7][w7] | Done: the memo tests edit tiers and the override between loads and alternate two project roots. |
 | [W8][w8] | Abort between commit and bookkeeping; read the next pass's derived inputs. |
 | [W9][w9] | Frozen direct-estimator reference and threshold comparison exist; preserve them when changing pressure logic. |
 | [W10][w10] | Three active witnesses exist; the dead update-count witness is retired with its disjunct. |
@@ -3276,21 +3279,27 @@ evaluation of this area and its disposition are recorded in
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L454
 [sched-default]: ../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
-[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4848
+[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4880-L4889
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L239-L240
 [call-reattach]: ../../../../crates/daemon/src/lib.rs#L5101
 [call-fire]: ../../../../crates/daemon/src/lib.rs#L5305
 [call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5362
 [call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5679
 [call-bind]: ../../../../crates/daemon/src/lib.rs#L12427
-[eff-proj]: ../../../../crates/daemon/src/config.rs#L242
+[eff-proj]: ../../../../crates/daemon/src/config.rs#L374-L382
 [eff-warn-doc]: ../../../../crates/daemon/src/config.rs#L266-L267
-[eff-warn]: ../../../../crates/daemon/src/config.rs#L268
+[eff-warn]: ../../../../crates/daemon/src/config.rs#L410-L505
 [eff-clone]: ../../../../crates/daemon/src/config.rs#L288
-[tier-cached]: ../../../../crates/daemon/src/config.rs#L368
-[guidance]: ../../../../crates/daemon/src/config.rs#L414
-[merge]: ../../../../crates/daemon/src/config.rs#L716
-[raise-only]: ../../../../crates/daemon/src/config.rs#L740
+[tier-cached]: ../../../../crates/daemon/src/config.rs#L586-L617
+[guidance]: ../../../../crates/daemon/src/config.rs#L650-L707
+[merge]: ../../../../crates/daemon/src/config.rs#L934
+[raise-only]: ../../../../crates/daemon/src/config.rs#L734
+[memo]: ../../../../crates/daemon/src/config.rs#L312-L369
+[memo-serves]: ../../../../crates/daemon/src/config.rs#L326-L333
+[memo-store]: ../../../../crates/daemon/src/config.rs#L492-L503
+[memo-bound]: ../../../../crates/daemon/src/config.rs#L277
+[identity]: ../../../../crates/daemon/src/config.rs#L279-L310
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2518
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13

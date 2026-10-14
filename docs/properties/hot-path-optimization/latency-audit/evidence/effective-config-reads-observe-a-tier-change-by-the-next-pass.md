@@ -87,7 +87,7 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
   intent. A merged cache that stores the result silences the repeat unless it
   also stores and re-emits the warning.
 - Missing evidence: A decision on the warning surface.
-- Conclusion: needs human input.
+- Conclusion: needs human input. Superseded by the memo entry below.
 
 ### Q: Should the history_summarizer read the bind-frozen config instead?
 
@@ -98,7 +98,36 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
   reads a fresh merge per pass. Switching it to the frozen copy removes the
   per-pass cost and the one-pass edit latency together.
 - Missing evidence: A specification decision.
-- Conclusion: needs human input.
+- Conclusion: needs human input. Superseded by the memo entry below.
+
+### Q: How does the merged memo keep warnings and tier changes? (decision at the memo head)
+
+- Sources examined: the [memo][memo-head], [`SourceIdentity`][identity-head],
+  [`effective_with_warnings`][eff-warn-head], and the [memo tests][t-memo-head].
+- Findings: The daemon maintainer's decisions are to keep per-load warning
+  re-emission and to keep the history_summarizer reading a fresh merge per
+  pass rather than the bind-frozen config. The memo therefore stores the
+  merge's warnings and returns them on every hit, and `effective_for_project`
+  emits them each load. A tier with a read failure is never memoized, so it is
+  re-read and re-warned on every load as the doc states. The memo is one
+  entry keyed on the identities of the user tier, the project tier (whose
+  path names its root), and the guidance override; each identity is the path
+  plus device, inode, length, mtime, and ctime from `stat`. A rewrite always
+  moves the ctime, so the override's change-on-every-read behavior holds.
+  Alternating roots replace the entry, so admitted-tier state for a root is
+  read only on a miss, as before. The retained bytes are bounded by
+  `MERGED_CONFIG_RETAINED_BYTES_BOUND` (4 MiB), added to
+  `DECLARED_RETAINED_RESIDENT_BYTES`.
+- Payoff: An uncommitted probe timed `effective_with_warnings` on one host,
+  release build, `taskset -c 5`, with a user tier naming a 4 KiB guidance
+  override and a small project tier, 200 samples of 50 calls, three runs.
+  Before, medians were 54.83-54.96 us; after, 11.70-11.74 us. The p10-p90
+  ranges do not overlap, so the change stays.
+- Missing evidence: None for this record. A same-ctime rewrite is outside
+  the identity and also outside the tier contract at HEAD.
+- Conclusion: resolved with answer - warnings re-emit on every load and the
+  per-pass merge stays, served from the memo while every source identity
+  matches.
 
 [eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4608-L4617
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L230-L234
@@ -118,3 +147,7 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 [merge]: ../../../../../crates/daemon/src/config.rs#L716
 [raise-only]: ../../../../../crates/daemon/src/config.rs#L740
 [t-mtime]: ../../../../../crates/daemon/src/config.rs#L2165-L2202
+[memo-head]: ../../../../../crates/daemon/src/config.rs#L312-L369
+[identity-head]: ../../../../../crates/daemon/src/config.rs#L279-L310
+[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L410-L505
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2518-L2622

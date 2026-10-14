@@ -514,6 +514,8 @@ directory sync fails, which leaves the count unknown.
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes. | unaudited |
 | [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
 | [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] | A `*/15 * * * *` project runs at its instant and not before; the same instant does not run twice. | unaudited |
+| [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; an override rewrite with its mtime restored, a project-tier edit, a user-tier edit, and a removed tier each reach the next load. | unaudited |
+| [`the_merged_memo_reemits_warnings_and_keeps_project_raise_only_rules`][t-memo-raise] | Alternating a hostile and a quiet project root on one cache keeps each root's merge, refuses the hostile tier's raise-only and user-only keys, and repeats the per-key warnings on a memo hit. | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | A same mtime hides an edit; a new mtime reloads. | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | The `ProjectRaiseOnly` threshold. | unaudited |
 | [`project_tier_cannot_raise_the_user_memory_gate`][t-gate] | The `ProjectRaiseOnly` gate. | unaudited |
@@ -804,6 +806,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
 [t-mtime]: ../../../../crates/daemon/src/config.rs#L2118
+[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2518
+[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2570
 [t-raise]: ../../../../crates/daemon/src/config.rs#L1314
 [t-gate]: ../../../../crates/daemon/src/config.rs#L1650
 [t-hostile]: ../../../../crates/daemon/src/config.rs#L1718

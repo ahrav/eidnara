@@ -266,9 +266,107 @@ pub struct ConfigCache {
     project: TierConfig,
     admitted_user: Option<Option<Value>>,
     admitted_projects: std::collections::VecDeque<(PathBuf, Option<Value>)>,
+    merged: Option<MergedConfig>,
 }
 
 const ADMITTED_PROJECT_CAPACITY: usize = 8;
+
+/// Upper bound on the bytes the merged-config memo retains: two tiers and one
+/// guidance override at their read limits, with room for the derived strings.
+/// A merge whose estimate exceeds it is served without being memoized.
+pub const MERGED_CONFIG_RETAINED_BYTES_BOUND: usize = 4 << 20;
+
+/// A file the merge read, named by its path and the `stat` fields any rewrite
+/// changes: device, inode, length, and both modification and change times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceIdentity {
+    path: PathBuf,
+    stat: Option<[i64; 7]>,
+}
+
+impl SourceIdentity {
+    fn of(path: &Path) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let stat = fs::metadata(path).ok().map(|metadata| {
+            [
+                metadata.dev() as i64,
+                metadata.ino() as i64,
+                metadata.len() as i64,
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ]
+        });
+        Self {
+            path: path.to_path_buf(),
+            stat,
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        *self == Self::of(&self.path)
+    }
+}
+
+/// The last merge with the identities of every file it read. A load whose
+/// user tier, project tier, and guidance override all keep their identities
+/// is served from it, with its warnings emitted again. The project tier's path
+/// lies below its project root, so it also names the root.
+#[derive(Debug, Clone)]
+struct MergedConfig {
+    user: Option<SourceIdentity>,
+    project: SourceIdentity,
+    guidance: Option<SourceIdentity>,
+    effective: DaemonConfig,
+    warnings: Vec<String>,
+}
+
+impl MergedConfig {
+    fn serves(&self, user: Option<&SourceIdentity>, project: &SourceIdentity) -> bool {
+        self.user.as_ref() == user
+            && self.project == *project
+            && self
+                .guidance
+                .as_ref()
+                .is_none_or(SourceIdentity::is_current)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let path = |path: &Path| path.as_os_str().len();
+        let identity = |identity: &SourceIdentity| path(&identity.path);
+        let config = &self.effective;
+        std::mem::size_of::<Self>()
+            + self.user.as_ref().map_or(0, identity)
+            + identity(&self.project)
+            + self.guidance.as_ref().map_or(0, identity)
+            + self.warnings.iter().map(String::capacity).sum::<usize>()
+            + config
+                .model_chain
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>()
+            + config
+                .memory_classifier_review_user_memories_schedule
+                .as_ref()
+                .map_or(0, String::capacity)
+            + config
+                .prompt_surface_guidance_override
+                .as_ref()
+                .map_or(0, String::capacity)
+            + config.cache_ttl.capacity()
+            + config
+                .cache_ttl_by_model
+                .iter()
+                .map(|(model, ttl)| model.capacity() + ttl.capacity() + 64)
+                .sum::<usize>()
+            + match &config.admission {
+                ConfigAdmission::Admitted => 0,
+                ConfigAdmission::Unresolved { reason } => reason.capacity(),
+            }
+            + config.user_config_path.as_deref().map_or(0, path)
+    }
+}
 
 impl ConfigCache {
     /// Loads user config from the platform path and project config below `project_root`.
@@ -306,13 +404,23 @@ impl ConfigCache {
     }
 
     /// Tier read failures are reported on every load so a long-running daemon keeps
-    /// surfacing a config file it cannot use.
+    /// surfacing a config file it cannot use. A load whose sources all keep the
+    /// identities the last merge recorded returns that merge and its warnings;
+    /// a tier that could not be read is never memoized, so it is retried.
     fn effective_with_warnings(
         &mut self,
         user_path: Option<&Path>,
         project_root: &Path,
     ) -> (DaemonConfig, Vec<String>) {
         let project_path = discover_tier(&project_root.join(".eidnara").join("eidnara"));
+        let user_identity = user_path.map(SourceIdentity::of);
+        let project_identity = SourceIdentity::of(&project_path);
+        if let Some(merged) = &self.merged
+            && merged.serves(user_identity.as_ref(), &project_identity)
+        {
+            return (merged.effective.clone(), merged.warnings.clone());
+        }
+        self.merged = None;
         let user = match user_path {
             Some(user_path) => read_tier_cached(&mut self.user, user_path.to_path_buf()),
             None => None,
@@ -365,8 +473,13 @@ impl ConfigCache {
         for tier in [&self.user, &self.project] {
             warnings.extend(tier.warning.iter().cloned());
         }
-        if let Some(user_path) = user_path {
-            resolve_user_guidance_override(&mut effective, user.as_ref(), user_path, &mut warnings);
+        let guidance_path =
+            user_path.and_then(|user_path| guidance_override_path(user.as_ref(), user_path));
+        // The identity is taken before the read, so a rewrite racing the read
+        // leaves a stale identity that the next load does not match.
+        let guidance = guidance_path.as_deref().map(SourceIdentity::of);
+        if let Some(guidance_path) = &guidance_path {
+            resolve_user_guidance_override(&mut effective, guidance_path, &mut warnings);
         }
         let rejections = [user_rejections, project_rejections].concat();
         if !rejections.is_empty() {
@@ -375,6 +488,18 @@ impl ConfigCache {
                 "configuration unresolved ({reason}); the last admitted tier documents stay in effect and the host's native compaction owns folding"
             ));
             effective.admission = ConfigAdmission::Unresolved { reason };
+        }
+        if self.user.warning.is_none() && self.project.warning.is_none() {
+            let merged = MergedConfig {
+                user: user_identity,
+                project: project_identity,
+                guidance,
+                effective: effective.clone(),
+                warnings: warnings.clone(),
+            };
+            if merged.retained_bytes() <= MERGED_CONFIG_RETAINED_BYTES_BOUND {
+                self.merged = Some(merged);
+            }
         }
         (effective, warnings)
     }
@@ -504,34 +629,27 @@ fn emit_warnings(warnings: Vec<String>) {
     }
 }
 
-fn resolve_user_guidance_override(
-    cfg: &mut DaemonConfig,
-    user: Option<&Value>,
-    user_config_path: &Path,
-    warnings: &mut Vec<String>,
-) {
-    let Some(configured_path) = user
+/// The guidance override file the user tier names; a relative path resolves
+/// from the user config directory.
+fn guidance_override_path(user: Option<&Value>, user_config_path: &Path) -> Option<PathBuf> {
+    let configured_path = user
         .and_then(|value| value.pointer(ConfigKey::PromptSurfaceGuidanceOverridePath.pointer()))
         .and_then(Value::as_str)
-    else {
-        return;
-    };
-    if configured_path.is_empty() {
-        return;
-    }
-
-    cfg.prompt_surface_guidance_override = None;
+        .filter(|configured_path| !configured_path.is_empty())?;
     let configured_path = Path::new(configured_path);
-    let path = if configured_path.is_absolute() {
+    Some(if configured_path.is_absolute() {
         configured_path.to_path_buf()
     } else {
         user_config_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(configured_path)
-    };
+    })
+}
 
-    let metadata = match fs::metadata(&path) {
+fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings: &mut Vec<String>) {
+    cfg.prompt_surface_guidance_override = None;
+    let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) => {
             warnings.push(format!(
@@ -556,7 +674,7 @@ fn resolve_user_guidance_override(
         ));
         return;
     }
-    let bytes = match read_bounded_bytes(&path, MAX_GUIDANCE_OVERRIDE_BYTES) {
+    let bytes = match read_bounded_bytes(path, MAX_GUIDANCE_OVERRIDE_BYTES) {
         Ok(bytes) => bytes,
         Err(error) => {
             warnings.push(format!(
@@ -1816,7 +1934,8 @@ mod tests {
             });
             let (mut cfg, mut warnings) = merge_tiers_with_warnings(Some(&user), None);
 
-            resolve_user_guidance_override(&mut cfg, Some(&user), &user_path, &mut warnings);
+            let path = guidance_override_path(Some(&user), &user_path).unwrap();
+            resolve_user_guidance_override(&mut cfg, &path, &mut warnings);
 
             assert!(cfg.prompt_surface_guidance_override.is_none());
             assert_eq!(warnings.len(), 1);
@@ -2384,6 +2503,122 @@ mod tests {
         filetime::set_file_mtime(&user, newer).unwrap();
         let reloaded = cache.effective_for_paths(&user, &project);
         assert_eq!(reloaded.model_chain, vec!["model-b"]);
+    }
+
+    fn restore_mtime(path: &Path, mtime: std::time::SystemTime) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(mtime)).unwrap();
+    }
+
+    fn advance_mtime(path: &Path) {
+        let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+        restore_mtime(path, mtime + std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_merged_memo_observes_every_tier_and_override_change_by_the_next_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let guidance = dir.path().join("guidance.md");
+        let project = dir.path().join("project");
+        let project_file = project.join(".eidnara/eidnara.jsonc");
+        std::fs::create_dir_all(project.join(".eidnara")).unwrap();
+        std::fs::write(&guidance, "## Eidnara\nfirst\n").unwrap();
+        std::fs::write(
+            &user,
+            r#"{ "history_summarizer": { "model": "model-a" },
+                 "prompt_surface": { "guidance_override_path": "guidance.md" } }"#,
+        )
+        .unwrap();
+        std::fs::write(&project_file, r#"{ "memory": { "enabled": false } }"#).unwrap();
+        let mut cache = ConfigCache::default();
+        let (first, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(first.model_chain, vec!["model-a"]);
+        assert!(!first.memory_enabled);
+        let (served, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(served, first, "unchanged sources serve the memo");
+
+        // A guidance rewrite that restores its mtime still changes its identity.
+        let mtime = std::fs::metadata(&guidance).unwrap().modified().unwrap();
+        std::fs::write(&guidance, "## Eidnara\nsecond\n").unwrap();
+        restore_mtime(&guidance, mtime);
+        let (rewritten, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(
+            rewritten.prompt_surface_guidance_override.as_deref(),
+            Some("## Eidnara\nsecond\n")
+        );
+
+        std::fs::write(&project_file, r#"{ "memory": { "enabled": true } }"#).unwrap();
+        advance_mtime(&project_file);
+        let (project_edit, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(project_edit.memory_enabled);
+
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-b" } }"#).unwrap();
+        advance_mtime(&user);
+        let (user_edit, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(user_edit.model_chain, vec!["model-b"]);
+        assert_eq!(user_edit.prompt_surface_guidance_override, None);
+
+        std::fs::remove_file(&project_file).unwrap();
+        let (removed, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            removed.memory_enabled,
+            "a removed tier falls back to the default"
+        );
+    }
+
+    #[test]
+    fn the_merged_memo_reemits_warnings_and_keeps_project_raise_only_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        std::fs::write(
+            &user,
+            r#"{ "execute_threshold_percentage": 70, "user_memories": { "enabled": false } }"#,
+        )
+        .unwrap();
+        let hostile = dir.path().join("hostile");
+        let quiet = dir.path().join("quiet");
+        for (root, body) in [
+            (
+                &hostile,
+                r#"{ "execute_threshold_percentage": 10, "user_memories": { "enabled": true },
+                     "history_summarizer": { "model": "evil/model" } }"#,
+            ),
+            (&quiet, r#"{ "execute_threshold_percentage": 90 }"#),
+        ] {
+            std::fs::create_dir_all(root.join(".eidnara")).unwrap();
+            std::fs::write(root.join(".eidnara/eidnara.jsonc"), body).unwrap();
+        }
+        let mut cache = ConfigCache::default();
+        let (reference, reference_warnings) = merge_tiers_with_warnings(
+            Some(&serde_json::from_str(&std::fs::read_to_string(&user).unwrap()).unwrap()),
+            Some(
+                &serde_json::from_str(
+                    &std::fs::read_to_string(hostile.join(".eidnara/eidnara.jsonc")).unwrap(),
+                )
+                .unwrap(),
+            ),
+        );
+        assert!(!reference_warnings.is_empty());
+        // Alternating roots never serve one project's merge to the other, and
+        // every served load repeats the hostile tier's per-key warnings.
+        for _ in 0..2 {
+            let (hostile_config, hostile_warnings) =
+                cache.effective_with_warnings(Some(&user), &hostile);
+            assert_eq!(hostile_config.execute_threshold_percentage, 70.0);
+            assert!(!hostile_config.user_memory_collection_enabled);
+            assert_eq!(
+                hostile_config.model_chain, reference.model_chain,
+                "the project tier cannot set the model"
+            );
+            assert_eq!(hostile_warnings, reference_warnings);
+            let (served, served_warnings) = cache.effective_with_warnings(Some(&user), &hostile);
+            assert_eq!(served, hostile_config);
+            assert_eq!(served_warnings, hostile_warnings, "a memo hit re-emits");
+
+            let (quiet_config, quiet_warnings) = cache.effective_with_warnings(Some(&user), &quiet);
+            assert_eq!(quiet_config.execute_threshold_percentage, 90.0);
+            assert!(quiet_warnings.is_empty(), "{quiet_warnings:?}");
+        }
     }
 
     #[test]
