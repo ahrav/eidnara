@@ -520,6 +520,8 @@ directory sync fails, which leaves the count unknown.
 | [`unread_sources_and_oversized_merges_are_never_memoized`][t-memo-unread] | An unreadable guidance override, a 90,000-model user tier above the retained bound, and 200,000 repeated models whose deduplicated chain keeps that capacity leave the memo empty and serve the same merge. | unaudited |
 | [`a_tier_whose_entry_is_a_final_symlink_is_never_memoized`][t-memo-symlink] | A dangling project-tier link is not memoized, so creating its target makes the next load warn and stay `Unresolved`. | unaudited |
 | [`a_model_ttl_map_is_charged_its_node_share`][t-memo-map] | A 30,000-entry `cache_ttl` map within the tier limit, whose B-tree nodes carry it past the retained bound, leaves the memo empty. | unaudited |
+| [`a_tier_relinked_to_a_target_with_its_cached_mtime_is_never_memoized`][t-memo-relink] | A user tier renamed and replaced by a link to it keeps serving the tier cache's value and is never memoized, so editing the target makes the next load refuse the link. | unaudited |
+| [`a_settled_source_with_a_future_mtime_is_memoized`][t-memo-future] | A tier whose mtime is a day ahead is memoized once its ctime has settled. | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | A same mtime hides an edit; a new mtime reloads. | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | The `ProjectRaiseOnly` threshold. | unaudited |
 | [`project_tier_cannot_raise_the_user_memory_gate`][t-gate] | The `ProjectRaiseOnly` gate. | unaudited |
@@ -537,8 +539,7 @@ identity; any bench reaching `Handler::handle` or a production-sized steady
 session; a check that `DECLARED_RETAINED_RESIDENT_BYTES` includes every
 cache; token-cache lock contention evidence; a bounded-scan versus
 whole-input differential for the secret scanner; a DST or
-unsatisfiable-expression case for the cron stepper; guidance override
-staleness, or two project roots sharing one `ConfigCache`; any test that aborts between
+unsatisfiable-expression case for the cron stepper; any test that aborts between
 commit and bookkeeping and inspects the next pass; any test in
 `crates/daemon/tests/` or in `kernel_routes` that panics inside a
 `kernel_routes::blocking` closure or any other `spawn_blocking` worker and
@@ -809,16 +810,18 @@ not a claim that no related check exists anywhere in the repository.
 [t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1571
 [t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2623
-[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2680
-[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2752
-[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2809
-[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2848
-[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2931
-[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2900
-[t-raise]: ../../../../crates/daemon/src/config.rs#L1774
-[t-gate]: ../../../../crates/daemon/src/config.rs#L2115
-[t-hostile]: ../../../../crates/daemon/src/config.rs#L2184
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2631
+[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2688
+[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2760
+[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2817
+[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2856
+[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2939
+[t-memo-relink]: ../../../../crates/daemon/src/config.rs#L2980
+[t-memo-future]: ../../../../crates/daemon/src/config.rs#L3022
+[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2908
+[t-raise]: ../../../../crates/daemon/src/config.rs#L1782
+[t-gate]: ../../../../crates/daemon/src/config.rs#L2123
+[t-hostile]: ../../../../crates/daemon/src/config.rs#L2192
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643

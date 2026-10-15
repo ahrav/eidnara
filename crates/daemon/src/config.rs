@@ -282,7 +282,8 @@ pub const MERGED_CONFIG_RETAINED_BYTES_BOUND: u64 = 4 << 20;
 /// same tick could keep every `stat` field the memo compares.
 const RECENT_CHANGE_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The `stat` fields any rewrite, rename, or relink of a path changes.
+/// The `stat` fields any rewrite, rename, or relink of a path changes, and
+/// whether the entry is a regular file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileStamp {
     dev: u64,
@@ -290,6 +291,7 @@ struct FileStamp {
     len: u64,
     mtime: (i64, i64),
     ctime: (i64, i64),
+    regular: bool,
 }
 
 impl FileStamp {
@@ -301,6 +303,7 @@ impl FileStamp {
             len: metadata.len(),
             mtime: (metadata.mtime(), metadata.mtime_nsec()),
             ctime: (metadata.ctime(), metadata.ctime_nsec()),
+            regular: metadata.is_file(),
         }
     }
 }
@@ -342,13 +345,20 @@ impl SourceIdentity {
     /// This stamp comes from `lstat`, while [`read_tier_cached`] records the
     /// mtime from `stat`, which follows a final symlink. Presence differs for
     /// a dangling link and for a file created or removed between the two
-    /// calls.
+    /// calls, and a link whose target carries the cached mtime serves the
+    /// cached value while the stamp names the link, so only a regular file's
+    /// stamp describes the read.
     fn describes(&self, tier: &TierConfig) -> bool {
-        tier.warning.is_none() && self.stamp.is_some() == tier.mtime.is_some()
+        tier.warning.is_none()
+            && match &self.stamp {
+                Some(stamp) => stamp.regular && tier.mtime.is_some(),
+                None => tier.mtime.is_none(),
+            }
     }
 
-    /// Whether the entry last changed before `settled_before`, compared in
-    /// whole nanoseconds since the epoch.
+    /// Whether the entry's ctime, which every write, rename, and attribute
+    /// change moves to the current time, is before `settled_before`, compared
+    /// in whole nanoseconds since the epoch.
     fn changed_before(&self, settled_before: std::time::SystemTime) -> bool {
         let Ok(limit) = settled_before.duration_since(std::time::UNIX_EPOCH) else {
             return false;
@@ -357,9 +367,7 @@ impl SourceIdentity {
             i64::try_from(limit.as_secs()).unwrap_or(i64::MAX),
             i64::from(limit.subsec_nanos()),
         );
-        self.stamp
-            .as_ref()
-            .is_none_or(|stamp| stamp.mtime < limit && stamp.ctime < limit)
+        self.stamp.as_ref().is_none_or(|stamp| stamp.ctime < limit)
     }
 }
 
@@ -2966,6 +2974,66 @@ mod tests {
             "{linked_warnings:?}"
         );
         assert!(cache.merged.is_none());
+    }
+
+    #[test]
+    fn a_tier_relinked_to_a_target_with_its_cached_mtime_is_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let target = dir.path().join("target.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
+        // The rename keeps the target's mtime, so the tier cache's followed
+        // `stat` matches the cached mtime and the tier cache returns its
+        // cached value.
+        std::fs::rename(&user, &target).unwrap();
+        std::os::unix::fs::symlink("target.jsonc", &user).unwrap();
+        settle();
+        let (relinked, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(relinked.model_chain, vec!["model-a"]);
+        assert!(cache.merged.is_none(), "a link entry describes no read");
+
+        std::fs::write(
+            &target,
+            r#"{ "history_summarizer": { "model": "model-b" } }"#,
+        )
+        .unwrap();
+        backdate_mtime(&target);
+        let (edited, warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            matches!(edited.admission, ConfigAdmission::Unresolved { .. }),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("could not be read")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_settled_source_with_a_future_mtime_is_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        restore_mtime(
+            &user,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(86_400),
+        );
+        settle();
+        let mut cache = ConfigCache::default();
+        let (first, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(first.model_chain, vec!["model-a"]);
+        assert!(cache.merged.is_some(), "a settled ctime admits the memo");
     }
 
     #[test]

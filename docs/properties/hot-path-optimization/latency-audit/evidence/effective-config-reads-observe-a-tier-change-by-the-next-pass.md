@@ -26,7 +26,7 @@ privilege rules that a project tier must never bypass.
   bounded read of the override file on every call, no mtime gate), and
   returned a clone of the merged config on every call. At HEAD that work is
   the memo miss path of [`effective_from_sources`][eff-warn], which returns
-  a new `Arc` at [`:634`][eff-clone]. Its doc at [`:510-514`][eff-warn-doc]
+  a new `Arc` at [`:642`][eff-clone]. Its doc at [`:518-522`][eff-warn-doc]
   says tier read failures are reported on every load so a long-running
   daemon keeps surfacing them.
 - One [`ConfigCache`][cache-struct] holds one `user` and one `project`
@@ -42,7 +42,7 @@ privilege rules that a project tier must never bypass.
   wrapup path at [`:5956`][call-wrapup]. [`bind`][call-bind] freezes a copy
   into `SessionBinding`, whose doc at [`:248-249`][binding-doc] says config
   can change while the route stays open.
-- The mtime test at [`:2622-2660`][t-mtime] rewrites the user file with the
+- The mtime test at [`:2630-2668`][t-mtime] rewrites the user file with the
   original mtime restored and asserts the old value is returned, then
   asserts a new mtime reloads; that is the staleness contract at HEAD.
 
@@ -83,8 +83,8 @@ call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
 
 ### Q: Keep reporting tier read failures on every load?
 
-- Sources examined: [`:510-514`][eff-warn-doc], [`:515-636`][eff-warn],
-  [`read_tier_cached:715-746`][tier-cached].
+- Sources examined: [`:518-522`][eff-warn-doc], [`:523-644`][eff-warn],
+  [`read_tier_cached:723-754`][tier-cached].
 - Findings: The cache bypasses its hit path when `warning` is set, so a
   failing file is re-read and re-warned on every call. The doc states this as
   intent. A merged cache that stores the result silences the repeat unless it
@@ -115,17 +115,21 @@ call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
   re-read and re-warned on every load as the doc states. The memo is one
   entry keyed on the identities of the user tier, the project tier (whose
   path names its root), and the guidance override; each identity is the path
-  plus device, inode, length, mtime, and ctime from `lstat`, matching the
-  `NOFOLLOW` reads. A rewrite moves the ctime, and a merge is memoized only
-  when every source last changed more than one second before the load, so a
-  second rewrite inside one coarse timestamp tick is still read; the
-  override's change-on-every-read behavior holds. A tier or override whose
-  read failed is never memoized. A tier is also memoized only when its
-  `lstat` stamp and the followed `stat` in `read_tier_cached` agree on
-  whether the file exists. A dangling final symlink keeps its own stamp when
-  its target is created, and a file created or removed between the stamp and
-  the read would key the merge on an entry it did not read; both disagree on
-  presence and are read again.
+  plus device, inode, length, mtime, ctime, and regular-file status from
+  `lstat`, matching the `NOFOLLOW` reads. Every write and attribute change
+  moves the ctime, and a merge is memoized only when every source's ctime is
+  more than one second before the load, so a second rewrite inside one
+  coarse timestamp tick is still read; the mtime takes no part in that gate,
+  so a tier stamped into the future by a tool or a skewed clock is memoized
+  once its ctime settles; the override's change-on-every-read behavior
+  holds. A tier or override whose read failed is never memoized. A tier is
+  also memoized only when its `lstat` entry is a regular file, or absent in
+  agreement with the followed `stat` in `read_tier_cached`. A dangling final
+  symlink keeps its own stamp when its target is created, a file created or
+  removed between the stamp and the read would key the merge on an entry it
+  did not read, and a link placed over a cached tier whose target carries
+  the cached mtime is served from the tier cache's value; none of these is
+  memoized.
   Alternating roots replace the entry, so admitted-tier state for a root is
   read only on a miss, as before. The retained bytes are bounded by
   `MERGED_CONFIG_RETAINED_BYTES_BOUND` (4 MiB), added to
@@ -155,16 +159,16 @@ call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
 [call-bind]: ../../../../../crates/daemon/src/lib.rs#L13073-L13074
 [tier-struct]: ../../../../../crates/daemon/src/config.rs#L256-L262
 [cache-struct]: ../../../../../crates/daemon/src/config.rs#L265-L271
-[eff-proj]: ../../../../../crates/daemon/src/config.rs#L466-L476
-[eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L510-L514
-[eff-warn]: ../../../../../crates/daemon/src/config.rs#L515-L636
-[eff-clone]: ../../../../../crates/daemon/src/config.rs#L634
-[tier-cached]: ../../../../../crates/daemon/src/config.rs#L715-L746
-[guidance]: ../../../../../crates/daemon/src/config.rs#L779-L836
-[merge]: ../../../../../crates/daemon/src/config.rs#L1063
-[raise-only]: ../../../../../crates/daemon/src/config.rs#L863-L865
-[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2622-L2660
-[memo-head]: ../../../../../crates/daemon/src/config.rs#L366-L463
-[identity-head]: ../../../../../crates/daemon/src/config.rs#L308-L364
-[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L510-L636
-[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2679-L2985
+[eff-proj]: ../../../../../crates/daemon/src/config.rs#L474-L484
+[eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L518-L522
+[eff-warn]: ../../../../../crates/daemon/src/config.rs#L523-L644
+[eff-clone]: ../../../../../crates/daemon/src/config.rs#L642
+[tier-cached]: ../../../../../crates/daemon/src/config.rs#L723-L754
+[guidance]: ../../../../../crates/daemon/src/config.rs#L787-L844
+[merge]: ../../../../../crates/daemon/src/config.rs#L1071
+[raise-only]: ../../../../../crates/daemon/src/config.rs#L871-L873
+[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2630-L2668
+[memo-head]: ../../../../../crates/daemon/src/config.rs#L374-L471
+[identity-head]: ../../../../../crates/daemon/src/config.rs#L311-L372
+[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L518-L644
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2687-L3053

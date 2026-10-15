@@ -2412,8 +2412,10 @@ user tier's admitted fallback from the memo, assert per-key warnings repeat
 on a memo hit, and
 assert that an unread source, an oversized merge, a deduplicated chain whose
 retained capacity exceeds the bound, a model-TTL map whose B-tree nodes
-carry it past the bound, and a tier whose entry is a final symlink are never
-memoized; the mtime test and the three raise-only tests still pass.
+carry it past the bound, a tier whose entry is a dangling final symlink, and
+a tier relinked to a target carrying its cached mtime are never memoized,
+and that a settled tier with a future mtime is; the mtime test and the three
+raise-only tests still pass.
 Guarantee: A config edit takes effect within one pass, as today, and a
 project tier can never gain privilege through a stale or cross-project cache
 entry.
@@ -2424,13 +2426,16 @@ returns the merge of the new contents. The
 [merged memo][memo] records a [`SourceIdentity`][identity] for the user tier,
 the project tier, whose path names its root, and the override: the path and,
 without following a final symlink, its device, inode, length, modification
-time, and change time. It [serves][memo-serves] a load only when all of them
-match a fresh `stat`. A merge is [memoized][memo-store] only when every source
-was read, each tier's stamp and [`read_tier_cached`][tier-cached]'s followed
-`stat` agree on whether the file exists, and every source last changed more
-than [`RECENT_CHANGE_MARGIN`][memo-margin] (1 s) before the load began, so a
-rewrite inside one coarse timestamp tick after the memoized read cannot keep
-the stamp. A tier rewritten with its mtime restored misses the memo on its
+time, change time, and whether the entry is a regular file. It
+[serves][memo-serves] a load only when all of them match a fresh `stat`. A
+merge is [memoized][memo-store] only when every source was read, each tier's
+entry is a regular file or absent in agreement with
+[`read_tier_cached`][tier-cached]'s followed `stat`, and every source's
+change time is more than [`RECENT_CHANGE_MARGIN`][memo-margin] (1 s) before
+the load began, so a rewrite inside one coarse timestamp tick after the
+memoized read cannot keep the stamp; the change time alone gates this
+because every write and attribute change moves it, while a future
+modification time set by a tool or a skewed clock settles with it. A tier rewritten with its mtime restored misses the memo on its
 changed ctime and then takes [`read_tier_cached`][tier-cached]'s mtime fast
 path, which returns the cached `Value`, as the [mtime test][t-mtime] asserts;
 that is the tier staleness contract at HEAD, unchanged by the memo.
@@ -2448,10 +2453,13 @@ project tier every call because one `ConfigCache` holds one project tier
 the override edited without touching a tier. Every identity is taken before
 its read, so a rewrite racing the read leaves an identity the next load does
 not match. A tier whose file appears or disappears between its stamp and its
-read, or whose entry is a dangling final symlink, disagrees on presence and is
-not memoized. A dangling link keeps its own stamp when its target is created,
-so a memoized link would hide the read failure that a recompute reports; a
-symlink with a target fails the `NOFOLLOW` read and is not memoized either.
+read disagrees on presence and is not memoized, and a tier whose entry is any
+symlink is never memoized: a dangling link keeps its own stamp when its
+target is created, so a memoized link would hide the read failure that a
+recompute reports; a link with a target fails the `NOFOLLOW` read; and a
+link placed over a cached tier, pointing at a target that carries the
+cached mtime, is served from the tier cache's value, so a memo keyed on the
+link's stamp would hold that value past any edit of the target.
 A tier or override whose read failed is never memoized, so a transient
 failure is retried on the next load. The memo is bounded by
 [`MERGED_CONFIG_RETAINED_BYTES_BOUND`][memo-bound], declared in the daemon's
@@ -3306,19 +3314,19 @@ evaluation of this area and its disposition are recorded in
 [call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5550
 [call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5956
 [call-bind]: ../../../../crates/daemon/src/lib.rs#L13074
-[eff-proj]: ../../../../crates/daemon/src/config.rs#L466-L476
-[eff-warn]: ../../../../crates/daemon/src/config.rs#L510-L636
-[tier-cached]: ../../../../crates/daemon/src/config.rs#L715-L746
-[merge]: ../../../../crates/daemon/src/config.rs#L1063
-[raise-only]: ../../../../crates/daemon/src/config.rs#L863-L865
-[memo]: ../../../../crates/daemon/src/config.rs#L366-L463
-[memo-serves]: ../../../../crates/daemon/src/config.rs#L383-L390
-[memo-store]: ../../../../crates/daemon/src/config.rs#L603-L634
+[eff-proj]: ../../../../crates/daemon/src/config.rs#L474-L484
+[eff-warn]: ../../../../crates/daemon/src/config.rs#L518-L644
+[tier-cached]: ../../../../crates/daemon/src/config.rs#L723-L754
+[merge]: ../../../../crates/daemon/src/config.rs#L1071
+[raise-only]: ../../../../crates/daemon/src/config.rs#L871-L873
+[memo]: ../../../../crates/daemon/src/config.rs#L374-L471
+[memo-serves]: ../../../../crates/daemon/src/config.rs#L391-L398
+[memo-store]: ../../../../crates/daemon/src/config.rs#L611-L642
 [memo-bound]: ../../../../crates/daemon/src/config.rs#L278
 [memo-margin]: ../../../../crates/daemon/src/config.rs#L283
-[identity]: ../../../../crates/daemon/src/config.rs#L308-L364
-[t-memo]: ../../../../crates/daemon/src/config.rs#L2679-L2985
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2622-L2660
+[identity]: ../../../../crates/daemon/src/config.rs#L311-L372
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2687-L3053
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2630-L2668
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
