@@ -1705,9 +1705,26 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Round-trip, concurrent-writer, and per-byte agreement
-tests run natively and under Miri; none covers `to_vec` with span lengths
-that do not sum to `body_len`.
+Exercised: yes - `to_vec` allocates without zero-fill and copies through
+`copy_out_uninit`; under the [Miri job][ci-miri],
+`copy_out_uninit_initializes_every_byte_at_every_alignment_and_length`
+reads back an uninitialized destination at 32 shifts, which reach every head
+length and every count of leading single words, and at every length through a
+full head and lead, two full steps, and three single words; outside Miri the
+same test copies into a sentinel-filled buffer, which exposes a skipped byte in
+the aarch64 step kernels;
+`to_vec_copies_every_body_length_without_a_zero_fill` covers every body
+length through a lease, and
+`a_span_length_mismatch_refuses_before_writing_any_byte` shows a mismatched
+destination returns `LengthMismatch` with no byte written; skipping one tail
+byte, one head byte, or one word in `copy_out_uninit` fails the first under
+Miri as an uninitialized read. `to_vec` forms one span of exactly `body_len`
+bytes, so a mismatched span is unreachable through it and is witnessed at the
+span API.
+The round-trip, concurrent-writer, and per-byte agreement tests still run;
+the concurrent-writer test also checks that every copied word holds eight
+equal bytes, which the aarch64 step kernels must keep natively, and the
+[Valgrind job][ci-valgrind] round-trips frames through `to_vec`.
 Guarantee: A concurrent peer store of the same shape yields stale bytes,
 never a mixed-size data race, and a receiver never reads uninitialized
 process memory as payload.
@@ -1715,33 +1732,54 @@ Check: `always` - Every byte moved between the arena and process memory goes
 through [`copy_in`][copy-in], [`copy_out`][copy-out], `read_byte`, or
 `checksum`, each of which partitions the range with
 [`AccessShape::of(address, len)`][shape]; no `&[u8]` or `&mut [u8]` is
-formed over arena bytes; and a [`to_vec`][to-vec] that skips the zero-fill
-still returns a `Vec` whose every byte in `0..body_len` was written by
-`copy_out` before the `Vec` is observable, or returns `Err` without exposing
-the buffer. `always` because the soundness argument in the
+formed over arena bytes; and [`to_vec`][to-vec], which skips the zero-fill,
+returns a `Vec` whose every byte in `0..body_len` was written by
+[`copy_out_uninit`][copy-out-uninit] before the `Vec` is observable, or
+returns `Err` without exposing the buffer. On aarch64 outside Miri, each
+32-byte step of [`copy_out_uninit`][copy-step-out] and [`copy_in`][copy-step-in]
+moves its four aligned words through one `ldp q` and one `stp q`; Arm ARM
+B2.2.1 treats a 128-bit SIMD&FP access at a 64-bit-aligned address as a pair
+of single-copy-atomic 64-bit accesses, and with FEAT_LS64WB a 32-byte-aligned
+pair as one 256-bit single-copy-atomic access, which still moves each
+overlapped word whole, so each arena word keeps the address and width the
+shape assigns. Miri and every other target run the portable
+`AtomicU64` step definitions. `always` because the soundness argument in the
 [`LeaseSpan` contract][span-safety] and the crate's [AGENTS.md][agents]
 treat this as a verification boundary.
-Fault/timing angle: The zero-fill at [`to_vec:331`][to-vec-fill] makes the
-`Vec` initialized before any early `Err` return; replacing it with capacity
-plus `set_len` or `MaybeUninit` moves the initialization proof onto the
-per-span length checks. A `memcpy` replacement forms a reference over
-peer-writable memory, which the shm-transport catalog's
+Fault/timing angle: `to_vec` reserves capacity and sets the length only
+after `copy_to_uninit` returns `Ok`, so the initialization proof rests on the
+span's length check, which refuses before writing, and on
+`copy_out_uninit` writing every byte of the range `AccessShape` partitions.
+`copy_out_uninit` copies up to three leading single words so every step
+starts on a 32-byte boundary; the words and widths stay those the shape
+assigns. Any early `Err` drops the buffer unexposed. A `memcpy` replacement forms a
+reference over peer-writable memory, which the shm-transport catalog's
 [no-reference record][shm-noref] forbids.
 Required faults and enabling state: A peer writing the same span while the
-host copies (the [Miri thread test][t-concurrent] constructs it); a lease
-whose span lengths do not sum to `body_len`; a span starting at each of the
-eight word offsets.
+host copies (the [Miri thread test][t-concurrent] constructs it); a
+destination whose length differs from the span's; a span starting at each of
+the eight word offsets.
 Confidence: high - [Evidence](evidence/arena-payload-copies-keep-the-address-derived-atomic-shape.md).
-The shape derivation, both copies, the zero-fill, and the raw-pointer
-[exclusive-write documentation][span-ptr] are source-verified;
-[`receive_one`][receive-to-vec] calls `to_vec` on every inbound frame and
-[`write_reservation`][write-res] calls `copy_in` on every outbound frame.
+The shape derivation, both copies, the uninitialized `to_vec` buffer, and the
+raw-pointer
+[exclusive-write documentation][span-ptr] are source-verified; the aarch64
+step kernels are source-verified against Arm ARM B2.2.1 and checked natively
+and under memcheck on an aarch64 host, since Miri cannot execute inline
+assembly; [`InboundFrame::into_private`][receive-to-vec] calls `to_vec` on
+every inbound frame with a body (corrected from `receive_one`, which now
+delivers the lease) and [`write_reservation`][write-res] calls `copy_in` on
+every outbound frame.
 Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
-include the three lease tests under the [Miri job][ci-miri] and the
-[Valgrind job][ci-valgrind]; all unaudited.
+include the six lease copy tests under the [Miri job][ci-miri], three of
+them required witnesses there, and the [Valgrind job][ci-valgrind]; all
+unaudited.
 Impact: A torn multi-byte read or an uninitialized payload byte reaches the
 handler.
-Open questions: None.
+Open questions:
+- No CI job runs on aarch64, so the `ldp q`/`stp q` step kernels run only in
+  native and memcheck runs on aarch64 hosts; the CI Miri and Valgrind jobs
+  check the portable steps on x86-64. Whether to add an aarch64 runner is a CI
+  decision. (needs human input)
 
 ### direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges
 
@@ -2824,7 +2862,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [P4][p4] | Place any gate where spies and the sanitizer still see every written line. |
 | [P5][p5] | Sequence deny-then-fail through an SDK fake. |
 | [T1][t1] | Assert the dead-byte inequality over a long publish and release run; decide the deferred bound first. |
-| [T2][t2] | Add a mismatched-span `to_vec` case under Miri. |
+| [T2][t2] | Done: the zero-fill-free `to_vec` and its Miri witnesses landed; a mismatched span is witnessed at `copy_to_uninit`. |
 | [T3][t3] | Underfill, overflow, error, and panic are covered in-crate and through a real host; the failure classification and charge class are decided. Add a queued direct frame dropped by generation retirement. |
 | [T4][t4] | The marker test observes a serializer that runs after its handler ended. Lengthen the window with held egress when the marker misses it. |
 | [G1][g1] | Dedup at exactly the cap; second ingest before orphan recovery. |
@@ -3105,23 +3143,25 @@ evaluation of this area and its disposition are recorded in
 [batch]: ../../../../crates/shm-transport/src/backend/ring.rs#L2159
 [abort]: ../../../../crates/shm-transport/src/backend/ring.rs#L2271
 [prepare-commit]: ../../../../crates/shm-transport/src/backend/ring.rs#L2308
-[write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L2388
-[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L2520
+[write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L1374
+[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L1823
 [commit-underfill]: ../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
-[span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L33
-[span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L49-L52
-[shape]: ../../../../crates/shm-transport/src/lease.rs#L134-L156
-[copy-out]: ../../../../crates/shm-transport/src/lease.rs#L186
-[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L216
-[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L330
-[to-vec-fill]: ../../../../crates/shm-transport/src/lease.rs#L331
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L581-L619
+[span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L35
+[span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L51-L54
+[shape]: ../../../../crates/shm-transport/src/lease.rs#L159-L199
+[copy-out]: ../../../../crates/shm-transport/src/lease.rs#L211
+[copy-out-uninit]: ../../../../crates/shm-transport/src/lease.rs#L229
+[copy-step-out]: ../../../../crates/shm-transport/src/lease.rs#L269-L308
+[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L318
+[copy-step-in]: ../../../../crates/shm-transport/src/lease.rs#L347-L384
+[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L481
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L978
 [max-resident]: ../../../../crates/host-runtime/src/ring_transport.rs#L57-L58
 [affordable]: ../../../../crates/host-runtime/src/ring_transport.rs#L60
 [process-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L98
 [idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L909-L978
 [publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L799-L806
-[receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L664
+[receive-to-vec]: ../../../../crates/host-runtime/src/frame_channel.rs#L115-L125
 [publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1377-L1440
 [publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L1452
 [commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L1485
@@ -3135,8 +3175,8 @@ evaluation of this area and its disposition are recorded in
 [native-reserve]: ../../../../crates/shm-transport/src/backend/ring.rs#L1345
 [settle-with]: ../../../../crates/daemon/src/lib.rs#L13351
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L509-L544
-[ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
-[ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
+[ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
+[ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
 [ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L361
 [ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L379-L405
 [ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L407-L416

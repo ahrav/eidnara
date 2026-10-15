@@ -410,8 +410,11 @@ forcing and observing a failed live read.
 | [`sealed_sparse_object_repeated_setup_and_stress_conservation`][t-sparse] | A fresh ring has zero resident arena pages. | unaudited |
 | [Syscall counter test][t-syscall] | One `trim` is one `page_removals`. | unaudited |
 | [`copy_in_then_copy_out_round_trips_at_every_alignment_and_length`][t-roundtrip] | 16 source offsets x 16 shifts x 40 lengths round-trip; bytes before the shift are untouched. | unaudited |
-| [`span_reads_tolerate_a_concurrent_writer`][t-concurrent] | A concurrent same-shape `copy_in` never tears a byte through `read_byte`, `copy_to`, or `checksum`. | unaudited |
+| [`span_reads_tolerate_a_concurrent_writer`][t-concurrent] | A concurrent same-shape `copy_in` never tears a byte through `read_byte`, `copy_to`, or `checksum`; every copied word holds eight equal bytes; a drop guard stops the writer, so a failed read assertion fails the test instead of leaving the scope waiting. | unaudited |
 | [`read_byte_agrees_with_copy_to_at_every_alignment`][t-readbyte] | Per-byte and bulk reads agree. | unaudited |
+| [`copy_out_uninit_initializes_every_byte_at_every_alignment_and_length`][t-uninit] (Miri witness) | An uninitialized destination is fully written at 32 shifts x 120 lengths, reaching every head length and every count of leading single words; outside Miri a sentinel-filled copy checks the aarch64 step kernels. | unaudited |
+| [`to_vec_copies_every_body_length_without_a_zero_fill`][t-to-vec] (Miri witness) | `to_vec` returns the exact body at lengths 0 to 119 through the uninitialized buffer. | unaudited |
+| [`a_span_length_mismatch_refuses_before_writing_any_byte`][t-mismatch] (Miri witness) | A destination of another length refuses with `LengthMismatch` and keeps its sentinel bytes, through `copy_to_uninit` and `copy_to`. | unaudited |
 | [Miri job][ci-miri] | `lease::` and `backend::ring::miri` tests run under Miri; the job fails unless at least one passes. | unaudited |
 | [Valgrind job][ci-valgrind] | `shm-transport --test ring` runs under memcheck. | unaudited |
 | [`a_commit_past_the_write_deadline_is_refused`][t-deadline] | `publish_direct` with a slow serializer publishes nothing and reports `DirectFailure::Commit`. | unaudited |
@@ -430,8 +433,7 @@ forcing and observing a failed live read.
 None found: a test that asserts `arena_reclaimed - punched <
 punch_batch_bytes` as an inequality over a long publish and release sequence,
 or that measures resident pages on an idle host ring; any production reader
-of `resident_arena_pages` or of process RSS; a test of `to_vec` with span
-lengths that do not sum to `body_len`; a test of a queued direct frame
+of `resident_arena_pages` or of process RSS; a test of a queued direct frame
 dropped by generation retirement.
 
 Suspiciously quiet: the [hardware envelope bench][bench] counts
@@ -722,11 +724,14 @@ not a claim that no related check exists anywhere in the repository.
 [t-fifo]: ../../../../crates/shm-transport/tests/ring.rs#L124
 [t-sparse]: ../../../../crates/shm-transport/tests/ring.rs#L231
 [t-syscall]: ../../../../crates/shm-transport/src/backend/ring.rs#L3086-L3087
-[t-roundtrip]: ../../../../crates/shm-transport/src/lease.rs#L475
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L581
-[t-readbyte]: ../../../../crates/shm-transport/src/lease.rs#L543
-[ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
-[ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
+[t-roundtrip]: ../../../../crates/shm-transport/src/lease.rs#L791
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L978
+[t-readbyte]: ../../../../crates/shm-transport/src/lease.rs#L940
+[t-uninit]: ../../../../crates/shm-transport/src/lease.rs#L832
+[t-to-vec]: ../../../../crates/shm-transport/src/lease.rs#L867
+[t-mismatch]: ../../../../crates/shm-transport/src/lease.rs#L882
+[ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
+[ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
 [t-deadline]: ../../../../crates/host-runtime/src/ring_transport.rs#L3332
 [t-commitq]: ../../../../crates/shm-transport/src/backend/ring.rs#L3199
 [t-parts]: ../../../../crates/host-runtime/src/handler.rs#L1028
