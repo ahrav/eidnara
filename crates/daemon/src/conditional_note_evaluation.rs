@@ -329,21 +329,35 @@ fn next_occurrence<Tz: CronZone>(
                 cursor_ms.checked_add(skip_minutes * MINUTE_MS)?
             }
             OffsetChanges::HourApart => {
-                // A skip stops where the date bound must be taken again and
-                // at the first minute past the cap, where the search ends.
+                // A skip stops where the date bound must be taken again. A
+                // skip past the cap stops at the last minute at or before it:
+                // once the offset holds through that minute, every minute
+                // within the cap misses, and the search ends there.
                 let bound_stop_ms = if bound_until_ms > cursor_ms {
                     ceil_to_minute(bound_until_ms)
                 } else {
                     i64::MAX
                 };
+                let last_ms = cap_ms.div_euclid(MINUTE_MS) * MINUTE_MS;
                 let target_ms = cursor_ms
                     .checked_add(skip_minutes * MINUTE_MS)?
-                    .min(bound_stop_ms)
-                    .min(ceil_to_minute(cap_ms.saturating_add(1)));
-                let (reached_ms, reached_civil) =
-                    advance_while_offset_holds(tz, cursor_ms, offset, target_ms);
-                cursor_civil = reached_civil;
-                reached_ms
+                    .min(bound_stop_ms);
+                if target_ms <= last_ms {
+                    let (reached_ms, reached_civil) =
+                        advance_while_offset_holds(tz, cursor_ms, offset, target_ms);
+                    cursor_civil = reached_civil;
+                    reached_ms
+                } else if cursor_ms == last_ms {
+                    return None;
+                } else {
+                    match advance_while_offset_holds(tz, cursor_ms, offset, last_ms) {
+                        (_, Some(_)) => return None,
+                        (changed_ms, None) => {
+                            cursor_civil = None;
+                            changed_ms
+                        }
+                    }
+                }
             }
             OffsetChanges::Unbounded => cursor_ms.checked_add(skip_minutes * MINUTE_MS)?,
         };
@@ -2343,6 +2357,94 @@ mod tests {
             assert_matches_stepper("5 0 * * *", start, next - start, &chrono::Utc),
             Some(next)
         );
+    }
+
+    /// A zone that records the instant of every offset lookup the search makes.
+    #[derive(Clone)]
+    struct Recording {
+        inner: DailyDaylight,
+        seen: std::cell::RefCell<Vec<i64>>,
+    }
+
+    impl TimeZone for Recording {
+        type Offset = chrono::FixedOffset;
+
+        fn from_offset(_offset: &chrono::FixedOffset) -> Self {
+            unreachable!("the search never rebuilds a zone from an offset")
+        }
+
+        fn offset_from_local_date(
+            &self,
+            local: &chrono::NaiveDate,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            self.inner.offset_from_local_date(local)
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            self.inner.offset_from_local_datetime(local)
+        }
+
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> chrono::FixedOffset {
+            self.inner.offset_from_utc_date(utc)
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            self.seen
+                .borrow_mut()
+                .push(utc.and_utc().timestamp_millis());
+            self.inner.offset_from_utc_datetime(utc)
+        }
+    }
+
+    impl CronZone for Recording {
+        fn offset_changes(&self) -> OffsetChanges {
+            self.inner.changes
+        }
+    }
+
+    #[test]
+    fn the_search_looks_up_only_minutes_the_stepper_visits() {
+        // Daylight runs 02:00 to 05:00 UTC, so each offset lasts an hour and
+        // the zone may claim `HourApart`.
+        let zone = Recording {
+            inner: DailyDaylight {
+                start_minute: 120,
+                end_minute: 300,
+                shift_seconds: 3600,
+                changes: OffsetChanges::HourApart,
+            },
+            seen: std::cell::RefCell::new(Vec::new()),
+        };
+        let after_ms = utc_ms(2026, 3, 1, 3, 0);
+        for (expression, max_search_ms) in [
+            ("30 2 * * *", 60 * MINUTE_MS),
+            ("30 2 * * *", 150 * MINUTE_MS),
+            ("30 2 * * *", DAY_MS),
+            ("0 9 1 * *", 10 * DAY_MS),
+            ("0 9 1 * *", 40 * DAY_MS),
+            ("*/15 * * * *", 3 * MINUTE_MS),
+            ("*/15 * * * *", 20 * MINUTE_MS),
+        ] {
+            zone.seen.borrow_mut().clear();
+            let found = assert_matches_stepper(expression, after_ms, max_search_ms, &zone);
+            // The stepper visits the epoch minutes after `after_ms` up to the
+            // cap, or up to the match it returns.
+            let first_ms = after_ms + MINUTE_MS;
+            let last_ms = found.unwrap_or(after_ms + max_search_ms);
+            let seen = zone.seen.borrow();
+            let outside: Vec<i64> = seen
+                .iter()
+                .copied()
+                .filter(|&ms| ms < first_ms || ms > last_ms || ms.rem_euclid(MINUTE_MS) != 0)
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "{expression} within {max_search_ms}: lookups {outside:?} outside {first_ms}..={last_ms}"
+            );
+        }
     }
 
     #[test]

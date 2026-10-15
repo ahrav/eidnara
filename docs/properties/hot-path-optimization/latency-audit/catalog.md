@@ -2370,7 +2370,9 @@ calendar-impossible expressions; at a cap one minute short of an occurrence;
 from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937,
 and 2026 in each zone; at a shift that lands civil time just past a jump's
 target; in a zone with a 30-minute daylight window, searched minute by minute
-on both sides of 1970; and at the edges of chrono's representable range.
+on both sides of 1970; and at the edges of chrono's representable range. A
+recording zone shows every offset lookup falls on a minute the stepper
+visits, including when the skip runs past the cap.
 [Component tests][t-cron-parts] compare the byte parser with a frozen copy of
 the `&str` parser, the month-at-a-time date scan with a day-by-day scan, and
 the stack-built jitter seed with the formatted one.
@@ -2426,7 +2428,7 @@ Required faults and enabling state: A zone with DST; expressions such as
 `after_ms` at the `i64` extremes and at chrono's range edges.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
 The parser, the search, the cap, the conditional-note ceiling
-([`:638-667`][note-cap]), and the config acceptance
+([`:652-681`][note-cap]), and the config acceptance
 ([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
@@ -3347,10 +3349,10 @@ evaluation of this area and its disposition are recorded in
 [cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
 [parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L120-L175
 [vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L188
-[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L352
-[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L618
-[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L626
-[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L638-L667
+[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L366
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L632
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L640
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L652-L681
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
 [sched-default]: ../../../../crates/daemon/src/config.rs#L152
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L1226-L1244
@@ -3401,13 +3403,13 @@ evaluation of this area and its disposition are recorded in
 [sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074-L2447
-[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074
-[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2505-L2689
-[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L511-L556
-[cron-bound]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L451-L492
-[cron-never]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L367-L379
-[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L563-L587
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2088-L2549
+[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2088
+[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2607-L2791
+[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L525-L570
+[cron-bound]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L465-L506
+[cron-never]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L381-L393
+[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L577-L601
 [cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
 [cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
 [cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245

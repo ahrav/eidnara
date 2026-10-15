@@ -518,6 +518,7 @@ directory sync fails, which leaves the count unknown.
 | [`calendar_impossible_expressions_return_none_at_the_search_cap`][t-cron-cap] | `0 0 30 2 *` and `0 0 31 4,6,9,11 *` return `None` at the full cap; February 29 is found; a cap one minute short returns `None`. | unaudited |
 | [`the_jump_matches_the_stepper_across_every_transition_of_a_zone_year`][t-cron-sweep] | Starts from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937, and 2026 in twelve zones, with day-of-week expressions that jump to midnight across transitions. | unaudited |
 | [`the_jump_matches_the_stepper_at_the_edges_of_the_representable_range`][t-cron-edge] | Chrono's minimum and maximum instants and the `i64` extremes. | unaudited |
+| [`the_search_looks_up_only_minutes_the_stepper_visits`][t-cron-lookups] | A recording `HourApart` zone: every offset lookup of a search falls on an epoch minute the stepper visits, up to the cap or the match, including searches whose skip runs past the cap. | unaudited |
 | [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie] | Vixie `*`-prefix semantics. | unaudited |
 | [`the_byte_parser_accepts_exactly_what_the_str_parser_accepts`][t-cron-parser] | Property test: random byte soups with ASCII and Unicode whitespace, overflowing numbers, and stray separators, plus random five-field expressions; `parse_cron` masks equal a frozen copy of the `&str` parser. | unaudited |
 | [`the_month_scan_finds_the_date_a_day_by_day_scan_finds`][t-cron-month] | Property test: random day-of-month, month, and day-of-week fields from year -410 to 3285 with spans up to 3,000 days; the month-at-a-time scan equals a day-by-day scan. | unaudited |
@@ -819,21 +820,22 @@ not a claim that no related check exists anywhere in the repository.
 [diff-small]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L134
 [t-golden]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1773
 [t-marker]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1744
-[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2464
-[t-cron-prop]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2398
-[t-cron-dst]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2142
-[t-cron-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2324
-[t-cron-sweep]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2415
-[t-cron-edge]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2349
-[t-cron-unbounded]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2179
-[t-cron-epoch]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2205
-[t-cron-parser]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2617
-[t-cron-month]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2637
-[t-cron-jitter]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2656
-[t-cron-shift]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2253
+[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2566
+[t-cron-prop]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2500
+[t-cron-dst]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2156
+[t-cron-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2338
+[t-cron-sweep]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2517
+[t-cron-edge]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2451
+[t-cron-lookups]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2409
+[t-cron-unbounded]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2193
+[t-cron-epoch]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2219
+[t-cron-parser]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2719
+[t-cron-month]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2739
+[t-cron-jitter]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2758
+[t-cron-shift]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2267
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2450
-[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1553
+[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2552
+[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1567
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-mtime]: ../../../../crates/daemon/src/config.rs#L2645
 [t-memo-change]: ../../../../crates/daemon/src/config.rs#L2702
