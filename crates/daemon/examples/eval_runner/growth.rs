@@ -5,17 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use eval_core::{
-    Approval, CampaignResources, ClaimBoundary, Coverage, Cut, EnvelopeExceeded, ExecutionMode,
-    ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode,
-    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError,
-    RecordedRefusal, ResourceSample, ReviewerQuota, RunProfile, Scale, SearchEpisodeFault,
-    StoreBytes, StoreFamily, SwarmMix, eval_run_id,
+    Approval, CampaignResources, ClaimBoundary, Coverage, Cut, CutCoverage, EnvelopeExceeded,
+    ExecutionMode, ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract,
+    GrowthLedger, GrowthMode, GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Lane,
+    LivenessBounds, Operation, ProfileError, QuiescenceProgress, RecordedRefusal, ResourceSample,
+    ReviewerQuota, RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix,
+    eval_run_id,
 };
 use memory_store::memory_reviewer_jobs::{
     FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
-    MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal,
+    MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal, MemoryReviewerJobState,
 };
 use serde_json::json;
 
@@ -24,7 +25,7 @@ use super::aging::{
     store_file, suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
-use super::fault::{self, Witness, lost_reply_episode};
+use super::fault::{self, ReviewerRig, Witness, lost_reply_episode};
 use super::support::memory_reviewer_publish::{
     self as reviewer, abstain, activate_module_authority, commit_memory_domain, try_begin_job,
 };
@@ -106,6 +107,7 @@ pub fn bounds(profile: &RunProfile, messages: u32) -> GrowthBounds {
         projection_rows: 16 * u64::from(messages),
         open_holds: 1,
         store_bytes_per_commit: 64 << 10,
+        progress: profile.statistics.liveness_bounds.clone(),
     }
 }
 
@@ -200,13 +202,29 @@ pub struct Campaign {
     pub generation: u64,
     pub next_step: usize,
     pub checkpoints: BTreeMap<Cut, u64>,
+    /// The production reviewer worker the campaign hands every eighth
+    /// admission to, on its own OS-allocated peer port.
+    pub rig: ReviewerRig,
+    /// Jobs handed to the coordinator that have not yet settled.
+    pub handed: Vec<String>,
+    /// The approved bound on coordinator passes per quiescence.
+    pub reviewer_pass_bound: u64,
+    /// The progress witness of the drain the next sample follows.
+    pub progress: QuiescenceProgress,
 }
 
 impl Campaign {
-    pub fn open(root: &Path, plan: Plan, mode: GrowthMode) -> Self {
+    pub fn open(root: &Path, plan: Plan, mode: GrowthMode, bounds: &LivenessBounds) -> Self {
         let stores = Stores::open(root, &plan);
         let generation = activate_module_authority(&stores.memory, root);
         commit_memory_domain(&stores.corpus.kernel);
+        let rig = ReviewerRig::open(&stores, &root.join("reviewer-home"), root, generation, true);
+        let progress = QuiescenceProgress {
+            acknowledged_through: acknowledged_through(root),
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: true,
+        };
         Self {
             plan,
             stores,
@@ -218,7 +236,38 @@ impl Campaign {
             generation,
             next_step: 0,
             checkpoints: BTreeMap::new(),
+            rig,
+            handed: Vec::new(),
+            reviewer_pass_bound: Lane::ReviewerCoordinatorPasses.bound(bounds),
+            progress,
         }
+    }
+
+    /// The port the campaign's reviewer peer listens on.
+    pub fn port(&self) -> u16 {
+        self.rig.peer.port
+    }
+
+    /// Runs coordinator passes until every handed job has settled or the
+    /// approved bound is spent; returns the passes run and whether every
+    /// handed job settled.
+    fn settle_handed(&mut self) -> (u64, bool) {
+        let mut passes = 0;
+        while !self.handed.is_empty() && passes < self.reviewer_pass_bound {
+            self.rig.pass(&self.stores);
+            passes += 1;
+            let memory = &self.stores.memory;
+            self.handed.retain(|identity| {
+                !matches!(
+                    memory
+                        .lookup_memory_reviewer_job(reviewer::PROJECT, identity)
+                        .unwrap()
+                        .map(|job| job.state),
+                    Some(MemoryReviewerJobState::Terminal(_))
+                )
+            });
+        }
+        (passes, self.handed.is_empty())
     }
 
     pub fn root(&self) -> &Path {
@@ -266,13 +315,22 @@ impl Campaign {
             // admissions are stamped with the wall clock, not the drive's logical time.
             self.quota_pressure(i, reviewer::now_ms())?;
         }
-        self.stores.drain(now);
+        let catch_up_episodes = self.stores.drain(now);
+        let (reviewer_passes, reviewer_settled) = self.settle_handed();
+        self.progress = QuiescenceProgress {
+            acknowledged_through: acknowledged_through(self.root()),
+            catch_up_episodes,
+            reviewer_passes,
+            reviewer_settled,
+        };
         self.next_step += 1;
         self.sample(i as u32, charges)
     }
 
-    /// Admits one reviewer job. Admissions at `i % 8 == 3` abstain; once
-    /// pending jobs reach the cap, every admission abstains so the next
+    /// Admits one reviewer job. An admission at `i % 8 == 3` is activated
+    /// Ready and handed to the coordinator, which the drain runs until it
+    /// settles; every other one is claimed with its receipt begun and left
+    /// pending, and once pending jobs reach the cap it abstains so the next
     /// reservation still has a slot. A reservation refused by the permanent
     /// receipt quota is R24: counted, recorded as the expected refusal the
     /// report reconciles the count against, with nothing admitted.
@@ -280,16 +338,34 @@ impl Campaign {
         self.mix.record(Operation::QuotaPressure);
         let incarnation = reviewer::kernel_incarnation(&self.stores.corpus.kernel);
         let digest = format!("{:064x}", i);
-        let begun = match try_begin_job(
-            &self.stores.corpus.kernel,
-            &self.stores.memory,
-            &digest,
-            &incarnation,
-            self.generation,
-            i as u64,
-            now,
-        ) {
-            Ok(begun) => begun,
+        let admitted = if i % 8 == 3 {
+            self.rig
+                .feed(&self.stores, i as u64, now)
+                .map(|job| Err(job.causal_identity))
+        } else {
+            try_begin_job(
+                &self.stores.corpus.kernel,
+                &self.stores.memory,
+                &digest,
+                &incarnation,
+                self.generation,
+                i as u64,
+                now,
+            )
+            .map(Ok)
+        };
+        let begun = match admitted {
+            Ok(Ok(begun)) => begun,
+            Ok(Err(handed)) => {
+                self.admitted_total += 1;
+                self.handed.push(handed);
+                // At the cap the coordinator settles what it holds now, so
+                // the next reservation still has a slot.
+                if self.pending() >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
+                    self.settle_handed();
+                }
+                return Ok(());
+            }
             Err(refusal @ MemoryReviewerJobRefusal::MetadataQuota) => {
                 self.r24_refusals += 1;
                 self.witness.refusals.push(RecordedRefusal {
@@ -304,16 +380,18 @@ impl Campaign {
             Err(refusal) => return Err(RunError::Admission(refusal)),
         };
         self.admitted_total += 1;
-        let pending = self
-            .stores
-            .memory
-            .memory_reviewer_headroom(reviewer::PROJECT)
-            .unwrap()
-            .pending_jobs;
-        if i % 8 == 3 || pending >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
+        if self.pending() >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
             abstain(&self.stores.memory, &incarnation, &begun, now);
         }
         Ok(())
+    }
+
+    fn pending(&self) -> usize {
+        self.stores
+            .memory
+            .memory_reviewer_headroom(reviewer::PROJECT)
+            .unwrap()
+            .pending_jobs
     }
 
     pub fn headroom(&self) -> HeadroomSample {
@@ -349,6 +427,7 @@ impl Campaign {
             self.stores.tip(),
             charges,
             self.headroom(),
+            self.progress.clone(),
         )
     }
 }
@@ -377,6 +456,7 @@ fn sample_root(
     commit_seq: i64,
     charges: &Charges,
     headroom: HeadroomSample,
+    progress: QuiescenceProgress,
 ) -> ResourceSample {
     let artifacts = root.join("kernel").join("artifacts");
     let (artifact_objects, artifact_bytes) = walk_objects(&artifacts.join("objects"));
@@ -398,7 +478,19 @@ fn sample_root(
             "SELECT COUNT(*) FROM capture_pins WHERE released_at IS NULL",
         ),
         headroom,
+        progress,
     }
+}
+
+/// The projection's acknowledged checkpoint, read from its file.
+fn acknowledged_through(root: &Path) -> i64 {
+    read_only(&search_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 impl Campaign {
@@ -437,6 +529,10 @@ impl Campaign {
             generation,
             next_step,
             checkpoints,
+            rig,
+            handed,
+            reviewer_pass_bound,
+            progress,
         } = self;
         let tip = stores.tip();
         let stores = stores.close().reopen(now);
@@ -453,6 +549,10 @@ impl Campaign {
                 generation,
                 next_step,
                 checkpoints,
+                rig,
+                handed,
+                reviewer_pass_bound,
+                progress,
             },
             Ok(()),
         )
@@ -468,13 +568,24 @@ impl Campaign {
             mix,
             witness,
             mut checkpoints,
+            rig,
+            handed,
             ..
         } = self;
         let step = ledger.samples.last().map_or(0, |s| s.step + 1);
         let root = stores.root().to_path_buf();
         let tip = stores.tip();
+        drop(rig);
         drop(stores.close());
-        let sample = sample_root(&root, step, tip, charges, headroom);
+        // Nothing runs between the last drain and the close, so the final
+        // witness is the closed projection's checkpoint with no further work.
+        let progress = QuiescenceProgress {
+            acknowledged_through: acknowledged_through(&root),
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: handed.is_empty(),
+        };
+        let sample = sample_root(&root, step, tip, charges, headroom, progress);
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         ledger.record(sample)?;
         *checkpoints.entry(Cut::EndOfRun).or_insert(0) += 1;
@@ -516,7 +627,13 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let bounds = bounds(&profile, config.messages);
     let root = charges.occupy()?;
     let root_path = root.path().display().to_string();
-    let mut campaign = Campaign::open(root.path(), plan, config.mode);
+    let mut campaign = Campaign::open(
+        root.path(),
+        plan,
+        config.mode,
+        &profile.statistics.liveness_bounds,
+    );
+    let port = campaign.port();
     while campaign.remaining() > 0 {
         campaign.step(&mut charges)?;
     }
@@ -527,6 +644,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         checkpoints,
     } = campaign.finish(&mut charges)?;
     charges.release(root)?;
+    let cuts = episode_coverage(&witness);
     let mut coverage = witness.coverage;
     let quota = quota();
     if ledger.mode == GrowthMode::NeverRestored {
@@ -573,6 +691,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         expected_refusals: witness.refusals.clone(),
         fault_episodes: witness.episodes.len() as u64,
         safety_checks_while_armed: witness.safety_checks,
+        coverage: cuts,
         markers: coverage.fired().iter().map(|m| m.to_string()).collect(),
         envelope: charges.envelope.clone(),
     };
@@ -622,10 +741,30 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             roots: [root_path].into_iter().collect(),
             publish_dirs: [config.publish.display().to_string()].into_iter().collect(),
             cassette_namespaces: BTreeSet::new(),
-            ports: BTreeSet::new(),
+            ports: [port].into_iter().collect(),
         },
         coverage,
     })
+}
+
+/// The episodes' own cuts: each declared episode and its receipts. The fault
+/// shell's witness also declares the fault campaign's observer cuts, which
+/// this campaign's episodes do not all reach.
+fn episode_coverage(witness: &Witness) -> CutCoverage {
+    let mut coverage = CutCoverage::default();
+    for episode in &witness.episodes {
+        coverage.declare(episode.id.clone());
+        for _ in 0..witness
+            .cuts
+            .receipted
+            .get(&episode.id)
+            .copied()
+            .unwrap_or(0)
+        {
+            coverage.receipt(&episode.id).unwrap();
+        }
+    }
+    coverage
 }
 
 pub const USAGE: &str = "growth --scale <s0|s1|s2> --messages <n> --elapsed-bound-ms <n> \

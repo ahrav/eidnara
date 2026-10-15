@@ -2778,16 +2778,28 @@ permanent exhaustion is intended.
 A `ResourceSample` is everything a campaign holds at one quiescent point: per
 store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
 entries, and bytes; cassette bytes; temp roots and processes;
-commit-log and projection rows; open holds; and a `HeadroomSample` (pending
+commit-log and projection rows; open holds; a `HeadroomSample` (pending
 and terminal jobs, frozen and terminal pages, project bytes and remaining,
 admissions, R24
-refusals). A `GrowthLedger` records samples under a `GrowthMode`
+refusals); and a `QuiescenceProgress`, the healthy-progress witness of the
+drain that reached the point (the projection's `acknowledged_through`, the
+catch-up episodes the drain ran, the reviewer coordinator passes run until no
+job handed to the coordinator was Ready, and whether every handed job
+settled). A `GrowthLedger` records samples under a `GrowthMode`
 (`never_restored` or `restoring`) with monotonic steps and commit sequence;
 `restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
 counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
 ledger (`NotALeakVerdict` otherwise) with a baseline and a final sample
 (`NoBaseline` for one sample, which has no interval to judge growth over):
-every sample must carry every store
+every sample must carry a progress witness whose `acknowledged_through`
+equals its commit sequence (`NotQuiescent { step, acknowledged_through,
+commit_seq }`, a drain that stopped short) and whose catch-up episodes and
+reviewer passes are within the `catch_up_episodes` and
+`reviewer_coordinator_passes` of the approved liveness bounds that
+`GrowthBounds::progress` carries, with every handed job settled
+(`ProgressUnbounded { step, lane, used, bound }`); `check_samples` applies
+this in both modes, so a restoring ledger keeps its progress evidence too.
+Every sample must carry every store
 family (`StoreMissing { step, family }`, so an omitted store cannot hide its
 bytes), its project bytes must equal `expected_project_bytes`
 (`HeadroomMismatch`; `HeadroomOverflow` when the counts do not fit in `u64`,
@@ -2841,13 +2853,16 @@ mounts), and `digests_match_serial` refuses
 differs from its serial one and `TooFewCampaigns` below two, since isolation
 is a claim about at least two.
 
-`GrowthReport` (`eval-suite-c-growth-report/v1`) is what one campaign
+`GrowthReport` (`eval-suite-c-growth-report/v2`) is what one campaign
 publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, fault-episode and
 safety-check counts (`SafetyNeverChecked` when either the fault-episode count
 or the mix records a fault episode and no safety check ran while armed;
 `FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
-differ),
+differ), the fault episodes' cut coverage (`Coverage(IncompleteCoverage)`
+for a declared cut with no receipt, `FaultedWithoutCuts` when fault episodes
+ran and no cut was declared, so a missing coverage witness cannot read as
+sustainability success),
 markers, and envelope. `validate(contract)` requires `eval_run_id` and
 `profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
 as the Suite B report does; the manifest derives the run id and names the
@@ -3264,13 +3279,22 @@ the reviewer queue is real. `Campaign::step` applies the planned mutation
 (`publish`, `correct`, or `retire`, as `Stores::apply` reports it), reads the
 projection every third step (`query`), runs a lost-acknowledgement catch-up
 episode through the fault shell every fifth step that committed (`fault_episode`,
-with its safety check; a skipped retire leaves nothing to acknowledge), admits one reviewer job through the real reservation, staging,
-claim, and receipt path every fourth step and settles every other one by
-abstention (`quota_pressure`, so the ledger holds both pending allowances and
-permanent receipt charges), drains to quiescence, and samples. The store
+with its safety check; a skipped retire leaves nothing to acknowledge), admits one reviewer job every fourth step (`quota_pressure`): every other
+admission (`i % 8 == 3`) is activated Ready under the campaign's bound root
+and handed to the production `memory_reviewer::worker::Worker` through
+`fault::ReviewerRig` (the owner's activation record for exactly these stores,
+a local TLS peer on an OS-allocated port, the credential identity derived),
+and the rest go through the real reservation, staging, claim, and receipt
+path and stay pending, so the ledger holds both pending allowances and
+permanent receipt charges. The step then drains to quiescence, counting the
+catch-up episodes, runs `Worker::pass` directly until every handed job has
+settled or the approved `reviewer_coordinator_passes` is spent, records that
+as the next sample's `QuiescenceProgress`, and samples. The handed subjects
+are default-Sensitive, so each settles as a policy-blocked abstention before
+any request. The store
 refuses a reservation past `MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT`
 pending jobs, so an admission that brings the pending count to that cap is
-settled by abstention as well; the pending queue then holds one slot free and
+settled by abstention as well (a handed one by the coordinator at once); the pending queue then holds one slot free and
 every later admission becomes a permanent receipt charge, which is how a long
 history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
@@ -3313,8 +3337,11 @@ reported, not planted: a reservation the store refuses with
 the R24 expected refusal the report reconciles that count against, and
 admits nothing, and the campaign continues; any other refusal stops the run
 with `RunError::Admission`. An S0 history never reaches the quota, and the
-report says zero. Two campaigns run from one checkout on two roots publish the same
-result digest as their serial runs; a fixture that shares a root is refused.
+report says zero. Two campaigns run from one checkout on two roots, each with
+its own reviewer peer on an OS-allocated port, publish the same result digest
+as their serial runs; a fixture that shares a root or a port is refused. The
+campaign records no cassette, so its `cassette_namespaces` is empty and the
+isolation check covers roots, publish directories, and ports.
 The `growth` subcommand takes the `aging` flags plus `--mode
 <never_restored|restoring>`; the CI `eval-campaign` job runs `eval_growth`
 under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default

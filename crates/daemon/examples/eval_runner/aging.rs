@@ -579,8 +579,9 @@ impl Stores {
         }
     }
 
-    pub fn drain(&mut self, now: i64) {
-        self.catch_up(now);
+    /// Returns the catch-up episodes the drain ran.
+    pub fn drain(&mut self, now: i64) -> u64 {
+        let episodes = self.catch_up(now);
         embed_pending(
             &self.corpus,
             &self.projection,
@@ -593,15 +594,19 @@ impl Stores {
             0,
             "the drain embeds every open job"
         );
+        episodes
     }
 
     /// Publishes the outbox and runs catch-up episodes until the projection
-    /// acknowledges the tip; the embedding lane is left as it is.
-    pub fn catch_up(&mut self, now: i64) {
+    /// acknowledges the tip; the embedding lane is left as it is. Returns the
+    /// episodes it ran.
+    pub fn catch_up(&mut self, now: i64) -> u64 {
         self.publish_outbox();
         let tip = self.tip();
+        let mut episodes = 0;
         for _ in 0..MAX_EPISODES_PER_DRAIN {
             let report = self.episode(now, None, &mut |_| {});
+            episodes += 1;
             assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
             if report.acknowledged_through >= tip {
                 break;
@@ -612,6 +617,7 @@ impl Stores {
             0,
             "the drain reaches the tip"
         );
+        episodes
     }
 
     /// One catch-up episode, under one injected fault when `fault` is set.

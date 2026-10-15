@@ -14,8 +14,8 @@ use serde_json::Value;
 use crate::checkpoint::StoreFamily;
 use crate::fault::{ExpectedRefusal, RecordedRefusal};
 
-pub const GROWTH_REPORT_SCHEMA: &str = "eval-suite-c-growth-report/v1";
-const GROWTH_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-growth-report-result/v1";
+pub const GROWTH_REPORT_SCHEMA: &str = "eval-suite-c-growth-report/v2";
+const GROWTH_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-growth-report-result/v2";
 const SAMPLE_BYTE_FIELDS: [&str; 3] = ["stores", "artifact_bytes", "cassette_bytes"];
 
 /// The reviewer quota constants as the memory store declares them; the
@@ -89,6 +89,23 @@ pub struct StoreBytes {
     pub shm: u64,
 }
 
+/// The healthy-progress witness at one quiescent point: how far the
+/// projection acknowledged, and the work the drain to it took, in each
+/// lane's own unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuiescenceProgress {
+    pub acknowledged_through: i64,
+    /// Catch-up episodes the drain ran to reach the tip.
+    pub catch_up_episodes: u64,
+    /// Reviewer coordinator passes run until no job handed to the
+    /// coordinator was Ready; zero when none was handed over.
+    pub reviewer_passes: u64,
+    /// Whether every job handed to the coordinator had settled when the
+    /// passes stopped.
+    pub reviewer_settled: bool,
+}
+
 /// Everything a campaign holds at one quiescent point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +123,7 @@ pub struct ResourceSample {
     pub projection_rows: u64,
     pub open_holds: u64,
     pub headroom: HeadroomSample,
+    pub progress: QuiescenceProgress,
 }
 
 impl ResourceSample {
@@ -129,6 +147,45 @@ impl ResourceSample {
             .values()
             .fold(0u64, |t, b| t.saturating_add(b.wal))
     }
+}
+
+/// One quiescence's progress witness: the tip acknowledged, each lane within
+/// its approved bound, and every job handed to the coordinator settled.
+fn check_progress(
+    sample: &ResourceSample,
+    bounds: &crate::statistics::LivenessBounds,
+) -> Result<(), GrowthRefused> {
+    let progress = &sample.progress;
+    if progress.acknowledged_through != sample.commit_seq {
+        return Err(GrowthRefused::NotQuiescent {
+            step: sample.step,
+            acknowledged_through: progress.acknowledged_through,
+            commit_seq: sample.commit_seq,
+        });
+    }
+    for (lane, used) in [
+        (
+            crate::fault::Lane::CatchUpEpisodes,
+            progress.catch_up_episodes,
+        ),
+        (
+            crate::fault::Lane::ReviewerCoordinatorPasses,
+            progress.reviewer_passes,
+        ),
+    ] {
+        let bound = lane.bound(bounds);
+        let unsettled =
+            lane == crate::fault::Lane::ReviewerCoordinatorPasses && !progress.reviewer_settled;
+        if used > bound || unsettled {
+            return Err(GrowthRefused::ProgressUnbounded {
+                step: sample.step,
+                lane,
+                used,
+                bound,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn saturating_sum(start: u64, terms: impl IntoIterator<Item = u64>) -> u64 {
@@ -157,6 +214,9 @@ pub struct GrowthBounds {
     /// Store bytes the history may add per commit between the first and last
     /// sample; growth faster than this is a leak proportional to the history.
     pub store_bytes_per_commit: u64,
+    /// The approved profile's liveness bounds; every quiescence's drain is
+    /// judged against its lanes.
+    pub progress: crate::statistics::LivenessBounds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +311,21 @@ pub enum GrowthRefused {
     NotALeakVerdict {
         mode: GrowthMode,
     },
+    /// A quiescent sample whose projection had not acknowledged the tip: the
+    /// drain stopped short, so the point is not quiescent.
+    NotQuiescent {
+        step: u32,
+        acknowledged_through: i64,
+        commit_seq: i64,
+    },
+    /// A drain took more of a lane's unit than the approved bound, or the
+    /// reviewer passes stopped with handed-over work still Ready.
+    ProgressUnbounded {
+        step: u32,
+        lane: crate::fault::Lane,
+        used: u64,
+        bound: u64,
+    },
     /// `restore_attempted` counts a refusal only under `never_restored`; a
     /// restoring ledger with a nonzero count could not have come from the API.
     RestoresRefusedUnderRestoring {
@@ -286,7 +361,11 @@ impl GrowthLedger {
     /// The order, and every sample carrying every store family and a headroom
     /// that follows from the constants read. Evidence both modes carry; only
     /// `verdict` judges leaks.
-    pub fn check_samples(&self, quota: &ReviewerQuota) -> Result<(), GrowthRefused> {
+    pub fn check_samples(
+        &self,
+        quota: &ReviewerQuota,
+        bounds: &GrowthBounds,
+    ) -> Result<(), GrowthRefused> {
         if self.samples.is_empty() {
             return Err(GrowthRefused::NoSamples);
         }
@@ -295,6 +374,7 @@ impl GrowthLedger {
             if sample.commit_seq < 0 {
                 return Err(GrowthRefused::CommitSeqNegative { step: sample.step });
             }
+            check_progress(sample, &bounds.progress)?;
             if let Some(family) = StoreFamily::ALL
                 .into_iter()
                 .find(|f| !sample.stores.contains_key(f))
@@ -371,7 +451,7 @@ impl GrowthLedger {
         if self.samples.len() < 2 {
             return Err(GrowthRefused::NoBaseline);
         }
-        self.check_samples(quota)?;
+        self.check_samples(quota, bounds)?;
         if last.artifact_tmp_entries != 0 {
             return Err(GrowthRefused::Leak {
                 resource: "artifact_tmp_entries".to_string(),
@@ -700,6 +780,8 @@ pub struct GrowthReport {
     pub expected_refusals: Vec<RecordedRefusal>,
     pub fault_episodes: u64,
     pub safety_checks_while_armed: u64,
+    /// The fault episodes' declared cuts and their receipts.
+    pub coverage: crate::fault::CutCoverage,
     pub markers: BTreeSet<String>,
     pub envelope: crate::Envelope,
 }
@@ -716,6 +798,10 @@ pub enum GrowthReportError {
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
+    /// A declared cut with no receipt, or a receipt for an undeclared one.
+    Coverage(crate::fault::CoverageRefused),
+    /// Fault episodes ran but no cut was declared for them.
+    FaultedWithoutCuts,
     /// `fault_episodes` and the mix's `fault_episode` count disagree.
     FaultEpisodesDisagree {
         declared: u64,
@@ -792,6 +878,12 @@ impl GrowthReport {
         if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
         }
+        if faulted && self.coverage.declared.is_empty() {
+            return Err(GrowthReportError::FaultedWithoutCuts);
+        }
+        self.coverage
+            .verdict()
+            .map_err(GrowthReportError::Coverage)?;
         let exercised = self
             .mix
             .counts
@@ -872,7 +964,7 @@ impl GrowthReport {
                     ));
                 }
                 self.ledger
-                    .check_samples(&self.quota)
+                    .check_samples(&self.quota, &self.bounds)
                     .map_err(GrowthReportError::Growth)?;
             }
         }

@@ -1710,7 +1710,11 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   that is not pending plus terminal, or a sequence advance the commit log did
   not retain (`CommitRowsDisagree`) refuse, including in a ledger
   assembled without `record`;
-  the peak store total is the transient middle sample.
+  the peak store total is the transient middle sample; a sample whose
+  projection stopped short of the tip is `NotQuiescent`, and a drain that
+  ran more catch-up episodes than the approved bound, or reviewer passes that
+  stopped with handed work still Ready, is `ProgressUnbounded` naming the lane
+  (in both modes).
 - `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
   (marker `flt_restore_under_never_restored_refused`): a restore is refused
   and counted under `never_restored`; a `restoring` ledger's verdict is
@@ -1748,8 +1752,10 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   disagrees with the recorded R24 refusals (`R24Unreconciled`; an R11 entry
   is not counted), a recorded refusal whose production error does not name
   its variant (`RefusalNotEvidenced`), a marker no suite owns
-  (`UnregisteredMarker`), and an integer past the canonical safe range on
-  serialize or parse (`NotCanonical`) refuse.
+  (`UnregisteredMarker`), an integer past the canonical safe range on
+  serialize or parse (`NotCanonical`), a declared fault cut with no receipt
+  (`Coverage(IncompleteCoverage)`), fault episodes with no declared cut
+  (`FaultedWithoutCuts`), and a v1 report refuse.
 
 Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
 default shards run the never-restored campaign once with every scenario
@@ -1764,7 +1770,16 @@ completeness proof run in the `eval-campaign` CI job under
   bytes, no stray root, no process; the transient peak exceeds the closed
   size and the envelope's store-bytes peak equals it; the ledger's verdict passes; the
   published report and manifest parse back; a restore request on a live
-  never-restored campaign is refused, counted, and moves nothing.
+  never-restored campaign is refused, counted, and moves nothing; every
+  sample's progress witness acknowledged the tip within the catch-up bound
+  with every handed job settled, some quiescence ran coordinator passes
+  within their bound, and every fault episode's cut is declared and
+  receipted.
+- `a_handed_admission_settles_through_one_coordinator_pass_in_its_drain`
+  (`sls-liveness-memory-reviewer-work-bounded`): the first quota-pressure
+  admission is handed to the production worker and settled by one
+  `Worker::pass` in the drain that follows, as an abstention with no attempt
+  marker; the samples before it record no pass.
 - `reviewer_headroom_is_accounted_from_the_stores_own_constants`
   (`flt-memory-reviewer-quota-refusal-expected`; marker
   `flt_headroom_accounted_from_store_constants`): the report's constants are
@@ -1804,8 +1819,10 @@ completeness proof run in the `eval-campaign` CI job under
   `xc_parallel_campaigns_isolated`): two campaigns on two threads use disjoint
   roots and publish directories and publish the result digests of their
   serial runs, with the same commit-log rows, projection rows, artifact
-  objects, and mix counts; a fixture sharing a root is refused. This campaign opens no
-  port and records no cassette, so those resource sets are empty.
+  objects, and mix counts; each campaign's reviewer peer holds one
+  OS-allocated port and the ports are disjoint; a fixture sharing a root or
+  a port is refused. This campaign records no cassette, so its cassette
+  namespace set is empty.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 

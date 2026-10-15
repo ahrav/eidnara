@@ -2405,69 +2405,134 @@ const REVIEWER_CREDENTIAL_IDENTITY: &str = "eval-reviewer-credential-identity";
 /// Ready jobs the window opens with, before any fresh job is fed.
 const REVIEWER_BACKLOG: u64 = 2;
 
-/// The production worker over this arm's stores: one MODULE project whose
-/// one bound root stages every job, with the credential identity derived.
-fn reviewer_worker(
-    stores: &Stores,
-    home: &Path,
-    project_root: &Path,
+/// The production MemoryReviewer worker's surroundings for one root: the
+/// owner's activation record for exactly that root's stores, a local TLS peer
+/// on an OS-allocated port as the provider endpoint, the credential identity
+/// derived, and one MODULE project whose one bound root stages every job the
+/// rig feeds. The worker is built per pass, so the rig holds no store handle
+/// and the stores close and reopen under it.
+pub struct ReviewerRig {
+    /// Declared before `runtime`, so its listener drops while the reactor
+    /// that registered it still runs.
+    pub peer: Peer,
+    pub runtime: tokio::runtime::Runtime,
+    pub status: Arc<MemoryReviewerStatus>,
+    home: PathBuf,
+    project_root: PathBuf,
     generation: u64,
-    peer: &Peer,
-    status: &Arc<MemoryReviewerStatus>,
-) -> Arc<Worker> {
-    let host = Arc::new(MemoryReviewerHost {
-        supervisor: Arc::new(Supervisor::new(Arc::new(NoPublicModel))),
-        credentials: [(
-            REVIEWER_CREDENTIAL.to_string(),
-            zeroize::Zeroizing::new("sk-eval-reviewer".to_string()),
-        )]
-        .into_iter()
-        .collect(),
-        credential_identities: std::sync::OnceLock::from(
-            [(
-                REVIEWER_CREDENTIAL.to_string(),
-                REVIEWER_CREDENTIAL_IDENTITY.to_string(),
-            )]
-            .into_iter()
-            .collect::<BTreeMap<_, _>>(),
-        ),
-        worker_instance: "eval-reviewer".to_string(),
-    });
-    let endpoint = Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap();
-    let kernel = Arc::clone(&stores.corpus.kernel);
-    let route = ProjectRoute {
-        project: reviewer::PROJECT.to_string(),
-        authority_generation: generation,
-        roots: vec![RootScope {
-            project_root: project_root.to_path_buf(),
-            project_digest: REVIEWER_DIGEST.to_string(),
-            scope_id: format!("project:{REVIEWER_DIGEST}"),
-        }],
-    };
-    Arc::new(Worker {
-        host,
-        home: home.to_path_buf(),
-        store: Arc::clone(&stores.memory),
-        kernel: Arc::new(move || Some(Arc::clone(&kernel))),
-        projects: Arc::new(move || vec![route.clone()]),
-        status: Arc::clone(status),
-        permits: Arc::new(InvestigationPermits::default()),
-        providers: Providers::at(endpoint.clone(), endpoint, "us-east-1"),
-        rejection: Default::default(),
-    })
+    incarnation: String,
 }
 
-/// Activates one fresh History Summarizer job, as the handoff leaves it.
-fn feed_reviewer_job(stores: &Stores, kernel_incarnation: &str, firing: u64) {
-    reviewer::try_ready_job(
-        &stores.corpus.kernel,
-        &stores.memory,
-        REVIEWER_DIGEST,
-        kernel_incarnation,
-        firing,
-        reviewer::now_ms(),
-    )
-    .unwrap_or_else(|refusal| panic!("reviewer job {firing}: {refusal}"));
+impl ReviewerRig {
+    /// `project_root` is the route `generation` raised to MODULE authority;
+    /// `activate` writes the owner's record, so a rig without it measures a
+    /// worker whose gate stays closed.
+    pub fn open(
+        stores: &Stores,
+        home: &Path,
+        project_root: &Path,
+        generation: u64,
+        activate: bool,
+    ) -> Self {
+        let runtime = runtime();
+        let peer = runtime.block_on(Peer::start());
+        let incarnation = reviewer::kernel_incarnation(&stores.corpus.kernel);
+        if activate {
+            write_activation_record(
+                home,
+                &activation_record(&Deployment {
+                    model: "claude-eval",
+                    kernel_incarnation: &incarnation,
+                    memstore_incarnation: &stores
+                        .memory
+                        .memory_reviewer_store_incarnation()
+                        .unwrap(),
+                    provider: &peer.sender().provider_identity(),
+                    credential: REVIEWER_CREDENTIAL,
+                    credential_fingerprint: REVIEWER_CREDENTIAL_IDENTITY,
+                }),
+            );
+        }
+        Self {
+            runtime,
+            peer,
+            status: Arc::default(),
+            home: home.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+            generation,
+            incarnation,
+        }
+    }
+
+    /// Activates one fresh History Summarizer job, as the handoff leaves it,
+    /// under the rig's bound root; a reservation refusal writes nothing.
+    pub fn feed(
+        &self,
+        stores: &Stores,
+        firing: u64,
+        now: i64,
+    ) -> Result<memory_store::memory_reviewer_jobs::MemoryReviewerJob, MemoryReviewerJobRefusal>
+    {
+        reviewer::try_ready_job(
+            &stores.corpus.kernel,
+            &stores.memory,
+            REVIEWER_DIGEST,
+            &self.incarnation,
+            firing,
+            now,
+        )
+    }
+
+    /// One production `Worker::pass` over `stores`, driven directly.
+    pub fn pass(&self, stores: &Stores) -> usize {
+        let worker = self.worker(stores);
+        self.runtime
+            .block_on(worker.pass(&CancellationToken::new()))
+    }
+
+    fn worker(&self, stores: &Stores) -> Arc<Worker> {
+        let host = Arc::new(MemoryReviewerHost {
+            supervisor: Arc::new(Supervisor::new(Arc::new(NoPublicModel))),
+            credentials: [(
+                REVIEWER_CREDENTIAL.to_string(),
+                zeroize::Zeroizing::new("sk-eval-reviewer".to_string()),
+            )]
+            .into_iter()
+            .collect(),
+            credential_identities: std::sync::OnceLock::from(
+                [(
+                    REVIEWER_CREDENTIAL.to_string(),
+                    REVIEWER_CREDENTIAL_IDENTITY.to_string(),
+                )]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+            ),
+            worker_instance: "eval-reviewer".to_string(),
+        });
+        let endpoint =
+            Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap();
+        let kernel = Arc::clone(&stores.corpus.kernel);
+        let route = ProjectRoute {
+            project: reviewer::PROJECT.to_string(),
+            authority_generation: self.generation,
+            roots: vec![RootScope {
+                project_root: self.project_root.clone(),
+                project_digest: REVIEWER_DIGEST.to_string(),
+                scope_id: format!("project:{REVIEWER_DIGEST}"),
+            }],
+        };
+        Arc::new(Worker {
+            host,
+            home: self.home.clone(),
+            store: Arc::clone(&stores.memory),
+            kernel: Arc::new(move || Some(Arc::clone(&kernel))),
+            projects: Arc::new(move || vec![route.clone()]),
+            status: Arc::clone(&self.status),
+            permits: Arc::new(InvestigationPermits::default()),
+            providers: Providers::at(endpoint.clone(), endpoint, "us-east-1"),
+            rejection: Default::default(),
+        })
+    }
 }
 
 /// [`reviewer_liveness`]'s window, unjudged; `activate` writes the owner's
@@ -2487,27 +2552,19 @@ pub fn reviewer_window(
     let project_root = root.path().join("reviewer-project");
     std::fs::create_dir_all(&project_root).unwrap();
     let generation = reviewer::activate_module_authority(&stores.memory, &project_root);
-    let incarnation = reviewer::kernel_incarnation(&stores.corpus.kernel);
-    let runtime = runtime();
-    let peer = runtime.block_on(Peer::start());
-    let home = root.path().join("reviewer-home");
-    if activate {
-        write_activation_record(
-            &home,
-            &activation_record(&Deployment {
-                model: "claude-eval",
-                kernel_incarnation: &incarnation,
-                memstore_incarnation: &stores.memory.memory_reviewer_store_incarnation().unwrap(),
-                provider: &peer.sender().provider_identity(),
-                credential: REVIEWER_CREDENTIAL,
-                credential_fingerprint: REVIEWER_CREDENTIAL_IDENTITY,
-            }),
-        );
-    }
-    let status = Arc::new(MemoryReviewerStatus::default());
-    let worker = reviewer_worker(&stores, &home, &project_root, generation, &peer, &status);
+    let rig = ReviewerRig::open(
+        &stores,
+        &root.path().join("reviewer-home"),
+        &project_root,
+        generation,
+        activate,
+    );
+    let feed = |firing| {
+        rig.feed(&stores, firing, reviewer::now_ms())
+            .unwrap_or_else(|refusal| panic!("reviewer job {firing}: {refusal}"));
+    };
     for firing in 0..REVIEWER_BACKLOG {
-        feed_reviewer_job(&stores, &incarnation, firing);
+        feed(firing);
     }
 
     let projection_lock = witness.declare(episode(
@@ -2519,11 +2576,10 @@ pub fn reviewer_window(
         "an external connection holds BEGIN IMMEDIATE on the search projection for the whole reviewer window; the projection is outside the reviewer arm's core, which never opens it, and the lock is never released inside it",
     ));
     let holder = hold_write_lock(&search_file(stores.root()));
-    let cancel = CancellationToken::new();
     let mut progress = LaneProgress::new(bound);
     for step in 1..=bound {
-        feed_reviewer_job(&stores, &incarnation, REVIEWER_BACKLOG + step - 1);
-        runtime.block_on(worker.pass(&cancel));
+        feed(REVIEWER_BACKLOG + step - 1);
+        rig.pass(&stores);
         let ready = stores
             .memory
             .ready_memory_reviewer_jobs(
@@ -2534,7 +2590,7 @@ pub fn reviewer_window(
             .unwrap()
             .len();
         let facts = stores.memory.memory_reviewer_status_facts().unwrap();
-        let activation = status.activation_state();
+        let activation = rig.status.activation_state();
         let holds = activation == ActivationState::Open
             && ready == 0
             && facts.jobs_abstained == REVIEWER_BACKLOG + step;
@@ -2560,9 +2616,7 @@ pub fn reviewer_window(
     let armed_at_bound = armed_if_held(&search_file(stores.root()), &projection_lock);
     drop(holder);
     witness.receipt(&projection_lock);
-    drop(worker);
-    drop(peer);
-    drop(runtime);
+    drop(rig);
     charges.store_bytes(stores.root())?;
     drop(stores.close());
     charges.vacate(root)?;

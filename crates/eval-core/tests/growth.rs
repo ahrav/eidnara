@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 
 use eval_core::{
-    CampaignResources, ClaimBoundary, Coverage, Envelope, EnvelopeExceeded, ExpectedRefusal,
-    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode, GrowthRefused,
-    GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused, MixIncomplete, Operation,
-    RecordedRefusal, Resource, ResourceLimits, ResourceSample, ReviewerQuota, StoreBytes,
-    StoreFamily, SwarmMix, digests_match_serial, isolated, parse_growth_report,
+    CampaignResources, ClaimBoundary, Coverage, CutCoverage, Envelope, EnvelopeExceeded,
+    ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode,
+    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused,
+    LivenessBounds, MixIncomplete, Operation, QuiescenceProgress, RecordedRefusal, Resource,
+    ResourceLimits, ResourceSample, ReviewerQuota, StoreBytes, StoreFamily, SwarmMix,
+    digests_match_serial, isolated, parse_growth_report,
 };
 
 const SUITE: &str = "crates/eval-core/tests/growth.rs::";
@@ -30,6 +31,12 @@ fn bounds() -> GrowthBounds {
         projection_rows: 100_000,
         open_holds: 1,
         store_bytes_per_commit: 64 << 10,
+        progress: LivenessBounds {
+            catch_up_episodes: 4,
+            embedding_passes: 4,
+            materialization_episodes: 4,
+            reviewer_coordinator_passes: 2,
+        },
     }
 }
 
@@ -96,6 +103,12 @@ fn sample(step: u32, commit_seq: i64, wal: u64, tmp: u64) -> ResourceSample {
         projection_rows: step as u64 * 2,
         open_holds: 1,
         headroom: headroom(1, step as u64),
+        progress: QuiescenceProgress {
+            acknowledged_through: commit_seq,
+            catch_up_episodes: 1,
+            reviewer_passes: 1,
+            reviewer_settled: true,
+        },
     }
 }
 
@@ -131,6 +144,12 @@ fn report() -> GrowthReport {
         expected_refusals: Vec::new(),
         fault_episodes: 1,
         safety_checks_while_armed: 2,
+        coverage: {
+            let mut coverage = CutCoverage::default();
+            coverage.declare("growth-ack-lost-4");
+            coverage.receipt("growth-ack-lost-4").unwrap();
+            coverage
+        },
         markers: BTreeSet::new(),
         envelope,
     }
@@ -423,6 +442,7 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
     );
     let mut rowless = ledger.clone();
     rowless.samples[2].commit_seq = 12;
+    rowless.samples[2].progress.acknowledged_through = 12;
     assert_eq!(
         rowless.verdict(&quota(), &bounds()),
         Err(GrowthRefused::CommitRowsDisagree {
@@ -430,6 +450,41 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
             rows: 6,
         }),
         "a sequence advance the commit log did not retain buys no allowance"
+    );
+    let mut short = ledger.clone();
+    short.samples[1].progress.acknowledged_through = 6;
+    assert_eq!(
+        short.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::NotQuiescent {
+            step: 2,
+            acknowledged_through: 6,
+            commit_seq: 7,
+        }),
+        "a drain that stopped short of the tip is no quiescent point"
+    );
+    let mut slow = ledger.clone();
+    slow.samples[1].progress.catch_up_episodes = 5;
+    assert_eq!(
+        slow.verdict(&quota(), &bounds()),
+        Err(GrowthRefused::ProgressUnbounded {
+            step: 2,
+            lane: eval_core::Lane::CatchUpEpisodes,
+            used: 5,
+            bound: 4,
+        }),
+        "a drain that needed more episodes than the approved bound is not bounded progress"
+    );
+    let mut unsettled = ledger.clone();
+    unsettled.samples[0].progress.reviewer_settled = false;
+    assert_eq!(
+        unsettled.check_samples(&quota(), &bounds()),
+        Err(GrowthRefused::ProgressUnbounded {
+            step: 1,
+            lane: eval_core::Lane::ReviewerCoordinatorPasses,
+            used: 1,
+            bound: 2,
+        }),
+        "passes that stopped with handed-over work still Ready are unbounded in both modes"
     );
     let mut reordered = ledger.clone();
     reordered.samples.swap(1, 2);
@@ -687,6 +742,30 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     let mut other_quota = value.clone();
     other_quota["quota"]["receipt_charge_bytes"] = serde_json::json!(1);
     assert_ne!(GrowthReport::result_digest(&other_quota).unwrap(), digest);
+    let mut unreceipted = report.clone();
+    unreceipted.coverage.declare("growth-ack-lost-9");
+    assert!(
+        matches!(
+            unreceipted.validate(&contract()),
+            Err(GrowthReportError::Coverage(
+                eval_core::CoverageRefused::IncompleteCoverage { .. }
+            ))
+        ),
+        "a declared cut with no receipt is incomplete coverage, not sustainability success"
+    );
+    let mut cutless = report.clone();
+    cutless.coverage = CutCoverage::default();
+    assert_eq!(
+        cutless.validate(&contract()),
+        Err(GrowthReportError::FaultedWithoutCuts),
+        "fault episodes with no declared cut carry no coverage witness"
+    );
+    let mut v1 = report.clone();
+    v1.schema = "eval-suite-c-growth-report/v1".to_string();
+    assert!(matches!(
+        v1.validate(&contract()),
+        Err(GrowthReportError::SchemaMismatch { .. })
+    ));
     let mut restoring = report.clone();
     restoring.ledger.mode = GrowthMode::Restoring;
     restoring.validate(&contract()).unwrap();
