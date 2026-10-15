@@ -1934,8 +1934,12 @@ a refusal that leaves no reservation row and no object, and a refusal that
 counts an unrecovered orphan publish; the cap error, invalidated-retained
 bytes, reclaim, and the inclusive payload limit keep their earlier tests.
 Guarantee: No ingest publishes bytes that would raise the on-disk regular-file
-sum under `objects` above `artifact_cap`, and a refused ingest leaves no
-reservation row and no published object.
+sum under `objects` above `artifact_cap` while every byte under `objects`
+changed through the store since the last conclusive reconciliation, and a
+refused ingest leaves no reservation row and no published object. Bytes
+changed outside the store are drift: the count follows them at the next
+conclusive reconciliation, which latches admission closed
+([`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown]).
 Check: `always` - For every ingest, [`check_budget`][check-budget] runs under
 the exclusive [writer lock][lock-writer] before the reservation row, the
 shard creation, and the publish rename ([`:410-419`][ingest-lock]); it reads
