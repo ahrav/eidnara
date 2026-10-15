@@ -489,6 +489,19 @@ impl Fixture {
             .unwrap();
     }
 
+    fn retire_linked(&self, key: &str, evidence_key: &str) {
+        self.store
+            .commit(
+                intent(&format!("retire-{key}-{evidence_key}")),
+                |envelope| {
+                    envelope.retire_decision(&format!("decision-{key}"))?;
+                    envelope.retire_evidence(&format!("linked-object-{evidence_key}"))?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
     /// Admits `inputs` as the producer does, then runs it to a recorded abstention through the ledger's own receipt path: MODULE authority, activation, a claimed task lease, a begun receipt, and its completion.
     fn abstain(&self, inputs: &CausalInputs, firing: &str) -> String {
         let preparing = self
@@ -668,6 +681,48 @@ fn newly_linked_evidence_after_an_abstention_reconsiders_the_target_once_at_its_
         fixture.select(MEMORY_CLASSES, None).references.is_empty(),
         "the new job deduplicates repeated firings"
     );
+}
+
+#[test]
+fn a_cited_row_becoming_unavailable_after_an_abstention_reconsiders_the_target_once() {
+    let fixture = Fixture::open();
+    let target = fixture.publish_derived_over(
+        "t",
+        "canonical_claims",
+        "object_id",
+        "decision_summary",
+        Some(&repository("t")),
+    );
+    let cited = fixture.evidence("cited");
+    fixture.link("t", &cited);
+    let first = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&first), vec![target.clone()]);
+    let first_inputs = first.references[0].clone();
+    assert!(
+        first_inputs
+            .required_evidence
+            .iter()
+            .any(|e| e.evidence_id == cited && e.available)
+    );
+    let first_identity = fixture.abstain(&first_inputs, "slot-1");
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+
+    fixture.retire_linked("t", "cited");
+    let second = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&second), vec![target]);
+    let second_inputs = &second.references[0];
+    assert_eq!(second_inputs.target, first_inputs.target);
+    assert!(
+        second_inputs
+            .required_evidence
+            .iter()
+            .any(|e| e.evidence_id == cited && !e.available),
+        "{:?}",
+        second_inputs.required_evidence
+    );
+    let second_identity = fixture.reserve(second_inputs, "slot-2");
+    assert_ne!(second_identity, first_identity);
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
 }
 
 /// The linked rows are bounded at the selector: with more citations than `MAX_LINKED_EVIDENCE`, the inputs carry the descriptor's evidence and the newest eight, so re-citing a row already in the window changes nothing and one more new citation reconsiders the target once.
