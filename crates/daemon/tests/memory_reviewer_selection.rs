@@ -257,8 +257,8 @@ impl Fixture {
                         observed_at: 1,
                     })
                     .unwrap();
-                // The read that serves a repository-backed claim is the
-                // descriptor's own admission, as the materializer records it.
+                // Eligibility judges the descriptor through the reads that
+                // serve it, so the fixture admits the descriptor itself.
                 if provenance_backed {
                     envelope.record_admission(kernel::AdmissionRequest {
                         candidate_id: None,
@@ -446,6 +446,15 @@ fn the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors
     let _: Option<CausalInputs> = None;
 }
 
+/// The Memory Classifier's binding for one firing.
+fn classifier(firing: &str) -> ProducerBinding {
+    ProducerBinding {
+        producer: "memory-classifier".to_string(),
+        firing_id: firing.to_string(),
+        ordinal: 0,
+    }
+}
+
 /// Repository provenance for `key`'s evidence, so the remote fold admits it.
 fn repository(key: &str) -> kernel::RepositoryProvenance {
     kernel::RepositoryProvenance {
@@ -525,16 +534,11 @@ impl Fixture {
             .unwrap()
             .generation;
         let identity = self.reserve(inputs, firing);
-        let producer = ProducerBinding {
-            producer: "memory-classifier".to_string(),
-            firing_id: firing.to_string(),
-            ordinal: 0,
-        };
         self.ledger
             .activate_memory_reviewer_job(
                 PROJECT,
                 &identity,
-                &producer,
+                &classifier(firing),
                 &memory_store::memory_reviewer_jobs::MemoryReviewerJobInput {
                     subject: inputs.target.clone(),
                     starting_references: Vec::new(),
@@ -595,14 +599,9 @@ impl Fixture {
     }
 
     fn reserve(&self, inputs: &CausalInputs, firing: &str) -> String {
-        let producer = ProducerBinding {
-            producer: "memory-classifier".to_string(),
-            firing_id: firing.to_string(),
-            ordinal: 0,
-        };
         match self
             .ledger
-            .reserve_memory_reviewer_job(PROJECT, &producer, inputs, self.now)
+            .reserve_memory_reviewer_job(PROJECT, &classifier(firing), inputs, self.now)
             .unwrap()
         {
             memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => {
@@ -688,4 +687,46 @@ fn newly_linked_evidence_after_an_abstention_reconsiders_the_target_once_at_its_
         fixture.select(MEMORY_CLASSES, None).references.is_empty(),
         "the new job deduplicates repeated firings"
     );
+}
+
+/// The linked rows are bounded at the selector: with more citations than `MAX_LINKED_EVIDENCE`, the inputs carry the descriptor's evidence and the newest eight, so re-citing a row already in the window changes nothing and one more new citation reconsiders the target once.
+#[test]
+fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
+    use daemon::memory_reviewer::selection::MAX_LINKED_EVIDENCE;
+    let fixture = Fixture::open();
+    let target = fixture.publish_derived_over(
+        "t",
+        "canonical_claims",
+        "object_id",
+        "decision_summary",
+        Some(repository("t")),
+    );
+    let cited: Vec<String> = (0..=MAX_LINKED_EVIDENCE.get())
+        .map(|n| {
+            let evidence = fixture.evidence(&format!("c{n}"));
+            fixture.link("t", &evidence);
+            evidence
+        })
+        .collect();
+    let page = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&page), vec![target.clone()]);
+    let required: Vec<&str> = page.references[0]
+        .required_evidence
+        .iter()
+        .map(|e| e.evidence_id.as_str())
+        .collect();
+    assert_eq!(required.len(), MAX_LINKED_EVIDENCE.get() + 1);
+    assert!(
+        !required.contains(&cited[0].as_str()),
+        "the oldest citation falls outside the bound: {required:?}"
+    );
+    assert!(cited[1..].iter().all(|e| required.contains(&e.as_str())));
+    fixture.reserve(&page.references[0], "slot-1");
+    // Re-citing a row already among the newest eight moves it, not the set.
+    fixture.link("t", &cited[MAX_LINKED_EVIDENCE.get()]);
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+    let newest = fixture.evidence("newest");
+    fixture.link("t", &newest);
+    let page = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&page), vec![target]);
 }

@@ -47,7 +47,8 @@ pub const MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
 /// Allowance a `frozen` page holds for its serialized references, sized to [`MAX_FROZEN_PAGE_BYTES`]; terminal pages hold none.
 pub const FROZEN_SELECTION_ALLOWANCE_BYTES: u64 = 64 * 1024;
 
-const MAX_IDENTITY_BYTES: usize = 256;
+/// Byte bound of every identity a causal input or job row carries: target and evidence ids, firings, and producers.
+pub const MAX_IDENTITY_BYTES: usize = 256;
 
 /// What a review job investigates: a sealed staged subject by immutable digest, or a canonical memory at one revision.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

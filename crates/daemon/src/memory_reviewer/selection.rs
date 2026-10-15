@@ -12,7 +12,8 @@ use kernel::{
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
-    CausalInputs, EvidenceAvailability, FrozenSelectionPage, MAX_SELECTION_REFERENCES, ReviewTarget,
+    CausalInputs, EvidenceAvailability, FrozenSelectionPage, MAX_IDENTITY_BYTES,
+    MAX_SELECTION_REFERENCES, ReviewTarget,
 };
 
 /// The descriptor classes the production selector walks: the memories the Memory Classifier reviews, each resolved by the coordinator through its originating decision.
@@ -34,7 +35,7 @@ const _: () = {
 pub const PRODUCTION_SELECTION_OPEN: bool = false;
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.
 pub const MAX_EXAMINED_PER_PAGE: usize = 256;
-/// Evidence rows an originating decision may contribute to one target's causal inputs: the most recently cited first, so newly linked evidence always enters the fingerprint. With the descriptor's own evidence this stays under the ledger's `MAX_REQUIRED_EVIDENCE`.
+/// Evidence rows an originating decision may contribute to one target's causal inputs: the most recently cited first, so the newest citation always enters the fingerprint, and a liveness change reconsiders a target only for evidence among these rows. With the descriptor's own evidence this stays under the ledger's `MAX_REQUIRED_EVIDENCE`.
 pub const MAX_LINKED_EVIDENCE: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 const _: () =
     assert!(MAX_LINKED_EVIDENCE.get() < memory_store::memory_reviewer_jobs::MAX_REQUIRED_EVIDENCE);
@@ -173,20 +174,17 @@ pub fn select_review_targets(
             if references.len() >= MAX_SELECTION_REFERENCES {
                 return Ok(finish(references, Some(cursor)));
             }
-            let linked = if verdict.permits() {
-                linked_evidence(store, class, row, tip, budget).map_err(kernel)?
-            } else {
-                Vec::new()
-            };
-            if verdict.permits()
-                && let Some((inputs, causal_identity)) =
+            if verdict.permits() {
+                let linked = linked_evidence(store, class, row, tip, budget).map_err(kernel)?;
+                if let Some((inputs, causal_identity)) =
                     causal_inputs(row, &linked, policy_versions)
-                && ledger
-                    .lookup_memory_reviewer_job(ledger_project, &causal_identity)
-                    .map_err(|error| SelectionError::Ledger(error.to_string()))?
-                    .is_none()
-            {
-                references.push(inputs);
+                    && ledger
+                        .lookup_memory_reviewer_job(ledger_project, &causal_identity)
+                        .map_err(|error| SelectionError::Ledger(error.to_string()))?
+                        .is_none()
+                {
+                    references.push(inputs);
+                }
             }
             cursor.after = Some(row.object_id.clone());
         }
@@ -223,14 +221,17 @@ fn linked_evidence(
     store.linked_decision_evidence_within_budget(decision, tip, MAX_LINKED_EVIDENCE, budget)
 }
 
-/// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available together with each `linked` row and its liveness, and the caller's policy versions. The descriptor's own evidence is live while the descriptor is, so it keeps that availability when its decision also cites it. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
+/// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available together with each `linked` row and its liveness, and the caller's policy versions. The descriptor's own evidence is live while the descriptor is, so it keeps that availability when its decision also cites it. A linked id longer than the ledger's identity bound is left out, since no job could carry it, so one such citation cannot hide a reviewable target. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
 fn causal_inputs(
     row: &LiveDescriptor,
     linked: &[LinkedEvidence],
     policy_versions: &std::collections::BTreeMap<String, String>,
 ) -> Option<(CausalInputs, String)> {
     let mut evidence = std::collections::BTreeMap::from([(row.detail.evidence_id.clone(), true)]);
-    for link in linked {
+    for link in linked
+        .iter()
+        .filter(|link| link.evidence_id.len() <= MAX_IDENTITY_BYTES)
+    {
         evidence
             .entry(link.evidence_id.clone())
             .or_insert(link.live);
@@ -292,6 +293,35 @@ mod tests {
             causal_inputs(&row("e".repeat(300)), &[], &versions).is_none(),
             "an evidence id the ledger refuses yields no inputs"
         );
+        // A linked id past the ledger's bound is left out; the rest still bind.
+        let linked = [
+            kernel::LinkedEvidence {
+                evidence_id: "l".repeat(300),
+                live: true,
+            },
+            kernel::LinkedEvidence {
+                evidence_id: "linked-1".to_string(),
+                live: false,
+            },
+        ];
+        let (inputs, _) = causal_inputs(&row("evidence-1".to_string()), &linked, &versions)
+            .expect("an overlong linked id does not hide the target");
+        assert_eq!(
+            inputs
+                .required_evidence
+                .iter()
+                .map(|e| (e.evidence_id.as_str(), e.available))
+                .collect::<Vec<_>>(),
+            vec![("evidence-1", true), ("linked-1", false)]
+        );
+        // The descriptor's own evidence keeps its availability when its decision cites it too.
+        let own = [kernel::LinkedEvidence {
+            evidence_id: "evidence-1".to_string(),
+            live: false,
+        }];
+        let (inputs, _) = causal_inputs(&row("evidence-1".to_string()), &own, &versions).unwrap();
+        assert_eq!(inputs.required_evidence.len(), 1);
+        assert!(inputs.required_evidence[0].available);
     }
 
     #[test]

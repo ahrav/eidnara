@@ -8,7 +8,8 @@ use super::Sensitivity;
 
 pub use alignment::{ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot};
 pub use read::{
-    DecisionPage, DecisionRow, LinkedEvidence, ObservationRow, PagedDecision, SliceSnapshot,
+    DecisionPage, DecisionRow, LINKED_EVENT_WINDOW, LinkedEvidence, ObservationRow, PagedDecision,
+    SliceSnapshot,
 };
 pub use write::{
     APPROVAL_REVOKE_KIND, DECISION_CHANGE_KINDS, DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND,

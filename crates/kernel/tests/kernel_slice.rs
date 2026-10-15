@@ -1800,23 +1800,36 @@ fn ingest_evidence(store: &KernelStore, key: &str, digest: char) -> String {
         .evidence_id
 }
 
-fn cite(store: &KernelStore, key: &str, digest: char, evidence_id: &str) {
+/// Appends events to `decision_id` in one commit, each citing its evidence or nothing.
+fn cite_all(
+    store: &KernelStore,
+    decision_id: &str,
+    key: &str,
+    digest: char,
+    cited: &[Option<&str>],
+) {
     store
         .commit(intent(&format!("cite-{key}"), digest), |envelope| {
-            envelope.append_decision_event(
-                "decision-1",
-                DecisionEventSpec {
-                    event_kind: "evidence".to_string(),
-                    payload: DecisionEventPayload {
-                        summary: format!("cites {key}"),
+            for evidence_id in cited {
+                envelope.append_decision_event(
+                    decision_id,
+                    DecisionEventSpec {
+                        event_kind: "evidence".to_string(),
+                        payload: DecisionEventPayload {
+                            summary: format!("cites {key}"),
+                        },
+                        evidence_id: evidence_id.map(str::to_string),
+                        recorded_at: 10,
                     },
-                    evidence_id: Some(evidence_id.to_string()),
-                    recorded_at: 10,
-                },
-            )?;
+                )?;
+            }
             Ok(String::new())
         })
         .unwrap();
+}
+
+fn cite(store: &KernelStore, key: &str, digest: char, evidence_id: &str) {
+    cite_all(store, "decision-1", key, digest, &[Some(evidence_id)]);
 }
 
 /// The evidence a decision cites, itself or through its events: most recently cited first, deduplicated, bounded, as of the snapshot read, with each row's liveness; a decision unknown at the snapshot cites nothing and an unrelated decision's citations are not its own.
@@ -1862,22 +1875,9 @@ fn linked_decision_evidence_is_the_decisions_own_citations_newest_first_and_boun
     // Citing the decision's own evidence again moves it to the front once.
     cite(&store, "own-again", '7', &own);
     let unrelated = ingest_evidence(&store, "unrelated", '8');
-    store
-        .commit(intent("cite-unrelated", '9'), |envelope| {
-            envelope.append_decision_event(
-                "decision-2",
-                DecisionEventSpec {
-                    event_kind: "evidence".to_string(),
-                    payload: DecisionEventPayload {
-                        summary: "unrelated".to_string(),
-                    },
-                    evidence_id: Some(unrelated.clone()),
-                    recorded_at: 10,
-                },
-            )?;
-            Ok(String::new())
-        })
-        .unwrap();
+    cite_all(&store, "decision-2", "unrelated", '9', &[Some(&unrelated)]);
+    // An event that cites nothing adds no row.
+    cite_all(&store, "decision-1", "nothing", 'b', &[None]);
     let tip = store.tip().unwrap();
     assert_eq!(
         linked(tip, 8),
@@ -1908,4 +1908,36 @@ fn linked_decision_evidence_is_the_decisions_own_citations_newest_first_and_boun
     let retired = linked(store.tip().unwrap(), 8);
     assert!(retired.contains(&(first, false)), "{retired:?}");
     assert!(retired.contains(&(own, true)));
+}
+
+/// Two rows cited in one commit tie on their citation, and the bound keeps the lower evidence id; a decision with no evidence of its own reports only its events' citations.
+#[test]
+fn linked_decision_evidence_breaks_ties_by_evidence_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("decision-1", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let b = ingest_evidence(&store, "b", '2');
+    let a = ingest_evidence(&store, "a", '3');
+    cite_all(&store, "decision-1", "both", '4', &[Some(&b), Some(&a)]);
+    let linked = |max: usize| -> Vec<String> {
+        store
+            .linked_decision_evidence_within_budget(
+                "decision-object-1",
+                store.tip().unwrap(),
+                std::num::NonZeroUsize::new(max).unwrap(),
+                &kernel::applicability::EvalBudget::unbounded(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.evidence_id)
+            .collect()
+    };
+    assert_eq!(linked(8), vec![a.clone(), b]);
+    assert_eq!(linked(1), vec![a]);
 }

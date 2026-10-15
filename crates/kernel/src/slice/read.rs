@@ -21,7 +21,10 @@ pub struct DecisionRow {
     pub sensitivity: Sensitivity,
 }
 
-/// One evidence row a decision cites, itself or through one of its events, and whether that evidence was live at the snapshot read.
+/// Events examined per linked row [`KernelStore::linked_decision_evidence_within_budget`] may return.
+pub const LINKED_EVENT_WINDOW: i64 = 4;
+
+/// One evidence row a decision cites, itself or through one of its events, and whether that evidence was live at the snapshot read. A citation requires the evidence to be live when it is made, so only a later invalidation, such as an operator's artifact deletion, makes a cited row not live.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedEvidence {
     pub evidence_id: String,
@@ -274,11 +277,11 @@ impl KernelStore {
         Ok(targets)
     }
 
-    /// The evidence the decision at `decision_object_id` cites at snapshot `requested`: its own `evidence_id` and every event's, most recently cited first, ties in evidence-id order, at most `max` rows. Each row says whether the evidence was live at `requested`. A decision unknown at `requested` cites nothing. Work is bounded by the decision's own events, not the store's size, and the wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    /// The evidence the decision at `decision_object_id` cites at snapshot `requested`: its own `evidence_id` and the evidence of its newest events, most recently cited first, ties in evidence-id order, at most `max` rows. Each row says whether the evidence was live at `requested`. The read walks the decision's events newest first in primary-key order and stops after the newest [`LINKED_EVENT_WINDOW`] × `max` at or before `requested`, so its work is bounded by that window and the events newer than the snapshot, whatever the decision's history; a decision that re-cites the same evidence heavily inside that window can return fewer than `max` rows. A decision unknown at `requested` cites nothing; one retired at `requested` still reports the citations it made. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, and [`KernelError::FutureSnapshot`] when `requested` exceeds the tip.
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
     pub fn linked_decision_evidence_within_budget(
         &self,
         decision_object_id: &str,
@@ -292,23 +295,28 @@ impl KernelStore {
             .map_err(crate::map_sqlite)?;
         snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max.get()).unwrap_or(i64::MAX);
+        let window = limit.saturating_mul(LINKED_EVENT_WINDOW);
         let rows = tx
             .prepare_cached(
                 "WITH decision AS (
                      SELECT decision_id, evidence_id, created_commit_seq FROM decisions
                       WHERE object_id=?1 AND created_commit_seq<=?2
                  ),
+                 recent AS (
+                     SELECT e.evidence_id, e.commit_seq FROM decision_events e
+                       JOIN decision d ON d.decision_id=e.decision_id
+                      WHERE e.commit_seq<=?2
+                      ORDER BY e.event_ordinal DESC
+                      LIMIT ?4
+                 ),
                  cited AS (
                      SELECT evidence_id, created_commit_seq AS cited_at FROM decision
                       WHERE evidence_id IS NOT NULL
                      UNION ALL
-                     SELECT e.evidence_id, e.commit_seq FROM decision_events e
-                       JOIN decision d ON d.decision_id=e.decision_id
-                      WHERE e.evidence_id IS NOT NULL AND e.commit_seq<=?2
+                     SELECT evidence_id, commit_seq FROM recent WHERE evidence_id IS NOT NULL
                  )
                  SELECT c.evidence_id,
-                        m.created_commit_seq<=?2
-                          AND (m.invalidated_commit_seq IS NULL OR ?2<m.invalidated_commit_seq)
+                        m.invalidated_commit_seq IS NULL OR ?2<m.invalidated_commit_seq
                    FROM (SELECT evidence_id, MAX(cited_at) AS cited_at FROM cited
                           GROUP BY evidence_id) c
                    JOIN evidence_meta m ON m.evidence_id=c.evidence_id
@@ -318,7 +326,7 @@ impl KernelStore {
             .and_then(|mut statement| {
                 statement
                     .query_map(
-                        rusqlite::params![decision_object_id, requested, limit],
+                        rusqlite::params![decision_object_id, requested, limit, window],
                         |row| {
                             Ok(LinkedEvidence {
                                 evidence_id: row.get(0)?,
