@@ -1786,6 +1786,13 @@ completeness proof run in the `eval-campaign` CI job under
   with zero coordinator passes approved, the handed job is still pending at
   its quiescence, the witness records `reviewer_settled: false` with no pass,
   and `check_samples` refuses `ReviewerUnsettled`.
+- `a_cap_triggered_settle_and_its_drain_share_one_pass_bound`: with the
+  activation record removed, the gate stays closed; begun admissions fill the
+  pending queue to one short of the cap, and step 3's handed admission
+  reaches it. The cap-triggered settle and the drain together run exactly
+  `reviewer_coordinator_passes` passes, the witness records the job
+  unsettled, and `check_samples` refuses `ReviewerUnsettled` at the bound
+  rather than `ProgressUnbounded`.
 - `reviewer_headroom_is_accounted_from_the_stores_own_constants`
   (`flt-memory-reviewer-quota-refusal-expected`; marker
   `flt_headroom_accounted_from_store_constants`): the report's constants are
@@ -1796,8 +1803,9 @@ completeness proof run in the `eval-campaign` CI job under
 - `quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicking`:
   twice the per-project pending cap of admissions leaves the pending count one
   short of the cap, every admission pending or terminal, and the project bytes
-  equal to the constants' figure; the cap-triggered coordinator settles ran
-  passes that the next quiescence's witness counts.
+  equal to the constants' figure; each admission's cap-triggered coordinator
+  settle runs no more passes than the bound, and the settles together run
+  passes that each following quiescence's witness counts.
 - `a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing`: with the
   project's receipt charges planted past the quota, the next admission is
   refused with `MetadataQuota`, counted once in `r24_refusals`, charges
@@ -1827,9 +1835,11 @@ completeness proof run in the `eval-campaign` CI job under
   roots and publish directories and publish the result digests of their
   serial runs, with the same commit-log rows, projection rows, artifact
   objects, and mix counts; each campaign's reviewer peer holds one
-  OS-allocated port and the ports are disjoint; a fixture sharing a root or
-  a port is refused. This campaign records no cassette, so its cassette
-  namespace set is empty.
+  OS-allocated port and the concurrent pair's ports are disjoint; the serial
+  pair is compared without ports, so a port the OS hands from one serial run
+  to the next is accepted; a fixture sharing a root, or a concurrent fixture
+  sharing a port, is refused. This campaign records no cassette, so its
+  cassette namespace set is empty.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 

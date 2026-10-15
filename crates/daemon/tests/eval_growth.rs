@@ -413,11 +413,19 @@ fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicki
     let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     // Every other admission stays pending, so twice the cap overruns it.
     let admissions = 2 * MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT + 4;
+    let bound = s0_liveness().reviewer_coordinator_passes;
+    let mut cap_passes = 0;
     for k in 0..admissions {
         live.quota_pressure(4 * k + 3, now_ms()).unwrap();
+        let passes = std::mem::take(&mut live.passes_since_drain);
+        assert!(
+            passes <= bound,
+            "admission {k}'s quiescence witnesses {passes} passes"
+        );
+        cap_passes += passes;
     }
     assert!(
-        live.passes_since_drain > 0,
+        cap_passes > 0,
         "the cap-triggered settles ran passes, which wait for the next quiescence's witness"
     );
     let headroom = live.headroom();
@@ -570,6 +578,19 @@ type Shape = (u64, u64, u64, std::collections::BTreeMap<Operation, u64>);
 /// One campaign's result digest, shape, and the resources it held.
 type Outcome = (String, Shape, eval_core::CampaignResources);
 
+/// Callers must ensure the campaigns' listener lifetimes are disjoint so the
+/// OS can reuse released ports.
+fn serially_isolated(
+    a: &eval_core::CampaignResources,
+    b: &eval_core::CampaignResources,
+) -> Result<(), eval_core::IsolationRefused> {
+    let portless = |resources: &eval_core::CampaignResources| eval_core::CampaignResources {
+        ports: BTreeSet::new(),
+        ..resources.clone()
+    };
+    isolated(&portless(a), &portless(b))
+}
+
 fn shape(run: &Run) -> Shape {
     let last = run.report.ledger.samples.last().unwrap();
     (
@@ -621,7 +642,11 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
         );
     }
     isolated(&concurrent[0].2, &concurrent[1].2).unwrap();
-    isolated(&serial[0].2, &serial[1].2).unwrap();
+    serially_isolated(&serial[0].2, &serial[1].2).unwrap();
+    // The OS may hand a released ephemeral port to the next serial run.
+    let mut reused = serial[1].2.clone();
+    reused.ports = serial[0].2.ports.clone();
+    serially_isolated(&serial[0].2, &reused).unwrap();
     digests_match_serial(
         &concurrent
             .iter()
@@ -893,5 +918,57 @@ fn a_handed_admission_the_bound_leaves_unsettled_is_refused_by_the_ledger() {
             passes: 0,
             bound: 0,
         })
+    );
+}
+
+/// The approved pass bound covers every coordinator pass before one
+/// quiescence, so the cap-triggered settle in `quota_pressure` spends from
+/// the drain's budget. A closed gate keeps the handed job pending past that
+/// budget. The ledger reports `ReviewerUnsettled` when the shared budget is
+/// exhausted with a job pending.
+#[test]
+fn a_cap_triggered_settle_and_its_drain_share_one_pass_bound() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let profile = growth::profile(Scale::S0, 128, 600_000, None);
+    let mut charges = Charges::new(profile.envelope.clone());
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
+    // Removing the activation directory keeps the reviewer gate closed while
+    // the test exhausts the shared pass budget.
+    std::fs::remove_dir_all(
+        root.path()
+            .join("reviewer-home")
+            .join(daemon::memory_reviewer::activation::ACTIVATION_DIR),
+    )
+    .unwrap();
+    // Begun admissions (`i % 8 == 7`) fill the queue to one short of the cap,
+    // so step 3's handed admission reaches it.
+    for k in 0..MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT - 1 {
+        live.quota_pressure(8 * k + 7, now_ms()).unwrap();
+    }
+    assert_eq!(
+        live.headroom().pending_jobs,
+        MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT as u64 - 1
+    );
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let bound = s0_liveness().reviewer_coordinator_passes;
+    let sample = live.ledger.samples.last().unwrap();
+    assert_eq!(sample.step, 3);
+    assert_eq!(
+        sample.progress.reviewer_passes, bound,
+        "the cap-triggered settle and the drain together stop at the bound"
+    );
+    assert!(!sample.progress.reviewer_settled);
+    assert_eq!(
+        live.ledger
+            .check_samples(&growth::quota(), &growth::bounds(&profile, MESSAGES)),
+        Err(eval_core::GrowthRefused::ReviewerUnsettled {
+            step: 3,
+            passes: bound,
+            bound,
+        }),
+        "a job the bound leaves pending is refused as unsettled"
     );
 }

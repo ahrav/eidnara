@@ -256,14 +256,11 @@ impl Campaign {
         self.rig.port()
     }
 
-    /// Runs coordinator passes until every handed job is terminal or the
-    /// approved bound is spent, adding them to `passes_since_drain`; returns
-    /// whether every handed job settled.
+    /// The pass bound covers every coordinator pass before one quiescence, so
+    /// a cap-triggered settle and the drain's settle draw on the same budget.
     fn settle_handed(&mut self) -> bool {
-        let mut passes = 0;
-        while !self.handed.is_empty() && passes < self.reviewer_pass_bound {
+        while !self.handed.is_empty() && self.passes_since_drain < self.reviewer_pass_bound {
             self.rig.pass(&self.stores);
-            passes += 1;
             self.passes_since_drain += 1;
             let memory = &self.stores.memory;
             self.handed.retain(|identity| {

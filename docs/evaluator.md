@@ -3308,8 +3308,10 @@ so the worker passes over it whatever its lease, and a coordinator pass
 cannot change what the begun jobs hold. The store
 refuses a reservation past `MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT`
 pending jobs, so an admission that brings the pending count to that cap is
-settled by abstention as well (a handed one by the coordinator at once, whose
-passes count toward the next quiescence's witness); the pending queue then holds one slot free and
+settled by abstention as well (a handed one by the coordinator at once; its
+passes count toward the next quiescence's witness and draw on that
+quiescence's `reviewer_coordinator_passes`, so the drain's own settle runs
+only what the cap-triggered one left); the pending queue then holds one slot free and
 every later admission becomes a permanent receipt charge, which is how a long
 history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
@@ -3355,6 +3357,8 @@ with `RunError::Admission`. An S0 history never reaches the quota, and the
 report says zero. Two campaigns run from one checkout on two roots, each with
 its own reviewer peer on an OS-allocated port, publish the same result digest
 as their serial runs; a fixture that shares a root or a port is refused. The
+serial pair is compared without its ports: each serial run releases its peer
+port before the next binds, so the OS may hand the second the same port. The
 campaign records no cassette, so its `cassette_namespaces` is empty and the
 isolation check covers roots, publish directories, and ports.
 The `growth` subcommand takes the `aging` flags plus `--mode
