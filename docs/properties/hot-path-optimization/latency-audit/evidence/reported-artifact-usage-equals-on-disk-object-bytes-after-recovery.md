@@ -15,25 +15,26 @@ reports equals the disk.
 ## Evidence trail
 
 - Reported usage is [`artifact_budget_facts`][facts], which reaches
-  [`object_usage`][object-usage] and [`regular_file_bytes`][walk]; the same
-  walk backs [`check_budget`][check-budget]. Only one usage source exists.
+  [`reported_artifact_usage`][object-usage]: the count when one is held, and
+  otherwise [`regular_file_bytes`][walk]; [`check_budget`][check-budget] reads
+  the same count under the writer lock. Only one usage source exists.
 - `KernelStore::open` runs [`recover_interrupted_work`][recover] at
-  [open.rs:406][open-recover], which calls [`run_artifact_recovery`][recovery].
-- Publish: the reservation row commits at [`:424-471`][ingest-reservation],
-  the rename lands at [`:476-526`][ingest-publish], and the reference commits
-  at [`:580-595`][ingest-commit]. Between the rename and the reference commit
+  [open.rs:440][open-recover], which calls [`run_artifact_recovery`][recovery].
+- Publish: the reservation row commits at [`:427`][ingest-reservation],
+  the rename lands at [`:479`][ingest-publish], and the reference commits
+  at [`:583`][ingest-commit]. Between the rename and the reference commit
   the bytes are on disk with a `Live` row and no reference.
 - Unlink paths, each inside a fenced write with the writer lock held:
   [`cleanup_failed_reference`][cleanup] unlinks a newly published object when no
   reference or reservation protects it; [`reclaim_candidate`][reclaim-cand]
   reads the size in [`unlink_artifact`][unlink-artifact] and unlinks at
-  [`:212-289`][reclaim-cand] before its row deletes commit at
-  [`:212-289`][reclaim-cand]; [`complete_pending_purge_locked`][purge-unlink]
+  [`:239-319`][reclaim-cand] before its row deletes commit at
+  [`:239-319`][reclaim-cand]; [`complete_pending_purge_locked`][purge-unlink]
   unlinks the object and its temps before deleting the pending row. A dedup hit
   or a failed publish only [releases the row][release-res].
 - Recovery: [`prepare_startup_cas_recovery`][startup] promotes `Live` rows
   with no reference to `Reclaiming`, retires `Live` rows whose bytes are gone
-  ([`:109-136`][startup-unreachable]), and re-arms tombstones whose bytes
+  ([`:133`][startup-unreachable]), and re-arms tombstones whose bytes
   remain; [`run_artifact_recovery`][recovery] then runs `reclaim_candidate`
   over `Reclaiming` rows and pending unlinks.
 - Two sources bypass any counter: the [restore path][restore] installs a
@@ -328,33 +329,33 @@ sources because only one exists.
   walk that started after it, and the census takes at most a sixteenth of the
   descriptor table.
 
-[ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
-[ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
-[ingest-commit]: ../../../../../crates/kernel/src/cas/ingest.rs#L580-L595
+[ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L427
+[ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L479
+[ingest-commit]: ../../../../../crates/kernel/src/cas/ingest.rs#L583
 [check-budget]: ../../../../../crates/kernel/src/cas/ingest.rs#L947-L962
-[release-res]: ../../../../../crates/kernel/src/cas/ingest.rs#L756-L772
-[cleanup]: ../../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288
-[startup]: ../../../../../crates/kernel/src/cas/gc.rs#L78-L180
-[startup-unreachable]: ../../../../../crates/kernel/src/cas/gc.rs#L109-L136
-[reclaim-cand]: ../../../../../crates/kernel/src/cas/gc.rs#L212-L289
-[recovery]: ../../../../../crates/kernel/src/cas/gc.rs#L300-L341
-[unlink-artifact]: ../../../../../crates/kernel/src/cas/gc.rs#L403-L419
-[scan-objects]: ../../../../../crates/kernel/src/cas/gc.rs#L579
-[object-usage]: ../../../../../crates/kernel/src/cas/gc.rs#L637-L645
-[purge-unlink]: ../../../../../crates/kernel/src/cas/deletion.rs#L532-L556
-[latch]: ../../../../../crates/kernel/src/cas/mod.rs#L569
-[open-recover]: ../../../../../crates/kernel/src/open.rs#L406
-[recover]: ../../../../../crates/kernel/src/open.rs#L419-L422
-[facts]: ../../../../../crates/kernel/src/facts.rs#L144-L164
+[release-res]: ../../../../../crates/kernel/src/cas/ingest.rs#L1036-L1052
+[cleanup]: ../../../../../crates/kernel/src/cas/ingest.rs#L1059-L1123
+[walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1517-L1537
+[startup]: ../../../../../crates/kernel/src/cas/gc.rs#L102-L204
+[startup-unreachable]: ../../../../../crates/kernel/src/cas/gc.rs#L133
+[reclaim-cand]: ../../../../../crates/kernel/src/cas/gc.rs#L239-L319
+[recovery]: ../../../../../crates/kernel/src/cas/gc.rs#L330-L371
+[unlink-artifact]: ../../../../../crates/kernel/src/cas/gc.rs#L442-L460
+[scan-objects]: ../../../../../crates/kernel/src/cas/gc.rs#L663
+[object-usage]: ../../../../../crates/kernel/src/cas/usage.rs#L208-L216
+[purge-unlink]: ../../../../../crates/kernel/src/cas/deletion.rs#L535-L558
+[latch]: ../../../../../crates/kernel/src/cas/mod.rs#L631
+[open-recover]: ../../../../../crates/kernel/src/open.rs#L440
+[recover]: ../../../../../crates/kernel/src/open.rs#L458-L468
+[facts]: ../../../../../crates/kernel/src/facts.rs#L144
 [restore]: ../../../../../crates/kernel/src/backup.rs#L424
 [sampler-facts]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L226
 [t-oracle]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-recover-twice]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L384-L389
 [t-faults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
-[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
-[t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
+[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L903-L969
+[t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L634-L676
 [usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L52-L59
 [usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L66-L88
 [usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L96-L120
