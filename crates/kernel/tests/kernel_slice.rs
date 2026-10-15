@@ -1941,3 +1941,45 @@ fn linked_decision_evidence_breaks_ties_by_evidence_id() {
     assert_eq!(linked(8), vec![a.clone(), b]);
     assert_eq!(linked(1), vec![a]);
 }
+
+/// The read examines only the decision's newest `LINKED_EVENT_WINDOW` × `max` events, evidence-free events included, so a citation just past that window is absent even when fewer than `max` rows return.
+#[test]
+fn linked_decision_evidence_reads_only_the_newest_event_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("decision-1", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let max = std::num::NonZeroUsize::new(2).unwrap();
+    let window = max.get() * kernel::LINKED_EVENT_WINDOW;
+    let old = ingest_evidence(&store, "old", '2');
+    cite(&store, "old", '3', &old);
+    let recent = ingest_evidence(&store, "recent", '4');
+    let mut newer = vec![None; window - 2];
+    newer.push(Some(recent.as_str()));
+    cite_all(&store, "decision-1", "newer", '5', &newer);
+    let linked = || -> Vec<String> {
+        store
+            .linked_decision_evidence_within_budget(
+                "decision-object-1",
+                store.tip().unwrap(),
+                max,
+                &kernel::applicability::EvalBudget::unbounded(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.evidence_id)
+            .collect()
+    };
+    assert_eq!(
+        linked(),
+        vec![recent.clone(), old],
+        "the window's oldest event"
+    );
+    cite_all(&store, "decision-1", "one-more", '6', &[None]);
+    assert_eq!(linked(), vec![recent], "one event past the window");
+}

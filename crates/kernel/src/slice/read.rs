@@ -22,7 +22,7 @@ pub struct DecisionRow {
 }
 
 /// Events examined per linked row [`KernelStore::linked_decision_evidence_within_budget`] may return.
-pub const LINKED_EVENT_WINDOW: i64 = 4;
+pub const LINKED_EVENT_WINDOW: usize = 4;
 
 /// One evidence row a decision cites, itself or through one of its events, and whether that evidence was live at the snapshot read. A citation requires the evidence to be live when it is made, so only a later invalidation, such as an operator's artifact deletion, makes a cited row not live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,49 +294,8 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(crate::map_sqlite)?;
         snapshot_tip(&tx, requested)?;
-        let limit = i64::try_from(max.get()).unwrap_or(i64::MAX);
-        let window = limit.saturating_mul(LINKED_EVENT_WINDOW);
-        let rows = tx
-            .prepare_cached(
-                "WITH decision AS (
-                     SELECT decision_id, evidence_id, created_commit_seq FROM decisions
-                      WHERE object_id=?1 AND created_commit_seq<=?2
-                 ),
-                 recent AS (
-                     SELECT e.evidence_id, e.commit_seq FROM decision_events e
-                       JOIN decision d ON d.decision_id=e.decision_id
-                      WHERE e.commit_seq<=?2
-                      ORDER BY e.event_ordinal DESC
-                      LIMIT ?4
-                 ),
-                 cited AS (
-                     SELECT evidence_id, created_commit_seq AS cited_at FROM decision
-                      WHERE evidence_id IS NOT NULL
-                     UNION ALL
-                     SELECT evidence_id, commit_seq FROM recent WHERE evidence_id IS NOT NULL
-                 )
-                 SELECT c.evidence_id,
-                        m.invalidated_commit_seq IS NULL OR ?2<m.invalidated_commit_seq
-                   FROM (SELECT evidence_id, MAX(cited_at) AS cited_at FROM cited
-                          GROUP BY evidence_id) c
-                   JOIN evidence_meta m ON m.evidence_id=c.evidence_id
-                  ORDER BY c.cited_at DESC, c.evidence_id
-                  LIMIT ?3",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_map(
-                        rusqlite::params![decision_object_id, requested, limit, window],
-                        |row| {
-                            Ok(LinkedEvidence {
-                                evidence_id: row.get(0)?,
-                                live: row.get(1)?,
-                            })
-                        },
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .map_err(crate::map_sqlite)?;
+        let rows =
+            linked_evidence(&tx, decision_object_id, requested, max).map_err(crate::map_sqlite)?;
         tx.commit().map_err(crate::map_sqlite)?;
         Ok(rows)
     }
@@ -410,6 +369,66 @@ pub(crate) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, 
         return Err(KernelError::FutureSnapshot);
     }
     Ok(tip)
+}
+
+/// The rows of [`KernelStore::linked_decision_evidence_within_budget`], read in `tx`: the decision's own evidence and the evidence of its newest [`LINKED_EVENT_WINDOW`] × `max` events at or before `requested`, each kept at its latest citation, ordered by that citation newest first and then by evidence id, at most `max` rows.
+fn linked_evidence(
+    tx: &Transaction<'_>,
+    decision_object_id: &str,
+    requested: i64,
+    max: std::num::NonZeroUsize,
+) -> rusqlite::Result<Vec<LinkedEvidence>> {
+    let Some((decision_id, created, own)) = tx
+        .prepare_cached(
+            "SELECT d.decision_id, d.created_commit_seq, m.evidence_id,
+                    m.invalidated_commit_seq IS NULL OR ?2<m.invalidated_commit_seq
+               FROM decisions d LEFT JOIN evidence_meta m ON m.evidence_id=d.evidence_id
+              WHERE d.object_id=?1 AND d.created_commit_seq<=?2",
+        )?
+        .query_row(rusqlite::params![decision_object_id, requested], |row| {
+            let own = row
+                .get::<_, Option<String>>(2)?
+                .map(|evidence_id| -> rusqlite::Result<_> { Ok((evidence_id, row.get(3)?)) })
+                .transpose()?;
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, own))
+        })
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    // Each evidence id with its latest citation and liveness.
+    let mut cited: Vec<(String, i64, bool)> = Vec::new();
+    let mut cite = |evidence_id: String, cited_at: i64, live: bool| {
+        if let Some(entry) = cited.iter_mut().find(|(id, ..)| *id == evidence_id) {
+            entry.1 = entry.1.max(cited_at);
+        } else {
+            cited.push((evidence_id, cited_at, live));
+        }
+    };
+    if let Some((evidence_id, live)) = own {
+        cite(evidence_id, created, live);
+    }
+    let mut events = tx.prepare_cached(
+        "SELECT m.evidence_id, e.commit_seq,
+                m.invalidated_commit_seq IS NULL OR ?2<m.invalidated_commit_seq
+           FROM decision_events e LEFT JOIN evidence_meta m ON m.evidence_id=e.evidence_id
+          WHERE e.decision_id=?1 AND e.commit_seq<=?2
+          ORDER BY e.event_ordinal DESC",
+    )?;
+    let mut rows = events.query(rusqlite::params![decision_id, requested])?;
+    // Stepping stops at the window, so the walk reads no older event.
+    for _ in 0..max.get().saturating_mul(LINKED_EVENT_WINDOW) {
+        let Some(row) = rows.next()? else { break };
+        if let Some(evidence_id) = row.get::<_, Option<String>>(0)? {
+            cite(evidence_id, row.get(1)?, row.get(2)?);
+        }
+    }
+    cited.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    cited.truncate(max.get());
+    Ok(cited
+        .into_iter()
+        .map(|(evidence_id, _, live)| LinkedEvidence { evidence_id, live })
+        .collect())
 }
 
 /// Loads decisions live at `requested`, ordered by `decision_id`.
