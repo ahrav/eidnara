@@ -2879,17 +2879,53 @@ pub struct NoteInput<'a> {
 #[derive(Debug)]
 struct PreparedFieldScan {
     field_id: &'static str,
-    redaction: Redaction,
+    /// The scan's findings; the redacted text moves into the prepared value, so the scan
+    /// holds no payload.
+    detections: Vec<Detection>,
     /// Disposition of each detected span, persisted verbatim into
     /// `scan_detections.action`.
     detection_action: &'static str,
-    owners: Vec<PreparedDomainOwner>,
+    owners: PreparedScanOwners,
+}
+
+/// The durable owners one field scan records.
+#[derive(Debug)]
+enum PreparedScanOwners {
+    /// The first `len` of the write's default owners. The defaults only grow, so the
+    /// prefix keeps naming the owners the write held when the field was prepared.
+    Defaults(usize),
+    /// Owners assigned to this scan alone.
+    Listed(Vec<PreparedDomainOwner>),
+}
+
+impl PreparedScanOwners {
+    fn resolve<'a>(&'a self, defaults: &'a [PreparedDomainOwner]) -> &'a [PreparedDomainOwner] {
+        match self {
+            Self::Defaults(len) => &defaults[..*len],
+            Self::Listed(owners) => owners,
+        }
+    }
+
+    /// Appends `owner`. A prefix that `owner` extends in `defaults` stays a prefix.
+    fn push(&mut self, defaults: &[PreparedDomainOwner], owner: &PreparedDomainOwner) {
+        match self {
+            Self::Defaults(len) if defaults.get(*len) == Some(owner) => *len += 1,
+            Self::Defaults(len) => {
+                let mut owners = defaults[..*len].to_vec();
+                owners.push(owner.clone());
+                *self = Self::Listed(owners);
+            }
+            Self::Listed(owners) => owners.push(owner.clone()),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct PreparedWrite {
     owner_kind: &'static str,
     scans: Vec<PreparedFieldScan>,
+    /// `domain_owners` must remain append-only because [`PreparedScanOwners::Defaults`]
+    /// stores a prefix length into it.
     domain_owners: Vec<PreparedDomainOwner>,
     existing_scan_links: BTreeSet<PreparedExistingScanLink>,
     /// Set by a write whose audit rows may be omitted when every scan preserved an existing
@@ -2963,11 +2999,16 @@ impl PreparedWrite {
             scope_key: scope_key.into(),
             owner_key: owner_key.into(),
         };
-        if !self.domain_owners.contains(&owner) {
-            for scan in self.scans.iter_mut().filter(|scan| scan.owners.is_empty()) {
-                scan.owners.push(owner.clone());
+        if self.domain_owners.contains(&owner) {
+            return;
+        }
+        let index = self.domain_owners.len();
+        self.domain_owners.push(owner);
+        let (defaults, owner) = (&self.domain_owners, &self.domain_owners[index]);
+        for scan in &mut self.scans {
+            if scan.owners.resolve(defaults).is_empty() {
+                scan.owners.push(defaults, owner);
             }
-            self.domain_owners.push(owner);
         }
     }
 
@@ -2987,8 +3028,8 @@ impl PreparedWrite {
             self.domain_owners.push(owner.clone());
         }
         for scan in &mut self.scans[first_scan..] {
-            if !scan.owners.contains(&owner) {
-                scan.owners.push(owner.clone());
+            if !scan.owners.resolve(&self.domain_owners).contains(&owner) {
+                scan.owners.push(&self.domain_owners, &owner);
             }
         }
     }
@@ -3011,7 +3052,7 @@ impl PreparedWrite {
             owner_key: owner_key.into(),
         };
         for scan in &mut self.scans[range] {
-            scan.owners = vec![owner.clone()];
+            scan.owners = PreparedScanOwners::Listed(vec![owner.clone()]);
         }
     }
 
@@ -3021,7 +3062,7 @@ impl PreparedWrite {
         let named = self
             .scans
             .iter()
-            .flat_map(|scan| scan.owners.iter())
+            .flat_map(|scan| scan.owners.resolve(&self.domain_owners))
             .chain(self.existing_scan_links.iter().map(|link| &link.owner));
         for owner in named {
             if !owners.contains(owner) {
@@ -3120,12 +3161,9 @@ impl PreparedWrite {
     fn record_observed_scan(&mut self, field_id: &'static str, detections: Vec<Detection>) {
         self.scans.push(PreparedFieldScan {
             field_id,
-            redaction: Redaction {
-                text: String::new(),
-                detections,
-            },
+            detections,
             detection_action: "substitute",
-            owners: self.domain_owners.clone(),
+            owners: PreparedScanOwners::Defaults(self.domain_owners.len()),
         });
     }
 
@@ -3136,7 +3174,7 @@ impl PreparedWrite {
     fn recorded_detections(&self, field_ids: &[&str]) -> bool {
         self.scans
             .iter()
-            .any(|scan| field_ids.contains(&scan.field_id) && !scan.redaction.detections.is_empty())
+            .any(|scan| field_ids.contains(&scan.field_id) && !scan.detections.is_empty())
     }
 
     fn reject_recorded_identities(&self, field_ids: &[&str]) -> Result<(), MemoryStoreError> {
@@ -3196,17 +3234,22 @@ impl PreparedWrite {
         policy: PreparedFieldPolicy,
     ) -> Result<String, MemoryStoreError> {
         ensure_durable_text_bound(input)?;
-        let redaction = match layer {
+        let Redaction { text, detections } = match layer {
             PreparedScanLayer::Durable => redact_durable_text(input),
             PreparedScanLayer::Transaction => redact_transaction_durable_text(input),
         };
-        if matches!(policy, PreparedFieldPolicy::NewIdentity) && !redaction.detections.is_empty() {
+        if matches!(policy, PreparedFieldPolicy::NewIdentity) && !detections.is_empty() {
             return Err(MemoryStoreError::Redaction(
                 RedactionErrorKind::SecretDetected,
             ));
         }
         let output = match policy {
-            PreparedFieldPolicy::Content => redaction.text.clone(),
+            PreparedFieldPolicy::Content => text,
+            PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity
+                if text == input =>
+            {
+                text
+            }
             PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity => {
                 input.to_owned()
             }
@@ -3222,9 +3265,9 @@ impl PreparedWrite {
         };
         self.scans.push(PreparedFieldScan {
             field_id,
-            redaction,
+            detections,
             detection_action,
-            owners: self.domain_owners.clone(),
+            owners: PreparedScanOwners::Defaults(self.domain_owners.len()),
         });
         Ok(output)
     }
@@ -3320,9 +3363,10 @@ impl ActiveWriteTransaction<'_> {
         if prepared.scans.is_empty() {
             return Ok(());
         }
-        let preserve_only_and_clean = prepared.scans.iter().all(|scan| {
-            scan.detection_action == "preserve" && scan.redaction.detections.is_empty()
-        });
+        let preserve_only_and_clean = prepared
+            .scans
+            .iter()
+            .all(|scan| scan.detection_action == "preserve" && scan.detections.is_empty());
         if prepared.skip_audit_when_only_clean_identities
             && preserve_only_and_clean
             && prepared.existing_scan_links.is_empty()
@@ -3335,6 +3379,14 @@ impl ActiveWriteTransaction<'_> {
             )));
         }
         let owners = prepared.persisted_owners();
+        let copies: usize = prepared
+            .scans
+            .iter()
+            .map(|scan| scan.owners.resolve(&prepared.domain_owners).len())
+            .sum();
+        // Each owner may insert a scope row and an owner row; the batch, every scan, and
+        // every copy take one id each.
+        let mut ids = OpaqueIds::new(2 * owners.len() + 1 + prepared.scans.len() + copies)?;
         let mut domain_owner_ids = Vec::with_capacity(owners.len());
         {
             let mut insert_scope = self.tx.prepare_cached(
@@ -3359,31 +3411,16 @@ impl ActiveWriteTransaction<'_> {
                 let private_scope_key = active_scan_private_key(owner.scope_kind, &owner.scope_key);
                 let private_owner_key =
                     active_scan_private_key(prepared.owner_kind, &owner.owner_key);
-                let proposed_scope_id = opaque_id()?;
-                insert_scope.execute(params![
-                    proposed_scope_id,
-                    owner.scope_kind,
-                    private_scope_key
-                ])?;
-                let owner_scope_id: String = select_scope
-                    .query_row(params![owner.scope_kind, private_scope_key], |row| {
-                        row.get(0)
-                    })?;
-                let proposed_owner_id = opaque_id()?;
-                insert_owner.execute(params![
-                    proposed_owner_id,
-                    owner_scope_id,
-                    prepared.owner_kind,
-                    private_owner_key
-                ])?;
-                let domain_owner_id = select_owner.query_row(
-                    params![owner_scope_id, prepared.owner_kind, private_owner_key],
-                    |row| row.get::<_, String>(0),
-                )?;
+                let scope_key = params![owner.scope_kind, private_scope_key];
+                let owner_scope_id =
+                    registered_audit_id(&mut select_scope, &mut insert_scope, scope_key, &mut ids)?;
+                let owner_key = params![owner_scope_id, prepared.owner_kind, private_owner_key];
+                let domain_owner_id =
+                    registered_audit_id(&mut select_owner, &mut insert_owner, owner_key, &mut ids)?;
                 domain_owner_ids.push((owner.clone(), domain_owner_id));
             }
         }
-        let batch_id = opaque_id()?;
+        let batch_id = ids.next_id()?;
         self.tx
             .prepare_cached(
                 "INSERT INTO scan_batches(scan_batch_id,owner_kind,created_at_ms)
@@ -3410,7 +3447,8 @@ impl ActiveWriteTransaction<'_> {
              ) VALUES (?1,?2,?3,?4,?5,?6)",
         )?;
         for field in &prepared.scans {
-            if field.owners.is_empty() {
+            let field_owners = field.owners.resolve(&prepared.domain_owners);
+            if field_owners.is_empty() {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                     MemoryStoreError::Serde(format!(
                         "scan field {} has no durable owner",
@@ -3418,16 +3456,16 @@ impl ActiveWriteTransaction<'_> {
                     )),
                 )));
             }
-            let scan_id = opaque_id()?;
+            let scan_id = ids.next_id()?;
             insert_scan.execute(params![
                 scan_id,
                 batch_id,
                 DETECTOR_ID,
                 revision,
                 semantic_digest,
-                i64::try_from(field.redaction.detections.len()).unwrap_or(i64::MAX),
+                i64::try_from(field.detections.len()).unwrap_or(i64::MAX),
             ])?;
-            for owner in &field.owners {
+            for owner in field_owners {
                 let domain_owner_id = domain_owner_ids
                     .iter()
                     .find_map(|(candidate, id)| (candidate == owner).then_some(id))
@@ -3437,7 +3475,7 @@ impl ActiveWriteTransaction<'_> {
                         )))
                     })?;
                 insert_copy.execute(params![
-                    opaque_id()?,
+                    ids.next_id()?,
                     scan_id,
                     domain_owner_id,
                     prepared.owner_kind,
@@ -3446,7 +3484,7 @@ impl ActiveWriteTransaction<'_> {
             }
             // The detector build is recorded once per field scan, so a
             // detection row carries only what varies within one scan.
-            for (ordinal, label) in persisted_detection_labels(&field.redaction.detections)
+            for (ordinal, label) in persisted_detection_labels(&field.detections)
                 .into_iter()
                 .enumerate()
             {
@@ -3492,6 +3530,29 @@ impl ActiveWriteTransaction<'_> {
     }
 }
 
+/// Returns the stored id for `key`, inserting a row with a fresh id from `ids` when none
+/// exists; `insert` binds that id first and `key` after it. When `INSERT OR IGNORE` skips
+/// insertion, the repeated lookup returns the stored id or fails with `QueryReturnedNoRows`.
+fn registered_audit_id(
+    select: &mut rusqlite::Statement<'_>,
+    insert: &mut rusqlite::Statement<'_>,
+    key: &[&dyn rusqlite::ToSql],
+    ids: &mut OpaqueIds,
+) -> rusqlite::Result<String> {
+    if let Some(id) = select.query_row(key, |row| row.get(0)).optional()? {
+        return Ok(id);
+    }
+    let proposed = ids.next_id()?;
+    let mut row: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(key.len() + 1);
+    row.push(&proposed);
+    row.extend_from_slice(key);
+    if insert.execute(&*row)? == 1 {
+        Ok(proposed)
+    } else {
+        select.query_row(key, |row| row.get(0))
+    }
+}
+
 /// Repeated labels carry no additional type information.
 /// The count a caller needs lives in `field_scans.finding_count`.
 fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
@@ -3513,18 +3574,54 @@ const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 /// Thirty-two lowercase hex characters, the shape every audit identifier column checks: six
 /// bytes of big-endian creation milliseconds, then ten random bytes. The time prefix keeps one
 /// batch's rows on a few index leaves, so writing them and the next pass's retirement dirty
-/// O(rows per leaf) pages instead of one page per row. Generated in Rust so an audit write
-/// spends no statement on an identifier; the per-row link copy below binds the same prefix and
-/// appends SQLite's `randomblob` because it needs one value per selected row.
-fn opaque_id() -> rusqlite::Result<String> {
-    let mut bytes = [0u8; 16];
-    bytes[..6].copy_from_slice(&opaque_id_time_prefix());
-    getrandom::getrandom(&mut bytes[6..]).map_err(|error| {
+/// O(rows per leaf) pages. An audit write binds these identifiers as parameters; the per-row
+/// link copy in `persist_audit` binds the same prefix and appends SQLite's `randomblob` to
+/// generate one value per selected row.
+///
+/// One source serves one audit write and reads the clock once, so every id it mints shares
+/// the write's starting millisecond. Each random read is sorted, so when `expected` covers
+/// every identifier the write mints, each audit index receives that write's keys in
+/// increasing order.
+struct OpaqueIds {
+    prefix: [u8; 6],
+    suffixes: std::vec::IntoIter<[u8; 10]>,
+}
+
+impl OpaqueIds {
+    fn new(expected: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            prefix: opaque_id_time_prefix(),
+            suffixes: sorted_random_suffixes(expected)?.into_iter(),
+        })
+    }
+
+    fn next_id(&mut self) -> rusqlite::Result<String> {
+        let suffix = loop {
+            if let Some(suffix) = self.suffixes.next() {
+                break suffix;
+            }
+            self.suffixes = sorted_random_suffixes(OPAQUE_ID_REFILL)?.into_iter();
+        };
+        let mut bytes = [0u8; 16];
+        bytes[..6].copy_from_slice(&self.prefix);
+        bytes[6..].copy_from_slice(&suffix);
+        Ok(hex_digest(bytes))
+    }
+}
+
+/// Suffixes per extra random read, which keep ids valid when a write mints more than its
+/// `expected` count.
+const OPAQUE_ID_REFILL: usize = 32;
+
+fn sorted_random_suffixes(count: usize) -> rusqlite::Result<Vec<[u8; 10]>> {
+    let mut suffixes = vec![[0u8; 10]; count];
+    getrandom::getrandom(suffixes.as_flattened_mut()).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
             "random source unavailable for an audit identifier: {error}"
         ))))
     })?;
-    Ok(hex_digest(bytes))
+    suffixes.sort_unstable();
+    Ok(suffixes)
 }
 
 fn opaque_id_time_prefix() -> [u8; 6] {
@@ -10192,7 +10289,7 @@ impl MemoryStore {
             }
             let mut insert_refusal = write.scans[first_scan..]
                 .iter()
-                .any(|scan| !scan.redaction.detections.is_empty())
+                .any(|scan| !scan.detections.is_empty())
                 .then_some(MemoryStoreError::Redaction(
                     RedactionErrorKind::SecretDetected,
                 ));
@@ -25043,7 +25140,17 @@ mod tests {
             }
         };
         let before = now();
-        let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
+        let mut source = OpaqueIds::new(3).unwrap();
+        let ids: Vec<String> = (0..2 * OPAQUE_ID_REFILL + 4)
+            .map(|_| source.next_id().unwrap())
+            .collect();
+        assert!(
+            ids[..3].is_sorted(),
+            "one draw hands out increasing identifiers"
+        );
+        for refill in ids[3..3 + 2 * OPAQUE_ID_REFILL].chunks(OPAQUE_ID_REFILL) {
+            assert!(refill.is_sorted(), "each refill draw is sorted");
+        }
         assert_minted_between(&ids, before, now());
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 
@@ -25094,6 +25201,123 @@ mod tests {
             "enabling state: the first write's scan gained a link copy"
         );
         assert_minted_between(&linked, before, after);
+    }
+
+    #[test]
+    fn an_audit_write_inserts_its_keys_in_key_order_and_reuses_registered_owner_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let column = |sql: &str| -> Vec<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        };
+        let write_fields = |owner_key: &str, fields: usize| {
+            let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+            write.domain_owner("session", "ses_order", owner_key);
+            for field in 0..fields {
+                write
+                    .content("content", &format!("plain text {field}"))
+                    .unwrap();
+            }
+            let second_owner = fields / 2;
+            write.domain_owner_for_scans_since(second_owner, "project", "proj_order", owner_key);
+            write
+                .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+                .unwrap();
+        };
+        write_fields("first", 70);
+        let scans = column("SELECT scan_id FROM field_scans ORDER BY rowid");
+        let copies = column("SELECT owner_copy_id FROM scan_owner_copies ORDER BY rowid");
+        let copied_scans = column("SELECT scan_id FROM scan_owner_copies ORDER BY rowid");
+        assert_eq!((scans.len(), copies.len()), (70, 105));
+        for ids in [&scans, &copies, &copied_scans] {
+            assert!(ids.is_sorted(), "{ids:?}");
+        }
+        let owner_rows = || {
+            column(
+                "SELECT (SELECT COUNT(*) FROM scan_owner_scopes) || ':' ||
+                        (SELECT COUNT(*) FROM scan_domain_owners)",
+            )
+        };
+        let owner_ids = || {
+            column(
+                "SELECT owner_scope_id || ':' || domain_owner_id FROM scan_domain_owners ORDER BY rowid",
+            )
+        };
+        assert_eq!(owner_rows(), ["2:2"]);
+        let registered = owner_ids();
+        write_fields("first", 3);
+        assert_eq!(owner_rows(), ["2:2"], "registered rows are reused");
+        assert_eq!(owner_ids(), registered);
+        let reused = column(
+            "SELECT DISTINCT domain_owner_id FROM scan_owner_copies
+              WHERE scan_id IN (SELECT scan_id FROM field_scans ORDER BY rowid DESC LIMIT 3)
+              ORDER BY domain_owner_id",
+        );
+        let mut expected_owners: Vec<String> = registered
+            .iter()
+            .map(|ids| ids.split_once(':').unwrap().1.to_owned())
+            .collect();
+        expected_owners.sort();
+        assert_eq!(
+            reused, expected_owners,
+            "the second write's copies name the stored owners"
+        );
+        write_fields("second", 3);
+        assert_eq!(
+            owner_rows(),
+            ["2:4"],
+            "a new owner joins the existing scopes"
+        );
+    }
+
+    #[test]
+    fn a_refused_owner_insert_fails_the_lookup_and_an_existing_row_draws_no_id() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE owners(
+                 id TEXT PRIMARY KEY,
+                 key TEXT NOT NULL UNIQUE CHECK (length(key) = 4)
+             );
+             INSERT INTO owners VALUES ('stored-id', 'kept');",
+        )
+        .unwrap();
+        let mut select = conn
+            .prepare("SELECT id FROM owners WHERE key = ?1")
+            .unwrap();
+        let mut insert = conn
+            .prepare("INSERT OR IGNORE INTO owners(id, key) VALUES (?1, ?2)")
+            .unwrap();
+        let mut ids = OpaqueIds::new(1).unwrap();
+        assert_eq!(
+            registered_audit_id(&mut select, &mut insert, params!["kept"], &mut ids).unwrap(),
+            "stored-id"
+        );
+        assert_eq!(ids.suffixes.len(), 1, "a stored row draws no id");
+        let fresh =
+            registered_audit_id(&mut select, &mut insert, params!["knew"], &mut ids).unwrap();
+        assert_eq!(ids.suffixes.len(), 0);
+        assert_eq!(
+            fresh.len(),
+            32,
+            "the one expected id went to the missing row"
+        );
+        assert!(matches!(
+            registered_audit_id(&mut select, &mut insert, params!["rejected"], &mut ids),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM owners", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
     }
 
     #[test]
@@ -33733,6 +33957,119 @@ mod shadow_tests {
         assert!(prepared.ends_with("password=<REDACTED:password>"));
     }
 
+    /// Every policy and layer prepares clean, detected, and boundary inputs to the output an
+    /// independent redaction gives, and records a scan holding only the findings, action,
+    /// and owners. The `<REDACTED` check fails when scan state keeps redacted text, and the
+    /// sentinel check when it keeps the secret; a legal `ExistingIdentity` output keeps its
+    /// input. A detected `NewIdentity`, an oversized input, and a redaction that grows past
+    /// the bound refuse and append no scan, even after an earlier field prepared.
+    #[test]
+    fn prepared_fields_move_their_text_out_and_keep_only_scan_metadata() {
+        const SENTINEL: &str = "password=sentinel-hunter-two";
+        let secret_input = format!("note {SENTINEL} end");
+        let boundary = "b".repeat(MAX_DURABLE_TEXT_BYTES);
+        let growth_secret = "\npassword=hunter-two";
+        let grows = format!(
+            "{}{growth_secret}",
+            "x".repeat(MAX_DURABLE_TEXT_BYTES - growth_secret.len())
+        );
+        let oversized = "o".repeat(MAX_DURABLE_TEXT_BYTES + 1);
+        let layers = [PreparedScanLayer::Durable, PreparedScanLayer::Transaction];
+        let policies = [
+            PreparedFieldPolicy::Content,
+            PreparedFieldPolicy::NewIdentity,
+            PreparedFieldPolicy::ExistingIdentity,
+        ];
+        for layer in layers {
+            let redact = |input: &str| match layer {
+                PreparedScanLayer::Durable => redact_durable_text(input),
+                PreparedScanLayer::Transaction => redact_transaction_durable_text(input),
+            };
+            assert!(
+                !redact(&secret_input).detections.is_empty(),
+                "the sentinel is detected"
+            );
+            assert!(
+                redact(&grows).text.len() > MAX_DURABLE_TEXT_BYTES,
+                "the growth input redacts past the bound"
+            );
+            for policy in policies {
+                let action = match policy {
+                    PreparedFieldPolicy::Content => "substitute",
+                    PreparedFieldPolicy::NewIdentity => "reject",
+                    PreparedFieldPolicy::ExistingIdentity => "preserve",
+                };
+                let label = format!(
+                    "{} {action}",
+                    match layer {
+                        PreparedScanLayer::Durable => "durable",
+                        PreparedScanLayer::Transaction => "transaction",
+                    }
+                );
+                let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
+                write.domain_owner("session", "ses", "owner");
+                write
+                    .prepare_field("earlier", "clean earlier text", layer, policy)
+                    .unwrap();
+                for (case, input) in [
+                    ("clean", "clean value"),
+                    ("detected", secret_input.as_str()),
+                    ("boundary", boundary.as_str()),
+                    ("growth", grows.as_str()),
+                    ("oversized", oversized.as_str()),
+                ] {
+                    let before = write.scans.len();
+                    let independent = redact(input);
+                    let refused = input.len() > MAX_DURABLE_TEXT_BYTES
+                        || (matches!(policy, PreparedFieldPolicy::NewIdentity)
+                            && !independent.detections.is_empty())
+                        || (matches!(policy, PreparedFieldPolicy::Content)
+                            && independent.text.len() > MAX_DURABLE_TEXT_BYTES);
+                    let prepared = write.prepare_field("field", input, layer, policy);
+                    if refused {
+                        assert!(prepared.is_err(), "{label} {case}");
+                        assert_eq!(
+                            write.scans.len(),
+                            before,
+                            "{label} {case}: no scan appended"
+                        );
+                        continue;
+                    }
+                    let output =
+                        prepared.unwrap_or_else(|error| panic!("{label} {case}: {error:?}"));
+                    let expected = match policy {
+                        PreparedFieldPolicy::Content => independent.text.clone(),
+                        PreparedFieldPolicy::NewIdentity
+                        | PreparedFieldPolicy::ExistingIdentity => input.to_owned(),
+                    };
+                    assert_eq!(output, expected, "{label} {case}");
+                    let scan = write.scans.last().unwrap();
+                    assert_eq!(write.scans.len(), before + 1, "{label} {case}");
+                    assert_eq!(scan.field_id, "field");
+                    assert_eq!(scan.detections, independent.detections, "{label} {case}");
+                    assert_eq!(scan.detection_action, action);
+                    assert_eq!(
+                        scan.owners
+                            .resolve(&write.domain_owners)
+                            .iter()
+                            .map(|owner| owner.owner_key.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["owner"]
+                    );
+                }
+                let scan_state = format!("{:?}", write.scans);
+                assert!(
+                    !scan_state.contains("sentinel-hunter-two"),
+                    "{label}: {scan_state}"
+                );
+                assert!(
+                    !scan_state.contains("<REDACTED"),
+                    "{label}: no redacted text is kept"
+                );
+            }
+        }
+    }
+
     /// Reassignment changes only the selected scans; a scan prepared afterwards keeps the
     /// default owners because `domain_owners` is not widened.
     #[test]
@@ -33744,6 +34081,7 @@ mod shadow_tests {
         write.existing_identity("second", "two").unwrap();
         let owner_keys = |scan: &PreparedFieldScan| {
             scan.owners
+                .resolve(&write.domain_owners)
                 .iter()
                 .map(|owner| owner.owner_key.clone())
                 .collect::<Vec<_>>()
@@ -33759,6 +34097,143 @@ mod shadow_tests {
             vec!["pass"],
             "the reassigned owner is not a default owner"
         );
+    }
+
+    /// A scan that records its owners as a prefix of the defaults resolves to the list a
+    /// copy of the defaults would hold after the same owner changes.
+    #[test]
+    fn scan_owners_match_copied_owner_lists_under_every_short_operation_sequence() {
+        #[derive(Default)]
+        struct Model {
+            defaults: Vec<PreparedDomainOwner>,
+            scans: Vec<Vec<PreparedDomainOwner>>,
+            prepared_with: Vec<usize>,
+            links: Vec<PreparedDomainOwner>,
+        }
+        let owner = |scope_kind, scope_key: &str, owner_key: &str| PreparedDomainOwner {
+            scope_kind,
+            scope_key: scope_key.to_owned(),
+            owner_key: owner_key.to_owned(),
+        };
+        let owners = [
+            owner("session", "ses", "a"),
+            owner("session", "ses", "b"),
+            owner("project", "proj", "c"),
+        ];
+        const OPERATIONS: usize = 8;
+        const STEPS: u32 = 5;
+        let apply = |write: &mut PreparedWrite, model: &mut Model, operation: usize| {
+            let last_scan = model.scans.len().saturating_sub(1);
+            let (since, target) = match operation {
+                0 => {
+                    write.record_observed_scan("field", Vec::new());
+                    model.scans.push(model.defaults.clone());
+                    model.prepared_with.push(model.defaults.len());
+                    return;
+                }
+                1 | 2 => {
+                    let target = &owners[operation - 1];
+                    write.domain_owner(target.scope_kind, &*target.scope_key, &*target.owner_key);
+                    if !model.defaults.contains(target) {
+                        for scan in model.scans.iter_mut().filter(|scan| scan.is_empty()) {
+                            scan.push(target.clone());
+                        }
+                        model.defaults.push(target.clone());
+                    }
+                    return;
+                }
+                3 => (0, &owners[2]),
+                4 => (last_scan, &owners[1]),
+                5 => (0, &owners[0]),
+                6 => {
+                    let target = &owners[2];
+                    let range = 0..model.scans.len().min(1);
+                    write.reassign_scans_in(
+                        range.clone(),
+                        target.scope_kind,
+                        &*target.scope_key,
+                        &*target.owner_key,
+                    );
+                    for scan in &mut model.scans[range] {
+                        *scan = vec![target.clone()];
+                    }
+                    return;
+                }
+                _ => {
+                    let target = &owners[1];
+                    write.link_existing_scans(
+                        target.scope_kind,
+                        &*target.scope_key,
+                        &*target.owner_key,
+                        ["scan".to_owned()],
+                    );
+                    if !model.defaults.contains(target) {
+                        model.defaults.push(target.clone());
+                    }
+                    if !model.links.contains(target) {
+                        model.links.push(target.clone());
+                    }
+                    return;
+                }
+            };
+            write.domain_owner_for_scans_since(
+                since,
+                target.scope_kind,
+                &*target.scope_key,
+                &*target.owner_key,
+            );
+            if !model.defaults.contains(target) {
+                model.defaults.push(target.clone());
+            }
+            for scan in &mut model.scans[since..] {
+                if !scan.contains(target) {
+                    scan.push(target.clone());
+                }
+            }
+        };
+        let (mut widened_prefixes, mut listed) = (0, 0);
+        for code in 0..OPERATIONS.pow(STEPS) {
+            let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
+            let mut model = Model::default();
+            let mut rest = code;
+            for _ in 0..STEPS {
+                apply(&mut write, &mut model, rest % OPERATIONS);
+                rest /= OPERATIONS;
+                assert_eq!(write.domain_owners, model.defaults, "sequence {code}");
+                assert_eq!(write.scans.len(), model.scans.len(), "sequence {code}");
+                for ((scan, expected), prepared_with) in write
+                    .scans
+                    .iter()
+                    .zip(&model.scans)
+                    .zip(&model.prepared_with)
+                {
+                    assert_eq!(
+                        scan.owners.resolve(&write.domain_owners),
+                        expected.as_slice(),
+                        "sequence {code}"
+                    );
+                    match scan.owners {
+                        PreparedScanOwners::Defaults(len) if len > *prepared_with => {
+                            widened_prefixes += 1;
+                        }
+                        PreparedScanOwners::Defaults(_) => {}
+                        PreparedScanOwners::Listed(_) => listed += 1,
+                    }
+                }
+                let mut persisted = model.defaults.clone();
+                for named in model.scans.iter().flatten().chain(&model.links) {
+                    if !persisted.contains(named) {
+                        persisted.push(named.clone());
+                    }
+                }
+                assert_eq!(write.persisted_owners(), persisted, "sequence {code}");
+            }
+        }
+        assert!(
+            widened_prefixes > 0,
+            "some prefix grew after its scan was prepared"
+        );
+        assert!(listed > 0, "some scan received its own owner list");
     }
 
     fn apply_state_sync_sections(
