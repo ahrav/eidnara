@@ -381,6 +381,29 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
 }
 
 #[test]
+fn a_restore_moves_the_passes_run_since_the_last_quiescence_into_its_own_witness() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::Restoring, &s0_liveness());
+    live.step(&mut charges).unwrap();
+    // Passes a cap-triggered settle ran after the last drain, before the restore.
+    live.passes_since_drain = 3;
+    let (mut live, restored) = live.restore(1_700_000_000_000);
+    restored.unwrap();
+    assert_eq!(
+        live.passes_since_drain, 0,
+        "the next drain's witness starts from zero"
+    );
+    live.sample(100, &mut charges).unwrap();
+    assert_eq!(
+        live.ledger.samples.last().unwrap().progress.reviewer_passes,
+        3,
+        "the restore's witness carries the passes run since the previous quiescence"
+    );
+}
+
+#[test]
 fn the_final_sample_reads_the_closed_files_without_reopening_the_memory_store() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();

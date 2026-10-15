@@ -551,10 +551,11 @@ impl Campaign {
         assert_eq!(stores.tip(), tip, "a reopen moves no commit");
         // The reopen rebuilds the projection in one bootstrap, so the
         // reopened stores are the quiescent point the next sample witnesses.
+        // The restore's witness carries the passes run since the last drain.
         let progress = QuiescenceProgress {
             acknowledged_through: acknowledged_through(stores.root()),
             catch_up_episodes: 0,
-            reviewer_passes: 0,
+            reviewer_passes: passes_since_drain,
             reviewer_settled: handed.is_empty(),
         };
         (
@@ -572,7 +573,7 @@ impl Campaign {
                 rig,
                 handed,
                 reviewer_pass_bound,
-                passes_since_drain,
+                passes_since_drain: 0,
                 progress,
             },
             Ok(()),
@@ -591,6 +592,7 @@ impl Campaign {
             mut checkpoints,
             rig,
             handed,
+            passes_since_drain,
             ..
         } = self;
         let step = ledger.samples.last().map_or(0, |s| s.step + 1);
@@ -598,12 +600,12 @@ impl Campaign {
         let tip = stores.tip();
         drop(rig);
         drop(stores.close());
-        // Nothing runs between the last drain and the close, so the final
-        // witness is the closed projection's checkpoint with no further work.
+        // The final witness reads the closed projection's checkpoint and
+        // carries the passes run since the last quiescence.
         let progress = QuiescenceProgress {
             acknowledged_through: acknowledged_through(&root),
             catch_up_episodes: 0,
-            reviewer_passes: 0,
+            reviewer_passes: passes_since_drain,
             reviewer_settled: handed.is_empty(),
         };
         let sample = sample_root(&root, step, tip, charges, headroom, progress);

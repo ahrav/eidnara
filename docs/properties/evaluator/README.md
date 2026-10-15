@@ -1830,6 +1830,10 @@ completeness proof run in the `eval-campaign` CI job under
   the sample after the restore witnesses the reopened stores (the checkpoint
   at the tip, no catch-up episode, no pass, settled), while the sample before
   it recorded the drain's catch-up episodes.
+- `a_restore_moves_the_passes_run_since_the_last_quiescence_into_its_own_witness`:
+  passes accumulated after the last drain are the restore sample's
+  `reviewer_passes`, and the accumulator reads zero afterwards, so the next
+  drain's witness counts only its own passes.
 - `a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing`
   (`xc-campaign-resource-envelope-declared-and-enforced`; marker
   `xc_envelope_breach_stops_the_run`): a run with a 64 KiB store bound stops

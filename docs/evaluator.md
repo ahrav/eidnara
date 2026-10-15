@@ -3343,10 +3343,12 @@ files are measured: an open commits a new fence epoch and runs startup
 maintenance, so a sample taken after it would not be the history's own.
 `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
-in place, resets the progress witness to the reopened stores (the
-projection's checkpoint, no catch-up episode, no pass, settled when nothing
-is handed), since the reopen's bootstrap is the quiescent point the next
-sample witnesses, and the ledger then gives no leak verdict.
+in place and rebuilds the progress witness from the reopened stores (the
+projection's checkpoint, no catch-up episode, the passes a cap-triggered
+settle ran since the last drain, settled when nothing is handed), since the
+reopen's bootstrap is the quiescent point the next sample witnesses, and the
+pass accumulator starts the next drain from zero; the ledger then gives no
+leak verdict.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
 and the bounds scaled from the message count (with a per-commit store-byte
