@@ -168,4 +168,4 @@ or a refusal after an unrecovered orphan publish.
 [daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L184-L195
 [usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L119-L160
-[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L595
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L623

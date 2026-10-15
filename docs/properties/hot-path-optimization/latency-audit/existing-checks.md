@@ -464,6 +464,7 @@ would change.
 | [`bytes_removed_outside_the_store_fail_the_next_admission_closed`][t-usage-removed] | An object removed outside the store makes maintenance latch; the next ingest is `IngestionFailClosed`. | unaudited |
 | [`a_batch_counts_each_distinct_payload_once_and_a_refused_batch_subtracts_it`][t-usage-batch] | A batch with a duplicate adds each distinct payload once on a non-empty store; a refused batch nets zero. | unaudited |
 | [`a_removal_larger_than_the_count_fails_the_next_admission_closed`][t-usage-underflow] | An object grown outside the store underflows the count at purge; usage equals the walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown] | An object grown outside the store and purged leaves the count below the walk with admission open on the count; the next maintenance pass replaces the count with the walk and the next ingest is `IngestionFailClosed`. | unaudited |
 | [`a_restore_reconciles_the_count_it_held_and_keeps_admission_open`][t-usage-restore] | Restore recovery reconciles once against the held count; usage equals the walk and admission stays open. | unaudited |
 | [`a_walk_counts_only_regular_files_at_both_levels`][t-usage-file-set] | The fallback walk and the census at open both count a top-level file and a shard object and skip symlinks and nested directories. | unaudited |
 | [`the_open_census_sums_every_shard_when_shards_outnumber_its_workers`][t-usage-census] | With 256 shards and up to 64 census workers, the census at open, a maintenance reconciliation, and the fallback walk each equal the independent sum; open takes one walk. | unaudited |
@@ -782,14 +783,15 @@ not a claim that no related check exists anywhere in the repository.
 [t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L328
 [t-usage-batch]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L341
 [t-usage-underflow]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L374
-[t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L395
-[t-usage-file-set]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L423
-[t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L450
-[t-usage-raced]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L504
-[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L542
+[t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L423
+[t-usage-grown]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L395
+[t-usage-file-set]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L451
+[t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L478
+[t-usage-raced]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L532
+[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
 [t-usage-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L45
-[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L595
-[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L617
+[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L623
+[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L645
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426

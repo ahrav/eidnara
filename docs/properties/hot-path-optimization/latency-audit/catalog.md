@@ -238,7 +238,7 @@ the [check inventory](existing-checks.md).
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
 | T1-T2 | default-production | [`process_limits`][process-limits] runs at host startup; every inbound frame calls [`to_vec`][to-vec] and every outbound frame calls `copy_in`. |
 | T3-T4 | default-production | The daemon's `settle_prepared_via` sends every transform and exact-length response through `settle_direct_with` and `RequestCtx::output_from_direct_write` to [`reserve_direct`][reserve-direct]; the fault arms need the `direct_fill` [fixture arm][fixture-arm], which reaches the same reservation through [`output_from_writer`][from-writer]. |
-| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], every store open runs the seed and reconciliation walks, and the daemon's [memory-reviewer sweep][daemon-maintenance] runs a GC pass and its reconciliation; purge has no daemon caller. |
+| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], every store open seeds the count from one census walk and reconciles only when that census failed or recovery changed the count, and the daemon's [memory-reviewer sweep][daemon-maintenance] runs a GC pass and its reconciliation; purge has no daemon caller. |
 | G3 | default-production | Cleanup, startup recovery, GC reclaim, and the retried GC unlink run in the daemon; the purge decrement runs only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The memory_classifier schedule [defaults to `None`][sched-default]; conditional notes need a cron on the note. |
@@ -3285,7 +3285,7 @@ evaluation of this area and its disposition are recorded in
 [walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1699
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
 [usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L38-L42
-[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L542
+[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
 [daemon-maintenance]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [sample-interval]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
 

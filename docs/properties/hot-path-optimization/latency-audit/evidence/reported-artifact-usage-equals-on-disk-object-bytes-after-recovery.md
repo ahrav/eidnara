@@ -342,11 +342,11 @@ sources because only one exists.
 [usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L184-L195
 [daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [sample-interval]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
-[t-usage-raced]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L504
-[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L595
-[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L617
+[t-usage-raced]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L532
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L623
+[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L645
 [usage-reconcile-bounded]: ../../../../../crates/kernel/src/cas/usage.rs#L119-L160
 [usage-raced-counter]: ../../../../../crates/kernel/src/cas/usage.rs#L22-L36
 [walk-descriptors]: ../../../../../crates/kernel/src/cas/ingest.rs#L1548-L1561
-[t-usage-raced-bound]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L542
+[t-usage-raced-bound]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
 [t-usage-descriptors]: ../../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L45

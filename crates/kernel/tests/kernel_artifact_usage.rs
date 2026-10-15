@@ -392,6 +392,34 @@ fn a_removal_larger_than_the_count_fails_the_next_admission_closed() {
 }
 
 #[test]
+fn an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    store.ingest_artifact(request("kept", &[b'k'; 60])).unwrap();
+    let handle = store.ingest_artifact(request("grown", b"1234")).unwrap();
+    // Growing the object outside the store makes its unlink subtract more
+    // bytes than it added while the count stays above zero.
+    let path = object_path(root.path(), &handle.digest);
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&path, permissions).unwrap();
+    fs::write(&path, b"1234567890").unwrap();
+    store
+        .delete_artifact(purge("grown", &handle.digest))
+        .unwrap();
+    assert_eq!(reported(&store), 54, "the unlink subtracted the grown size");
+    assert_eq!(walked_bytes(root.path()), 60);
+
+    // Admission runs on the count until the next reconciliation walk.
+    store.ingest_artifact(request("eight", &[b'e'; 8])).unwrap();
+    store.run_staging_maintenance(0).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "the pass replaced the count");
+    let error = store.ingest_artifact(request("next", b"x")).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+}
+
+#[test]
 fn a_restore_reconciles_the_count_it_held_and_keeps_admission_open() {
     let root = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();
