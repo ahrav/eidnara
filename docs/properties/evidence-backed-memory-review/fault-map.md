@@ -55,6 +55,7 @@
 | `provider-response-budget-is-cumulative-per-job` | 600 KiB bodies; 40 KiB texts; explicit remainders | yes |
 | `attempt-ledger-preserves-cross-generation-ceilings` | takeover with an open attempt; `unknown` with bytes; `failed` without bytes; reopen; direct SQL | yes |
 | `guarded-request-handoff-precedes-network-polling` | peer waiting on store release; terminal write refused | yes |
+| `material-claims-require-exact-cited-byte-support` | none | yes |
 | `observer-route-does-not-change-background-rosters` | observer alone; observer newer than a live harness; observer-only second root; both close orders; worker pass over an empty view | yes |
 
 ## Coverage checks to add

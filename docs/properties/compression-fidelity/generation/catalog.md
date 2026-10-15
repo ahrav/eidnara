@@ -64,7 +64,7 @@ path. Scripted output exercises mechanics; it is not model-quality evidence.
 | Dependencies | [Config:139-145][config] defaults to an empty model chain; [handler:5685-5692][lib] reports `no_models`. Real generation is configuration-dependent. |
 | Product context | Losing rejection, a scoped limit, final status, or uncertainty changes the permitted next action in C1-C5. C6 also exposes the difference between native and presented evidence. |
 | Unproven assumptions | [Tool summaries:1242-1259][chunk] omit result payloads. Covered ordinals and surviving aliases do not establish exposure of a decisive receipt. |
-| Wildcard, last | [MemoryReviewer fixture `judge`:55-70][curator-corpus] is substring-based. Its source/script separation is reusable; its lexical classifier is not a general semantic oracle. |
+| Wildcard, last | [MemoryReviewer corpus][curator-corpus] declares each judgment as exact spans and a score per case. Its source/script/declaration separation is reusable; its declarations are fixture-specific, not a general semantic oracle. |
 
 Property passes follow the system model. Each row records a separate attention
 focus, not independent corroboration by another reviewer.

@@ -3,6 +3,13 @@
 Every claim-bearing check in the tree that touches this catalog's records.
 Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
+## Semantic evidence corpus
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `corpus_*` (thirteen cases) | `crates/daemon/tests/memory_reviewer_coordinator.rs` | each case's cited bytes, score (valid and off-side citations, warranted and unwarranted claims, independent support), origin groups, limitations, and unchanged target tokens equal its declarations; the `[0,40)` prefix and an off-side citation score as valid citations and unsupported claims; the whole commit and a span of it are one origin and byte-identical commits in two repositories are two | unaudited |
+| `the_corpus_covers_every_relation_once` | same | thirteen distinct labels; retain, retire, revise, no change, and abstention each appear | unaudited |
+
 ## Canonical resolution and target binding
 
 | Check | Location | Covers | Status |

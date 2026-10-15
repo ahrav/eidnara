@@ -36,7 +36,7 @@ code surface. Slugs assigned to a later ticket appear in the index with no
 record until that ticket lands. Landed so far: #725 (canonical resolution), #726 (private result expiry),
 #727 (broker-free recovery), #728 (observational routes), #729 (exact
 integers at the client seam), #730 (the review command), and #731 (cumulative
-response budgets).
+response budgets), and #592 (the semantic evidence corpus).
 
 ## Landed by
 
@@ -53,6 +53,6 @@ response budgets).
 
 Slugs the specification assigns to other units (history lineage, lifecycle and
 retention, gate and status truth beyond the two status records above, semantic
-evidence, evaluation evidence, and later application) are indexed in
+evidence beyond `material-claims-require-exact-cited-byte-support`, evaluation evidence, and later application) are indexed in
 `catalog.md` without a record. They belong to the owners the specification
 names and are not obligations of these seven tickets.

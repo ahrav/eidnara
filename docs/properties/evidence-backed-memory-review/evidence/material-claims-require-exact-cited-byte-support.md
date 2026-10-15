@@ -22,7 +22,9 @@ descriptor over the same commit identity and evidence as its base.
 
 `crates/daemon/src/memory_reviewer/broker.rs` - `native_origin_key` keys an
 origin by class and identity without revision, representation, or span, which
-the corpus's origin function mirrors from the descriptor detail.
+`run_case`'s `origin` closure mirrors from the descriptor's class and identity.
+`crates/daemon/tests/memory_reviewer_broker.rs` witnesses the broker's own key
+("two spans of one message are one origin").
 
 `crates/daemon/src/memory_reviewer/coordinator.rs` - `proposal_target` names a
 native subject by its object id, revision, snapshot, and last-change commit
@@ -34,8 +36,26 @@ A proposal cites the first 40 bytes of a superseding commit, which stop inside
 "pre-test hook", and the corpus counts the revision as supported because the
 citation is valid.
 
+## Timing windows and dependencies
+
+None: the corpus is scripted and each case is one run.
+
 ## What a test must construct
 
 A valid prefix citation whose bytes do not contain the claim's span, expecting
-one unwarranted claim; a valid citation of an unrelated source, expecting one
-unwarranted claim; two spans of one commit, expecting one independent origin.
+one unwarranted claim; a valid citation of an unrelated source whose range
+numerically contains another source's supporting span, expecting one
+unwarranted claim and one off-side citation; the whole commit and a span of
+it, expecting one independent origin; byte-identical commits in two
+repositories, expecting two.
+
+## Investigation log
+
+### Q: production-resolved retain over a canonical memory
+- Sources examined: `crates/daemon/src/memory_reviewer/selection.rs`
+  (`PRODUCTION_SELECTION_OPEN`);
+  `crates/daemon/tests/memory_reviewer_coordinator.rs::a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model`.
+- Findings: a canonical subject resolves and abstains `owner_sensitive` for a
+  remote model; no decision representation is Remote-eligible.
+- Missing evidence: an owner-approved Remote-eligible decision representation.
+- Conclusion: needs human input.

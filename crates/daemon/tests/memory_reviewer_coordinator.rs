@@ -284,6 +284,11 @@ impl Fixture {
                 Origin::SpanOf { base, bytes } => {
                     let unit = units[base].clone().expect("a span names an own commit");
                     let start = sources[base].message.find(bytes).unwrap() as u64;
+                    assert_eq!(
+                        sources[base].message.rfind(bytes),
+                        Some(start as usize),
+                        "a span's bytes occur once in its base"
+                    );
                     published.push(publish_span(
                         &store,
                         &unit,
@@ -577,20 +582,24 @@ fn user_text(prompt: &serde_json::Value) -> String {
 }
 
 async fn run_case(case: &Case) {
-    // The case's declarations are internally consistent before anything runs: every cited source is one the case allows on that side, and every span names bytes its source holds.
-    for cite in case.support {
-        assert!(case.allowed_support.contains(&cite.source), "{}", case.name);
-    }
-    for cite in case.contradictions {
-        assert!(
-            case.allowed_contradictions.contains(&cite.source),
-            "{}",
-            case.name
-        );
-    }
+    // The case's declarations are internally consistent before anything runs: every claim span names bytes its source holds, in a source the case allows on that side, and a span source repeats its base's message.
     for claim in case.claims {
-        for span in claim.supported_by.iter().chain(claim.contradicted_by) {
+        for span in claim.supported_by {
             support::memory_reviewer_corpus::locate(case, span);
+            assert!(case.allowed_support.contains(&span.source), "{}", case.name);
+        }
+        for span in claim.contradicted_by {
+            support::memory_reviewer_corpus::locate(case, span);
+            assert!(
+                case.allowed_contradictions.contains(&span.source),
+                "{}",
+                case.name
+            );
+        }
+    }
+    for source in case.sources {
+        if let Origin::SpanOf { base, .. } = source.origin {
+            assert_eq!(source.message, case.sources[base].message, "{}", case.name);
         }
     }
     let mut fixture = Fixture::open(case.sources);
@@ -797,6 +806,13 @@ async fn run_case(case: &Case) {
             };
             let scored = score(case, &support, &contradictions, origin);
             assert_eq!(Some(scored), case.score, "{}", case.name);
+            if !case.answerable {
+                assert_eq!(
+                    scored.warranted_claims, 0,
+                    "{}: evidence that cannot decide the claim warrants none of it",
+                    case.name
+                );
+            }
             // The declared origin groups agree with the descriptors' own native identity.
             for group in case.origin_groups {
                 let origins: std::collections::BTreeSet<String> =
@@ -899,14 +915,12 @@ fn the_corpus_covers_every_relation_once() {
     relations.dedup();
     assert_eq!(relations.len(), 13);
     // The actions the qualification needs each appear: retain, retire, revise, no change, and abstention.
-    for action in ["Retain", "Retire", "Revise", "NoChange", "Abstain"] {
-        assert!(
-            CASES
-                .iter()
-                .any(|case| format!("{:?}", case.action).starts_with(action)),
-            "{action}"
-        );
-    }
+    let has = |wanted: fn(&Action) -> bool| CASES.iter().any(|case| wanted(&case.action));
+    assert!(has(|a| matches!(a, Action::Retain)));
+    assert!(has(|a| matches!(a, Action::Retire)));
+    assert!(has(|a| matches!(a, Action::Revise)));
+    assert!(has(|a| matches!(a, Action::NoChange)));
+    assert!(has(|a| matches!(a, Action::Abstain(_))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

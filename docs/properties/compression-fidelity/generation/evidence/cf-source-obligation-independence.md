@@ -31,9 +31,10 @@ logs or related repositories are supplied. No test or external model runs here.
 - [citations_golden.rs:22-44,88-145][golden] contains native messages and
   independently listed expected identities/presented bytes. This is an existing
   deterministic fixture pattern, not the new semantic corpus.
-- [memory_reviewer_corpus.rs:44-70][curator] separates source/script/expectation fields,
-  but `judge` recognizes fixed substrings. Its implementation is not reusable
-  as a general test of temporal state, polarity, scope, or evidence fidelity.
+- [memory_reviewer_corpus.rs][curator] separates source/script/expectation fields
+  and declares each judgment as exact spans per case. Those declarations are
+  fixture-specific, not a general test of temporal state, polarity, scope, or
+  evidence fidelity.
 - [lib.rs:18252-18281][lib] provides the existing private test ancestry.
   At inspection the corpus and its module were absent; U1 (#718) adds
   `crates/daemon/testdata/compression-fidelity.json` and registers

@@ -78,12 +78,13 @@ const fn whole(source: usize) -> Cite {
 /// A material claim the expected proposal makes, with the human-judged spans that warrant it: a support citation covering one of `supported_by`, or a contradiction citation covering one of `contradicted_by`.
 #[derive(Debug, Clone, Copy)]
 pub struct Claim {
+    /// A label naming the claim; scoring reads only the spans.
     pub text: &'static str,
     pub supported_by: &'static [Span],
     pub contradicted_by: &'static [Span],
 }
 
-/// The action the case warrants.
+/// The action the scripted proposal takes; the claims and `Score` say whether the evidence warrants it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Retain,
@@ -97,10 +98,13 @@ pub enum Action {
 /// What scoring a published proposal against the case's declarations must give. Citation validity and claim support are counted apart: a valid citation of irrelevant bytes is valid and warrants nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Score {
+    /// Citations the run bound: each was asserted valid first (its alias names its own source's evidence, the evidence was disclosed, the range stays within the source), and production refuses an invalid one before binding.
     pub valid_citations: usize,
+    /// Citations of a source the case does not allow on that side.
+    pub off_side_citations: usize,
     pub warranted_claims: usize,
     pub unwarranted_claims: usize,
-    /// Distinct native origins among the support citations: one origin counts once however many forms of it are cited.
+    /// Distinct native origins among the support citations that cover a claim's supporting span: one origin counts once however many forms of it are cited, and a citation that warrants nothing is no support.
     pub independent_support: usize,
 }
 
@@ -119,12 +123,12 @@ pub struct Case {
     pub claims: &'static [Claim],
     pub support: &'static [Cite],
     pub contradictions: &'static [Cite],
-    /// Sources a proposal may cite as support, and as contradiction.
+    /// Sources that may bear on a claim as support, and as contradiction: every claim span lies in one, and a citation outside them is counted off-side.
     pub allowed_support: &'static [usize],
     pub allowed_contradictions: &'static [usize],
     /// Sources sharing one native origin, as judged from how they were authored.
     pub origin_groups: &'static [&'static [usize]],
-    /// Whether the evidence the run can reach answers the question.
+    /// Whether the evidence the run can reach decides whether the memory holds; an unanswerable published case warrants no claim.
     pub answerable: bool,
     /// Text each required limitation contains.
     pub limitations: &'static [&'static str],
@@ -178,6 +182,7 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &[],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 1,
             warranted_claims: 1,
             unwarranted_claims: 0,
@@ -214,6 +219,7 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &["one commit message"],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 1,
             warranted_claims: 1,
             unwarranted_claims: 0,
@@ -252,6 +258,7 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &[],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 1,
             warranted_claims: 1,
             unwarranted_claims: 0,
@@ -296,10 +303,11 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &[],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 1,
             warranted_claims: 0,
             unwarranted_claims: 1,
-            independent_support: 1,
+            independent_support: 0,
         }),
     },
     Case {
@@ -307,8 +315,8 @@ pub const CASES: &[Case] = &[
         relation: Relation::SimilarText,
         sources: &[
             SUBJECT,
-            own("docs(a): note that the workspace builds with bun\n"),
-            own("docs(b): the same note, copied: the workspace builds with bun\n"),
+            own("docs: note that the workspace builds with bun\n"),
+            own("docs: note that the workspace builds with bun\n"),
         ],
         turns: &[
             READ_1_2,
@@ -340,6 +348,7 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &["near-identical"],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 2,
             warranted_claims: 1,
             unwarranted_claims: 0,
@@ -390,6 +399,7 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &["one commit"],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 2,
             warranted_claims: 1,
             unwarranted_claims: 0,
@@ -427,6 +437,7 @@ pub const CASES: &[Case] = &[
         answerable: true,
         limitations: &[],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 1,
             warranted_claims: 1,
             unwarranted_claims: 0,
@@ -465,6 +476,7 @@ pub const CASES: &[Case] = &[
         answerable: false,
         limitations: &["withheld by policy"],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 0,
             warranted_claims: 0,
             unwarranted_claims: 1,
@@ -497,6 +509,7 @@ pub const CASES: &[Case] = &[
         answerable: false,
         limitations: &["absence is not proven"],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 0,
             warranted_claims: 0,
             unwarranted_claims: 1,
@@ -550,9 +563,10 @@ pub const CASES: &[Case] = &[
         allowed_support: &[],
         allowed_contradictions: &[],
         origin_groups: &[&[1]],
-        answerable: true,
+        answerable: false,
         limitations: &["bears on"],
         score: Some(Score {
+            off_side_citations: 0,
             valid_citations: 0,
             warranted_claims: 0,
             unwarranted_claims: 0,
@@ -583,32 +597,37 @@ pub const CASES: &[Case] = &[
     Case {
         name: "irrelevant but valid citation",
         relation: Relation::IrrelevantCitation,
-        sources: &[SUBJECT, UNRELATED],
+        sources: &[SUBJECT, UNRELATED, own("builds with bun\n")],
         turns: &[
-            READ_1,
+            READ_1_2,
             Turn(
                 r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":null,"support":[{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#,
             ),
         ],
         action: Action::Retain,
+        // Source 2 supports the claim at bytes that fall inside the range of the cited source 1, so only a scorer that matches the cited source to the span's own source leaves the claim unwarranted.
         claims: &[Claim {
             text: BUILDS_WITH_BUN,
-            supported_by: &[],
+            supported_by: &[Span {
+                source: 2,
+                bytes: "builds with bun",
+            }],
             contradicted_by: &[],
         }],
         support: &[whole(1)],
         contradictions: &[],
-        // The citation is structurally valid: the source is linked and disclosed. Its bytes warrant nothing.
-        allowed_support: &[1],
+        // The citation is structurally valid: source 1 is linked and disclosed. It may bear on nothing, so it is off-side and its bytes warrant nothing.
+        allowed_support: &[2],
         allowed_contradictions: &[],
-        origin_groups: &[&[1]],
-        answerable: false,
+        origin_groups: &[&[1], &[2]],
+        answerable: true,
         limitations: &[],
         score: Some(Score {
             valid_citations: 1,
+            off_side_citations: 1,
             warranted_claims: 0,
             unwarranted_claims: 1,
-            independent_support: 1,
+            independent_support: 0,
         }),
     },
 ];
@@ -658,26 +677,44 @@ pub fn score(
     contradictions: &[(usize, std::ops::Range<u64>)],
     origin: impl Fn(usize) -> String,
 ) -> Score {
-    let covers = |cited: &[(usize, std::ops::Range<u64>)], spans: &[Span]| {
-        spans.iter().any(|span| {
-            let wanted = locate(case, span);
-            cited.iter().any(|(source, range)| {
-                *source == span.source && range.start <= wanted.start && wanted.end <= range.end
-            })
-        })
+    let covers = |(source, range): &(usize, std::ops::Range<u64>), span: &Span| {
+        let wanted = locate(case, span);
+        *source == span.source && range.start <= wanted.start && wanted.end <= range.end
+    };
+    let warrants = |cited: &[(usize, std::ops::Range<u64>)], spans: &[Span]| {
+        cited
+            .iter()
+            .any(|cite| spans.iter().any(|span| covers(cite, span)))
     };
     let warranted = case
         .claims
         .iter()
         .filter(|claim| {
-            covers(support, claim.supported_by) || covers(contradictions, claim.contradicted_by)
+            warrants(support, claim.supported_by) || warrants(contradictions, claim.contradicted_by)
         })
         .count();
-    let mut origins: Vec<String> = support.iter().map(|(source, _)| origin(*source)).collect();
+    let mut origins: Vec<String> = support
+        .iter()
+        .filter(|cite| {
+            case.claims
+                .iter()
+                .any(|claim| claim.supported_by.iter().any(|span| covers(cite, span)))
+        })
+        .map(|(source, _)| origin(*source))
+        .collect();
     origins.sort();
     origins.dedup();
+    let off_side = support
+        .iter()
+        .filter(|(source, _)| !case.allowed_support.contains(source))
+        .count()
+        + contradictions
+            .iter()
+            .filter(|(source, _)| !case.allowed_contradictions.contains(source))
+            .count();
     Score {
         valid_citations: support.len() + contradictions.len(),
+        off_side_citations: off_side,
         warranted_claims: warranted,
         unwarranted_claims: case.claims.len() - warranted,
         independent_support: origins.len(),

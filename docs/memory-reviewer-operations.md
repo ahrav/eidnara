@@ -217,25 +217,25 @@ No deployment-owner authorization for live model calls exists, and no Q38 disclo
 
 ### 7.2 Scripted proof (not a quality claim)
 
-The scripted corpus (`crates/daemon/tests/support/memory_reviewer_corpus.rs`) is thirteen hand-authored cases whose model turns are fixed text. Each case declares, from its source text, the action it warrants, the material claims a proposal makes with the exact bytes that support or contradict each, which sources may be cited on which side, which sources share one native origin, whether the reachable evidence answers the question, and the limitations a proposal must state. `memory_reviewer_coordinator::corpus_*` runs every case through real stores, the coordinator, and settlement, then scores the selected proposal against those declarations: citation validity (the cited alias names its own source's evidence, was disclosed, and stays within its bytes) is counted apart from claim support (a cited range covering a declared span), and independent support counts distinct native origins, read from the descriptors' identity. The relation names are reporting labels; no keyword reading of the text decides any judgment. The corpus proves the coordinator's delivery, citation binding, and outcome ledger and says nothing about model quality.
+The scripted corpus (`crates/daemon/tests/support/memory_reviewer_corpus.rs`) is thirteen hand-authored cases whose model turns are fixed text. Each case declares, from its source text, the action it warrants, the material claims a proposal makes with the exact bytes that support or contradict each, which sources may be cited on which side, which sources share one native origin, whether the reachable evidence answers the question, and the limitations a proposal must state. `memory_reviewer_coordinator::corpus_*` runs every case through real stores, the coordinator, and settlement, then scores the selected proposal against those declarations: citation validity (the cited alias names its own source's evidence, was disclosed, and stays within its bytes; asserted, then counted) is counted apart from claim support (a cited range of the span's own source covering a declared span), a citation of a source the case does not allow on that side is off-side, and independent support counts distinct native origins among the support citations that cover a claim's span, read from the descriptors' class and identity. The relation names are reporting labels; no keyword reading of the text decides support or origin, and required limitations match a declared substring. The corpus proves the coordinator's delivery, citation binding, and outcome ledger and says nothing about model quality.
 
-| Case | Action | Valid citations | Warranted / unwarranted claims | Independent support |
+| Case | Action | Valid / off-side citations | Warranted / unwarranted claims | Independent support |
 | --- | --- | --- | --- | --- |
-| supporting evidence | retain | 1 | 1 / 0 | 1 |
-| contradiction | retire, target tokens unchanged | 1 | 1 / 0 | 0 |
-| supersession | revise | 1 | 1 / 0 | 1 |
-| supersession cited by a prefix (`[0,40)`) | revise | 1 | 0 / 1 (valid reference, unsupported claim) | 1 |
-| similar text from independent repositories | retain | 2 | 1 / 0 | 2 |
-| two forms of one commit (a span of the same commit) | retain | 2 | 1 / 0 | 1 |
-| decisive evidence outside initial context | retire | 1 | 1 / 0 | 0 |
-| protected source | retain, limitation stated | 0 | 0 / 1 | 0 |
-| incomplete search | retain, absence not asserted | 0 | 0 / 1 | 0 |
+| supporting evidence | retain | 1 / 0 | 1 / 0 | 1 |
+| contradiction | retire, target tokens unchanged | 1 / 0 | 1 / 0 | 0 |
+| supersession | revise | 1 / 0 | 1 / 0 | 1 |
+| supersession cited by a prefix (`[0,40)`) | revise | 1 / 0 | 0 / 1 (valid reference, unsupported claim) | 0 |
+| similar text from independent repositories (byte-identical commits) | retain | 2 / 0 | 1 / 0 | 2 |
+| two forms of one commit (the whole commit and a span of it) | retain | 2 / 0 | 1 / 0 | 1 |
+| decisive evidence outside initial context | retire | 1 / 0 | 1 / 0 | 0 |
+| protected source | retain, limitation stated | 0 / 0 | 0 / 1 | 0 |
+| incomplete search | retain, absence not asserted | 0 / 0 | 0 / 1 | 0 |
 | injected instructions | abstain `model_declined` | | | |
-| warranted no change | `no_change` | 0 | 0 / 0 | 0 |
+| warranted no change | `no_change` | 0 / 0 | 0 / 0 | 0 |
 | insufficient evidence | abstain `model_declined` | | | |
-| irrelevant but valid citation | retain | 1 | 0 / 1 (valid citation, unsupported claim) | 1 |
+| irrelevant but valid citation | retain | 1 / 1 | 0 / 1 (valid citation, unsupported claim) | 0 |
 
-Every published case's target names the subject's exact object id, revision, and last-change commit token, and no case changes canonical state. The contradiction on a later related-search page, the search cap, invalid and undisclosed citations, and budget exhaustion are witnessed by the coordinator and related-memory tests outside the corpus (`memory_reviewer_related_memories::one_page_delivers_the_later_contradiction_and_charges_only_disclosed_excerpts`, `candidate_and_inspection_bounds_stop_with_explicit_incompleteness`, `memory_reviewer_coordinator::a_citation_outside_the_disclosed_bytes_is_refused_before_binding`, `exhausted_rounds_and_malformed_output_abstain_as_budget_exhausted`). The production-resolved `retain` over a canonical or promoted memory stays open with the production selection gate: every corpus subject is a repository-backed commit.
+Every published case's target names the subject's exact object id, revision, and last-change commit token, and no case changes any source descriptor's observation. The corpus scores origins itself, from descriptor identity; the broker's own origin key is witnessed by `memory_reviewer_broker::canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both` and its span case. The contradiction on a later related-search page (at the broker's discovery boundary; no coordinator test drives a model through a second `find_related` page), the search cap, invalid and undisclosed citations, and budget exhaustion are witnessed by the coordinator and related-memory tests outside the corpus (`memory_reviewer_related_memories::pages_continue_at_one_snapshot_and_see_eligibility_changes_at_disclosure`, `candidate_and_inspection_bounds_stop_with_explicit_incompleteness`, `memory_reviewer_coordinator::a_citation_outside_the_disclosed_bytes_is_refused_before_binding`, `exhausted_rounds_and_malformed_output_abstain_as_budget_exhausted`). The production-resolved `retain` over a canonical or promoted memory stays open with the production selection gate: every corpus subject is a repository-backed commit.
 
 ### 7.3 Actual-model observations
 
