@@ -2371,8 +2371,9 @@ from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937,
 and 2026 in each zone; at a shift that lands civil time just past a jump's
 target; in a zone with a 30-minute daylight window, searched minute by minute
 on both sides of 1970; and at the edges of chrono's representable range. A
-recording zone shows every offset lookup falls on a minute the stepper
-visits, including when the skip runs past the cap.
+recording zone shows every offset lookup falls within the cap, including
+when the skip runs past it and when a fall-back places the match before a
+probe.
 [Component tests][t-cron-parts] compare the byte parser with a frozen copy of
 the `&str` parser, the month-at-a-time date scan with a day-by-day scan, and
 the stack-built jitter seed with the formatted one.
@@ -2387,7 +2388,9 @@ it replaced, including `None` for unsatisfiable-but-valid expressions within
 the cap and `None` at unrepresentable instants;
 [`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter, and
 `parse_cron` accepts exactly the expressions the `&str` parser accepted, with
-the same masks. The search visits only epoch minutes the stepper visits.
+the same masks. Every zone lookup of the search falls on an epoch minute
+after `after_ms` and at or before the cap; a probe may pass a match that an
+offset change places before it, and the bisection returns to that minute.
 Without a zone lookup, a [date bound][cron-bound] moves the cursor to the first
 epoch minute that could reach the first listed civil minute still reachable
 under any offset chrono represents (just under a day either way); it returns
@@ -2428,7 +2431,7 @@ Required faults and enabling state: A zone with DST; expressions such as
 `after_ms` at the `i64` extremes and at chrono's range edges.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
 The parser, the search, the cap, the conditional-note ceiling
-([`:652-681`][note-cap]), and the config acceptance
+([`:642-671`][note-cap]), and the config acceptance
 ([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
@@ -3350,9 +3353,9 @@ evaluation of this area and its disposition are recorded in
 [parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L120-L175
 [vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L188
 [stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L366
-[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L632
-[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L640
-[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L652-L681
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L622
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L630
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
 [sched-default]: ../../../../crates/daemon/src/config.rs#L152
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L1226-L1244
@@ -3398,18 +3401,18 @@ evaluation of this area and its disposition are recorded in
 [sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327
 [sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351
 [sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L86
-[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L536
-[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L626
+[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L939-L952
+[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L929-L937
 [sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2088-L2549
-[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2088
-[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2607-L2791
-[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L525-L570
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078-L2565
+[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078
+[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2623-L2791
+[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L525-L560
 [cron-bound]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L465-L506
 [cron-never]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L381-L393
-[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L577-L601
+[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L567-L606
 [cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
 [cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
 [cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245

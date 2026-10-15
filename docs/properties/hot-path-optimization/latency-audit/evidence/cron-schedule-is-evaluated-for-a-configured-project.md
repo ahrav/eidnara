@@ -20,7 +20,7 @@ consumer.
   `chrono::Local` and maps `None` to `i64::MAX` (`:735-737`). The conditional-note
   path calls `next_due_at_ms` through
   [`next_conditional_note_check_due_at`][note-due] with a clamp and jitter
-  (`:652-681`). This record witnesses the scheduler consumer; the note
+  (`:642-671`). This record witnesses the scheduler consumer; the note
   consumer has the fixture-zone golden and is covered by W6's Exercised.
 - [`MemoryClassifierScheduler::tick`][sched-tick] asks the host for
   `scheduled_projects()` and hands them to [`due_projects`][sched-due-projects],
@@ -118,9 +118,9 @@ route in `MODULE` authority. No existing test records the marker.
 [sched-filter]: ../../../../../crates/daemon/src/lib.rs#L15119
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L152
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L1232
-[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L632-L634
-[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L640-L642
-[note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L652-L681
+[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L622-L632
+[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L630-L632
+[note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
 [marker-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054-L1071
 [due-projects-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351-L385

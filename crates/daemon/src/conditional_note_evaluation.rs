@@ -536,18 +536,8 @@ fn minutes_until_candidate(
     if changes == OffsetChanges::Unbounded {
         return 1;
     }
-    if date_listed {
-        // Bits above 59 and 23 are never set, so an empty remainder means
-        // no later minute this hour or no later hour today.
-        let later_minutes = (cron.minute >> minute) >> 1;
-        if hour_listed && later_minutes != 0 {
-            return i64::from(later_minutes.trailing_zeros()) + 1;
-        }
-        let later_hours = (cron.hour >> hour) >> 1;
-        if later_hours != 0 {
-            let hours = later_hours.trailing_zeros() + 1;
-            return i64::from(hours * 60 - minute + cron.minute.trailing_zeros());
-        }
+    if date_listed && let Some((h, m)) = next_listed_time(cron, hour, minute) {
+        return i64::from(h * 60 + m) - i64::from(hour * 60 + minute);
     }
     let to_midnight = i64::from(24 * 60 - (hour * 60 + minute));
     let first_listed = i64::from(cron.hour.trailing_zeros() * 60 + cron.minute.trailing_zeros());
@@ -2406,7 +2396,7 @@ mod tests {
     }
 
     #[test]
-    fn the_search_looks_up_only_minutes_the_stepper_visits() {
+    fn every_lookup_of_the_search_falls_within_its_cap() {
         // Daylight runs 02:00 to 05:00 UTC, so each offset lasts an hour and
         // the zone may claim `HourApart`.
         let zone = Recording {
@@ -2418,22 +2408,48 @@ mod tests {
             },
             seen: std::cell::RefCell::new(Vec::new()),
         };
-        let after_ms = utc_ms(2026, 3, 1, 3, 0);
-        for (expression, max_search_ms) in [
-            ("30 2 * * *", 60 * MINUTE_MS),
-            ("30 2 * * *", 150 * MINUTE_MS),
-            ("30 2 * * *", DAY_MS),
-            ("0 9 1 * *", 10 * DAY_MS),
-            ("0 9 1 * *", 40 * DAY_MS),
-            ("*/15 * * * *", 3 * MINUTE_MS),
-            ("*/15 * * * *", 20 * MINUTE_MS),
+        let start = utc_ms(2026, 3, 1, 3, 0);
+        // At 04:31 UTC civil time is 05:31 in daylight, so the skip to the
+        // next civil 05:30 aims at the following day, past a cap near 06:00;
+        // the fall-back at 05:00 UTC brings civil 05:30 inside the cap.
+        let fall_back = utc_ms(2026, 3, 1, 4, 31);
+        let fall_back_match = Some(Some(utc_ms(2026, 3, 1, 5, 30)));
+        for (expression, after_ms, max_search_ms, expected) in [
+            ("30 2 * * *", start, 60 * MINUTE_MS, None),
+            ("30 2 * * *", start, 150 * MINUTE_MS, None),
+            ("30 2 * * *", start, DAY_MS, None),
+            ("0 9 1 * *", start, 10 * DAY_MS, None),
+            ("0 9 1 * *", start, 40 * DAY_MS, None),
+            ("*/15 * * * *", start, 3 * MINUTE_MS, None),
+            ("*/15 * * * *", start, 20 * MINUTE_MS, None),
+            ("30 5 * * *", fall_back, 90 * MINUTE_MS, fall_back_match),
+            (
+                "30 5 * * *",
+                fall_back + 20_000,
+                90 * MINUTE_MS + 30_000,
+                fall_back_match,
+            ),
+            (
+                "45 5 * * *",
+                fall_back,
+                50 * MINUTE_MS + 30_000,
+                Some(Some(utc_ms(2026, 3, 1, 4, 45))),
+            ),
         ] {
             zone.seen.borrow_mut().clear();
             let found = assert_matches_stepper(expression, after_ms, max_search_ms, &zone);
-            // The stepper visits the epoch minutes after `after_ms` up to the
-            // cap, or up to the match it returns.
-            let first_ms = after_ms + MINUTE_MS;
-            let last_ms = found.unwrap_or(after_ms + max_search_ms);
+            if let Some(expected) = expected {
+                assert_eq!(
+                    found, expected,
+                    "{expression} after {after_ms} within {max_search_ms}"
+                );
+            }
+            // Every lookup falls on an epoch minute after `after_ms` and at
+            // or before the cap. An hourly probe may pass a match that an
+            // offset change places before it; the bisection then returns to
+            // that minute, so `found` bounds the result, not the probes.
+            let first_ms = after_ms.div_euclid(MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+            let last_ms = after_ms + max_search_ms;
             let seen = zone.seen.borrow();
             let outside: Vec<i64> = seen
                 .iter()
