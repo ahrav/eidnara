@@ -135,10 +135,11 @@ sources because only one exists.
   refused with `IngestionFailClosed`, and only a new store, which re-seeds
   from the tree, admits again. The walk follows
   [`regular_file_bytes`][walk-head]'s file set, so a stray root-level file
-  counts and its later appearance or disappearance is drift. The count is a
-  `Mutex<Option<u64>>` of about 24 bytes and replaces the cached
-  `Option<u64>` and generation the store already held, so the declared
-  retained-resident total is unchanged.
+  counts and its later appearance or disappearance is drift. The count, the
+  tree-change number, and the deferral counter share one mutex over a
+  32-byte value (`Option<u64>`, `u64`, `u8`, and padding on x86_64) and
+  replace the cached `Option<u64>` and generation the store already held, so
+  the declared retained-resident total grows by 8 bytes.
 - Missing evidence: None for the decision. Drift between a restore's
   install and its reconciliation is detected only at that reconciliation.
 - Conclusion: resolved with answer - a writer-lock count seeded by the open
@@ -284,7 +285,8 @@ sources because only one exists.
   before the change). `EMFILE` or `ENFILE` from a worker now repeats the walk
   on the calling thread, which holds one shard descriptor, and the walk
   becomes the count. The deferral counter is one `u8` beside the count and
-  the tree-change number under the same mutex.
+  the tree-change number under the same mutex, which grows the value from 24
+  to 32 bytes.
 - Missing evidence: A census at open that runs the descriptor table out; the
   descriptor test lowers the limit after open and exercises the admission
   walk. A walk whose single-threaded repeat also fails with `EMFILE`, which
@@ -296,7 +298,7 @@ sources because only one exists.
 [ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
 [ingest-commit]: ../../../../../crates/kernel/src/cas/ingest.rs#L580-L595
-[check-budget]: ../../../../../crates/kernel/src/cas/ingest.rs#L665-L682
+[check-budget]: ../../../../../crates/kernel/src/cas/ingest.rs#L947-L962
 [release-res]: ../../../../../crates/kernel/src/cas/ingest.rs#L756-L772
 [cleanup]: ../../../../../crates/kernel/src/cas/ingest.rs#L779-L849
 [walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288
