@@ -18,7 +18,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use memory_store::memory_reviewer_jobs::{
     EnqueueOutcome, FrozenSelection, FrozenSelectionPage, FrozenSelectionState,
-    MemoryReviewerJobError, MemoryReviewerJobRefusal, ProducerBinding,
+    MAX_FROZEN_SELECTIONS_PER_PROJECT, MemoryReviewerJobError, MemoryReviewerJobRefusal,
+    ProducerBinding,
 };
 use memory_store::{LeaseAcquireOutcome, LeaseClaim, LeaseCompleteOutcome, MemoryStore};
 use serde_json::{Value, json};
@@ -560,9 +561,10 @@ impl MemoryClassifierScheduler {
             .expire_memory_reviewer_work(now_ms)
             .map_err(|error| format!("expiring memory_reviewer work failed: {error}"))?;
         // This slot's own page first: a page it froze and could not enqueue resumes; one that expired or was already enqueued records that outcome and selects nothing new under this attempt.
-        if let Some(own) = store
+        let own = store
             .lookup_frozen_selection(&project.project, project.task.name(), command_id)
-            .map_err(|error| format!("frozen selection lookup failed: {error}"))?
+            .map_err(|error| format!("frozen selection lookup failed: {error}"))?;
+        if let Some(own) = &own
             && own.state != FrozenSelectionState::Frozen
         {
             let enqueued = own.state == FrozenSelectionState::Enqueued;
@@ -580,10 +582,15 @@ impl MemoryClassifierScheduler {
                 json!({"ok": enqueued, "code": code}),
             );
         }
-        let frozen = match store
-            .frozen_selection_for_project(&project.project)
-            .map_err(|error| format!("frozen selection lookup failed: {error}"))?
-        {
+        // `MAX_FROZEN_SELECTIONS_PER_PROJECT` is one, so this slot's frozen page is the project's frozen page.
+        const _: () = assert!(MAX_FROZEN_SELECTIONS_PER_PROJECT == 1);
+        let held = match own {
+            Some(own) => Some(own),
+            None => store
+                .frozen_selection_for_project(&project.project)
+                .map_err(|error| format!("frozen selection lookup failed: {error}"))?,
+        };
+        let frozen = match held {
             Some(frozen) => frozen,
             None => {
                 let cursor = store
