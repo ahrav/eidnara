@@ -2369,8 +2369,11 @@ spring-forward and fall-back instants; at the full cap for
 calendar-impossible expressions; at a cap one minute short of an occurrence;
 from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937,
 and 2026 in each zone; at a shift that lands civil time just past a jump's
-target; in a zone with a 30-minute daylight window; and at the edges of
-chrono's representable range.
+target; in a zone with a 30-minute daylight window, searched minute by minute
+on both sides of 1970; and at the edges of chrono's representable range.
+[Component tests][t-cron-parts] compare the byte parser with a frozen copy of
+the `&str` parser, the month-at-a-time date scan with a day-by-day scan, and
+the stack-built jitter seed with the formatted one.
 Guarantee: A field-jumping search never fires a schedule at a different
 instant, never fires one the stepper would never fire, and never runs past
 the cap.
@@ -2380,18 +2383,26 @@ returns the same `Option<i64>` as the test-only
 [`frozen_minute_stepper`][t-cron-frozen], a verbatim copy of the minute stepper
 it replaced, including `None` for unsatisfiable-but-valid expressions within
 the cap and `None` at unrepresentable instants;
-[`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter. The search
-visits only epoch minutes the stepper visits: from each minute it
-[skips][cron-skip] to the next civil midnight when the date fails, to the next
-civil hour when the hour fails, and to the next listed minute otherwise. How
-far a skip may run depends on what the zone's [`CronZone`][cron-zone] impl
-claims: `Never` (UTC and fixed offsets) skips straight to the target;
-`HourApart` stops the skip at the first minute whose offset differs, found by
+[`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter, and
+`parse_cron` accepts exactly the expressions the `&str` parser accepted, with
+the same masks. The search visits only epoch minutes the stepper visits.
+Without a zone lookup, a [date bound][cron-bound] moves the cursor to the first
+epoch minute that could reach the first listed civil minute still reachable
+under any offset chrono represents (just under a day either way); it returns
+`None` when no listed date falls before the cap, or at once when
+[no date can ever match][cron-never], and it is taken again once that civil
+minute becomes unreachable. From each minute the search then
+[skips][cron-skip] to the next listed minute today, to the first listed time
+of a matching date within two days, or to the next civil midnight. How far a
+skip may run depends on what the zone's [`CronZone`][cron-zone] impl claims:
+`Never` (UTC and fixed offsets) skips straight to the target; `HourApart`
+stops the skip at the first minute whose offset differs, found by
 [probes][cron-advance] every [`OFFSET_PROBE_MS`][cron-probe] (one hour) and
-bisection; `Unbounded` visits every minute. [`Local`][cron-local] claims
-`HourApart` when `TZ` is unset or names a zone file and `Unbounded` when `TZ`
-holds a POSIX rule, which may place offset changes minutes apart. `always`
-because the scheduler consumes the value directly as its due time.
+bisection, and at the bound's horizon and the cap; `Unbounded` visits every
+minute. [`Local`][cron-local] claims `HourApart` when `TZ` is unset or names a
+zone file and `Unbounded` when `TZ` holds a POSIX rule, which may place offset
+changes minutes apart. `always` because the scheduler consumes the value
+directly as its due time.
 Fault/timing angle: The stepper evaluates local civil fields for each epoch
 minute, so a spring-forward gap skips that day and a fall-back overlap
 matches the earlier instant first; the jump is exact while the offset holds,
@@ -2401,28 +2412,37 @@ parse of the chrono-tz 0.10.4 tables, put the closest two transitions about
 6.9 days apart (America/Cambridge_Bay, 2000). A custom zone file under
 `/etc/localtime` with shorter offset runs is outside that evidence.
 `parse_cron` accepts day-of-month 1..31 independent of month, so
-`0 0 30 2 *` is valid and unsatisfiable and searches the full
+`0 0 30 2 *` is valid and unsatisfiable within the full
 [`MAX_SEARCH_MS`][cap] (4 x 366 days) on the scheduler task
-([`next_due`][sched-due]); with `HourApart` the jump reaches the cap with
-about 35,000 offset probes instead of 2.1 million minute evaluations.
-[`matches_day`][vixie] implements Vixie OR semantics.
+([`next_due`][sched-due]); the search returns `None` for it before any zone
+lookup. A satisfiable expression whose next date is far pays hourly probes
+only across the window of about a day plus the zone's offset before its
+first reachable civil minute, because an offset of almost a day could bring
+any earlier minute there. [`matches_day`][vixie] implements Vixie OR
+semantics.
 Required faults and enabling state: A zone with DST; expressions such as
 `30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
 `0 0 29 2 *`; a zone whose offset changes sit less than an hour apart;
 `after_ms` at the `i64` extremes and at chrono's range edges.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
 The parser, the search, the cap, the conditional-note ceiling
-([`:369-373`][note-cap]), and the config acceptance
+([`:638-667`][note-cap]), and the config acceptance
 ([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the differential tests, the Vixie test, the extreme-instant test, and
-the golden; all unaudited.
+list the differential and component tests, the Vixie test, the
+extreme-instant test, and the golden; all unaudited.
 Impact: A scheduled task fires at the wrong instant or never.
 Open questions:
 
 - Should validation reject calendar-impossible dates instead? That is a
   config-acceptance change outside a latency change. (needs human input)
+- Should zone files claim offset runs longer than an hour, or POSIX rules be
+  classified by the runs they define? Under the current claims the search
+  costs about one `Local` lookup per hour of its last day; a six-day probe
+  cut New York's weekly search from about 2.4 us to 0.48 us in a local probe,
+  but a custom zone file or rule with shorter runs would break the stepper
+  equality. (needs human input)
 
 ### effective-config-reads-observe-a-tier-change-by-the-next-pass
 
@@ -3300,15 +3320,15 @@ evaluation of this area and its disposition are recorded in
 [diff-header]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
 [cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
-[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L125
-[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L152
-[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L230-L260
-[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L342
-[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L350
-[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L369-L373
+[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L120-L175
+[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L188
+[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L352
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L618
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L626
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L638-L667
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
-[sched-default]: ../../../../crates/daemon/src/config.rs#L127
-[sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
+[sched-default]: ../../../../crates/daemon/src/config.rs#L151
+[sched-accept]: ../../../../crates/daemon/src/config.rs#L1157-L1174
 [eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4880-L4889
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L239-L240
 [call-reattach]: ../../../../crates/daemon/src/lib.rs#L5101
@@ -3358,13 +3378,16 @@ evaluation of this area and its disposition are recorded in
 [sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1850-L2058
-[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1782
-[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L264
-[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L291-L326
-[cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L166
-[cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L168-L195
-[cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L198-L219
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074-L2462
+[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074
+[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2505-L2689
+[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L511-L556
+[cron-bound]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L451-L492
+[cron-never]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L367-L379
+[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L563-L587
+[cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
+[cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
+[cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245
 [sched-projects]: ../../../../crates/daemon/src/lib.rs#L14662
 [sched-authority]: ../../../../crates/daemon/src/lib.rs#L14681-L14686
 [sched-filter]: ../../../../crates/daemon/src/lib.rs#L14698-L14711

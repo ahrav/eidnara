@@ -512,12 +512,16 @@ directory sync fails, which leaves the count unknown.
 | [`truncation_uses_marker_and_keeps_multibyte_boundaries`][t-marker] | Marker suffix, budget, scalar-boundary prefix. | unaudited |
 | [`the_field_jumping_search_matches_the_frozen_minute_stepper`][t-cron-prop] | Property test: random expressions, twelve zones, `after_ms` in 1800..2100, caps up to 14 days; the search equals the frozen stepper. | unaudited |
 | [`a_zone_without_an_hour_between_changes_is_searched_minute_by_minute`][t-cron-unbounded] | A 30-minute daylight window: the `Unbounded` claim equals the stepper and an overclaimed `HourApart` misses the match. | unaudited |
+| [`a_minute_by_minute_search_matches_the_stepper_on_both_sides_of_the_epoch`][t-cron-epoch] | An `Unbounded` zone with a seconds-bearing 30-minute daylight window, searched from 1900, late 1969, and 2026; each result equals the frozen stepper. | unaudited |
 | [`a_jump_across_a_shift_resumes_at_the_first_shifted_minute`][t-cron-shift] | A shift landing civil time past a jump's target: the bisected minute finds the match, and Lord Howe's half-hour shift equals the stepper. | unaudited |
 | [`a_spring_forward_gap_skips_the_day_and_a_fall_back_overlap_fires_the_earlier_instant`][t-cron-dst] | New York spring gap and both fall-back instants, Lord Howe and Kathmandu offsets, and Apia's skipped day, each equal to the frozen stepper. | unaudited |
 | [`calendar_impossible_expressions_return_none_at_the_search_cap`][t-cron-cap] | `0 0 30 2 *` and `0 0 31 4,6,9,11 *` return `None` at the full cap; February 29 is found; a cap one minute short returns `None`. | unaudited |
 | [`the_jump_matches_the_stepper_across_every_transition_of_a_zone_year`][t-cron-sweep] | Starts from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937, and 2026 in twelve zones, with day-of-week expressions that jump to midnight across transitions. | unaudited |
 | [`the_jump_matches_the_stepper_at_the_edges_of_the_representable_range`][t-cron-edge] | Chrono's minimum and maximum instants and the `i64` extremes. | unaudited |
 | [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie] | Vixie `*`-prefix semantics. | unaudited |
+| [`the_byte_parser_accepts_exactly_what_the_str_parser_accepts`][t-cron-parser] | Property test: random byte soups with ASCII and Unicode whitespace, overflowing numbers, and stray separators, plus random five-field expressions; `parse_cron` masks equal a frozen copy of the `&str` parser. | unaudited |
+| [`the_month_scan_finds_the_date_a_day_by_day_scan_finds`][t-cron-month] | Property test: random day-of-month, month, and day-of-week fields from year -410 to 3285 with spans up to 3,000 days; the month-at-a-time scan equals a day-by-day scan. | unaudited |
+| [`the_jitter_hashes_the_formatted_note_seed`][t-cron-jitter] | Property test: any `i64` note id and optional Unicode hash; the stack-built seed hash equals the hash of the formatted `"{note_id}:{hash}"`. `the_jitter_seed_spells_extreme_note_ids` pins `i64::MIN`, `-1`, `0`, and `i64::MAX`. | unaudited |
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes. | unaudited |
 | [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
 | [`a_tick_evaluates_the_configured_cron_schedule_of_a_module_project`][t-sched-marker] | The `cron-schedule-is-evaluated-for-a-configured-project` marker: a tick leaves a `next_due` entry with the schedule and a finite instant. | unaudited |
@@ -811,18 +815,22 @@ not a claim that no related check exists anywhere in the repository.
 [diff-small]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L134
 [t-golden]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1773
 [t-marker]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1744
-[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1585
-[t-cron-prop]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2009
-[t-cron-dst]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1850
-[t-cron-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1935
-[t-cron-sweep]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2026
-[t-cron-edge]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1960
-[t-cron-unbounded]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1887
-[t-cron-shift]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1913
+[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2464
+[t-cron-prop]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2398
+[t-cron-dst]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2142
+[t-cron-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2324
+[t-cron-sweep]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2415
+[t-cron-edge]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2349
+[t-cron-unbounded]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2179
+[t-cron-epoch]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2205
+[t-cron-parser]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2617
+[t-cron-month]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2637
+[t-cron-jitter]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2656
+[t-cron-shift]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2253
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1571
-[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
-[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
+[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2450
+[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1553
+[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-mtime]: ../../../../crates/daemon/src/config.rs#L2118
 [t-memo-change]: ../../../../crates/daemon/src/config.rs#L2606
 [t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2664

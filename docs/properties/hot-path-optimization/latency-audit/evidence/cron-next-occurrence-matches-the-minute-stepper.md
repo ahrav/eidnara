@@ -118,6 +118,59 @@ The frozen copy is a test-only function kept because the change replaces
 - Conclusion: resolved with answer - the search matches the stepper on every
   tested input, and every zone claims only the bound its data supports.
 
+### Q: How close does the search run to the cost of its zone lookups? (at the lookup-floor head)
+
+- Sources examined: [`next_occurrence`][floor-search], the
+  [date bound][floor-bound], the [month scan][floor-month], the
+  [impossible-date check][floor-never], the [byte parser][floor-parse],
+  [`deterministic_jitter_ms`][floor-jitter], the
+  [component tests][floor-tests], and chrono 0.4.45's `offset/local/unix.rs`
+  and `tz_info/timezone.rs`.
+- Findings: Most of a search's cost is `Local` lookups. Each one reads
+  `SystemTime::now` (about 26 ns) to check chrono's one-second zone cache,
+  borrows a thread-local, and binary-searches the zone's transitions: 81 ns
+  in New York, 63 ns for a UTC zone file, and 105 ns for a POSIX rule on the
+  probe host. The search now returns `None` without a lookup when no date can
+  match; takes a minute-precise date bound before its first lookup, and again
+  only once the bound's civil minute is out of reach; scans dates a listed
+  month at a time with day bitmasks; parses the five fields in one byte scan;
+  hashes the jitter seed without a `String`; stops `HourApart` skips at the
+  bound's horizon and at the cap, and lets one skip cross two days; and
+  rejects an `Unbounded` minute by its time of day before reading its date.
+  A counting zone shows what remains: two lookups for `*/15 * * * *`, about one
+  per hour until the match for daily and weekday schedules, and 26 to 34 for
+  weekly through yearly ones, because an offset of almost a day could carry
+  any minute of the preceding day onto the first listed civil time. Measured
+  New York and UTC costs are 91 to 98 percent of lookups times lookup cost
+  plus the parse and the `TZ` read; a POSIX-rule zone costs about one lookup
+  per minute. Under the `HourApart` claim a 60-minute probe gap is the widest
+  that cannot hide a run of another offset, and `FixedOffset`'s range fixes
+  the one-day window, so fewer lookups need a stronger claim.
+- Payoff: One host (Xeon 8488C, `taskset -c 30`, release, 32 start instants,
+  31 alternating blocks per arm), with 44 scenarios over `Local` in New York,
+  a UTC zone file, and `EST5EDT,M3.2.0,M11.1.0`. Paired against the previous
+  head in two worktrees, the geometric mean of per-scenario time ratios went
+  from 0.99 (the same code against itself) to 0.46. In New York:
+  `*/15 * * * *` 443 to 257 ns, `0 3 * * *` 1.30 to 0.99 us, `30 2 * * 1`
+  3.10 to 2.41 us, and `0 0 30 2 *` 1.87 us to 35 ns; validity checks 192 to
+  25 ns; the POSIX-rule weekly search 271 to 173 us. Before this PR the minute
+  stepper took 1.5 us, 57 us, 448 us, and 188 ms for those four New York
+  searches. These are local probe numbers, not approved bench evidence.
+- Negative controls (run locally, then reverted): rounding the bound's epoch
+  minute a minute late, excluding the current minute from the bound, a
+  lookahead skip one day too far, a 28-day February in the impossible-date
+  check, a weekday rotation off by one, a truncating remainder for the time of
+  day of an `Unbounded` minute, reversed jitter digits, and an unfolded
+  day-of-week `7` each fail at least one test.
+- Missing evidence: A run length beyond one hour for zone files and POSIX
+  rules. A probe every six days (tzdb's closest transitions are 6.9 days
+  apart) measured New York's weekly search at about 0.48 us, and treating a
+  POSIX rule with month-long runs as `HourApart` measured its weekly search at
+  about 3.3 us. Both strengthen what `CronZone` claims.
+- Conclusion: resolved with answer - under the current claims the search
+  runs within about 10 percent of its lookup cost; a stronger zone claim is a
+  design decision (needs human input).
+
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
 [parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L125-L145
 [vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L150-L160
@@ -135,3 +188,10 @@ The frozen copy is a test-only function kept because the change replaces
 [advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L291-L326
 [diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1782-L2058
 [zone-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L168-L219
+[floor-search]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L247-L352
+[floor-bound]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L440-L504
+[floor-month]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L388-L434
+[floor-never]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L363-L379
+[floor-parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L51-L181
+[floor-jitter]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L669-L697
+[floor-tests]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2505-L2689
