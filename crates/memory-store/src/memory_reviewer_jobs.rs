@@ -542,7 +542,7 @@ pub(crate) fn load_memory_reviewer_job(
     project: &str,
     causal_identity: &str,
 ) -> rusqlite::Result<Option<MemoryReviewerJob>> {
-    conn.query_row(
+    conn.query_row_cached(
         &format!(
             "SELECT {JOB_COLUMNS} FROM memory_reviewer_jobs WHERE project = ?1 AND causal_identity = ?2"
         ),
@@ -799,7 +799,7 @@ pub fn finish_memory_reviewer_job_in_tx(
     outcome: MemoryReviewerJobOutcome,
     now_ms: i64,
 ) -> rusqlite::Result<MemoryReviewerJob> {
-    let changed = conn.execute(
+    let changed = conn.execute_cached(
         "UPDATE memory_reviewer_jobs
             SET state = 'terminal', outcome = ?3, allowance_bytes = 0, input_json = NULL,
                 updated_at_ms = ?4
@@ -1292,7 +1292,7 @@ pub(crate) fn memory_reviewer_write(
 
 /// The store's own durable incarnation, read inside the caller's transaction.
 pub(crate) fn store_incarnation_in_tx(conn: &GuardedConn<'_>) -> rusqlite::Result<String> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT database_incarnation_id FROM memory_reviewer_store_identity WHERE id = 0",
         [],
         |row| row.get(0),

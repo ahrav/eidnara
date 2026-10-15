@@ -31,7 +31,7 @@ use super::open::{
     activate_wal, apply_preclassification_profile, family_sidecars, harden_family, open_reader,
     open_writer, restore_marker_path, stamp_writer_fence, suffix_path, verify_exact_identity,
 };
-use super::{KernelError, KernelStore, Sensitivity};
+use super::{CachedSql, KernelError, KernelStore, Sensitivity};
 
 const BACKUP_PAGES_PER_STEP: i32 = 128;
 // `Busy` and `Locked` mean the step made no progress, so yielding alone spins a
@@ -1020,7 +1020,7 @@ pub(crate) fn release_capture_pin_in_tx(
     released_at: i64,
 ) -> Result<bool, KernelError> {
     let changed = tx
-        .execute(
+        .execute_cached(
             "UPDATE capture_pins SET released_at=MIN(?1,COALESCE(expires_at,?1))
              WHERE capture_pin_id=?2 AND released_at IS NULL",
             params![released_at, capture_pin_id],
@@ -1029,14 +1029,14 @@ pub(crate) fn release_capture_pin_in_tx(
     if changed != 1 {
         return Ok(false);
     }
-    tx.execute(
+    tx.execute_cached(
         "UPDATE capture_pin_refs
          SET released_at=(SELECT released_at FROM capture_pins WHERE capture_pin_id=?1)
          WHERE capture_pin_id=?1 AND released_at IS NULL",
         [capture_pin_id],
     )
     .map_err(super::map_sqlite)?;
-    tx.execute(
+    tx.execute_cached(
         &format!(
             "{COLLAPSE_RELEASED_REFS_SQL} AND evidence_id IN (
                  SELECT evidence_id FROM capture_pin_refs WHERE capture_pin_id=?1

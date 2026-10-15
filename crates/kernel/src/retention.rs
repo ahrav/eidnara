@@ -269,7 +269,7 @@ fn load_run_lifecycle(
     tx: &Transaction<'_>,
     extraction_run_id: &str,
 ) -> Result<Option<RunLifecycle>, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at,provenance_witness
          FROM extraction_runs WHERE extraction_run_id=?1",
         [extraction_run_id],
@@ -292,7 +292,7 @@ fn latest_active_candidate_heartbeat(
     tx: &Transaction<'_>,
     extraction_run_id: &str,
 ) -> Result<i64, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT COALESCE(MAX(heartbeat_at),0) FROM candidates
          WHERE extraction_run_id=?1 AND terminal_state IS NULL",
         [extraction_run_id],

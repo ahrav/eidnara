@@ -1246,6 +1246,32 @@ mod sqlite_backend {
             Ok(statement)
         }
 
+        /// [`Self::query_row`] through the connection's statement cache.
+        ///
+        /// # Errors
+        ///
+        /// As [`Self::prepare_cached`], or the SQLite error from running `sql` or from `f`.
+        pub fn query_row_cached<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+        where
+            P: rusqlite::Params,
+            F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+        {
+            self.prepare_cached(sql)?.query_row(params, f)
+        }
+
+        /// [`Self::execute`] through the connection's statement cache.
+        ///
+        /// # Errors
+        ///
+        /// As [`Self::prepare_cached`], or the SQLite error from running `sql`.
+        pub fn execute_cached<P: rusqlite::Params>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> rusqlite::Result<usize> {
+            self.prepare_cached(sql)?.execute(params)
+        }
+
         /// A cached write is refused in a read callback, and a cached pragma write meets
         /// the authorizer, as uncached statements do.
         ///
@@ -6719,6 +6745,45 @@ mod tests {
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
             .expect("count");
         assert_eq!(rows, 0, "no refused write reached the store");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cached forms of `query_row` and `execute` meet the read callback's write refusal, and a fenced callback runs them like the uncached forms.
+    #[test]
+    fn cached_row_and_execute_forms_keep_the_read_callback_refusal() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let refused =
+            store.with_conn(|c| c.execute_cached("INSERT INTO kv (k, v) VALUES ('a', '1')", []));
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "a cached write must be refused in a read callback, got {refused:?}"
+        );
+        let refused = store.with_conn(|c| {
+            c.query_row_cached(
+                "INSERT INTO kv (k, v) VALUES ('r', '1') RETURNING k",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        });
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "a cached returning write must be refused in a read callback, got {refused:?}"
+        );
+        for value in ["1", "2"] {
+            store
+                .with_conn_fenced(|tx| {
+                    tx.execute_cached(
+                        "INSERT INTO kv (k, v) VALUES (?1, ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                        [value],
+                    )
+                })
+                .expect("a fenced callback runs the cached write");
+        }
+        let rows: i64 = store
+            .with_conn(|c| c.query_row_cached("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(rows, 2, "only the fenced writes reached the store");
         let _ = std::fs::remove_dir_all(&root);
     }
 

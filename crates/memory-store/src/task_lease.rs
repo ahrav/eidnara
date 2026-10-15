@@ -230,7 +230,7 @@ pub(crate) fn module_authority_tx(
     kind: &TaskLeaseKind,
     project: &str,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT generation, note_eval_protocol_epoch
            FROM authority
           WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
@@ -248,7 +248,7 @@ fn load_claim_tx(
     project: &str,
     claim_id: &str,
 ) -> rusqlite::Result<Option<ClaimRow>> {
-    tx.query_row(
+    tx.query_row_cached(
         &format!(
             "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
               WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3"
@@ -270,7 +270,7 @@ fn mark_terminal_tx(
     response: &str,
     now_ms: i64,
 ) -> rusqlite::Result<usize> {
-    tx.execute(
+    tx.execute_cached(
         "UPDATE note_eval_claims
             SET terminal_kind = ?1, completion_id = COALESCE(?2, completion_id),
                 terminal_response = ?3, terminal_at_ms = ?4
@@ -832,7 +832,7 @@ impl MemoryStore {
                     _ => return Ok(LeaseRenewOutcome::AuthorityChanged),
                 }
                 let expires_at = now_ms + kind.lease_ms;
-                tx.execute(
+                tx.execute_cached(
                     "UPDATE note_eval_claims
                         SET expires_at = ?1
                       WHERE project = ?2 AND task_kind = ?3 AND claim_id = ?4
