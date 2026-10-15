@@ -23,9 +23,8 @@ use super::{
 use crate::current_time_ms;
 use crate::durable_fs::{
     MAX_CONCURRENT_SYNCS, PublishOutcome, StorageError, classify_errno, classify_io,
-    create_new_file, durable_unlink, open_regular_nofollow, publish_noreplace_between_locked,
-    sync_all_concurrently, sync_directory, sync_publish_directories_with, temp_name, unlink_temp,
-    write_and_sync,
+    create_new_file, durable_unlink, open_regular_nofollow, sync_all_concurrently, sync_directory,
+    sync_publish_directories_with, temp_name, unlink_temp, write_and_sync,
 };
 use crate::envelope::{ObjectRow, PendingChange, check_fence, commit_with_writer};
 use crate::object_write::map_write_error;
@@ -480,18 +479,16 @@ impl KernelStore {
         let publish = if faults.rename {
             Err(injected_storage_error())
         } else {
-            publish_noreplace_between_locked(tmp, &temp_name, &shard, &prepared.digest[2..])
+            self.publish_counted_object(tmp, &temp_name, &shard, &prepared.digest[2..], byte_length)
         };
         let published_new = match publish {
             Ok(PublishOutcome::Published) => {
                 staged.consume();
-                self.count_published_artifact(byte_length);
                 true
             }
             // A retained temp link makes the object's link count two, which
             // `verify_object` rejects.
             Ok(PublishOutcome::PublishedTempRetained) => {
-                self.count_published_artifact(byte_length);
                 if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
@@ -769,9 +766,7 @@ impl KernelStore {
             Some(budget) => self.lock_writer_within(&budget.acquire_limit())?,
             None => self.lock_writer()?,
         };
-        let usage = self
-            .counted_artifact_usage(objects)
-            .map_err(|_| KernelError::Io)?;
+        let usage = self.counted_artifact_usage().map_err(storage)?;
         let added = distinct_prepared
             .iter()
             .filter(|prepared| !object_is_present(objects, &prepared.digest))
@@ -920,22 +915,22 @@ impl KernelStore {
         };
         for (index, prepared) in prepared.iter().enumerate() {
             let byte_length = prepared.bytes.len() as u64;
-            match publish_noreplace_between_locked(
-                tmp,
-                &names[index],
-                &shards[index],
-                &prepared.digest[2..],
-            )
-            .map_err(storage)?
+            match self
+                .publish_counted_object(
+                    tmp,
+                    &names[index],
+                    &shards[index],
+                    &prepared.digest[2..],
+                    byte_length,
+                )
+                .map_err(storage)?
             {
                 PublishOutcome::Published => {
                     staged[index].consume();
-                    self.count_published_artifact(byte_length);
                     published_new[index] = true;
                 }
                 // A retained temp link makes the object's link count two, which `verify_object` rejects. The batch syncs the temporary directory after every publication, which makes these unlinks durable.
                 PublishOutcome::PublishedTempRetained => {
-                    self.count_published_artifact(byte_length);
                     published_new[index] = true;
                     unlink_temp(tmp, &names[index]).map_err(storage)?;
                     staged[index].consume();
@@ -955,70 +950,15 @@ impl KernelStore {
         digest: &str,
         byte_length: u64,
     ) -> Result<(), ArtifactError> {
-        let usage = self.counted_artifact_usage(objects)?;
+        let usage = self.counted_artifact_usage().map_err(|error| {
+            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
+        })?;
         let already_present = object_is_present(objects, digest);
         let projected = usage.saturating_add(if already_present { 0 } else { byte_length });
         if projected > self.artifact_cap {
             return Err(ArtifactError::capacity(usage, self.artifact_cap));
         }
         Ok(())
-    }
-
-    /// A walk racing an unlink can count the removed object, so the walk caches its total only if `generation` remains unchanged.
-    fn counted_artifact_usage(&self, objects: &File) -> Result<u64, ArtifactError> {
-        let generation = {
-            let usage = self
-                .artifact_usage
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(bytes) = usage.bytes {
-                return Ok(bytes);
-            }
-            usage.generation
-        };
-        #[cfg(feature = "test-support")]
-        self.artifact_census_walks
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let walked = regular_file_bytes(objects, &|| false)
-            .map_err(|error| {
-                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-            })?
-            .expect("an uncancellable walk completes");
-        let mut usage = self
-            .artifact_usage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if usage.generation == generation {
-            usage.bytes = Some(walked);
-        }
-        Ok(walked)
-    }
-
-    fn count_published_artifact(&self, byte_length: u64) {
-        let mut usage = self
-            .artifact_usage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(bytes) = usage.bytes.as_mut() {
-            *bytes = bytes.saturating_add(byte_length);
-        }
-    }
-
-    /// Clears the cached count before an object below `objects` is unlinked, so the next ingest walks the tree.
-    pub(super) fn forget_artifact_usage(&self) {
-        let mut usage = self
-            .artifact_usage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        usage.generation = usage.generation.wrapping_add(1);
-        usage.bytes = None;
-    }
-
-    /// Ingestion walks of the object tree on this store since it opened.
-    #[cfg(feature = "test-support")]
-    pub fn artifact_census_walks_for_test(&self) -> usize {
-        self.artifact_census_walks
-            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn merge_replayed_classification(
@@ -1170,8 +1110,7 @@ impl KernelStore {
         }
         match self.shard_directory(digest, false) {
             Ok(Some(shard)) => {
-                self.forget_artifact_usage();
-                if durable_unlink(&shard, &digest[2..]).is_err() {
+                if self.unlink_counted_object(&shard, &digest[2..]).is_err() {
                     self.latch_cas_failure();
                 }
             }
@@ -1584,57 +1523,206 @@ pub(super) fn regular_file_bytes(
     objects: &File,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<u64>, StorageError> {
+    let Some((mut bytes, shards)) = top_level_entries(objects, cancelled)? else {
+        return Ok(None);
+    };
+    let mut shard_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+    for shard in &shards {
+        let Some(shard_bytes) = shard_bytes(objects, shard, &mut shard_buffer, cancelled)? else {
+            return Ok(None);
+        };
+        bytes = bytes.saturating_add(shard_bytes);
+    }
+    Ok(Some(bytes))
+}
+
+/// [`regular_file_bytes`] without cancellation, with the shard directories
+/// divided among up to [`MAX_WALK_WORKERS`] threads.
+///
+/// Each object costs one `statat`, whose latency is a metadata lookup when the
+/// inode is cached and a device read when it is not; the workers overlap those
+/// latencies. The worker count is sized for reads in flight: a walk of an
+/// uncached tree waits on the device, and workers beyond the processor count
+/// keep more reads queued. A failure other than exhaustion outranks an
+/// exhaustion, because only the former latches the store.
+pub(super) fn regular_file_bytes_concurrently(objects: &File) -> Result<u64, StorageError> {
+    match regular_file_bytes_on_workers(objects) {
+        Err(error) if descriptors_ran_out(&error) => regular_file_bytes(objects, &|| false)
+            .map(|bytes| bytes.expect("an uncancellable walk completes")),
+        walked => walked,
+    }
+}
+
+fn descriptors_ran_out(error: &StorageError) -> bool {
+    error.raw_os_error().is_some_and(|code| {
+        code == rustix::io::Errno::MFILE.raw_os_error()
+            || code == rustix::io::Errno::NFILE.raw_os_error()
+    })
+}
+
+fn regular_file_bytes_on_workers(objects: &File) -> Result<u64, StorageError> {
+    let (mut bytes, shards) =
+        top_level_entries(objects, &|| false)?.expect("an uncancellable walk completes");
+    let next_shard = std::sync::atomic::AtomicUsize::new(0);
+    let walk_shards = || -> Result<u64, StorageError> {
+        let mut buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+        let mut bytes = 0_u64;
+        while let Some(shard) =
+            shards.get(next_shard.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        {
+            let shard_bytes = shard_bytes(objects, shard, &mut buffer, &|| false)?
+                .expect("an uncancellable walk completes");
+            bytes = bytes.saturating_add(shard_bytes);
+        }
+        Ok(bytes)
+    };
+    let workers = MAX_WALK_WORKERS
+        .min(shards.len())
+        .min(descriptor_budget_workers());
+    let results = std::thread::scope(|scope| {
+        // A helper whose thread cannot be created leaves its shards to the others.
+        let helpers: Vec<_> = (1..workers)
+            .filter_map(|_| {
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, walk_shards)
+                    .ok()
+            })
+            .collect();
+        let mut results = vec![walk_shards()];
+        results.extend(helpers.into_iter().map(|helper| {
+            helper
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }));
+        results
+    });
+    let mut exhausted = None;
+    for result in results {
+        match result {
+            Ok(shard_bytes) => bytes = bytes.saturating_add(shard_bytes),
+            Err(error @ StorageError::Other(_)) => return Err(error),
+            Err(error) => exhausted = exhausted.or(Some(error)),
+        }
+    }
+    exhausted.map_or(Ok(bytes), Err)
+}
+
+/// The regular-file bytes directly below `objects` and the names of its shard
+/// directories, polling `cancelled` before every entry; `None` once it returns
+/// true.
+fn top_level_entries(
+    objects: &File,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<(u64, Vec<std::ffi::CString>)>, StorageError> {
     let mut bytes = 0_u64;
-    for entry in rfs::Dir::read_from(objects).map_err(classify_errno)? {
+    let mut shards = Vec::new();
+    let mut top_buffer = Vec::with_capacity(WALK_BUFFER_BYTES);
+    // Reading a directory advances its descriptor's offset, so the walk reads a
+    // descriptor of its own and concurrent walks of `objects` stay independent.
+    let top = open_shard_nofollow(objects, c".")?;
+    let mut entries = rfs::RawDir::new(&top, top_buffer.spare_capacity_mut());
+    while let Some(entry) = next_dir_entry(&mut entries)? {
         if cancelled() {
             return Ok(None);
         }
-        let entry = entry.map_err(classify_errno)?;
         let name = entry.file_name();
         if is_dot_entry(name) {
             continue;
         }
-        // Reclamation can unlink an entry between the directory read and this stat.
-        let stat = match rfs::statat(objects, name, AtFlags::SYMLINK_NOFOLLOW) {
+        match entry.file_type() {
+            rfs::FileType::Directory => {}
+            rfs::FileType::RegularFile | rfs::FileType::Unknown => {
+                // Reclamation can unlink an entry between the directory read and this stat.
+                let stat = match rfs::statat(objects, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) => stat,
+                    Err(rustix::io::Errno::NOENT) => continue,
+                    Err(error) => return Err(classify_errno(error)),
+                };
+                let kind = rfs::FileType::from_raw_mode(stat.st_mode);
+                if kind.is_file() {
+                    bytes = bytes.saturating_add(stat_bytes(&stat));
+                    continue;
+                }
+                if !kind.is_dir() {
+                    continue;
+                }
+            }
+            _ => continue,
+        }
+        shards.push(name.to_owned());
+    }
+    Ok(Some((bytes, shards)))
+}
+
+/// Sums regular-file sizes in the shard `name` below `objects`, polling
+/// `cancelled` before every entry; `None` once it returns true. A shard removed
+/// before it opens holds zero bytes.
+fn shard_bytes(
+    objects: &File,
+    name: &std::ffi::CStr,
+    buffer: &mut Vec<u8>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<u64>, StorageError> {
+    let shard = match open_shard_nofollow(objects, name) {
+        Ok(shard) => shard,
+        Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(0));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = 0_u64;
+    let mut entries = rfs::RawDir::new(&shard, buffer.spare_capacity_mut());
+    while let Some(entry) = next_dir_entry(&mut entries)? {
+        if cancelled() {
+            return Ok(None);
+        }
+        let name = entry.file_name();
+        if is_dot_entry(name)
+            || !matches!(
+                entry.file_type(),
+                rfs::FileType::RegularFile | rfs::FileType::Unknown
+            )
+        {
+            continue;
+        }
+        let stat = match rfs::statat(&shard, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => stat,
             Err(rustix::io::Errno::NOENT) => continue,
             Err(error) => return Err(classify_errno(error)),
         };
-        let kind = rfs::FileType::from_raw_mode(stat.st_mode);
-        if kind.is_file() {
+        if rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
             bytes = bytes.saturating_add(stat_bytes(&stat));
-            continue;
-        }
-        if !kind.is_dir() {
-            continue;
-        }
-        let shard = match open_shard_nofollow(objects, name) {
-            Ok(shard) => shard,
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        for shard_entry in rfs::Dir::read_from(&shard).map_err(classify_errno)? {
-            if cancelled() {
-                return Ok(None);
-            }
-            let shard_entry = shard_entry.map_err(classify_errno)?;
-            let shard_name = shard_entry.file_name();
-            if is_dot_entry(shard_name) {
-                continue;
-            }
-            let shard_stat = match rfs::statat(&shard, shard_name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(shard_stat) => shard_stat,
-                Err(rustix::io::Errno::NOENT) => continue,
-                Err(error) => return Err(classify_errno(error)),
-            };
-            if rfs::FileType::from_raw_mode(shard_stat.st_mode).is_file() {
-                bytes = bytes.saturating_add(stat_bytes(&shard_stat));
-            }
         }
     }
     Ok(Some(bytes))
+}
+
+/// Threads the uncancellable census walks on at most, the caller included.
+const MAX_WALK_WORKERS: usize = 64;
+
+const DESCRIPTORS_PER_WALK_WORKER: u64 = 16;
+
+fn descriptor_budget_workers() -> usize {
+    rustix::process::getrlimit(rustix::process::Resource::Nofile)
+        .current
+        .map_or(MAX_WALK_WORKERS, |soft| {
+            usize::try_from(soft / DESCRIPTORS_PER_WALK_WORKER)
+                .unwrap_or(MAX_WALK_WORKERS)
+                .max(1)
+        })
+}
+
+const WALK_BUFFER_BYTES: usize = 16 * 1024;
+
+/// `next_dir_entry` treats `ENOENT` from a removed directory as end-of-directory.
+fn next_dir_entry<'dir>(
+    directory: &'dir mut rfs::RawDir<'_, &File>,
+) -> Result<Option<rfs::RawDirEntry<'dir>>, StorageError> {
+    match directory.next() {
+        None | Some(Err(rustix::io::Errno::NOENT)) => Ok(None),
+        Some(Ok(entry)) => Ok(Some(entry)),
+        Some(Err(error)) => Err(classify_errno(error)),
+    }
 }
 
 fn object_is_present(objects: &File, digest: &str) -> bool {

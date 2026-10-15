@@ -7,13 +7,7 @@ mod deletion;
 pub(super) mod gc;
 mod ingest;
 mod read;
-
-/// The cached byte count below the artifact `objects` directory. `generation` advances at every unlink, so a walk that started before one discards its total.
-#[derive(Debug, Default)]
-pub(crate) struct ArtifactUsage {
-    pub(crate) generation: u64,
-    pub(crate) bytes: Option<u64>,
-}
+mod usage;
 
 use std::fmt;
 use std::fs::File;
@@ -468,6 +462,9 @@ pub use gc::ArtifactGcResult;
 pub(crate) use gc::ObjectPresence;
 pub(crate) use ingest::is_exact_retention;
 pub(crate) use read::egress_facts_tx;
+#[cfg(feature = "test-support")]
+pub(crate) use usage::ReconciliationHook;
+pub(crate) use usage::{ArtifactCensus, ArtifactUsage};
 
 impl fmt::Debug for ArtifactError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
