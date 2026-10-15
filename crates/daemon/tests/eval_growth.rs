@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use campaign::Charges;
 use eval_core::{
     Approval, Coverage, EnvelopeExceeded, ExpectedRefusal, GrowthContract, GrowthMode,
-    GrowthRefused, GrowthReport, MARKERS, Operation, ProfileError, Resource, Scale, StoreFamily,
-    digests_match_serial, isolated, parse_growth_report, parse_manifest,
+    GrowthRefused, GrowthReport, MARKERS, Operation, ProfileError, QuiescenceProgress, Resource,
+    Scale, StoreFamily, digests_match_serial, isolated, parse_growth_report, parse_manifest,
 };
 use growth::{Campaign, Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
 use memory_store::memory_reviewer_jobs::{
@@ -33,6 +33,13 @@ use support::memory_reviewer_publish::{PROJECT, now_ms};
 
 const MESSAGES: u32 = 40;
 const SUITE: &str = "crates/daemon/tests/eval_growth.rs::";
+
+/// The S0 profile's liveness bounds, which every quiescence is judged by.
+fn s0_liveness() -> eval_core::LivenessBounds {
+    growth::profile(Scale::S0, 128, 600_000, None)
+        .statistics
+        .liveness_bounds
+}
 
 fn budget() -> Option<u64> {
     let variable = Scale::S0.budget_env();
@@ -141,6 +148,54 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
     for window in report.ledger.samples.windows(2) {
         assert!(window[0].commit_seq <= window[1].commit_seq);
     }
+    // Every quiescence carries its healthy-progress witness: the projection
+    // acknowledged the tip within the approved catch-up bound, and every job
+    // handed to the coordinator settled within its pass bound.
+    for sample in &report.ledger.samples {
+        assert_eq!(
+            sample.progress.acknowledged_through, sample.commit_seq,
+            "step {}",
+            sample.step
+        );
+        assert!(sample.progress.catch_up_episodes <= contract.bounds.progress.catch_up_episodes);
+        assert!(sample.progress.reviewer_settled, "step {}", sample.step);
+    }
+    let passed: Vec<_> = report
+        .ledger
+        .samples
+        .iter()
+        .filter(|s| s.progress.reviewer_passes > 0)
+        .collect();
+    assert!(
+        !passed.is_empty()
+            && passed.iter().all(|s| s.progress.reviewer_passes
+                <= contract.bounds.progress.reviewer_coordinator_passes),
+        "the coordinator settled the handed jobs at some quiescence within its bound"
+    );
+    assert!(
+        report.ledger.samples[..report.ledger.samples.len() - 1]
+            .iter()
+            .any(|s| s.progress.catch_up_episodes > 0),
+        "the drains ran catch-up episodes"
+    );
+    assert_eq!(
+        report.coverage.declared,
+        report
+            .episodes
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<BTreeSet<_>>(),
+        "every fault episode declares its cut and nothing else is declared"
+    );
+    assert!(
+        report.coverage.declared.iter().all(|cut| report
+            .coverage
+            .receipted
+            .get(cut)
+            .is_some_and(|n| *n > 0)),
+        "and every declared cut is receipted: {:?}",
+        report.coverage
+    );
     report
         .ledger
         .verdict(&report.quota, &report.bounds)
@@ -167,7 +222,7 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     live.step(&mut charges).unwrap();
     live.step(&mut charges).unwrap();
     let tip = live.tip();
@@ -238,8 +293,8 @@ fn the_swarm_mix_exercises_every_operation_kind_scenario(published: &Published) 
     for op in Operation::ALL {
         assert!(report.mix.counts[&op] > 0, "{op:?}");
     }
-    assert!(report.fault_episodes >= 4);
-    assert!(report.safety_checks_while_armed >= report.fault_episodes);
+    assert!(report.episodes.len() >= 4);
+    assert!(report.safety_checks_while_armed >= report.episodes.len() as u64);
     assert!(
         report.expected_refusals.is_empty(),
         "no refusal is planted in the growth campaign"
@@ -277,17 +332,45 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::Restoring);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::Restoring, &s0_liveness());
     live.step(&mut charges).unwrap();
     let tmp = root
         .path()
         .join("kernel/artifacts/tmp/.artifact-deadbeef-x.tmp");
     std::fs::write(&tmp, b"stray").unwrap();
     live.sample(100, &mut charges).unwrap();
-    assert_eq!(live.ledger.samples.last().unwrap().artifact_tmp_entries, 1);
+    let [stepped, resampled] = &live.ledger.samples[..] else {
+        panic!("{:?}", live.ledger.samples);
+    };
+    assert_eq!(resampled.artifact_tmp_entries, 1);
+    assert!(
+        stepped.progress.catch_up_episodes > 0,
+        "the step's drain ran catch-up episodes"
+    );
+    assert_eq!(
+        resampled.progress,
+        QuiescenceProgress {
+            acknowledged_through: resampled.commit_seq,
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: true,
+        },
+        "a sample with no drain since the last one witnesses no further work"
+    );
     let (mut live, restored) = live.restore(1_700_000_000_000);
     restored.unwrap();
     live.sample(101, &mut charges).unwrap();
+    let reopened = live.ledger.samples.last().unwrap();
+    assert_eq!(
+        reopened.progress,
+        QuiescenceProgress {
+            acknowledged_through: reopened.commit_seq,
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: true,
+        },
+        "the reopened stores are the quiescent point; no drain ran to reach it"
+    );
     assert_eq!(
         live.ledger.samples.last().unwrap().artifact_tmp_entries,
         0,
@@ -304,12 +387,69 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
     ));
 }
 
+/// Passes a cap-triggered settle ran after the last recorded quiescence stay
+/// in the accumulator until a sample records them: the restore's own sample
+/// when the caller takes one, otherwise the next step's or the final sample.
+#[test]
+fn passes_run_before_a_restore_reach_the_ledger_whichever_sample_follows() {
+    let opened = || {
+        let root = tempfile::tempdir().unwrap();
+        let charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+        let plan = aging::plan(MESSAGES).unwrap();
+        let live = Campaign::open(root.path(), plan, GrowthMode::Restoring, &s0_liveness());
+        (root, charges, live)
+    };
+    let restored = |mut live: Campaign, charges: &mut Charges| {
+        live.step(charges).unwrap();
+        live.passes_since_drain = 3;
+        let (live, restored) = live.restore(1_700_000_000_000);
+        restored.unwrap();
+        live
+    };
+
+    let (_root, mut charges, live) = opened();
+    let mut live = restored(live, &mut charges);
+    live.sample(100, &mut charges).unwrap();
+    assert_eq!(
+        live.ledger.samples.last().unwrap().progress.reviewer_passes,
+        3,
+        "the restore's own sample witnesses the passes"
+    );
+    assert_eq!(
+        live.passes_since_drain, 0,
+        "a recorded witness drains the accumulator"
+    );
+
+    let (_root, mut charges, live) = opened();
+    let mut live = restored(live, &mut charges);
+    live.step(&mut charges).unwrap();
+    assert_eq!(
+        live.ledger.samples.last().unwrap().progress.reviewer_passes,
+        3,
+        "step 1 hands nothing over, so its sample's passes are the ones run before the restore"
+    );
+    live.step(&mut charges).unwrap();
+    assert_eq!(
+        live.ledger.samples.last().unwrap().progress.reviewer_passes,
+        0
+    );
+
+    let (_root, mut charges, live) = opened();
+    let live = restored(live, &mut charges);
+    let ledger = live.finish(&mut charges).unwrap().ledger;
+    assert_eq!(
+        ledger.samples.last().unwrap().progress.reviewer_passes,
+        3,
+        "the final sample witnesses the passes"
+    );
+}
+
 #[test]
 fn the_final_sample_reads_the_closed_files_without_reopening_the_memory_store() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     for _ in 0..4 {
         live.step(&mut charges).unwrap();
     }
@@ -359,12 +499,24 @@ fn releasing_the_campaign_root_charges_no_store_bytes_beyond_the_samples() {
 fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicking() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     // Every other admission stays pending, so twice the cap overruns it.
     let admissions = 2 * MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT + 4;
+    let bound = s0_liveness().reviewer_coordinator_passes;
+    let mut cap_passes = 0;
     for k in 0..admissions {
         live.quota_pressure(4 * k + 3, now_ms()).unwrap();
+        let passes = std::mem::take(&mut live.passes_since_drain);
+        assert!(
+            passes <= bound,
+            "admission {k}'s quiescence witnesses {passes} passes"
+        );
+        cap_passes += passes;
     }
+    assert!(
+        cap_passes > 0,
+        "the cap-triggered settles ran passes, which wait for the next quiescence's witness"
+    );
     let headroom = live.headroom();
     assert_eq!(
         headroom.pending_jobs,
@@ -387,7 +539,7 @@ fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicki
 fn a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     // Step 3 settles its admission, so the one row holds a receipt charge only.
     live.quota_pressure(3, now_ms()).unwrap();
     let over_quota = MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
@@ -462,7 +614,7 @@ fn a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing_scenari
     let mut profile = growth::profile(Scale::S0, 128, 600_000, None);
     profile.envelope.store_bytes = 64 << 10;
     let mut charges = Charges::new(profile.envelope.clone());
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     let mut breach = None;
     for _ in 0..8 {
         match live.step(&mut charges) {
@@ -515,6 +667,19 @@ type Shape = (u64, u64, u64, std::collections::BTreeMap<Operation, u64>);
 /// One campaign's result digest, shape, and the resources it held.
 type Outcome = (String, Shape, eval_core::CampaignResources);
 
+/// Callers must ensure the campaigns' listener lifetimes are disjoint so the
+/// OS can reuse released ports.
+fn serially_isolated(
+    a: &eval_core::CampaignResources,
+    b: &eval_core::CampaignResources,
+) -> Result<(), eval_core::IsolationRefused> {
+    let portless = |resources: &eval_core::CampaignResources| eval_core::CampaignResources {
+        ports: BTreeSet::new(),
+        ..resources.clone()
+    };
+    isolated(&portless(a), &portless(b))
+}
+
 fn shape(run: &Run) -> Shape {
     let last = run.report.ledger.samples.last().unwrap();
     (
@@ -529,12 +694,11 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
     budget_ms: u64,
     coverage: &mut Coverage,
 ) {
-    fn one(publish: &std::path::Path, budget_ms: u64) -> Outcome {
-        let run = growth::run(&config(
-            publish.join("out"),
-            budget_ms,
-            GrowthMode::NeverRestored,
-        ))
+    fn one(publish: &std::path::Path, budget_ms: u64, opened: impl FnOnce()) -> Outcome {
+        let run = growth::run_with(
+            &config(publish.join("out"), budget_ms, GrowthMode::NeverRestored),
+            opened,
+        )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&run.report_bytes).unwrap();
         (
@@ -546,20 +710,35 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
     let serial: Vec<_> = (0..2)
         .map(|_| {
             let publish = tempfile::tempdir().unwrap();
-            one(publish.path(), budget_ms)
+            one(publish.path(), budget_ms, || {})
         })
         .collect();
+    let listening = std::sync::Arc::new(std::sync::Barrier::new(2));
     let handles: Vec<_> = (0..2)
         .map(|_| {
+            let listening = listening.clone();
             std::thread::spawn(move || {
                 let publish = tempfile::tempdir().unwrap();
-                one(publish.path(), budget_ms)
+                one(publish.path(), budget_ms, || {
+                    listening.wait();
+                })
             })
         })
         .collect();
     let concurrent: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    for (_, _, resources) in concurrent.iter().chain(&serial) {
+        assert_eq!(
+            resources.ports.len(),
+            1,
+            "each campaign's reviewer peer holds one OS-allocated port: {resources:?}"
+        );
+    }
     isolated(&concurrent[0].2, &concurrent[1].2).unwrap();
-    isolated(&serial[0].2, &serial[1].2).unwrap();
+    serially_isolated(&serial[0].2, &serial[1].2).unwrap();
+    // The OS may hand a released ephemeral port to the next serial run.
+    let mut reused = serial[1].2.clone();
+    reused.ports = serial[0].2.ports.clone();
+    serially_isolated(&serial[0].2, &reused).unwrap();
     digests_match_serial(
         &concurrent
             .iter()
@@ -580,6 +759,15 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
         isolated(&concurrent[0].2, &shared),
         Err(eval_core::IsolationRefused::SharedRoot { .. })
     ));
+    let mut shared_port = concurrent[1].2.clone();
+    shared_port.ports = concurrent[0].2.ports.clone();
+    assert!(
+        matches!(
+            isolated(&concurrent[0].2, &shared_port),
+            Err(eval_core::IsolationRefused::SharedPort { .. })
+        ),
+        "a campaign reusing another's peer port is not isolated"
+    );
     coverage.record("xc_parallel_campaigns_isolated").unwrap();
 }
 
@@ -683,7 +871,7 @@ fn a_fifth_step_that_commits_nothing_runs_no_lost_reply_episode() {
     plan.steps[4].step = retire;
     let root = tempfile::tempdir().unwrap();
     let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     for _ in 0..5 {
         live.step(&mut charges).unwrap();
     }
@@ -695,7 +883,7 @@ fn a_symlink_under_the_artifact_objects_is_neither_an_object_nor_its_bytes() {
     let plan = aging::plan(MESSAGES).unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     for _ in 0..4 {
         live.step(&mut charges).unwrap();
     }
@@ -751,10 +939,128 @@ fn the_artifact_store_is_bounded_by_the_ledger_not_charged_to_the_envelope() {
     let mut profile = growth::profile(Scale::S0, 128, 600_000, None);
     profile.envelope.artifact_bytes = 1;
     let mut charges = Charges::new(profile.envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
     for _ in 0..4 {
         live.step(&mut charges).unwrap();
     }
     assert!(live.ledger.samples.last().unwrap().artifact_bytes > 1);
     assert_eq!(charges.envelope.peaks.artifact_bytes, 0);
+}
+
+/// The admission handed to the coordinator is settled by the production
+/// worker in the drain that follows it: one pass, an `owner_sensitive`
+/// abstention, no attempt marker, and the sample's progress witness says so.
+#[test]
+fn a_handed_admission_settles_through_one_coordinator_pass_in_its_drain() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let sample = live.ledger.samples.last().unwrap();
+    assert_eq!(sample.step, 3, "step 3 is the first quota-pressure step");
+    assert_eq!(sample.progress.reviewer_passes, 1, "{:?}", sample.progress);
+    assert!(sample.progress.reviewer_settled);
+    assert!(live.handed.is_empty());
+    let facts = live.stores.memory.memory_reviewer_status_facts().unwrap();
+    assert_eq!(facts.jobs_abstained, 1);
+    assert_eq!(
+        facts.attempts_attempted, 0,
+        "the run settled before any request"
+    );
+    assert_eq!(facts.jobs_ready, 0);
+    for earlier in &live.ledger.samples[..3] {
+        assert_eq!(
+            earlier.progress.reviewer_passes, 0,
+            "nothing was handed over yet"
+        );
+    }
+}
+
+/// The producer reports what it saw: with no coordinator pass approved, the
+/// handed job is still pending at the quiescence, the witness says unsettled,
+/// and the ledger refuses it.
+#[test]
+fn a_handed_admission_the_bound_leaves_unsettled_is_refused_by_the_ledger() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let bounds = eval_core::LivenessBounds {
+        reviewer_coordinator_passes: 0,
+        ..s0_liveness()
+    };
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &bounds);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let sample = live.ledger.samples.last().unwrap();
+    assert_eq!(sample.progress.reviewer_passes, 0);
+    assert!(!sample.progress.reviewer_settled);
+    assert_eq!(live.handed.len(), 1);
+    let growth_bounds = eval_core::GrowthBounds {
+        progress: bounds,
+        ..growth::bounds(&growth::profile(Scale::S0, 128, 600_000, None), MESSAGES)
+    };
+    assert_eq!(
+        live.ledger.check_samples(&growth::quota(), &growth_bounds),
+        Err(eval_core::GrowthRefused::ReviewerUnsettled {
+            step: 3,
+            passes: 0,
+            bound: 0,
+        })
+    );
+}
+
+/// The approved pass bound covers every coordinator pass before one
+/// quiescence, so the cap-triggered settle in `quota_pressure` spends from
+/// the drain's budget. A closed gate keeps the handed job pending past that
+/// budget. The ledger reports `ReviewerUnsettled` when the shared budget is
+/// exhausted with a job pending.
+#[test]
+fn a_cap_triggered_settle_and_its_drain_share_one_pass_bound() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let profile = growth::profile(Scale::S0, 128, 600_000, None);
+    let mut charges = Charges::new(profile.envelope.clone());
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &s0_liveness());
+    // Removing the activation directory keeps the reviewer gate closed while
+    // the test exhausts the shared pass budget.
+    std::fs::remove_dir_all(
+        root.path()
+            .join("reviewer-home")
+            .join(daemon::memory_reviewer::activation::ACTIVATION_DIR),
+    )
+    .unwrap();
+    // Begun admissions (`i % 8 == 7`) fill the queue to one short of the cap,
+    // so step 3's handed admission reaches it.
+    for k in 0..MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT - 1 {
+        live.quota_pressure(8 * k + 7, now_ms()).unwrap();
+    }
+    assert_eq!(
+        live.headroom().pending_jobs,
+        MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT as u64 - 1
+    );
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let bound = s0_liveness().reviewer_coordinator_passes;
+    let sample = live.ledger.samples.last().unwrap();
+    assert_eq!(sample.step, 3);
+    assert_eq!(
+        sample.progress.reviewer_passes, bound,
+        "the cap-triggered settle and the drain together stop at the bound"
+    );
+    assert!(!sample.progress.reviewer_settled);
+    assert_eq!(
+        live.ledger
+            .check_samples(&growth::quota(), &growth::bounds(&profile, MESSAGES)),
+        Err(eval_core::GrowthRefused::ReviewerUnsettled {
+            step: 3,
+            passes: bound,
+            bound,
+        }),
+        "a job the bound leaves pending is refused as unsettled"
+    );
 }

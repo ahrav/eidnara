@@ -5,17 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use eval_core::{
-    Approval, CampaignResources, ClaimBoundary, Coverage, Cut, EnvelopeExceeded, ExecutionMode,
-    ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode,
-    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Operation, ProfileError,
-    RecordedRefusal, ResourceSample, ReviewerQuota, RunProfile, Scale, SearchEpisodeFault,
-    StoreBytes, StoreFamily, SwarmMix, eval_run_id,
+    Approval, CampaignResources, ClaimBoundary, Coverage, Cut, CutCoverage, EnvelopeExceeded,
+    ExecutionMode, ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract,
+    GrowthLedger, GrowthMode, GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, Lane,
+    LivenessBounds, Operation, ProfileError, QuiescenceProgress, RecordedRefusal, ResourceSample,
+    ReviewerQuota, RunProfile, Scale, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix,
+    eval_run_id,
 };
 use memory_store::memory_reviewer_jobs::{
     FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT,
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
-    MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal,
+    MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobRefusal, MemoryReviewerJobState,
 };
 use serde_json::json;
 
@@ -24,7 +25,7 @@ use super::aging::{
     store_file, suite_c_manifest,
 };
 use super::campaign::{Charges, identity, prepare_publish, publish_file};
-use super::fault::{self, Witness, lost_reply_episode};
+use super::fault::{self, ReviewerRig, Witness, lost_reply_episode};
 use super::support::memory_reviewer_publish::{
     self as reviewer, abstain, activate_module_authority, commit_memory_domain, try_begin_job,
 };
@@ -61,6 +62,10 @@ pub enum RunError {
     Report(#[from] GrowthReportError),
     #[error("reviewer admission refused: {0}")]
     Admission(MemoryReviewerJobRefusal),
+    /// The manifest declares reviewer model calls excluded; a committed
+    /// attempt marker means a run reached the provider.
+    #[error("{attempts} reviewer attempt markers committed; reviewer model calls are excluded")]
+    ReviewerAttempted { attempts: u64 },
     #[error("publish {}: {kind}", path.display())]
     Publish {
         path: PathBuf,
@@ -106,6 +111,7 @@ pub fn bounds(profile: &RunProfile, messages: u32) -> GrowthBounds {
         projection_rows: 16 * u64::from(messages),
         open_holds: 1,
         store_bytes_per_commit: 64 << 10,
+        progress: profile.statistics.liveness_bounds.clone(),
     }
 }
 
@@ -200,13 +206,27 @@ pub struct Campaign {
     pub generation: u64,
     pub next_step: usize,
     pub checkpoints: BTreeMap<Cut, u64>,
+    /// The production reviewer worker the campaign hands every eighth
+    /// admission to, on its own OS-allocated peer port.
+    pub rig: ReviewerRig,
+    /// Jobs handed to the coordinator that have not yet settled.
+    pub handed: Vec<String>,
+    /// The approved bound on coordinator passes per quiescence.
+    pub reviewer_pass_bound: u64,
+    /// Coordinator passes run since the last recorded sample, a cap-triggered
+    /// settle included; `sample` drains it once a witness records them.
+    pub passes_since_drain: u64,
+    /// Catch-up episodes the drains ran since the last recorded sample;
+    /// `sample` drains it once a witness records them.
+    pub catch_up_since_sample: u64,
 }
 
 impl Campaign {
-    pub fn open(root: &Path, plan: Plan, mode: GrowthMode) -> Self {
+    pub fn open(root: &Path, plan: Plan, mode: GrowthMode, bounds: &LivenessBounds) -> Self {
         let stores = Stores::open(root, &plan);
         let generation = activate_module_authority(&stores.memory, root);
         commit_memory_domain(&stores.corpus.kernel);
+        let rig = ReviewerRig::open(&stores, &root.join("reviewer-home"), root, generation, true);
         Self {
             plan,
             stores,
@@ -218,6 +238,35 @@ impl Campaign {
             generation,
             next_step: 0,
             checkpoints: BTreeMap::new(),
+            rig,
+            handed: Vec::new(),
+            reviewer_pass_bound: Lane::ReviewerCoordinatorPasses.bound(bounds),
+            passes_since_drain: 0,
+            catch_up_since_sample: 0,
+        }
+    }
+
+    /// The port the campaign's reviewer peer listens on.
+    pub fn port(&self) -> u16 {
+        self.rig.port()
+    }
+
+    /// The pass bound covers every coordinator pass before one quiescence, so
+    /// a cap-triggered settle and the drain's settle draw on the same budget.
+    fn settle_handed(&mut self) {
+        while !self.handed.is_empty() && self.passes_since_drain < self.reviewer_pass_bound {
+            self.rig.pass(&self.stores);
+            self.passes_since_drain += 1;
+            let memory = &self.stores.memory;
+            self.handed.retain(|identity| {
+                !matches!(
+                    memory
+                        .lookup_memory_reviewer_job(reviewer::PROJECT, identity)
+                        .unwrap()
+                        .map(|job| job.state),
+                    Some(MemoryReviewerJobState::Terminal(_))
+                )
+            });
         }
     }
 
@@ -266,30 +315,56 @@ impl Campaign {
             // admissions are stamped with the wall clock, not the drive's logical time.
             self.quota_pressure(i, reviewer::now_ms())?;
         }
-        self.stores.drain(now);
+        self.catch_up_since_sample += self.stores.drain(now);
+        self.settle_handed();
         self.next_step += 1;
         self.sample(i as u32, charges)
     }
 
-    /// Admits one reviewer job. Admissions at `i % 8 == 3` abstain; once
-    /// pending jobs reach the cap, every admission abstains so the next
+    /// Admits one reviewer job. An admission at `i % 8 == 3` is activated
+    /// Ready and handed to the coordinator, which the drain runs until it
+    /// settles; every other one is claimed with its receipt begun and left
+    /// pending, and once pending jobs reach the cap it abstains so the next
     /// reservation still has a slot. A reservation refused by the permanent
     /// receipt quota is R24: counted, recorded as the expected refusal the
     /// report reconciles the count against, with nothing admitted.
     pub fn quota_pressure(&mut self, i: usize, now: i64) -> Result<(), RunError> {
         self.mix.record(Operation::QuotaPressure);
         let incarnation = reviewer::kernel_incarnation(&self.stores.corpus.kernel);
+        // A begun job is staged under its own digest, which the rig's one
+        // bound root never names, so the worker passes over it and never
+        // takes it over, however long its lease runs.
         let digest = format!("{:064x}", i);
-        let begun = match try_begin_job(
-            &self.stores.corpus.kernel,
-            &self.stores.memory,
-            &digest,
-            &incarnation,
-            self.generation,
-            i as u64,
-            now,
-        ) {
-            Ok(begun) => begun,
+        debug_assert_ne!(digest, fault::REVIEWER_DIGEST);
+        let admitted = if i % 8 == 3 {
+            self.rig
+                .feed(&self.stores, i as u64, now)
+                .map(|job| Admitted::Handed(job.causal_identity))
+        } else {
+            try_begin_job(
+                &self.stores.corpus.kernel,
+                &self.stores.memory,
+                &digest,
+                &incarnation,
+                self.generation,
+                i as u64,
+                now,
+            )
+            .map(|begun| Admitted::Begun(Box::new(begun)))
+        };
+        let begun = match admitted {
+            Ok(Admitted::Begun(begun)) => begun,
+            Ok(Admitted::Handed(handed)) => {
+                self.admitted_total += 1;
+                self.handed.push(handed);
+                // At the cap the coordinator settles what it holds now, so
+                // the next reservation still has a slot; the passes count
+                // toward the next quiescence's witness.
+                if self.pending() >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
+                    self.settle_handed();
+                }
+                return Ok(());
+            }
             Err(refusal @ MemoryReviewerJobRefusal::MetadataQuota) => {
                 self.r24_refusals += 1;
                 self.witness.refusals.push(RecordedRefusal {
@@ -304,16 +379,18 @@ impl Campaign {
             Err(refusal) => return Err(RunError::Admission(refusal)),
         };
         self.admitted_total += 1;
-        let pending = self
-            .stores
-            .memory
-            .memory_reviewer_headroom(reviewer::PROJECT)
-            .unwrap()
-            .pending_jobs;
-        if i % 8 == 3 || pending >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
+        if self.pending() >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
             abstain(&self.stores.memory, &incarnation, &begun, now);
         }
         Ok(())
+    }
+
+    fn pending(&self) -> usize {
+        self.stores
+            .memory
+            .memory_reviewer_headroom(reviewer::PROJECT)
+            .unwrap()
+            .pending_jobs
     }
 
     pub fn headroom(&self) -> HeadroomSample {
@@ -342,6 +419,17 @@ impl Campaign {
         }
     }
 
+    /// The progress witness of the quiescent point a sample records: the
+    /// projection's checkpoint and the work run since the last recorded sample.
+    fn progress(&self) -> QuiescenceProgress {
+        QuiescenceProgress {
+            acknowledged_through: acknowledged_through(self.root()),
+            catch_up_episodes: self.catch_up_since_sample,
+            reviewer_passes: self.passes_since_drain,
+            reviewer_settled: self.handed.is_empty(),
+        }
+    }
+
     fn sample_at(&self, step: u32, charges: &Charges) -> ResourceSample {
         sample_root(
             self.root(),
@@ -349,6 +437,7 @@ impl Campaign {
             self.stores.tip(),
             charges,
             self.headroom(),
+            self.progress(),
         )
     }
 }
@@ -377,6 +466,7 @@ fn sample_root(
     commit_seq: i64,
     charges: &Charges,
     headroom: HeadroomSample,
+    progress: QuiescenceProgress,
 ) -> ResourceSample {
     let artifacts = root.join("kernel").join("artifacts");
     let (artifact_objects, artifact_bytes) = walk_objects(&artifacts.join("objects"));
@@ -398,7 +488,19 @@ fn sample_root(
             "SELECT COUNT(*) FROM capture_pins WHERE released_at IS NULL",
         ),
         headroom,
+        progress,
     }
+}
+
+/// The projection's acknowledged checkpoint, read from its file.
+fn acknowledged_through(root: &Path) -> i64 {
+    read_only(&search_file(root))
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM projection_checkpoint",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 impl Campaign {
@@ -411,6 +513,8 @@ impl Campaign {
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         charges.elapsed()?;
         self.ledger.record(sample)?;
+        self.passes_since_drain = 0;
+        self.catch_up_since_sample = 0;
         *self.checkpoints.entry(Cut::AtQuiescence).or_insert(0) += 1;
         Ok(())
     }
@@ -437,8 +541,15 @@ impl Campaign {
             generation,
             next_step,
             checkpoints,
+            rig,
+            handed,
+            reviewer_pass_bound,
+            passes_since_drain,
+            catch_up_since_sample,
         } = self;
         let tip = stores.tip();
+        // The reopen rebuilds the projection in one bootstrap; the work
+        // accumulated since the last recorded sample carries into the next.
         let stores = stores.close().reopen(now);
         assert_eq!(stores.tip(), tip, "a reopen moves no commit");
         (
@@ -453,6 +564,11 @@ impl Campaign {
                 generation,
                 next_step,
                 checkpoints,
+                rig,
+                handed,
+                reviewer_pass_bound,
+                passes_since_drain,
+                catch_up_since_sample,
             },
             Ok(()),
         )
@@ -462,19 +578,24 @@ impl Campaign {
     /// sample from the closed files: quiescent, with nothing transient left.
     pub fn finish(self, charges: &mut Charges) -> Result<Finished, RunError> {
         let headroom = self.headroom();
+        let mut progress = self.progress();
         let Campaign {
             stores,
             mut ledger,
             mix,
             witness,
             mut checkpoints,
+            rig,
             ..
         } = self;
         let step = ledger.samples.last().map_or(0, |s| s.step + 1);
         let root = stores.root().to_path_buf();
         let tip = stores.tip();
+        drop(rig);
         drop(stores.close());
-        let sample = sample_root(&root, step, tip, charges, headroom);
+        // The final witness reads the closed projection's checkpoint.
+        progress.acknowledged_through = acknowledged_through(&root);
+        let sample = sample_root(&root, step, tip, charges, headroom, progress);
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         ledger.record(sample)?;
         *checkpoints.entry(Cut::EndOfRun).or_insert(0) += 1;
@@ -488,6 +609,12 @@ impl Campaign {
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
+    run_with(config, || {})
+}
+
+/// `opened` runs once the campaign's reviewer peer listens and before any
+/// step, so concurrent callers can hold every listener open at once.
+pub fn run_with(config: &Config, opened: impl FnOnce()) -> Result<Run, RunError> {
     let profile = profile(
         config.scale,
         config.messages,
@@ -516,9 +643,15 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let bounds = bounds(&profile, config.messages);
     let root = charges.occupy()?;
     let root_path = root.path().display().to_string();
-    let mut campaign = Campaign::open(root.path(), plan, config.mode);
+    let mut campaign = Campaign::open(root.path(), plan, config.mode, &bounds.progress);
+    let port = campaign.port();
+    opened();
     while campaign.remaining() > 0 {
         campaign.step(&mut charges)?;
+    }
+    let attempts = ReviewerRig::attempts(&campaign.stores);
+    if attempts != 0 {
+        return Err(RunError::ReviewerAttempted { attempts });
     }
     let Finished {
         ledger,
@@ -527,6 +660,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         checkpoints,
     } = campaign.finish(&mut charges)?;
     charges.release(root)?;
+    let cuts = episode_coverage(&witness);
     let mut coverage = witness.coverage;
     let quota = quota();
     if ledger.mode == GrowthMode::NeverRestored {
@@ -571,8 +705,9 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         ledger,
         mix,
         expected_refusals: witness.refusals.clone(),
-        fault_episodes: witness.episodes.len() as u64,
+        episodes: witness.episodes.clone(),
         safety_checks_while_armed: witness.safety_checks,
+        coverage: cuts,
         markers: coverage.fired().iter().map(|m| m.to_string()).collect(),
         envelope: charges.envelope.clone(),
     };
@@ -622,10 +757,35 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             roots: [root_path].into_iter().collect(),
             publish_dirs: [config.publish.display().to_string()].into_iter().collect(),
             cassette_namespaces: BTreeSet::new(),
-            ports: BTreeSet::new(),
+            ports: [port].into_iter().collect(),
         },
         coverage,
     })
+}
+
+/// The episodes' own cuts: each declared episode and its receipts. The fault
+/// shell's witness also declares the fault campaign's observer cuts, which
+/// this campaign's episodes do not all reach.
+fn episode_coverage(witness: &Witness) -> CutCoverage {
+    let declared: BTreeSet<String> = witness.episodes.iter().map(|e| e.id.clone()).collect();
+    let receipted = witness
+        .cuts
+        .receipted
+        .iter()
+        .filter(|(cut, _)| declared.contains(*cut))
+        .map(|(cut, n)| (cut.clone(), *n))
+        .collect();
+    CutCoverage {
+        declared,
+        receipted,
+    }
+}
+
+/// One quota-pressure admission: claimed with its receipt begun, or handed
+/// to the coordinator by causal identity.
+enum Admitted {
+    Begun(Box<reviewer::BegunJob>),
+    Handed(String),
 }
 
 pub const USAGE: &str = "growth --scale <s0|s1|s2> --messages <n> --elapsed-bound-ms <n> \
