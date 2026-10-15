@@ -1827,9 +1827,10 @@ completeness proof run in the `eval-campaign` CI job under
 - `a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_verdict`:
   a stray `artifacts/tmp` entry is seen by the sampler, swept by the reopen's
   `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`;
-  the sample after the restore witnesses the reopened stores (the checkpoint
-  at the tip, no catch-up episode, no pass, settled), while the sample before
-  it recorded the drain's catch-up episodes.
+  the step's sample records its drain's catch-up episodes, and the sample
+  taken right after it with no drain between witnesses none (the checkpoint
+  at the tip, no catch-up episode, no pass, settled), as does the sample
+  after the restore.
 - `passes_run_before_a_restore_reach_the_ledger_whichever_sample_follows`:
   passes accumulated after the last recorded sample and before a restore are
   the `reviewer_passes` of whichever sample follows, the restore's own, the

@@ -3343,14 +3343,15 @@ files are measured: an open commits a new fence epoch and runs startup
 maintenance, so a sample taken after it would not be the history's own.
 `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
-in place and rebuilds the progress witness from the reopened stores (the
-projection's checkpoint, no catch-up episode, the passes run since the last
-recorded sample, settled when nothing is handed), since the reopen's
-bootstrap is the quiescent point the next sample witnesses. Coordinator
-passes accumulate until a sample records them, whichever sample that is: the
-restore's own when the caller takes one, otherwise the next step's or the
-final one, so a cap-triggered settle's passes reach the ledger on every
-path. The ledger then gives no leak verdict.
+in place, and the ledger then gives no leak verdict. Every sample builds its
+progress witness at the moment it is taken: the projection's checkpoint as
+the files hold it, the catch-up episodes and coordinator passes accumulated
+since the last recorded sample, and whether every handed job has settled;
+recording the sample drains both accumulators. So a second sample with no
+drain between witnesses no further work, a sample after a restore witnesses
+the reopen's bootstrap plus whatever ran since the last recorded sample, and
+a cap-triggered settle's passes reach the ledger through whichever sample
+follows, the restore's own, the next step's, or the final one.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
 and the bounds scaled from the message count (with a per-commit store-byte

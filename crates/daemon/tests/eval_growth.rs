@@ -339,16 +339,23 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
         .join("kernel/artifacts/tmp/.artifact-deadbeef-x.tmp");
     std::fs::write(&tmp, b"stray").unwrap();
     live.sample(100, &mut charges).unwrap();
-    assert_eq!(live.ledger.samples.last().unwrap().artifact_tmp_entries, 1);
+    let [stepped, resampled] = &live.ledger.samples[..] else {
+        panic!("{:?}", live.ledger.samples);
+    };
+    assert_eq!(resampled.artifact_tmp_entries, 1);
     assert!(
-        live.ledger
-            .samples
-            .last()
-            .unwrap()
-            .progress
-            .catch_up_episodes
-            > 0,
-        "the drain before the restore ran catch-up episodes"
+        stepped.progress.catch_up_episodes > 0,
+        "the step's drain ran catch-up episodes"
+    );
+    assert_eq!(
+        resampled.progress,
+        QuiescenceProgress {
+            acknowledged_through: resampled.commit_seq,
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: true,
+        },
+        "a sample with no drain since the last one witnesses no further work"
     );
     let (mut live, restored) = live.restore(1_700_000_000_000);
     restored.unwrap();
