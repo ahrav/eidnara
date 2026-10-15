@@ -23,7 +23,7 @@ slug the specification assigns.
 
 ## Index
 
-Every slug the seven residual tickets own. Slugs the specification assigns to other owners are not indexed here.
+Every slug the seven residual tickets own, plus the semantic-evidence slug #592 makes executable. Slugs the specification assigns to other owners are not indexed here.
 
 | Slug | Ticket | Record |
 | --- | --- | --- |
@@ -47,6 +47,7 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | `provider-response-budget-is-cumulative-per-job` | #731 | yes |
 | `attempt-ledger-preserves-cross-generation-ceilings` | #731 | yes |
 | `guarded-request-handoff-precedes-network-polling` | #731 | yes |
+| `material-claims-require-exact-cited-byte-support` | #592 | yes |
 
 ## Records
 
@@ -353,6 +354,22 @@ Confidence: high - [evidence](evidence/guarded-request-handoff-precedes-network-
 Existing check: `memory_reviewer_disclosure::the_network_wait_begins_only_after_both_owners_release`, `a_failed_attempt_whose_terminal_cannot_be_recorded_reports_it`, `nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_cannot_commit`
 Impact: A slow provider would hold the Memory Store, or a per-chunk write would turn every response into a write storm
 Open questions: None.
+
+### material-claims-require-exact-cited-byte-support
+
+Type: safety
+Reachability: test-only - the scripted corpus in `crates/daemon/tests/support/memory_reviewer_corpus.rs` drives the production coordinator, broker, and settlement over real stores; the scoring is the corpus's, applied to the receipt-selected proposal
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_coordinator.rs::corpus_*` runs thirteen cases
+Guarantee: A published proposal's material claim counts as warranted only when a support citation covers a human-declared span of exact source bytes that supports it, or a contradiction citation covers one that contradicts it. Citation validity (the cited alias names its own source's evidence, the evidence was disclosed, the range stays within the source) is counted apart from support, so a valid citation of irrelevant bytes or of a prefix that stops before the claim's bytes scores as valid and unsupported. Independent support counts distinct native origins read from descriptor identity: two spans of one commit count once, and matching text from independent repositories counts twice. A memory target names the subject's exact object id, revision, and last-change commit token.
+Check: `always` - for every published corpus case, the cited support and contradiction ranges equal the case's declared citations, `score` over those ranges equals the declared `Score`, every declared origin group maps to one descriptor origin and distinct groups to distinct origins, every declared limitation appears, and the target equals the subject's unchanged tokens; an abstaining case is unanswerable by declaration and records its declared reason
+Fault/timing angle: none
+Required faults and enabling state: none beyond the corpus's sources: a prefix read `[0,40)`, a span descriptor over the same commit and evidence as its base, a protected source, an injected-instruction source, and an unrelated source
+Confidence: medium - [evidence](evidence/material-claims-require-exact-cited-byte-support.md). Scripted turns make every judgment the corpus's own; the record proves the scoring and delivery discipline, not model usefulness
+Existing check: `crates/daemon/tests/memory_reviewer_coordinator.rs::corpus_supporting_evidence`, `corpus_contradiction`, `corpus_supersession`, `corpus_supersession_cited_by_a_prefix`, `corpus_similar_text_from_independent_repositories`, `corpus_two_forms_of_one_commit`, `corpus_decisive_evidence_outside_initial_context`, `corpus_protected_source`, `corpus_incomplete_search`, `corpus_injected_instructions`, `corpus_warranted_no_change`, `corpus_insufficient_evidence`, `corpus_irrelevant_but_valid_citation`, `the_corpus_covers_every_relation_once`
+Impact: Without the separation, a structurally valid citation would read as support and a scripted success would read as a useful proposal
+Open questions:
+- A production-resolved `retain` over a canonical or promoted memory needs the owner's Remote-eligible decision representation; every corpus subject is a repository-backed commit (needs human input)
 
 ## Relationship map
 

@@ -49,6 +49,7 @@ response budgets).
 | #729 | `status-sanitizer-preserves-inclusive-integer-domain` |
 | #730 | `completed-outcome-pages-have-live-keyset-semantics`, `shared-path-fixture-reaches-selected-readable-proposal`, `reference-only-cli-outcomes-preserve-meaning`, `review-cli-owns-one-replay-free-connection`, `review-cli-validates-byte-exact-inert-payloads`, `review-cli-preserves-shared-kernel-refusal-shapes`, `status-freshness-never-defaults-unknown-to-zero`, `status-counts-preserve-overlapping-ledger-populations` |
 | #731 | `provider-response-budget-is-cumulative-per-job`, `attempt-ledger-preserves-cross-generation-ceilings`, `guarded-request-handoff-precedes-network-polling` |
+| #592 | `material-claims-require-exact-cited-byte-support` |
 
 Slugs the specification assigns to other units (history lineage, lifecycle and
 retention, gate and status truth beyond the two status records above, semantic
