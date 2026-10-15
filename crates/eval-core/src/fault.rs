@@ -15,8 +15,8 @@ use context_core::canonical_json::{
     ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
 };
 
-pub const FAULT_REPORT_SCHEMA: &str = "eval-suite-c-fault-report/v1";
-const FAULT_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-fault-report-result/v1";
+pub const FAULT_REPORT_SCHEMA: &str = "eval-suite-c-fault-report/v2";
+const FAULT_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-fault-report-result/v2";
 /// Every oracle checkpoint a report receipts, reached or not.
 const ORACLE_CUTS: [Cut; 5] = [
     Cut::AfterAtomicTransition,
@@ -169,6 +169,12 @@ pub enum FaultAction {
     /// `IdentitySweep::lose_next_reclaim_reply_for_test`: an identity
     /// reclamation's COMMIT reply is lost after the projection applied it.
     IdentitySweepLoseReclaimReply,
+    /// `storage::after_commit_for_test`: a reviewer receipt's completion
+    /// commits, then a shadow the row reader refuses is planted on the
+    /// connection, so the settlement's read-back fails and its caller sees a
+    /// store error for a completion that applied. The runner drops the
+    /// shadow once the reply is lost, so the fault is consumed.
+    ReviewerCompletionLoseReply,
     ProjectionBatch {
         fault: BatchFaultKind,
     },
@@ -236,7 +242,8 @@ impl FaultAction {
             | Self::BackupBeforeRename
             | Self::KernelCommitFailAfterEvents
             | Self::MessageCleanupLoseWriteReply
-            | Self::IdentitySweepLoseReclaimReply => Heal::Consumed,
+            | Self::IdentitySweepLoseReclaimReply
+            | Self::ReviewerCompletionLoseReply => Heal::Consumed,
             Self::ProcessKill { .. } | Self::CorruptQuiescentFile => Heal::Reopen,
             Self::ExpectedRefusal { refusal } => match refusal {
                 ExpectedRefusal::R11DeletionBearingCatchUp => Heal::Reopen,
@@ -272,7 +279,9 @@ impl FaultAction {
                 fault,
                 ArtifactGcFaultKind::AfterReclaiming | ArtifactGcFaultKind::AfterUnlink
             ),
-            Self::MessageCleanupLoseWriteReply | Self::IdentitySweepLoseReclaimReply => true,
+            Self::MessageCleanupLoseWriteReply
+            | Self::IdentitySweepLoseReclaimReply
+            | Self::ReviewerCompletionLoseReply => true,
             Self::HeldPublication
             | Self::ArtifactIngest { .. }
             | Self::ArtifactDeletion { .. }
@@ -289,7 +298,8 @@ impl FaultAction {
 
     /// The store the action's seam lives in: catch-up and publication write the
     /// search projection, the CAS and the materializer's outbox are the kernel,
-    /// R11 is the projection's refusal and R24 the memory store's. A lock
+    /// a reviewer completion is the memory store's, R11 is the projection's
+    /// refusal and R24 the memory store's. A lock
     /// holder, a kill, and a corrupted file name their own store.
     pub fn family(&self) -> Option<StoreFamily> {
         match self {
@@ -307,6 +317,7 @@ impl FaultAction {
             | Self::KernelRestore { .. }
             | Self::BackupBeforeRename
             | Self::KernelCommitFailAfterEvents => Some(StoreFamily::Kernel),
+            Self::ReviewerCompletionLoseReply => Some(StoreFamily::Memory),
             Self::ExpectedRefusal { refusal } => Some(match refusal {
                 ExpectedRefusal::R11DeletionBearingCatchUp => StoreFamily::SearchProjection,
                 ExpectedRefusal::R24ReceiptQuotaExhausted => StoreFamily::Memory,
@@ -989,7 +1000,7 @@ pub struct LaneProgress {
     pub met_at: Option<u64>,
     pub stalled_at: Option<u64>,
     pub holds_at_bound: bool,
-    pub fresh_commits: u64,
+    pub fresh_work: u64,
     pub blocked: Option<String>,
 }
 
@@ -1033,6 +1044,10 @@ pub enum LivenessRefused {
     },
     NoOutsideCoreFault,
     EmptyHealthyCore,
+    /// Two arms both claim to drive one lane; each lane has one arm.
+    LaneInTwoArms {
+        lane: Lane,
+    },
 }
 
 impl LivenessReport {
@@ -1078,7 +1093,7 @@ impl LivenessReport {
                 .is_some_and(|k| k <= progress.bound && progress.holds_at_bound)
                 && progress.stalled_at.is_none()
                 && progress.blocked.is_none()
-                && progress.fresh_commits > 0;
+                && progress.fresh_work > 0;
             if !met || progress.steps != progress.bound {
                 return Err(LivenessRefused::LivenessUnmet {
                     lane: *lane,
@@ -1143,7 +1158,9 @@ pub struct FaultReport {
     pub effects: EffectLedger,
     pub expected_refusals: Vec<RecordedRefusal>,
     pub safety_checks_while_armed: u64,
-    pub liveness: Option<LivenessReport>,
+    /// One report per liveness arm; together their cores drive every
+    /// [`Lane`] exactly once.
+    pub liveness: Vec<LivenessReport>,
     pub markers: BTreeSet<String>,
     pub envelope: crate::Envelope,
 }
@@ -1444,7 +1461,7 @@ impl FaultReport {
         if self.safety_checks_while_armed == 0 {
             return Err(FaultReportError::SafetyNeverChecked);
         }
-        if let Some(liveness) = &self.liveness {
+        for liveness in &self.liveness {
             for id in &liveness.outside_core {
                 let Some(episode) = self.episodes.iter().find(|e| &e.id == id) else {
                     return Err(FaultReportError::UnknownEpisode {
@@ -1471,6 +1488,23 @@ impl FaultReport {
             liveness
                 .verdict(bounds)
                 .map_err(FaultReportError::Liveness)?;
+        }
+        // Liveness is judged per arm, and every lane is some arm's to drive:
+        // a lane no arm drives has no progress evidence, which is not a pass.
+        let mut driven = BTreeSet::new();
+        for liveness in &self.liveness {
+            for lane in &liveness.core.lanes {
+                if !driven.insert(*lane) {
+                    return Err(FaultReportError::Liveness(LivenessRefused::LaneInTwoArms {
+                        lane: *lane,
+                    }));
+                }
+            }
+        }
+        if let Some(lane) = Lane::ALL.into_iter().find(|lane| !driven.contains(lane)) {
+            return Err(FaultReportError::Liveness(LivenessRefused::LaneNotDriven {
+                lane,
+            }));
         }
         Ok(())
     }

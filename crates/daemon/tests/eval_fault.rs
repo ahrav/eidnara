@@ -199,9 +199,10 @@ fn the_fault_campaign_receipts_every_declared_cut_scenario(campaign: &Campaign) 
         "a safety check ran while every fault that arms on the aging drive's stores was armed: {} < {armed}",
         report.safety_checks_while_armed
     );
-    assert!(
-        report.liveness.is_some(),
-        "liveness is reported as its own mode"
+    assert_eq!(
+        report.liveness.len(),
+        2,
+        "liveness is reported as its own mode, one report per arm"
     );
 
     let published = serde_json::from_slice(&std::fs::read(out.join(REPORT_FILE)).unwrap()).unwrap();
@@ -236,7 +237,7 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
     let run = &campaign.run;
     let effects = &run.report.effects.effects;
     let lost: Vec<_> = effects.iter().filter(|(_, e)| e.reply_lost()).collect();
-    assert_eq!(lost.len(), 3, "{effects:?}");
+    assert_eq!(lost.len(), 4, "{effects:?}");
     for (identity, effect) in &lost {
         assert!(
             effect.read_back,
@@ -278,6 +279,28 @@ fn a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario(campaign
             == 1,
         "the rolled-back publication enters no ledger entry: {effects:?}"
     );
+    let completions: Vec<_> = lost
+        .iter()
+        .filter(|(id, _)| id.starts_with("reviewer_completion:"))
+        .collect();
+    assert_eq!(
+        completions.len(),
+        1,
+        "the after-commit hook loses one reviewer completion reply"
+    );
+    assert_eq!(
+        completions[0].1.outcome,
+        EffectOutcome::Applied,
+        "the completion committed before its read-back failed, and the closed memory store says so"
+    );
+    let completion = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| e.action == FaultAction::ReviewerCompletionLoseReply)
+        .unwrap();
+    assert_eq!(completion.scope.store, StoreFamily::Memory);
+    assert_eq!(completion.heal, Heal::Consumed);
     for cut in ["reconciling", "reconciliation_read"] {
         assert_eq!(
             run.report.coverage.receipted.get(cut),
@@ -462,7 +485,7 @@ fn a_held_publication_admits_once_and_publishes_on_release_scenario(campaign: &C
 
 fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Campaign) {
     let run = &campaign.run;
-    let liveness = run.report.liveness.as_ref().unwrap();
+    let liveness = &run.report.liveness[0];
     liveness.verdict(run.profile.liveness()).unwrap();
     assert_eq!(
         liveness.outside_core.len(),
@@ -476,7 +499,7 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
             .core
             .lanes
             .contains(&eval_core::Lane::ReviewerCoordinatorPasses),
-        "the reviewer coordinator is outside this campaign's core"
+        "the reviewer coordinator is the reviewer arm's lane"
     );
     for (lane, progress) in &liveness.lanes {
         assert_eq!(
@@ -496,7 +519,7 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
         assert!(progress.stalled_at.is_none(), "{lane:?}: {progress:?}");
         assert!(progress.blocked.is_none(), "{lane:?}: {progress:?}");
         assert!(
-            progress.fresh_commits >= 8,
+            progress.fresh_work >= 8,
             "{lane:?} was fed fresh kernel work inside its window: {progress:?}"
         );
     }
@@ -513,10 +536,50 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
     assert!(run.report.safety_checks_while_armed > run.profile.liveness().catch_up_episodes);
 }
 
-const SCENARIOS: [fn(&Campaign); 10] = [
+fn the_reviewer_arm_settles_every_fed_job_within_its_bound_scenario(campaign: &Campaign) {
+    let run = &campaign.run;
+    let arm = &run.report.liveness[1];
+    arm.verdict(run.profile.liveness()).unwrap();
+    assert_eq!(
+        arm.core.lanes,
+        BTreeSet::from([eval_core::Lane::ReviewerCoordinatorPasses])
+    );
+    assert_eq!(
+        arm.core.families,
+        BTreeSet::from([StoreFamily::Kernel, StoreFamily::Memory]),
+        "the worker reads the kernel and settles through the memory store"
+    );
+    let lock = run
+        .report
+        .episodes
+        .iter()
+        .find(|e| arm.outside_core.contains(&e.id))
+        .unwrap();
+    assert_eq!(lock.action, FaultAction::ExternalLockHolder);
+    assert_eq!(lock.scope.store, StoreFamily::SearchProjection);
+    assert_eq!(arm.armed_at_bound, arm.outside_core, "armed through the bound");
+    let progress = &arm.lanes[&eval_core::Lane::ReviewerCoordinatorPasses];
+    let bound = run.profile.liveness().reviewer_coordinator_passes;
+    assert_eq!(progress.bound, bound);
+    assert_eq!(progress.steps, bound);
+    assert_eq!(
+        progress.met_at,
+        Some(1),
+        "the first pass settles the backlog and the job fed with it"
+    );
+    assert!(progress.holds_at_bound && progress.stalled_at.is_none());
+    assert_eq!(
+        progress.fresh_work, bound,
+        "one fresh job is activated per step"
+    );
+    assert!(arm.permanent_stalls.is_empty());
+}
+
+const SCENARIOS: [fn(&Campaign); 11] = [
     a_test_binary_child_killed_at_a_named_cut_recovers_scenario,
     a_held_publication_admits_once_and_publishes_on_release_scenario,
     liveness_bounds_are_met_with_outside_core_faults_armed_scenario,
+    the_reviewer_arm_settles_every_fed_job_within_its_bound_scenario,
     the_fault_campaign_receipts_every_declared_cut_scenario,
     a_lost_reply_stays_unknown_until_readback_at_after_recovery_scenario,
     deletion_bearing_catch_up_is_an_expected_refusal_and_a_permanent_stall_scenario,
@@ -608,6 +671,15 @@ fn a_held_publication_admits_once_and_publishes_on_release() {
 fn liveness_bounds_are_met_with_outside_core_faults_armed() {
     budget_or_panic();
     liveness_bounds_are_met_with_outside_core_faults_armed_scenario(&campaign(
+        &mut Coverage::default(),
+    ));
+}
+
+#[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
+fn the_reviewer_arm_settles_every_fed_job_within_its_bound() {
+    budget_or_panic();
+    the_reviewer_arm_settles_every_fed_job_within_its_bound_scenario(&campaign(
         &mut Coverage::default(),
     ));
 }
@@ -771,6 +843,7 @@ fn fault_markers_each_name_a_scenario_here() {
         "a_test_binary_child_killed_at_a_named_cut_recovers",
         "liveness_bounds_are_met_with_outside_core_faults_armed",
         "a_held_publication_admits_once_and_publishes_on_release",
+        "the_reviewer_arm_settles_every_fed_job_within_its_bound",
     ]
     .into_iter()
     .collect();
@@ -782,7 +855,7 @@ fn fault_markers_each_name_a_scenario_here() {
             marker.name
         );
     }
-    assert_eq!(mine.len(), 10);
+    assert_eq!(mine.len(), 11);
     let _ = &Expected::Exactly {
         state: eval_core::EffectState::Applied,
     };

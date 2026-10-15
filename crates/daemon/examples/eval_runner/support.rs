@@ -11,3 +11,5 @@ pub mod eval_surface;
 pub mod memory_reviewer_publish;
 #[path = "../../tests/support/publish.rs"]
 pub mod publish;
+#[path = "../../tests/support/tls_peer.rs"]
+pub mod tls_peer;

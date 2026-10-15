@@ -9,16 +9,18 @@ check; a missing entry is `IncompleteCoverage`, not `Pass`."
 - `crates/eval-core/src/fault.rs` `FaultReport::safety_checks_while_armed`;
   `FaultReport::validate` refuses `SafetyNeverChecked` when it is zero.
 - `crates/eval-core/src/fault.rs` `LivenessReport` and its `verdict`;
-  `FaultReport::validate` evaluates it only `if let Some(liveness)`, and
-  `crates/eval-core/tests/fault.rs` validates a report with `liveness: None`,
-  so the progress member is asserted by the drive rather than refused by the
-  report.
+  `FaultReport::validate` judges every arm in `liveness` and refuses
+  `LaneNotDriven` for a lane no arm drives and `LaneInTwoArms` for a lane two
+  arms claim; `crates/eval-core/tests/fault.rs`
+  `a_fault_report_round_trips_and_refuses_what_it_cannot_prove` refuses an
+  empty `liveness`, a report missing the reviewer arm, and a lane driven twice.
 - `crates/eval-core/src/markers.rs` `Coverage::complete` refuses
   `Incomplete { missing }`.
 - `crates/eval-core/tests/fault.rs`
   `a_missing_receipt_is_incomplete_coverage_not_pass`.
 - `crates/daemon/tests/eval_fault.rs`
-  `liveness_bounds_are_met_with_outside_core_faults_armed`.
+  `liveness_bounds_are_met_with_outside_core_faults_armed` and
+  `the_reviewer_arm_settles_every_fed_job_within_its_bound`.
 - `crates/daemon/examples/eval_runner/fault.rs`
   `Witness::safety_check_while_armed` counts checks while armed;
   `Witness::safety_check` after an episode does not.
