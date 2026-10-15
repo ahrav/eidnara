@@ -12,9 +12,9 @@ use daemon::memory_reviewer::selection::{
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass};
 use kernel::{
-    ArtifactIngestRequest, CommitIntent, DecisionPayload, DecisionSpec, Dimension, DomainSpec,
-    KernelStore, ProjectScope, ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceDescriptorPolicy, SourceDescriptorRequest,
+    CommitIntent, DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, ProjectScope,
+    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
+    SourceDescriptorRequest,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
@@ -168,16 +168,15 @@ impl Fixture {
         self.publish_derived_over(key, class, identity_field, representation, None)
     }
 
-    /// [`Self::publish_derived`] over evidence carrying `provenance`.
     fn publish_derived_over(
         &self,
         key: &str,
         class: &str,
         identity_field: &str,
         representation: &str,
-        provenance: Option<kernel::RepositoryProvenance>,
+        repository_id: Option<&str>,
     ) -> String {
-        let provenance_backed = provenance.is_some();
+        let repository_backed = repository_id.is_some();
         let object = format!("decision-{key}");
         self.store
             .commit(intent(&format!("decision-{key}")), |envelope| {
@@ -215,26 +214,19 @@ impl Fixture {
                 Ok(String::new())
             })
             .unwrap();
-        let handle = self
-            .store
-            .ingest_artifact(ArtifactIngestRequest {
+        let handle = support::host_ingest::ingest(
+            &self.store,
+            support::host_ingest::HostEvidence {
                 intent: intent(&format!("evidence-{key}")),
-                payload: format!("claim {key}").into_bytes(),
+                payload: &format!("claim {key}"),
                 evidence_id: format!("evidence-{key}"),
                 object_id: format!("evidence-object-{key}"),
-                object_kind: "evidence".to_string(),
-                domain_id: DOMAIN.to_string(),
-                source_kind: "conversation".to_string(),
+                domain_id: DOMAIN,
+                source_kind: "conversation",
                 source_id: format!("src/{key}"),
-                source_revision: 1,
-                media_type: "text/plain".to_string(),
-                retention_class: "canonical".to_string(),
-                retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance,
-            })
-            .unwrap();
+                repository_id,
+            },
+        );
         let mut published = None;
         self.store
             .commit(intent(&format!("descriptor-{key}")), |envelope| {
@@ -259,7 +251,7 @@ impl Fixture {
                     .unwrap();
                 // Eligibility judges the descriptor through the reads that
                 // serve it, so the fixture admits the descriptor itself.
-                if provenance_backed {
+                if repository_backed {
                     envelope.record_admission(kernel::AdmissionRequest {
                         candidate_id: None,
                         subject_object_id: Some(outcome.object_id.clone()),
@@ -455,37 +447,26 @@ fn classifier(firing: &str) -> ProducerBinding {
     }
 }
 
-/// Repository provenance for `key`'s evidence, so the remote fold admits it.
-fn repository(key: &str) -> kernel::RepositoryProvenance {
-    kernel::RepositoryProvenance {
-        repository_id: format!("repo-{key}"),
-        revision: "0".repeat(40),
-    }
+fn repository(key: &str) -> String {
+    format!("repo-{key}")
 }
 
 impl Fixture {
-    /// Ingests one evidence row under `key` with repository provenance; returns its evidence id.
     fn evidence(&self, key: &str) -> String {
-        self.store
-            .ingest_artifact(ArtifactIngestRequest {
+        support::host_ingest::ingest(
+            &self.store,
+            support::host_ingest::HostEvidence {
                 intent: intent(&format!("linked-{key}")),
-                payload: format!("linked {key}").into_bytes(),
+                payload: &format!("linked {key}"),
                 evidence_id: format!("linked-{key}"),
                 object_id: format!("linked-object-{key}"),
-                object_kind: "evidence".to_string(),
-                domain_id: DOMAIN.to_string(),
-                source_kind: "repo".to_string(),
+                domain_id: DOMAIN,
+                source_kind: "repo",
                 source_id: format!("src/linked-{key}"),
-                source_revision: 1,
-                media_type: "text/plain".to_string(),
-                retention_class: "canonical".to_string(),
-                retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: Some(repository(key)),
-            })
-            .unwrap()
-            .evidence_id
+                repository_id: Some(&repository(key)),
+            },
+        )
+        .evidence_id
     }
 
     /// Records an event on `key`'s decision that cites `evidence`.
@@ -622,7 +603,7 @@ fn newly_linked_evidence_after_an_abstention_reconsiders_the_target_once_at_its_
         "canonical_claims",
         "object_id",
         "decision_summary",
-        Some(repository("t")),
+        Some(&repository("t")),
     );
     let first = fixture.select(MEMORY_CLASSES, None);
     assert_eq!(
@@ -641,7 +622,7 @@ fn newly_linked_evidence_after_an_abstention_reconsiders_the_target_once_at_its_
         "promoted_memory",
         "decision_object_id",
         "summary",
-        Some(repository("u")),
+        Some(&repository("u")),
     );
     let unrelated_evidence = fixture.evidence("unrelated");
     fixture.link("u", &unrelated_evidence);
@@ -699,7 +680,7 @@ fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
         "canonical_claims",
         "object_id",
         "decision_summary",
-        Some(repository("t")),
+        Some(&repository("t")),
     );
     let cited: Vec<String> = (0..=MAX_LINKED_EVIDENCE.get())
         .map(|n| {
@@ -735,13 +716,13 @@ fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
 #[test]
 fn a_batch_pairs_each_target_with_its_own_linked_evidence() {
     let fixture = Fixture::open();
-    let derived = |key: &str, provenance: Option<kernel::RepositoryProvenance>| {
+    let derived = |key: &str, repository_id: Option<&str>| {
         let object_id = fixture.publish_derived_over(
             key,
             "canonical_claims",
             "object_id",
             "decision_summary",
-            provenance,
+            repository_id,
         );
         let evidence = fixture.evidence(&format!("for-{}", &key[..2]));
         fixture.link(key, &evidence);
@@ -749,13 +730,13 @@ fn a_batch_pairs_each_target_with_its_own_linked_evidence() {
     };
     let permitted: BTreeMap<String, String> = ["p0", "p1", "p2"]
         .into_iter()
-        .map(|key| (derived(key, Some(repository(key))), key.to_string()))
+        .map(|key| (derived(key, Some(&repository(key))), key.to_string()))
         .collect();
     let denied: Vec<String> = ["d0", "d1", "d2"]
         .into_iter()
         .map(|key| derived(key, None))
         .collect();
-    let unbindable = derived(&format!("u{}", "u".repeat(299)), Some(repository("u")));
+    let unbindable = derived(&format!("u{}", "u".repeat(299)), Some(&repository("u")));
     assert!(
         denied
             .iter()
