@@ -3104,3 +3104,57 @@ fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
         );
     }
 }
+
+/// A live settlement that finds its proposal already sealed by an earlier attempt, with retention not yet moved, adopts the byte-identical row and transfers retention on its own; a sealed row with other bytes conflicts and moves nothing.
+#[test]
+fn a_sealed_untransferred_row_is_adopted_and_transferred_by_a_live_settlement() {
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let proposal = fixture.bound_proposal(&[&evidence]);
+    let reference = fixture.stage_only(&broker, &proposal);
+    let settled = fixture
+        .settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        )
+        .unwrap();
+    assert_eq!(settled, Settled::Published(reference.clone()));
+    assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
+    let review = fixture
+        .store
+        .lookup_review_hold(
+            &fixture.review_hold_binding(1, &reference.candidate_id),
+            fixture.now + 6,
+        )
+        .unwrap()
+        .expect("the settlement transferred retention to the review hold");
+    assert_eq!(review.expires_at, fixture.now + 5 + REVIEW_EXPIRY_MAX_MS);
+
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let mut other = fixture.bound_proposal(&[&evidence]);
+    other.new_text = Some("other bytes at the same identity".to_string());
+    let sealed = fixture.stage_only(&broker, &other);
+    assert_eq!(
+        fixture.settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        ),
+        Err(SettlementError::ConflictingContent)
+    );
+    assert_eq!(fixture.receipt().terminal, None);
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(
+                &fixture.review_hold_binding(1, &sealed.candidate_id),
+                fixture.now + 6,
+            )
+            .unwrap(),
+        None
+    );
+}
