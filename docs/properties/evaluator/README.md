@@ -1756,12 +1756,15 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   (`UnregisteredMarker`), an integer past the canonical safe range on
   serialize or parse (`NotCanonical`), a declared fault cut with no receipt
   (`Coverage(IncompleteCoverage)`), fault episodes with no declared cut
-  (`FaultedWithoutCuts`), an episode whose id is not a declared cut
-  (`Coverage(UndeclaredCut)`), an episode triggered at a step no sample
-  records (`EpisodeNotSampled`), a declared cut that is not a listed episode
-  (`CutNotAnEpisode`), a duplicate or malformed episode (`Episode`), a ledger
-  in which no sample's witness records a reviewer pass
-  (`ReviewerNeverPassed`), and a v1 report refuse.
+  (`FaultedWithoutCuts`), a declared cut that is not a listed episode
+  (`CutNotAnEpisode`), and a v1 report refuse.
+- `declared_cuts_name_the_episodes_that_ran_not_merely_their_count`: a
+  receipted cut set of the right size whose cut names no listed episode
+  refuses (`Coverage(UndeclaredCut)` for the episode left undeclared), as do
+  an episode triggered at a step no sample records (`EpisodeNotSampled`) and
+  a duplicate episode id (`Episode(DuplicateEpisode)`).
+- `a_report_whose_ledger_never_ran_a_reviewer_pass_is_refused`: with every
+  sample's `reviewer_passes` zero, `validate` refuses `ReviewerNeverPassed`.
 
 Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
 default shards run the never-restored campaign once with every scenario
