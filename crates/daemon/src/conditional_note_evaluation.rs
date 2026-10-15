@@ -123,24 +123,22 @@ fn parse_field(token: &str, min: u64, max: u64, dow_field: bool) -> Option<u64> 
 /// `parse_cron` accepts exactly five numeric fields: `minute hour dom month dow`.
 /// `parse_cron` rejects empty or whitespace-only input.
 fn parse_cron(expression: &str) -> Option<ParsedCron> {
-    let trimmed = expression.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    if tokens.len() != 5 {
+    let mut tokens = expression.split_whitespace();
+    let mut token = || tokens.next();
+    let (minute, hour, dom, month, dow) = (token()?, token()?, token()?, token()?, token()?);
+    if tokens.next().is_some() {
         return None;
     }
     Some(ParsedCron {
-        minute: parse_field(tokens[0], 0, 59, false)?,
-        hour: parse_field(tokens[1], 0, 23, false)?,
-        dom: parse_field(tokens[2], 1, 31, false)?,
-        month: parse_field(tokens[3], 1, 12, false)?,
-        dow: parse_field(tokens[4], 0, 7, true)?,
+        minute: parse_field(minute, 0, 59, false)?,
+        hour: parse_field(hour, 0, 23, false)?,
+        dom: parse_field(dom, 1, 31, false)?,
+        month: parse_field(month, 1, 12, false)?,
+        dow: parse_field(dow, 0, 7, true)?,
         // Vixie cron sets DOM_STAR/DOW_STAR from a leading `*`, so `*/2` and `*,5`
         // are unrestricted like a bare `*`.
-        dom_restricted: !tokens[2].starts_with('*'),
-        dow_restricted: !tokens[4].starts_with('*'),
+        dom_restricted: !dom.starts_with('*'),
+        dow_restricted: !dow.starts_with('*'),
     })
 }
 
@@ -2241,6 +2239,23 @@ mod tests {
             next_due_at_ms("0 0 1,8 * 1", monday_2026_09_07, MAX_SEARCH_MS, &utc),
             Some(tuesday_2026_09_08)
         );
+    }
+
+    #[test]
+    fn a_cron_needs_exactly_five_whitespace_separated_fields() {
+        for valid in ["* * * * *", "  0 9 * * 1-5 ", "0\t9\n*  *\u{a0}1"] {
+            assert!(is_valid_conditional_note_cron(valid), "{valid:?}");
+        }
+        for invalid in [
+            "",
+            "   ",
+            "* * * *",
+            "* * * * * *",
+            "* * * * ,",
+            "* * * *  ",
+        ] {
+            assert!(!is_valid_conditional_note_cron(invalid), "{invalid:?}");
+        }
     }
 
     fn compiled_state(now: i64) -> ConditionalNoteLifecycleState {
