@@ -17,15 +17,18 @@ privilege rules that a project tier must never bypass.
 - [`effective_config`][eff-cfg] locks the handler's single `ConfigCache` and
   calls [`effective_for_project`][eff-proj], which resolves the user path
   from `XDG_CONFIG_HOME` and `HOME` per call and delegates to
-  [`effective_with_warnings`][eff-warn].
-- [`effective_with_warnings`][eff-warn] calls [`read_tier_cached`][tier-cached]
-  twice (one `fs::metadata` each; a same-path, same-mtime, no-warning hit
-  clones the cached `Value`), runs [`merge_tiers_with_warnings`][merge],
-  calls [`resolve_user_guidance_override`][guidance] (a `metadata` and a full
+  [`effective_from_sources`][eff-warn].
+- At the baseline, `effective_with_warnings` called
+  [`read_tier_cached`][tier-cached] twice (one `fs::metadata` each; a
+  same-path, same-mtime, no-warning hit clones the cached `Value`), ran
+  [`merge_tiers_with_warnings`][merge], called
+  [`resolve_user_guidance_override`][guidance] (a `metadata` and a full
   bounded read of the override file on every call, no mtime gate), and
-  returns `self.effective.clone()` at [`:288`][eff-clone]. Its doc at
-  [`:266-267`][eff-warn-doc] says tier read failures are reported on every
-  load so a long-running daemon keeps surfacing them.
+  returned a clone of the merged config on every call. At HEAD that work is
+  the memo miss path of [`effective_from_sources`][eff-warn], which returns
+  a new `Arc` at [`:634`][eff-clone]. Its doc at [`:510-514`][eff-warn-doc]
+  says tier read failures are reported on every load so a long-running
+  daemon keeps surfacing them.
 - One [`ConfigCache`][cache-struct] holds one `user` and one `project`
   [`TierConfig`][tier-struct] (path, mtime, value, warning). A different
   `project_root` changes `path`, so two roots alternating re-read the file
@@ -35,11 +38,11 @@ privilege rules that a project tier must never bypass.
   project value only when it tightens the user value.
 - Per-pass callers: [`maybe_spawn_reattach`][call-reattach],
   [`prepare_history_summarizer_fire`][call-fire] after the state load, pending-rewrite,
-  and live-history_summarizer early returns ([`:5084-5120`][fire-early]), and the
-  wrapup path at [`:5439`][call-wrapup]. [`bind`][call-bind] freezes a copy
-  into `SessionBinding`, whose doc at [`:230-234`][binding-doc] says config
+  and live-history_summarizer early returns ([`:5462-5549`][fire-early]), and the
+  wrapup path at [`:5956`][call-wrapup]. [`bind`][call-bind] freezes a copy
+  into `SessionBinding`, whose doc at [`:248-249`][binding-doc] says config
   can change while the route stays open.
-- The mtime test at [`:2165-2202`][t-mtime] rewrites the user file with the
+- The mtime test at [`:2622-2660`][t-mtime] rewrites the user file with the
   original mtime restored and asserts the old value is returned, then
   asserts a new mtime reloads; that is the staleness contract at HEAD.
 
@@ -70,18 +73,18 @@ next pass; bind two project roots and alternate them; assert the bound
 mtime cache and three privilege tests; none covers override staleness or two
 roots sharing one cache.
 
-Use passes that reach the `prepare_history_summarizer_fire` call at `lib.rs:5051`:
-not a subagent pass (`:8234`), state load succeeds, no `pending_rewrite`, and
-no live history_summarizer completion pending (`:5013-5051`); the check is on each
-call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
-`:4557-4560`) bypass the cache and cannot exercise this record.
+Use passes that reach the `prepare_history_summarizer_fire` call at `lib.rs:5550`:
+not a subagent pass (`:9067`), state load succeeds, no `pending_rewrite`, and
+no live history_summarizer completion pending (`:5462-5549`); the check is on each
+call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
+`:4881-4884`) bypass the cache and cannot exercise this record.
 
 ## Investigation log
 
 ### Q: Keep reporting tier read failures on every load?
 
-- Sources examined: [`:266-267`][eff-warn-doc], [`:268-288`][eff-warn],
-  [`read_tier_cached:368-398`][tier-cached].
+- Sources examined: [`:510-514`][eff-warn-doc], [`:515-636`][eff-warn],
+  [`read_tier_cached:715-746`][tier-cached].
 - Findings: The cache bypasses its hit path when `warning` is set, so a
   failing file is re-read and re-warned on every call. The doc states this as
   intent. A merged cache that stores the result silences the repeat unless it
@@ -91,8 +94,8 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 
 ### Q: Should the history_summarizer read the bind-frozen config instead?
 
-- Sources examined: [`:5122`][call-fire], [`:11902-11903`][call-bind],
-  [`:230-234`][binding-doc].
+- Sources examined: [`:5550`][call-fire], [`:13073-13074`][call-bind],
+  [`:248-249`][binding-doc].
 - Findings: The binding doc freezes the fallback history budget because
   config can change while the route stays open; the history_summarizer deliberately
   reads a fresh merge per pass. Switching it to the frozen copy removes the
@@ -128,7 +131,8 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
   `MERGED_CONFIG_RETAINED_BYTES_BOUND` (4 MiB), added to
   `DECLARED_RETAINED_RESIDENT_BYTES`. The estimate counts each vector at its
   capacity, because deduplicating the model chain shortens it in place and
-  keeps its buffer.
+  keeps its buffer, and charges each `cache_ttl` map entry three inline
+  entry sizes for its share of a partially filled B-tree node.
 - Payoff: An uncommitted probe timed `effective_with_warnings` on one host,
   release build, `taskset -c 5`, with a user tier naming a 4 KiB guidance
   override and a small project tier, 200 samples of 50 calls, three runs.
@@ -142,25 +146,25 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
   per-pass merge stays, served from the memo while every source identity
   matches.
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4608-L4617
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L230-L234
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4847
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5084-L5120
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5122
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5439
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11902-L11903
-[tier-struct]: ../../../../../crates/daemon/src/config.rs#L222-L228
-[cache-struct]: ../../../../../crates/daemon/src/config.rs#L230-L235
-[eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
-[eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
-[eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288
-[eff-clone]: ../../../../../crates/daemon/src/config.rs#L288
-[tier-cached]: ../../../../../crates/daemon/src/config.rs#L368-L398
-[guidance]: ../../../../../crates/daemon/src/config.rs#L414-L496
-[merge]: ../../../../../crates/daemon/src/config.rs#L716
-[raise-only]: ../../../../../crates/daemon/src/config.rs#L740
-[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2165-L2202
-[memo-head]: ../../../../../crates/daemon/src/config.rs#L366-L460
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4880-L4889
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L248-L249
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L5141
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5462-L5549
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5550
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5956
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L13073-L13074
+[tier-struct]: ../../../../../crates/daemon/src/config.rs#L256-L262
+[cache-struct]: ../../../../../crates/daemon/src/config.rs#L265-L271
+[eff-proj]: ../../../../../crates/daemon/src/config.rs#L466-L476
+[eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L510-L514
+[eff-warn]: ../../../../../crates/daemon/src/config.rs#L515-L636
+[eff-clone]: ../../../../../crates/daemon/src/config.rs#L634
+[tier-cached]: ../../../../../crates/daemon/src/config.rs#L715-L746
+[guidance]: ../../../../../crates/daemon/src/config.rs#L779-L836
+[merge]: ../../../../../crates/daemon/src/config.rs#L1063
+[raise-only]: ../../../../../crates/daemon/src/config.rs#L863-L865
+[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2622-L2660
+[memo-head]: ../../../../../crates/daemon/src/config.rs#L366-L463
 [identity-head]: ../../../../../crates/daemon/src/config.rs#L308-L364
-[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L507-L633
-[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2674-L2935
+[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L510-L636
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2677-L2969

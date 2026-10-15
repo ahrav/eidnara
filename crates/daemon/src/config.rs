@@ -392,6 +392,7 @@ impl MergedConfig {
     /// Bytes the memo holds, counting each heap allocation at its capacity
     /// rounded up to 16 bytes plus 16 bytes of allocator overhead.
     fn retained_bytes(&self) -> u64 {
+        const MAP_ENTRY_NODE_BYTES: usize = 3 * std::mem::size_of::<(String, String)>();
         fn allocation(capacity: usize) -> usize {
             if capacity == 0 {
                 0
@@ -448,7 +449,9 @@ impl MergedConfig {
             + allocation(cache_ttl.capacity())
             + cache_ttl_by_model
                 .iter()
-                .map(|(model, ttl)| allocation(model.capacity()) + allocation(ttl.capacity()) + 64)
+                .map(|(model, ttl)| {
+                    allocation(model.capacity()) + allocation(ttl.capacity()) + MAP_ENTRY_NODE_BYTES
+                })
                 .sum::<usize>()
             + match admission {
                 ConfigAdmission::Admitted => 0,
@@ -2874,6 +2877,37 @@ mod tests {
         assert!(
             cache.merged.is_none(),
             "the estimate counts the chain's retained capacity"
+        );
+    }
+
+    #[test]
+    fn a_model_ttl_map_is_charged_its_node_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let digits: Vec<char> = ('a'..='z').chain('0'..='9').collect();
+        let models = (0..30_000).map(|index: usize| {
+            let key: String = [index / 1296, index / 36 % 36, index % 36]
+                .into_iter()
+                .map(|digit| digits[digit])
+                .collect();
+            (key, serde_json::Value::from("1"))
+        });
+        let text = serde_json::json!({
+            "cache_ttl": serde_json::Value::Object(models.collect())
+        })
+        .to_string();
+        assert!(text.len() as u64 <= MAX_CONFIG_TIER_BYTES);
+        std::fs::write(&user, text).unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        let (effective, warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(effective.cache_ttl_by_model.len(), 30_000);
+        assert!(
+            cache.merged.is_none(),
+            "a map whose nodes retain more than the bound is served unmemoized"
         );
     }
 
