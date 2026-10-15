@@ -196,25 +196,15 @@ impl CronZone for chrono::FixedOffset {
 }
 
 impl CronZone for chrono::Local {
-    /// chrono reads the zone from `/etc/localtime` when `TZ` is unset and from
-    /// the zone file `TZ` names when one exists; otherwise it parses `TZ` as a
-    /// POSIX rule, which may place offset changes minutes apart.
     fn offset_changes(&self) -> OffsetChanges {
-        let Some(value) = std::env::var_os("TZ") else {
-            return OffsetChanges::HourApart;
-        };
-        let name = std::path::Path::new(&value);
-        let name = name.strip_prefix(":").unwrap_or(name);
-        let zone_file = if name.is_absolute() {
-            name.to_path_buf()
-        } else {
-            std::path::Path::new("/usr/share/zoneinfo").join(name)
-        };
-        if !name.as_os_str().is_empty() && zone_file.is_file() {
-            OffsetChanges::HourApart
-        } else {
-            OffsetChanges::Unbounded
-        }
+        local_offset_changes(std::env::var_os("TZ").as_deref())
+    }
+}
+
+fn local_offset_changes(tz: Option<&std::ffi::OsStr>) -> OffsetChanges {
+    match tz {
+        Some(value) if value.as_encoded_bytes().contains(&b',') => OffsetChanges::Unbounded,
+        _ => OffsetChanges::HourApart,
     }
 }
 
@@ -1977,6 +1967,33 @@ mod tests {
             next_occurrence(&cron, after_ms, DAY_MS, &zone(OffsetChanges::HourApart)),
             found
         );
+    }
+
+    #[test]
+    fn a_local_tz_rule_with_transition_dates_is_searched_minute_by_minute() {
+        use std::ffi::OsStr;
+        for rule in ["STD0DST,J60/1:10,J60/2:40", "EST5EDT,M3.2.0,M11.1.0"] {
+            assert_eq!(
+                local_offset_changes(Some(OsStr::new(rule))),
+                OffsetChanges::Unbounded,
+                "{rule}"
+            );
+        }
+        for zone in [
+            "",
+            "UTC",
+            "UTC0",
+            "America/New_York",
+            ":Europe/London",
+            "/etc/localtime",
+        ] {
+            assert_eq!(
+                local_offset_changes(Some(OsStr::new(zone))),
+                OffsetChanges::HourApart,
+                "{zone}"
+            );
+        }
+        assert_eq!(local_offset_changes(None), OffsetChanges::HourApart);
     }
 
     #[test]
