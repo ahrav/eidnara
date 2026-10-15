@@ -339,6 +339,21 @@ pub(crate) fn fence_project_claims_tx(
     Ok(fenced)
 }
 
+/// Nulls the responses of terminal claims past their completion-replay window; `idx_note_eval_claims_unredacted` holds exactly the rows it can change.
+const REDACT_TERMINAL_RESPONSES_SQL: &str = "UPDATE note_eval_claims SET terminal_response = NULL
+      WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
+        AND terminal_response IS NOT NULL
+        AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3";
+
+/// Terminal claims past their retention, read by age through `idx_note_eval_claims_terminal_age`.
+const EXPIRED_TERMINAL_CLAIMS_SQL: &str = "SELECT claim_id FROM note_eval_claims
+      WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
+        AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3";
+
+const DELETE_EXPIRED_TERMINAL_CLAIMS_SQL: &str = "DELETE FROM note_eval_claims
+      WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
+        AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3";
+
 /// Ledger garbage collection: expire overdue active claims, tombstone expired
 /// `no_work` decisions (`decision = ''` keeps replay identity), then null the
 /// response of terminal claims once their completion-replay window has passed
@@ -367,17 +382,12 @@ fn collect_ledgers_tx(
           WHERE project = ?1 AND task_kind = ?2 AND decision <> '' AND expires_at <= ?3",
     )?
     .execute(params![project, kind.task_kind, now_ms])?;
-    tx.prepare_cached(
-        "UPDATE note_eval_claims SET terminal_response = NULL
-          WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
-            AND terminal_response IS NOT NULL
-            AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3",
-    )?
-    .execute(params![
-        project,
-        kind.task_kind,
-        now_ms - kind.response_redact_ms
-    ])?;
+    tx.prepare_cached(REDACT_TERMINAL_RESPONSES_SQL)?
+        .execute(params![
+            project,
+            kind.task_kind,
+            now_ms - kind.response_redact_ms
+        ])?;
     // Reclaim rows, not just columns. Blanking `decision`/`terminal_response`
     // stops a row counting toward the cap but leaves it on disk forever, so both
     // ledgers would grow without bound - one acquisition row per poll, including
@@ -415,11 +425,7 @@ fn collect_ledgers_tx(
         now_ms - kind.no_work_retention_ms
     ])?;
     let expired_claims = {
-        let mut statement = tx.prepare_cached(
-            "SELECT claim_id FROM note_eval_claims
-              WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
-                AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3",
-        )?;
+        let mut statement = tx.prepare_cached(EXPIRED_TERMINAL_CLAIMS_SQL)?;
 
         statement
             .query_map(
@@ -437,16 +443,12 @@ fn collect_ledgers_tx(
             &claim_owner_key(kind, &claim_id),
         )?;
     }
-    tx.prepare_cached(
-        "DELETE FROM note_eval_claims
-          WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
-            AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3",
-    )?
-    .execute(params![
-        project,
-        kind.task_kind,
-        now_ms - kind.terminal_retention_ms
-    ])?;
+    tx.prepare_cached(DELETE_EXPIRED_TERMINAL_CLAIMS_SQL)?
+        .execute(params![
+            project,
+            kind.task_kind,
+            now_ms - kind.terminal_retention_ms
+        ])?;
     Ok(())
 }
 
@@ -1048,5 +1050,51 @@ impl MemoryStore {
             )?;
             Ok(WriteDisposition::Applied(LeaseAbandonOutcome::Abandoned))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DELETE_EXPIRED_TERMINAL_CLAIMS_SQL, EXPIRED_TERMINAL_CLAIMS_SQL,
+        REDACT_TERMINAL_RESPONSES_SQL,
+    };
+    use crate::MemoryStore;
+
+    /// Ledger collection runs on every acquisition, so its terminal-claim reads seek by age and touch only the claims they redact or delete.
+    #[test]
+    fn ledger_collection_seeks_terminal_claims_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "eidnara-task-lease-plan");
+        for (sql, index) in [
+            (
+                REDACT_TERMINAL_RESPONSES_SQL,
+                "idx_note_eval_claims_unredacted",
+            ),
+            (
+                EXPIRED_TERMINAL_CLAIMS_SQL,
+                "idx_note_eval_claims_terminal_age",
+            ),
+            (
+                DELETE_EXPIRED_TERMINAL_CLAIMS_SQL,
+                "idx_note_eval_claims_terminal_age",
+            ),
+        ] {
+            let plan: Vec<String> = store
+                .inner
+                .with_conn_unfenced(|conn| {
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+                        .query_map(rusqlite::params!["project", "kind", 0_i64], |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect()
+                })
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains(index) && step.contains("terminal_at_ms<?")),
+                "{sql}: {plan:?}"
+            );
+        }
     }
 }

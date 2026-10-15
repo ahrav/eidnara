@@ -423,9 +423,13 @@ impl CausalInputs {
 
     /// The causal review identity: target digest joined with the fingerprint.
     pub fn causal_identity(&self) -> Result<String, MemoryReviewerJobRefusal> {
-        let normalized = self.clone().normalized()?;
-        let target = normalized.target.encode()?;
-        let fingerprint = normalized.fingerprint()?;
+        self.clone().normalized()?.normalized_identity()
+    }
+
+    /// [`Self::causal_identity`] of inputs already in [`Self::normalized`] form.
+    fn normalized_identity(&self) -> Result<String, MemoryReviewerJobRefusal> {
+        let target = self.target.encode()?;
+        let fingerprint = self.fingerprint()?;
         Ok(digest_hex(
             format!("{target}\u{1f}{fingerprint}").as_bytes(),
         ))
@@ -566,29 +570,19 @@ fn scalar(
     }
 }
 
-/// Receipt charges of every row plus allowances of non-terminal rows and frozen pages.
+/// Receipt charges of every row plus allowances of non-terminal rows and frozen pages, read from the per-project totals the baseline's triggers keep equal to that sum over `memory_reviewer_jobs` and `memory_reviewer_frozen_selections`.
 pub(crate) fn metadata_bytes(
     conn: &GuardedConn<'_>,
     project: Option<&str>,
 ) -> rusqlite::Result<u64> {
-    let jobs = scalar(
+    let bytes = scalar(
         conn,
         project,
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM memory_reviewer_jobs
+        "SELECT COALESCE(SUM(metadata_bytes), 0) FROM memory_reviewer_metadata_totals
          WHERE project = ?1",
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM memory_reviewer_jobs",
+        "SELECT COALESCE(SUM(metadata_bytes), 0) FROM memory_reviewer_metadata_totals",
     )?;
-    let pages = scalar(
-        conn,
-        project,
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0)
-         FROM memory_reviewer_frozen_selections WHERE project = ?1",
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0)
-         FROM memory_reviewer_frozen_selections",
-    )?;
-    Ok(u64::try_from(jobs)
-        .unwrap_or(u64::MAX)
-        .saturating_add(u64::try_from(pages).unwrap_or(u64::MAX)))
+    Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
 fn pending_jobs(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<usize> {
@@ -644,7 +638,7 @@ pub fn reserve_memory_reviewer_job_in_tx(
     check_identity(project).map_err(refuse)?;
     producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
-    let causal_identity = inputs.causal_identity().map_err(refuse)?;
+    let causal_identity = inputs.normalized_identity().map_err(refuse)?;
     inputs.reject_secrets()?;
     if let Some(existing) = load_memory_reviewer_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
@@ -962,9 +956,14 @@ pub fn freeze_selection_in_tx(
     }
     let mut normalized = Vec::with_capacity(page.references.len());
     for inputs in &page.references {
-        let inputs = inputs.clone().normalized().map_err(refuse)?;
-        inputs.reject_secrets()?;
-        normalized.push(inputs);
+        normalized.push(inputs.clone().normalized().map_err(refuse)?);
+    }
+    // References repeat the question template and policy versions; each distinct string is scanned once.
+    let mut scanned = std::collections::BTreeSet::new();
+    for (_, text) in normalized.iter().flat_map(causal_identity_fields) {
+        if scanned.insert(text) {
+            reject_secret(text)?;
+        }
     }
     if let Some(cursor) = &page.next_cursor {
         reject_secret(cursor)?;
@@ -1025,8 +1024,15 @@ pub fn freeze_selection_in_tx(
             now_ms,
         ],
     )?;
-    load_selection(conn, project, slot_id, selection_attempt)?
-        .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
+    Ok(FrozenSelection {
+        project: project.to_string(),
+        slot_id: slot_id.to_string(),
+        selection_attempt: selection_attempt.to_string(),
+        page: Some(page),
+        state: FrozenSelectionState::Frozen,
+        selection_deadline_ms: deadline,
+        created_at_ms: now_ms,
+    })
 }
 
 /// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. An `Enqueued` result still carries the page, so the caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` return a compact receipt and leave the cursor where it was. Any completion at or after the selection deadline is refused as expired and left for the sweep, so the receipt does not depend on transaction ordering. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
@@ -1137,12 +1143,20 @@ pub fn advance_selection_cursor_in_tx(
     if cursor.is_some_and(|cursor| cursor.len() > 512) {
         return Err(refuse(MemoryReviewerJobRefusal::InvalidRequest));
     }
-    conn.prepare_cached(
-        "INSERT INTO memory_reviewer_selection_cursors (project, slot_id, cursor, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(project, slot_id) DO UPDATE SET cursor = excluded.cursor, updated_at_ms = excluded.updated_at_ms",
-    )?
-    .execute(params![project, slot_id, cursor, now_ms])?;
+    // An existing continuation is updated in place, so its update trigger scans the new cursor once; the insert and its trigger run only for a slot's first continuation.
+    let updated = conn
+        .prepare_cached(
+            "UPDATE memory_reviewer_selection_cursors SET cursor = ?3, updated_at_ms = ?4
+              WHERE project = ?1 AND slot_id = ?2",
+        )?
+        .execute(params![project, slot_id, cursor, now_ms])?;
+    if updated == 0 {
+        conn.prepare_cached(
+            "INSERT INTO memory_reviewer_selection_cursors (project, slot_id, cursor, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?
+        .execute(params![project, slot_id, cursor, now_ms])?;
+    }
     Ok(())
 }
 
@@ -1183,17 +1197,24 @@ pub fn enqueue_frozen_selection_in_tx(
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))?;
     // Headroom is judged once for the whole page against the committed state, crediting the allowance the page releases when it leaves `frozen` later in this transaction; nothing is written before the judgement, so a `Deferred` outcome leaves the row untouched whatever the caller does with its transaction. A page either fits entirely or is deferred entirely.
     producer.validate().map_err(refuse)?;
+    // With the project's pending capacity already full, any count of new jobs overflows the project cap, which is judged before the host cap and the quota, so the first reference that needs a new job decides the deferral.
+    let project_full =
+        pending_jobs(conn, Some(project))? >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
     let mut fresh = Vec::with_capacity(page.references.len());
     let mut replayed = 0usize;
     for inputs in &page.references {
         let inputs = inputs.clone().normalized().map_err(refuse)?;
-        let causal_identity = inputs.causal_identity().map_err(refuse)?;
+        let causal_identity = inputs.normalized_identity().map_err(refuse)?;
         if load_memory_reviewer_job(conn, project, &causal_identity)?.is_some()
             || fresh
                 .iter()
                 .any(|(_, fresh_id)| *fresh_id == causal_identity)
         {
             replayed += 1;
+        } else if project_full {
+            return Ok(EnqueueOutcome::Deferred(
+                MemoryReviewerJobRefusal::ProjectCapacity,
+            ));
         } else {
             fresh.push((inputs, causal_identity));
         }
@@ -1231,7 +1252,8 @@ pub fn enqueue_frozen_selection_in_tx(
             now_ms,
         )?;
     }
-    complete_frozen_selection_in_tx(
+    // The row read above is frozen and inside its deadline in this transaction, which is all the pre-deadline completion checks.
+    retire_frozen_page_in_tx(
         conn,
         project,
         &selection.slot_id,
@@ -1292,6 +1314,14 @@ fn scan_causal_identities(
     write: &mut PreparedWrite,
     inputs: &CausalInputs,
 ) -> Result<(), MemoryStoreError> {
+    for (field_id, value) in causal_identity_fields(inputs) {
+        write.identity(field_id, value)?;
+    }
+    Ok(())
+}
+
+/// Each free string of `inputs` under the field id its scan records, in a fixed order.
+fn causal_identity_fields(inputs: &CausalInputs) -> impl Iterator<Item = (&'static str, &str)> {
     let CausalInputs {
         target,
         question_template,
@@ -1299,19 +1329,27 @@ fn scan_causal_identities(
         required_evidence,
         policy_versions,
     } = inputs;
-    scan_target(write, target)?;
-    write.identity("question_template", question_template)?;
-    for signal in signals {
-        write.identity("signal", signal)?;
-    }
-    for EvidenceAvailability { evidence_id, .. } in required_evidence {
-        write.identity("evidence_id", evidence_id)?;
-    }
-    for (name, version) in policy_versions {
-        write.identity("policy_name", name)?;
-        write.identity("policy_version", version)?;
-    }
-    Ok(())
+    let target = match target {
+        ReviewTarget::StagedSubject { candidate_id, .. } => ("candidate_id", candidate_id.as_str()),
+        ReviewTarget::Memory { object_id, .. } => ("object_id", object_id.as_str()),
+    };
+    std::iter::once(target)
+        .chain(std::iter::once((
+            "question_template",
+            question_template.as_str(),
+        )))
+        .chain(signals.iter().map(|signal| ("signal", signal.as_str())))
+        .chain(
+            required_evidence
+                .iter()
+                .map(|evidence| ("evidence_id", evidence.evidence_id.as_str())),
+        )
+        .chain(policy_versions.iter().flat_map(|(name, version)| {
+            [
+                ("policy_name", name.as_str()),
+                ("policy_version", version.as_str()),
+            ]
+        }))
 }
 
 fn scan_target(write: &mut PreparedWrite, target: &ReviewTarget) -> Result<(), MemoryStoreError> {
@@ -1659,9 +1697,13 @@ impl MemoryStore {
                 if let Some(cursor) = &page.next_cursor {
                     write.identity("next_cursor", cursor)?;
                 }
-                page.references
-                    .iter()
-                    .try_for_each(|inputs| scan_causal_identities(write, inputs))?;
+                // References repeat the question template and policy versions, so each distinct value under a field id is scanned and receipted once for the page.
+                let mut scanned = std::collections::BTreeSet::new();
+                for field in page.references.iter().flat_map(causal_identity_fields) {
+                    if scanned.insert(field) {
+                        write.identity(field.0, field.1)?;
+                    }
+                }
                 write.reassign_scans_in(
                     first_reference_scan..write.scans.len(),
                     "project",
@@ -1866,6 +1908,25 @@ impl MemoryStore {
         check_project(project)?;
         self.inner
             .with_conn(|conn| load_memory_reviewer_job(conn, project, causal_identity))
+            .map_err(Into::into)
+    }
+
+    /// Whether each of `causal_identities` already has a review job under `project`, in order, read in one connection hold. A stored row that does not decode fails the read, as [`Self::lookup_memory_reviewer_job`] does.
+    pub fn memory_reviewer_jobs_exist(
+        &self,
+        project: &str,
+        causal_identities: &[String],
+    ) -> Result<Vec<bool>, MemoryStoreError> {
+        check_project(project)?;
+        self.inner
+            .with_conn(|conn| {
+                causal_identities
+                    .iter()
+                    .map(|identity| {
+                        load_memory_reviewer_job(conn, project, identity).map(|job| job.is_some())
+                    })
+                    .collect()
+            })
             .map_err(Into::into)
     }
 

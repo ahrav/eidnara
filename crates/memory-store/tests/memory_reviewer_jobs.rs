@@ -2003,3 +2003,225 @@ fn a_failed_enqueue_commit_keeps_the_page_the_cursor_and_recorded_outcomes() {
         );
     }
 }
+
+/// Each project's metadata total equals the receipt charges plus allowances of its job and frozen-page rows after every write the store makes and after direct row edits and deletes, so a quota judged from the totals is the quota judged from the rows.
+#[test]
+fn metadata_totals_equal_the_sum_over_jobs_and_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let check = |store: &MemoryStore, step: &str| {
+        let rows: Vec<(String, i64, i64)> = store
+            .with_conn_for_test(|conn| {
+                conn.prepare(
+                    "SELECT p.project,
+                            COALESCE((SELECT SUM(receipt_charge_bytes + allowance_bytes)
+                                        FROM memory_reviewer_jobs j WHERE j.project = p.project), 0)
+                          + COALESCE((SELECT SUM(receipt_charge_bytes + allowance_bytes)
+                                        FROM memory_reviewer_frozen_selections f WHERE f.project = p.project), 0),
+                            COALESCE((SELECT metadata_bytes FROM memory_reviewer_metadata_totals t
+                                       WHERE t.project = p.project), 0)
+                       FROM (SELECT project FROM memory_reviewer_jobs
+                             UNION SELECT project FROM memory_reviewer_frozen_selections
+                             UNION SELECT project FROM memory_reviewer_metadata_totals) p
+                      ORDER BY p.project",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect()
+            })
+            .unwrap();
+        for (project, summed, total) in &rows {
+            assert_eq!(summed, total, "{step}: {project}");
+            let headroom = store.memory_reviewer_headroom(project).unwrap();
+            assert_eq!(
+                headroom.project_metadata_bytes,
+                u64::try_from(*summed).unwrap(),
+                "{step}: {project}"
+            );
+        }
+        let host: i64 = rows.iter().map(|(_, summed, _)| summed).sum();
+        if let Some((project, _, _)) = rows.first() {
+            assert_eq!(
+                store
+                    .memory_reviewer_headroom(project)
+                    .unwrap()
+                    .host_metadata_bytes,
+                u64::try_from(host).unwrap(),
+                "{step}"
+            );
+        }
+        rows.len()
+    };
+    assert_eq!(check(&store, "empty"), 0);
+    let first = reserved(
+        store
+            .reserve_memory_reviewer_job("proj-a", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    let second = reserved(
+        store
+            .reserve_memory_reviewer_job("proj-b", &producer("f1"), &inputs("cand-2"), NOW)
+            .unwrap(),
+    );
+    assert_eq!(check(&store, "reserved"), 2);
+    store
+        .activate_memory_reviewer_job(
+            "proj-a",
+            &first.causal_identity,
+            &producer("f1"),
+            &input("cand-1"),
+            NOW + 1,
+        )
+        .unwrap();
+    store
+        .finish_memory_reviewer_job(
+            "proj-b",
+            &second.causal_identity,
+            MemoryReviewerJobOutcome::Failed,
+            NOW + 1,
+        )
+        .unwrap();
+    check(&store, "activated and finished");
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-3"), inputs("cand-4")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
+    store
+        .freeze_selection("proj-a", "slot-1", "attempt-1", &page, NOW + 2)
+        .unwrap();
+    store
+        .freeze_selection("proj-b", "slot-1", "attempt-1", &page, NOW + 2)
+        .unwrap();
+    check(&store, "frozen");
+    let selection = store
+        .lookup_frozen_selection("proj-a", "slot-1", "attempt-1")
+        .unwrap()
+        .unwrap();
+    let enqueued = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj-a", &selection, &producer("f2"), NOW + 3)
+        })
+        .unwrap();
+    assert!(
+        matches!(enqueued, EnqueueOutcome::Enqueued { jobs: 2, .. }),
+        "{enqueued:?}"
+    );
+    check(&store, "enqueued");
+    store
+        .expire_memory_reviewer_work(NOW + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + 10)
+        .unwrap();
+    check(&store, "expired");
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = receipt_charge_bytes + 7
+                  WHERE project = 'proj-a'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE memory_reviewer_frozen_selections SET project = 'proj-c' WHERE project = 'proj-b'",
+                [],
+            )?;
+            conn.execute(
+                "DELETE FROM memory_reviewer_jobs WHERE causal_identity = ?1",
+                [&first.causal_identity],
+            )?;
+            conn.execute(
+                "DELETE FROM memory_reviewer_frozen_selections WHERE project = 'proj-a'",
+                [],
+            )
+        })
+        .unwrap();
+    assert_eq!(check(&store, "edited and deleted"), 3);
+}
+
+/// A frozen page's references repeat the question template, evidence, and policy versions; the freeze scans and receipts each distinct value under its field once, so the audit grows by the page's distinct values, not by its references.
+#[test]
+fn a_freeze_receipts_each_distinct_reference_value_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let copies = |store: &MemoryStore| -> BTreeMap<String, i64> {
+        store
+            .with_conn_for_test(|conn| {
+                conn.prepare(
+                    "SELECT field_id, COUNT(*) FROM scan_owner_copies
+                      WHERE field_id IN ('candidate_id', 'question_template', 'evidence_id',
+                                         'policy_name', 'policy_version', 'signal')
+                      GROUP BY field_id",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+            })
+            .unwrap()
+    };
+    let before = copies(&store);
+    store
+        .freeze_selection(
+            "proj",
+            "slot-1",
+            "attempt-1",
+            &FrozenSelectionPage {
+                references: vec![inputs("cand-1"), inputs("cand-2"), inputs("cand-3")],
+                next_cursor: None,
+            },
+            NOW,
+        )
+        .unwrap();
+    let after = copies(&store);
+    let grew = |field: &str| {
+        after.get(field).copied().unwrap_or(0) - before.get(field).copied().unwrap_or(0)
+    };
+    assert_eq!(grew("candidate_id"), 3, "each reference's own target");
+    for field in [
+        "question_template",
+        "evidence_id",
+        "policy_name",
+        "policy_version",
+    ] {
+        assert_eq!(grew(field), 1, "{field} is shared by every reference");
+    }
+    assert_eq!(grew("signal"), 2, "the two signals every reference carries");
+}
+
+/// The batched dedup read answers, in order, whether each identity already has a job under the project, exactly as one lookup per identity does.
+#[test]
+fn the_batched_job_existence_read_matches_single_lookups() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let held = reserved(
+        store
+            .reserve_memory_reviewer_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    reserved(
+        store
+            .reserve_memory_reviewer_job("other", &producer("f1"), &inputs("cand-2"), NOW)
+            .unwrap(),
+    );
+    let identities = vec![
+        inputs("cand-2").causal_identity().unwrap(),
+        held.causal_identity.clone(),
+        inputs("cand-3").causal_identity().unwrap(),
+        held.causal_identity.clone(),
+    ];
+    assert_eq!(
+        store
+            .memory_reviewer_jobs_exist("proj", &identities)
+            .unwrap(),
+        vec![false, true, false, true]
+    );
+    for identity in &identities {
+        assert_eq!(
+            store
+                .lookup_memory_reviewer_job("proj", identity)
+                .unwrap()
+                .is_some(),
+            *identity == held.causal_identity
+        );
+    }
+    assert!(
+        store
+            .memory_reviewer_jobs_exist("proj", &[])
+            .unwrap()
+            .is_empty()
+    );
+}
