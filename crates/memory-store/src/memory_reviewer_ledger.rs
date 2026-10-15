@@ -1616,6 +1616,15 @@ impl MemoryStore {
         now_ms: i64,
     ) -> Result<Option<i64>, MemoryStoreError> {
         check_project(project)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self
+            .claim_expiry_read_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            hook();
+        }
         self.inner
             .with_conn(|conn| live_claim_expiry(conn, project, causal_identity, claim_id, now_ms))
             .map_err(Into::into)

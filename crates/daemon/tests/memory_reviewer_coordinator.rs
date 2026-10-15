@@ -719,14 +719,20 @@ async fn run_case(case: &Case) {
             .unwrap();
             assert_eq!(selected.reference, reference);
             let proposal = &selected.proposal;
-            let expected_action = match action {
-                Action::Retain => kernel::ProposalAction::Retain,
-                Action::Retire => kernel::ProposalAction::Retire,
-                Action::Revise => kernel::ProposalAction::Revise,
-                Action::NoChange => kernel::ProposalAction::NoChange,
+            let (expected_action, expected_text) = match action {
+                Action::Retain => (kernel::ProposalAction::Retain, None),
+                Action::Retire => (kernel::ProposalAction::Retire, None),
+                Action::Revise(text) => (kernel::ProposalAction::Revise, Some(text)),
+                Action::NoChange => (kernel::ProposalAction::NoChange, None),
                 Action::Abstain(_) => unreachable!(),
             };
             assert_eq!(proposal.action, expected_action, "{}", case.name);
+            assert_eq!(
+                proposal.new_text.as_deref(),
+                expected_text,
+                "{}: the published replacement text",
+                case.name
+            );
             // A memory target names exactly the subject the run bound, unchanged since: its object, revision, and last change.
             let kernel::ProposalTarget::Memory(target) = &proposal.target else {
                 panic!("{}: {:?}", case.name, proposal.target)
@@ -927,7 +933,7 @@ fn the_corpus_covers_every_relation_once() {
     let has = |wanted: fn(&Action) -> bool| CASES.iter().any(|case| wanted(&case.action));
     assert!(has(|a| matches!(a, Action::Retain)));
     assert!(has(|a| matches!(a, Action::Retire)));
-    assert!(has(|a| matches!(a, Action::Revise)));
+    assert!(has(|a| matches!(a, Action::Revise(_))));
     assert!(has(|a| matches!(a, Action::NoChange)));
     assert!(has(|a| matches!(a, Action::Abstain(_))));
 }
@@ -3079,6 +3085,52 @@ async fn a_lease_at_the_slack_boundary_is_used_and_one_past_it_is_renewed() {
             "{elapsed} ms elapsed"
         );
     }
+}
+
+/// Cancellation ends the run with `InvestigationError::Cancelled` while the renewal started beside its read batch is still stalled before its lease-expiry read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_cancelled_during_a_read_batch_returns_without_waiting_on_its_side_renewal() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    const STALL: Duration = Duration::from_secs(30);
+    let case = &CASES[0];
+    let fixture = Fixture::open(case.sources);
+    let cancel = CancellationToken::new();
+    let (release, released) = mpsc::channel::<()>();
+    let (report, stalled) = mpsc::channel::<bool>();
+    let mut peer = Peer::start().await;
+    let server = {
+        let ledger = Arc::clone(&fixture.ledger);
+        let cancel = cancel.clone();
+        let mut armed = Some((released, report));
+        peer.serve_script_with(
+            vec![text_response(&fixture.expand(case.turns[0].0))],
+            move |_| {
+                // The first attempt's pre-attempt check has already read the lease, so the next expiry read is the renewal beside the read batch this response asks for.
+                if let Some((released, report)) = armed.take() {
+                    let cancel = cancel.clone();
+                    ledger.before_next_memory_reviewer_claim_expiry_read_for_test(Box::new(
+                        move || {
+                            cancel.cancel();
+                            let _ = report.send(released.recv_timeout(STALL).is_ok());
+                        },
+                    ));
+                }
+                Box::pin(async {})
+            },
+        )
+    };
+    let settled = fixture.run(&peer, Some(fixture.approval()), &cancel).await;
+    let _ = release.send(());
+    assert!(
+        matches!(settled, Err(InvestigationError::Cancelled)),
+        "{settled:?}"
+    );
+    assert!(
+        stalled.recv_timeout(STALL * 2).unwrap(),
+        "the run must return while its side renewal is still stalled"
+    );
+    server.await.unwrap();
 }
 
 /// A model profile the request encoder refuses is a configuration fault: the run reports it unavailable and leaves the receipt open, instead of durably abstaining the job as budget exhaustion.

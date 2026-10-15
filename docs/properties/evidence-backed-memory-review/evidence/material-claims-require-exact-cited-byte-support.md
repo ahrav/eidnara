@@ -16,9 +16,12 @@ written as their exact bytes and resolved to the one range they occupy.
 
 `crates/daemon/tests/memory_reviewer_coordinator.rs` - `run_case` maps each
 citation to its source by alias, checks the evidence id and disclosure, and
-compares the cited ranges, the score, the origin groups, the limitations, and
-the target tokens with the case's declarations. `publish_span` publishes a span
-descriptor over the same commit identity and evidence as its base.
+compares the action and its replacement text, the cited ranges, the score, the
+origin groups, the limitations, and the target tokens with the case's
+declarations. A `Revise` case declares its replacement text apart from the
+scripted turn, so a proposal published with other text fails. `publish_span`
+publishes a span descriptor over the same commit identity and evidence as its
+base.
 
 `crates/daemon/src/memory_reviewer/broker.rs` - `native_origin_key` keys an
 origin by class and identity without revision, representation, or span, which

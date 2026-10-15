@@ -250,6 +250,15 @@ impl Coordinator {
             .execution_cutoff_ms
             .saturating_sub((self.now_ms)());
         let cutoff = Instant::now() + Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
+        let renewal = Arc::new(ClaimRenewal {
+            ledger: Arc::clone(&self.ledger),
+            project: context.job.project.clone(),
+            causal_identity: context.job.causal_identity.clone(),
+            claim: context.claim.clone(),
+            authority_generation: i64::try_from(context.receipt.authority_generation)
+                .unwrap_or(i64::MAX),
+            now_ms: Arc::clone(&self.now_ms),
+        });
         let mut run = Run {
             coordinator: self,
             context,
@@ -261,6 +270,8 @@ impl Coordinator {
             discovery: RelatedMemoryDiscovery::new(""),
             cutoff,
             marker_token: marker_token(),
+            renewal,
+            side_renewal: None,
         };
         let settled = run
             .investigate(prepared.subject, prepared.starting, cancel)
@@ -417,6 +428,8 @@ struct Run<'a> {
     cutoff: Instant,
     /// Random per run and never in any evidence, so a marker inside disclosed bytes cannot pass as a boundary the host drew.
     marker_token: String,
+    renewal: Arc<ClaimRenewal>,
+    side_renewal: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Sixteen hex digits of OS entropy for the run's alias markers.
@@ -426,24 +439,24 @@ fn marker_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The renewal of one run's task claim, borrowing only what the ledger write needs, so it can run beside the Kernel reads of a read batch.
-struct ClaimRenewal<'a> {
-    ledger: &'a MemoryStore,
-    project: &'a str,
-    causal_identity: &'a str,
-    claim: &'a TaskClaim,
+/// Owned inputs let a `'static` task renew the claim independently of the run's lifetime.
+struct ClaimRenewal {
+    ledger: Arc<MemoryStore>,
+    project: String,
+    causal_identity: String,
+    claim: TaskClaim,
     authority_generation: i64,
-    now_ms: &'a (dyn Fn() -> i64 + Send + Sync),
+    now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
-impl ClaimRenewal<'_> {
+impl ClaimRenewal {
     fn renew(&self) -> Result<(), InvestigationError> {
         let now = (self.now_ms)();
         let live = self
             .ledger
             .live_memory_reviewer_claim_expiry(
-                self.project,
-                self.causal_identity,
+                &self.project,
+                &self.causal_identity,
                 &self.claim.claim_id,
                 now,
             )
@@ -458,7 +471,7 @@ impl ClaimRenewal<'_> {
         match self
             .ledger
             .renew_memory_reviewer_task(
-                self.project,
+                &self.project,
                 &self.claim.claim_id,
                 &self.claim.worker_instance,
                 self.claim.slot,
@@ -473,24 +486,17 @@ impl ClaimRenewal<'_> {
     }
 }
 
-impl<'a> Run<'a> {
-    /// The task lease is shorter than a run: one attempt plus the settlement reserve. A live worker starts each attempt under a fresh lease: one with at most [`LEASE_RENEWAL_SLACK_MS`] elapsed, as a claim just acquired or renewed alongside the previous read batch is, is used as it stands, and any other is renewed first. A lease that will not renew is another worker's fence, and the run ends without settling.
-    fn renew_claim(&self) -> Result<(), InvestigationError> {
-        self.claim_renewal().renew()
-    }
-
-    /// Borrows only the run's shared references, so the renewal can run while the run itself is borrowed mutably.
-    fn claim_renewal(&self) -> ClaimRenewal<'a> {
-        let (coordinator, job, receipt) =
-            (self.coordinator, self.context.job, self.context.receipt);
-        ClaimRenewal {
-            ledger: &coordinator.ledger,
-            project: &job.project,
-            causal_identity: &job.causal_identity,
-            claim: self.context.claim,
-            authority_generation: i64::try_from(receipt.authority_generation).unwrap_or(i64::MAX),
-            now_ms: &*coordinator.now_ms,
+impl Run<'_> {
+    /// Awaiting `side_renewal` lets the freshness check observe the lease left by that task. Cancellation while awaiting `side_renewal` returns `Cancelled`. The freshness check accepts leases with zero through [`LEASE_RENEWAL_SLACK_MS`] elapsed; other leases require renewal. A rejected renewal returns `Fenced`.
+    async fn renew_claim(&mut self, cancel: &CancellationToken) -> Result<(), InvestigationError> {
+        if let Some(side) = self.side_renewal.take() {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(InvestigationError::Cancelled),
+                _ = side => {}
+            }
         }
+        self.renewal.renew()
     }
 
     async fn investigate(
@@ -533,7 +539,7 @@ impl<'a> Run<'a> {
             if (self.coordinator.now_ms)() >= self.context.receipt.execution_cutoff_ms {
                 return self.settle_now(RunResult::Exhausted).await;
             }
-            self.renew_claim()?;
+            self.renew_claim(cancel).await?;
             let attempt_index = u32::try_from(round).unwrap_or(u32::MAX);
             let attempt = self.attempt(attempt_index, cancel).await?;
             // A cancellation that landed while the attempt completed still belongs to the owner: no result of that attempt settles the receipt.
@@ -559,26 +565,26 @@ impl<'a> Run<'a> {
             };
             match step {
                 Step::ReadBatch { operations } => {
-                    // The next attempt's lease renewal writes the Memory Store while the batch reads the Kernel, so the two run side by side. Its outcome is not consulted here: the freshness check before that attempt decides, renewing again when the batch outlasted the slack or this renewal did not take.
+                    // Batch execution can finish while lease renewal remains pending on the blocking pool.
+                    if !cancel.is_cancelled() {
+                        let renewal = Arc::clone(&self.renewal);
+                        self.side_renewal = Some(tokio::task::spawn_blocking(move || {
+                            let _ = renewal.renew();
+                        }));
+                    }
                     let ended = tokio::task::block_in_place(|| {
-                        let renewal = self.claim_renewal();
-                        std::thread::scope(|scope| {
-                            // A thread the host cannot spawn leaves the renewal to the pre-attempt check.
-                            let _ =
-                                std::thread::Builder::new().spawn_scoped(scope, || renewal.renew());
-                            for operation in operations {
-                                if cancel.is_cancelled() {
-                                    return Err(InvestigationError::Cancelled);
-                                }
-                                let now = (self.coordinator.now_ms)();
-                                if now >= self.context.receipt.execution_cutoff_ms {
-                                    return Ok(Some(RunResult::Exhausted));
-                                }
-                                self.execute(&mut broker, operation, now);
+                        for operation in operations {
+                            if cancel.is_cancelled() {
+                                return Err(InvestigationError::Cancelled);
                             }
-                            broker.accounting.end_batch();
-                            Ok(None)
-                        })
+                            let now = (self.coordinator.now_ms)();
+                            if now >= self.context.receipt.execution_cutoff_ms {
+                                return Ok(Some(RunResult::Exhausted));
+                            }
+                            self.execute(&mut broker, operation, now);
+                        }
+                        broker.accounting.end_batch();
+                        Ok(None)
                     })?;
                     if let Some(result) = ended {
                         return self.settle(&broker, result);
