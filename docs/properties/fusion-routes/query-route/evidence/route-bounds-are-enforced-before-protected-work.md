@@ -13,8 +13,10 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 ## Evidence trail
 
 - `crates/daemon/src/query_route.rs`: `QueryRouteLimits` names every bound
-  and `validate` refuses a `validation_batch` or `lexical_accepted` over the
-  kernel's candidate maximum and a `response_bytes` below
+  and `validate` refuses a `validation_batch`, `lexical_accepted`, or
+  `exact_page_rows` over the kernel's candidate maximum (the certified
+  resolver refuses a larger exact page as `PageOverBound`) and a
+  `response_bytes` below
   `QueryRouteLimits::response_floor`, the measured empty fused envelope, at
   installation; `handle_retrieval_query` checks `query_bytes` before the
   budget is derived; `execute` passes `query_bytes` to `classify`, refuses

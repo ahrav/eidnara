@@ -237,7 +237,7 @@ the [check inventory](existing-checks.md).
 | P1-P4 | default-production | The plugin runs the verdict, mid-turn, paging, and logging steps on every production pass; `deps.client` is the SDK client ([hook.ts][hookclient]). |
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
 | T1-T2 | default-production | [`process_limits`][process-limits] runs at host startup; every inbound frame calls [`to_vec`][to-vec] and every outbound frame calls `copy_in`. |
-| T3-T4 | test-only | [`reserve_direct`][reserve-direct] is reached only through [`output_from_writer`][from-writer], whose sole non-crate caller is a [fixture arm][fixture-arm] no test sends. |
+| T3-T4 | default-production | The daemon's `settle_prepared_via` sends every transform and exact-length response through `settle_direct_with` and `RequestCtx::output_from_direct_write` to [`reserve_direct`][reserve-direct]; the fault arms need the `direct_fill` [fixture arm][fixture-arm], which reaches the same reservation through [`output_from_writer`][from-writer]. |
 | G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], every store open runs the seed and reconciliation walks, and the daemon's [memory-reviewer sweep][daemon-maintenance] runs a GC pass and its reconciliation; purge has no daemon caller. |
 | G3 | default-production | Cleanup, startup recovery, GC reclaim, and the retried GC unlink run in the daemon; the purge decrement runs only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
@@ -249,13 +249,13 @@ the [check inventory](existing-checks.md).
 Transform execution topology is resolved by the host-owned unit runner. W8 and
 W11 retain separate safety and overlap obligations, now with post-commit abort
 evidence. W12 has transform-specific redaction evidence but an unresolved
-kernel-route boundary. T3 and T4 are
-test-only at HEAD because the
-direct path has no production sender; the specification would move them to
-default-production for whichever routes it moves to the direct path,
-transform responses first. T3's check applies unchanged to a
-`MeasuredSource::Json` response, which the owned path serializes twice at
-HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
+kernel-route boundary. T3 and T4 are default-production: the daemon sends
+every transform and exact-length response through the direct path. T3's
+check applies unchanged to a `MeasuredSource::Json` response, which the owned
+path measures structurally (`measure_json`,
+`crates/daemon/src/dispatch.rs:605-610`) and serializes once into the
+reserved body (`MeasuredOutput::write_to`, `:464-480`); the serializer-based
+count runs only for a value past the wire cap.
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
 [unit-host-live]: ../../../../crates/host-runtime/src/handler.rs#L606
@@ -266,7 +266,7 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 [unit-settle-live]: ../../../../crates/daemon/src/lib.rs#L8993-L9011
 [unit-abort-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L254
 [unit-emergency-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L771-L837
-[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
+[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L444-L472
 [unit-failure-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L839-L929
 
 ## Index
@@ -1708,7 +1708,11 @@ Status: active
 Exercised: yes - `to_vec` allocates without zero-fill and copies through
 `copy_out_uninit`; under the [Miri job][ci-miri],
 `copy_out_uninit_initializes_every_byte_at_every_alignment_and_length`
-reads back an uninitialized destination at every shift and length,
+reads back an uninitialized destination at 32 shifts, which reach every head
+length and every count of leading single words, and at every length through a
+full head and lead, two full steps, and three single words; outside Miri the
+same test copies into a sentinel-filled buffer, which exposes a skipped byte in
+the aarch64 step kernels;
 `to_vec_copies_every_body_length_without_a_zero_fill` covers every body
 length through a lease, and
 `a_span_length_mismatch_refuses_before_writing_any_byte` shows a mismatched
@@ -1717,8 +1721,10 @@ byte, one head byte, or one word in `copy_out_uninit` fails the first under
 Miri as an uninitialized read. `to_vec` forms one span of exactly `body_len`
 bytes, so a mismatched span is unreachable through it and is witnessed at the
 span API.
-The round-trip, concurrent-writer, and per-byte agreement tests still run,
-and the [Valgrind job][ci-valgrind] round-trips frames through `to_vec`.
+The round-trip, concurrent-writer, and per-byte agreement tests still run;
+the concurrent-writer test also checks that every copied word holds eight
+equal bytes, which the aarch64 step kernels must keep natively, and the
+[Valgrind job][ci-valgrind] round-trips frames through `to_vec`.
 Guarantee: A concurrent peer store of the same shape yields stale bytes,
 never a mixed-size data race, and a receiver never reads uninitialized
 process memory as payload.
@@ -1729,14 +1735,24 @@ through [`copy_in`][copy-in], [`copy_out`][copy-out], `read_byte`, or
 formed over arena bytes; and [`to_vec`][to-vec], which skips the zero-fill,
 returns a `Vec` whose every byte in `0..body_len` was written by
 [`copy_out_uninit`][copy-out-uninit] before the `Vec` is observable, or
-returns `Err` without exposing the buffer. `always` because the soundness argument in the
+returns `Err` without exposing the buffer. On aarch64 outside Miri, each
+32-byte step of [`copy_out_uninit`][copy-step-out] and [`copy_in`][copy-step-in]
+moves its four aligned words through one `ldp q` and one `stp q`; Arm ARM
+B2.2.1 treats a 128-bit SIMD&FP access at a 64-bit-aligned address as a pair
+of single-copy-atomic 64-bit accesses, and with FEAT_LS64WB a 32-byte-aligned
+pair as one 256-bit single-copy-atomic access, which still moves each
+overlapped word whole, so each arena word keeps the address and width the
+shape assigns. Miri and every other target run the portable
+`AtomicU64` step definitions. `always` because the soundness argument in the
 [`LeaseSpan` contract][span-safety] and the crate's [AGENTS.md][agents]
 treat this as a verification boundary.
 Fault/timing angle: `to_vec` reserves capacity and sets the length only
 after `copy_to_uninit` returns `Ok`, so the initialization proof rests on the
 span's length check, which refuses before writing, and on
 `copy_out_uninit` writing every byte of the range `AccessShape` partitions.
-Any early `Err` drops the buffer unexposed. A `memcpy` replacement forms a
+`copy_out_uninit` copies up to three leading single words so every step
+starts on a 32-byte boundary; the words and widths stay those the shape
+assigns. Any early `Err` drops the buffer unexposed. A `memcpy` replacement forms a
 reference over peer-writable memory, which the shm-transport catalog's
 [no-reference record][shm-noref] forbids.
 Required faults and enabling state: A peer writing the same span while the
@@ -1746,16 +1762,24 @@ the eight word offsets.
 Confidence: high - [Evidence](evidence/arena-payload-copies-keep-the-address-derived-atomic-shape.md).
 The shape derivation, both copies, the uninitialized `to_vec` buffer, and the
 raw-pointer
-[exclusive-write documentation][span-ptr] are source-verified;
-[`receive_one`][receive-to-vec] calls `to_vec` on every inbound frame and
-[`write_reservation`][write-res] calls `copy_in` on every outbound frame.
+[exclusive-write documentation][span-ptr] are source-verified; the aarch64
+step kernels are source-verified against Arm ARM B2.2.1 and checked natively
+and under memcheck on an aarch64 host, since Miri cannot execute inline
+assembly; [`InboundFrame::into_private`][receive-to-vec] calls `to_vec` on
+every inbound frame with a body (corrected from `receive_one`, which now
+delivers the lease) and [`write_reservation`][write-res] calls `copy_in` on
+every outbound frame.
 Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
 include the six lease copy tests under the [Miri job][ci-miri], three of
 them required witnesses there, and the [Valgrind job][ci-valgrind]; all
 unaudited.
 Impact: A torn multi-byte read or an uninitialized payload byte reaches the
 handler.
-Open questions: None.
+Open questions:
+- No CI job runs on aarch64, so the `ldp q`/`stp q` step kernels run only in
+  native and memcheck runs on aarch64 hosts; the CI Miri and Valgrind jobs
+  check the portable steps on x86-64. Whether to add an aarch64 runner is a CI
+  decision. (needs human input)
 
 ### direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges
 
@@ -1776,7 +1800,17 @@ JSON and emitted bodies stay owned;
 `a_failed_direct_serializer_publishes_nothing_and_returns_its_charge`
 (`host-runtime/tests/direct_frames.rs`) drives the four fault arms of the
 `direct_fill` fixture through a real host and ring at the one-frame egress
-floor; the deadline arm keeps its in-crate test.
+floor and reads one `direct_serialize_failure.observed` count per arm from
+`host.status`; the deadline arm keeps its in-crate test, which classifies a
+late commit as `DirectFailure::Commit` rather than a body failure;
+`a_settled_direct_response_holds_its_decode_charges_until_it_publishes`
+(`daemon/src/transform_unit/host_tests.rs`) holds a real transform response
+between the daemon's `handle` and publication and finds the decode's scratch
+charges still held, then released once the response publishes;
+`a_held_response_keeps_its_request_charges_until_its_direct_serializer_runs`
+(`daemon/src/lib.rs`) shows the charges travel with the direct serializer,
+return once it runs, stay off a retained clone, and drop at once for an error
+outcome.
 Guarantee: The direct path never publishes a frame whose body differs from
 its header's declared length, a mid-write failure leaves no hole, partial
 frame, or leaked slot, and deferring serialization releases neither the
@@ -1806,11 +1840,24 @@ reported through `Publisher::try_publish` as
 [`ReadClose::Corrupt("shared-memory publish failed")`][publish-fail], which
 closes the whole connection, while the owned path turns the same failure into
 a request-scoped `encode_failed` terminal in
-[`settle_prepared_with`][settle-with]. On the direct path the closure holds
-the source tree after `handle` returns, so a scratch charge released at
-return undercounts until the endpoint thread serializes; a cancelled or
-retired generation drops the queued frame with its closure and must release
-both.
+[`settle_prepared_with`][settle-with]. The connection close is the decided
+classification: the daemon measures every direct body before reserving it,
+and `write_measured` writes the same immutable source at that length, so a
+publication-time mismatch is a writer-integrity fault rather than a
+request-scoped encoding error; a measurement failure still settles the
+request as `encode_failed` before any reservation. A body failure (serializer
+`Err`, panic, or a written length other than `body_len`) also increments
+`direct_serialize_failure.observed` in `host.status`; a refused commit leaves
+it unchanged. Two charges cover a direct frame until commit. The egress
+charge of the measured length plus header covers the ring bytes. The decode's
+scratch charges cover the source: the pass shares its charges with the
+response through `PreparedOutcome::holding`, and `handle` hands any charges
+left in its meter to the response the same way. The serializer owns the
+`PreparedOutput` and its held charges, so both drop when the serializer runs
+or when the queued frame drops; a cancelled or retired generation drops the
+queued frame with its closure and releases both. A clone of the output, such
+as the completed-page replay copy, starts with an empty charge list, and its
+retaining cache charges it against the completed-response budget.
 Required faults and enabling state: A serializer that writes `body_len - 1`,
 `body_len + 1`, returns `Err` after some bytes, or panics; a body wrapping
 the arena end; a deadline expiring during serialization; a direct response
@@ -1818,32 +1865,21 @@ queued behind slow egress with the handler future gone (T4); generation
 retirement with a direct frame queued; an egress budget near capacity.
 Confidence: medium - [Evidence](evidence/direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges.md).
 The reservation, writer, commit, abort, charge, and failure classification
-are source-verified; the path has no production sender at HEAD, so the
-charge class for captured source bytes is undecided.
+are source-verified, and the daemon's transform and exact-length responses
+are the production sender.
 Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
-cover the deadline arm, quarantine at ring level, and the owned-arm
-`into_parts` cases; none for the direct arm's charge; all unaudited.
+cover the deadline arm, quarantine at ring level, the owned-arm `into_parts`
+cases, the direct arm's charge through the in-crate hold-or-return test and
+the two daemon charge tests, the four fault arms through the real-host test,
+and the production settlement branch; none for a queued direct frame dropped
+by generation retirement; all unaudited.
 Impact: A response that won settlement closes the connection for every
 in-flight request, or source bytes outlive the charge that admitted them.
-Open questions:
-
-- Decided: a serializer failure on the direct path closes the connection.
-  The daemon measures every direct body before reserving it, and
-  `write_measured` writes the same immutable source at that length, so a
-  publication-time mismatch is a writer-integrity fault rather than a
-  request-scoped encoding error. A measurement failure still settles the
-  request as `encode_failed` before any reservation.
-- Decided: the egress charge of the measured length plus header covers the
-  direct frame until commit. The serializer owns the `PreparedOutput`, whose
-  transform segments and exact bytes are immutable shared sources that the
-  owned path's settlement also kept alive until it finished writing; the
-  owned path's body copy of the same length is the allocation the direct
-  path removes. The source drops when the serializer runs or when the queued
-  frame drops.
-- [The host-runtime terminal record][hr-terminal] holds trivially on the
-  failure arm because nothing is emitted; the settled `Response` is then
-  never delivered, which [its publication-failure record][hr-pubfail]
-  already covers for owned frames.
+[The host-runtime terminal record][hr-terminal] holds trivially on the
+failure arm because nothing is emitted; the settled `Response` is then never
+delivered, which [its publication-failure record][hr-pubfail] already covers
+for owned frames.
+Open questions: None.
 
 ### direct-frame-outlives-its-handler-before-publication
 
@@ -1877,9 +1913,12 @@ it; a handler that returns immediately after
 [`output_from_writer`][from-writer]; observation of handler completion (the
 joined future) and of the `Publisher::try_publish` commit as separate events.
 Confidence: medium - [Evidence](evidence/direct-frame-outlives-its-handler-before-publication.md).
-The queueing and commit points are source-verified; the direct path is
-reached only through the [fixture arm][fixture-arm] at HEAD.
-Existing check: none found.
+The queueing and commit points are source-verified, and the daemon's
+transform and exact-length responses are the production sender; the marker
+test observes the window through the `direct_fill` fixture arm.
+Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
+list `a_direct_frame_serializes_after_its_handler_has_ended` as the T4
+marker; unaudited.
 Impact: T3's charge clause passes without the window ever opening.
 Open questions: None.
 
@@ -2877,8 +2916,8 @@ oracle. The following notes define the evidence to request, not tickets.
 | [P5][p5] | Sequence deny-then-fail through an SDK fake. |
 | [T1][t1] | Assert the dead-byte inequality over a long publish and release run; decide the deferred bound first. |
 | [T2][t2] | Done: the zero-fill-free `to_vec` and its Miri witnesses landed; a mismatched span is witnessed at `copy_to_uninit`. |
-| [T3][t3] | Done: the fault arms are covered and the failure classification and charge class are decided in the record. |
-| [T4][t4] | Done: `a_direct_frame_serializes_after_its_handler_has_ended` reaches the window. |
+| [T3][t3] | Underfill, overflow, error, and panic are covered in-crate and through a real host; the failure classification and charge class are decided. Add a queued direct frame dropped by generation retirement. |
+| [T4][t4] | The marker test observes a serializer that runs after its handler ended. Lengthen the window with held egress when the marker misses it. |
 | [G1][g1] | Done: dedup at exactly the cap and a second ingest before orphan recovery are covered by the usage tests. |
 | [G2][g2] | Done: the walk is the oracle and the reconciliation; the usage tests compare the count against it at every quiescent point. |
 | [G3][g3] | Done: the usage tests record a non-zero byte delta per decrement path. |
@@ -3157,36 +3196,38 @@ evaluation of this area and its disposition are recorded in
 [batch]: ../../../../crates/shm-transport/src/backend/ring.rs#L2159
 [abort]: ../../../../crates/shm-transport/src/backend/ring.rs#L2271
 [prepare-commit]: ../../../../crates/shm-transport/src/backend/ring.rs#L2308
-[write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L2388
-[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L2520
+[write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L1374
+[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L1823
 [commit-underfill]: ../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
-[span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L33
-[span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L49-L52
-[shape]: ../../../../crates/shm-transport/src/lease.rs#L134-L156
-[copy-out]: ../../../../crates/shm-transport/src/lease.rs#L203
-[copy-out-uninit]: ../../../../crates/shm-transport/src/lease.rs#L221
-[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L251
-[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L367
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L847
+[span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L35
+[span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L51-L54
+[shape]: ../../../../crates/shm-transport/src/lease.rs#L159-L199
+[copy-out]: ../../../../crates/shm-transport/src/lease.rs#L211
+[copy-out-uninit]: ../../../../crates/shm-transport/src/lease.rs#L229
+[copy-step-out]: ../../../../crates/shm-transport/src/lease.rs#L269-L308
+[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L318
+[copy-step-in]: ../../../../crates/shm-transport/src/lease.rs#L347-L384
+[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L481
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L978
 [max-resident]: ../../../../crates/host-runtime/src/ring_transport.rs#L57-L58
 [affordable]: ../../../../crates/host-runtime/src/ring_transport.rs#L60
 [process-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L98
-[idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
-[publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L696-L704
-[receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L664
-[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1333-L1389
-[publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L788
-[commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L815
-[res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L830
+[idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L909-L978
+[publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L799-L806
+[receive-to-vec]: ../../../../crates/host-runtime/src/frame_channel.rs#L115-L125
+[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1377-L1440
+[publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L1452
+[commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L1485
+[res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L1497
 [config-validate]: ../../../../crates/host-runtime/src/config.rs#L127-L131
-[outbuf]: ../../../../crates/host-runtime/src/handler.rs#L320-L335
+[outbuf]: ../../../../crates/host-runtime/src/handler.rs#L327-L332
 [into-parts]: ../../../../crates/host-runtime/src/handler.rs#L394
 [from-writer]: ../../../../crates/host-runtime/src/handler.rs#L554
-[reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L517
-[direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
+[reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L574
+[direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L157-L183
 [native-reserve]: ../../../../crates/shm-transport/src/backend/ring.rs#L1345
-[settle-with]: ../../../../crates/daemon/src/lib.rs#L12657
-[fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L492-L503
+[settle-with]: ../../../../crates/daemon/src/lib.rs#L13351
+[fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L509-L544
 [ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
 [ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L364

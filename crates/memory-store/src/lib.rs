@@ -470,6 +470,16 @@ pub enum TransformRootPrune {
     ClockDisagrees { now_ms: i64, newest_ms: i64 },
 }
 
+/// The newest recorded write anchors the pruning clock check: pruning retains every root when that timestamp exceeds `now_ms` or precedes it by more than one retention window.
+const NEWEST_RECORDED_WRITE_SQL: &str = "SELECT MAX(at) FROM (
+     SELECT MAX(MAX(observed_at, COALESCE(session_activity_at, observed_at))) AS at
+       FROM transform_session_roots
+     UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+ )";
+
+const PRUNE_IDLE_TRANSFORM_ROOTS_SQL: &str = "DELETE FROM transform_session_roots
+  WHERE MAX(observed_at, COALESCE(session_activity_at, observed_at)) < ?1";
+
 /// Milliseconds since the epoch, or `None` for a clock before the epoch or past `i64` milliseconds.
 fn epoch_millis(elapsed: Result<std::time::Duration, std::time::SystemTimeError>) -> Option<i64> {
     i64::try_from(elapsed.ok()?.as_millis()).ok()
@@ -2875,13 +2885,47 @@ struct PreparedFieldScan {
     /// Disposition of each detected span, persisted verbatim into
     /// `scan_detections.action`.
     detection_action: &'static str,
-    owners: Vec<PreparedDomainOwner>,
+    owners: PreparedScanOwners,
+}
+
+/// The durable owners one field scan records.
+#[derive(Debug)]
+enum PreparedScanOwners {
+    /// The first `len` of the write's default owners. The defaults only grow, so the
+    /// prefix keeps naming the owners the write held when the field was prepared.
+    Defaults(usize),
+    /// Owners assigned to this scan alone.
+    Listed(Vec<PreparedDomainOwner>),
+}
+
+impl PreparedScanOwners {
+    fn resolve<'a>(&'a self, defaults: &'a [PreparedDomainOwner]) -> &'a [PreparedDomainOwner] {
+        match self {
+            Self::Defaults(len) => &defaults[..*len],
+            Self::Listed(owners) => owners,
+        }
+    }
+
+    /// Appends `owner`. A prefix that `owner` extends in `defaults` stays a prefix.
+    fn push(&mut self, defaults: &[PreparedDomainOwner], owner: &PreparedDomainOwner) {
+        match self {
+            Self::Defaults(len) if defaults.get(*len) == Some(owner) => *len += 1,
+            Self::Defaults(len) => {
+                let mut owners = defaults[..*len].to_vec();
+                owners.push(owner.clone());
+                *self = Self::Listed(owners);
+            }
+            Self::Listed(owners) => owners.push(owner.clone()),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct PreparedWrite {
     owner_kind: &'static str,
     scans: Vec<PreparedFieldScan>,
+    /// `domain_owners` must remain append-only because [`PreparedScanOwners::Defaults`]
+    /// stores a prefix length into it.
     domain_owners: Vec<PreparedDomainOwner>,
     existing_scan_links: BTreeSet<PreparedExistingScanLink>,
     /// Set by a write whose audit rows may be omitted when every scan preserved an existing
@@ -2955,11 +2999,16 @@ impl PreparedWrite {
             scope_key: scope_key.into(),
             owner_key: owner_key.into(),
         };
-        if !self.domain_owners.contains(&owner) {
-            for scan in self.scans.iter_mut().filter(|scan| scan.owners.is_empty()) {
-                scan.owners.push(owner.clone());
+        if self.domain_owners.contains(&owner) {
+            return;
+        }
+        let index = self.domain_owners.len();
+        self.domain_owners.push(owner);
+        let (defaults, owner) = (&self.domain_owners, &self.domain_owners[index]);
+        for scan in &mut self.scans {
+            if scan.owners.resolve(defaults).is_empty() {
+                scan.owners.push(defaults, owner);
             }
-            self.domain_owners.push(owner);
         }
     }
 
@@ -2979,8 +3028,8 @@ impl PreparedWrite {
             self.domain_owners.push(owner.clone());
         }
         for scan in &mut self.scans[first_scan..] {
-            if !scan.owners.contains(&owner) {
-                scan.owners.push(owner.clone());
+            if !scan.owners.resolve(&self.domain_owners).contains(&owner) {
+                scan.owners.push(&self.domain_owners, &owner);
             }
         }
     }
@@ -3003,7 +3052,7 @@ impl PreparedWrite {
             owner_key: owner_key.into(),
         };
         for scan in &mut self.scans[range] {
-            scan.owners = vec![owner.clone()];
+            scan.owners = PreparedScanOwners::Listed(vec![owner.clone()]);
         }
     }
 
@@ -3013,7 +3062,7 @@ impl PreparedWrite {
         let named = self
             .scans
             .iter()
-            .flat_map(|scan| scan.owners.iter())
+            .flat_map(|scan| scan.owners.resolve(&self.domain_owners))
             .chain(self.existing_scan_links.iter().map(|link| &link.owner));
         for owner in named {
             if !owners.contains(owner) {
@@ -3114,7 +3163,7 @@ impl PreparedWrite {
             field_id,
             detections,
             detection_action: "substitute",
-            owners: self.domain_owners.clone(),
+            owners: PreparedScanOwners::Defaults(self.domain_owners.len()),
         });
     }
 
@@ -3196,6 +3245,11 @@ impl PreparedWrite {
         }
         let output = match policy {
             PreparedFieldPolicy::Content => text,
+            PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity
+                if text == input =>
+            {
+                text
+            }
             PreparedFieldPolicy::NewIdentity | PreparedFieldPolicy::ExistingIdentity => {
                 input.to_owned()
             }
@@ -3213,7 +3267,7 @@ impl PreparedWrite {
             field_id,
             detections,
             detection_action,
-            owners: self.domain_owners.clone(),
+            owners: PreparedScanOwners::Defaults(self.domain_owners.len()),
         });
         Ok(output)
     }
@@ -3325,6 +3379,14 @@ impl ActiveWriteTransaction<'_> {
             )));
         }
         let owners = prepared.persisted_owners();
+        let copies: usize = prepared
+            .scans
+            .iter()
+            .map(|scan| scan.owners.resolve(&prepared.domain_owners).len())
+            .sum();
+        // Each owner may insert a scope row and an owner row; the batch, every scan, and
+        // every copy take one id each.
+        let mut ids = OpaqueIds::new(2 * owners.len() + 1 + prepared.scans.len() + copies)?;
         let mut domain_owner_ids = Vec::with_capacity(owners.len());
         {
             let mut insert_scope = self.tx.prepare_cached(
@@ -3349,31 +3411,16 @@ impl ActiveWriteTransaction<'_> {
                 let private_scope_key = active_scan_private_key(owner.scope_kind, &owner.scope_key);
                 let private_owner_key =
                     active_scan_private_key(prepared.owner_kind, &owner.owner_key);
-                let proposed_scope_id = opaque_id()?;
-                insert_scope.execute(params![
-                    proposed_scope_id,
-                    owner.scope_kind,
-                    private_scope_key
-                ])?;
-                let owner_scope_id: String = select_scope
-                    .query_row(params![owner.scope_kind, private_scope_key], |row| {
-                        row.get(0)
-                    })?;
-                let proposed_owner_id = opaque_id()?;
-                insert_owner.execute(params![
-                    proposed_owner_id,
-                    owner_scope_id,
-                    prepared.owner_kind,
-                    private_owner_key
-                ])?;
-                let domain_owner_id = select_owner.query_row(
-                    params![owner_scope_id, prepared.owner_kind, private_owner_key],
-                    |row| row.get::<_, String>(0),
-                )?;
+                let scope_key = params![owner.scope_kind, private_scope_key];
+                let owner_scope_id =
+                    registered_audit_id(&mut select_scope, &mut insert_scope, scope_key, &mut ids)?;
+                let owner_key = params![owner_scope_id, prepared.owner_kind, private_owner_key];
+                let domain_owner_id =
+                    registered_audit_id(&mut select_owner, &mut insert_owner, owner_key, &mut ids)?;
                 domain_owner_ids.push((owner.clone(), domain_owner_id));
             }
         }
-        let batch_id = opaque_id()?;
+        let batch_id = ids.next_id()?;
         self.tx
             .prepare_cached(
                 "INSERT INTO scan_batches(scan_batch_id,owner_kind,created_at_ms)
@@ -3400,7 +3447,8 @@ impl ActiveWriteTransaction<'_> {
              ) VALUES (?1,?2,?3,?4,?5,?6)",
         )?;
         for field in &prepared.scans {
-            if field.owners.is_empty() {
+            let field_owners = field.owners.resolve(&prepared.domain_owners);
+            if field_owners.is_empty() {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                     MemoryStoreError::Serde(format!(
                         "scan field {} has no durable owner",
@@ -3408,7 +3456,7 @@ impl ActiveWriteTransaction<'_> {
                     )),
                 )));
             }
-            let scan_id = opaque_id()?;
+            let scan_id = ids.next_id()?;
             insert_scan.execute(params![
                 scan_id,
                 batch_id,
@@ -3417,7 +3465,7 @@ impl ActiveWriteTransaction<'_> {
                 semantic_digest,
                 i64::try_from(field.detections.len()).unwrap_or(i64::MAX),
             ])?;
-            for owner in &field.owners {
+            for owner in field_owners {
                 let domain_owner_id = domain_owner_ids
                     .iter()
                     .find_map(|(candidate, id)| (candidate == owner).then_some(id))
@@ -3427,7 +3475,7 @@ impl ActiveWriteTransaction<'_> {
                         )))
                     })?;
                 insert_copy.execute(params![
-                    opaque_id()?,
+                    ids.next_id()?,
                     scan_id,
                     domain_owner_id,
                     prepared.owner_kind,
@@ -3482,6 +3530,29 @@ impl ActiveWriteTransaction<'_> {
     }
 }
 
+/// Returns the stored id for `key`, inserting a row with a fresh id from `ids` when none
+/// exists; `insert` binds that id first and `key` after it. When `INSERT OR IGNORE` skips
+/// insertion, the repeated lookup returns the stored id or fails with `QueryReturnedNoRows`.
+fn registered_audit_id(
+    select: &mut rusqlite::Statement<'_>,
+    insert: &mut rusqlite::Statement<'_>,
+    key: &[&dyn rusqlite::ToSql],
+    ids: &mut OpaqueIds,
+) -> rusqlite::Result<String> {
+    if let Some(id) = select.query_row(key, |row| row.get(0)).optional()? {
+        return Ok(id);
+    }
+    let proposed = ids.next_id()?;
+    let mut row: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(key.len() + 1);
+    row.push(&proposed);
+    row.extend_from_slice(key);
+    if insert.execute(&*row)? == 1 {
+        Ok(proposed)
+    } else {
+        select.query_row(key, |row| row.get(0))
+    }
+}
+
 /// Repeated labels carry no additional type information.
 /// The count a caller needs lives in `field_scans.finding_count`.
 fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
@@ -3503,18 +3574,54 @@ const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 /// Thirty-two lowercase hex characters, the shape every audit identifier column checks: six
 /// bytes of big-endian creation milliseconds, then ten random bytes. The time prefix keeps one
 /// batch's rows on a few index leaves, so writing them and the next pass's retirement dirty
-/// O(rows per leaf) pages instead of one page per row. Generated in Rust so an audit write
-/// spends no statement on an identifier; the per-row link copy below binds the same prefix and
-/// appends SQLite's `randomblob` because it needs one value per selected row.
-fn opaque_id() -> rusqlite::Result<String> {
-    let mut bytes = [0u8; 16];
-    bytes[..6].copy_from_slice(&opaque_id_time_prefix());
-    getrandom::getrandom(&mut bytes[6..]).map_err(|error| {
+/// O(rows per leaf) pages. An audit write binds these identifiers as parameters; the per-row
+/// link copy in `persist_audit` binds the same prefix and appends SQLite's `randomblob` to
+/// generate one value per selected row.
+///
+/// One source serves one audit write and reads the clock once, so every id it mints shares
+/// the write's starting millisecond. Each random read is sorted, so when `expected` covers
+/// every identifier the write mints, each audit index receives that write's keys in
+/// increasing order.
+struct OpaqueIds {
+    prefix: [u8; 6],
+    suffixes: std::vec::IntoIter<[u8; 10]>,
+}
+
+impl OpaqueIds {
+    fn new(expected: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            prefix: opaque_id_time_prefix(),
+            suffixes: sorted_random_suffixes(expected)?.into_iter(),
+        })
+    }
+
+    fn next_id(&mut self) -> rusqlite::Result<String> {
+        let suffix = loop {
+            if let Some(suffix) = self.suffixes.next() {
+                break suffix;
+            }
+            self.suffixes = sorted_random_suffixes(OPAQUE_ID_REFILL)?.into_iter();
+        };
+        let mut bytes = [0u8; 16];
+        bytes[..6].copy_from_slice(&self.prefix);
+        bytes[6..].copy_from_slice(&suffix);
+        Ok(hex_digest(bytes))
+    }
+}
+
+/// Suffixes per extra random read, which keep ids valid when a write mints more than its
+/// `expected` count.
+const OPAQUE_ID_REFILL: usize = 32;
+
+fn sorted_random_suffixes(count: usize) -> rusqlite::Result<Vec<[u8; 10]>> {
+    let mut suffixes = vec![[0u8; 10]; count];
+    getrandom::getrandom(suffixes.as_flattened_mut()).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
             "random source unavailable for an audit identifier: {error}"
         ))))
     })?;
-    Ok(hex_digest(bytes))
+    suffixes.sort_unstable();
+    Ok(suffixes)
 }
 
 fn opaque_id_time_prefix() -> [u8; 6] {
@@ -8116,7 +8223,7 @@ impl MemoryStore {
         self.transform_root_prune
     }
 
-    /// Deletes roots whose observation and cache activity are both older than the retention window ending at `now_ms`. The store's newest recorded root observation or cache activity checks the clock: when that write is later than `now_ms`, or more than one window before it, retention keeps every root. A dormant store therefore prunes at the first open after new activity, and a clock that jumps ahead at open deletes nothing.
+    /// Retention deletes roots whose observation and cache activity both precede the 30-day window ending at `now_ms`. Retention keeps every root when `now_ms` is unreadable, or when the newest recorded root observation or cache activity is later than `now_ms` or more than 30 days before it.
     fn prune_transform_session_roots(
         &self,
         now_ms: Option<i64>,
@@ -8127,30 +8234,16 @@ impl MemoryStore {
         };
         self.inner
             .with_conn_fenced(|conn| {
-                let newest: Option<i64> = conn.query_row(
-                    "SELECT MAX(at) FROM (
-                         SELECT MAX(observed_at) AS at FROM transform_session_roots
-                         UNION ALL SELECT MAX(last_activity_at) FROM cache_state
-                     )",
-                    [],
-                    |row| row.get(0),
-                )?;
+                let newest: Option<i64> =
+                    conn.query_row(NEWEST_RECORDED_WRITE_SQL, [], |row| row.get(0))?;
                 let Some(newest_ms) = newest else {
                     return Ok(TransformRootPrune::Pruned(0));
                 };
                 if newest_ms > now_ms || now_ms.saturating_sub(newest_ms) > RETENTION_MS {
                     return Ok(TransformRootPrune::ClockDisagrees { now_ms, newest_ms });
                 }
-                // Cache rows are retained across session teardown, so row existence is not
-                // activity.
                 let deleted = conn.execute(
-                    "DELETE FROM transform_session_roots AS roots
-                      WHERE roots.observed_at < ?1
-                        AND NOT EXISTS (
-                            SELECT 1 FROM cache_state AS cache
-                             WHERE cache.session_id = roots.session_id
-                               AND cache.last_activity_at >= ?1
-                        )",
+                    PRUNE_IDLE_TRANSFORM_ROOTS_SQL,
                     params![now_ms - RETENTION_MS],
                 )?;
                 Ok(TransformRootPrune::Pruned(deleted))
@@ -22919,6 +23012,189 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_cache_row_with_a_null_session_id_leaves_stale_roots_to_the_prune() {
+        let now_ms =
+            epoch_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        root_observed_at(&store, "live", now_ms - DAY_MS);
+        root_observed_at(&store, "stale", now_ms - 40 * DAY_MS);
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                     VALUES (NULL, 1, '{}', '{}', ?1)",
+                    params![now_ms - DAY_MS],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.prune_transform_session_roots(Some(now_ms)).unwrap(),
+            TransformRootPrune::Pruned(1)
+        );
+        assert!(
+            !store
+                .knows_transform_session_root("stale", "/root-a")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn the_transform_root_prune_reads_only_its_two_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let plan = |sql: &str| -> Vec<String> {
+            store
+                .inner
+                .with_conn_unfenced(|conn| {
+                    let mut explain = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let cutoff = vec![0_i64; explain.parameter_count()];
+                    explain
+                        .query_map(rusqlite::params_from_iter(cutoff), |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect()
+                })
+                .unwrap()
+        };
+        let reads = |steps: &[String]| -> Vec<String> {
+            steps
+                .iter()
+                .filter(|step| step.contains("SEARCH") || step.contains("SCAN"))
+                .filter(|step| !step.contains("subquery"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            reads(&plan(NEWEST_RECORDED_WRITE_SQL)),
+            [
+                "SEARCH transform_session_roots USING COVERING INDEX transform_session_roots_by_retention",
+                "SEARCH cache_state USING COVERING INDEX cache_state_by_activity",
+            ]
+        );
+        assert_eq!(
+            reads(&plan(PRUNE_IDLE_TRANSFORM_ROOTS_SQL)),
+            [
+                "SEARCH transform_session_roots USING INDEX transform_session_roots_by_retention (<expr><?)"
+            ]
+        );
+    }
+
+    #[test]
+    fn root_retention_tracks_cache_activity_through_every_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let session = |n: u64| (n < 7).then(|| format!("s{n}"));
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                for _ in 0..2000 {
+                    let (a, b, at) = (next(8), next(8), next(100) as i64);
+                    let root = format!("/r{}", next(3));
+                    match next(9) {
+                        0 => conn.execute(
+                            "INSERT OR IGNORE INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)",
+                            params![session(a), at],
+                        )?,
+                        1 => conn.execute(
+                            "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)
+                             ON CONFLICT(session_id) DO UPDATE SET last_activity_at = excluded.last_activity_at",
+                            params![session(a), at],
+                        )?,
+                        2 => conn.execute(
+                            "UPDATE OR IGNORE cache_state SET session_id = ?2 WHERE session_id IS ?1",
+                            params![session(a), session(b)],
+                        )?,
+                        3 => conn.execute(
+                            "DELETE FROM cache_state WHERE session_id IS ?1",
+                            params![session(a)],
+                        )?,
+                        4 => conn.execute(
+                            "INSERT INTO transform_session_roots (session_id, project_root, observed_at)
+                             VALUES (?1, ?2, ?3)
+                             ON CONFLICT(session_id, project_root) DO UPDATE SET observed_at = excluded.observed_at",
+                            params![format!("s{a}"), root, at],
+                        )?,
+                        5 => conn.execute(
+                            "INSERT OR REPLACE INTO transform_session_roots (session_id, project_root, observed_at)
+                             VALUES (?1, ?2, ?3)",
+                            params![format!("s{a}"), root, at],
+                        )?,
+                        6 => conn.execute(
+                            "UPDATE OR IGNORE transform_session_roots SET session_id = ?2 WHERE session_id = ?1",
+                            params![format!("s{a}"), format!("s{b}")],
+                        )?,
+                        7 => conn.execute(
+                            "DELETE FROM transform_session_roots WHERE session_id = ?1 AND project_root = ?2",
+                            params![format!("s{a}"), root],
+                        )?,
+                        _ => conn.execute(
+                            "INSERT OR REPLACE INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                             VALUES (?1, 1, '{}', '{}', ?2)",
+                            params![session(a), at],
+                        )?,
+                    };
+                    let stale: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM transform_session_roots AS roots
+                          WHERE roots.session_activity_at IS NOT (
+                              SELECT cache.last_activity_at FROM cache_state AS cache
+                               WHERE cache.session_id = roots.session_id)",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(stale, 0);
+                    let newest = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, Option<i64>>(0));
+                    assert_eq!(
+                        newest(NEWEST_RECORDED_WRITE_SQL)?,
+                        newest(
+                            "SELECT MAX(at) FROM (
+                                 SELECT MAX(observed_at) AS at FROM transform_session_roots
+                                 UNION ALL SELECT MAX(last_activity_at) FROM cache_state
+                             )"
+                        )?
+                    );
+                    let cutoff = next(110) as i64;
+                    let selected = |sql: &str| -> rusqlite::Result<Vec<(String, String)>> {
+                        conn.prepare(sql)?
+                            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
+                            .collect()
+                    };
+                    assert_eq!(
+                        selected(
+                            "SELECT session_id, project_root FROM transform_session_roots
+                              WHERE MAX(observed_at, COALESCE(session_activity_at, observed_at)) < ?1
+                              ORDER BY 1, 2"
+                        )?,
+                        selected(
+                            "SELECT session_id, project_root FROM transform_session_roots AS roots
+                              WHERE roots.observed_at < ?1
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM cache_state AS cache
+                                     WHERE cache.session_id = roots.session_id
+                                       AND cache.last_activity_at >= ?1)
+                              ORDER BY 1, 2"
+                        )?,
+                        "cutoff {cutoff}"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
     /// The row stores the canonical root, so the canonical form is what must be scanned. A
     /// symlink whose own spelling is clean can resolve to a detectable target, and scanning
     /// the caller's spelling would clear bytes that are never persisted while the bytes that
@@ -24864,7 +25140,17 @@ mod tests {
             }
         };
         let before = now();
-        let ids: Vec<String> = (0..64).map(|_| opaque_id().unwrap()).collect();
+        let mut source = OpaqueIds::new(3).unwrap();
+        let ids: Vec<String> = (0..2 * OPAQUE_ID_REFILL + 4)
+            .map(|_| source.next_id().unwrap())
+            .collect();
+        assert!(
+            ids[..3].is_sorted(),
+            "one draw hands out increasing identifiers"
+        );
+        for refill in ids[3..3 + 2 * OPAQUE_ID_REFILL].chunks(OPAQUE_ID_REFILL) {
+            assert!(refill.is_sorted(), "each refill draw is sorted");
+        }
         assert_minted_between(&ids, before, now());
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 
@@ -24915,6 +25201,123 @@ mod tests {
             "enabling state: the first write's scan gained a link copy"
         );
         assert_minted_between(&linked, before, after);
+    }
+
+    #[test]
+    fn an_audit_write_inserts_its_keys_in_key_order_and_reuses_registered_owner_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let column = |sql: &str| -> Vec<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        };
+        let write_fields = |owner_key: &str, fields: usize| {
+            let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+            write.domain_owner("session", "ses_order", owner_key);
+            for field in 0..fields {
+                write
+                    .content("content", &format!("plain text {field}"))
+                    .unwrap();
+            }
+            let second_owner = fields / 2;
+            write.domain_owner_for_scans_since(second_owner, "project", "proj_order", owner_key);
+            write
+                .execute(&store.inner, |_| Ok(WriteDisposition::Applied(())))
+                .unwrap();
+        };
+        write_fields("first", 70);
+        let scans = column("SELECT scan_id FROM field_scans ORDER BY rowid");
+        let copies = column("SELECT owner_copy_id FROM scan_owner_copies ORDER BY rowid");
+        let copied_scans = column("SELECT scan_id FROM scan_owner_copies ORDER BY rowid");
+        assert_eq!((scans.len(), copies.len()), (70, 105));
+        for ids in [&scans, &copies, &copied_scans] {
+            assert!(ids.is_sorted(), "{ids:?}");
+        }
+        let owner_rows = || {
+            column(
+                "SELECT (SELECT COUNT(*) FROM scan_owner_scopes) || ':' ||
+                        (SELECT COUNT(*) FROM scan_domain_owners)",
+            )
+        };
+        let owner_ids = || {
+            column(
+                "SELECT owner_scope_id || ':' || domain_owner_id FROM scan_domain_owners ORDER BY rowid",
+            )
+        };
+        assert_eq!(owner_rows(), ["2:2"]);
+        let registered = owner_ids();
+        write_fields("first", 3);
+        assert_eq!(owner_rows(), ["2:2"], "registered rows are reused");
+        assert_eq!(owner_ids(), registered);
+        let reused = column(
+            "SELECT DISTINCT domain_owner_id FROM scan_owner_copies
+              WHERE scan_id IN (SELECT scan_id FROM field_scans ORDER BY rowid DESC LIMIT 3)
+              ORDER BY domain_owner_id",
+        );
+        let mut expected_owners: Vec<String> = registered
+            .iter()
+            .map(|ids| ids.split_once(':').unwrap().1.to_owned())
+            .collect();
+        expected_owners.sort();
+        assert_eq!(
+            reused, expected_owners,
+            "the second write's copies name the stored owners"
+        );
+        write_fields("second", 3);
+        assert_eq!(
+            owner_rows(),
+            ["2:4"],
+            "a new owner joins the existing scopes"
+        );
+    }
+
+    #[test]
+    fn a_refused_owner_insert_fails_the_lookup_and_an_existing_row_draws_no_id() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE owners(
+                 id TEXT PRIMARY KEY,
+                 key TEXT NOT NULL UNIQUE CHECK (length(key) = 4)
+             );
+             INSERT INTO owners VALUES ('stored-id', 'kept');",
+        )
+        .unwrap();
+        let mut select = conn
+            .prepare("SELECT id FROM owners WHERE key = ?1")
+            .unwrap();
+        let mut insert = conn
+            .prepare("INSERT OR IGNORE INTO owners(id, key) VALUES (?1, ?2)")
+            .unwrap();
+        let mut ids = OpaqueIds::new(1).unwrap();
+        assert_eq!(
+            registered_audit_id(&mut select, &mut insert, params!["kept"], &mut ids).unwrap(),
+            "stored-id"
+        );
+        assert_eq!(ids.suffixes.len(), 1, "a stored row draws no id");
+        let fresh =
+            registered_audit_id(&mut select, &mut insert, params!["knew"], &mut ids).unwrap();
+        assert_eq!(ids.suffixes.len(), 0);
+        assert_eq!(
+            fresh.len(),
+            32,
+            "the one expected id went to the missing row"
+        );
+        assert!(matches!(
+            registered_audit_id(&mut select, &mut insert, params!["rejected"], &mut ids),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM owners", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
     }
 
     #[test]
@@ -33647,6 +34050,7 @@ mod shadow_tests {
                     assert_eq!(scan.detection_action, action);
                     assert_eq!(
                         scan.owners
+                            .resolve(&write.domain_owners)
                             .iter()
                             .map(|owner| owner.owner_key.as_str())
                             .collect::<Vec<_>>(),
@@ -33677,6 +34081,7 @@ mod shadow_tests {
         write.existing_identity("second", "two").unwrap();
         let owner_keys = |scan: &PreparedFieldScan| {
             scan.owners
+                .resolve(&write.domain_owners)
                 .iter()
                 .map(|owner| owner.owner_key.clone())
                 .collect::<Vec<_>>()
@@ -33692,6 +34097,143 @@ mod shadow_tests {
             vec!["pass"],
             "the reassigned owner is not a default owner"
         );
+    }
+
+    /// A scan that records its owners as a prefix of the defaults resolves to the list a
+    /// copy of the defaults would hold after the same owner changes.
+    #[test]
+    fn scan_owners_match_copied_owner_lists_under_every_short_operation_sequence() {
+        #[derive(Default)]
+        struct Model {
+            defaults: Vec<PreparedDomainOwner>,
+            scans: Vec<Vec<PreparedDomainOwner>>,
+            prepared_with: Vec<usize>,
+            links: Vec<PreparedDomainOwner>,
+        }
+        let owner = |scope_kind, scope_key: &str, owner_key: &str| PreparedDomainOwner {
+            scope_kind,
+            scope_key: scope_key.to_owned(),
+            owner_key: owner_key.to_owned(),
+        };
+        let owners = [
+            owner("session", "ses", "a"),
+            owner("session", "ses", "b"),
+            owner("project", "proj", "c"),
+        ];
+        const OPERATIONS: usize = 8;
+        const STEPS: u32 = 5;
+        let apply = |write: &mut PreparedWrite, model: &mut Model, operation: usize| {
+            let last_scan = model.scans.len().saturating_sub(1);
+            let (since, target) = match operation {
+                0 => {
+                    write.record_observed_scan("field", Vec::new());
+                    model.scans.push(model.defaults.clone());
+                    model.prepared_with.push(model.defaults.len());
+                    return;
+                }
+                1 | 2 => {
+                    let target = &owners[operation - 1];
+                    write.domain_owner(target.scope_kind, &*target.scope_key, &*target.owner_key);
+                    if !model.defaults.contains(target) {
+                        for scan in model.scans.iter_mut().filter(|scan| scan.is_empty()) {
+                            scan.push(target.clone());
+                        }
+                        model.defaults.push(target.clone());
+                    }
+                    return;
+                }
+                3 => (0, &owners[2]),
+                4 => (last_scan, &owners[1]),
+                5 => (0, &owners[0]),
+                6 => {
+                    let target = &owners[2];
+                    let range = 0..model.scans.len().min(1);
+                    write.reassign_scans_in(
+                        range.clone(),
+                        target.scope_kind,
+                        &*target.scope_key,
+                        &*target.owner_key,
+                    );
+                    for scan in &mut model.scans[range] {
+                        *scan = vec![target.clone()];
+                    }
+                    return;
+                }
+                _ => {
+                    let target = &owners[1];
+                    write.link_existing_scans(
+                        target.scope_kind,
+                        &*target.scope_key,
+                        &*target.owner_key,
+                        ["scan".to_owned()],
+                    );
+                    if !model.defaults.contains(target) {
+                        model.defaults.push(target.clone());
+                    }
+                    if !model.links.contains(target) {
+                        model.links.push(target.clone());
+                    }
+                    return;
+                }
+            };
+            write.domain_owner_for_scans_since(
+                since,
+                target.scope_kind,
+                &*target.scope_key,
+                &*target.owner_key,
+            );
+            if !model.defaults.contains(target) {
+                model.defaults.push(target.clone());
+            }
+            for scan in &mut model.scans[since..] {
+                if !scan.contains(target) {
+                    scan.push(target.clone());
+                }
+            }
+        };
+        let (mut widened_prefixes, mut listed) = (0, 0);
+        for code in 0..OPERATIONS.pow(STEPS) {
+            let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
+            let mut model = Model::default();
+            let mut rest = code;
+            for _ in 0..STEPS {
+                apply(&mut write, &mut model, rest % OPERATIONS);
+                rest /= OPERATIONS;
+                assert_eq!(write.domain_owners, model.defaults, "sequence {code}");
+                assert_eq!(write.scans.len(), model.scans.len(), "sequence {code}");
+                for ((scan, expected), prepared_with) in write
+                    .scans
+                    .iter()
+                    .zip(&model.scans)
+                    .zip(&model.prepared_with)
+                {
+                    assert_eq!(
+                        scan.owners.resolve(&write.domain_owners),
+                        expected.as_slice(),
+                        "sequence {code}"
+                    );
+                    match scan.owners {
+                        PreparedScanOwners::Defaults(len) if len > *prepared_with => {
+                            widened_prefixes += 1;
+                        }
+                        PreparedScanOwners::Defaults(_) => {}
+                        PreparedScanOwners::Listed(_) => listed += 1,
+                    }
+                }
+                let mut persisted = model.defaults.clone();
+                for named in model.scans.iter().flatten().chain(&model.links) {
+                    if !persisted.contains(named) {
+                        persisted.push(named.clone());
+                    }
+                }
+                assert_eq!(write.persisted_owners(), persisted, "sequence {code}");
+            }
+        }
+        assert!(
+            widened_prefixes > 0,
+            "some prefix grew after its scan was prepared"
+        );
+        assert!(listed > 0, "some scan received its own owner list");
     }
 
     fn apply_state_sync_sections(

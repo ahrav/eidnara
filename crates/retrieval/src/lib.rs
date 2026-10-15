@@ -437,39 +437,44 @@ impl QueryRow for rusqlite::Connection {
 }
 
 pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>, ProjectionError> {
-    let row: Option<(ProjectionIdentity, i64)> = conn
-        .query_row(
-            "SELECT schema_version,kernel_incarnation_id,projection_policy_version,
-                    identity_contract_version,limit_manifest_protocol_version,embedding_model,
-                    tokenizer_fingerprint,analysis_identity,vector_dimension,generation_epoch
-             FROM projection_identity WHERE singleton=1",
-            [],
-            |row| {
-                Ok((
-                    ProjectionIdentity {
-                        schema_version: row.get(0)?,
-                        kernel_incarnation_id: row.get(1)?,
-                        projection_policy_version: row.get(2)?,
-                        identity_contract_version: row.get(3)?,
-                        limit_manifest_protocol_version: row.get(4)?,
-                        embedding_model: row.get(5)?,
-                        tokenizer_fingerprint: row.get(6)?,
-                        analysis_identity: row.get(7)?,
-                        vector_dimension: row.get(8)?,
-                        generation_epoch: 0,
-                    },
-                    row.get(9)?,
-                ))
-            },
-        )
-        .optional()?;
-    row.map(|(identity, epoch)| {
-        Ok(ProjectionIdentity {
-            generation_epoch: u64::try_from(epoch).map_err(|_| ProjectionError::CorruptRow)?,
-            ..identity
-        })
-    })
+    conn.query_row(
+        "SELECT schema_version,kernel_incarnation_id,projection_policy_version,
+                identity_contract_version,limit_manifest_protocol_version,embedding_model,
+                tokenizer_fingerprint,analysis_identity,vector_dimension,generation_epoch
+         FROM projection_identity WHERE singleton=1",
+        [],
+        identity_row,
+    )
+    .optional()?
+    .map(installed_identity)
     .transpose()
+}
+
+fn identity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(ProjectionIdentity, i64)> {
+    Ok((
+        ProjectionIdentity {
+            schema_version: row.get(0)?,
+            kernel_incarnation_id: row.get(1)?,
+            projection_policy_version: row.get(2)?,
+            identity_contract_version: row.get(3)?,
+            limit_manifest_protocol_version: row.get(4)?,
+            embedding_model: row.get(5)?,
+            tokenizer_fingerprint: row.get(6)?,
+            analysis_identity: row.get(7)?,
+            vector_dimension: row.get(8)?,
+            generation_epoch: 0,
+        },
+        row.get(9)?,
+    ))
+}
+
+fn installed_identity(
+    (identity, epoch): (ProjectionIdentity, i64),
+) -> Result<ProjectionIdentity, ProjectionError> {
+    Ok(ProjectionIdentity {
+        generation_epoch: u64::try_from(epoch).map_err(|_| ProjectionError::CorruptRow)?,
+        ..identity
+    })
 }
 
 /// The digests one record persists under. Production computes both from the

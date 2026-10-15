@@ -183,47 +183,21 @@ impl Encoder {
     }
 }
 
-/// The byte each character escapes to after `\`, `u` for `\u00XX`, or 0 when serde_json
-/// writes it unchanged.
-static ESCAPE: [u8; 256] = {
-    let mut table = [0u8; 256];
+/// Whether serde_json escapes each byte inside a string.
+static ESCAPES: [bool; 256] = {
+    let mut table = [false; 256];
     let mut byte = 0;
-    while byte < 0x20 {
-        table[byte] = b'u';
+    while byte < 256 {
+        table[byte] = crate::json_string::escape(byte as u8).1 > 1;
         byte += 1;
     }
-    table[0x08] = b'b';
-    table[0x09] = b't';
-    table[0x0a] = b'n';
-    table[0x0c] = b'f';
-    table[0x0d] = b'r';
-    table[b'"' as usize] = b'"';
-    table[b'\\' as usize] = b'\\';
     table
 };
 
-/// Flags the bytes of `word` below 0x20, equal to `"`, or equal to `\`. Every such byte sets
-/// its high bit; a byte above a flagged one can also be set by the borrow, so callers check
-/// each flagged byte against [`ESCAPE`].
-fn escape_flags(word: u64) -> u64 {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    let control = word.wrapping_sub(ONES * 0x20) & !word & HIGH;
-    let quote = word ^ (ONES * u64::from(b'"'));
-    let quote = quote.wrapping_sub(ONES) & !quote & HIGH;
-    let backslash = word ^ (ONES * u64::from(b'\\'));
-    let backslash = backslash.wrapping_sub(ONES) & !backslash & HIGH;
-    control | quote | backslash
-}
-
-fn push_escape(out: &mut String, byte: u8, escape: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out.push('\\');
-    out.push(char::from(escape));
-    if escape == b'u' {
-        out.push_str("00");
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+fn push_escape(out: &mut String, byte: u8) {
+    let (escaped, len) = crate::json_string::escape(byte);
+    for &byte in &escaped[..len] {
+        out.push(char::from(byte));
     }
 }
 
@@ -236,7 +210,7 @@ fn push_escaped(out: &mut String, value: &str) {
     let mut start = 0;
     let mut index = 0;
     while let Some(chunk) = bytes.get(index..index + 8) {
-        let flags = escape_flags(u64::from_le_bytes(
+        let flags = crate::json_string::escape_marks(u64::from_le_bytes(
             chunk.try_into().expect("the chunk holds eight bytes"),
         ));
         if flags == 0 {
@@ -244,19 +218,17 @@ fn push_escaped(out: &mut String, value: &str) {
             continue;
         }
         index += (flags.trailing_zeros() / 8) as usize;
-        let escape = ESCAPE[usize::from(bytes[index])];
-        if escape != 0 {
+        if ESCAPES[usize::from(bytes[index])] {
             out.push_str(&value[start..index]);
-            push_escape(out, bytes[index], escape);
+            push_escape(out, bytes[index]);
             start = index + 1;
         }
         index += 1;
     }
     while index < bytes.len() {
-        let escape = ESCAPE[usize::from(bytes[index])];
-        if escape != 0 {
+        if ESCAPES[usize::from(bytes[index])] {
             out.push_str(&value[start..index]);
-            push_escape(out, bytes[index], escape);
+            push_escape(out, bytes[index]);
             start = index + 1;
         }
         index += 1;

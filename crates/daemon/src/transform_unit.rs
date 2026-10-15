@@ -158,7 +158,7 @@ pub(crate) enum HistorySummarizerFollowup {
 
 /// The environment drops this hold after its request fields, so charges cover their lifetime.
 pub(crate) struct PassHold {
-    pub(crate) _charges: Vec<host_runtime::wire::ByteCharge>,
+    pub(crate) _charges: Arc<[host_runtime::wire::ByteCharge]>,
     pub(crate) _page_apply: Option<Arc<PageApplyGuard>>,
     /// Last, so a waiting same-session pass wakes only after the page phase is released.
     pub(crate) _lane: SessionPass,

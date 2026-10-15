@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 use storage::GuardedConn;
 
 use crate::{
-    OccurrenceRecord, Payload, PersistBounds, ProjectionError, QueryRow, Tombstone,
-    TombstoneReason, persist_occurrences, tombstone_occurrence,
+    OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, QueryRow,
+    Tombstone, TombstoneReason, persist_occurrences, tombstone_occurrence,
 };
 
 /// The batch's source prefix does not depend on vector generation.
@@ -341,6 +341,40 @@ pub fn read_checkpoint(
     )
     .optional()
     .map_err(ProjectionError::from)
+}
+
+/// The identity and checkpoint share one SQLite statement snapshot. The outer `None` denotes a missing identity row; the inner `None` denotes a missing checkpoint row.
+///
+/// # Errors
+///
+/// The function propagates SQLite errors from statement preparation, execution, and row decoding.
+pub fn read_identity_and_checkpoint(
+    conn: &GuardedConn<'_>,
+) -> Result<Option<(ProjectionIdentity, Option<ProjectionCheckpoint>)>, ProjectionError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT i.schema_version,i.kernel_incarnation_id,i.projection_policy_version,
+                i.identity_contract_version,i.limit_manifest_protocol_version,i.embedding_model,
+                i.tokenizer_fingerprint,i.analysis_identity,i.vector_dimension,i.generation_epoch,
+                c.snapshot_commit_seq,c.checkpoint_commit_seq,c.hold_id
+         FROM projection_identity i LEFT JOIN projection_checkpoint c ON c.singleton=1
+         WHERE i.singleton=1",
+    )?;
+    let row = statement
+        .query_row([], |row| {
+            let identity = crate::identity_row(row)?;
+            let checkpoint = match row.get::<_, Option<i64>>(10)? {
+                Some(snapshot_commit_seq) => Some(ProjectionCheckpoint {
+                    snapshot_commit_seq,
+                    checkpoint_commit_seq: row.get(11)?,
+                    hold_id: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                }),
+                None => None,
+            };
+            Ok((identity, checkpoint))
+        })
+        .optional()?;
+    row.map(|(identity, checkpoint)| Ok((crate::installed_identity(identity)?, checkpoint)))
+        .transpose()
 }
 
 /// Applies one batch inside the caller's transaction. Admission from sizes

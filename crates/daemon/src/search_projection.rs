@@ -408,11 +408,25 @@ impl SearchProjection {
         budget: &SharedBudget,
         f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, SearchProjectionError> {
+        self.read_until(budget.deadline(), budget.stop_predicate(), f)
+    }
+
+    /// [`Self::read_within`] whose acquisition wait and SQLite VM steps also end once `stop` returns `true`; see [`storage::SqliteStore::with_conn_interruptible`] for the polling contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when `deadline` passed or `stop` held before acquisition, during the wait, or during a statement.
+    pub fn read_until<T>(
+        &self,
+        deadline: Instant,
+        stop: impl FnMut() -> bool + Send + 'static,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
         self.run(
             f,
             Access::ReadUnder {
-                deadline: budget.deadline(),
-                stop: Box::new(budget.stop_predicate()),
+                deadline,
+                stop: Box::new(stop),
             },
         )
     }

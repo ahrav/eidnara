@@ -9,13 +9,13 @@ use kernel::{
 };
 use storage::GuardedConn;
 
-use crate::batch::{ProjectionCheckpoint, read_checkpoint};
-use crate::eligibility::{Disposition, OccurrenceCandidate, judge_occurrences_within_budget};
+use crate::batch::{ProjectionCheckpoint, read_identity_and_checkpoint};
+use crate::eligibility::{CandidateTerms, Disposition, judge_dispositions_within_budget};
 use crate::exact::association::EXTRACTION_VERSION;
 use crate::exact::lookup::{
-    AssociationRow, Cursor, ExactQuery, LookupContext, LookupRefusal, page,
+    AssociationRow, Cursor, ExactQuery, LookupContext, LookupRefusal, page_at,
 };
-use crate::{ProjectionError, TombstoneReason, read_identity};
+use crate::{ProjectionError, TombstoneReason};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletenessCertificate {
@@ -210,14 +210,18 @@ pub enum ResolveRefusal {
     Kernel(#[from] KernelError),
 }
 
-fn candidate(row: &AssociationRow) -> OccurrenceCandidate {
-    OccurrenceCandidate::new(
-        row.occurrence_id.clone(),
-        row.class,
-        row.source_object_id.clone(),
-        row.revision,
-        row.source_artifact_digest.clone(),
-    )
+impl CandidateTerms for AssociationRow {
+    fn object_id(&self) -> &str {
+        &self.source_object_id
+    }
+
+    fn source_revision(&self) -> i64 {
+        self.revision
+    }
+
+    fn artifact_digest(&self) -> Option<&str> {
+        Some(&self.source_artifact_digest)
+    }
 }
 
 fn retained_bytes(row: &AssociationRow) -> usize {
@@ -302,28 +306,25 @@ fn resolve_inner(
     if request.bounds.page_rows.get() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(ResolveRefusal::PageOverBound);
     }
-    // Final use re-judges every proof occurrence in one kernel batch, so
-    // retention past the batch bound could mint a proof no use can validate.
+    // Retention stays within one kernel batch, the size of one enumeration judgement.
     if request.bounds.max_retained.get() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(ResolveRefusal::RetainedOverBound);
     }
     let certificate = request.certificate;
-    admit_certificate(conn, request).map_err(|refusal| {
+    let state = admit_certificate(conn, request).map_err(|refusal| {
         if is_interrupt(&refusal) {
             ResolveRefusal::BudgetExhausted
         } else {
             refusal
         }
     })?;
-    let installed = kernel
-        .database_incarnation_id_within_budget(budget)
+    let identified = kernel
+        .capture_identified_commit_read_target_within_budget(budget)
         .map_err(budget_refusal)?;
-    if installed != certificate.canonical_incarnation_id {
+    if identified.database_incarnation_id != certificate.canonical_incarnation_id {
         return Err(CertificateRefusal::IncarnationMismatch.into());
     }
-    let initial = kernel
-        .capture_commit_read_target_within_budget(budget)
-        .map_err(budget_refusal)?;
+    let initial = identified.target;
     if initial.incarnation != certificate.kernel_incarnation {
         return Err(CertificateRefusal::IncarnationMismatch.into());
     }
@@ -353,14 +354,15 @@ fn resolve_inner(
             complete_through: certificate.complete_through_commit_seq,
         });
     }
-    attempt.enumerate(conn)?;
+    attempt.enumerate(conn, state)?;
     Ok(attempt.finish())
 }
 
+/// Admits the certificate against the projection's identity and checkpoint. The inner result is the page state of the same transaction snapshot: the checkpoint every page reads under, or the schema refusal the first page reports.
 fn admit_certificate(
     conn: &GuardedConn<'_>,
     request: &ResolveRequest<'_>,
-) -> Result<(), ResolveRefusal> {
+) -> Result<Result<ProjectionCheckpoint, LookupRefusal>, ResolveRefusal> {
     let certificate = request.certificate;
     if certificate.extraction_version != EXTRACTION_VERSION {
         return Err(CertificateRefusal::ExtractionVersion {
@@ -376,22 +378,27 @@ fn admit_certificate(
         }
         .into());
     }
-    let identity = read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
+    let (identity, checkpoint) =
+        read_identity_and_checkpoint(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
     if identity.kernel_incarnation_id != certificate.canonical_incarnation_id {
         return Err(CertificateRefusal::IncarnationMismatch.into());
     }
     if identity.identity_contract_version != certificate.identity_contract_version {
         return Err(CertificateRefusal::IdentityContract.into());
     }
-    let checkpoint = read_checkpoint(conn, &certificate.canonical_incarnation_id)?
-        .ok_or(LookupRefusal::NoCheckpoint)?;
+    let checkpoint = checkpoint.ok_or(LookupRefusal::NoCheckpoint)?;
     if checkpoint != certificate.projection {
         return Err(CertificateRefusal::ProjectionMismatch.into());
     }
     if certificate.complete_through_commit_seq != checkpoint.checkpoint_commit_seq {
         return Err(CertificateRefusal::CompleteThrough.into());
     }
-    Ok(())
+    if identity.schema_version != crate::SCHEMA_VERSION
+        || identity.analysis_identity != crate::lexical::AnalysisIdentity::current_str()
+    {
+        return Ok(Err(LookupRefusal::SchemaMismatch));
+    }
+    Ok(Ok(checkpoint))
 }
 
 impl Attempt<'_> {
@@ -421,7 +428,12 @@ impl Attempt<'_> {
         Ok(())
     }
 
-    fn enumerate(&mut self, conn: &GuardedConn<'_>) -> Result<(), ResolveRefusal> {
+    /// Every page reads the transaction snapshot `state` came from, so each page reads under its checkpoint.
+    fn enumerate(
+        &mut self,
+        conn: &GuardedConn<'_>,
+        state: Result<ProjectionCheckpoint, LookupRefusal>,
+    ) -> Result<(), ResolveRefusal> {
         let bounds = self.request.bounds;
         let mut cursor: Option<Cursor> = None;
         loop {
@@ -447,7 +459,21 @@ impl Attempt<'_> {
                 page_rows,
                 budget: self.budget,
             };
-            let page = match page(conn, &context, &self.request.query, cursor.as_ref()) {
+            let read = match &state {
+                Ok(checkpoint) => page_at(
+                    conn,
+                    &context,
+                    &self.request.query,
+                    cursor.as_ref(),
+                    checkpoint.clone(),
+                ),
+                Err(refusal) => context
+                    .budget
+                    .check()
+                    .map_err(|_| LookupRefusal::BudgetExhausted)
+                    .and(Err(refusal.clone())),
+            };
+            let page = match read {
                 Ok(page) => page,
                 Err(refusal) => return self.late_failure(refusal.into()),
             };
@@ -478,16 +504,15 @@ impl Attempt<'_> {
         if live.is_empty() {
             return Ok(());
         }
-        let candidates: Vec<OccurrenceCandidate> = live.iter().map(candidate).collect();
         (self.before_judgement)();
-        let report = judge_occurrences_within_budget(
+        let report = judge_dispositions_within_budget(
             self.kernel,
             self.request.authority.project,
             self.request.authority.destination,
-            &candidates,
+            &live,
             self.budget,
         )?;
-        self.resolution.consumed.validated += candidates.len();
+        self.resolution.consumed.validated += live.len();
         if report.incarnation != self.initial.incarnation {
             self.disqualify(Disqualification::SnapshotChanged);
             self.stop(IncompleteReason::KernelIncarnationChanged);
@@ -504,8 +529,8 @@ impl Attempt<'_> {
             self.disqualify(Disqualification::SnapshotChanged);
         }
         self.snapshot.get_or_insert(report.snapshot);
-        for (row, judged) in live.into_iter().zip(&report.occurrences) {
-            match judged.disposition {
+        for (row, disposition) in live.into_iter().zip(report.dispositions) {
+            match disposition {
                 Disposition::Eligible => self.retain(row),
                 Disposition::PolicyExcluded(verdict) => {
                     self.resolution.observations.record(verdict);
@@ -580,19 +605,17 @@ pub enum ProofInvalidation {
     InventoryEpochChanged,
     ProjectionChanged,
     IncarnationChanged,
-    CanonicalChanged {
-        proven: i64,
-        current: i64,
-    },
+    CanonicalChanged { proven: i64, current: i64 },
     SnapshotChanged,
-    Rejected {
-        occurrence_id: String,
-        verdict: EligibilityVerdict,
-    },
 }
 
 /// Revalidates `proof` for final use at the current authority, projection,
-/// and kernel state. An interrupted checkpoint read, like an ended `budget`,
+/// and kernel state. One kernel capture is the linearization point: the
+/// database identity, incarnation, tip, and classification generation it reads
+/// must equal the state the proof's occurrences were judged eligible at. An
+/// eligibility verdict is a function of that egress state, so an unchanged
+/// snapshot carries every verdict forward, and any change before the capture
+/// defeats the proof. An interrupted checkpoint read, like an ended `budget`,
 /// invalidates the proof as `BudgetExhausted`.
 pub fn validate_for_use(
     conn: &GuardedConn<'_>,
@@ -604,9 +627,10 @@ pub fn validate_for_use(
     validate_for_use_inner(conn, kernel, proof, authority, budget, || ())
 }
 
-/// `after_judgement` runs after the kernel batch returns and before
-/// `capture_commit_read_target_within_budget` rechecks the budget and kernel
-/// incarnation, allowing tests to change either value in that window.
+/// `before_capture` runs after the projection checks and before
+/// `capture_identified_commit_read_target_within_budget` rechecks the budget,
+/// the kernel identity and incarnation, the tip, and the classification
+/// generation, allowing tests to change any of them in that window.
 #[cfg(feature = "test-support")]
 pub fn validate_for_use_with_hook_for_test(
     conn: &GuardedConn<'_>,
@@ -614,9 +638,9 @@ pub fn validate_for_use_with_hook_for_test(
     proof: &ExactProof,
     authority: Authority<'_>,
     budget: &EvalBudget,
-    after_judgement: impl FnOnce(),
+    before_capture: impl FnOnce(),
 ) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
-    validate_for_use_inner(conn, kernel, proof, authority, budget, after_judgement)
+    validate_for_use_inner(conn, kernel, proof, authority, budget, before_capture)
 }
 
 fn validate_for_use_inner(
@@ -625,7 +649,7 @@ fn validate_for_use_inner(
     proof: &ExactProof,
     authority: Authority<'_>,
     budget: &EvalBudget,
-    after_judgement: impl FnOnce(),
+    before_capture: impl FnOnce(),
 ) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
     if budget.is_exhausted() {
         return Ok(Err(ProofInvalidation::BudgetExhausted));
@@ -637,25 +661,27 @@ fn validate_for_use_inner(
     if authority.inventory_epoch != certificate.inventory_epoch {
         return Ok(Err(ProofInvalidation::InventoryEpochChanged));
     }
-    let checkpoint = match read_checkpoint(conn, &certificate.canonical_incarnation_id) {
-        Ok(checkpoint) => checkpoint,
+    let checkpoint = match read_identity_and_checkpoint(conn) {
+        Ok(Some((identity, checkpoint)))
+            if identity.kernel_incarnation_id == certificate.canonical_incarnation_id =>
+        {
+            checkpoint
+        }
+        Ok(_) => return Err(ProjectionError::IdentityMismatch.into()),
         Err(ProjectionError::Interrupted) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
         Err(error) => return Err(error.into()),
     };
     if checkpoint.as_ref() != Some(&certificate.projection) {
         return Ok(Err(ProofInvalidation::ProjectionChanged));
     }
-    let kernel_state = (|| -> Result<_, KernelError> {
-        let incarnation = kernel.database_incarnation_id_within_budget(budget)?;
-        let target = kernel.capture_commit_read_target_within_budget(budget)?;
-        Ok((incarnation, target))
-    })();
-    let (incarnation, target) = match kernel_state {
-        Ok(state) => state,
+    before_capture();
+    let identified = match kernel.capture_identified_commit_read_target_within_budget(budget) {
+        Ok(identified) => identified,
         Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
         Err(error) => return Err(error.into()),
     };
-    if incarnation != certificate.canonical_incarnation_id
+    let target = identified.target;
+    if identified.database_incarnation_id != certificate.canonical_incarnation_id
         || target.incarnation != proof.kernel.incarnation
     {
         return Ok(Err(ProofInvalidation::IncarnationChanged));
@@ -666,37 +692,8 @@ fn validate_for_use_inner(
             current: target.through_commit,
         }));
     }
-    let candidates: Vec<OccurrenceCandidate> = proof.occurrences.iter().map(candidate).collect();
-    let report = match judge_occurrences_within_budget(
-        kernel,
-        authority.project,
-        authority.destination,
-        &candidates,
-        budget,
-    ) {
-        Ok(report) => report,
-        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
-        Err(error) => return Err(error.into()),
-    };
-    after_judgement();
-    let after = match kernel.capture_commit_read_target_within_budget(budget) {
-        Ok(target) => target,
-        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
-        Err(error) => return Err(error.into()),
-    };
-    if after.incarnation != proof.kernel.incarnation {
-        return Ok(Err(ProofInvalidation::IncarnationChanged));
-    }
-    if report.snapshot != proof.snapshot {
+    if identified.egress_snapshot() != proof.snapshot {
         return Ok(Err(ProofInvalidation::SnapshotChanged));
-    }
-    for judged in &report.occurrences {
-        if let Disposition::PolicyExcluded(verdict) = judged.disposition {
-            return Ok(Err(ProofInvalidation::Rejected {
-                occurrence_id: judged.occurrence_id.clone(),
-                verdict,
-            }));
-        }
     }
     Ok(Ok(()))
 }
