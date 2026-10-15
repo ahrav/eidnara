@@ -2576,12 +2576,20 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
         let now = fixture.now + 7;
         std::thread::spawn(move || {
             barrier.wait();
-            (0..200)
-                .map(|_| {
-                    read_selected_proposal(&store, &ledger, PROJECT, &identity, now)
-                        .map(|selected| selected.reference)
-                })
-                .collect::<Vec<_>>()
+            // Reads run until 50 past the first refusal, so the release lands among them however fast a read is.
+            const READS_PAST_FIRST_REFUSAL: usize = 50;
+            const MAX_READS: usize = 100_000;
+            let mut reads = Vec::new();
+            let mut reads_since_first_refusal = 0;
+            while reads_since_first_refusal < READS_PAST_FIRST_REFUSAL && reads.len() < MAX_READS {
+                let read = read_selected_proposal(&store, &ledger, PROJECT, &identity, now)
+                    .map(|selected| selected.reference);
+                if read.is_err() || reads_since_first_refusal > 0 {
+                    reads_since_first_refusal += 1;
+                }
+                reads.push(read);
+            }
+            reads
         })
     };
     barrier.wait();

@@ -12,9 +12,9 @@ use daemon::memory_reviewer::selection::{
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass};
 use kernel::{
-    ArtifactIngestRequest, CommitIntent, DecisionPayload, DecisionSpec, Dimension, DomainSpec,
-    KernelStore, ProjectScope, ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceDescriptorPolicy, SourceDescriptorRequest,
+    CommitIntent, DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, ProjectScope,
+    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
+    SourceDescriptorRequest,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
@@ -165,6 +165,18 @@ impl Fixture {
         identity_field: &str,
         representation: &str,
     ) -> String {
+        self.publish_derived_over(key, class, identity_field, representation, None)
+    }
+
+    fn publish_derived_over(
+        &self,
+        key: &str,
+        class: &str,
+        identity_field: &str,
+        representation: &str,
+        repository_id: Option<&str>,
+    ) -> String {
+        let repository_backed = repository_id.is_some();
         let object = format!("decision-{key}");
         self.store
             .commit(intent(&format!("decision-{key}")), |envelope| {
@@ -202,26 +214,19 @@ impl Fixture {
                 Ok(String::new())
             })
             .unwrap();
-        let handle = self
-            .store
-            .ingest_artifact(ArtifactIngestRequest {
+        let handle = support::host_ingest::ingest(
+            &self.store,
+            support::host_ingest::HostEvidence {
                 intent: intent(&format!("evidence-{key}")),
-                payload: format!("claim {key}").into_bytes(),
+                payload: &format!("claim {key}"),
                 evidence_id: format!("evidence-{key}"),
                 object_id: format!("evidence-object-{key}"),
-                object_kind: "evidence".to_string(),
-                domain_id: DOMAIN.to_string(),
-                source_kind: "conversation".to_string(),
+                domain_id: DOMAIN,
+                source_kind: "conversation",
                 source_id: format!("src/{key}"),
-                source_revision: 1,
-                media_type: "text/plain".to_string(),
-                retention_class: "canonical".to_string(),
-                retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: None,
-            })
-            .unwrap();
+                repository_id,
+            },
+        );
         let mut published = None;
         self.store
             .commit(intent(&format!("descriptor-{key}")), |envelope| {
@@ -244,6 +249,23 @@ impl Fixture {
                         observed_at: 1,
                     })
                     .unwrap();
+                // Eligibility judges the descriptor through the reads that
+                // serve it, so the fixture admits the descriptor itself.
+                if repository_backed {
+                    envelope.record_admission(kernel::AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some(outcome.object_id.clone()),
+                        source_class: Some(kernel::SourceClass::ExplicitUser),
+                        taint_class: Some(kernel::TaintClass::UserExplicit),
+                        event: kernel::AdmissionEvent {
+                            kind: kernel::EventKind::Other,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "test".to_string(),
+                        },
+                    })?;
+                }
                 published = Some(outcome.object_id);
                 Ok(String::new())
             })
@@ -414,4 +436,409 @@ fn the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors
     assert_eq!(page.next_cursor, None);
     let _ = MAX_EXAMINED_PER_PAGE;
     let _: Option<CausalInputs> = None;
+}
+
+/// The Memory Classifier's binding for one firing.
+fn classifier(firing: &str) -> ProducerBinding {
+    ProducerBinding {
+        producer: "memory-classifier".to_string(),
+        firing_id: firing.to_string(),
+        ordinal: 0,
+    }
+}
+
+fn repository(key: &str) -> String {
+    format!("repo-{key}")
+}
+
+impl Fixture {
+    fn evidence(&self, key: &str) -> String {
+        support::host_ingest::ingest(
+            &self.store,
+            support::host_ingest::HostEvidence {
+                intent: intent(&format!("linked-{key}")),
+                payload: &format!("linked {key}"),
+                evidence_id: format!("linked-{key}"),
+                object_id: format!("linked-object-{key}"),
+                domain_id: DOMAIN,
+                source_kind: "repo",
+                source_id: format!("src/linked-{key}"),
+                repository_id: Some(&repository(key)),
+            },
+        )
+        .evidence_id
+    }
+
+    /// Records an event on `key`'s decision that cites `evidence`.
+    fn link(&self, key: &str, evidence: &str) {
+        self.store
+            .commit(intent(&format!("event-{key}-{evidence}")), |envelope| {
+                envelope.append_decision_event(
+                    &format!("decision-id-{key}"),
+                    kernel::DecisionEventSpec {
+                        event_kind: "evidence".to_string(),
+                        payload: kernel::DecisionEventPayload {
+                            summary: format!("linked {evidence}"),
+                        },
+                        evidence_id: Some(evidence.to_string()),
+                        recorded_at: 2,
+                    },
+                )?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    fn retire_linked(&self, key: &str, evidence_key: &str) {
+        self.store
+            .commit(
+                intent(&format!("retire-{key}-{evidence_key}")),
+                |envelope| {
+                    envelope.retire_decision(&format!("decision-{key}"))?;
+                    envelope.retire_evidence(&format!("linked-object-{evidence_key}"))?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
+    /// Admits `inputs` as the producer does, then runs it to a recorded abstention through the ledger's own receipt path: MODULE authority, activation, a claimed task lease, a begun receipt, and its completion.
+    fn abstain(&self, inputs: &CausalInputs, firing: &str) -> String {
+        let preparing = self
+            .ledger
+            .authority_begin_prepare("ctx", PROJECT, "memories")
+            .unwrap();
+        let checksum = self
+            .ledger
+            .authority_seed_checksum("ctx", PROJECT, "memories")
+            .unwrap();
+        self.ledger
+            .authority_verify_prepare(
+                "ctx",
+                PROJECT,
+                "memories",
+                preparing.generation,
+                &checksum,
+                &checksum,
+            )
+            .unwrap();
+        let generation = self
+            .ledger
+            .authority_ack_prepare("ctx", PROJECT, "memories", preparing.generation)
+            .unwrap()
+            .generation;
+        let identity = self.reserve(inputs, firing);
+        self.ledger
+            .activate_memory_reviewer_job(
+                PROJECT,
+                &identity,
+                &classifier(firing),
+                &memory_store::memory_reviewer_jobs::MemoryReviewerJobInput {
+                    subject: inputs.target.clone(),
+                    starting_references: Vec::new(),
+                    question_template: inputs.question_template.clone(),
+                },
+                self.now,
+            )
+            .unwrap();
+        let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = self
+            .ledger
+            .acquire_memory_reviewer_task(
+                PROJECT,
+                "acq-1",
+                "worker-a",
+                0,
+                i64::try_from(generation).unwrap(),
+                &identity,
+                self.now,
+            )
+            .unwrap()
+        else {
+            panic!("the job is claimed")
+        };
+        let kernel_incarnation = self
+            .store
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap();
+        let memory_store::memory_reviewer_ledger::MemoryReviewerBeginOutcome::Begun(receipt) = self
+            .ledger
+            .begin_memory_reviewer_receipt(
+                PROJECT,
+                &identity,
+                &kernel_incarnation,
+                &claim.claim_id,
+                self.now,
+            )
+            .unwrap()
+        else {
+            panic!("the receipt begins")
+        };
+        self.ledger
+            .complete_memory_reviewer_receipt(
+                PROJECT,
+                &identity,
+                &claim.claim_id,
+                &format!("completion-{identity}"),
+                "worker-a",
+                0,
+                receipt.generation,
+                &kernel_incarnation,
+                &memory_store::memory_reviewer_ledger::ReceiptCompletion::Abstained(
+                    memory_store::memory_reviewer_ledger::AbstainReason::OwnerSensitive,
+                ),
+                self.now + 1,
+            )
+            .unwrap();
+        identity
+    }
+
+    fn reserve(&self, inputs: &CausalInputs, firing: &str) -> String {
+        match self
+            .ledger
+            .reserve_memory_reviewer_job(PROJECT, &classifier(firing), inputs, self.now)
+            .unwrap()
+        {
+            memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => {
+                job.causal_identity
+            }
+            other => panic!("fresh inputs reserve: {other:?}"),
+        }
+    }
+}
+
+/// Q29's bounded reconsideration through the production selector: once a decision-derived target's review abstained, repeated selections at unchanged inputs pass it and an unrelated write changes nothing, but evidence newly linked to its originating decision, at the target's unchanged revision, selects it once under a new causal identity. The abstained outcome stays recorded under the old identity, and the new job deduplicates like any other.
+#[test]
+fn newly_linked_evidence_after_an_abstention_reconsiders_the_target_once_at_its_unchanged_revision()
+{
+    let fixture = Fixture::open();
+    let target = fixture.publish_derived_over(
+        "t",
+        "canonical_claims",
+        "object_id",
+        "decision_summary",
+        Some(&repository("t")),
+    );
+    let first = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(
+        Fixture::targets(&first),
+        vec![target.clone()],
+        "repository-backed evidence is remote-eligible"
+    );
+    let first_inputs = first.references[0].clone();
+    let first_identity = fixture.abstain(&first_inputs, "slot-1");
+
+    // Repeated firings at unchanged inputs pass the target.
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+    // An unrelated decision's evidence is not linked to the target.
+    fixture.publish_derived_over(
+        "u",
+        "promoted_memory",
+        "decision_object_id",
+        "summary",
+        Some(&repository("u")),
+    );
+    let unrelated_evidence = fixture.evidence("unrelated");
+    fixture.link("u", &unrelated_evidence);
+    let unrelated = fixture.select(MEMORY_CLASSES, None);
+    assert!(
+        !Fixture::targets(&unrelated).contains(&target),
+        "an unrelated write is not a causal change"
+    );
+    for inputs in &unrelated.references {
+        fixture.reserve(inputs, "slot-unrelated");
+    }
+
+    // Evidence newly linked to the target's originating decision reconsiders it once.
+    let linked = fixture.evidence("new");
+    fixture.link("t", &linked);
+    let second = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&second), vec![target.clone()]);
+    let second_inputs = &second.references[0];
+    assert_eq!(
+        second_inputs.target, first_inputs.target,
+        "the target and its revision are unchanged"
+    );
+    assert!(
+        second_inputs
+            .required_evidence
+            .iter()
+            .any(|e| e.evidence_id == linked && e.available)
+    );
+    let second_identity = fixture.reserve(second_inputs, "slot-2");
+    assert_ne!(second_identity, first_identity);
+    assert!(matches!(
+        fixture
+            .ledger
+            .lookup_memory_reviewer_job(PROJECT, &first_identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        memory_store::memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
+            MemoryReviewerJobOutcome::Abstained
+        )
+    ));
+    assert!(
+        fixture.select(MEMORY_CLASSES, None).references.is_empty(),
+        "the new job deduplicates repeated firings"
+    );
+}
+
+#[test]
+fn a_cited_row_becoming_unavailable_after_an_abstention_reconsiders_the_target_once() {
+    let fixture = Fixture::open();
+    let target = fixture.publish_derived_over(
+        "t",
+        "canonical_claims",
+        "object_id",
+        "decision_summary",
+        Some(&repository("t")),
+    );
+    let cited = fixture.evidence("cited");
+    fixture.link("t", &cited);
+    let first = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&first), vec![target.clone()]);
+    let first_inputs = first.references[0].clone();
+    assert!(
+        first_inputs
+            .required_evidence
+            .iter()
+            .any(|e| e.evidence_id == cited && e.available)
+    );
+    let first_identity = fixture.abstain(&first_inputs, "slot-1");
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+
+    fixture.retire_linked("t", "cited");
+    let second = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&second), vec![target]);
+    let second_inputs = &second.references[0];
+    assert_eq!(second_inputs.target, first_inputs.target);
+    assert!(
+        second_inputs
+            .required_evidence
+            .iter()
+            .any(|e| e.evidence_id == cited && !e.available),
+        "{:?}",
+        second_inputs.required_evidence
+    );
+    let second_identity = fixture.reserve(second_inputs, "slot-2");
+    assert_ne!(second_identity, first_identity);
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+}
+
+/// The selector's causal inputs carry the descriptor's evidence and at most `MAX_LINKED_EVIDENCE` linked rows, the most recently cited within the event window. Re-citing a row already in the set keeps the set while every row of it stays inside that window; one more new citation changes the causal identity, so the next selection reconsiders the target once.
+#[test]
+fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
+    use daemon::memory_reviewer::selection::MAX_LINKED_EVIDENCE;
+    let fixture = Fixture::open();
+    let target = fixture.publish_derived_over(
+        "t",
+        "canonical_claims",
+        "object_id",
+        "decision_summary",
+        Some(&repository("t")),
+    );
+    let cited: Vec<String> = (0..=MAX_LINKED_EVIDENCE.get())
+        .map(|n| {
+            let evidence = fixture.evidence(&format!("c{n}"));
+            fixture.link("t", &evidence);
+            evidence
+        })
+        .collect();
+    let page = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&page), vec![target.clone()]);
+    let required: Vec<&str> = page.references[0]
+        .required_evidence
+        .iter()
+        .map(|e| e.evidence_id.as_str())
+        .collect();
+    assert_eq!(required.len(), MAX_LINKED_EVIDENCE.get() + 1);
+    assert!(
+        !required.contains(&cited[0].as_str()),
+        "the oldest citation falls outside the bound: {required:?}"
+    );
+    assert!(cited[1..].iter().all(|e| required.contains(&e.as_str())));
+    fixture.reserve(&page.references[0], "slot-1");
+    // Re-citing a row already among the newest eight moves it, not the set.
+    fixture.link("t", &cited[MAX_LINKED_EVIDENCE.get()]);
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+    let newest = fixture.evidence("newest");
+    fixture.link("t", &newest);
+    let page = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&page), vec![target]);
+}
+
+/// One batch fingerprints its permitted decision-derived rows together, so each selected target carries its own decision's citations even with denied rows and a row the ledger cannot bind sorted between them; a held row is passed while the others are still selected with their own inputs.
+#[test]
+fn a_batch_pairs_each_target_with_its_own_linked_evidence() {
+    let fixture = Fixture::open();
+    let derived = |key: &str, repository_id: Option<&str>| {
+        let object_id = fixture.publish_derived_over(
+            key,
+            "canonical_claims",
+            "object_id",
+            "decision_summary",
+            repository_id,
+        );
+        let evidence = fixture.evidence(&format!("for-{}", &key[..2]));
+        fixture.link(key, &evidence);
+        object_id
+    };
+    let permitted: BTreeMap<String, String> = ["p0", "p1", "p2"]
+        .into_iter()
+        .map(|key| (derived(key, Some(&repository(key))), key.to_string()))
+        .collect();
+    let denied: Vec<String> = ["d0", "d1", "d2"]
+        .into_iter()
+        .map(|key| derived(key, None))
+        .collect();
+    let unbindable = derived(&format!("u{}", "u".repeat(299)), Some(&repository("u")));
+    assert!(
+        denied
+            .iter()
+            .chain([&unbindable])
+            .any(|id| permitted.keys().any(|p| id < p)),
+        "a passed row sorts before a selected one, so a misaligned read would show"
+    );
+    let selected = |page: &memory_store::memory_reviewer_jobs::FrozenSelectionPage| {
+        page.references
+            .iter()
+            .map(|inputs| {
+                let ReviewTarget::Memory { object_id, .. } = &inputs.target else {
+                    panic!("{:?}", inputs.target)
+                };
+                let evidence: Vec<(String, bool)> = inputs
+                    .required_evidence
+                    .iter()
+                    .map(|e| (e.evidence_id.clone(), e.available))
+                    .collect();
+                (object_id.clone(), evidence)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let page = fixture.select(MEMORY_CLASSES, None);
+    let expected: BTreeMap<String, Vec<(String, bool)>> = permitted
+        .iter()
+        .map(|(object_id, key)| {
+            (
+                object_id.clone(),
+                vec![
+                    (format!("evidence-{key}"), true),
+                    (format!("linked-for-{key}"), true),
+                ],
+            )
+        })
+        .collect();
+    assert_eq!(selected(&page), expected);
+    let (held_id, _) = permitted.iter().next().unwrap();
+    let held = page
+        .references
+        .iter()
+        .find(|inputs| {
+            matches!(&inputs.target, ReviewTarget::Memory { object_id, .. } if object_id == held_id)
+        })
+        .unwrap();
+    fixture.reserve(held, "slot-held");
+    let mut rest = expected.clone();
+    rest.remove(held_id);
+    assert_eq!(selected(&fixture.select(MEMORY_CLASSES, None)), rest);
 }
