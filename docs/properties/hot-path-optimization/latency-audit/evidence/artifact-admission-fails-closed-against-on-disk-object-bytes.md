@@ -108,6 +108,27 @@ or a refusal after an unrecovered orphan publish.
 - Conclusion: resolved with answer - the refusal points and codes are
   unchanged; the count replaces the walk as the admitted usage.
 
+### Q: Do the daemon's maintenance passes change who relieves a cap, and can a failed audit walk close admission?
+
+- Sources examined: the daemon's [memory-reviewer
+  sweep][daemon-maintenance], [`settle_census`][usage-settle],
+  [`reconcile_artifact_usage`][usage-reconcile-split], and the
+  [usage tests][t-usage].
+- Findings: The first entry's premise is wrong: the memory-reviewer sweep
+  calls `run_staging_maintenance`, so in production GC also lowers usage,
+  for invalidated bytes past their grace. `delete_artifact` still has no
+  daemon caller. The classification question stays open with that premise.
+  A census or reconciliation walk that fails settles nothing, so it neither
+  latches nor moves the held count; admission without a count walks under
+  the writer lock and refuses with `IngestionFailClosed` when that walk
+  fails, as
+  [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk]
+  asserts.
+- Missing evidence: A stated policy on the retry class.
+- Conclusion: needs human input for the classification; resolved with
+  answer for the failed walk - admission fails closed only when it needs a
+  walk that fails.
+
 [ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L361-L663
 [staged]: ../../../../../crates/kernel/src/cas/ingest.rs#L38-L56
 [ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L379-L405
@@ -144,3 +165,7 @@ or a refusal after an unrecovered orphan publish.
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
 [check-budget-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L950-L965
+[daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L158-L169
+[usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L112-L134
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L554

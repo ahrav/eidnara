@@ -465,6 +465,9 @@ would change.
 | [`a_restore_reconciles_the_count_it_held_and_keeps_admission_open`][t-usage-restore] | Restore recovery reconciles once against the held count; usage equals the walk and admission stays open. | unaudited |
 | [`a_walk_counts_only_regular_files_at_both_levels`][t-usage-file-set] | The fallback walk and the census at open both count a top-level file and a shard object and skip symlinks and nested directories. | unaudited |
 | [`the_open_census_sums_every_shard_when_shards_outnumber_its_workers`][t-usage-census] | With 256 shards and up to 64 census workers, the census at open, a maintenance reconciliation, and the fallback walk each equal the independent sum; open takes one walk. | unaudited |
+| [`a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_it`][t-usage-raced] | The writer lock is free after the maintenance walk returns; an ingest and a purge landed there leave usage equal to the walk and admission open, and the next pass still latches on a stray file. | unaudited |
+| [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk] | A maintenance walk that hits an unreadable directory keeps the count and admission; with no count held the same failure refuses with `IngestionFailClosed`. | unaudited |
+| [`an_open_whose_census_fails_admits_once_a_later_walk_succeeds`][t-usage-failed-census] | A census at open that hits an unreadable directory latches nothing; the first ingest after the directory is readable walks, admits, and matches the walk. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
 | [`recover_twice`][t-recover-twice] | A second recovery changes nothing. | unaudited |
 | [`return_value_fault_table_latches_eio_and_never_publishes_a_reference`][t-faults] | Six ingest fault points. | unaudited |
@@ -472,12 +475,14 @@ would change.
 | [`crash_windows_recover_idempotently_and_match_no_crash_execution`][t-crash] | SIGKILL children at reservation, ingest, and purge barriers. | unaudited |
 | [`startup_retires_a_live_reservation_whose_bytes_are_already_gone`][t-gone] | Recovery deletes a reservation with no bytes. | unaudited |
 
-None found: any daemon caller of `run_staging_maintenance` or
-`delete_artifact`, so the GC and purge decrement paths and the maintenance
-reconciliation run only in kernel tests and benches; a test that the health
-sampler's lock-free count read and `check_budget`'s locked read agree under
+None found: a daemon caller of `delete_artifact`, so the purge decrement
+runs only in kernel tests and benches (the daemon's memory-reviewer sweep
+calls `run_staging_maintenance`, so GC reclaim and the maintenance
+reconciliation run in production); a test that the health sampler's
+lock-free count read and `check_budget`'s locked read agree under
 concurrent ingest; a restore that finds drift; a durable unlink whose
-directory sync fails, which leaves the count unknown.
+directory sync fails, which leaves the count unknown; a census that fails
+with `EMFILE` or `ENFILE` rather than `EACCES`, which no fault seam injects.
 
 ## Wildcard and cross-cutting
 
@@ -768,6 +773,9 @@ not a claim that no related check exists anywhere in the repository.
 [t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L393
 [t-usage-file-set]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L421
 [t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L448
+[t-usage-raced]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L502
+[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L554
+[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L576
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426

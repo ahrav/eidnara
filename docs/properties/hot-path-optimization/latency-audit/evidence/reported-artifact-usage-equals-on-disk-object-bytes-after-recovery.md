@@ -203,6 +203,59 @@ sources because only one exists.
   file set as the walk it replaces and settles it through the same latch, so
   every equality the usage tests assert still holds.
 
+### Q: Does a reconciliation that releases the writer lock during its walk keep the count equal to the walk, and what does a failed walk settle?
+
+- Sources examined: [`reconcile_artifact_usage`][usage-reconcile-split],
+  the [tree-change record][usage-tree-change],
+  [`publish_counted_object`][usage-publish-counted],
+  [`unlink_counted_object`][usage-unlink-change],
+  [`settle_census`][usage-settle], the daemon's [memory-reviewer
+  sweep][daemon-maintenance] and its [intervals][sample-interval], the
+  [usage tests][t-usage], and a local probe (release build, `taskset -c
+  4-7`, a store of 4,000 objects, 15 maintenance passes each beside a thread
+  that ingests in a loop, three runs against the parent commit; uncommitted
+  probe numbers, not approved bench evidence).
+- Findings: The earlier entries state that the daemon calls no maintenance.
+  It does: the memory-reviewer sweep calls `run_staging_maintenance` every
+  30 s when idle and every 5 s after a pass that advanced, up to four calls
+  a slice, so the reconciliation and its latch run in production. At the
+  parent commit each such pass held the writer lock for a whole walk, and a
+  walk that failed for any reason other than exhaustion latched the store
+  closed. Now the walk runs without the writer lock. Every publication and
+  every object unlink holds the writer lock from its filesystem change
+  through its tree-change record, so once the reconciliation takes the
+  writer lock no change is half-applied; it compares only when the
+  tree-change number equals the one it read before walking, and otherwise
+  leaves the comparison to the next pass. A publication that finds the
+  object already present changes nothing and records nothing; a failed
+  publication records a change, because the fallback link can place and
+  remove the object inside its window. A census or reconciliation walk that
+  fails settles nothing: a held count stays, and an admission that holds no
+  count walks under the writer lock and fails closed itself. The count and
+  the tree-change number share one mutex, the same shape as the parent's
+  count and generation, so the retained-resident total is unchanged.
+  [`a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_it`][t-usage-raced]
+  finds the writer lock free after the walk, lands a publication and then
+  an unlink there, keeps usage equal to the walk and admission open, and
+  shows the next pass still latches on a stray file.
+  [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk]
+  and [`an_open_whose_census_fails_admits_once_a_later_walk_succeeds`][t-usage-failed-census]
+  fail a walk with an unreadable directory. Negative controls, run locally
+  and reverted: comparing regardless of the tree-change number, dropping the
+  publication's record, dropping the unlink's record, and holding the writer
+  lock across the walk each fail the race test; latching on a failed walk
+  fails both failed-walk tests. Probe: concurrent ingests completed during
+  the 15 passes rose from 627, 629, and 618 to 787, 800, and 919; ordinary
+  ingest p50 was 488, 496, and 474 us before and 494, 542, and 505 us
+  after, inside the run-to-run spread; a pass's own duration is dominated by
+  GC's per-candidate writer acquisitions, which this change leaves alone.
+- Missing evidence: A failed walk caused by `EMFILE` or `ENFILE`, which no
+  fault seam injects; the tests use `EACCES` and skip when the process
+  ignores mode bits.
+- Conclusion: resolved with answer - the reconciliation compares only a walk
+  no publication or unlink overlapped, holds the writer lock only for the
+  comparison, and a failed walk is no evidence against the count.
+
 [ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
 [ingest-commit]: ../../../../../crates/kernel/src/cas/ingest.rs#L580-L595
@@ -245,3 +298,13 @@ sources because only one exists.
 [usage-seed]: ../../../../../crates/kernel/src/cas/usage.rs#L88-L108
 [usage-census]: ../../../../../crates/kernel/src/cas/usage.rs#L169-L190
 [t-oracle-head]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
+[usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L112-L134
+[usage-tree-change]: ../../../../../crates/kernel/src/cas/usage.rs#L22-L35
+[usage-publish-counted]: ../../../../../crates/kernel/src/cas/usage.rs#L51-L78
+[usage-unlink-change]: ../../../../../crates/kernel/src/cas/usage.rs#L80-L110
+[usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L158-L169
+[daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[sample-interval]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
+[t-usage-raced]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L502
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L554
+[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L576

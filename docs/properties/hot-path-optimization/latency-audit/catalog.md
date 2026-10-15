@@ -238,8 +238,8 @@ the [check inventory](existing-checks.md).
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
 | T1-T2 | default-production | [`process_limits`][process-limits] runs at host startup; every inbound frame calls [`to_vec`][to-vec] and every outbound frame calls `copy_in`. |
 | T3-T4 | test-only | [`reserve_direct`][reserve-direct] is reached only through [`output_from_writer`][from-writer], whose sole non-crate caller is a [fixture arm][fixture-arm] no test sends. |
-| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], and every store open runs the seed and reconciliation walks; GC and purge decrements have no daemon caller. |
-| G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
+| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], every store open runs the seed and reconciliation walks, and the daemon's [memory-reviewer sweep][daemon-maintenance] runs a GC pass and its reconciliation; purge has no daemon caller. |
+| G3 | default-production | Cleanup, startup recovery, GC reclaim, and the retried GC unlink run in the daemon; the purge decrement runs only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The memory_classifier schedule [defaults to `None`][sched-default]; conditional notes need a cron on the note. |
 | W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14634-14647`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
@@ -1899,7 +1899,7 @@ sum under `objects` above `artifact_cap`, and a refused ingest leaves no
 reservation row and no published object.
 Check: `always` - For every ingest, [`check_budget`][check-budget] runs under
 the exclusive [writer lock][lock-writer] before the reservation row, the
-shard creation, and the publish rename ([`:411-420`][ingest-lock]); it reads
+shard creation, and the publish rename ([`:410-419`][ingest-lock]); it reads
 the [writer-lock count][usage-count] and refuses with [`Capacity`][cap-error]
 carrying `usage` and `cap` when `usage + byte_length > artifact_cap`, adds
 zero for a digest already present ([`object_is_present`][present]), and
@@ -1911,12 +1911,15 @@ contradicted latches the [fail-closed state][latch], and
 it stages anything. `always` because the cap is a hard promise with no
 admission on the failure arm.
 Fault/timing angle: The temp file is written and synced under `tmp`
-([`:379-405`][ingest-temp]) before the lock and the check, so `tmp` bytes are
+([`:378-404`][ingest-temp]) before the lock and the check, so `tmp` bytes are
 never counted and a refused ingest still cost one full write. Every count
 update runs inside the writer lock that publishes or unlinks, so the count
 cannot lag a publish. Bytes changed outside the store are invisible to the
 count until a [reconciliation walk][usage-reconcile] at open, restore
-recovery, or maintenance compares them and latches.
+recovery, or maintenance compares them and latches. A walk that fails
+settles nothing, so it leaves a held count and admission as they were; an
+admission that holds no count walks under the writer lock and refuses with
+`IngestionFailClosed` when that walk fails.
 Required faults and enabling state: A store at `cap - 1` receiving a two-byte
 payload; the same digest re-ingested at the cap; an invalidated reference
 whose bytes remain; a crash between publish and reference commit followed by
@@ -1932,10 +1935,12 @@ reservation behind.
 Open questions:
 
 - The daemon maps `Capacity` to [`StoreBusy`][busy], a retryable class, while
-  the only production paths that lower usage are failed-ingest cleanup and
-  startup recovery ([`run_staging_maintenance`][maintenance] and
-  [`delete_artifact`][delete] have no daemon caller). Is "busy" the intended
-  classification of a cap that only a restart or an operator relieves?
+  the production paths that lower usage are failed-ingest cleanup, startup
+  recovery, and the GC pass of the daemon's [memory-reviewer
+  sweep][daemon-maintenance] through [`run_staging_maintenance`][maintenance]
+  ([`delete_artifact`][delete] has no daemon caller), and GC frees only
+  invalidated bytes past their grace. Is "busy" the intended classification
+  of a cap that only such a reclaim, a restart, or an operator relieves?
   (needs human input)
 
 ### reported-artifact-usage-equals-on-disk-object-bytes-after-recovery
@@ -1945,9 +1950,11 @@ Reachability: default-production
 Status: active
 Exercised: yes - The [usage tests][t-usage] compare the reported usage with
 an independent `st_size` walk after publish, dedup, cleanup, startup
-recovery, reclaim, purge, a failed unlink, and its retry, and inject drift
-both ways; the fault-injection oracle still asserts the equality after every
-fault point and after a second recovery.
+recovery, reclaim, purge, a failed unlink, and its retry, inject drift
+both ways, land an ingest and a purge between a reconciliation walk and its
+comparison, and fail a reconciliation walk and an open census; the
+fault-injection oracle still asserts the equality after every fault point
+and after a second recovery.
 Guarantee: Reported artifact usage never drifts from the bytes actually on
 disk once recovery has run, whatever crash window preceded it.
 Check: `always` - At every quiescent point (after `KernelStore::open`
@@ -1961,17 +1968,20 @@ lock: the kernel store has no spare mutable column and a new table or column
 is a format break, so the durable counter the specification named is
 replaced by a count the [open walk][open-seed] seeds before startup
 recovery. [`reconcile_artifact_usage`][usage-reconcile] re-walks the tree at
-the end of every recovery and every [maintenance pass][maintenance]; with a
-count held, a walk that disagrees latches the [fail-closed state][latch], so
-drift is detected at the next reconciliation and the admission after it is
+the end of every recovery and every [maintenance pass][maintenance] without
+holding the writer lock across the walk, then takes the writer lock and
+compares only when no publication or unlink recorded a [tree
+change][usage-tree-change] since the walk began; with a count held, a walk
+that disagrees latches the [fail-closed state][latch], so drift is detected
+at the next conclusive reconciliation and the admission after it is
 refused. `always`
 because the [usage tests][t-usage] and the [fault-injection
 oracle][t-oracle] assert exactly this equality.
 Fault/timing angle: Every path that changes on-disk object bytes is a
 filesystem operation beside, not inside, a SQLite transaction: publish by
 rename after the [reservation row][ingest-reservation] commits and before the
-reference commits ([`:476-526`][ingest-publish],
-[`:580-595`][ingest-commit]); unlink inside a fenced write in
+reference commits ([`:475-523`][ingest-publish],
+[`:577-592`][ingest-commit]); unlink inside a fenced write in
 [`cleanup_failed_reference`][cleanup], [`reclaim_candidate`][reclaim-cand]
 (through [`unlink_artifact`][unlink-artifact]), and
 [`complete_pending_purge_locked`][purge-unlink], each through
@@ -1989,10 +1999,13 @@ unknown, so the next reader walks; a removal larger than the count leaves it
 unknown and latches. A reconciliation that finds drift latches and replaces
 the count with the walk, so admission stays refused while the sampler reports
 the bytes on disk; only a new store admits again. In production the
-reconciliation runs at open and at restore, because the daemon calls neither
-maintenance nor deletion. A clean open walks once: the
+reconciliation runs at open, at restore, and after the GC pass of every
+[memory-reviewer sweep][daemon-maintenance], which repeats every 30 s when
+idle and every 5 s after a pass that advanced, with up to four maintenance
+calls a slice ([`SAMPLE_INTERVAL`][sample-interval]); the daemon has no purge
+caller. A clean open walks once: the
 [census][usage-census] starts on a thread of its own once the layout and any
-interrupted restore are settled ([`:319`][open-census]), runs beside the
+interrupted restore are settled ([`:320`][open-census]), runs beside the
 database open, and [seeds the count][usage-seed] before startup recovery;
 until `open` returns, the opening thread is the store's only user, so that
 walk counts the tree the writer lock would have seen. Open walks again after
@@ -2000,8 +2013,16 @@ recovery only when recovery changed the count. Every uncancellable walk
 divides the shard directories among up to [64 threads][walk-workers]
 ([`regular_file_bytes_concurrently`][walk-concurrent]); the count it settles
 is the same sum, and a failure other than exhaustion outranks an exhaustion
-from another worker, so a walk that would have latched still latches. Each
-maintenance pass holds the writer lock for one walk.
+from another worker, so an admission walk that would have latched still
+latches. A census or reconciliation walk that fails, for any reason, settles
+nothing: a held count stays, and an admission that finds none walks again
+under the writer lock. The reconciliation walk runs without the writer lock.
+Each publication and unlink holds the writer lock from its filesystem change
+through its [tree-change record][usage-tree-change], so once the
+reconciliation holds the writer lock no change is half-applied: an unchanged
+tree-change number proves its walk saw the tree the count describes, and a
+changed one leaves the comparison to the next pass. A maintenance pass holds
+the writer lock only for that comparison.
 The [restore path][restore] runs recovery and its reconciliation against the
 count it held; tests writing [directly to disk][t-orphan] do so before the
 store opens. The health sampler reads the count without the writer lock
@@ -2010,11 +2031,13 @@ no count is held, so equality with the walk is claimed only at quiescence.
 Required faults and enabling state: The six ingest fault points and three GC
 fault points in [`cas_fault_injection.rs`][t-faults]; SIGKILL at the
 [post-reservation and post-publish crash barriers][t-crash]; an object added
-or removed under `objects` by something other than the store.
+or removed under `objects` by something other than the store; a publication
+or unlink between a reconciliation walk and its comparison; a directory
+below `objects` that a reconciliation walk or the open census cannot read.
 Confidence: high - [Evidence](evidence/reported-artifact-usage-equals-on-disk-object-bytes-after-recovery.md).
 Every byte-changing path, both recovery branches, and every count update are
-source-verified; GC and purge reclamation are reached only by tests and
-benches.
+source-verified; GC reclamation runs in the daemon's memory-reviewer sweep,
+and purge is reached only by tests and benches.
 Existing check: [CAS checks](existing-checks.md#cas-usage-accounting) include
 the usage tests, the semantic oracle, `recover_twice`, the orphan
 reconciliation, the fallback walk's cancellation, and the retired live
@@ -2026,7 +2049,7 @@ Open questions: None.
 ### artifact-byte-decrement-paths-are-exercised
 
 Type: reachability
-Reachability: test-only
+Reachability: default-production
 Status: active
 Exercised: yes - [`kernel_artifact_usage.rs`][t-usage] reaches all five
 markers with a non-zero independent byte delta.
@@ -2046,17 +2069,18 @@ object past its grace; [`complete_pending_purge_locked`][purge-unlink]
 unlinking a purged digest; and a GC unlink that fails and is retried.
 `sometimes` because these are operational states, and executing the unlink
 lines with a zero-byte candidate would not exercise the accounting.
-Fault/timing angle: At HEAD only cleanup and startup recovery run in
-production; GC and purge decrements are reached only when a caller is added,
-so the production reconciliation at open and restore never sees them.
+Fault/timing angle: At HEAD cleanup, startup recovery, and the GC reclaim
+and retry run in production, GC through the daemon's [memory-reviewer
+sweep][daemon-maintenance]; the purge decrement is reached only when a
+caller is added, so the production reconciliation never sees it.
 Required faults and enabling state: `ArtifactIngestFault::AfterEvents` after a
 new publish; a writer that stops after `AfterPublish` (the usage test panics
 in the hook; the SIGKILL child at `INGEST_CRASH_POINT` constructs the same
 state); an invalidated reference aged past its grace; a purge request;
 `ArtifactGcFault::Unlink`.
 Confidence: high - [Evidence](evidence/artifact-byte-decrement-paths-are-exercised.md).
-The five unlink sites and the absence of daemon callers for GC and purge are
-source-verified.
+The five unlink sites, the daemon's GC caller, and the absence of a daemon
+purge caller are source-verified.
 Existing check: [Usage tests][t-usage] fire each marker; the
 [CAS fault tables](existing-checks.md#cas-usage-accounting) exercise the
 fault points and crash windows; all unaudited.
@@ -3165,18 +3189,18 @@ evaluation of this area and its disposition are recorded in
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L492-L503
 [ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
-[ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L365
-[ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L379-L405
-[ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L411-L420
-[ingest-reservation]: ../../../../crates/kernel/src/cas/ingest.rs#L424-L471
-[ingest-publish]: ../../../../crates/kernel/src/cas/ingest.rs#L476-L526
-[ingest-commit]: ../../../../crates/kernel/src/cas/ingest.rs#L580-L595
-[check-budget]: ../../../../crates/kernel/src/cas/ingest.rs#L950
-[release-res]: ../../../../crates/kernel/src/cas/ingest.rs#L1039-L1055
-[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1062
-[stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1498-L1500
-[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1525
-[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1702
+[ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L364
+[ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L378-L404
+[ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L410-L419
+[ingest-reservation]: ../../../../crates/kernel/src/cas/ingest.rs#L423-L470
+[ingest-publish]: ../../../../crates/kernel/src/cas/ingest.rs#L475-L523
+[ingest-commit]: ../../../../crates/kernel/src/cas/ingest.rs#L577-L592
+[check-budget]: ../../../../crates/kernel/src/cas/ingest.rs#L947
+[release-res]: ../../../../crates/kernel/src/cas/ingest.rs#L1036-L1052
+[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1059
+[stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1495-L1497
+[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1522
+[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1699
 [startup]: ../../../../crates/kernel/src/cas/gc.rs#L102
 [startup-unreachable]: ../../../../crates/kernel/src/cas/gc.rs#L109-L136
 [reclaim-cand]: ../../../../crates/kernel/src/cas/gc.rs#L239
@@ -3187,30 +3211,33 @@ evaluation of this area and its disposition are recorded in
 [delete]: ../../../../crates/kernel/src/cas/deletion.rs#L239
 [cap-default]: ../../../../crates/kernel/src/cas/mod.rs#L24
 [cap-error]: ../../../../crates/kernel/src/cas/mod.rs#L318-L325
-[latch]: ../../../../crates/kernel/src/cas/mod.rs#L628
-[recover]: ../../../../crates/kernel/src/open.rs#L459-L464
-[lock-writer]: ../../../../crates/kernel/src/open.rs#L476-L485
+[latch]: ../../../../crates/kernel/src/cas/mod.rs#L631
+[recover]: ../../../../crates/kernel/src/open.rs#L462-L467
+[lock-writer]: ../../../../crates/kernel/src/open.rs#L479-L488
 [facts]: ../../../../crates/kernel/src/facts.rs#L145
 [maintenance]: ../../../../crates/kernel/src/retention.rs#L197
 [restore]: ../../../../crates/kernel/src/backup.rs#L422-L424
 [busy]: ../../../../crates/daemon/src/kernel_routes/state.rs#L290-L295
-[route-ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L256
+[route-ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L255
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
 [t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
-[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L25-L32
-[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L48-L73
-[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L81-L121
-[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L125-L133
-[open-seed]: ../../../../crates/kernel/src/open.rs#L432
-[open-census]: ../../../../crates/kernel/src/open.rs#L319
-[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L88-L108
-[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L169-L190
-[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1542-L1594
-[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1687
+[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L42-L49
+[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L56-L78
+[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L86-L110
+[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L122-L169
+[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L173-L181
+[open-seed]: ../../../../crates/kernel/src/open.rs#L435
+[open-census]: ../../../../crates/kernel/src/open.rs#L320
+[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L136-L156
+[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L243-L264
+[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1539-L1591
+[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1684
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L31-L35
+[daemon-maintenance]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[sample-interval]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
 
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7

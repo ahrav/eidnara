@@ -122,6 +122,21 @@ enumerating the paths.
 - Missing evidence: None.
 - Conclusion: resolved with answer - all five markers fire.
 
+### Q: Which decrement paths run in production?
+
+- Sources examined: the daemon's [memory-reviewer
+  sweep][daemon-maintenance] and the callers of `delete_artifact` in
+  `crates/daemon/src`.
+- Findings: The sweep calls `run_staging_maintenance`, so GC reclaim and the
+  retried GC unlink run in production beside cleanup and startup recovery.
+  No daemon source calls `delete_artifact`, so the purge decrement runs only
+  in kernel tests and benches. Each of the four production paths records a
+  tree change through [`unlink_counted_object`][usage-unlink-change], which
+  the maintenance reconciliation reads before it compares.
+- Missing evidence: None.
+- Conclusion: resolved with answer - four of five paths run in production;
+  the record's reachability is default-production.
+
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
 [ingest-postpublish]: ../../../../../crates/kernel/src/cas/ingest.rs#L528-L572
 [ingest-commit-fail]: ../../../../../crates/kernel/src/cas/ingest.rs#L645-L652
@@ -154,3 +169,5 @@ enumerating the paths.
 [recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[usage-unlink-change]: ../../../../../crates/kernel/src/cas/usage.rs#L80-L110
