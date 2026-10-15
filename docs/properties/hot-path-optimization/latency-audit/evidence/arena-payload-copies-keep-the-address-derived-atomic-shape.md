@@ -1,6 +1,7 @@
 # arena-payload-copies-keep-the-address-derived-atomic-shape
 
-Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
+Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10. Source
+links below point at that commit.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
 ## Discovery trigger
@@ -132,25 +133,67 @@ tracing the initialization clause.
 - Conclusion: resolved with answer - the change stays; every exposed byte is
   written by `copy_out_uninit` before `set_len`.
 
+### Q: Do the aarch64 SIMD step kernels keep the address-derived shape, and what did they buy?
+
+- Sources examined: `copy_out_uninit`, `copy_step_out`, `copy_in`, and
+  `copy_step_in` in `crates/shm-transport/src/lease.rs`; Arm ARM DDI 0487
+  B2.2.1, "Requirements for single-copy atomicity".
+- Findings: both copies move the shape's word region in 32-byte steps of four
+  aligned words. On aarch64 outside Miri, a step is one `ldp q` and one
+  `stp q`. B2.2.1 treats a 128-bit SIMD&FP read or write at a 64-bit-aligned
+  address as a pair of single-copy-atomic 64-bit accesses and treats each
+  register of a load or store pair separately; that is the access a relaxed
+  `AtomicU64` load or store compiles to, so every arena word keeps the address
+  and width `AccessShape::of` assigns. `copy_out_uninit` copies up to three
+  leading single words so each step load starts on a 32-byte boundary. Miri and every other target, x86-64 included, run the
+  portable `AtomicU64` step definitions. The uninitialized-copy test runs 32
+  shifts, which reach every head length and every leading-word count, at every
+  length through two full steps and three single words; outside Miri it also
+  copies into a sentinel-filled buffer. Storing only the low register of
+  either aarch64 step fails four or five lease tests natively; the
+  concurrent-writer test stops its writer through a drop guard, so that failure
+  ends the test instead of leaving the scope waiting, and it checks that every
+  word it copies holds eight equal bytes. A lead of any length up to the word
+  count is correct, since it changes only how words group into steps.
+- Payoff: an uncommitted probe times `to_vec` and `ProducerReservation::write`
+  through a real ring with mimalloc on one Graviton3 host, same core and
+  producer-on-another-core, at 256 B to 8 MiB, scoring the geomean of 5%-trimmed
+  per-frame means. Eight interleaved pairs against the scalar step kernels:
+  inbound -13.1% (95% bootstrap -13.6% to -12.7%), same-core -21.8%,
+  cross-core -3.1%; outbound -18.4%. glibc `memcpy` plus allocation, which T2
+  forbids, scores 6.5% below the SIMD kernels; the gap sits at frames of 64 KiB
+  and below, where the shape's byte-atomic head and tail and the block lookup
+  dominate. Against the zero-filling `to_vec` at `b9b840cca`, inbound is
+  -52.1%.
+- Missing evidence: x86-64, the shipped target, was not measured; it runs
+  scalar `AtomicU64` steps with the same lead split. A faster cross-core reader
+  raises the producer's next 4 KiB write by about 10-20% under the probe, with a
+  spinning or a blocking reader; the outbound SIMD stores more than offset it in
+  the probe, but a Node peer writes inbound frames in production. No CI job
+  runs on aarch64.
+- Conclusion: resolved with answer - the step kernels keep the shape at the
+  hardware level, the portable steps remain the Miri-checked definition, and
+  no CI job runs the aarch64 kernels.
+
 [agents]: ../../../../../crates/shm-transport/AGENTS.md
-[span-doc]: ../../../../../crates/shm-transport/src/lease.rs#L10-L13
-[span-safety]: ../../../../../crates/shm-transport/src/lease.rs#L25-L33
-[span-ptr]: ../../../../../crates/shm-transport/src/lease.rs#L49-L52
-[read-byte]: ../../../../../crates/shm-transport/src/lease.rs#L62-L82
-[copy-to]: ../../../../../crates/shm-transport/src/lease.rs#L84-L93
-[checksum]: ../../../../../crates/shm-transport/src/lease.rs#L95-L123
-[shape]: ../../../../../crates/shm-transport/src/lease.rs#L134-L156
-[copy-out]: ../../../../../crates/shm-transport/src/lease.rs#L176-L206
-[copy-in]: ../../../../../crates/shm-transport/src/lease.rs#L208-L235
-[to-vec]: ../../../../../crates/shm-transport/src/lease.rs#L328-L348
-[to-vec-fill]: ../../../../../crates/shm-transport/src/lease.rs#L331
-[t-roundtrip]: ../../../../../crates/shm-transport/src/lease.rs#L475-L506
-[t-readbyte]: ../../../../../crates/shm-transport/src/lease.rs#L543
-[t-concurrent]: ../../../../../crates/shm-transport/src/lease.rs#L581-L619
-[ring-span]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2060-L2068
-[write-res]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2388-L2419
-[res-write]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2519-L2531
-[receive-to-vec]: ../../../../../crates/host-runtime/src/ring_transport.rs#L731-L736
-[ci-miri]: ../../../../../.github/workflows/ci.yml#L597-L635
-[ci-valgrind]: ../../../../../.github/workflows/ci.yml#L637-L669
+[span-doc]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L10-L13
+[span-safety]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L25-L33
+[span-ptr]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L49-L52
+[read-byte]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L62-L82
+[copy-to]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L84-L93
+[checksum]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L95-L123
+[shape]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L134-L156
+[copy-out]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L176-L206
+[copy-in]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L208-L235
+[to-vec]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L328-L348
+[to-vec-fill]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L331
+[t-roundtrip]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L475-L506
+[t-readbyte]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L543
+[t-concurrent]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/lease.rs#L581-L619
+[ring-span]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/backend/ring.rs#L2060-L2068
+[write-res]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/backend/ring.rs#L2388-L2419
+[res-write]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/shm-transport/src/backend/ring.rs#L2519-L2531
+[receive-to-vec]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/host-runtime/src/ring_transport.rs#L731-L736
+[ci-miri]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/.github/workflows/ci.yml#L597-L635
+[ci-valgrind]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/.github/workflows/ci.yml#L637-L669
 [shm-noref]: ../../../shm-transport/catalog.md#no-rust-reference-over-peer-writable-payload
