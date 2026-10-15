@@ -266,11 +266,12 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
     }
 }
 
-/// Copies the `WORDS_PER_STEP` aligned words at `source` into `step`. Each arena word is read by
-/// one aligned 64-bit single-copy-atomic access at the address and width `AccessShape` assigns:
-/// a relaxed `AtomicU64` load, or on aarch64 outside Miri one `ldp q`. Arm ARM B2.2.1 treats
-/// each register of a load pair separately, and a 128-bit SIMD&FP read of a 64-bit-aligned
-/// address as a pair of single-copy-atomic 64-bit reads.
+/// Copies the `WORDS_PER_STEP` aligned words at `source` into `step`. Each arena word is read
+/// whole, at the address and width `AccessShape` assigns, by one single-copy-atomic access: a
+/// relaxed `AtomicU64` load, or on aarch64 outside Miri one `ldp q`. Arm ARM B2.2.1 treats each
+/// register of a load pair separately and a 128-bit SIMD&FP read of a 64-bit-aligned address as
+/// a pair of single-copy-atomic 64-bit reads; with FEAT_LS64WB a 32-byte-aligned pair is one
+/// 256-bit single-copy-atomic read, which still returns every overlapped 64-bit word whole.
 ///
 /// # Safety
 /// `source` is 8-aligned and `source..source.add(STEP_BYTES)` lies in a range
@@ -344,10 +345,12 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
 }
 
 /// Stores the `WORDS_PER_STEP` words of `step` to the aligned arena words at `destination`.
-/// Each arena word is written by one aligned 64-bit single-copy-atomic access at the address
-/// and width `AccessShape` assigns: a relaxed `AtomicU64` store, or on aarch64 outside Miri one
-/// `stp q`. Arm ARM B2.2.1 treats each register of a store pair separately, and a 128-bit
-/// SIMD&FP write to a 64-bit-aligned address as a pair of single-copy-atomic 64-bit writes.
+/// Each arena word is written whole, at the address and width `AccessShape` assigns, by one
+/// single-copy-atomic access: a relaxed `AtomicU64` store, or on aarch64 outside Miri one
+/// `stp q`. Arm ARM B2.2.1 treats each register of a store pair separately and a 128-bit
+/// SIMD&FP write to a 64-bit-aligned address as a pair of single-copy-atomic 64-bit writes; with
+/// FEAT_LS64WB a 32-byte-aligned pair is one 256-bit single-copy-atomic write, which a same-shape
+/// 64-bit load still observes whole.
 ///
 /// # Safety
 /// `destination` is 8-aligned and `destination..destination.add(STEP_BYTES)` lies in a range

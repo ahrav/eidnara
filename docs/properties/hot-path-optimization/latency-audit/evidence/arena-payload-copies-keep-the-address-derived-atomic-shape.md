@@ -1,7 +1,8 @@
 # arena-payload-copies-keep-the-address-derived-atomic-shape
 
-Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10. Source
-links below point at that commit.
+Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10. The
+evidence trail links below point at that commit; the investigation log links
+point at HEAD.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
 ## Discovery trigger
@@ -13,7 +14,7 @@ verification boundary: the byte-width discipline that turns a concurrent peer
 store into stale data instead of a data race, and the initialization proof
 that keeps uninitialized process memory out of a payload.
 
-## Evidence trail
+## Evidence trail at the baseline
 
 - [`LeaseSpan`][span-doc] has no `&[u8]` accessor; its `new` contract at
   [`:25-33`][span-safety] requires that no `&[u8]` or `&mut [u8]` is formed
@@ -106,10 +107,12 @@ tracing the initialization clause.
 - Conclusion: resolved with answer - no path at HEAD exposes uninitialized or
   partial bytes; a zero-fill-free replacement must re-establish that per span.
 
-### Q: What does the zero-fill-free `to_vec` rest on, and what did removing the fill buy?
+### Q: What does the zero-fill-free `to_vec` rest on?
 
-- Sources examined: `to_vec`, `LeaseSpan::copy_to_uninit`, `copy_out`, and
-  `copy_out_uninit` in `crates/shm-transport/src/lease.rs` at `9548fd28d29a`.
+- Sources examined: [`to_vec`][head-to-vec],
+  [`copy_to_uninit`][head-copy-to-uninit], [`copy_out`][head-copy-out], and
+  [`copy_out_uninit`][head-copy-out-uninit] in
+  `crates/shm-transport/src/lease.rs` at HEAD.
 - Findings: `to_vec` reserves `body_len` bytes of capacity, copies into that
   spare capacity through `copy_to_uninit`, and calls `set_len` only after it
   returns `Ok`. `copy_to_uninit` refuses a destination of another length
@@ -122,31 +125,35 @@ tracing the initialization clause.
   `copy_out_uninit` fails
   `copy_out_uninit_initializes_every_byte_at_every_alignment_and_length` as an
   uninitialized read.
-- Payoff: the hardware-envelope and ipc-budget benches were removed from the
-  repository before this change, so an uncommitted probe timed `to_vec` over
-  a real ring on one host, pinned to one CPU, three runs before and three
-  after, back to back. Medians before then after: 64 KiB 2.7 to 2.1-2.3 us,
-  1 MiB 50.3-50.4 to 38.3-38.4 us, 8 MiB 557-633 to 415-486 us, 32 MiB
-  18.9-19.5 to 18.0-18.5 ms; the 64 KiB to 8 MiB p10-p90 ranges do not
-  overlap between the two builds. 4 KiB stayed at 0.2 us.
-- Missing evidence: None for the initialization clause.
+- Missing evidence: None for the initialization clause. No retained
+  before-and-after measurement exists; the catalog owns none, so no payoff
+  figure is claimed here.
 - Conclusion: resolved with answer - the change stays; every exposed byte is
   written by `copy_out_uninit` before `set_len`.
 
-### Q: Do the aarch64 SIMD step kernels keep the address-derived shape, and what did they buy?
+### Q: Do the aarch64 SIMD step kernels keep the address-derived shape?
 
-- Sources examined: `copy_out_uninit`, `copy_step_out`, `copy_in`, and
-  `copy_step_in` in `crates/shm-transport/src/lease.rs`; Arm ARM DDI 0487
-  B2.2.1, "Requirements for single-copy atomicity".
+- Sources examined: [`copy_out_uninit`][head-copy-out-uninit],
+  [`copy_step_out`][head-copy-step-out], [`copy_in`][head-copy-in], and
+  [`copy_step_in`][head-copy-step-in] in `crates/shm-transport/src/lease.rs` at
+  HEAD; Arm ARM DDI 0487 B2.2.1, "Requirements for single-copy atomicity".
 - Findings: both copies move the shape's word region in 32-byte steps of four
   aligned words. On aarch64 outside Miri, a step is one `ldp q` and one
   `stp q`. B2.2.1 treats a 128-bit SIMD&FP read or write at a 64-bit-aligned
   address as a pair of single-copy-atomic 64-bit accesses and treats each
   register of a load or store pair separately; that is the access a relaxed
   `AtomicU64` load or store compiles to, so every arena word keeps the address
-  and width `AccessShape::of` assigns. `copy_out_uninit` copies up to three
-  leading single words so each step load starts on a 32-byte boundary. Miri and every other target, x86-64 included, run the
-  portable `AtomicU64` step definitions. The uninitialized-copy test runs 32
+  and width `AccessShape::of` assigns. With FEAT_LS64WB, B2.2.1 treats a
+  32-byte-aligned SIMD&FP pair to Normal Write-Back Shareable memory as one
+  256-bit single-copy-atomic access. Single-copy atomicity is defined over
+  overlapping accesses of any size: a load that returns any byte of an
+  overlapping store returns every overlapped byte from that store or later,
+  so the wider access still reads or writes each overlapped 64-bit word
+  whole, and a same-shape `AtomicU64` access on the other side still observes
+  stale or current words, never torn ones. `copy_out_uninit` copies up to
+  three leading single words so each step load starts on a 32-byte boundary.
+  Miri and every other target, x86-64 included, run the portable `AtomicU64`
+  step definitions. The uninitialized-copy test runs 32
   shifts, which reach every head length and every leading-word count, at every
   length through two full steps and three single words; outside Miri it also
   copies into a sentinel-filled buffer. Storing only the low register of
@@ -155,22 +162,12 @@ tracing the initialization clause.
   ends the test instead of leaving the scope waiting, and it checks that every
   word it copies holds eight equal bytes. A lead of any length up to the word
   count is correct, since it changes only how words group into steps.
-- Payoff: an uncommitted probe times `to_vec` and `ProducerReservation::write`
-  through a real ring with mimalloc on one Graviton3 host, same core and
-  producer-on-another-core, at 256 B to 8 MiB, scoring the geomean of 5%-trimmed
-  per-frame means. Eight interleaved pairs against the scalar step kernels:
-  inbound -13.1% (95% bootstrap -13.6% to -12.7%), same-core -21.8%,
-  cross-core -3.1%; outbound -18.4%. glibc `memcpy` plus allocation, which T2
-  forbids, scores 6.5% below the SIMD kernels; the gap sits at frames of 64 KiB
-  and below, where the shape's byte-atomic head and tail and the block lookup
-  dominate. Against the zero-filling `to_vec` at `b9b840cca`, inbound is
-  -52.1%.
-- Missing evidence: x86-64, the shipped target, was not measured; it runs
-  scalar `AtomicU64` steps with the same lead split. A faster cross-core reader
-  raises the producer's next 4 KiB write by about 10-20% under the probe, with a
-  spinning or a blocking reader; the outbound SIMD stores more than offset it in
-  the probe, but a Node peer writes inbound frames in production. No CI job
-  runs on aarch64.
+- Missing evidence: x86-64, the shipped target, runs scalar `AtomicU64` steps
+  with the same lead split. No CI job runs on aarch64. No retained
+  before-and-after measurement exists; the catalog owns none, so no payoff
+  figure is claimed here. A faster cross-core reader can raise the cost of
+  the producer's next write, and a Node peer writes inbound frames in
+  production.
 - Conclusion: resolved with answer - the step kernels keep the shape at the
   hardware level, the portable steps remain the Miri-checked definition, and
   no CI job runs the aarch64 kernels.
@@ -197,3 +194,10 @@ tracing the initialization clause.
 [ci-miri]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/.github/workflows/ci.yml#L597-L635
 [ci-valgrind]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/.github/workflows/ci.yml#L637-L669
 [shm-noref]: ../../../shm-transport/catalog.md#no-rust-reference-over-peer-writable-payload
+[head-to-vec]: ../../../../../crates/shm-transport/src/lease.rs#L481
+[head-copy-to-uninit]: ../../../../../crates/shm-transport/src/lease.rs#L99
+[head-copy-out]: ../../../../../crates/shm-transport/src/lease.rs#L211
+[head-copy-out-uninit]: ../../../../../crates/shm-transport/src/lease.rs#L229
+[head-copy-step-out]: ../../../../../crates/shm-transport/src/lease.rs#L280
+[head-copy-in]: ../../../../../crates/shm-transport/src/lease.rs#L318
+[head-copy-step-in]: ../../../../../crates/shm-transport/src/lease.rs#L359

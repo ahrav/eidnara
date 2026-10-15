@@ -1739,8 +1739,10 @@ returns `Err` without exposing the buffer. On aarch64 outside Miri, each
 32-byte step of [`copy_out_uninit`][copy-step-out] and [`copy_in`][copy-step-in]
 moves its four aligned words through one `ldp q` and one `stp q`; Arm ARM
 B2.2.1 treats a 128-bit SIMD&FP access at a 64-bit-aligned address as a pair
-of single-copy-atomic 64-bit accesses, so each arena word keeps the address and
-width the shape assigns. Miri and every other target run the portable
+of single-copy-atomic 64-bit accesses, and with FEAT_LS64WB a 32-byte-aligned
+pair as one 256-bit single-copy-atomic access, which still moves each
+overlapped word whole, so each arena word keeps the address and width the
+shape assigns. Miri and every other target run the portable
 `AtomicU64` step definitions. `always` because the soundness argument in the
 [`LeaseSpan` contract][span-safety] and the crate's [AGENTS.md][agents]
 treat this as a verification boundary.
@@ -3142,18 +3144,18 @@ evaluation of this area and its disposition are recorded in
 [abort]: ../../../../crates/shm-transport/src/backend/ring.rs#L2271
 [prepare-commit]: ../../../../crates/shm-transport/src/backend/ring.rs#L2308
 [write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L1374
-[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L2520
+[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L1823
 [commit-underfill]: ../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
 [span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L35
 [span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L51-L54
 [shape]: ../../../../crates/shm-transport/src/lease.rs#L159-L199
 [copy-out]: ../../../../crates/shm-transport/src/lease.rs#L211
 [copy-out-uninit]: ../../../../crates/shm-transport/src/lease.rs#L229
-[copy-step-out]: ../../../../crates/shm-transport/src/lease.rs#L269-L307
-[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L317
-[copy-step-in]: ../../../../crates/shm-transport/src/lease.rs#L346-L381
-[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L478
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L975
+[copy-step-out]: ../../../../crates/shm-transport/src/lease.rs#L269-L308
+[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L318
+[copy-step-in]: ../../../../crates/shm-transport/src/lease.rs#L347-L384
+[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L481
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L978
 [max-resident]: ../../../../crates/host-runtime/src/ring_transport.rs#L57-L58
 [affordable]: ../../../../crates/host-runtime/src/ring_transport.rs#L60
 [process-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L98
