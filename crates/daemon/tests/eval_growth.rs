@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use campaign::Charges;
 use eval_core::{
     Approval, Coverage, EnvelopeExceeded, ExpectedRefusal, GrowthContract, GrowthMode,
-    GrowthRefused, GrowthReport, MARKERS, Operation, ProfileError, Resource, Scale, StoreFamily,
-    digests_match_serial, isolated, parse_growth_report, parse_manifest,
+    GrowthRefused, GrowthReport, MARKERS, Operation, ProfileError, QuiescenceProgress, Resource,
+    Scale, StoreFamily, digests_match_serial, isolated, parse_growth_report, parse_manifest,
 };
 use growth::{Campaign, Config, MANIFEST_FILE, REPORT_FILE, Run, RunError};
 use memory_store::memory_reviewer_jobs::{
@@ -340,9 +340,30 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
     std::fs::write(&tmp, b"stray").unwrap();
     live.sample(100, &mut charges).unwrap();
     assert_eq!(live.ledger.samples.last().unwrap().artifact_tmp_entries, 1);
+    assert!(
+        live.ledger
+            .samples
+            .last()
+            .unwrap()
+            .progress
+            .catch_up_episodes
+            > 0,
+        "the drain before the restore ran catch-up episodes"
+    );
     let (mut live, restored) = live.restore(1_700_000_000_000);
     restored.unwrap();
     live.sample(101, &mut charges).unwrap();
+    let reopened = live.ledger.samples.last().unwrap();
+    assert_eq!(
+        reopened.progress,
+        QuiescenceProgress {
+            acknowledged_through: reopened.commit_seq,
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: true,
+        },
+        "the reopened stores are the quiescent point; no drain ran to reach it"
+    );
     assert_eq!(
         live.ledger.samples.last().unwrap().artifact_tmp_entries,
         0,

@@ -808,6 +808,8 @@ pub enum GrowthReportError {
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
+    /// No quiescence in the ledger ran a reviewer coordinator pass.
+    ReviewerNeverPassed,
     Episode(EpisodeRefused),
     /// An episode triggered at a step the ledger never sampled.
     EpisodeNotSampled {
@@ -987,6 +989,16 @@ impl GrowthReport {
                     .check_samples(&self.quota, &self.bounds)
                     .map_err(GrowthReportError::Growth)?;
             }
+        }
+        // A complete mix exercised quota pressure, which hands work to the
+        // coordinator, so the ledger witnesses at least one reviewer pass.
+        if self
+            .ledger
+            .samples
+            .iter()
+            .all(|s| s.progress.reviewer_passes == 0)
+        {
+            return Err(GrowthReportError::ReviewerNeverPassed);
         }
         crate::fault::validate_episodes(&self.episodes).map_err(GrowthReportError::Episode)?;
         for episode in &self.episodes {

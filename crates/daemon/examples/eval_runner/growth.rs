@@ -544,11 +544,19 @@ impl Campaign {
             handed,
             reviewer_pass_bound,
             passes_since_drain,
-            progress,
+            progress: _,
         } = self;
         let tip = stores.tip();
         let stores = stores.close().reopen(now);
         assert_eq!(stores.tip(), tip, "a reopen moves no commit");
+        // The reopen rebuilds the projection in one bootstrap, so the
+        // reopened stores are the quiescent point the next sample witnesses.
+        let progress = QuiescenceProgress {
+            acknowledged_through: acknowledged_through(stores.root()),
+            catch_up_episodes: 0,
+            reviewer_passes: 0,
+            reviewer_settled: handed.is_empty(),
+        };
         (
             Campaign {
                 plan,

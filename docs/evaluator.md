@@ -2865,6 +2865,9 @@ publishes: identity, profile digest, claim boundary, the quota read, the
 bounds, the ledger, the mix, expected refusals, the fault episodes it ran and
 its safety-check count (`SafetyNeverChecked` when either an episode is listed
 or the mix records a fault episode and no safety check ran while armed;
+`ReviewerNeverPassed` when no sample's progress witness records a reviewer
+coordinator pass, since a complete mix exercised quota pressure, which hands
+work to the coordinator;
 `FaultEpisodesDisagree` when the listed episodes and the mix's `fault_episode`
 tally differ; `Episode` for a duplicate or malformed episode, as the fault
 report refuses them), the episodes' cut coverage (`Coverage(IncompleteCoverage)`
@@ -3340,7 +3343,10 @@ files are measured: an open commits a new fence epoch and runs startup
 maintenance, so a sample taken after it would not be the history's own.
 `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
-in place, and the ledger then gives no leak verdict.
+in place, resets the progress witness to the reopened stores (the
+projection's checkpoint, no catch-up episode, no pass, settled when nothing
+is handed), since the reopen's bootstrap is the quiescent point the next
+sample witnesses, and the ledger then gives no leak verdict.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
 and the bounds scaled from the message count (with a per-commit store-byte

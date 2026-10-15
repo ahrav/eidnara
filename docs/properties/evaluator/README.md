@@ -1759,8 +1759,9 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   (`FaultedWithoutCuts`), an episode whose id is not a declared cut
   (`Coverage(UndeclaredCut)`), an episode triggered at a step no sample
   records (`EpisodeNotSampled`), a declared cut that is not a listed episode
-  (`CutNotAnEpisode`), a duplicate or malformed episode (`Episode`), and a v1
-  report refuse.
+  (`CutNotAnEpisode`), a duplicate or malformed episode (`Episode`), a ledger
+  in which no sample's witness records a reviewer pass
+  (`ReviewerNeverPassed`), and a v1 report refuse.
 
 Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
 default shards run the never-restored campaign once with every scenario
@@ -1825,7 +1826,10 @@ completeness proof run in the `eval-campaign` CI job under
   safety check.
 - `a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_verdict`:
   a stray `artifacts/tmp` entry is seen by the sampler, swept by the reopen's
-  `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`.
+  `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`;
+  the sample after the restore witnesses the reopened stores (the checkpoint
+  at the tip, no catch-up episode, no pass, settled), while the sample before
+  it recorded the drain's catch-up episodes.
 - `a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing`
   (`xc-campaign-resource-envelope-declared-and-enforced`; marker
   `xc_envelope_breach_stops_the_run`): a run with a 64 KiB store bound stops

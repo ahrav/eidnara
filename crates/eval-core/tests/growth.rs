@@ -1115,6 +1115,19 @@ fn declared_cuts_name_the_episodes_that_ran_not_merely_their_count() {
 }
 
 #[test]
+fn a_report_whose_ledger_never_ran_a_reviewer_pass_is_refused() {
+    let mut idle = report();
+    for sample in &mut idle.ledger.samples {
+        sample.progress.reviewer_passes = 0;
+    }
+    assert_eq!(
+        idle.validate(&contract()),
+        Err(GrowthReportError::ReviewerNeverPassed),
+        "quota pressure hands work to the coordinator, so a complete ledger witnesses a pass"
+    );
+}
+
+#[test]
 fn growth_markers_each_name_a_test_here() {
     let mine: Vec<_> = eval_core::MARKERS
         .iter()
