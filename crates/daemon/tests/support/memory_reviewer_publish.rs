@@ -278,8 +278,8 @@ pub fn publish(
     begun: &BegunJob,
     now: i64,
 ) -> ReviewProposal {
-    let settled = settle_proposal(kernel, store, digest, kernel_incarnation, begun, now, None)
-        .unwrap();
+    let settled =
+        settle_proposal(kernel, store, digest, kernel_incarnation, begun, now, None).unwrap();
     assert!(matches!(settled, Settled::Published(_)), "{settled:?}");
     proposal()
 }

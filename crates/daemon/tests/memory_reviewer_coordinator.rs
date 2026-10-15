@@ -19,7 +19,6 @@ use daemon::memory_reviewer::project_text::{InspectionBinding, ProjectText, Prot
 use daemon::memory_reviewer::settlement::{
     ReadRefusal, Settled, TaskClaim, read_selected_proposal,
 };
-use host_runtime::model_execution::backend::LlmExecutionBackend;
 use host_runtime::model_execution::supervisor::Supervisor;
 use kernel::{
     CommitIntent, Dimension, DomainSpec, KernelStore, ProviderEgress, ReviewBinding, ReviewOwner,
@@ -38,6 +37,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use support::memory_reviewer_corpus::{CASES, Case, Expected, Relation, Source, judge};
+use support::memory_reviewer_gate::NoPublicModel;
 use support::tls_peer::{Peer, Scripted, json_response, text_response};
 
 const DOMAIN: &str = "domain";
@@ -77,20 +77,6 @@ fn kernel_incarnation(root: &std::path::Path) -> String {
         |row| row.get(0),
     )
     .unwrap()
-}
-
-/// The supervisor's public backend: never reached, since every MemoryReviewer attempt is an internal launch.
-struct NoPublicModel;
-
-impl LlmExecutionBackend for NoPublicModel {
-    fn execute(
-        &self,
-        _request: host_runtime::model_execution::backend::BackendRequest,
-        _events: host_runtime::model_execution::backend::EventSink,
-        _cancel: CancellationToken,
-    ) -> host_runtime::model_execution::backend::BackendFuture {
-        Box::pin(async { unreachable!("no public run is started") })
-    }
 }
 
 /// Publishes one commit with `message` as remote-eligible evidence, or as `Sensitive` evidence a remote model never receives.

@@ -1918,7 +1918,16 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   holds when no job is Ready and every fed job has settled; it holds from
   step 1 with `fresh_work` equal to the bound. The staged subjects are
   default-Sensitive, so every run settles as a policy-blocked abstention and
-  the peer counts zero provider connections.
+  the memory store records no attempt marker. The worker never opens the
+  projection, so the lock shares no resource with the core.
+- `a_reviewer_window_behind_a_closed_gate_is_unmet_at_its_bound`: the same
+  window with no activation record settles nothing; the lane never meets its
+  predicate, records the closed gate as its block, and the verdict is
+  `LivenessUnmet` while the projection lock stayed armed.
+- `a_reviewer_completion_that_never_committed_reads_back_not_applied`: a
+  receipt that began and never completed reads back `not_applied` from the
+  closed memory store, so the reviewer completion's `applied` read-back is
+  not a constant.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 - `a_lost_reply_episode_that_does_not_reach_its_target_is_refused`: a

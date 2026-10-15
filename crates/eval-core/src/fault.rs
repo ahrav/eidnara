@@ -169,7 +169,7 @@ pub enum FaultAction {
     /// `IdentitySweep::lose_next_reclaim_reply_for_test`: an identity
     /// reclamation's COMMIT reply is lost after the projection applied it.
     IdentitySweepLoseReclaimReply,
-    /// `storage::after_commit_for_test`: a reviewer receipt's completion
+    /// `after_commit_for_test`: a reviewer receipt's completion
     /// commits, then a shadow the row reader refuses is planted on the
     /// connection, so the settlement's read-back fails and its caller sees a
     /// store error for a completion that applied. The runner drops the
@@ -1002,6 +1002,42 @@ pub struct LaneProgress {
     pub holds_at_bound: bool,
     pub fresh_work: u64,
     pub blocked: Option<String>,
+}
+
+impl LaneProgress {
+    /// A lane about to be driven to `bound`: no step taken, nothing fed.
+    pub fn new(bound: u64) -> Self {
+        Self {
+            bound,
+            steps: 0,
+            met_at: None,
+            stalled_at: None,
+            holds_at_bound: false,
+            fresh_work: 0,
+            blocked: None,
+        }
+    }
+
+    /// Records window step `step`: `fed` units of fresh work, whether the
+    /// lane's predicate `holds` after it, and the block that stopped the lane
+    /// if one did. A block, once seen, stays recorded; a stall is the first
+    /// step after `met_at` at which the predicate failed.
+    pub fn observe(&mut self, step: u64, fed: u64, holds: bool, blocked: Option<String>) {
+        self.steps += 1;
+        self.fresh_work += fed;
+        if blocked.is_some() {
+            self.blocked = blocked;
+        }
+        if holds && self.met_at.is_none() {
+            self.met_at = Some(step);
+        }
+        if !holds && self.met_at.is_some() && self.stalled_at.is_none() {
+            self.stalled_at = Some(step);
+        }
+        if step == self.bound {
+            self.holds_at_bound = holds;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3199,9 +3199,10 @@ references. A CAS ingest fault cannot
 be the permanent outside-core fault here: its latch refuses the kernel
 ingestion the fresh publishes need, which would put the fault inside the core.
 This arm declares three lanes and `verdict` judges those; the R11 stall is
-listed under `permanent_stalls`. The evaluator drives every lane directly and
-the claim boundary says so: the lifecycle owner's wall-clock reads are outside
-the core. The liveness root is charged while its stores are open, before the
+listed under `permanent_stalls`. The evaluator drives every lane directly, so
+the lifecycle owner's wall-clock reads are outside the core; this document
+states that boundary, and the pinned claim boundary's exclusions do not name
+it. The liveness root is charged while its stores are open, before the
 close checkpoints their WALs.
 
 The reviewer coordinator lane is a second arm on its own root
@@ -3211,14 +3212,19 @@ arm holds locked. Its core is the kernel, the memory store, and the production
 root, the deployment owner's activation record for exactly these stores, a
 local TLS peer as the provider endpoint, and the credential identity derived.
 Outside it, an external `BEGIN IMMEDIATE` on the search projection stays armed
-for the whole window and at the bound. The window opens with two Ready
+for the whole window and at the bound; the worker never opens the
+projection, so the lock shares no resource with the core and is not a
+contention test. The window opens with two Ready
 History Summarizer jobs; each of the profile's `reviewer_coordinator_passes`
 steps activates one fresh job (`fresh_work` counts them) and runs one
-`Worker::pass`, and the lane holds when the activation gate is open, no job
+`Worker::pass` directly, outside the worker task's loop, and the lane holds when the activation gate is open, no job
 is Ready, and the abstained count equals every job fed. The staged subjects
 are default-Sensitive, so each run settles as a policy-blocked abstention
-before any request; the arm refuses the run when the peer counted a
-connection. Job deadlines are wall-clock, as the queue's are by design.
+before any request; every send commits an attempt marker first, so the arm
+refuses the run when the memory store records any attempt.
+`fault::reviewer_window` is the unjudged window; with no activation record
+written its passes settle nothing and the verdict is `LivenessUnmet` with the
+closed gate as the block. Job deadlines are wall-clock, as the queue's are by design.
 
 The reviewer completion's lost reply (`reviewer_completion_lose_reply`) runs
 on its own root after the second recovery: the root raises its project to
@@ -3230,7 +3236,9 @@ shadow refuses the read-back, and the settlement answers
 `SettlementError::Store`; the effect
 `reviewer_completion:<causal identity>@<episode>` stays unknown until the
 recovery reads `memory_reviewer_receipts.state` from the closed memory store,
-which reads `complete`, so it is `applied`. The runner drops the shadow before
+which reads `complete` with terminal kind `complete` and a selected result,
+so it is `applied`; an open receipt, another terminal, or no receipt reads
+`not_applied`. The runner drops the shadow before
 its safety check, which reads the memory store's segments through the same
 connection.
 

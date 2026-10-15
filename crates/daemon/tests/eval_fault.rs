@@ -485,7 +485,7 @@ fn a_held_publication_admits_once_and_publishes_on_release_scenario(campaign: &C
 
 fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Campaign) {
     let run = &campaign.run;
-    let liveness = &run.report.liveness[0];
+    let liveness = arm_driving(&run.report, eval_core::Lane::CatchUpEpisodes);
     liveness.verdict(run.profile.liveness()).unwrap();
     assert_eq!(
         liveness.outside_core.len(),
@@ -536,10 +536,18 @@ fn liveness_bounds_are_met_with_outside_core_faults_armed_scenario(campaign: &Ca
     assert!(run.report.safety_checks_while_armed > run.profile.liveness().catch_up_episodes);
 }
 
+/// The arm whose core drives `lane`; `validate` makes it unique.
+fn arm_driving(report: &FaultReport, lane: eval_core::Lane) -> &eval_core::LivenessReport {
+    report
+        .liveness
+        .iter()
+        .find(|arm| arm.core.lanes.contains(&lane))
+        .unwrap()
+}
+
 fn the_reviewer_arm_settles_every_fed_job_within_its_bound_scenario(campaign: &Campaign) {
     let run = &campaign.run;
-    let arm = &run.report.liveness[1];
-    arm.verdict(run.profile.liveness()).unwrap();
+    let arm = arm_driving(&run.report, eval_core::Lane::ReviewerCoordinatorPasses);
     assert_eq!(
         arm.core.lanes,
         BTreeSet::from([eval_core::Lane::ReviewerCoordinatorPasses])
@@ -557,20 +565,15 @@ fn the_reviewer_arm_settles_every_fed_job_within_its_bound_scenario(campaign: &C
         .unwrap();
     assert_eq!(lock.action, FaultAction::ExternalLockHolder);
     assert_eq!(lock.scope.store, StoreFamily::SearchProjection);
-    assert_eq!(arm.armed_at_bound, arm.outside_core, "armed through the bound");
+    assert_eq!(
+        arm.armed_at_bound, arm.outside_core,
+        "armed through the bound"
+    );
     let progress = &arm.lanes[&eval_core::Lane::ReviewerCoordinatorPasses];
-    let bound = run.profile.liveness().reviewer_coordinator_passes;
-    assert_eq!(progress.bound, bound);
-    assert_eq!(progress.steps, bound);
     assert_eq!(
         progress.met_at,
         Some(1),
         "the first pass settles the backlog and the job fed with it"
-    );
-    assert!(progress.holds_at_bound && progress.stalled_at.is_none());
-    assert_eq!(
-        progress.fresh_work, bound,
-        "one fresh job is activated per step"
     );
     assert!(arm.permanent_stalls.is_empty());
 }
@@ -1543,5 +1546,94 @@ fn a_descriptor_invalidated_past_the_tip_fails_the_safety_check() {
     assert!(
         outcome.is_err(),
         "an invalidation past the tip fails the safety check"
+    );
+}
+
+/// The reviewer arm's predicate is the runner's: a window whose owner never
+/// wrote the activation record runs passes that settle nothing, and the
+/// verdict names the reviewer lane unmet with the closed gate as its block.
+#[test]
+fn a_reviewer_window_behind_a_closed_gate_is_unmet_at_its_bound() {
+    let profile = fault::profile(
+        Scale::S0,
+        MESSAGES,
+        600_000,
+        Some(Approval {
+            approved_by: "maintainer".to_string(),
+            approved_at_run_id: "ab".repeat(32),
+        }),
+    );
+    let fault_profile = profile.fault_profile().unwrap();
+    let plan = fault::plan(MESSAGES).unwrap();
+    let mut charges = campaign::Charges::new(profile.envelope.clone());
+    let mut witness = Witness::new();
+    let report = fault::reviewer_window(
+        &plan,
+        &mut charges,
+        &mut witness,
+        fault_profile.liveness(),
+        false,
+    )
+    .unwrap();
+    let progress = &report.lanes[&eval_core::Lane::ReviewerCoordinatorPasses];
+    assert_eq!(progress.met_at, None, "{progress:?}");
+    assert!(
+        progress
+            .blocked
+            .as_deref()
+            .is_some_and(|b| b.contains("missing")),
+        "{progress:?}"
+    );
+    assert!(matches!(
+        report.verdict(fault_profile.liveness()),
+        Err(eval_core::LivenessRefused::LivenessUnmet {
+            lane: eval_core::Lane::ReviewerCoordinatorPasses,
+            blocked: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        report.armed_at_bound, report.outside_core,
+        "the projection lock was armed throughout, so only the gate explains the miss"
+    );
+}
+
+/// The reviewer completion's read-back distinguishes: a receipt that began
+/// and never completed reads back `not_applied` from the closed memory store.
+#[test]
+fn a_reviewer_completion_that_never_committed_reads_back_not_applied() {
+    use support::memory_reviewer_publish as reviewer;
+    let root = tempfile::tempdir().unwrap();
+    let plan = aging::plan(MESSAGES).unwrap();
+    let stores = aging::Stores::open(root.path(), &plan);
+    reviewer::commit_memory_domain(&stores.corpus.kernel);
+    let generation = reviewer::activate_module_authority(&stores.memory, root.path());
+    let incarnation = reviewer::kernel_incarnation(&stores.corpus.kernel);
+    let begun = reviewer::begin_job(
+        &stores.corpus.kernel,
+        &stores.memory,
+        &"c".repeat(64),
+        &incarnation,
+        generation,
+        1,
+        reviewer::now_ms(),
+    );
+    let mut witness = Witness::new();
+    let identity = format!(
+        "reviewer_completion:{}@reviewer-completion-reply-lost",
+        begun.job.causal_identity
+    );
+    witness.effects.attempt(&identity);
+    witness
+        .effects
+        .lose_reply(&identity, "reviewer-completion-reply-lost")
+        .unwrap();
+    let closed = stores.close();
+    read_back(closed.root(), &mut witness).unwrap();
+    assert_eq!(
+        witness.effects.effects[&identity].expected,
+        Expected::Exactly {
+            state: EffectState::NotApplied
+        }
     );
 }

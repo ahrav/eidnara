@@ -155,15 +155,20 @@ fn liveness() -> LivenessReport {
             families: [StoreFamily::Memory, StoreFamily::SearchProjection]
                 .into_iter()
                 .collect(),
-            lanes: [Lane::CatchUpEpisodes, Lane::EmbeddingPasses]
-                .into_iter()
-                .collect(),
+            lanes: [
+                Lane::CatchUpEpisodes,
+                Lane::EmbeddingPasses,
+                Lane::MaterializationEpisodes,
+            ]
+            .into_iter()
+            .collect(),
         },
         outside_core: ["ingest-write".to_string()].into_iter().collect(),
         armed_at_bound: ["ingest-write".to_string()].into_iter().collect(),
         lanes: [
             (Lane::CatchUpEpisodes, lane(64, Some(3), true)),
             (Lane::EmbeddingPasses, lane(32, Some(2), true)),
+            (Lane::MaterializationEpisodes, lane(16, Some(1), true)),
         ]
         .into_iter()
         .collect(),
@@ -171,26 +176,23 @@ fn liveness() -> LivenessReport {
     }
 }
 
-/// The arm that drives the lanes `liveness()` leaves out, so the two arms
+/// The reviewer arm as the runner lays it out: the kernel and the memory
+/// store in its core, the projection lock outside it, so the two arms
 /// together drive every lane once.
 fn reviewer_arm() -> LivenessReport {
     LivenessReport {
         core: HealthyCore {
-            families: [StoreFamily::Memory].into_iter().collect(),
-            lanes: [
-                Lane::MaterializationEpisodes,
-                Lane::ReviewerCoordinatorPasses,
-            ]
+            families: [StoreFamily::Kernel, StoreFamily::Memory]
+                .into_iter()
+                .collect(),
+            lanes: [Lane::ReviewerCoordinatorPasses].into_iter().collect(),
+        },
+        outside_core: ["projection-lock".to_string()].into_iter().collect(),
+        armed_at_bound: ["projection-lock".to_string()].into_iter().collect(),
+        lanes: [(Lane::ReviewerCoordinatorPasses, lane(8, Some(1), true))]
             .into_iter()
             .collect(),
-        },
-        lanes: [
-            (Lane::MaterializationEpisodes, lane(16, Some(1), true)),
-            (Lane::ReviewerCoordinatorPasses, lane(8, Some(1), true)),
-        ]
-        .into_iter()
-        .collect(),
-        ..liveness()
+        permanent_stalls: vec![],
     }
 }
 
@@ -220,6 +222,13 @@ fn report() -> FaultReport {
                     },
                 )
             },
+            FaultEpisode {
+                scope: FaultScope {
+                    store: StoreFamily::SearchProjection,
+                    operation: "write".to_string(),
+                },
+                ..episode("projection-lock", FaultAction::ExternalLockHolder)
+            },
         ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
@@ -239,7 +248,14 @@ fn report() -> FaultReport {
             .into_iter()
             .collect(),
         ),
-        coverage: coverage(&["lost-ack", "kill", "ingest-write", "acknowledged", "r11"]),
+        coverage: coverage(&[
+            "lost-ack",
+            "kill",
+            "ingest-write",
+            "projection-lock",
+            "acknowledged",
+            "r11",
+        ]),
         effects,
         expected_refusals: vec![RecordedRefusal {
             episode: "r11".to_string(),
@@ -933,9 +949,40 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     assert_eq!(
         reviewer_less.validate(&profile()),
         Err(FaultReportError::Liveness(LivenessRefused::LaneNotDriven {
-            lane: Lane::MaterializationEpisodes
+            lane: Lane::ReviewerCoordinatorPasses
         })),
         "a lane no arm drives is missing evidence, not a pass"
+    );
+    let mut healed_second = report.clone();
+    healed_second.liveness[1].armed_at_bound.clear();
+    assert_eq!(
+        healed_second.validate(&profile()),
+        Err(FaultReportError::Liveness(LivenessRefused::FaultHealed {
+            episode: "projection-lock".to_string()
+        })),
+        "every arm is judged, not only the first"
+    );
+    let mut faulted_second = report.clone();
+    faulted_second.liveness[1]
+        .core
+        .families
+        .insert(StoreFamily::SearchProjection);
+    assert_eq!(
+        faulted_second.validate(&profile()),
+        Err(FaultReportError::CoreFamilyFaulted {
+            episode: "projection-lock".to_string(),
+            store: StoreFamily::SearchProjection,
+        }),
+        "the second arm's outside-core fault is checked against its own core"
+    );
+    let mut v1 = report.clone();
+    v1.schema = "eval-suite-c-fault-report/v1".to_string();
+    assert!(
+        matches!(
+            v1.validate(&profile()),
+            Err(FaultReportError::SchemaMismatch { .. })
+        ),
+        "a v1 report carried one optional liveness report, not one per arm"
     );
     let mut twice = report;
     twice.liveness[1].core.lanes.insert(Lane::CatchUpEpisodes);
