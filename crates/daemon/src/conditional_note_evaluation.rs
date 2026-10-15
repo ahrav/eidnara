@@ -227,10 +227,14 @@ fn next_occurrence<Tz: CronZone>(
         .checked_mul(MINUTE_MS)?
         .checked_add(MINUTE_MS)?;
     let cap_ms = after_ms.saturating_add(max_search_ms.clamp(0, MAX_SEARCH_MS));
+    let mut cursor_civil = None;
     while cursor_ms <= cap_ms {
         // `timestamp_millis_opt` returns no civil time outside chrono's representable
         // date range; an unrepresentable `cursor_ms` makes the search return `None`.
-        let civil = tz.timestamp_millis_opt(cursor_ms).single()?;
+        let civil = match cursor_civil.take() {
+            Some(civil) => civil,
+            None => tz.timestamp_millis_opt(cursor_ms).single()?,
+        };
         let skip_minutes = if date_could_match(cron, &civil) {
             let skip_minutes = minutes_until_candidate(cron, &civil);
             if skip_minutes == 0 {
@@ -258,7 +262,10 @@ fn next_occurrence<Tz: CronZone>(
             OffsetChanges::Never => cursor_ms.checked_add(skip_minutes * MINUTE_MS)?,
             OffsetChanges::HourApart => {
                 let target_ms = cursor_ms.checked_add(skip_minutes * MINUTE_MS)?;
-                advance_while_offset_holds(tz, cursor_ms, civil.offset().fix(), target_ms)
+                let (reached_ms, reached_civil) =
+                    advance_while_offset_holds(tz, cursor_ms, civil.offset().fix(), target_ms);
+                cursor_civil = reached_civil;
+                reached_ms
             }
             OffsetChanges::Unbounded => cursor_ms.checked_add(MINUTE_MS)?,
         };
@@ -345,7 +352,8 @@ fn minutes_until_candidate<Tz: TimeZone>(cron: &ParsedCron, civil: &chrono::Date
 }
 
 /// The first epoch minute in `(from_ms, target_ms]` whose offset differs from
-/// `offset` or that has no civil time, or `target_ms` when none does. Probes
+/// `offset` or that has no civil time, or `target_ms` when none does, with the
+/// civil time at `target_ms` in the second case. Probes
 /// run every [`OFFSET_PROBE_MS`] and at `target_ms`; because each offset lasts
 /// at least that long, two probes that report `offset` hold it between them.
 fn advance_while_offset_holds<Tz: TimeZone>(
@@ -353,21 +361,25 @@ fn advance_while_offset_holds<Tz: TimeZone>(
     from_ms: i64,
     offset: chrono::FixedOffset,
     target_ms: i64,
-) -> i64 {
-    let holds = |ms: i64| {
+) -> (i64, Option<chrono::DateTime<Tz>>) {
+    let civil_holding = |ms: i64| {
         tz.timestamp_millis_opt(ms)
             .single()
-            .is_some_and(|civil| civil.offset().fix() == offset)
+            .filter(|civil| civil.offset().fix() == offset)
     };
     let mut held_ms = from_ms;
-    while held_ms < target_ms {
+    loop {
         let probe_ms = held_ms.saturating_add(OFFSET_PROBE_MS).min(target_ms);
-        if !holds(probe_ms) {
-            return first_change_after(held_ms, probe_ms, holds);
+        match civil_holding(probe_ms) {
+            Some(civil) if probe_ms == target_ms => return (target_ms, Some(civil)),
+            Some(_) => held_ms = probe_ms,
+            None => {
+                let changed_ms =
+                    first_change_after(held_ms, probe_ms, |ms| civil_holding(ms).is_some());
+                return (changed_ms, None);
+            }
         }
-        held_ms = probe_ms;
     }
-    target_ms
 }
 
 /// Bisects `(held_ms, changed_ms]`, both epoch minutes, to the first minute
