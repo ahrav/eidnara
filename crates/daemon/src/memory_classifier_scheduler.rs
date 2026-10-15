@@ -76,6 +76,17 @@ impl ScheduledTask {
         }
     }
 }
+/// The selection slot's identities on the lease ledger and the producer its jobs are reserved under, for tests that compose the slot's store primitives outside the scheduler.
+#[cfg(feature = "test-support")]
+pub mod selection_slot {
+    /// The task name frozen pages and cursors are keyed by; a slot's command id is `{TASK}@{due}`.
+    pub const TASK: &str = super::MEMORY_REVIEWER_REVIEW_SELECTION_TASK;
+    pub const TASK_ID: i64 = super::MEMORY_REVIEWER_REVIEW_SELECTION_TASK_ID;
+    pub const LEDGER_SLOT: i64 = super::SCHEDULER_SLOT + 2;
+    pub const INSTANCE: &str = super::SCHEDULER_INSTANCE;
+    pub const PRODUCER: &str = super::MEMORY_REVIEWER_SELECTION_PRODUCER;
+}
+
 /// The ledger session every scheduled run is recorded under.
 pub(crate) const SCHEDULER_LEDGER_SESSION: &str = "eidnara-memory_classifier-scheduler";
 /// The scheduler's worker identity on the lease ledger; one slot per daemon.
@@ -2347,10 +2358,11 @@ mod tests {
             .map(|n| Ok(selection_page(10 * n, 2, Some(&format!("cursor-{n}")))))
             .collect();
         clock.advance(15 * MINUTE);
-        for _ in 0..4 {
+        // The deferral outlasts the next cron instant: every retry, the one at T0+30m included, is the same slot offering the same page.
+        for _ in 0..20 {
             let events = scheduler.tick(&host).await;
             assert!(
-                matches!(&events[0], TickEvent::CapacityDeferred { .. }),
+                matches!(&events[0], TickEvent::CapacityDeferred { due_at_ms, .. } if *due_at_ms == T0 + 15 * MINUTE_MS),
                 "{events:?}"
             );
             clock.advance(MINUTE);
@@ -2360,6 +2372,15 @@ mod tests {
             1,
             "arrivals waited behind the deferred page: no second selection"
         );
+        for inputs in &selection_page(10, 2, None).references {
+            assert_eq!(
+                store
+                    .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
+                    .unwrap(),
+                None,
+                "no arrival was admitted ahead of the deferred page"
+            );
+        }
         for index in 0..2 {
             store
                 .finish_memory_reviewer_job(
@@ -2409,9 +2430,18 @@ mod tests {
             host.selection_cursors.lock().unwrap().as_slice(),
             [None, Some("cursor-0".to_string())]
         );
+        for inputs in &selection_page(10, 2, None).references {
+            assert!(
+                store
+                    .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
+                    .unwrap()
+                    .is_some(),
+                "the arrivals were served next"
+            );
+        }
     }
 
-    /// Repeated selection expiry is recorded each time and never replays: each round's slot selects anew from the recorded cursor under its own attempt identity and freezes a page that full capacity defers; once that page passes its 24-hour selection deadline, the slot's lease has ended expired on the ledger and the sweep has expired the page, so the next slot resumes nothing and selects again. No round moves the cursor, admits a page's targets, or disturbs an earlier recorded outcome.
+    /// Repeated selection expiry is recorded each time and never replays: each round's slot selects the same targets anew from the recorded cursor under its own attempt identity and freezes a page that full capacity defers; once that page passes its 24-hour selection deadline, the slot's lease has ended expired on the ledger and the sweep has expired the page, so the next slot resumes nothing and selects again. When capacity returns, the renewed page is a new admission for the targets no page admitted and a replay of the one job already admitted, whose recorded outcome stands. No round moves the cursor, admits a page's targets, or disturbs an earlier recorded outcome.
     #[tokio::test]
     async fn repeated_selection_expiry_records_each_slot_and_moves_nothing() {
         use memory_store::memory_reviewer_jobs::MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
@@ -2455,8 +2485,8 @@ mod tests {
                     )
                     .unwrap();
             }
-            *host.selections.lock().unwrap() =
-                vec![Ok(selection_page(100 + 10 * round, 2, Some("stale")))];
+            // The walk finds the same targets every round, the admitted `memory-0` among them.
+            *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("stale")))];
             clock.advance(15 * MINUTE);
             let events = scheduler.tick(&host).await;
             assert!(
@@ -2492,7 +2522,7 @@ mod tests {
                 Some("kept"),
                 "round {round}: expiry moves no cursor"
             );
-            for inputs in &selection_page(100 + 10 * round, 2, None).references {
+            for inputs in &selection_page(1, 2, None).references {
                 assert_eq!(
                     store
                         .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
@@ -2520,120 +2550,59 @@ mod tests {
             ],
             "each round selected once, from the recorded cursor"
         );
-        assert!(matches!(
+        assert_eq!(
             store
-                .lookup_memory_reviewer_job("git:a", &first)
+                .memory_reviewer_headroom("git:a")
                 .unwrap()
-                .unwrap()
-                .state,
-            memory_store::memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
-                memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Failed
-            )
-        ));
-    }
-
-    /// Permanent quota exhaustion is a refusal the store keeps for its incarnation: the slot completes as refused naming the quota, the frozen page and every recorded outcome stay as they were, no job is admitted, the cursor does not move, and the next slot re-offers the same page instead of selecting past it.
-    #[tokio::test]
-    async fn permanent_quota_exhaustion_refuses_the_slot_and_keeps_page_cursor_and_outcomes() {
-        use memory_store::memory_reviewer_jobs::{
-            MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MemoryReviewerJobOutcome,
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
-        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
-        let clock = ManualClock::at(T0 + 1_000);
-        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
-        assert!(scheduler.tick(&host).await.is_empty());
-        // A page is frozen while headroom remains; then one terminal job's permanent receipt charge takes the project to its quota.
-        let due = T0 + 15 * MINUTE_MS;
-        let command = slot_command_id(MEMORY_REVIEWER_REVIEW_SELECTION_TASK, due);
-        store
-            .freeze_selection(
-                "git:a",
-                MEMORY_REVIEWER_REVIEW_SELECTION_TASK,
-                &command,
-                &selection_page(0, 2, Some("next")),
-                due,
-            )
-            .unwrap();
-        let producer = ProducerBinding {
-            producer: "filler".to_string(),
-            firing_id: "f".to_string(),
-            ordinal: 0,
-        };
-        let filler = selection_page(1_000, 1, None).references[0].clone();
-        let identity = filler.causal_identity().unwrap();
-        store
-            .reserve_memory_reviewer_job("git:a", &producer, &filler, T0)
-            .unwrap();
-        store
-            .with_fenced_conn_for_test(|conn| {
-                conn.execute(
-                    "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
-                    rusqlite::params![
-                        i64::try_from(MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT / 2).unwrap(),
-                        identity
-                    ],
-                )
-            })
-            .unwrap();
-        store
-            .finish_memory_reviewer_job("git:a", &identity, MemoryReviewerJobOutcome::Failed, T0)
-            .unwrap();
-        let headroom = store.memory_reviewer_headroom("git:a").unwrap();
-        // The page's own allowance is released at enqueue; the rest of the quota still cannot hold two admissions once the charge fills it.
-        store
-            .with_fenced_conn_for_test(|conn| {
-                conn.execute(
-                    "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = receipt_charge_bytes + ?1 WHERE causal_identity = ?2",
-                    rusqlite::params![
-                        i64::try_from(headroom.project_metadata_remaining).unwrap(),
-                        identity
-                    ],
-                )
-            })
-            .unwrap();
+                .pending_jobs,
+            0,
+            "the last sweep released every filler"
+        );
+        // With capacity free, the next slot selects the same page once more: the admitted `memory-0` replays its recorded row and only the two never-admitted targets become jobs.
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("stale")))];
         clock.advance(15 * MINUTE);
-        for round in 0..2 {
-            let events = scheduler.tick(&host).await;
-            let TickEvent::Ran { outcome, .. } = &events[0] else {
-                panic!("round {round}: {events:?}")
-            };
-            assert_eq!(
-                *outcome,
-                TaskRunOutcome::Ran {
-                    response: json!({"ok": false, "code": "memory_reviewer_selection_refused", "refusal": MemoryReviewerJobRefusal::MetadataQuota.to_string()})
-                },
-                "round {round}"
-            );
-            assert_eq!(ready_jobs(&store, "git:a"), 0, "round {round}: no job admitted");
-            assert_eq!(
-                store
-                    .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
-                    .unwrap(),
-                None,
-                "round {round}: the cursor does not move past the refused page"
-            );
-            let frozen = store
-                .frozen_selection_for_project("git:a")
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued" && response["jobs"] == 2 && response["replayed"] == 1),
+            "{events:?}"
+        );
+        assert_eq!(
+            store
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
-                .expect("the refused page stays frozen");
-            assert_eq!(frozen.state, FrozenSelectionState::Frozen);
-            assert!(matches!(
+                .as_deref(),
+            Some("stale"),
+            "the renewed page that enqueued moves the cursor"
+        );
+        assert!(
+            matches!(
                 store
-                    .lookup_memory_reviewer_job("git:a", &identity)
+                    .lookup_memory_reviewer_job("git:a", &first)
                     .unwrap()
                     .unwrap()
                     .state,
                 memory_store::memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
-                    MemoryReviewerJobOutcome::Failed
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Failed
                 )
-            ));
-            clock.advance(15 * MINUTE);
-        }
-        assert!(
-            host.selection_cursors.lock().unwrap().is_empty(),
-            "every slot re-offered the frozen page instead of selecting past it"
+            ),
+            "the replayed job keeps its recorded outcome"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_exported_selection_slot_is_the_one_the_scheduler_leases() {
+        assert_eq!(
+            selection_slot::LEDGER_SLOT,
+            ScheduledTask::MemoryReviewerReviewSelection.ledger_slot()
+        );
+        assert_eq!(
+            selection_slot::TASK_ID,
+            ScheduledTask::MemoryReviewerReviewSelection.lease_id()
+        );
+        assert_eq!(
+            selection_slot::TASK,
+            ScheduledTask::MemoryReviewerReviewSelection.name()
         );
     }
 
@@ -2708,6 +2677,7 @@ mod tests {
         use memory_store::memory_reviewer_jobs::{
             FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
             MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
+            MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobOutcome, MemoryReviewerJobState,
         };
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -2715,6 +2685,32 @@ mod tests {
         let clock = ManualClock::at(T0 + 1_000);
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
+        // An earlier job's recorded outcome, which no refusal may disturb; its permanent receipt charge stays in the quota.
+        let earlier = selection_page(2_000, 1, None).references[0]
+            .causal_identity()
+            .unwrap();
+        store
+            .reserve_memory_reviewer_job(
+                "git:a",
+                &ProducerBinding {
+                    producer: "earlier".to_string(),
+                    firing_id: "e".to_string(),
+                    ordinal: 0,
+                },
+                &selection_page(2_000, 1, None).references[0],
+                T0,
+            )
+            .unwrap();
+        store
+            .finish_memory_reviewer_job("git:a", &earlier, MemoryReviewerJobOutcome::Failed, T0)
+            .unwrap();
+        let earlier_state = || {
+            store
+                .lookup_memory_reviewer_job("git:a", &earlier)
+                .unwrap()
+                .unwrap()
+                .state
+        };
         // A receipt charge near the project quota stands in for a long history of admitted work: the frozen page fits exactly, and once its allowance is released exactly one more reservation fits beside its receipt, so a page of two is refused.
         let producer = ProducerBinding {
             producer: "filler".to_string(),
@@ -2729,7 +2725,8 @@ mod tests {
             MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
                 - MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
                 - FROZEN_SELECTION_ALLOWANCE_BYTES
-                - FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+                - FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+                - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
         )
         .unwrap();
         store
@@ -2785,6 +2782,11 @@ mod tests {
         assert_eq!(
             store.frozen_selection_for_project("git:a").unwrap(),
             Some(frozen)
+        );
+        assert_eq!(
+            earlier_state(),
+            MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Failed),
+            "both refusals left the earlier outcome as recorded"
         );
     }
 

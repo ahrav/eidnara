@@ -1425,7 +1425,7 @@ fn stepping_as(model: &str, step: &str) -> Vec<u8> {
     json_response("200 OK", &body, "")
 }
 
-/// U8's positive production-path proof: a commit published through the Git publisher is repository-backed evidence the production policy makes Remote-eligible; the production selector picks it, the scheduler's atomic enqueue admits it under the selection slot's lease, and the production worker runs it through the coordinator to a scripted, non-abstaining `retain` that cites the subject. The completed receipt selects a readable proposal over the memory at its unchanged tokens, and no canonical row changes.
+/// U8's eligibility witness: a commit published through the Git publisher is repository-backed evidence the production policy makes Remote-eligible. The production selector function, given the test-only `git_commits` class because `MEMORY_CLASSES` walks only the decision-derived classes, picks it under production policy versions; the store primitives the scheduler's selection slot composes (its lease, frozen page, and atomic enqueue under the slot's own identities) admit it; and the production worker runs it through the coordinator to a scripted, non-abstaining `retain` that cites the subject. The completed receipt selects a readable proposal over the memory at its unchanged tokens, and the Kernel tip does not move. The production-class witness stays gated with `PRODUCTION_SELECTION_OPEN`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal() {
     use daemon::memory_reviewer::selection::{SelectionScope, select_review_targets};
@@ -1447,25 +1447,29 @@ async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal
             project: &kernel::ProjectScope::new(PROJECT_DIGEST).unwrap(),
             ledger_project: PROJECT,
             classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
-            policy_versions: &BTreeMap::new(),
+            policy_versions: &daemon::memory_reviewer::handoff::review_policy_versions(),
         },
         None,
         &kernel::applicability::EvalBudget::unbounded(),
     )
     .unwrap();
     assert_eq!(page.references.len(), 1);
-    // The scheduler's selection slot: a lease, a frozen page, and one atomic enqueue that completes the slot.
-    let slot = 3;
-    let command = format!("memory_reviewer_review_selection@{now}");
+    // The selection slot under the scheduler's own identities: a lease, a frozen page, and one atomic enqueue that completes the slot.
+    use daemon::selection_slot;
+    let command = format!("{}@{now}", selection_slot::TASK);
+    let generation = rig
+        .store
+        .next_memory_classifier_scheduler_generation(selection_slot::INSTANCE)
+        .unwrap();
     let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = rig
         .store
         .acquire_memory_classifier_task(
             PROJECT,
             &command,
-            "scheduler-a",
-            slot,
-            i64::try_from(rig.generation).unwrap(),
-            slot,
+            selection_slot::INSTANCE,
+            selection_slot::LEDGER_SLOT,
+            generation,
+            selection_slot::TASK_ID,
             now,
             now,
         )
@@ -1475,19 +1479,19 @@ async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal
     };
     let frozen = rig
         .store
-        .freeze_selection(PROJECT, "memory_reviewer_review_selection", &command, &page, now)
+        .freeze_selection(PROJECT, selection_slot::TASK, &command, &page, now)
         .unwrap();
     let enqueued = rig
         .store
         .enqueue_frozen_selection(
             PROJECT,
             &claim.claim_id,
-            &command,
-            "scheduler-a",
-            slot,
+            &format!("{command}:complete"),
+            selection_slot::INSTANCE,
+            selection_slot::LEDGER_SLOT,
             &frozen,
             &ProducerBinding {
-                producer: "memory-classifier-selection".to_string(),
+                producer: selection_slot::PRODUCER.to_string(),
                 firing_id: command.clone(),
                 ordinal: 0,
             },
@@ -1546,9 +1550,10 @@ async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal
         "the proposal cites the disclosed commit"
     );
     // No canonical change: the descriptor reads the same at the new tip as before the run.
+    assert_eq!(rig.kernel.tip().unwrap(), tip_before, "no canonical commit");
     let after = rig
         .kernel
-        .observation_for_object_as_of(&object_id, rig.kernel.tip().unwrap())
+        .observation_for_object_as_of(&object_id, tip_before)
         .unwrap();
     assert_eq!(before, after);
 }

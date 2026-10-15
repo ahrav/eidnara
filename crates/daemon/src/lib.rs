@@ -60,6 +60,8 @@ pub mod m0_compose;
 pub(crate) mod m1_compose;
 pub mod memory_capture;
 pub(crate) mod memory_classifier_scheduler;
+#[cfg(feature = "test-support")]
+pub use memory_classifier_scheduler::selection_slot;
 pub(crate) mod memory_render;
 pub mod memory_reviewer;
 pub mod memory_tool;

@@ -1833,3 +1833,111 @@ fn a_terminal_page_releases_the_scan_audit_of_its_references() {
         "only the identities the compact row still retains keep their audit"
     );
 }
+
+/// Bookkeeping that cannot commit preserves the frozen page and every recorded outcome: a failure injected while the second reference becomes a job, while the page moves to `enqueued`, or while the continuation advances rolls the whole enqueue back, leaving the page frozen as it was, no job for any reference, the cursor where it stood, and an earlier terminal outcome unchanged; the same page then enqueues once the failure clears.
+#[test]
+fn a_failed_enqueue_commit_keeps_the_page_the_cursor_and_recorded_outcomes() {
+    let second = inputs("cand-2").causal_identity().unwrap();
+    for (name, trigger) in [
+        (
+            "between the job inserts",
+            format!(
+                "CREATE TRIGGER fail_enqueue BEFORE INSERT ON memory_reviewer_jobs WHEN NEW.causal_identity = '{second}'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END"
+            ),
+        ),
+        (
+            "at the page transition",
+            "CREATE TRIGGER fail_enqueue BEFORE UPDATE ON memory_reviewer_frozen_selections
+             BEGIN SELECT RAISE(ABORT, 'injected'); END"
+                .to_string(),
+        ),
+        (
+            "at the continuation",
+            "CREATE TRIGGER fail_enqueue BEFORE INSERT ON memory_reviewer_selection_cursors
+             BEGIN SELECT RAISE(ABORT, 'injected'); END"
+                .to_string(),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let earlier = reserved(
+            store
+                .reserve_memory_reviewer_job("proj", &producer("old"), &inputs("old"), NOW)
+                .unwrap(),
+        );
+        store
+            .finish_memory_reviewer_job(
+                "proj",
+                &earlier.causal_identity,
+                MemoryReviewerJobOutcome::Failed,
+                NOW,
+            )
+            .unwrap();
+        let page = FrozenSelectionPage {
+            references: vec![inputs("cand-1"), inputs("cand-2")],
+            next_cursor: Some("cursor-2".to_string()),
+        };
+        let frozen = store
+            .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+            .unwrap();
+        store.execute_tag_sql_for_test(&trigger).unwrap();
+        let failed = store.with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        });
+        assert!(
+            failed
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("injected")),
+            "{name}: {failed:?}"
+        );
+        assert_eq!(
+            store
+                .lookup_frozen_selection("proj", "slot-1", "attempt-1")
+                .unwrap()
+                .as_ref(),
+            Some(&frozen),
+            "{name}: the page is frozen as it was"
+        );
+        for reference in &page.references {
+            assert_eq!(
+                store
+                    .lookup_memory_reviewer_job("proj", &reference.causal_identity().unwrap())
+                    .unwrap(),
+                None,
+                "{name}: no reference became a job"
+            );
+        }
+        assert_eq!(
+            store.selection_cursor("proj", "slot-1").unwrap(),
+            None,
+            "{name}: the continuation did not move"
+        );
+        assert_eq!(
+            store
+                .lookup_memory_reviewer_job("proj", &earlier.causal_identity)
+                .unwrap()
+                .unwrap()
+                .state,
+            MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Failed),
+            "{name}: the recorded outcome stands"
+        );
+        store
+            .execute_tag_sql_for_test("DROP TRIGGER fail_enqueue")
+            .unwrap();
+        let retried = store
+            .with_fenced_conn_for_test(|conn| {
+                enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 2)
+            })
+            .unwrap();
+        assert!(
+            matches!(retried, EnqueueOutcome::Enqueued { jobs: 2, .. }),
+            "{name}: {retried:?}"
+        );
+        assert_eq!(
+            store.selection_cursor("proj", "slot-1").unwrap().as_deref(),
+            Some("cursor-2"),
+            "{name}"
+        );
+    }
+}
