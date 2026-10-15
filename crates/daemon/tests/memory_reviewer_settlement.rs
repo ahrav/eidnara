@@ -867,6 +867,17 @@ fn a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel() {
     assert_eq!(selected.reference, expected);
     assert_eq!(selected.proposal, fixture.bound_proposal(&[&evidence]));
     assert_eq!(selected.review_expires_at, hold.expires_at);
+    assert_eq!(
+        read_selected_proposal(
+            &fixture.store,
+            &fixture.ledger,
+            &"b".repeat(64),
+            &fixture.identity,
+            fixture.now + 6,
+        ),
+        Err(ReadRefusal::NotSelected),
+        "another project cannot read this selection"
+    );
     let created_at = fixture
         .store
         .read_review_input(&expected, &fixture.proposal_binding(1), fixture.now + 6)

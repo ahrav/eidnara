@@ -3448,12 +3448,20 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
     );
     assert_eq!(rig.kernel.tip().unwrap(), tip, "no canonical commit");
     let facts = rig.store.memory_reviewer_status_facts().unwrap();
-    assert_eq!(facts.jobs_abstained, 1);
     assert_eq!(facts.attempts_attempted, 0);
     assert_eq!(
-        (facts.jobs_reserved, facts.jobs_ready),
-        (0, 0),
-        "no orphaned reservation or second job"
+        (
+            facts.jobs_reserved,
+            facts.jobs_ready,
+            facts.jobs_expired,
+            facts.jobs_nonadmitted,
+            facts.jobs_failed,
+            facts.jobs_unknown,
+            facts.jobs_completed,
+            facts.jobs_abstained,
+        ),
+        (0, 0, 0, 0, 0, 0, 0, 1),
+        "exactly one job row, and it abstained"
     );
     assert_eq!(
         listener.accept().map(|_| ()).unwrap_err().kind(),
