@@ -84,6 +84,7 @@ fn kernel_incarnation(root: &std::path::Path) -> String {
 /// Publishes one commit with `message` as remote-eligible evidence, or as `Sensitive` evidence a remote model never receives; returns its descriptor and the unit it published, so a span of the same commit can be published under that unit's identity.
 fn publish_commit_unit(
     store: &KernelStore,
+    gate: &daemon::projection_gates::HookGate,
     root: &std::path::Path,
     message: &str,
     protected: bool,
@@ -92,8 +93,14 @@ fn publish_commit_unit(
     (String, SourceDescriptorDetail),
     daemon::harness_sources::SourceUnit,
 ) {
-    gix::init(root).unwrap();
-    let repo = gix::open_opts(root, gix::open::Options::isolated()).unwrap();
+    let repo: gix::Repository = gix::ThreadSafeRepository::init_opts(
+        root,
+        gix::create::Kind::WithWorktree,
+        gix::create::Options::default(),
+        gix::open::Options::isolated(),
+    )
+    .unwrap()
+    .into();
     let tree = repo
         .write_object(gix::objs::Tree::empty())
         .unwrap()
@@ -115,7 +122,7 @@ fn publish_commit_unit(
     let oid = repo.write_object(&commit).unwrap().detach().to_string();
     let object_bytes = u64::try_from(message.len()).unwrap().max(4096) + 1024;
     let selection = read_selection(
-        &support::projection_gate::open_gate(),
+        gate,
         &RepositoryBinding {
             repository_id: format!("repo-{}", root.file_name().unwrap().to_str().unwrap()),
             path: root.to_path_buf(),
@@ -266,12 +273,14 @@ impl Fixture {
         let mut dirs = Vec::new();
         let mut published = Vec::new();
         let mut units = Vec::new();
+        let gate = support::projection_gate::open_gate();
         for source in sources {
             match source.origin {
                 Origin::Own => {
                     let dir = tempfile::tempdir().unwrap();
                     let (descriptor, unit) = publish_commit_unit(
                         &store,
+                        &gate,
                         dir.path(),
                         source.message,
                         source.protected,
