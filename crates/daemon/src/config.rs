@@ -256,6 +256,10 @@ impl DaemonConfig {
 struct TierConfig {
     path: PathBuf,
     mtime: Option<SystemTime>,
+    /// The stamp of the file whose contents `value` holds: from the opened
+    /// descriptor when it was read, and from the followed `stat` that matched
+    /// `mtime` on a cache hit.
+    stamp: Option<FileStamp>,
     value: Option<Value>,
     /// Records an unreadable file or malformed JSONC. A missing file records nothing.
     warning: Option<String>,
@@ -282,8 +286,7 @@ pub const MERGED_CONFIG_RETAINED_BYTES_BOUND: u64 = 4 << 20;
 /// same tick could keep every `stat` field the memo compares.
 const RECENT_CHANGE_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The `stat` fields any rewrite, rename, or relink of a path changes, and
-/// whether the entry is a regular file.
+/// The `stat` fields any rewrite, rename, or relink of a path changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileStamp {
     dev: u64,
@@ -291,7 +294,6 @@ struct FileStamp {
     len: u64,
     mtime: (i64, i64),
     ctime: (i64, i64),
-    regular: bool,
 }
 
 impl FileStamp {
@@ -303,7 +305,6 @@ impl FileStamp {
             len: metadata.len(),
             mtime: (metadata.mtime(), metadata.mtime_nsec()),
             ctime: (metadata.ctime(), metadata.ctime_nsec()),
-            regular: metadata.is_file(),
         }
     }
 }
@@ -342,18 +343,14 @@ impl SourceIdentity {
                 .map(FileStamp::of)
     }
 
-    /// This stamp comes from `lstat`, while [`read_tier_cached`] records the
-    /// mtime from `stat`, which follows a final symlink. Presence differs for
-    /// a dangling link and for a file created or removed between the two
-    /// calls, and a link whose target carries the cached mtime serves the
-    /// cached value while the stamp names the link, so only a regular file's
-    /// stamp describes the read.
+    /// This stamp comes from `lstat` before the read, while the tier records
+    /// the stamp of the file it holds. They differ for a dangling link, for a
+    /// link whose target carries the cached mtime, for a file created or
+    /// removed between the two calls, and for a directory exchanged under the
+    /// path between the two calls, so the memo is keyed only on the file whose
+    /// contents it holds.
     fn describes(&self, tier: &TierConfig) -> bool {
-        tier.warning.is_none()
-            && match &self.stamp {
-                Some(stamp) => stamp.regular && tier.mtime.is_some(),
-                None => tier.mtime.is_none(),
-            }
+        tier.warning.is_none() && self.stamp == tier.stamp
     }
 
     /// Whether the entry's ctime, which every write, rename, and attribute
@@ -595,11 +592,9 @@ impl ConfigCache {
         // The identity is taken before the read, so a rewrite racing the read
         // leaves a stale identity that the next load does not match.
         let guidance = guidance_path.as_deref().map(SourceIdentity::of);
-        let warnings_before_guidance = warnings.len();
-        if let Some(guidance_path) = &guidance_path {
-            resolve_user_guidance_override(&mut effective, guidance_path, &mut warnings);
-        }
-        let guidance_resolved = warnings.len() == warnings_before_guidance;
+        let guidance_read = guidance_path
+            .as_deref()
+            .and_then(|path| resolve_user_guidance_override(&mut effective, path, &mut warnings));
         let rejections = [user_rejections, project_rejections].concat();
         if !rejections.is_empty() {
             let reason = rejections.join("; ");
@@ -614,10 +609,9 @@ impl ConfigCache {
             .as_ref()
             .is_none_or(|identity| identity.describes(&self.user))
             && project_identity.describes(&self.project)
-            && guidance_resolved
             && guidance
                 .as_ref()
-                .is_none_or(|identity| identity.stamp.is_some());
+                .is_none_or(|identity| identity.stamp.is_some() && identity.stamp == guidance_read);
         let settled = [
             user_identity.as_ref(),
             Some(&project_identity),
@@ -678,15 +672,22 @@ const MAX_GUIDANCE_OVERRIDE_BYTES: u64 = 1 << 20;
 
 /// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
 /// `InvalidData` error and reports as an ignored tier, not as absent.
-fn read_bounded_config(path: &Path) -> io::Result<String> {
-    let bytes = read_bounded_bytes(path, MAX_CONFIG_TIER_BYTES)?;
-    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+fn read_bounded_config(path: &Path) -> io::Result<(String, FileStamp)> {
+    let (bytes, stamp) = read_bounded_file(path, MAX_CONFIG_TIER_BYTES)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok((text, stamp))
 }
 
-/// Reads at most `limit` bytes from `path`; a longer file is `InvalidData`.
-/// The bound is enforced on bytes read, not on a size sampled beforehand, so a
-/// file growing under the read cannot exceed it.
 pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    read_bounded_file(path, limit).map(|(bytes, _)| bytes)
+}
+
+/// Reads at most `limit` bytes from `path` and returns them with the stamp of
+/// the opened file; a longer file is `InvalidData`. The bound is enforced on
+/// bytes read, not on a size sampled beforehand, so a file growing under the
+/// read cannot exceed it.
+fn read_bounded_file(path: &Path, limit: u64) -> io::Result<(Vec<u8>, FileStamp)> {
     use std::io::Read;
 
     // A FIFO or device at a project-controlled path would block the open or
@@ -703,7 +704,8 @@ pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>>
     )
     .map_err(io::Error::from)?
     .into();
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "not a regular file",
@@ -717,21 +719,24 @@ pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>>
             format!("config file exceeds {limit} bytes"),
         ));
     }
-    Ok(raw)
+    Ok((raw, FileStamp::of(&metadata)))
 }
 
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
-    let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let metadata = fs::metadata(&path).ok();
+    let mtime = metadata.as_ref().and_then(|m| m.modified().ok());
     // `chmod` restores readability without changing mtime, so a failed read is re-attempted.
     if cache.path == path && cache.mtime == mtime && cache.warning.is_none() {
+        cache.stamp = metadata.as_ref().map(FileStamp::of);
         return cache.value.clone();
     }
     cache.path = path.clone();
     cache.mtime = mtime;
-    let (value, warning) = match read_bounded_config(&path) {
-        Ok(raw) => match serde_json::from_str(&strip_jsonc(&raw)) {
-            Ok(value) => (Some(value), None),
+    let (value, stamp, warning) = match read_bounded_config(&path) {
+        Ok((raw, stamp)) => match serde_json::from_str(&strip_jsonc(&raw)) {
+            Ok(value) => (Some(value), Some(stamp), None),
             Err(error) => (
+                None,
                 None,
                 Some(format!(
                     "config file {} is not valid JSONC ({error}); ignoring it",
@@ -739,8 +744,9 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
                 )),
             ),
         },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None, None),
         Err(error) => (
+            None,
             None,
             Some(format!(
                 "config file {} could not be read ({error}); ignoring it",
@@ -749,6 +755,7 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
         ),
     };
     cache.value = value;
+    cache.stamp = stamp;
     cache.warning = warning;
     cache.value.clone()
 }
@@ -784,7 +791,13 @@ fn guidance_override_path(user: Option<&Value>, user_config_path: &Path) -> Opti
     })
 }
 
-fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings: &mut Vec<String>) {
+/// Applies the override at `path` and returns the stamp of the file it read,
+/// or `None` with a warning pushed.
+fn resolve_user_guidance_override(
+    cfg: &mut DaemonConfig,
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<FileStamp> {
     cfg.prompt_surface_guidance_override = None;
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -793,7 +806,7 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
                 "prompt_surface.guidance_override_path ({}) could not be read ({error}); using built-in guidance.",
                 path.display()
             ));
-            return;
+            return None;
         }
     };
     if !metadata.is_file() {
@@ -801,7 +814,7 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             "prompt_surface.guidance_override_path ({}) is not a file; using built-in guidance.",
             path.display()
         ));
-        return;
+        return None;
     }
 
     if metadata.len() > MAX_GUIDANCE_OVERRIDE_BYTES {
@@ -809,16 +822,16 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             "prompt_surface.guidance_override_path ({}) exceeds {MAX_GUIDANCE_OVERRIDE_BYTES} bytes; using built-in guidance.",
             path.display()
         ));
-        return;
+        return None;
     }
-    let bytes = match read_bounded_bytes(path, MAX_GUIDANCE_OVERRIDE_BYTES) {
-        Ok(bytes) => bytes,
+    let (bytes, stamp) = match read_bounded_file(path, MAX_GUIDANCE_OVERRIDE_BYTES) {
+        Ok(read) => read,
         Err(error) => {
             warnings.push(format!(
                 "prompt_surface.guidance_override_path ({}) could not be read ({error}); using built-in guidance.",
                 path.display()
             ));
-            return;
+            return None;
         }
     };
     let content = String::from_utf8_lossy(&bytes).into_owned();
@@ -827,7 +840,7 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             "prompt_surface.guidance_override_path ({}) is empty; using built-in guidance.",
             path.display()
         ));
-        return;
+        return None;
     }
 
     let markers = guidance_marker_count(&content);
@@ -837,10 +850,11 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             path.display(),
             GUIDANCE_MARKER
         ));
-        return;
+        return None;
     }
 
     cfg.prompt_surface_guidance_override = Some(content);
+    Some(stamp)
 }
 
 const GUIDANCE_MARKER: &str = "## Eidnara";
@@ -3034,6 +3048,45 @@ mod tests {
         let (first, _) = cache.effective_with_warnings(Some(&user), &project);
         assert_eq!(first.model_chain, vec!["model-a"]);
         assert!(cache.merged.is_some(), "a settled ctime admits the memo");
+    }
+
+    #[test]
+    fn a_source_exchanged_between_its_stamp_and_its_read_is_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live");
+        let other = dir.path().join("other");
+        let parked = dir.path().join("parked");
+        let project = dir.path().join("project");
+        for path in [&live, &other, &project] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let user = live.join("user.jsonc");
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        std::fs::write(
+            other.join("user.jsonc"),
+            r#"{ "history_summarizer": { "model": "model-b" } }"#,
+        )
+        .unwrap();
+        backdate_mtime(&other.join("user.jsonc"));
+        settle();
+        let exchange = || {
+            std::fs::rename(&live, &parked).unwrap();
+            std::fs::rename(&other, &live).unwrap();
+            std::fs::rename(&parked, &other).unwrap();
+        };
+
+        let mut cache = ConfigCache::default();
+        let stamped = SourceIdentity::of(&user);
+        exchange();
+        let (read, _) = cache.effective_from_sources(Some(stamped), &project);
+        assert_eq!(read.model_chain, vec!["model-b"]);
+        exchange();
+        let (served, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(
+            served.model_chain,
+            vec!["model-a"],
+            "a memo entry describes the file that was read"
+        );
     }
 
     #[test]

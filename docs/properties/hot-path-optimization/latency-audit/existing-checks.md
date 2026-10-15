@@ -522,6 +522,7 @@ directory sync fails, which leaves the count unknown.
 | [`a_model_ttl_map_is_charged_its_node_share`][t-memo-map] | A 30,000-entry `cache_ttl` map within the tier limit, whose B-tree nodes carry it past the retained bound, leaves the memo empty. | unaudited |
 | [`a_tier_relinked_to_a_target_with_its_cached_mtime_is_never_memoized`][t-memo-relink] | A user tier renamed and replaced by a link to it keeps serving the tier cache's value and is never memoized, so editing the target makes the next load refuse the link. | unaudited |
 | [`a_settled_source_with_a_future_mtime_is_memoized`][t-memo-future] | A tier whose mtime is a day ahead is memoized once its ctime has settled. | unaudited |
+| [`a_source_exchanged_between_its_stamp_and_its_read_is_never_memoized`][t-memo-exchange] | A user tier whose directory is exchanged between the pre-read stamp and the read serves the file read and is never memoized, so swapping the directories back serves the original on the next load. | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | A same mtime hides an edit; a new mtime reloads. | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | The `ProjectRaiseOnly` threshold. | unaudited |
 | [`project_tier_cannot_raise_the_user_memory_gate`][t-gate] | The `ProjectRaiseOnly` gate. | unaudited |
@@ -810,18 +811,19 @@ not a claim that no related check exists anywhere in the repository.
 [t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1571
 [t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2631
-[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2688
-[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2760
-[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2817
-[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2856
-[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2939
-[t-memo-relink]: ../../../../crates/daemon/src/config.rs#L2980
-[t-memo-future]: ../../../../crates/daemon/src/config.rs#L3022
-[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2908
-[t-raise]: ../../../../crates/daemon/src/config.rs#L1782
-[t-gate]: ../../../../crates/daemon/src/config.rs#L2123
-[t-hostile]: ../../../../crates/daemon/src/config.rs#L2192
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2645
+[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2702
+[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2774
+[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2831
+[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2870
+[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2953
+[t-memo-relink]: ../../../../crates/daemon/src/config.rs#L2994
+[t-memo-future]: ../../../../crates/daemon/src/config.rs#L3036
+[t-memo-exchange]: ../../../../crates/daemon/src/config.rs#L3054
+[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2922
+[t-raise]: ../../../../crates/daemon/src/config.rs#L1796
+[t-gate]: ../../../../crates/daemon/src/config.rs#L2137
+[t-hostile]: ../../../../crates/daemon/src/config.rs#L2206
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643
