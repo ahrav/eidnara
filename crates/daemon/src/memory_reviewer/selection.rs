@@ -128,12 +128,16 @@ pub fn select_review_targets(
     let tip = store.tip_within_budget(budget).map_err(kernel)?;
     let mut references = Vec::new();
     let mut examined = 0usize;
+    // The first batch holds as many rows as the page has references, and each later batch doubles up to the cap, so a page that fills from its first rows reads and judges few rows past them while a long walk still reads in large batches.
+    let mut batch = MAX_SELECTION_REFERENCES;
+    let mut ledger_first = false;
     // A page that filled at the end of a batch returns before another batch is read and judged.
     while references.len() < MAX_SELECTION_REFERENCES {
         let remaining = MAX_EXAMINED_PER_PAGE.saturating_sub(examined);
-        let Some(max_rows) = NonZeroUsize::new(remaining.min(MAX_SELECTION_REFERENCES * 4)) else {
+        let Some(max_rows) = NonZeroUsize::new(remaining.min(batch)) else {
             break;
         };
+        batch = (batch * 2).min(MAX_SELECTION_REFERENCES * 8);
         let page = store
             .live_source_descriptors(
                 classes[cursor.class_index],
@@ -145,19 +149,19 @@ pub fn select_review_targets(
             .map_err(kernel)?;
         examined += page.rows.len();
         // The review these targets feed discloses to a remote model, so a target is eligible only if the remote fold admits it; a locally readable but remotely denied memory would spend a job on a policy abstention.
-        let candidates: Vec<EligibilityCandidate> = page
-            .rows
-            .iter()
-            .map(|row| EligibilityCandidate {
-                object_id: row.object_id.clone(),
-                source_revision: row.detail.revision.parse().unwrap_or(-1),
-                artifact_digest: Some(row.detail.artifact_digest.clone()),
-            })
-            .collect();
-        let verdicts = if candidates.is_empty() {
-            Vec::new()
-        } else {
-            store
+        let judge = |rows: &[&LiveDescriptor]| -> Result<Vec<bool>, SelectionError> {
+            if rows.is_empty() {
+                return Ok(Vec::new());
+            }
+            let candidates: Vec<EligibilityCandidate> = rows
+                .iter()
+                .map(|row| EligibilityCandidate {
+                    object_id: row.object_id.clone(),
+                    source_revision: row.detail.revision.parse().unwrap_or(-1),
+                    artifact_digest: Some(row.detail.artifact_digest.clone()),
+                })
+                .collect();
+            Ok(store
                 .judge_surface_eligibility_within_budget(
                     project,
                     ArtifactDestination::Remote,
@@ -167,27 +171,78 @@ pub fn select_review_targets(
                 )
                 .map_err(kernel)?
                 .verdicts
+                .iter()
+                .map(|verdict| verdict.permits())
+                .collect())
         };
+        let rows: Vec<&LiveDescriptor> = page.rows.iter().collect();
+        // Eligibility-first judges the whole batch up front; ledger-first judges only the rows the ledger shows without a job.
+        let permits = if ledger_first {
+            None
+        } else {
+            Some(judge(&rows)?)
+        };
+        let may_select = |index: usize| permits.as_ref().is_none_or(|permits| permits[index]);
         let class = classes[cursor.class_index];
-        for (row, verdict) in page.rows.iter().zip(verdicts) {
+        let (mut checked, mut with_job) = (0usize, 0usize);
+        let mut next_row = 0;
+        // Each chunk holds exactly as many rows that may still be selected as the page has room for, so a chunk never reads past the row that fills the page, and its dedup is one ledger read.
+        while next_row < rows.len() {
             // The cursor passes a row only after it is selected or skipped; a full page stops before the row that would not fit, so that row is examined first next time.
             if references.len() >= MAX_SELECTION_REFERENCES {
                 return Ok(finish(references, Some(cursor)));
             }
-            if verdict.permits() {
-                let linked = linked_evidence(store, class, row, tip, budget).map_err(kernel)?;
+            let room = MAX_SELECTION_REFERENCES - references.len();
+            let start = next_row;
+            let mut taken = 0;
+            while next_row < rows.len() && taken < room {
+                taken += usize::from(may_select(next_row));
+                next_row += 1;
+            }
+            let judged: Vec<&LiveDescriptor> = (start..next_row)
+                .filter(|index| may_select(*index))
+                .map(|index| rows[index])
+                .collect();
+            let linked = linked_evidence(store, class, &judged, tip, budget).map_err(kernel)?;
+            let mut bound = Vec::with_capacity(judged.len());
+            let mut identities = Vec::with_capacity(judged.len());
+            for (row, linked) in judged.into_iter().zip(linked) {
                 if let Some((inputs, causal_identity)) =
                     causal_inputs(row, &linked, policy_versions)
-                    && ledger
-                        .lookup_memory_reviewer_job(ledger_project, &causal_identity)
-                        .map_err(|error| SelectionError::Ledger(error.to_string()))?
-                        .is_none()
                 {
-                    references.push(inputs);
+                    bound.push((row, inputs));
+                    identities.push(causal_identity);
                 }
             }
-            cursor.after = Some(row.object_id.clone());
+            if !identities.is_empty() {
+                let existing = ledger
+                    .memory_reviewer_jobs_exist(ledger_project, &identities)
+                    .map_err(|error| SelectionError::Ledger(error.to_string()))?;
+                checked += existing.len();
+                with_job += existing.iter().filter(|exists| **exists).count();
+                let fresh: Vec<_> = bound
+                    .into_iter()
+                    .zip(existing)
+                    .filter_map(|(bound, exists)| (!exists).then_some(bound))
+                    .collect();
+                if permits.is_some() {
+                    references.extend(fresh.into_iter().map(|(_, inputs)| inputs));
+                } else {
+                    let fresh_rows: Vec<&LiveDescriptor> =
+                        fresh.iter().map(|(row, _)| *row).collect();
+                    let fresh_permits = judge(&fresh_rows)?;
+                    references.extend(
+                        fresh
+                            .into_iter()
+                            .zip(fresh_permits)
+                            .filter_map(|((_, inputs), permitted)| permitted.then_some(inputs)),
+                    );
+                }
+            }
+            cursor.after = Some(rows[next_row - 1].object_id.clone());
         }
+        // A target needs both a permitting verdict and no job, so either order selects the same rows; the order decides which check the rows failing the other one skip. A batch whose ledger-checked rows mostly had a job is followed by a ledger-first batch.
+        ledger_first = with_job * 2 > checked;
         if page.next.is_none() {
             if cursor.class_index + 1 < classes.len() {
                 cursor.class_index += 1;
@@ -207,18 +262,34 @@ fn finish(references: Vec<CausalInputs>, cursor: Option<Cursor>) -> FrozenSelect
     }
 }
 
-/// The evidence a decision-derived descriptor's originating decision cites at `tip`, itself or through its events, bounded by [`MAX_LINKED_EVIDENCE`]; a native descriptor links none. This is the bounded enumeration that lets newly linked or newly retired evidence reconsider a target at an unchanged revision; unrelated writes, clocks, and selection attempts never enter it.
+/// The evidence each of `rows`' originating decisions cites at `tip`, itself or through its events, bounded by [`MAX_LINKED_EVIDENCE`], in `rows` order and read in one Kernel transaction; a native descriptor links none. This is the bounded enumeration that lets newly linked or newly retired evidence reconsider a target at an unchanged revision; unrelated writes, clocks, and selection attempts never enter it.
 fn linked_evidence(
     store: &KernelStore,
     class: OccurrenceClass,
-    row: &LiveDescriptor,
+    rows: &[&LiveDescriptor],
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Vec<LinkedEvidence>, kernel::KernelError> {
-    let Some(decision) = super::broker::originating_decision(class, &row.detail.identity) else {
-        return Ok(Vec::new());
-    };
-    store.linked_decision_evidence_within_budget(decision, tip, MAX_LINKED_EVIDENCE, budget)
+) -> Result<Vec<Vec<LinkedEvidence>>, kernel::KernelError> {
+    let decisions: Vec<Option<&str>> = rows
+        .iter()
+        .map(|row| super::broker::originating_decision(class, &row.detail.identity))
+        .collect();
+    let read: Vec<&str> = decisions.iter().flatten().copied().collect();
+    let mut linked = if read.is_empty() {
+        Vec::new()
+    } else {
+        store.linked_decision_evidence_batch_within_budget(
+            &read,
+            tip,
+            MAX_LINKED_EVIDENCE,
+            budget,
+        )?
+    }
+    .into_iter();
+    Ok(decisions
+        .iter()
+        .map(|decision| decision.and_then(|_| linked.next()).unwrap_or_default())
+        .collect())
 }
 
 /// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available together with each `linked` row and its liveness, and the caller's policy versions. The descriptor's own evidence is live while the descriptor is, so it keeps that availability when its decision also cites it. A linked id longer than the ledger's identity bound is left out, since no job could carry it, so one such citation cannot hide a reviewable target. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
