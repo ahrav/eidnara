@@ -179,9 +179,13 @@ fn a_never_restored_campaign_samples_every_quiescence_and_refuses_a_restore_scen
         "the drains ran catch-up episodes"
     );
     assert_eq!(
-        report.coverage.declared.len() as u64,
-        report.fault_episodes,
-        "every fault episode declares its cut"
+        report.coverage.declared,
+        report
+            .episodes
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<BTreeSet<_>>(),
+        "every fault episode declares its cut and nothing else is declared"
     );
     assert!(
         report.coverage.declared.iter().all(|cut| report
@@ -289,8 +293,8 @@ fn the_swarm_mix_exercises_every_operation_kind_scenario(published: &Published) 
     for op in Operation::ALL {
         assert!(report.mix.counts[&op] > 0, "{op:?}");
     }
-    assert!(report.fault_episodes >= 4);
-    assert!(report.safety_checks_while_armed >= report.fault_episodes);
+    assert!(report.episodes.len() >= 4);
+    assert!(report.safety_checks_while_armed >= report.episodes.len() as u64);
     assert!(
         report.expected_refusals.is_empty(),
         "no refusal is planted in the growth campaign"
@@ -605,12 +609,11 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
     budget_ms: u64,
     coverage: &mut Coverage,
 ) {
-    fn one(publish: &std::path::Path, budget_ms: u64) -> Outcome {
-        let run = growth::run(&config(
-            publish.join("out"),
-            budget_ms,
-            GrowthMode::NeverRestored,
-        ))
+    fn one(publish: &std::path::Path, budget_ms: u64, opened: impl FnOnce()) -> Outcome {
+        let run = growth::run_with(
+            &config(publish.join("out"), budget_ms, GrowthMode::NeverRestored),
+            opened,
+        )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&run.report_bytes).unwrap();
         (
@@ -622,14 +625,18 @@ fn two_concurrent_campaigns_on_one_checkout_match_their_serial_digests_scenario(
     let serial: Vec<_> = (0..2)
         .map(|_| {
             let publish = tempfile::tempdir().unwrap();
-            one(publish.path(), budget_ms)
+            one(publish.path(), budget_ms, || {})
         })
         .collect();
+    let listening = std::sync::Arc::new(std::sync::Barrier::new(2));
     let handles: Vec<_> = (0..2)
         .map(|_| {
+            let listening = listening.clone();
             std::thread::spawn(move || {
                 let publish = tempfile::tempdir().unwrap();
-                one(publish.path(), budget_ms)
+                one(publish.path(), budget_ms, || {
+                    listening.wait();
+                })
             })
         })
         .collect();

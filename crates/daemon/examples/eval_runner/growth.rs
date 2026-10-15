@@ -612,6 +612,12 @@ impl Campaign {
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
+    run_with(config, || {})
+}
+
+/// `opened` runs once the campaign's reviewer peer listens and before any
+/// step, so concurrent callers can hold every listener open at once.
+pub fn run_with(config: &Config, opened: impl FnOnce()) -> Result<Run, RunError> {
     let profile = profile(
         config.scale,
         config.messages,
@@ -642,6 +648,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let root_path = root.path().display().to_string();
     let mut campaign = Campaign::open(root.path(), plan, config.mode, &bounds.progress);
     let port = campaign.port();
+    opened();
     while campaign.remaining() > 0 {
         campaign.step(&mut charges)?;
     }
@@ -701,7 +708,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         ledger,
         mix,
         expected_refusals: witness.refusals.clone(),
-        fault_episodes: witness.episodes.len() as u64,
+        episodes: witness.episodes.clone(),
         safety_checks_while_armed: witness.safety_checks,
         coverage: cuts,
         markers: coverage.fired().iter().map(|m| m.to_string()).collect(),

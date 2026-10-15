@@ -2862,15 +2862,19 @@ is a claim about at least two.
 
 `GrowthReport` (`eval-suite-c-growth-report/v2`) is what one campaign
 publishes: identity, profile digest, claim boundary, the quota read, the
-bounds, the ledger, the mix, expected refusals, fault-episode and
-safety-check counts (`SafetyNeverChecked` when either the fault-episode count
+bounds, the ledger, the mix, expected refusals, the fault episodes it ran and
+its safety-check count (`SafetyNeverChecked` when either an episode is listed
 or the mix records a fault episode and no safety check ran while armed;
-`FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
-differ), the fault episodes' cut coverage (`Coverage(IncompleteCoverage)`
+`FaultEpisodesDisagree` when the listed episodes and the mix's `fault_episode`
+tally differ; `Episode` for a duplicate or malformed episode, as the fault
+report refuses them), the episodes' cut coverage (`Coverage(IncompleteCoverage)`
 for a declared cut with no receipt, `FaultedWithoutCuts` when fault episodes
-ran and no cut was declared, `CutsDisagree { declared, episodes }` when the
-declared cuts are not one per fault episode, so a missing coverage witness
-cannot read as sustainability success),
+ran and no cut was declared; the declared set is derived from the episodes:
+`Coverage(UndeclaredCut)` for an episode whose id is not declared,
+`CutNotAnEpisode { cut }` for a declared cut that is not a listed episode,
+and `EpisodeNotSampled { episode, step }` for an episode triggered at a step
+no sample records, so a receipted set of the right size cannot stand in for
+the episodes that ran),
 markers, and envelope. `validate(contract)` requires `eval_run_id` and
 `profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
 as the Suite B report does; the manifest derives the run id and names the
@@ -2902,7 +2906,7 @@ each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
 keeps steps, commit sequence, row and object counts, and headroom, so a
 concurrent campaign that saw another campaign's commits does not match its
-serial digest; the digest protocol is `eval-suite-c-growth-report-result/v1`.
+serial digest; the digest protocol is `eval-suite-c-growth-report-result/v2`.
 
 ## Aging shell
 
@@ -3356,7 +3360,10 @@ admits nothing, and the campaign continues; any other refusal stops the run
 with `RunError::Admission`. An S0 history never reaches the quota, and the
 report says zero. Two campaigns run from one checkout on two roots, each with
 its own reviewer peer on an OS-allocated port, publish the same result digest
-as their serial runs; a fixture that shares a root or a port is refused. The
+as their serial runs; `run_with(config, opened)` calls `opened` once the peer
+listens and before the first step, and the concurrent pair waits there on a
+barrier, so both ports are held at once and the pair's ports are disjoint; a
+fixture that shares a root or a port is refused. The
 serial pair is compared without its ports: each serial run releases its peer
 port before the next binds, so the OS may hand the second the same port. The
 campaign records no cassette, so its `cassette_namespaces` is empty and the

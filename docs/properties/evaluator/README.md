@@ -1756,8 +1756,11 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   (`UnregisteredMarker`), an integer past the canonical safe range on
   serialize or parse (`NotCanonical`), a declared fault cut with no receipt
   (`Coverage(IncompleteCoverage)`), fault episodes with no declared cut
-  (`FaultedWithoutCuts`), declared cuts that are not one per fault episode
-  (`CutsDisagree`), and a v1 report refuse.
+  (`FaultedWithoutCuts`), an episode whose id is not a declared cut
+  (`Coverage(UndeclaredCut)`), an episode triggered at a step no sample
+  records (`EpisodeNotSampled`), a declared cut that is not a listed episode
+  (`CutNotAnEpisode`), a duplicate or malformed episode (`Episode`), and a v1
+  report refuse.
 
 Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
 default shards run the never-restored campaign once with every scenario
@@ -1804,8 +1807,8 @@ completeness proof run in the `eval-campaign` CI job under
   twice the per-project pending cap of admissions leaves the pending count one
   short of the cap, every admission pending or terminal, and the project bytes
   equal to the constants' figure; each admission's cap-triggered coordinator
-  settle runs no more passes than the bound, and the settles together run
-  passes that each following quiescence's witness counts.
+  settle runs no more passes than the bound, and the settles together run at
+  least one pass.
 - `a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing`: with the
   project's receipt charges planted past the quota, the next admission is
   refused with `MetadataQuota`, counted once in `r24_refusals`, charges
@@ -1835,7 +1838,9 @@ completeness proof run in the `eval-campaign` CI job under
   roots and publish directories and publish the result digests of their
   serial runs, with the same commit-log rows, projection rows, artifact
   objects, and mix counts; each campaign's reviewer peer holds one
-  OS-allocated port and the concurrent pair's ports are disjoint; the serial
+  OS-allocated port, both peers listen before either campaign steps (a
+  barrier in `run_with`'s `opened` hook), and the concurrent pair's ports are
+  disjoint; the serial
   pair is compared without ports, so a port the OS hands from one serial run
   to the next is accepted; a fixture sharing a root, or a concurrent fixture
   sharing a port, is refused. This campaign records no cassette, so its
