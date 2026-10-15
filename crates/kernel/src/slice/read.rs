@@ -21,6 +21,13 @@ pub struct DecisionRow {
     pub sensitivity: Sensitivity,
 }
 
+/// One evidence row a decision cites, itself or through one of its events, and whether that evidence was live at the snapshot read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedEvidence {
+    pub evidence_id: String,
+    pub live: bool,
+}
+
 /// One keyset page of decisions with their registry rows, from [`KernelStore::decision_page_within_budget`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionPage {
@@ -265,6 +272,65 @@ impl KernelStore {
         };
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(targets)
+    }
+
+    /// The evidence the decision at `decision_object_id` cites at snapshot `requested`: its own `evidence_id` and every event's, most recently cited first, ties in evidence-id order, at most `max` rows. Each row says whether the evidence was live at `requested`. A decision unknown at `requested` cites nothing. Work is bounded by the decision's own events, not the store's size, and the wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, and [`KernelError::FutureSnapshot`] when `requested` exceeds the tip.
+    pub fn linked_decision_evidence_within_budget(
+        &self,
+        decision_object_id: &str,
+        requested: i64,
+        max: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(crate::map_sqlite)?;
+        snapshot_tip(&tx, requested)?;
+        let limit = i64::try_from(max.get()).unwrap_or(i64::MAX);
+        let rows = tx
+            .prepare_cached(
+                "WITH decision AS (
+                     SELECT decision_id, evidence_id, created_commit_seq FROM decisions
+                      WHERE object_id=?1 AND created_commit_seq<=?2
+                 ),
+                 cited AS (
+                     SELECT evidence_id, created_commit_seq AS cited_at FROM decision
+                      WHERE evidence_id IS NOT NULL
+                     UNION ALL
+                     SELECT e.evidence_id, e.commit_seq FROM decision_events e
+                       JOIN decision d ON d.decision_id=e.decision_id
+                      WHERE e.evidence_id IS NOT NULL AND e.commit_seq<=?2
+                 )
+                 SELECT c.evidence_id,
+                        m.created_commit_seq<=?2
+                          AND (m.invalidated_commit_seq IS NULL OR ?2<m.invalidated_commit_seq)
+                   FROM (SELECT evidence_id, MAX(cited_at) AS cited_at FROM cited
+                          GROUP BY evidence_id) c
+                   JOIN evidence_meta m ON m.evidence_id=c.evidence_id
+                  ORDER BY c.cited_at DESC, c.evidence_id
+                  LIMIT ?3",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        rusqlite::params![decision_object_id, requested, limit],
+                        |row| {
+                            Ok(LinkedEvidence {
+                                evidence_id: row.get(0)?,
+                                live: row.get(1)?,
+                            })
+                        },
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(crate::map_sqlite)?;
+        tx.commit().map_err(crate::map_sqlite)?;
+        Ok(rows)
     }
 
     /// Returns decision-payload sizes in bytes at snapshot `requested`, keyed by `object_id`: the query reads `length(decision_payload)` only, so a caller can bound how many full payloads it materializes before asking for any of them.

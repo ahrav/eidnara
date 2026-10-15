@@ -1776,3 +1776,136 @@ fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
         Err(KernelError::Deadline)
     );
 }
+
+fn ingest_evidence(store: &KernelStore, key: &str, digest: char) -> String {
+    store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent(&format!("evidence-{key}"), digest),
+            payload: format!("evidence {key}").into_bytes(),
+            evidence_id: format!("evidence-{key}"),
+            object_id: format!("evidence-object-{key}"),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: format!("evidence-{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap()
+        .evidence_id
+}
+
+fn cite(store: &KernelStore, key: &str, digest: char, evidence_id: &str) {
+    store
+        .commit(intent(&format!("cite-{key}"), digest), |envelope| {
+            envelope.append_decision_event(
+                "decision-1",
+                DecisionEventSpec {
+                    event_kind: "evidence".to_string(),
+                    payload: DecisionEventPayload {
+                        summary: format!("cites {key}"),
+                    },
+                    evidence_id: Some(evidence_id.to_string()),
+                    recorded_at: 10,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// The evidence a decision cites, itself or through its events: most recently cited first, deduplicated, bounded, as of the snapshot read, with each row's liveness; a decision unknown at the snapshot cites nothing and an unrelated decision's citations are not its own.
+#[test]
+fn linked_decision_evidence_is_the_decisions_own_citations_newest_first_and_bounded() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    let linked = |requested: i64, max: usize| -> Vec<(String, bool)> {
+        store
+            .linked_decision_evidence_within_budget(
+                "decision-object-1",
+                requested,
+                std::num::NonZeroUsize::new(max).unwrap(),
+                &budget,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.evidence_id, row.live))
+            .collect()
+    };
+    let before = store.tip().unwrap();
+    let own = ingest_evidence(&store, "own", '1');
+    store
+        .commit(intent("decision-1", '2'), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                evidence_id: Some(own.clone()),
+                ..decision(1)
+            })?;
+            envelope.insert_decision(decision(2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert!(linked(before, 8).is_empty(), "unknown at the snapshot");
+    assert_eq!(linked(store.tip().unwrap(), 8), vec![(own.clone(), true)]);
+
+    let first = ingest_evidence(&store, "first", '3');
+    cite(&store, "first", '4', &first);
+    let at_first = store.tip().unwrap();
+    let second = ingest_evidence(&store, "second", '5');
+    cite(&store, "second", '6', &second);
+    // Citing the decision's own evidence again moves it to the front once.
+    cite(&store, "own-again", '7', &own);
+    let unrelated = ingest_evidence(&store, "unrelated", '8');
+    store
+        .commit(intent("cite-unrelated", '9'), |envelope| {
+            envelope.append_decision_event(
+                "decision-2",
+                DecisionEventSpec {
+                    event_kind: "evidence".to_string(),
+                    payload: DecisionEventPayload {
+                        summary: "unrelated".to_string(),
+                    },
+                    evidence_id: Some(unrelated.clone()),
+                    recorded_at: 10,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    assert_eq!(
+        linked(tip, 8),
+        vec![
+            (own.clone(), true),
+            (second.clone(), true),
+            (first.clone(), true)
+        ]
+    );
+    assert_eq!(
+        linked(tip, 2),
+        vec![(own.clone(), true), (second, true)],
+        "the bound keeps the most recently cited"
+    );
+    assert_eq!(
+        linked(at_first, 8),
+        vec![(first.clone(), true), (own.clone(), true)],
+        "a later citation is not visible at an earlier snapshot"
+    );
+    // A retired decision's evidence can retire too; its rows read as not live.
+    store
+        .commit(intent("retire", 'a'), |envelope| {
+            envelope.retire_decision("decision-object-1")?;
+            envelope.retire_evidence("evidence-object-first")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let retired = linked(store.tip().unwrap(), 8);
+    assert!(retired.contains(&(first, false)), "{retired:?}");
+    assert!(retired.contains(&(own, true)));
+}

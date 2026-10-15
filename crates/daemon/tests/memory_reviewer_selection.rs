@@ -165,6 +165,19 @@ impl Fixture {
         identity_field: &str,
         representation: &str,
     ) -> String {
+        self.publish_derived_over(key, class, identity_field, representation, None)
+    }
+
+    /// [`Self::publish_derived`] over evidence carrying `provenance`.
+    fn publish_derived_over(
+        &self,
+        key: &str,
+        class: &str,
+        identity_field: &str,
+        representation: &str,
+        provenance: Option<kernel::RepositoryProvenance>,
+    ) -> String {
+        let provenance_backed = provenance.is_some();
         let object = format!("decision-{key}");
         self.store
             .commit(intent(&format!("decision-{key}")), |envelope| {
@@ -219,7 +232,7 @@ impl Fixture {
                 retain_until: None,
                 asserted_sensitivity: Sensitivity::Normal,
                 provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: None,
+                provenance,
             })
             .unwrap();
         let mut published = None;
@@ -244,6 +257,23 @@ impl Fixture {
                         observed_at: 1,
                     })
                     .unwrap();
+                // The read that serves a repository-backed claim is the
+                // descriptor's own admission, as the materializer records it.
+                if provenance_backed {
+                    envelope.record_admission(kernel::AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some(outcome.object_id.clone()),
+                        source_class: Some(kernel::SourceClass::ExplicitUser),
+                        taint_class: Some(kernel::TaintClass::UserExplicit),
+                        event: kernel::AdmissionEvent {
+                            kind: kernel::EventKind::Other,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "test".to_string(),
+                        },
+                    })?;
+                }
                 published = Some(outcome.object_id);
                 Ok(String::new())
             })
@@ -414,4 +444,248 @@ fn the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors
     assert_eq!(page.next_cursor, None);
     let _ = MAX_EXAMINED_PER_PAGE;
     let _: Option<CausalInputs> = None;
+}
+
+/// Repository provenance for `key`'s evidence, so the remote fold admits it.
+fn repository(key: &str) -> kernel::RepositoryProvenance {
+    kernel::RepositoryProvenance {
+        repository_id: format!("repo-{key}"),
+        revision: "0".repeat(40),
+    }
+}
+
+impl Fixture {
+    /// Ingests one evidence row under `key` with repository provenance; returns its evidence id.
+    fn evidence(&self, key: &str) -> String {
+        self.store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("linked-{key}")),
+                payload: format!("linked {key}").into_bytes(),
+                evidence_id: format!("linked-{key}"),
+                object_id: format!("linked-object-{key}"),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "repo".to_string(),
+                source_id: format!("src/linked-{key}"),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: Some(repository(key)),
+            })
+            .unwrap()
+            .evidence_id
+    }
+
+    /// Records an event on `key`'s decision that cites `evidence`.
+    fn link(&self, key: &str, evidence: &str) {
+        self.store
+            .commit(intent(&format!("event-{key}-{evidence}")), |envelope| {
+                envelope.append_decision_event(
+                    &format!("decision-id-{key}"),
+                    kernel::DecisionEventSpec {
+                        event_kind: "evidence".to_string(),
+                        payload: kernel::DecisionEventPayload {
+                            summary: format!("linked {evidence}"),
+                        },
+                        evidence_id: Some(evidence.to_string()),
+                        recorded_at: 2,
+                    },
+                )?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// Admits `inputs` as the producer does, then runs it to a recorded abstention through the ledger's own receipt path: MODULE authority, activation, a claimed task lease, a begun receipt, and its completion.
+    fn abstain(&self, inputs: &CausalInputs, firing: &str) -> String {
+        let preparing = self
+            .ledger
+            .authority_begin_prepare("ctx", PROJECT, "memories")
+            .unwrap();
+        let checksum = self
+            .ledger
+            .authority_seed_checksum("ctx", PROJECT, "memories")
+            .unwrap();
+        self.ledger
+            .authority_verify_prepare(
+                "ctx",
+                PROJECT,
+                "memories",
+                preparing.generation,
+                &checksum,
+                &checksum,
+            )
+            .unwrap();
+        let generation = self
+            .ledger
+            .authority_ack_prepare("ctx", PROJECT, "memories", preparing.generation)
+            .unwrap()
+            .generation;
+        let identity = self.reserve(inputs, firing);
+        let producer = ProducerBinding {
+            producer: "memory-classifier".to_string(),
+            firing_id: firing.to_string(),
+            ordinal: 0,
+        };
+        self.ledger
+            .activate_memory_reviewer_job(
+                PROJECT,
+                &identity,
+                &producer,
+                &memory_store::memory_reviewer_jobs::MemoryReviewerJobInput {
+                    subject: inputs.target.clone(),
+                    starting_references: Vec::new(),
+                    question_template: inputs.question_template.clone(),
+                },
+                self.now,
+            )
+            .unwrap();
+        let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = self
+            .ledger
+            .acquire_memory_reviewer_task(
+                PROJECT,
+                "acq-1",
+                "worker-a",
+                0,
+                i64::try_from(generation).unwrap(),
+                &identity,
+                self.now,
+            )
+            .unwrap()
+        else {
+            panic!("the job is claimed")
+        };
+        let kernel_incarnation = self
+            .store
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap();
+        let memory_store::memory_reviewer_ledger::MemoryReviewerBeginOutcome::Begun(receipt) = self
+            .ledger
+            .begin_memory_reviewer_receipt(
+                PROJECT,
+                &identity,
+                &kernel_incarnation,
+                &claim.claim_id,
+                self.now,
+            )
+            .unwrap()
+        else {
+            panic!("the receipt begins")
+        };
+        self.ledger
+            .complete_memory_reviewer_receipt(
+                PROJECT,
+                &identity,
+                &claim.claim_id,
+                &format!("completion-{identity}"),
+                "worker-a",
+                0,
+                receipt.generation,
+                &kernel_incarnation,
+                &memory_store::memory_reviewer_ledger::ReceiptCompletion::Abstained(
+                    memory_store::memory_reviewer_ledger::AbstainReason::OwnerSensitive,
+                ),
+                self.now + 1,
+            )
+            .unwrap();
+        identity
+    }
+
+    fn reserve(&self, inputs: &CausalInputs, firing: &str) -> String {
+        let producer = ProducerBinding {
+            producer: "memory-classifier".to_string(),
+            firing_id: firing.to_string(),
+            ordinal: 0,
+        };
+        match self
+            .ledger
+            .reserve_memory_reviewer_job(PROJECT, &producer, inputs, self.now)
+            .unwrap()
+        {
+            memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => {
+                job.causal_identity
+            }
+            other => panic!("fresh inputs reserve: {other:?}"),
+        }
+    }
+}
+
+/// Q29's bounded reconsideration through the production selector: once a decision-derived target's review abstained, repeated selections at unchanged inputs pass it and an unrelated write changes nothing, but evidence newly linked to its originating decision, at the target's unchanged revision, selects it once under a new causal identity. The abstained outcome stays recorded under the old identity, and the new job deduplicates like any other.
+#[test]
+fn newly_linked_evidence_after_an_abstention_reconsiders_the_target_once_at_its_unchanged_revision()
+{
+    let fixture = Fixture::open();
+    let target = fixture.publish_derived_over(
+        "t",
+        "canonical_claims",
+        "object_id",
+        "decision_summary",
+        Some(repository("t")),
+    );
+    let first = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(
+        Fixture::targets(&first),
+        vec![target.clone()],
+        "repository-backed evidence is remote-eligible"
+    );
+    let first_inputs = first.references[0].clone();
+    let first_identity = fixture.abstain(&first_inputs, "slot-1");
+
+    // Repeated firings at unchanged inputs pass the target.
+    assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
+    // An unrelated decision's evidence is not linked to the target.
+    fixture.publish_derived_over(
+        "u",
+        "promoted_memory",
+        "decision_object_id",
+        "summary",
+        Some(repository("u")),
+    );
+    let unrelated_evidence = fixture.evidence("unrelated");
+    fixture.link("u", &unrelated_evidence);
+    let unrelated = fixture.select(MEMORY_CLASSES, None);
+    assert!(
+        !Fixture::targets(&unrelated).contains(&target),
+        "an unrelated write is not a causal change"
+    );
+    for inputs in &unrelated.references {
+        fixture.reserve(inputs, "slot-unrelated");
+    }
+
+    // Evidence newly linked to the target's originating decision reconsiders it once.
+    let linked = fixture.evidence("new");
+    fixture.link("t", &linked);
+    let second = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&second), vec![target.clone()]);
+    let second_inputs = &second.references[0];
+    assert_eq!(
+        second_inputs.target, first_inputs.target,
+        "the target and its revision are unchanged"
+    );
+    assert!(
+        second_inputs
+            .required_evidence
+            .iter()
+            .any(|e| e.evidence_id == linked && e.available)
+    );
+    let second_identity = fixture.reserve(second_inputs, "slot-2");
+    assert_ne!(second_identity, first_identity);
+    assert!(matches!(
+        fixture
+            .ledger
+            .lookup_memory_reviewer_job(PROJECT, &first_identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        memory_store::memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
+            MemoryReviewerJobOutcome::Abstained
+        )
+    ));
+    assert!(
+        fixture.select(MEMORY_CLASSES, None).references.is_empty(),
+        "the new job deduplicates repeated firings"
+    );
 }

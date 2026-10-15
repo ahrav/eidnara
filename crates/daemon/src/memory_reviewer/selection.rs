@@ -7,7 +7,8 @@ use std::num::NonZeroUsize;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, EligibilityCandidate, KernelStore, LiveDescriptor, ProjectScope, Surface,
+    ArtifactDestination, EligibilityCandidate, KernelStore, LinkedEvidence, LiveDescriptor,
+    ProjectScope, Surface,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
@@ -33,6 +34,10 @@ const _: () = {
 pub const PRODUCTION_SELECTION_OPEN: bool = false;
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.
 pub const MAX_EXAMINED_PER_PAGE: usize = 256;
+/// Evidence rows an originating decision may contribute to one target's causal inputs: the most recently cited first, so newly linked evidence always enters the fingerprint. With the descriptor's own evidence this stays under the ledger's `MAX_REQUIRED_EVIDENCE`.
+pub const MAX_LINKED_EVIDENCE: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+const _: () =
+    assert!(MAX_LINKED_EVIDENCE.get() < memory_store::memory_reviewer_jobs::MAX_REQUIRED_EVIDENCE);
 
 /// Where a selection resumes: the index into the class list and the last object id passed in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,13 +167,20 @@ pub fn select_review_targets(
                 .map_err(kernel)?
                 .verdicts
         };
+        let class = classes[cursor.class_index];
         for (row, verdict) in page.rows.iter().zip(verdicts) {
             // The cursor passes a row only after it is selected or skipped; a full page stops before the row that would not fit, so that row is examined first next time.
             if references.len() >= MAX_SELECTION_REFERENCES {
                 return Ok(finish(references, Some(cursor)));
             }
+            let linked = if verdict.permits() {
+                linked_evidence(store, class, row, tip, budget).map_err(kernel)?
+            } else {
+                Vec::new()
+            };
             if verdict.permits()
-                && let Some((inputs, causal_identity)) = causal_inputs(row, policy_versions)
+                && let Some((inputs, causal_identity)) =
+                    causal_inputs(row, &linked, policy_versions)
                 && ledger
                     .lookup_memory_reviewer_job(ledger_project, &causal_identity)
                     .map_err(|error| SelectionError::Ledger(error.to_string()))?
@@ -197,11 +209,32 @@ fn finish(references: Vec<CausalInputs>, cursor: Option<Cursor>) -> FrozenSelect
     }
 }
 
-/// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available, and the caller's policy versions. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
+/// The evidence a decision-derived descriptor's originating decision cites at `tip`, itself or through its events, bounded by [`MAX_LINKED_EVIDENCE`]; a native descriptor links none. This is the bounded enumeration that lets newly linked or newly retired evidence reconsider a target at an unchanged revision; unrelated writes, clocks, and selection attempts never enter it.
+fn linked_evidence(
+    store: &KernelStore,
+    class: OccurrenceClass,
+    row: &LiveDescriptor,
+    tip: i64,
+    budget: &EvalBudget,
+) -> Result<Vec<LinkedEvidence>, kernel::KernelError> {
+    let Some(decision) = super::broker::originating_decision(class, &row.detail.identity) else {
+        return Ok(Vec::new());
+    };
+    store.linked_decision_evidence_within_budget(decision, tip, MAX_LINKED_EVIDENCE, budget)
+}
+
+/// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available together with each `linked` row and its liveness, and the caller's policy versions. The descriptor's own evidence is live while the descriptor is, so it keeps that availability when its decision also cites it. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
 fn causal_inputs(
     row: &LiveDescriptor,
+    linked: &[LinkedEvidence],
     policy_versions: &std::collections::BTreeMap<String, String>,
 ) -> Option<(CausalInputs, String)> {
+    let mut evidence = std::collections::BTreeMap::from([(row.detail.evidence_id.clone(), true)]);
+    for link in linked {
+        evidence
+            .entry(link.evidence_id.clone())
+            .or_insert(link.live);
+    }
     let inputs = CausalInputs {
         target: ReviewTarget::Memory {
             object_id: row.object_id.clone(),
@@ -211,10 +244,13 @@ fn causal_inputs(
             .id()
             .to_string(),
         signals: Vec::new(),
-        required_evidence: vec![EvidenceAvailability {
-            evidence_id: row.detail.evidence_id.clone(),
-            available: true,
-        }],
+        required_evidence: evidence
+            .into_iter()
+            .map(|(evidence_id, available)| EvidenceAvailability {
+                evidence_id,
+                available,
+            })
+            .collect(),
         policy_versions: policy_versions.clone(),
     };
     let causal_identity = inputs.causal_identity().ok()?;
@@ -250,10 +286,10 @@ mod tests {
             },
         };
         let versions = std::collections::BTreeMap::new();
-        assert!(causal_inputs(&row("evidence-1".to_string()), &versions).is_some());
+        assert!(causal_inputs(&row("evidence-1".to_string()), &[], &versions).is_some());
         // The Kernel accepts text fields up to 1024 bytes; the ledger binds identities up to 256.
         assert!(
-            causal_inputs(&row("e".repeat(300)), &versions).is_none(),
+            causal_inputs(&row("e".repeat(300)), &[], &versions).is_none(),
             "an evidence id the ledger refuses yields no inputs"
         );
     }
