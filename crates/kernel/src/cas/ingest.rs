@@ -1576,7 +1576,9 @@ fn regular_file_bytes_on_workers(objects: &File) -> Result<u64, StorageError> {
         }
         Ok(bytes)
     };
-    let workers = MAX_WALK_WORKERS.min(shards.len());
+    let workers = MAX_WALK_WORKERS
+        .min(shards.len())
+        .min(descriptor_budget_workers());
     let results = std::thread::scope(|scope| {
         // A helper whose thread cannot be created leaves its shards to the others.
         let helpers: Vec<_> = (1..workers)
@@ -1697,6 +1699,18 @@ fn shard_bytes(
 
 /// Threads the uncancellable census walks on at most, the caller included.
 const MAX_WALK_WORKERS: usize = 64;
+
+const DESCRIPTORS_PER_WALK_WORKER: u64 = 16;
+
+fn descriptor_budget_workers() -> usize {
+    rustix::process::getrlimit(rustix::process::Resource::Nofile)
+        .current
+        .map_or(MAX_WALK_WORKERS, |soft| {
+            usize::try_from(soft / DESCRIPTORS_PER_WALK_WORKER)
+                .unwrap_or(MAX_WALK_WORKERS)
+                .max(1)
+        })
+}
 
 const WALK_BUFFER_BYTES: usize = 16 * 1024;
 

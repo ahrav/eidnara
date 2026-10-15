@@ -2068,8 +2068,12 @@ snapshot and holds it across the walk, so a writer that overlaps every pass
 delays drift detection by at most three passes
 ([`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound]).
 A census walk whose workers run the descriptor table out (`EMFILE` or
-`ENFILE`) repeats on the calling thread with one shard descriptor
-([`regular_file_bytes_concurrently`][walk-concurrent]).
+`ENFILE`) repeats on the calling thread with one shard descriptor, and the
+workers number at most one per sixteen descriptors of the soft limit
+([`regular_file_bytes_concurrently`][walk-concurrent]). A walk that settles
+advances a settlement number, and a reconciliation whose snapshot predates
+it leaves the newer census in place
+([`a_census_settled_during_an_older_walk_is_kept`][t-usage-settled-order]).
 The [restore path][restore] runs recovery and its reconciliation against the
 count it held; tests writing [directly to disk][t-orphan] do so before the
 store opens. The health sampler reads the count without the writer lock
@@ -3249,7 +3253,7 @@ evaluation of this area and its disposition are recorded in
 [cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1059
 [stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1495-L1497
 [walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1522
-[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1714
+[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1728
 [startup]: ../../../../crates/kernel/src/cas/gc.rs#L102
 [startup-unreachable]: ../../../../crates/kernel/src/cas/gc.rs#L109-L136
 [reclaim-cand]: ../../../../crates/kernel/src/cas/gc.rs#L239
@@ -3272,20 +3276,21 @@ evaluation of this area and its disposition are recorded in
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
 [t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
-[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L49-L56
-[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L63-L85
-[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L93-L117
-[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L132-L195
-[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L199-L207
+[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L52-L59
+[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L66-L88
+[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L96-L120
+[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L135-L204
+[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L208-L216
 [open-seed]: ../../../../crates/kernel/src/open.rs#L435
 [open-census]: ../../../../crates/kernel/src/open.rs#L320
-[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L162-L182
-[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L269-L290
-[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1539-L1606
-[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1699
+[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L170-L190
+[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L278-L299
+[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1539-L1608
+[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1701
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
-[usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L38-L42
+[usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L41-L45
 [t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
+[t-usage-settled-order]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L609
 [daemon-maintenance]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [sample-interval]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
 

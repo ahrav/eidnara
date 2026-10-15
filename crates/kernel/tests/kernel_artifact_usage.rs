@@ -605,6 +605,27 @@ fn drift_latches_once_raced_reconciliations_reach_their_bound() {
     assert_usage_matches_walk(&store, root.path(), "latched on the conclusive walk");
 }
 
+#[test]
+fn a_census_settled_during_an_older_walk_is_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    store.ingest_artifact(request("one", b"1234")).unwrap();
+
+    // Between the first pass's walk and its comparison, a stray file lands
+    // and a whole second pass walks, settles the new total, and latches.
+    let root_path = root.path().to_path_buf();
+    store.on_next_artifact_reconciliation_for_test(move |store| {
+        fs::write(root_path.join("artifacts/objects/stray"), b"drift").unwrap();
+        store.run_staging_maintenance(0).unwrap();
+        assert_usage_matches_walk(store, &root_path, "the second pass settled the stray");
+    });
+    store.run_staging_maintenance(0).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "the older walk kept the newer census");
+    let error = store.ingest_artifact(request("refused", b"x")).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+}
+
 /// An unreadable directory below `objects`, or `None` when this process
 /// reads it anyway because it ignores mode bits.
 fn unreadable_shard(root: &Path) -> Option<std::path::PathBuf> {

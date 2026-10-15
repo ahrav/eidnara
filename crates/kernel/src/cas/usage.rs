@@ -21,13 +21,16 @@ use crate::{KernelError, KernelStore};
 
 /// The counted bytes below `objects`, `None` until a walk succeeds and after
 /// an unlink whose outcome is unknown, beside the number of publications and
-/// unlinks applied to the tree since the store opened. `raced_reconciliations`
+/// unlinks applied to the tree since the store opened. `settlements` counts
+/// the walks that became the count, so a reconciliation whose walk predates
+/// a later settlement leaves that settlement in place. `raced_reconciliations`
 /// counts consecutive comparisons deferred because `tree_changes` moved
 /// between a reconciliation's snapshot and its comparison.
 #[derive(Debug, Default)]
 pub(crate) struct ArtifactUsage {
     bytes: Option<u64>,
     tree_changes: u64,
+    settlements: u64,
     raced_reconciliations: u8,
 }
 
@@ -138,7 +141,10 @@ impl KernelStore {
             };
             writer = Some(held);
         }
-        let changes = self.counted_usage().tree_changes;
+        let (changes, settlements) = {
+            let usage = self.counted_usage();
+            (usage.tree_changes, usage.settlements)
+        };
         let walked = self.walk_artifact_usage();
         #[cfg(feature = "test-support")]
         self.run_reconciliation_hook();
@@ -149,11 +155,13 @@ impl KernelStore {
             writer = Some(held);
         }
         let mut usage = self.counted_usage();
-        if usage.tree_changes == changes {
-            usage.raced_reconciliations = 0;
-            self.settle_census(&mut usage, walked);
-        } else {
-            usage.raced_reconciliations = usage.raced_reconciliations.saturating_add(1);
+        if usage.settlements == settlements {
+            if usage.tree_changes == changes {
+                usage.raced_reconciliations = 0;
+                self.settle_census(&mut usage, walked);
+            } else {
+                usage.raced_reconciliations = usage.raced_reconciliations.saturating_add(1);
+            }
         }
         drop(usage);
         drop(writer);
@@ -192,6 +200,7 @@ impl KernelStore {
             self.latch_cas_failure();
         }
         usage.bytes = Some(walked);
+        usage.settlements = usage.settlements.wrapping_add(1);
     }
 
     /// The usage the health sampler reports: the count when one is held, and

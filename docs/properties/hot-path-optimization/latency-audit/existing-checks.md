@@ -471,6 +471,8 @@ would change.
 | [`a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_it`][t-usage-raced] | The writer lock is free after the maintenance walk returns; an ingest and a purge landed there leave usage equal to the walk and admission open, and the next pass still latches on a stray file. | unaudited |
 | [`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound] | With a stray file under `objects`, three maintenance passes each raced by an ingest leave admission open; the fourth holds the writer across its walk and the next ingest is `IngestionFailClosed`. | unaudited |
 | [`an_admission_walk_short_of_descriptors_counts_the_tree_one_shard_at_a_time`][t-usage-descriptors] | With 128 shards and the soft descriptor limit eight above the descriptors in use, an admission with no count held walks the tree and admits; the walk becomes the count. | unaudited |
+| [`a_census_settled_during_an_older_walk_is_kept`][t-usage-settled-order] | A second maintenance pass that walks, settles, and latches between the first pass's walk and comparison keeps its total; usage equals the walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`a_store_opens_while_its_census_shares_a_small_descriptor_table`][t-usage-open-descriptors] | With 128 shards and the soft descriptor limit twelve above the descriptors in use, the store opens and the census becomes the count. | unaudited |
 | [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk] | A maintenance walk that hits an unreadable directory keeps the count and admission; with no count held the same failure refuses with `IngestionFailClosed`. | unaudited |
 | [`an_open_whose_census_fails_admits_once_a_later_walk_succeeds`][t-usage-failed-census] | A census at open that hits an unreadable directory latches nothing; the first ingest after the directory is readable walks, admits, and matches the walk. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
@@ -486,9 +488,9 @@ calls `run_staging_maintenance`, so GC reclaim and the maintenance
 reconciliation run in production); a test that the health sampler's
 lock-free count read and `check_budget`'s locked read agree under
 concurrent ingest; a restore that finds drift; a durable unlink whose
-directory sync fails, which leaves the count unknown; a census at open that
-runs the descriptor table out, which the descriptor test exercises only on
-the admission walk.
+directory sync fails, which leaves the count unknown; a census at open whose
+workers hold the descriptors the database open needs, which the open test
+did not produce.
 
 ## Wildcard and cross-cutting
 
@@ -789,9 +791,11 @@ not a claim that no related check exists anywhere in the repository.
 [t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L478
 [t-usage-raced]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L532
 [t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
-[t-usage-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L45
-[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L623
-[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L645
+[t-usage-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L67
+[t-usage-settled-order]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L609
+[t-usage-open-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L103
+[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L644
+[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L666
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426
