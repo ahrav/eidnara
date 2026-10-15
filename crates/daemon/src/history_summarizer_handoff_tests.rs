@@ -3203,7 +3203,7 @@ impl host_runtime::model_execution::backend::LlmExecutionBackend for NoPublicMod
     }
 }
 
-/// #709 U1's producer-to-outcome chain for a conversation candidate: the real publication path validates a producer output, reserves, stages the subject, and activates the job; the production worker then finds nothing to run while the disclosure gate has no owner record, leaving the job pending rather than abstained; once the owner's record opens the gate, the run settles `owner_sensitive` with no attempt marker and no Kernel commit. Every identity the chain carries joins: the firing's recorded reservation is the job, the job's producer binding is the firing, and the staged candidate is the job's target.
+/// #709 U1's producer-to-outcome chain for a conversation candidate: the real publication path validates a producer output, reserves, stages the subject, and activates the job; the production worker then finds nothing to run while the disclosure gate has no owner record, leaving the job pending rather than abstained; once the owner's record opens the gate, the run settles `owner_sensitive` with no attempt marker and no Kernel commit. The identities the chain carries join: the job's producer binding names firing 3 at the chunk's ordinal, the staged candidate is owned by exactly that job, and no other job row exists in any state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send_and_no_canonical_change()
  {
@@ -3290,6 +3290,7 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
         format!("{}#3", rig_key()),
         "the job's firing is firing 3 under this session's handoff key"
     );
+    assert_eq!(job.producer.ordinal, 2, "the chunk's first ordinal");
     let ReviewTarget::StagedSubject {
         kernel_incarnation,
         candidate_id,
@@ -3319,7 +3320,15 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
     );
     let tip = rig.kernel.tip().unwrap();
 
-    let endpoint = Endpoint::for_test("localhost", 9, rustls::RootCertStore::empty()).unwrap();
+    // The provider endpoint is a listener nobody answers, so a send would show as a queued connection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = Endpoint::for_test(
+        "localhost",
+        listener.local_addr().unwrap().port(),
+        rustls::RootCertStore::empty(),
+    )
+    .unwrap();
     let providers = Providers::at(endpoint.clone(), endpoint, "us-east-1");
     let host = Arc::new(MemoryReviewerHost {
         supervisor: Arc::new(host_runtime::model_execution::supervisor::Supervisor::new(
@@ -3365,7 +3374,7 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
     });
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    // No owner record: the gate is closed, the job stays pending, and nothing abstains falsely.
+    // Publication ran under the handoff's own open gate; the worker reads the owner's record itself. With the record missing at the pass, the gate is closed, the job stays pending, and nothing abstains falsely. A gate already missing at publication is a nonadmission instead (`every_accepted_chunk_published_while_the_gate_is_not_open_records_the_nonadmission`).
     assert_eq!(worker.pass(&cancel).await, 0);
     assert_eq!(
         status.activation_state(),
@@ -3441,4 +3450,14 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
     let facts = rig.store.memory_reviewer_status_facts().unwrap();
     assert_eq!(facts.jobs_abstained, 1);
     assert_eq!(facts.attempts_attempted, 0);
+    assert_eq!(
+        (facts.jobs_reserved, facts.jobs_ready),
+        (0, 0),
+        "no orphaned reservation or second job"
+    );
+    assert_eq!(
+        listener.accept().map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "no connection reached the provider endpoint"
+    );
 }
