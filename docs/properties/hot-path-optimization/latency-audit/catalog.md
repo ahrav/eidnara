@@ -2002,7 +2002,13 @@ cleanup, GC pass, or purge returns with the writer lock released), the usage
 the store reports through [`artifact_budget_facts`][facts] and the usage
 `check_budget` admits against are the same [count][usage-count], and it
 equals an independent sum of `st_size` over regular files under `objects`
-and its subdirectories. The count lives in process memory under the writer
+and its subdirectories, provided every byte under `objects` changed through
+the store since the last conclusive reconciliation. A byte changed outside
+the store is drift: an unlink then subtracts the size on disk rather than
+the size counted
+([`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown]),
+and the equality resumes at the next conclusive reconciliation, which
+latches. The count lives in process memory under the writer
 lock: the kernel store has no spare mutable column and a new table or column
 is a format break, so the durable counter the specification named is
 replaced by a count the [open walk][open-seed] seeds before startup
@@ -2049,7 +2055,8 @@ interrupted restore are settled ([`:320`][open-census]), runs beside the
 database open, and [seeds the count][usage-seed] before startup recovery;
 until `open` returns, the opening thread is the store's only user, so that
 walk counts the tree the writer lock would have seen. Open walks again after
-recovery only when recovery changed the count. Every uncancellable walk
+recovery when the census failed or recovery changed the count. Every
+uncancellable walk
 divides the shard directories among up to [64 threads][walk-workers]
 ([`regular_file_bytes_concurrently`][walk-concurrent]); the count it settles
 is the same sum, and a failure other than exhaustion outranks an exhaustion
@@ -3290,6 +3297,7 @@ evaluation of this area and its disposition are recorded in
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
 [usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L41-L45
 [t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
+[t-usage-grown]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L395
 [t-usage-settled-order]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L609
 [daemon-maintenance]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [sample-interval]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
