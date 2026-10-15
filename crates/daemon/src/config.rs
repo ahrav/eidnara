@@ -20,6 +20,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -255,6 +256,10 @@ impl DaemonConfig {
 struct TierConfig {
     path: PathBuf,
     mtime: Option<SystemTime>,
+    /// The stamp of the file whose contents `value` holds: from the opened
+    /// descriptor when it was read, and from the followed `stat` that matched
+    /// `mtime` on a cache hit.
+    stamp: Option<FileStamp>,
     value: Option<Value>,
     /// Records an unreadable file or malformed JSONC. A missing file records nothing.
     warning: Option<String>,
@@ -291,6 +296,19 @@ struct FileStamp {
     ctime: (i64, i64),
 }
 
+impl FileStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            len: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
 /// A file the merge read, named by its path and the stamp of the entry at that
 /// path. The stamp does not follow a final symlink, as the bounded reads open
 /// with `NOFOLLOW`.
@@ -302,26 +320,42 @@ struct SourceIdentity {
 
 impl SourceIdentity {
     fn of(path: &Path) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        let stamp = fs::symlink_metadata(path).ok().map(|metadata| FileStamp {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            len: metadata.len(),
-            mtime: (metadata.mtime(), metadata.mtime_nsec()),
-            ctime: (metadata.ctime(), metadata.ctime_nsec()),
-        });
-        Self {
-            path: path.to_path_buf(),
-            stamp,
-        }
+        Self::lstat(path.to_path_buf()).0
+    }
+
+    /// The identity of `path` and whether `path` exists as [`Path::exists`]
+    /// reports it, following a final symlink; only a symlink costs a second
+    /// `stat`.
+    fn lstat(path: PathBuf) -> (Self, bool) {
+        let metadata = fs::symlink_metadata(&path).ok();
+        let exists = metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.is_symlink() || path.exists());
+        let stamp = metadata.as_ref().map(FileStamp::of);
+        (Self { path, stamp }, exists)
     }
 
     fn is_current(&self) -> bool {
-        *self == Self::of(&self.path)
+        self.stamp
+            == fs::symlink_metadata(&self.path)
+                .ok()
+                .as_ref()
+                .map(FileStamp::of)
     }
 
-    /// Whether the entry last changed before `settled_before`, compared in
-    /// whole nanoseconds since the epoch.
+    /// This stamp comes from `lstat` before the read, while the tier records
+    /// the stamp of the file it holds. They differ for a dangling link, for a
+    /// link whose target carries the cached mtime, for a file created or
+    /// removed between the two calls, and for a directory exchanged under the
+    /// path between the two calls, so the memo is keyed only on the file whose
+    /// contents it holds.
+    fn describes(&self, tier: &TierConfig) -> bool {
+        tier.warning.is_none() && self.stamp == tier.stamp
+    }
+
+    /// Whether the entry's ctime, which every write, rename, and attribute
+    /// change moves to the current time, is before `settled_before`, compared
+    /// in whole nanoseconds since the epoch.
     fn changed_before(&self, settled_before: std::time::SystemTime) -> bool {
         let Ok(limit) = settled_before.duration_since(std::time::UNIX_EPOCH) else {
             return false;
@@ -330,9 +364,7 @@ impl SourceIdentity {
             i64::try_from(limit.as_secs()).unwrap_or(i64::MAX),
             i64::from(limit.subsec_nanos()),
         );
-        self.stamp
-            .as_ref()
-            .is_none_or(|stamp| stamp.mtime < limit && stamp.ctime < limit)
+        self.stamp.as_ref().is_none_or(|stamp| stamp.ctime < limit)
     }
 }
 
@@ -345,7 +377,7 @@ struct MergedConfig {
     user: Option<SourceIdentity>,
     project: SourceIdentity,
     guidance: Option<SourceIdentity>,
-    effective: DaemonConfig,
+    effective: Arc<DaemonConfig>,
     warnings: Vec<String>,
 }
 
@@ -365,6 +397,7 @@ impl MergedConfig {
     /// Bytes the memo holds, counting each heap allocation at its capacity
     /// rounded up to 16 bytes plus 16 bytes of allocator overhead.
     fn retained_bytes(&self) -> u64 {
+        const MAP_ENTRY_NODE_BYTES: usize = 3 * std::mem::size_of::<(String, String)>();
         fn allocation(capacity: usize) -> usize {
             if capacity == 0 {
                 0
@@ -372,8 +405,8 @@ impl MergedConfig {
                 capacity.next_multiple_of(16) + 16
             }
         }
-        fn strings(values: &[String]) -> usize {
-            allocation(std::mem::size_of_val(values))
+        fn strings(values: &Vec<String>) -> usize {
+            allocation(values.capacity() * std::mem::size_of::<String>())
                 + values
                     .iter()
                     .map(|value| allocation(value.capacity()))
@@ -403,13 +436,14 @@ impl MergedConfig {
             cache_ttl_by_model,
             admission,
             user_config_path,
-        } = &self.effective;
+        } = &*self.effective;
         let optional = |value: &Option<String>| {
             value
                 .as_ref()
                 .map_or(0, |value| allocation(value.capacity()))
         };
         let bytes = std::mem::size_of::<Self>()
+            + allocation(std::mem::size_of::<DaemonConfig>() + 2 * std::mem::size_of::<usize>())
             + self.user.as_ref().map_or(0, identity)
             + identity(&self.project)
             + self.guidance.as_ref().map_or(0, identity)
@@ -420,7 +454,9 @@ impl MergedConfig {
             + allocation(cache_ttl.capacity())
             + cache_ttl_by_model
                 .iter()
-                .map(|(model, ttl)| allocation(model.capacity()) + allocation(ttl.capacity()) + 64)
+                .map(|(model, ttl)| {
+                    allocation(model.capacity()) + allocation(ttl.capacity()) + MAP_ENTRY_NODE_BYTES
+                })
                 .sum::<usize>()
             + match admission {
                 ConfigAdmission::Admitted => 0,
@@ -434,7 +470,7 @@ impl MergedConfig {
 impl ConfigCache {
     /// Loads user config from the platform path and project config below `project_root`.
     /// Warnings go to stderr.
-    pub fn effective_for_project(&mut self, project_root: &Path) -> DaemonConfig {
+    pub fn effective_for_project(&mut self, project_root: &Path) -> Arc<DaemonConfig> {
         let (effective, warnings) = self.effective_for_env(
             std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
             std::env::var("HOME").ok().as_deref(),
@@ -460,10 +496,20 @@ impl ConfigCache {
         xdg_config_home: Option<&str>,
         home: Option<&str>,
         project_root: &Path,
+    ) -> (Arc<DaemonConfig>, Vec<String>) {
+        let user = user_config_base_from(xdg_config_home, home).map(discover_tier);
+        self.effective_from_sources(user, project_root)
+    }
+
+    #[cfg(test)]
+    fn effective_with_warnings(
+        &mut self,
+        user_path: Option<&Path>,
+        project_root: &Path,
     ) -> (DaemonConfig, Vec<String>) {
-        let user_path =
-            user_config_base_from(xdg_config_home, home).map(|base| discover_tier(&base));
-        self.effective_with_warnings(user_path.as_deref(), project_root)
+        let (effective, warnings) =
+            self.effective_from_sources(user_path.map(SourceIdentity::of), project_root);
+        (Arc::unwrap_or_clone(effective), warnings)
     }
 
     /// Tier read failures are reported on every load so a long-running daemon keeps
@@ -471,28 +517,29 @@ impl ConfigCache {
     /// identities the last merge recorded returns that merge and its warnings;
     /// a merge with a source that could not be read, or that changed within
     /// [`RECENT_CHANGE_MARGIN`], is never memoized, so it is read again.
-    fn effective_with_warnings(
+    fn effective_from_sources(
         &mut self,
-        user_path: Option<&Path>,
+        user_identity: Option<SourceIdentity>,
         project_root: &Path,
-    ) -> (DaemonConfig, Vec<String>) {
-        let project_path = discover_tier(&project_root.join(".eidnara").join("eidnara"));
+    ) -> (Arc<DaemonConfig>, Vec<String>) {
+        let project_identity = discover_tier(project_root.join(".eidnara/eidnara"));
         let settled_before = std::time::SystemTime::now()
             .checked_sub(RECENT_CHANGE_MARGIN)
             .unwrap_or(std::time::UNIX_EPOCH);
-        let user_identity = user_path.map(SourceIdentity::of);
-        let project_identity = SourceIdentity::of(&project_path);
+        let user_path = user_identity
+            .as_ref()
+            .map(|identity| identity.path.as_path());
         if let Some(merged) = &self.merged
             && merged.serves(user_identity.as_ref(), &project_identity)
         {
-            return (merged.effective.clone(), merged.warnings.clone());
+            return (Arc::clone(&merged.effective), merged.warnings.clone());
         }
         self.merged = None;
         let user = match user_path {
             Some(user_path) => read_tier_cached(&mut self.user, user_path.to_path_buf()),
             None => None,
         };
-        let project = read_tier_cached(&mut self.project, project_path);
+        let project = read_tier_cached(&mut self.project, project_identity.path.clone());
         let mut user_rejections: Vec<String> = user_path
             .and(self.user.warning.clone())
             .into_iter()
@@ -545,11 +592,9 @@ impl ConfigCache {
         // The identity is taken before the read, so a rewrite racing the read
         // leaves a stale identity that the next load does not match.
         let guidance = guidance_path.as_deref().map(SourceIdentity::of);
-        let warnings_before_guidance = warnings.len();
-        if let Some(guidance_path) = &guidance_path {
-            resolve_user_guidance_override(&mut effective, guidance_path, &mut warnings);
-        }
-        let guidance_resolved = warnings.len() == warnings_before_guidance;
+        let guidance_read = guidance_path
+            .as_deref()
+            .and_then(|path| resolve_user_guidance_override(&mut effective, path, &mut warnings));
         let rejections = [user_rejections, project_rejections].concat();
         if !rejections.is_empty() {
             let reason = rejections.join("; ");
@@ -560,9 +605,13 @@ impl ConfigCache {
         }
         // A read failure of any source is retried by the next load, and a
         // source changed within the margin is read again until it settles.
-        let sources_read = user_path.and(self.user.warning.as_ref()).is_none()
-            && self.project.warning.is_none()
-            && guidance_resolved;
+        let sources_read = user_identity
+            .as_ref()
+            .is_none_or(|identity| identity.describes(&self.user))
+            && project_identity.describes(&self.project)
+            && guidance
+                .as_ref()
+                .is_none_or(|identity| identity.stamp.is_some() && identity.stamp == guidance_read);
         let settled = [
             user_identity.as_ref(),
             Some(&project_identity),
@@ -571,12 +620,13 @@ impl ConfigCache {
         .into_iter()
         .flatten()
         .all(|identity| identity.changed_before(settled_before));
+        let effective = Arc::new(effective);
         if sources_read && settled {
             let merged = MergedConfig {
                 user: user_identity,
                 project: project_identity,
                 guidance,
-                effective: effective.clone(),
+                effective: Arc::clone(&effective),
                 warnings: warnings.clone(),
             };
             if merged.retained_bytes() <= MERGED_CONFIG_RETAINED_BYTES_BOUND {
@@ -589,29 +639,28 @@ impl ConfigCache {
 
 /// A CWD-relative fallback would let the untrusted project tree supply user-tier-only keys, so empty and relative values yield no user tier.
 fn user_config_base_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
-    let absolute = |value: Option<&str>| {
+    fn absolute(value: Option<&str>) -> Option<&Path> {
         value
             .filter(|v| !v.is_empty() && Path::new(v).is_absolute())
-            .map(PathBuf::from)
-    };
-    if let Some(xdg) = absolute(xdg_config_home) {
-        return Some(xdg.join("eidnara").join("eidnara"));
+            .map(Path::new)
     }
-    Some(
-        absolute(home)?
-            .join(".config")
-            .join("eidnara")
-            .join("eidnara"),
-    )
+    if let Some(xdg) = absolute(xdg_config_home) {
+        return Some(xdg.join("eidnara/eidnara"));
+    }
+    Some(absolute(home)?.join(".config/eidnara/eidnara"))
 }
 
-fn discover_tier(base: &Path) -> PathBuf {
-    let jsonc = base.with_extension("jsonc");
-    if jsonc.exists() {
+/// `base` ends in a name without an extension, so appending `.jsonc` names the
+/// same path as `with_extension("jsonc")`.
+fn discover_tier(base: PathBuf) -> SourceIdentity {
+    let mut jsonc = base.into_os_string();
+    jsonc.push(".jsonc");
+    let (jsonc, exists) = SourceIdentity::lstat(jsonc.into());
+    if exists {
         return jsonc;
     }
-    let json = base.with_extension("json");
-    if json.exists() { json } else { jsonc }
+    let (json, exists) = SourceIdentity::lstat(jsonc.path.with_extension("json"));
+    if exists { json } else { jsonc }
 }
 
 /// Largest config tier file read. A project controls its own `.eidnara`
@@ -623,15 +672,22 @@ const MAX_GUIDANCE_OVERRIDE_BYTES: u64 = 1 << 20;
 
 /// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
 /// `InvalidData` error and reports as an ignored tier, not as absent.
-fn read_bounded_config(path: &Path) -> io::Result<String> {
-    let bytes = read_bounded_bytes(path, MAX_CONFIG_TIER_BYTES)?;
-    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+fn read_bounded_config(path: &Path) -> io::Result<(String, FileStamp)> {
+    let (bytes, stamp) = read_bounded_file(path, MAX_CONFIG_TIER_BYTES)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok((text, stamp))
 }
 
-/// Reads at most `limit` bytes from `path`; a longer file is `InvalidData`.
-/// The bound is enforced on bytes read, not on a size sampled beforehand, so a
-/// file growing under the read cannot exceed it.
 pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    read_bounded_file(path, limit).map(|(bytes, _)| bytes)
+}
+
+/// Reads at most `limit` bytes from `path` and returns them with the stamp of
+/// the opened file; a longer file is `InvalidData`. The bound is enforced on
+/// bytes read, not on a size sampled beforehand, so a file growing under the
+/// read cannot exceed it.
+fn read_bounded_file(path: &Path, limit: u64) -> io::Result<(Vec<u8>, FileStamp)> {
     use std::io::Read;
 
     // A FIFO or device at a project-controlled path would block the open or
@@ -648,7 +704,8 @@ pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>>
     )
     .map_err(io::Error::from)?
     .into();
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "not a regular file",
@@ -662,21 +719,24 @@ pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>>
             format!("config file exceeds {limit} bytes"),
         ));
     }
-    Ok(raw)
+    Ok((raw, FileStamp::of(&metadata)))
 }
 
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
-    let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let metadata = fs::metadata(&path).ok();
+    let mtime = metadata.as_ref().and_then(|m| m.modified().ok());
     // `chmod` restores readability without changing mtime, so a failed read is re-attempted.
     if cache.path == path && cache.mtime == mtime && cache.warning.is_none() {
+        cache.stamp = metadata.as_ref().map(FileStamp::of);
         return cache.value.clone();
     }
     cache.path = path.clone();
     cache.mtime = mtime;
-    let (value, warning) = match read_bounded_config(&path) {
-        Ok(raw) => match serde_json::from_str(&strip_jsonc(&raw)) {
-            Ok(value) => (Some(value), None),
+    let (value, stamp, warning) = match read_bounded_config(&path) {
+        Ok((raw, stamp)) => match serde_json::from_str(&strip_jsonc(&raw)) {
+            Ok(value) => (Some(value), Some(stamp), None),
             Err(error) => (
+                None,
                 None,
                 Some(format!(
                     "config file {} is not valid JSONC ({error}); ignoring it",
@@ -684,8 +744,9 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
                 )),
             ),
         },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None, None),
         Err(error) => (
+            None,
             None,
             Some(format!(
                 "config file {} could not be read ({error}); ignoring it",
@@ -694,6 +755,7 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
         ),
     };
     cache.value = value;
+    cache.stamp = stamp;
     cache.warning = warning;
     cache.value.clone()
 }
@@ -729,7 +791,13 @@ fn guidance_override_path(user: Option<&Value>, user_config_path: &Path) -> Opti
     })
 }
 
-fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings: &mut Vec<String>) {
+/// Applies the override at `path` and returns the stamp of the file it read,
+/// or `None` with a warning pushed.
+fn resolve_user_guidance_override(
+    cfg: &mut DaemonConfig,
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<FileStamp> {
     cfg.prompt_surface_guidance_override = None;
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -738,7 +806,7 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
                 "prompt_surface.guidance_override_path ({}) could not be read ({error}); using built-in guidance.",
                 path.display()
             ));
-            return;
+            return None;
         }
     };
     if !metadata.is_file() {
@@ -746,7 +814,7 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             "prompt_surface.guidance_override_path ({}) is not a file; using built-in guidance.",
             path.display()
         ));
-        return;
+        return None;
     }
 
     if metadata.len() > MAX_GUIDANCE_OVERRIDE_BYTES {
@@ -754,16 +822,16 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             "prompt_surface.guidance_override_path ({}) exceeds {MAX_GUIDANCE_OVERRIDE_BYTES} bytes; using built-in guidance.",
             path.display()
         ));
-        return;
+        return None;
     }
-    let bytes = match read_bounded_bytes(path, MAX_GUIDANCE_OVERRIDE_BYTES) {
-        Ok(bytes) => bytes,
+    let (bytes, stamp) = match read_bounded_file(path, MAX_GUIDANCE_OVERRIDE_BYTES) {
+        Ok(read) => read,
         Err(error) => {
             warnings.push(format!(
                 "prompt_surface.guidance_override_path ({}) could not be read ({error}); using built-in guidance.",
                 path.display()
             ));
-            return;
+            return None;
         }
     };
     let content = String::from_utf8_lossy(&bytes).into_owned();
@@ -772,7 +840,7 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             "prompt_surface.guidance_override_path ({}) is empty; using built-in guidance.",
             path.display()
         ));
-        return;
+        return None;
     }
 
     let markers = guidance_marker_count(&content);
@@ -782,10 +850,11 @@ fn resolve_user_guidance_override(cfg: &mut DaemonConfig, path: &Path, warnings:
             path.display(),
             GUIDANCE_MARKER
         ));
-        return;
+        return None;
     }
 
     cfg.prompt_surface_guidance_override = Some(content);
+    Some(stamp)
 }
 
 const GUIDANCE_MARKER: &str = "## Eidnara";
@@ -2532,6 +2601,31 @@ mod tests {
         assert!(!effective.memory_enabled);
     }
 
+    #[test]
+    fn tier_discovery_follows_a_final_symlink_as_path_exists_does_and_stamps_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("eidnara");
+        let jsonc = dir.path().join("eidnara.jsonc");
+        let json = dir.path().join("eidnara.json");
+        let target = dir.path().join("target.jsonc");
+        std::fs::write(&json, "{}").unwrap();
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), &jsonc).unwrap();
+        assert_eq!(discover_tier(base.clone()), SourceIdentity::of(&json));
+
+        std::fs::remove_file(&jsonc).unwrap();
+        std::os::unix::fs::symlink(&target, &jsonc).unwrap();
+        let linked = discover_tier(base.clone());
+        assert_eq!(linked, SourceIdentity::of(&jsonc));
+        assert_ne!(linked.stamp, SourceIdentity::of(&target).stamp);
+
+        std::fs::remove_file(&jsonc).unwrap();
+        std::fs::remove_file(&json).unwrap();
+        let absent = discover_tier(base);
+        assert_eq!(absent.path, jsonc);
+        assert_eq!(absent.stamp, None);
+    }
+
     /// The four built-in guidance assets must each carry exactly one section marker,
     /// the same rule `resolve_user_guidance_override` applies to an override.
     #[test]
@@ -2591,9 +2685,11 @@ mod tests {
         filetime::set_file_mtime(path, filetime::FileTime::from_system_time(mtime)).unwrap();
     }
 
-    fn advance_mtime(path: &Path) {
-        let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
-        restore_mtime(path, mtime + std::time::Duration::from_secs(2));
+    fn backdate_mtime(path: &Path) {
+        restore_mtime(
+            path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
     }
 
     /// Waits until every file written so far is outside the recent-change
@@ -2630,6 +2726,38 @@ mod tests {
         let (served, _) = cache.effective_with_warnings(Some(&user), &project);
         assert_eq!(served, first, "unchanged sources serve the memo");
 
+        // Populating `cache.merged` before each change exercises memo invalidation.
+        std::fs::write(&project_file, r#"{ "memory": { "enabled": true } }"#).unwrap();
+        backdate_mtime(&project_file);
+        let (project_edit, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(project_edit.memory_enabled);
+        settle();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
+        std::fs::write(
+            &user,
+            r#"{ "history_summarizer": { "model": "model-b" },
+                 "prompt_surface": { "guidance_override_path": "guidance.md" } }"#,
+        )
+        .unwrap();
+        backdate_mtime(&user);
+        let (user_edit, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(user_edit.model_chain, vec!["model-b"]);
+        settle();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
+        std::fs::remove_file(&project_file).unwrap();
+        let (removed, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            removed.memory_enabled,
+            "a removed tier falls back to the default"
+        );
+        settle();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
         // A guidance rewrite that restores its mtime still changes its identity.
         let mtime = std::fs::metadata(&guidance).unwrap().modified().unwrap();
         std::fs::write(&guidance, "## Eidnara\nsecond\n").unwrap();
@@ -2640,24 +2768,6 @@ mod tests {
             Some("## Eidnara\nsecond\n")
         );
         assert!(cache.merged.is_none());
-
-        std::fs::write(&project_file, r#"{ "memory": { "enabled": true } }"#).unwrap();
-        advance_mtime(&project_file);
-        let (project_edit, _) = cache.effective_with_warnings(Some(&user), &project);
-        assert!(project_edit.memory_enabled);
-
-        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-b" } }"#).unwrap();
-        advance_mtime(&user);
-        let (user_edit, _) = cache.effective_with_warnings(Some(&user), &project);
-        assert_eq!(user_edit.model_chain, vec!["model-b"]);
-        assert_eq!(user_edit.prompt_surface_guidance_override, None);
-
-        std::fs::remove_file(&project_file).unwrap();
-        let (removed, _) = cache.effective_with_warnings(Some(&user), &project);
-        assert!(
-            removed.memory_enabled,
-            "a removed tier falls back to the default"
-        );
     }
 
     #[test]
@@ -2790,6 +2900,209 @@ mod tests {
             cache.effective_with_warnings(Some(&user), &project).0,
             oversized
         );
+
+        // Deduplication shortens the chain in place and keeps its buffer, so a
+        // tier within `MAX_CONFIG_TIER_BYTES` of repeated models retains more
+        // than `MERGED_CONFIG_RETAINED_BYTES_BOUND`.
+        let repeats = vec!["a"; 200_000];
+        let text =
+            serde_json::json!({ "history_summarizer": { "fallback_models": repeats } }).to_string();
+        assert!(text.len() as u64 <= MAX_CONFIG_TIER_BYTES);
+        std::fs::write(&user, text).unwrap();
+        settle();
+        let (deduplicated, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(deduplicated.model_chain, vec!["a"]);
+        assert!(
+            cache.merged.is_none(),
+            "the estimate counts the chain's retained capacity"
+        );
+    }
+
+    #[test]
+    fn a_model_ttl_map_is_charged_its_node_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let digits: Vec<char> = ('a'..='z').chain('0'..='9').collect();
+        let models = (0..30_000).map(|index: usize| {
+            let key: String = [index / 1296, index / 36 % 36, index % 36]
+                .into_iter()
+                .map(|digit| digits[digit])
+                .collect();
+            (key, serde_json::Value::from("1"))
+        });
+        let text = serde_json::json!({
+            "cache_ttl": serde_json::Value::Object(models.collect())
+        })
+        .to_string();
+        assert!(text.len() as u64 <= MAX_CONFIG_TIER_BYTES);
+        std::fs::write(&user, text).unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        let (effective, warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(effective.cache_ttl_by_model.len(), 30_000);
+        assert!(
+            cache.merged.is_none(),
+            "a map whose nodes retain more than the bound is served unmemoized"
+        );
+    }
+
+    #[test]
+    fn a_tier_whose_entry_is_a_final_symlink_is_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        let tier = project.join(".eidnara/eidnara.jsonc");
+        std::fs::create_dir_all(project.join(".eidnara")).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        let mut cache = ConfigCache::default();
+        cache.effective_with_warnings(Some(&user), &project);
+
+        // `lstat` stamps the dangling link itself, while the tier cache's
+        // `stat` follows it and returns `ENOENT`.
+        std::os::unix::fs::symlink("generated.jsonc", &tier).unwrap();
+        settle();
+        let (dangling, dangling_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(matches!(dangling.admission, ConfigAdmission::Admitted));
+        assert!(dangling_warnings.is_empty(), "{dangling_warnings:?}");
+        assert!(cache.merged.is_none(), "the link's stamp describes no read");
+
+        // Creating the target keeps the link's own stamp; the read refuses the
+        // final symlink, so the load warns and is unresolved.
+        std::fs::write(
+            project.join(".eidnara/generated.jsonc"),
+            r#"{ "memory": { "enabled": false } }"#,
+        )
+        .unwrap();
+        let (linked, linked_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            matches!(linked.admission, ConfigAdmission::Unresolved { .. }),
+            "{linked_warnings:?}"
+        );
+        assert!(
+            linked_warnings
+                .iter()
+                .any(|warning| warning.contains("could not be read")),
+            "{linked_warnings:?}"
+        );
+        assert!(cache.merged.is_none());
+    }
+
+    #[test]
+    fn a_tier_relinked_to_a_target_with_its_cached_mtime_is_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let target = dir.path().join("target.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
+        // The rename keeps the target's mtime, so the tier cache's followed
+        // `stat` matches the cached mtime and the tier cache returns its
+        // cached value.
+        std::fs::rename(&user, &target).unwrap();
+        std::os::unix::fs::symlink("target.jsonc", &user).unwrap();
+        settle();
+        let (relinked, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(relinked.model_chain, vec!["model-a"]);
+        assert!(cache.merged.is_none(), "a link entry describes no read");
+
+        std::fs::write(
+            &target,
+            r#"{ "history_summarizer": { "model": "model-b" } }"#,
+        )
+        .unwrap();
+        backdate_mtime(&target);
+        let (edited, warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            matches!(edited.admission, ConfigAdmission::Unresolved { .. }),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("could not be read")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_settled_source_with_a_future_mtime_is_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        restore_mtime(
+            &user,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(86_400),
+        );
+        settle();
+        let mut cache = ConfigCache::default();
+        let (first, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(first.model_chain, vec!["model-a"]);
+        assert!(cache.merged.is_some(), "a settled ctime admits the memo");
+    }
+
+    #[test]
+    fn a_source_exchanged_between_its_stamp_and_its_read_is_never_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live");
+        let other = dir.path().join("other");
+        let parked = dir.path().join("parked");
+        let project = dir.path().join("project");
+        for path in [&live, &other, &project] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let user = live.join("user.jsonc");
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        std::fs::write(
+            other.join("user.jsonc"),
+            r#"{ "history_summarizer": { "model": "model-b" } }"#,
+        )
+        .unwrap();
+        backdate_mtime(&other.join("user.jsonc"));
+        settle();
+        let exchange = || {
+            std::fs::rename(&live, &parked).unwrap();
+            std::fs::rename(&other, &live).unwrap();
+            std::fs::rename(&parked, &other).unwrap();
+        };
+
+        let mut cache = ConfigCache::default();
+        let stamped = SourceIdentity::of(&user);
+        exchange();
+        let (read, _) = cache.effective_from_sources(Some(stamped), &project);
+        assert_eq!(read.model_chain, vec!["model-b"]);
+        exchange();
+        let (served, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(
+            served.model_chain,
+            vec!["model-a"],
+            "a memo entry describes the file that was read"
+        );
+    }
+
+    #[test]
+    fn a_memo_hit_shares_the_memoized_config_of_the_discovered_user_tier() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user = home.path().join("eidnara/eidnara.jsonc");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
+        settle();
+        let mut cache = ConfigCache::default();
+        let (first, _) = cache.effective_for_env(home.path().to_str(), None, project.path());
+        let (served, _) = cache.effective_for_env(home.path().to_str(), None, project.path());
+        assert!(Arc::ptr_eq(&first, &served), "a hit clones no config");
+        assert_eq!(served.model_chain, vec!["model-a"]);
+        assert_eq!(served.user_config_path.as_deref(), Some(user.as_path()));
     }
 
     #[test]
@@ -2934,7 +3247,9 @@ mod fold_authority_parity {
     }
 
     fn load(home: &Path, project: &Path) -> (DaemonConfig, Vec<String>) {
-        ConfigCache::default().effective_for_env(home.to_str(), None, project)
+        let (config, warnings) =
+            ConfigCache::default().effective_for_env(home.to_str(), None, project);
+        (Arc::unwrap_or_clone(config), warnings)
     }
 
     fn load_row(row: &Value) -> (Outcome, Vec<String>) {
@@ -2982,7 +3297,7 @@ mod fold_authority_parity {
         let row = row("a mixed-type fallback array is unresolved");
         let (home, project) = materialize(&row);
         let parsed = |base: PathBuf| {
-            let text = std::fs::read_to_string(discover_tier(&base)).ok()?;
+            let text = std::fs::read_to_string(discover_tier(base).path).ok()?;
             serde_json::from_str::<Value>(&strip_jsonc(&text)).ok()
         };
         let (config, _) = merge_tiers_with_warnings(
@@ -3026,7 +3341,9 @@ mod fold_authority_parity {
                 std::fs::write(&user, text).unwrap();
                 filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(mtime, 0))
                     .unwrap();
-                cache.effective_for_env(home.path().to_str(), None, project.path())
+                let (config, warnings) =
+                    cache.effective_for_env(home.path().to_str(), None, project.path());
+                (Arc::unwrap_or_clone(config), warnings)
             };
 
             let (never_admitted, _) = load(rejected_text, 1_000);

@@ -526,10 +526,15 @@ directory sync fails, which leaves the count unknown.
 | [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
 | [`a_tick_evaluates_the_configured_cron_schedule_of_a_module_project`][t-sched-marker] | The `cron-schedule-is-evaluated-for-a-configured-project` marker: a tick leaves a `next_due` entry with the schedule and a finite instant. | unaudited |
 | [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] | A `*/15 * * * *` project runs at its instant and not before; the same instant does not run twice. | unaudited |
-| [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; an override rewrite with its mtime restored, a project-tier edit, a user-tier edit, and a removed tier each reach the next load. | unaudited |
+| [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; a project-tier edit, a user-tier edit, a removed tier, and an override rewrite with its mtime restored each start from a populated memo and reach the next load. | unaudited |
 | [`the_merged_memo_reemits_warnings_and_keeps_project_raise_only_rules`][t-memo-raise] | Alternating a hostile and a quiet project root on one cache keeps each root's merge, refuses the hostile tier's raise-only and user-only keys, and repeats the per-key warnings on a memo hit. | unaudited |
 | [`a_rejected_user_tier_serves_its_admitted_fallback_from_the_memo`][t-memo-fallback] | A rejected user tier memoizes its admitted fallback and `Unresolved` admission; the hit returns the same merge and warnings. | unaudited |
-| [`unread_sources_and_oversized_merges_are_never_memoized`][t-memo-unread] | An unreadable guidance override and a 90,000-model user tier above the retained bound leave the memo empty and serve the same merge. | unaudited |
+| [`unread_sources_and_oversized_merges_are_never_memoized`][t-memo-unread] | An unreadable guidance override, a 90,000-model user tier above the retained bound, and 200,000 repeated models whose deduplicated chain keeps that capacity leave the memo empty and serve the same merge. | unaudited |
+| [`a_tier_whose_entry_is_a_final_symlink_is_never_memoized`][t-memo-symlink] | A dangling project-tier link is not memoized, so creating its target makes the next load warn and stay `Unresolved`. | unaudited |
+| [`a_model_ttl_map_is_charged_its_node_share`][t-memo-map] | A 30,000-entry `cache_ttl` map within the tier limit, whose B-tree nodes carry it past the retained bound, leaves the memo empty. | unaudited |
+| [`a_tier_relinked_to_a_target_with_its_cached_mtime_is_never_memoized`][t-memo-relink] | A user tier renamed and replaced by a link to it keeps serving the tier cache's value and is never memoized, so editing the target makes the next load refuse the link. | unaudited |
+| [`a_settled_source_with_a_future_mtime_is_memoized`][t-memo-future] | A tier whose mtime is a day ahead is memoized once its ctime has settled. | unaudited |
+| [`a_source_exchanged_between_its_stamp_and_its_read_is_never_memoized`][t-memo-exchange] | A user tier whose directory is exchanged between the pre-read stamp and the read serves the file read and is never memoized, so swapping the directories back serves the original on the next load. | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | A same mtime hides an edit; a new mtime reloads. | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | The `ProjectRaiseOnly` threshold. | unaudited |
 | [`project_tier_cannot_raise_the_user_memory_gate`][t-gate] | The `ProjectRaiseOnly` gate. | unaudited |
@@ -547,8 +552,7 @@ identity; any bench reaching `Handler::handle` or a production-sized steady
 session; a check that `DECLARED_RETAINED_RESIDENT_BYTES` includes every
 cache; token-cache lock contention evidence; a bounded-scan versus
 whole-input differential for the secret scanner; a DST or
-unsatisfiable-expression case for the cron stepper; guidance override
-staleness, or two project roots sharing one `ConfigCache`; any test that aborts between
+unsatisfiable-expression case for the cron stepper; any test that aborts between
 commit and bookkeeping and inspects the next pass; any test in
 `crates/daemon/tests/` or in `kernel_routes` that panics inside a
 `kernel_routes::blocking` closure or any other `spawn_blocking` worker and
@@ -831,14 +835,19 @@ not a claim that no related check exists anywhere in the repository.
 [t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2450
 [t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1553
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2118
-[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2606
-[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2664
-[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2721
-[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2760
-[t-raise]: ../../../../crates/daemon/src/config.rs#L1314
-[t-gate]: ../../../../crates/daemon/src/config.rs#L1650
-[t-hostile]: ../../../../crates/daemon/src/config.rs#L1718
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2645
+[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2702
+[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2774
+[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2831
+[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2870
+[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2953
+[t-memo-relink]: ../../../../crates/daemon/src/config.rs#L2994
+[t-memo-future]: ../../../../crates/daemon/src/config.rs#L3036
+[t-memo-exchange]: ../../../../crates/daemon/src/config.rs#L3054
+[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2922
+[t-raise]: ../../../../crates/daemon/src/config.rs#L1796
+[t-gate]: ../../../../crates/daemon/src/config.rs#L2137
+[t-hostile]: ../../../../crates/daemon/src/config.rs#L2206
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643
