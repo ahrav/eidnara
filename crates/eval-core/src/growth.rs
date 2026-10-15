@@ -98,8 +98,9 @@ pub struct QuiescenceProgress {
     pub acknowledged_through: i64,
     /// Catch-up episodes the drain ran to reach the tip.
     pub catch_up_episodes: u64,
-    /// Reviewer coordinator passes run until no job handed to the
-    /// coordinator was Ready; zero when none was handed over.
+    /// Reviewer coordinator passes run since the previous quiescence until
+    /// every job handed to the coordinator was terminal; zero when none was
+    /// handed over.
     pub reviewer_passes: u64,
     /// Whether every job handed to the coordinator had settled when the
     /// passes stopped.
@@ -155,35 +156,37 @@ fn check_progress(
     sample: &ResourceSample,
     bounds: &crate::statistics::LivenessBounds,
 ) -> Result<(), GrowthRefused> {
+    use crate::fault::Lane;
     let progress = &sample.progress;
+    let step = sample.step;
     if progress.acknowledged_through != sample.commit_seq {
         return Err(GrowthRefused::NotQuiescent {
-            step: sample.step,
+            step,
             acknowledged_through: progress.acknowledged_through,
             commit_seq: sample.commit_seq,
         });
     }
-    for (lane, used) in [
-        (
-            crate::fault::Lane::CatchUpEpisodes,
-            progress.catch_up_episodes,
-        ),
-        (
-            crate::fault::Lane::ReviewerCoordinatorPasses,
-            progress.reviewer_passes,
-        ),
-    ] {
+    let unbounded = |lane: Lane, used: u64| {
         let bound = lane.bound(bounds);
-        let unsettled =
-            lane == crate::fault::Lane::ReviewerCoordinatorPasses && !progress.reviewer_settled;
-        if used > bound || unsettled {
-            return Err(GrowthRefused::ProgressUnbounded {
-                step: sample.step,
-                lane,
-                used,
-                bound,
-            });
-        }
+        (used > bound).then_some(GrowthRefused::ProgressUnbounded {
+            step,
+            lane,
+            used,
+            bound,
+        })
+    };
+    if let Some(refused) = unbounded(Lane::CatchUpEpisodes, progress.catch_up_episodes) {
+        return Err(refused);
+    }
+    if let Some(refused) = unbounded(Lane::ReviewerCoordinatorPasses, progress.reviewer_passes) {
+        return Err(refused);
+    }
+    if !progress.reviewer_settled {
+        return Err(GrowthRefused::ReviewerUnsettled {
+            step,
+            passes: progress.reviewer_passes,
+            bound: bounds.reviewer_coordinator_passes,
+        });
     }
     Ok(())
 }
@@ -318,12 +321,17 @@ pub enum GrowthRefused {
         acknowledged_through: i64,
         commit_seq: i64,
     },
-    /// A drain took more of a lane's unit than the approved bound, or the
-    /// reviewer passes stopped with handed-over work still Ready.
+    /// A drain took more of a lane's unit than the approved bound.
     ProgressUnbounded {
         step: u32,
         lane: crate::fault::Lane,
         used: u64,
+        bound: u64,
+    },
+    /// The coordinator passes stopped with a handed job not yet terminal.
+    ReviewerUnsettled {
+        step: u32,
+        passes: u64,
         bound: u64,
     },
     /// `restore_attempted` counts a refusal only under `never_restored`; a
@@ -802,6 +810,11 @@ pub enum GrowthReportError {
     Coverage(crate::fault::CoverageRefused),
     /// Fault episodes ran but no cut was declared for them.
     FaultedWithoutCuts,
+    /// The declared cuts are not one per fault episode.
+    CutsDisagree {
+        declared: u64,
+        episodes: u64,
+    },
     /// `fault_episodes` and the mix's `fault_episode` count disagree.
     FaultEpisodesDisagree {
         declared: u64,
@@ -878,12 +891,6 @@ impl GrowthReport {
         if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
         }
-        if faulted && self.coverage.declared.is_empty() {
-            return Err(GrowthReportError::FaultedWithoutCuts);
-        }
-        self.coverage
-            .verdict()
-            .map_err(GrowthReportError::Coverage)?;
         let exercised = self
             .mix
             .counts
@@ -894,6 +901,19 @@ impl GrowthReport {
             return Err(GrowthReportError::FaultEpisodesDisagree {
                 declared: self.fault_episodes,
                 exercised,
+            });
+        }
+        if faulted && self.coverage.declared.is_empty() {
+            return Err(GrowthReportError::FaultedWithoutCuts);
+        }
+        self.coverage
+            .verdict()
+            .map_err(GrowthReportError::Coverage)?;
+        let declared = self.coverage.declared.len() as u64;
+        if declared != self.fault_episodes {
+            return Err(GrowthReportError::CutsDisagree {
+                declared,
+                episodes: self.fault_episodes,
             });
         }
         if let Some(marker) = self

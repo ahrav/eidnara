@@ -2398,7 +2398,8 @@ use super::support::memory_reviewer_publish as reviewer;
 use super::support::tls_peer::Peer;
 
 /// The bound root every reviewer job is staged under.
-const REVIEWER_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+pub const REVIEWER_DIGEST: &str =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const REVIEWER_CREDENTIAL: &str = "ANTHROPIC_API_KEY";
 /// The keyed identity the host's selection file records for the credential.
 const REVIEWER_CREDENTIAL_IDENTITY: &str = "eval-reviewer-credential-identity";
@@ -2414,9 +2415,9 @@ const REVIEWER_BACKLOG: u64 = 2;
 pub struct ReviewerRig {
     /// Declared before `runtime`, so its listener drops while the reactor
     /// that registered it still runs.
-    pub peer: Peer,
-    pub runtime: tokio::runtime::Runtime,
-    pub status: Arc<MemoryReviewerStatus>,
+    peer: Peer,
+    runtime: tokio::runtime::Runtime,
+    status: Arc<MemoryReviewerStatus>,
     home: PathBuf,
     project_root: PathBuf,
     generation: u64,
@@ -2481,6 +2482,26 @@ impl ReviewerRig {
             firing,
             now,
         )
+    }
+
+    /// The OS-allocated port the rig's provider peer listens on.
+    pub fn port(&self) -> u16 {
+        self.peer.port
+    }
+
+    /// The activation state the rig's worker last reported.
+    pub fn activation_state(&self) -> ActivationState {
+        self.status.activation_state()
+    }
+
+    /// The attempt markers the memory store holds: every send commits one
+    /// first, so zero is the durable proof that nothing was sent.
+    pub fn attempts(stores: &Stores) -> u64 {
+        stores
+            .memory
+            .memory_reviewer_status_facts()
+            .unwrap()
+            .attempts_attempted
     }
 
     /// One production `Worker::pass` over `stores`, driven directly.
@@ -2590,7 +2611,7 @@ pub fn reviewer_window(
             .unwrap()
             .len();
         let facts = stores.memory.memory_reviewer_status_facts().unwrap();
-        let activation = rig.status.activation_state();
+        let activation = rig.activation_state();
         let holds = activation == ActivationState::Open
             && ready == 0
             && facts.jobs_abstained == REVIEWER_BACKLOG + step;
@@ -2598,13 +2619,7 @@ pub fn reviewer_window(
         progress.observe(step, 1, holds, blocked);
         witness.safety_check_while_armed(&stores, "liveness_window_step");
     }
-    // Every send is a committed attempt marker first, so no marker is the
-    // durable proof that each run settled before any request.
-    let attempts = stores
-        .memory
-        .memory_reviewer_status_facts()
-        .unwrap()
-        .attempts_attempted;
+    let attempts = ReviewerRig::attempts(&stores);
     if attempts != 0 {
         return Err(unexpected(
             "reviewer-liveness",

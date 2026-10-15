@@ -416,6 +416,10 @@ fn quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicki
     for k in 0..admissions {
         live.quota_pressure(4 * k + 3, now_ms()).unwrap();
     }
+    assert!(
+        live.passes_since_drain > 0,
+        "the cap-triggered settles ran passes, which wait for the next quiescence's witness"
+    );
     let headroom = live.headroom();
     assert_eq!(
         headroom.pending_jobs,
@@ -856,4 +860,38 @@ fn a_handed_admission_settles_through_one_coordinator_pass_in_its_drain() {
             "nothing was handed over yet"
         );
     }
+}
+
+/// The producer reports what it saw: with no coordinator pass approved, the
+/// handed job is still pending at the quiescence, the witness says unsettled,
+/// and the ledger refuses it.
+#[test]
+fn a_handed_admission_the_bound_leaves_unsettled_is_refused_by_the_ledger() {
+    let plan = aging::plan(MESSAGES).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+    let bounds = eval_core::LivenessBounds {
+        reviewer_coordinator_passes: 0,
+        ..s0_liveness()
+    };
+    let mut live = Campaign::open(root.path(), plan, GrowthMode::NeverRestored, &bounds);
+    for _ in 0..4 {
+        live.step(&mut charges).unwrap();
+    }
+    let sample = live.ledger.samples.last().unwrap();
+    assert_eq!(sample.progress.reviewer_passes, 0);
+    assert!(!sample.progress.reviewer_settled);
+    assert_eq!(live.handed.len(), 1);
+    let growth_bounds = eval_core::GrowthBounds {
+        progress: bounds,
+        ..growth::bounds(&growth::profile(Scale::S0, 128, 600_000, None), MESSAGES)
+    };
+    assert_eq!(
+        live.ledger.check_samples(&growth::quota(), &growth_bounds),
+        Err(eval_core::GrowthRefused::ReviewerUnsettled {
+            step: 3,
+            passes: 0,
+            bound: 0,
+        })
+    );
 }

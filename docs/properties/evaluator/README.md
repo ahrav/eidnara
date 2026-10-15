@@ -1712,9 +1712,10 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   assembled without `record`;
   the peak store total is the transient middle sample; a sample whose
   projection stopped short of the tip is `NotQuiescent`, and a drain that
-  ran more catch-up episodes than the approved bound, or reviewer passes that
-  stopped with handed work still Ready, is `ProgressUnbounded` naming the lane
-  (in both modes).
+  ran more catch-up episodes or reviewer passes than the approved bound is
+  `ProgressUnbounded` naming the lane, a drain that used exactly its bound
+  passes, and passes that stopped with handed work not terminal are
+  `ReviewerUnsettled` (in both modes).
 - `a_restore_under_never_restored_is_refused_and_a_restoring_ledger_gives_no_leak_verdict`
   (marker `flt_restore_under_never_restored_refused`): a restore is refused
   and counted under `never_restored`; a `restoring` ledger's verdict is
@@ -1755,7 +1756,8 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   (`UnregisteredMarker`), an integer past the canonical safe range on
   serialize or parse (`NotCanonical`), a declared fault cut with no receipt
   (`Coverage(IncompleteCoverage)`), fault episodes with no declared cut
-  (`FaultedWithoutCuts`), and a v1 report refuse.
+  (`FaultedWithoutCuts`), declared cuts that are not one per fault episode
+  (`CutsDisagree`), and a v1 report refuse.
 
 Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
 default shards run the never-restored campaign once with every scenario
@@ -1780,6 +1782,10 @@ completeness proof run in the `eval-campaign` CI job under
   admission is handed to the production worker and settled by one
   `Worker::pass` in the drain that follows, as an abstention with no attempt
   marker; the samples before it record no pass.
+- `a_handed_admission_the_bound_leaves_unsettled_is_refused_by_the_ledger`:
+  with zero coordinator passes approved, the handed job is still pending at
+  its quiescence, the witness records `reviewer_settled: false` with no pass,
+  and `check_samples` refuses `ReviewerUnsettled`.
 - `reviewer_headroom_is_accounted_from_the_stores_own_constants`
   (`flt-memory-reviewer-quota-refusal-expected`; marker
   `flt_headroom_accounted_from_store_constants`): the report's constants are
@@ -1790,7 +1796,8 @@ completeness proof run in the `eval-campaign` CI job under
 - `quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicking`:
   twice the per-project pending cap of admissions leaves the pending count one
   short of the cap, every admission pending or terminal, and the project bytes
-  equal to the constants' figure.
+  equal to the constants' figure; the cap-triggered coordinator settles ran
+  passes that the next quiescence's witness counts.
 - `a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing`: with the
   project's receipt charges planted past the quota, the next admission is
   refused with `MetadataQuota`, counted once in `r24_refusals`, charges

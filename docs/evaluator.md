@@ -2783,9 +2783,9 @@ and terminal jobs, frozen and terminal pages, project bytes and remaining,
 admissions, R24
 refusals); and a `QuiescenceProgress`, the healthy-progress witness of the
 drain that reached the point (the projection's `acknowledged_through`, the
-catch-up episodes the drain ran, the reviewer coordinator passes run until no
-job handed to the coordinator was Ready, and whether every handed job
-settled). A `GrowthLedger` records samples under a `GrowthMode`
+catch-up episodes the drain ran, the reviewer coordinator passes run since the
+previous quiescence until every job handed to the coordinator was terminal,
+and whether every handed job settled). A `GrowthLedger` records samples under a `GrowthMode`
 (`never_restored` or `restoring`) with monotonic steps and commit sequence;
 `restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
 counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
@@ -2796,9 +2796,16 @@ equals its commit sequence (`NotQuiescent { step, acknowledged_through,
 commit_seq }`, a drain that stopped short) and whose catch-up episodes and
 reviewer passes are within the `catch_up_episodes` and
 `reviewer_coordinator_passes` of the approved liveness bounds that
-`GrowthBounds::progress` carries, with every handed job settled
-(`ProgressUnbounded { step, lane, used, bound }`); `check_samples` applies
-this in both modes, so a restoring ledger keeps its progress evidence too.
+`GrowthBounds::progress` carries (`ProgressUnbounded { step, lane, used,
+bound }`), with every handed job settled (`ReviewerUnsettled { step,
+passes, bound }`); `check_samples` applies this in both modes, so a restoring
+ledger keeps its progress evidence too. Only the catch-up and reviewer lanes
+are witnessed in a growth campaign: its drain publishes embeddings directly
+and runs no claim materializer, so those lanes' bounds judge the fault
+campaign's liveness mode alone. The checker is independent of the producer,
+which stops at the bound itself (`catch_up` refuses past its own episode cap,
+and the shell runs no pass past the approved bound), so an overrun reaches the
+ledger only from a forged report.
 Every sample must carry every store
 family (`StoreMissing { step, family }`, so an omitted store cannot hide its
 bytes), its project bytes must equal `expected_project_bytes`
@@ -2861,8 +2868,9 @@ or the mix records a fault episode and no safety check ran while armed;
 `FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
 differ), the fault episodes' cut coverage (`Coverage(IncompleteCoverage)`
 for a declared cut with no receipt, `FaultedWithoutCuts` when fault episodes
-ran and no cut was declared, so a missing coverage witness cannot read as
-sustainability success),
+ran and no cut was declared, `CutsDisagree { declared, episodes }` when the
+declared cuts are not one per fault episode, so a missing coverage witness
+cannot read as sustainability success),
 markers, and envelope. `validate(contract)` requires `eval_run_id` and
 `profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
 as the Suite B report does; the manifest derives the run id and names the
@@ -3291,10 +3299,17 @@ catch-up episodes, runs `Worker::pass` directly until every handed job has
 settled or the approved `reviewer_coordinator_passes` is spent, records that
 as the next sample's `QuiescenceProgress`, and samples. The handed subjects
 are default-Sensitive, so each settles as a policy-blocked abstention before
-any request. The store
+any request, and the peer's port carries no traffic: it is the campaign's
+isolated resource, not provider evidence. The manifest declares reviewer model
+calls excluded, so the run refuses itself (`RunError::ReviewerAttempted`) when
+the memory store holds any attempt marker before the final sample. A begun job
+is staged under its own digest, which the rig's one bound root never names,
+so the worker passes over it whatever its lease, and a coordinator pass
+cannot change what the begun jobs hold. The store
 refuses a reservation past `MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT`
 pending jobs, so an admission that brings the pending count to that cap is
-settled by abstention as well (a handed one by the coordinator at once); the pending queue then holds one slot free and
+settled by abstention as well (a handed one by the coordinator at once, whose
+passes count toward the next quiescence's witness); the pending queue then holds one slot free and
 every later admission becomes a permanent receipt charge, which is how a long
 history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with

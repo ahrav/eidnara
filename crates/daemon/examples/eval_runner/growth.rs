@@ -62,6 +62,10 @@ pub enum RunError {
     Report(#[from] GrowthReportError),
     #[error("reviewer admission refused: {0}")]
     Admission(MemoryReviewerJobRefusal),
+    /// The manifest declares reviewer model calls excluded; a committed
+    /// attempt marker means a run reached the provider.
+    #[error("{attempts} reviewer attempt markers committed; reviewer model calls are excluded")]
+    ReviewerAttempted { attempts: u64 },
     #[error("publish {}: {kind}", path.display())]
     Publish {
         path: PathBuf,
@@ -209,6 +213,9 @@ pub struct Campaign {
     pub handed: Vec<String>,
     /// The approved bound on coordinator passes per quiescence.
     pub reviewer_pass_bound: u64,
+    /// Coordinator passes run since the last drain, a cap-triggered settle
+    /// included.
+    pub passes_since_drain: u64,
     /// The progress witness of the drain the next sample follows.
     pub progress: QuiescenceProgress,
 }
@@ -239,23 +246,25 @@ impl Campaign {
             rig,
             handed: Vec::new(),
             reviewer_pass_bound: Lane::ReviewerCoordinatorPasses.bound(bounds),
+            passes_since_drain: 0,
             progress,
         }
     }
 
     /// The port the campaign's reviewer peer listens on.
     pub fn port(&self) -> u16 {
-        self.rig.peer.port
+        self.rig.port()
     }
 
-    /// Runs coordinator passes until every handed job has settled or the
-    /// approved bound is spent; returns the passes run and whether every
-    /// handed job settled.
-    fn settle_handed(&mut self) -> (u64, bool) {
+    /// Runs coordinator passes until every handed job is terminal or the
+    /// approved bound is spent, adding them to `passes_since_drain`; returns
+    /// whether every handed job settled.
+    fn settle_handed(&mut self) -> bool {
         let mut passes = 0;
         while !self.handed.is_empty() && passes < self.reviewer_pass_bound {
             self.rig.pass(&self.stores);
             passes += 1;
+            self.passes_since_drain += 1;
             let memory = &self.stores.memory;
             self.handed.retain(|identity| {
                 !matches!(
@@ -267,7 +276,7 @@ impl Campaign {
                 )
             });
         }
-        (passes, self.handed.is_empty())
+        self.handed.is_empty()
     }
 
     pub fn root(&self) -> &Path {
@@ -316,11 +325,11 @@ impl Campaign {
             self.quota_pressure(i, reviewer::now_ms())?;
         }
         let catch_up_episodes = self.stores.drain(now);
-        let (reviewer_passes, reviewer_settled) = self.settle_handed();
+        let reviewer_settled = self.settle_handed();
         self.progress = QuiescenceProgress {
             acknowledged_through: acknowledged_through(self.root()),
             catch_up_episodes,
-            reviewer_passes,
+            reviewer_passes: std::mem::take(&mut self.passes_since_drain),
             reviewer_settled,
         };
         self.next_step += 1;
@@ -337,11 +346,15 @@ impl Campaign {
     pub fn quota_pressure(&mut self, i: usize, now: i64) -> Result<(), RunError> {
         self.mix.record(Operation::QuotaPressure);
         let incarnation = reviewer::kernel_incarnation(&self.stores.corpus.kernel);
+        // A begun job is staged under its own digest, which the rig's one
+        // bound root never names, so the worker passes over it and never
+        // takes it over, however long its lease runs.
         let digest = format!("{:064x}", i);
+        debug_assert_ne!(digest, fault::REVIEWER_DIGEST);
         let admitted = if i % 8 == 3 {
             self.rig
                 .feed(&self.stores, i as u64, now)
-                .map(|job| Err(job.causal_identity))
+                .map(|job| Admitted::Handed(job.causal_identity))
         } else {
             try_begin_job(
                 &self.stores.corpus.kernel,
@@ -352,15 +365,16 @@ impl Campaign {
                 i as u64,
                 now,
             )
-            .map(Ok)
+            .map(|begun| Admitted::Begun(Box::new(begun)))
         };
         let begun = match admitted {
-            Ok(Ok(begun)) => begun,
-            Ok(Err(handed)) => {
+            Ok(Admitted::Begun(begun)) => begun,
+            Ok(Admitted::Handed(handed)) => {
                 self.admitted_total += 1;
                 self.handed.push(handed);
                 // At the cap the coordinator settles what it holds now, so
-                // the next reservation still has a slot.
+                // the next reservation still has a slot; the passes count
+                // toward the next quiescence's witness.
                 if self.pending() >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
                     self.settle_handed();
                 }
@@ -532,6 +546,7 @@ impl Campaign {
             rig,
             handed,
             reviewer_pass_bound,
+            passes_since_drain,
             progress,
         } = self;
         let tip = stores.tip();
@@ -552,6 +567,7 @@ impl Campaign {
                 rig,
                 handed,
                 reviewer_pass_bound,
+                passes_since_drain,
                 progress,
             },
             Ok(()),
@@ -627,15 +643,14 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let bounds = bounds(&profile, config.messages);
     let root = charges.occupy()?;
     let root_path = root.path().display().to_string();
-    let mut campaign = Campaign::open(
-        root.path(),
-        plan,
-        config.mode,
-        &profile.statistics.liveness_bounds,
-    );
+    let mut campaign = Campaign::open(root.path(), plan, config.mode, &bounds.progress);
     let port = campaign.port();
     while campaign.remaining() > 0 {
         campaign.step(&mut charges)?;
+    }
+    let attempts = ReviewerRig::attempts(&campaign.stores);
+    if attempts != 0 {
+        return Err(RunError::ReviewerAttempted { attempts });
     }
     let Finished {
         ledger,
@@ -751,20 +766,25 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
 /// shell's witness also declares the fault campaign's observer cuts, which
 /// this campaign's episodes do not all reach.
 fn episode_coverage(witness: &Witness) -> CutCoverage {
-    let mut coverage = CutCoverage::default();
-    for episode in &witness.episodes {
-        coverage.declare(episode.id.clone());
-        for _ in 0..witness
-            .cuts
-            .receipted
-            .get(&episode.id)
-            .copied()
-            .unwrap_or(0)
-        {
-            coverage.receipt(&episode.id).unwrap();
-        }
+    let declared: BTreeSet<String> = witness.episodes.iter().map(|e| e.id.clone()).collect();
+    let receipted = witness
+        .cuts
+        .receipted
+        .iter()
+        .filter(|(cut, _)| declared.contains(*cut))
+        .map(|(cut, n)| (cut.clone(), *n))
+        .collect();
+    CutCoverage {
+        declared,
+        receipted,
     }
-    coverage
+}
+
+/// One quota-pressure admission: claimed with its receipt begun, or handed
+/// to the coordinator by causal identity.
+enum Admitted {
+    Begun(Box<reviewer::BegunJob>),
+    Handed(String),
 }
 
 pub const USAGE: &str = "growth --scale <s0|s1|s2> --messages <n> --elapsed-bound-ms <n> \

@@ -478,14 +478,31 @@ fn a_never_restored_ledger_passes_only_when_the_final_sample_holds_nothing_trans
     unsettled.samples[0].progress.reviewer_settled = false;
     assert_eq!(
         unsettled.check_samples(&quota(), &bounds()),
+        Err(GrowthRefused::ReviewerUnsettled {
+            step: 1,
+            passes: 1,
+            bound: 2,
+        }),
+        "passes that stopped with handed work not terminal are refused in both modes"
+    );
+    let mut overpassed = ledger.clone();
+    overpassed.samples[0].progress.reviewer_passes = 3;
+    assert_eq!(
+        overpassed.check_samples(&quota(), &bounds()),
         Err(GrowthRefused::ProgressUnbounded {
             step: 1,
             lane: eval_core::Lane::ReviewerCoordinatorPasses,
-            used: 1,
+            used: 3,
             bound: 2,
         }),
-        "passes that stopped with handed-over work still Ready are unbounded in both modes"
+        "settled work that took more passes than the bound is still unbounded"
     );
+    let mut at_bound = ledger.clone();
+    at_bound.samples[1].progress.catch_up_episodes = 4;
+    at_bound.samples[1].progress.reviewer_passes = 2;
+    at_bound
+        .check_samples(&quota(), &bounds())
+        .expect("a drain that used exactly its bound is bounded");
     let mut reordered = ledger.clone();
     reordered.samples.swap(1, 2);
     assert_eq!(
@@ -759,6 +776,17 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         cutless.validate(&contract()),
         Err(GrowthReportError::FaultedWithoutCuts),
         "fault episodes with no declared cut carry no coverage witness"
+    );
+    let mut miscounted = report.clone();
+    miscounted.coverage.declare("growth-ack-lost-9");
+    miscounted.coverage.receipt("growth-ack-lost-9").unwrap();
+    assert_eq!(
+        miscounted.validate(&contract()),
+        Err(GrowthReportError::CutsDisagree {
+            declared: 2,
+            episodes: 1,
+        }),
+        "every fault episode declares exactly its own cut"
     );
     let mut v1 = report.clone();
     v1.schema = "eval-suite-c-growth-report/v1".to_string();
