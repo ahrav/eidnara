@@ -219,13 +219,11 @@ impl CronZone for chrono::Local {
 }
 
 /// `next_occurrence` returns the first instant strictly after `after_ms` whose local civil time in `tz` matches `cron`.
-/// It visits the same epoch minutes the minute stepper would, but jumps over every
-/// minute whose civil fields cannot match: to the next civil midnight when the date
-/// fails, to the next civil hour when the hour fails, and to the next listed minute
-/// otherwise. Civil time moves with epoch time while the offset holds, so in a zone
-/// whose offsets last an hour a jump stops early at the first minute whose offset
-/// differs, and the search resumes there; in a zone without that bound the search
-/// steps one minute at a time.
+/// The search skips an epoch minute only when its civil time cannot match.
+/// [`earliest_possible_match_ms`] bounds civil time by the zone's offsets,
+/// [`minutes_until_candidate`] assumes the current offset, and
+/// [`advance_while_offset_holds`] stops at the first changed offset in a zone
+/// whose offsets last an hour. Other zones advance one minute at a time.
 /// `next_occurrence` returns `None` when no match occurs by `after_ms + min(MAX_SEARCH_MS, max_search_ms)`.
 fn next_occurrence<Tz: CronZone>(
     cron: &ParsedCron,
@@ -243,10 +241,29 @@ fn next_occurrence<Tz: CronZone>(
         // `timestamp_millis_opt` returns no civil time outside chrono's representable
         // date range; an unrepresentable `cursor_ms` makes the search return `None`.
         let civil = tz.timestamp_millis_opt(cursor_ms).single()?;
-        let skip_minutes = minutes_until_candidate(cron, &civil);
-        if skip_minutes == 0 {
-            return Some(cursor_ms);
-        }
+        let skip_minutes = if date_could_match(cron, &civil) {
+            let skip_minutes = minutes_until_candidate(cron, &civil);
+            if skip_minutes == 0 {
+                return Some(cursor_ms);
+            }
+            skip_minutes
+        } else {
+            let offsets_ms = match changes {
+                OffsetChanges::Never => {
+                    let offset_ms = i64::from(civil.offset().fix().local_minus_utc()) * 1000;
+                    offset_ms..=offset_ms
+                }
+                OffsetChanges::HourApart | OffsetChanges::Unbounded => {
+                    -MAX_OFFSET_MS..=MAX_OFFSET_MS
+                }
+            };
+            let possible_ms = earliest_possible_match_ms(cron, cursor_ms, cap_ms, &offsets_ms)?;
+            if possible_ms > cursor_ms {
+                cursor_ms = possible_ms;
+                continue;
+            }
+            24 * 60 - i64::from(civil.hour() * 60 + civil.minute())
+        };
         cursor_ms = match changes {
             OffsetChanges::Never => cursor_ms.checked_add(skip_minutes * MINUTE_MS)?,
             OffsetChanges::HourApart => {
@@ -259,16 +276,69 @@ fn next_occurrence<Tz: CronZone>(
     None
 }
 
-/// Whole minutes from `civil` to the next civil minute that could match `cron`
-/// while the offset holds, or zero when `civil` matches.
+/// Whether a civil date could match `cron`: its month is listed and its day
+/// passes the Vixie day-of-month and day-of-week rule.
+fn date_could_match(cron: &ParsedCron, date: &impl Datelike) -> bool {
+    mask_has(cron.month, date.month())
+        && matches_day(cron, date.day(), date.weekday().num_days_from_sunday())
+}
+
+/// The largest offset chrono represents: a [`chrono::FixedOffset`] is whole
+/// seconds strictly within a day of UTC.
+const MAX_OFFSET_MS: i64 = 24 * 60 * MINUTE_MS - 1000;
+
+/// The first epoch minute at or after `cursor_ms` whose civil time could match
+/// `cron` when every offset, civil time minus epoch time, lies in `offsets_ms`.
+/// Each earlier minute from `cursor_ms` on has a civil time from
+/// `cursor_ms + offsets_ms.start()` up to before the first civil minute that
+/// could match, so none matches. `None` means no epoch minute up to `cap_ms`
+/// can match; at the ends of chrono's representable range the result is
+/// `cursor_ms`.
+fn earliest_possible_match_ms(
+    cron: &ParsedCron,
+    cursor_ms: i64,
+    cap_ms: i64,
+    offsets_ms: &std::ops::RangeInclusive<i64>,
+) -> Option<i64> {
+    let civil_date =
+        |ms: Option<i64>| Some(chrono::DateTime::from_timestamp_millis(ms?)?.date_naive());
+    let (Some(mut date), Some(last_date)) = (
+        civil_date(cursor_ms.checked_add(*offsets_ms.start())),
+        civil_date(cap_ms.checked_add(*offsets_ms.end())),
+    ) else {
+        return Some(cursor_ms);
+    };
+    while !date_could_match(cron, &date) {
+        let next = if mask_has(cron.month, date.month()) {
+            date.succ_opt()
+        } else {
+            date.with_day(1)
+                .and_then(|first| first.checked_add_months(chrono::Months::new(1)))
+        };
+        // A date past `last_date`, or past chrono's last date, is later than
+        // the civil time of every epoch minute up to `cap_ms`.
+        match next {
+            Some(next) if next <= last_date => date = next,
+            _ => return None,
+        }
+    }
+    let Some(first) = date.and_hms_opt(cron.hour.trailing_zeros(), cron.minute.trailing_zeros(), 0)
+    else {
+        return Some(cursor_ms);
+    };
+    // A minute matches only when its civil time reaches `first`, so its epoch
+    // time is at least `reach_ms`; `possible_ms` rounds `reach_ms` up to a
+    // whole minute.
+    let reach_ms = first.and_utc().timestamp_millis() - offsets_ms.end();
+    let possible_ms = (reach_ms + MINUTE_MS - 1).div_euclid(MINUTE_MS) * MINUTE_MS;
+    Some(cursor_ms.max(possible_ms))
+}
+
+/// Whole minutes from `civil`, on a date that could match `cron`, to the next
+/// civil minute that could match while the offset holds, or zero when `civil`
+/// matches.
 fn minutes_until_candidate<Tz: TimeZone>(cron: &ParsedCron, civil: &chrono::DateTime<Tz>) -> i64 {
     let minute = civil.minute();
-    let minute_of_day = i64::from(civil.hour() * 60 + minute);
-    if !mask_has(cron.month, civil.month())
-        || !matches_day(cron, civil.day(), civil.weekday().num_days_from_sunday())
-    {
-        return 24 * 60 - minute_of_day;
-    }
     if !mask_has(cron.hour, civil.hour()) {
         return 60 - i64::from(minute);
     }
@@ -1928,6 +1998,55 @@ mod tests {
             let after_ms = utc_ms(2026, 10, 3, start_hour, 7);
             assert_matches_stepper("*/7 2 4 10 *", after_ms, 2 * DAY_MS, &lord_howe);
             assert_matches_stepper("31,37 2 * * *", after_ms, 2 * DAY_MS, &lord_howe);
+        }
+    }
+
+    #[test]
+    fn a_date_jump_holds_at_the_largest_offsets_chrono_represents() {
+        // Offsets one second short of a day put civil time almost a day from
+        // epoch time. Closing a window with `shift_seconds = largest` moves
+        // civil time back 86,399 seconds, so a later minute can fall on an
+        // earlier date; closing one with `-largest` moves it forward as far.
+        let largest = 24 * 60 * 60 - 1;
+        let windows = [
+            (0, 24 * 60, OffsetChanges::Unbounded),
+            (600, 900, OffsetChanges::HourApart),
+        ];
+        let mut zones = Vec::new();
+        for (start_minute, end_minute, changes) in windows {
+            for shift_seconds in [largest, -largest] {
+                zones.push(DailyDaylight {
+                    start_minute,
+                    end_minute,
+                    shift_seconds,
+                    changes,
+                });
+            }
+        }
+        let fixed = [
+            chrono::FixedOffset::east_opt(largest).unwrap(),
+            chrono::FixedOffset::west_opt(largest).unwrap(),
+            chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60 + 7).unwrap(),
+        ];
+        let expressions = [
+            "0 0 1 * *",
+            "59 23 31 * *",
+            "30 12 1,15 * *",
+            "0 0 * * 0",
+            "15 10 * 2 *",
+        ];
+        for day in [1, 28, 31] {
+            for hour in [0, 13] {
+                let after_ms = utc_ms(2026, 1, day, hour, 7);
+                for expression in expressions {
+                    for zone in &zones {
+                        assert_matches_stepper(expression, after_ms, 35 * DAY_MS, zone);
+                    }
+                    for zone in &fixed {
+                        assert_matches_stepper(expression, after_ms, 35 * DAY_MS, zone);
+                    }
+                }
+            }
         }
     }
 
