@@ -3344,11 +3344,13 @@ maintenance, so a sample taken after it would not be the history's own.
 `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
 in place and rebuilds the progress witness from the reopened stores (the
-projection's checkpoint, no catch-up episode, the passes a cap-triggered
-settle ran since the last drain, settled when nothing is handed), since the
-reopen's bootstrap is the quiescent point the next sample witnesses, and the
-pass accumulator starts the next drain from zero; the ledger then gives no
-leak verdict.
+projection's checkpoint, no catch-up episode, the passes run since the last
+recorded sample, settled when nothing is handed), since the reopen's
+bootstrap is the quiescent point the next sample witnesses. Coordinator
+passes accumulate until a sample records them, whichever sample that is: the
+restore's own when the caller takes one, otherwise the next step's or the
+final one, so a cap-triggered settle's passes reach the ledger on every
+path. The ledger then gives no leak verdict.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
 and the bounds scaled from the message count (with a per-commit store-byte

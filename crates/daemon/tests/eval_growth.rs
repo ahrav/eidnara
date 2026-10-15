@@ -380,26 +380,60 @@ fn a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_ver
     ));
 }
 
+/// Passes a cap-triggered settle ran after the last recorded quiescence stay
+/// in the accumulator until a sample records them: the restore's own sample
+/// when the caller takes one, otherwise the next step's or the final sample.
 #[test]
-fn a_restore_moves_the_passes_run_since_the_last_quiescence_into_its_own_witness() {
-    let plan = aging::plan(MESSAGES).unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let mut charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
-    let mut live = Campaign::open(root.path(), plan, GrowthMode::Restoring, &s0_liveness());
-    live.step(&mut charges).unwrap();
-    // Passes a cap-triggered settle ran after the last drain, before the restore.
-    live.passes_since_drain = 3;
-    let (mut live, restored) = live.restore(1_700_000_000_000);
-    restored.unwrap();
-    assert_eq!(
-        live.passes_since_drain, 0,
-        "the next drain's witness starts from zero"
-    );
+fn passes_run_before_a_restore_reach_the_ledger_whichever_sample_follows() {
+    let opened = || {
+        let root = tempfile::tempdir().unwrap();
+        let charges = Charges::new(growth::profile(Scale::S0, 128, 600_000, None).envelope);
+        let plan = aging::plan(MESSAGES).unwrap();
+        let live = Campaign::open(root.path(), plan, GrowthMode::Restoring, &s0_liveness());
+        (root, charges, live)
+    };
+    let restored = |mut live: Campaign, charges: &mut Charges| {
+        live.step(charges).unwrap();
+        live.passes_since_drain = 3;
+        let (live, restored) = live.restore(1_700_000_000_000);
+        restored.unwrap();
+        live
+    };
+
+    let (_root, mut charges, live) = opened();
+    let mut live = restored(live, &mut charges);
     live.sample(100, &mut charges).unwrap();
     assert_eq!(
         live.ledger.samples.last().unwrap().progress.reviewer_passes,
         3,
-        "the restore's witness carries the passes run since the previous quiescence"
+        "the restore's own sample witnesses the passes"
+    );
+    assert_eq!(
+        live.passes_since_drain, 0,
+        "a recorded witness drains the accumulator"
+    );
+
+    let (_root, mut charges, live) = opened();
+    let mut live = restored(live, &mut charges);
+    live.step(&mut charges).unwrap();
+    assert_eq!(
+        live.ledger.samples.last().unwrap().progress.reviewer_passes,
+        3,
+        "step 1 hands nothing over, so its sample's passes are the ones run before the restore"
+    );
+    live.step(&mut charges).unwrap();
+    assert_eq!(
+        live.ledger.samples.last().unwrap().progress.reviewer_passes,
+        0
+    );
+
+    let (_root, mut charges, live) = opened();
+    let live = restored(live, &mut charges);
+    let ledger = live.finish(&mut charges).unwrap().ledger;
+    assert_eq!(
+        ledger.samples.last().unwrap().progress.reviewer_passes,
+        3,
+        "the final sample witnesses the passes"
     );
 }
 

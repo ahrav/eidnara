@@ -213,8 +213,8 @@ pub struct Campaign {
     pub handed: Vec<String>,
     /// The approved bound on coordinator passes per quiescence.
     pub reviewer_pass_bound: u64,
-    /// Coordinator passes run since the last drain, a cap-triggered settle
-    /// included.
+    /// Coordinator passes run since the last recorded sample, a cap-triggered
+    /// settle included; `sample` drains it once a witness records them.
     pub passes_since_drain: u64,
     /// The progress witness of the drain the next sample follows.
     pub progress: QuiescenceProgress,
@@ -326,7 +326,7 @@ impl Campaign {
         self.progress = QuiescenceProgress {
             acknowledged_through: acknowledged_through(self.root()),
             catch_up_episodes,
-            reviewer_passes: std::mem::take(&mut self.passes_since_drain),
+            reviewer_passes: self.passes_since_drain,
             reviewer_settled,
         };
         self.next_step += 1;
@@ -514,6 +514,7 @@ impl Campaign {
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         charges.elapsed()?;
         self.ledger.record(sample)?;
+        self.passes_since_drain = 0;
         *self.checkpoints.entry(Cut::AtQuiescence).or_insert(0) += 1;
         Ok(())
     }
@@ -551,7 +552,8 @@ impl Campaign {
         assert_eq!(stores.tip(), tip, "a reopen moves no commit");
         // The reopen rebuilds the projection in one bootstrap, so the
         // reopened stores are the quiescent point the next sample witnesses.
-        // The restore's witness carries the passes run since the last drain.
+        // The passes run since the last recorded sample stay in the
+        // accumulator until a sample records them.
         let progress = QuiescenceProgress {
             acknowledged_through: acknowledged_through(stores.root()),
             catch_up_episodes: 0,
@@ -573,7 +575,7 @@ impl Campaign {
                 rig,
                 handed,
                 reviewer_pass_bound,
-                passes_since_drain: 0,
+                passes_since_drain,
                 progress,
             },
             Ok(()),
