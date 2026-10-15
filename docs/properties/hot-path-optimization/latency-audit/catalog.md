@@ -242,7 +242,7 @@ the [check inventory](existing-checks.md).
 | G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The memory_classifier schedule [defaults to `None`][sched-default]; conditional notes need a cron on the note. |
-| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14634-14647`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
+| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:15119`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the deterministic abort seam is `#[cfg(test)]` [`after_transform_commit`][unit-after-hook]. |
 | W12 | default-production | Transform units use [the guarded host runner][unit-runner-live]. [`kernel_routes::blocking`][blocking] still runs without that guard; the panic itself is the injected fault. |
 
@@ -2813,8 +2813,8 @@ lines execute every [`IDLE_POLL`][sched-idle] on a default campaign while the
 list is empty, so `reachable` would be trivially satisfied.
 Fault/timing angle: The schedule [defaults to `None`][sched-default], and
 [`scheduled_projects`][sched-projects] drops any project whose schedule is
-`None` (`schedule: schedule?` at [`:14634-14647`][sched-filter]) or whose memories
-authority is not `MODULE` ([`:14617-14622`][sched-authority]), so a default
+`None` (`let schedule = schedule?;` at [`:15119`][sched-filter]) or whose memories
+authority is not `MODULE` ([`:15095-15100`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
@@ -3352,8 +3352,8 @@ evaluation of this area and its disposition are recorded in
 [occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L626
 [note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L638-L667
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
-[sched-default]: ../../../../crates/daemon/src/config.rs#L151
-[sched-accept]: ../../../../crates/daemon/src/config.rs#L1157-L1174
+[sched-default]: ../../../../crates/daemon/src/config.rs#L152
+[sched-accept]: ../../../../crates/daemon/src/config.rs#L1226-L1244
 [eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4880-L4889
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L236-L247
 [call-reattach]: ../../../../crates/daemon/src/lib.rs#L5141
@@ -3395,13 +3395,13 @@ evaluation of this area and its disposition are recorded in
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
 [sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327
 [sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351
-[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L72
+[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L86
 [sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L536
 [sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L626
 [sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074-L2462
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074-L2447
 [t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074
 [t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2505-L2689
 [cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L511-L556
@@ -3411,9 +3411,9 @@ evaluation of this area and its disposition are recorded in
 [cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
 [cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
 [cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14662
-[sched-authority]: ../../../../crates/daemon/src/lib.rs#L14681-L14686
-[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14698-L14711
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L15071-L15140
+[sched-authority]: ../../../../crates/daemon/src/lib.rs#L15095-L15100
+[sched-filter]: ../../../../crates/daemon/src/lib.rs#L15119
 
 Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
 `SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,

@@ -18,9 +18,10 @@ day semantics, and unsatisfiable-but-valid expressions that must return
   independent of month, and sets `dom_restricted` and `dow_restricted` from a
   leading `*`. [`matches_day`][vixie] implements Vixie OR semantics when both
   are restricted.
-- [`next_occurrence`][stepper] starts at the minute boundary after
-  `after_ms`, caps at `after_ms + min(MAX_SEARCH_MS, max_search_ms)`,
-  evaluates `tz.timestamp_millis_opt(cursor_ms).single()?` per minute so an
+- [`next_occurrence`][stepper], kept verbatim at HEAD as the test-only
+  `frozen_minute_stepper`, starts at the minute boundary after `after_ms`,
+  caps at `after_ms + min(MAX_SEARCH_MS, max_search_ms)`, evaluates
+  `tz.timestamp_millis_opt(cursor_ms).single()?` per minute so an
   unrepresentable instant returns `None`, and matches minute, hour, month, and
   day on the local civil fields. Its doc says evaluating each epoch minute by
   civil fields handles DST transitions.
@@ -29,7 +30,7 @@ day semantics, and unsatisfiable-but-valid expressions that must return
 - [`next_cron_occurrence`][occurrence] applies the parser's own cap and
   filters `ms != 0`; [`is_valid_conditional_note_cron`][valid] is
   `parse_cron(...).is_some()`. Conditional Notes use a smaller ceiling through
-  `next_due_at_ms` at [`:236-239`][note-cap] with the same zero filter.
+  `next_due_at_ms` at [`:645-649`][note-cap] with the same zero filter.
 - The memory_classifier scheduler's [`next_due`][sched-due] calls
   `next_cron_occurrence(schedule, now_ms, &chrono::Local)` and treats `None`
   as `i64::MAX`. The schedule [defaults to `None`][sched-default]; the config
@@ -146,16 +147,13 @@ The frozen copy is a test-only function kept because the change replaces
   per minute. Under the `HourApart` claim a 60-minute probe gap is the widest
   that cannot hide a run of another offset, and `FixedOffset`'s range fixes
   the one-day window, so fewer lookups need a stronger claim.
-- Payoff: One host (Xeon 8488C, `taskset -c 30`, release, 32 start instants,
-  31 alternating blocks per arm), with 44 scenarios over `Local` in New York,
-  a UTC zone file, and `EST5EDT,M3.2.0,M11.1.0`. Paired against the previous
-  head in two worktrees, the geometric mean of per-scenario time ratios went
-  from 0.99 (the same code against itself) to 0.46. In New York:
-  `*/15 * * * *` 443 to 257 ns, `0 3 * * *` 1.30 to 0.99 us, `30 2 * * 1`
-  3.10 to 2.41 us, and `0 0 30 2 *` 1.87 us to 35 ns; validity checks 192 to
-  25 ns; the POSIX-rule weekly search 271 to 173 us. Before this PR the minute
-  stepper took 1.5 us, 57 us, 448 us, and 188 ms for those four New York
-  searches. These are local probe numbers, not approved bench evidence.
+- Payoff: An uncommitted probe on one host, release build, pinned to one
+  CPU, paired against the previous head in two worktrees over 44 scenarios in
+  New York, a UTC zone file, and a POSIX rule. The geometric mean of
+  per-scenario time ratios went from 0.99 (the same code against itself) to
+  0.46; in New York `0 0 30 2 *` went from 1.87 us to 35 ns and the other
+  searches shortened by about a quarter to two fifths, so the change stays.
+  These are local probe numbers, not approved bench evidence.
 - Negative controls (run locally, then reverted): rounding the bound's epoch
   minute a minute late, excluding the current minute from the bound, a
   lookahead skip one day too far, a 28-day February in the impossible-date
@@ -172,24 +170,24 @@ The frozen copy is a test-only function kept because the change replaces
   design decision (needs human input).
 
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
-[parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L125-L145
-[vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L150-L160
-[stepper]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L163-L192
-[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L205-L210
-[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L212-L218
-[note-cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L236-L239
-[t-golden-cron]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
-[t-extreme]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1580
-[t-vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1594
-[sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L412-L416
-[sched-default]: ../../../../../crates/daemon/src/config.rs#L127
-[sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
-[jump-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L230-L260
-[advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L291-L326
-[diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1782-L2058
-[zone-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L168-L219
+[parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L122-L175
+[vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L188-L197
+[stepper]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074-L2097
+[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L618-L620
+[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L626-L628
+[note-cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L645-L649
+[t-golden-cron]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1553
+[t-extreme]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2450
+[t-vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2464
+[sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735-L737
+[sched-default]: ../../../../../crates/daemon/src/config.rs#L152
+[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1226-L1244
+[jump-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L352
+[advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L563-L587
+[diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2074-L2447
+[zone-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L202-L245
 [floor-search]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L247-L352
-[floor-bound]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L440-L504
+[floor-bound]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L436-L504
 [floor-month]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L388-L434
 [floor-never]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L363-L379
 [floor-parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L51-L181
