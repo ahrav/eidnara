@@ -2663,9 +2663,11 @@ mod tests {
         filetime::set_file_mtime(path, filetime::FileTime::from_system_time(mtime)).unwrap();
     }
 
-    fn advance_mtime(path: &Path) {
-        let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
-        restore_mtime(path, mtime + std::time::Duration::from_secs(2));
+    fn backdate_mtime(path: &Path) {
+        restore_mtime(
+            path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
     }
 
     /// Waits until every file written so far is outside the recent-change
@@ -2702,6 +2704,38 @@ mod tests {
         let (served, _) = cache.effective_with_warnings(Some(&user), &project);
         assert_eq!(served, first, "unchanged sources serve the memo");
 
+        // Populating `cache.merged` before each change exercises memo invalidation.
+        std::fs::write(&project_file, r#"{ "memory": { "enabled": true } }"#).unwrap();
+        backdate_mtime(&project_file);
+        let (project_edit, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(project_edit.memory_enabled);
+        settle();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
+        std::fs::write(
+            &user,
+            r#"{ "history_summarizer": { "model": "model-b" },
+                 "prompt_surface": { "guidance_override_path": "guidance.md" } }"#,
+        )
+        .unwrap();
+        backdate_mtime(&user);
+        let (user_edit, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(user_edit.model_chain, vec!["model-b"]);
+        settle();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
+        std::fs::remove_file(&project_file).unwrap();
+        let (removed, _) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(
+            removed.memory_enabled,
+            "a removed tier falls back to the default"
+        );
+        settle();
+        cache.effective_with_warnings(Some(&user), &project);
+        assert!(cache.merged.is_some());
+
         // A guidance rewrite that restores its mtime still changes its identity.
         let mtime = std::fs::metadata(&guidance).unwrap().modified().unwrap();
         std::fs::write(&guidance, "## Eidnara\nsecond\n").unwrap();
@@ -2712,24 +2746,6 @@ mod tests {
             Some("## Eidnara\nsecond\n")
         );
         assert!(cache.merged.is_none());
-
-        std::fs::write(&project_file, r#"{ "memory": { "enabled": true } }"#).unwrap();
-        advance_mtime(&project_file);
-        let (project_edit, _) = cache.effective_with_warnings(Some(&user), &project);
-        assert!(project_edit.memory_enabled);
-
-        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-b" } }"#).unwrap();
-        advance_mtime(&user);
-        let (user_edit, _) = cache.effective_with_warnings(Some(&user), &project);
-        assert_eq!(user_edit.model_chain, vec!["model-b"]);
-        assert_eq!(user_edit.prompt_surface_guidance_override, None);
-
-        std::fs::remove_file(&project_file).unwrap();
-        let (removed, _) = cache.effective_with_warnings(Some(&user), &project);
-        assert!(
-            removed.memory_enabled,
-            "a removed tier falls back to the default"
-        );
     }
 
     #[test]

@@ -514,7 +514,7 @@ directory sync fails, which leaves the count unknown.
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes. | unaudited |
 | [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
 | [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] | A `*/15 * * * *` project runs at its instant and not before; the same instant does not run twice. | unaudited |
-| [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; an override rewrite with its mtime restored, a project-tier edit, a user-tier edit, and a removed tier each reach the next load. | unaudited |
+| [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; a project-tier edit, a user-tier edit, a removed tier, and an override rewrite with its mtime restored each start from a populated memo and reach the next load. | unaudited |
 | [`the_merged_memo_reemits_warnings_and_keeps_project_raise_only_rules`][t-memo-raise] | Alternating a hostile and a quiet project root on one cache keeps each root's merge, refuses the hostile tier's raise-only and user-only keys, and repeats the per-key warnings on a memo hit. | unaudited |
 | [`a_rejected_user_tier_serves_its_admitted_fallback_from_the_memo`][t-memo-fallback] | A rejected user tier memoizes its admitted fallback and `Unresolved` admission; the hit returns the same merge and warnings. | unaudited |
 | [`unread_sources_and_oversized_merges_are_never_memoized`][t-memo-unread] | An unreadable guidance override, a 90,000-model user tier above the retained bound, and 200,000 repeated models whose deduplicated chain keeps that capacity leave the memo empty and serve the same merge. | unaudited |
@@ -810,15 +810,15 @@ not a claim that no related check exists anywhere in the repository.
 [t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
 [t-mtime]: ../../../../crates/daemon/src/config.rs#L2623
-[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2678
-[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2736
-[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2793
-[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2832
-[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2915
-[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2884
-[t-raise]: ../../../../crates/daemon/src/config.rs#L1314
-[t-gate]: ../../../../crates/daemon/src/config.rs#L1650
-[t-hostile]: ../../../../crates/daemon/src/config.rs#L1718
+[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2680
+[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2752
+[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2809
+[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2848
+[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2931
+[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2900
+[t-raise]: ../../../../crates/daemon/src/config.rs#L1774
+[t-gate]: ../../../../crates/daemon/src/config.rs#L2115
+[t-hostile]: ../../../../crates/daemon/src/config.rs#L2184
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643

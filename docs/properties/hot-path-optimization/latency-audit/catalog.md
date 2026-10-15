@@ -2406,9 +2406,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - [The memo tests][t-memo] edit each tier and rewrite the
-guidance override with its mtime restored between loads, alternate a hostile
-and a quiet project root on one cache, serve a rejected user tier's admitted
-fallback from the memo, assert per-key warnings repeat on a memo hit, and
+guidance override with its mtime restored, each against a populated memo,
+alternate a hostile and a quiet project root on one cache, serve a rejected
+user tier's admitted fallback from the memo, assert per-key warnings repeat
+on a memo hit, and
 assert that an unread source, an oversized merge, a deduplicated chain whose
 retained capacity exceeds the bound, a model-TTL map whose B-tree nodes
 carry it past the bound, and a tier whose entry is a final symlink are never
@@ -3316,7 +3317,7 @@ evaluation of this area and its disposition are recorded in
 [memo-bound]: ../../../../crates/daemon/src/config.rs#L278
 [memo-margin]: ../../../../crates/daemon/src/config.rs#L283
 [identity]: ../../../../crates/daemon/src/config.rs#L308-L364
-[t-memo]: ../../../../crates/daemon/src/config.rs#L2677-L2969
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2679-L2985
 [t-mtime]: ../../../../crates/daemon/src/config.rs#L2622-L2660
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7

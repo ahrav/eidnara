@@ -167,4 +167,4 @@ call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
 [memo-head]: ../../../../../crates/daemon/src/config.rs#L366-L463
 [identity-head]: ../../../../../crates/daemon/src/config.rs#L308-L364
 [eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L510-L636
-[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2677-L2969
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2679-L2985
