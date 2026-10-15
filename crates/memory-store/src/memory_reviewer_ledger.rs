@@ -1607,6 +1607,20 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
+    /// The claim's expiry while it is live on this job at `now_ms`, read without a write; `None` once it expired, ended, or names another job.
+    pub fn live_memory_reviewer_claim_expiry(
+        &self,
+        project: &str,
+        causal_identity: &str,
+        claim_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<i64>, MemoryStoreError> {
+        check_project(project)?;
+        self.inner
+            .with_conn(|conn| live_claim_expiry(conn, project, causal_identity, claim_id, now_ms))
+            .map_err(Into::into)
+    }
+
     pub fn lookup_memory_reviewer_receipt(
         &self,
         project: &str,

@@ -2983,6 +2983,104 @@ async fn a_claim_about_to_lapse_is_renewed_before_the_attempt_so_the_request_com
     assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
 }
 
+/// A claim acquired just before the run carries its first attempt without a renewal write; once provider time has aged the lease, the claim is renewed before the next attempt at the clock the read batch ran under.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_claim_carries_the_first_attempt_and_an_aged_one_is_renewed_before_the_next() {
+    use memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_TASK_LEASE_MS;
+    let case = &CASES[0];
+    let fixture = Fixture::open(case.sources);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut peer = Peer::start().await;
+    let script: Vec<Vec<u8>> = case
+        .turns
+        .iter()
+        .map(|turn| text_response(&fixture.expand(turn.0)))
+        .collect();
+    let server = {
+        let (ledger, identity, claim_id) = (
+            Arc::clone(&fixture.ledger),
+            fixture.identity.clone(),
+            fixture.claim.claim_id.clone(),
+        );
+        let (clock, seen) = (Arc::clone(&fixture.clock), Arc::clone(&seen));
+        peer.serve_script_with(script, move |_| {
+            // Each request is in flight here: record the lease it travels under, then let five seconds of provider time pass.
+            let now = clock.load(Ordering::SeqCst);
+            seen.lock().unwrap().push(
+                ledger
+                    .live_memory_reviewer_claim_expiry(PROJECT, &identity, &claim_id, now)
+                    .unwrap(),
+            );
+            clock.fetch_add(5_000, Ordering::SeqCst);
+            Box::pin(async {})
+        })
+    };
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert!(matches!(settled, Settled::Published(_)));
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            // The acquisition's own lease, unrenewed.
+            Some(fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS),
+            // Renewed for the second attempt, five seconds of provider time later.
+            Some(fixture.now + 5 + 5_000 + MEMORY_REVIEWER_TASK_LEASE_MS),
+        ]
+    );
+}
+
+/// The freshness window is inclusive: a lease with exactly the slack elapsed carries the attempt, and one a millisecond older is renewed first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_at_the_slack_boundary_is_used_and_one_past_it_is_renewed() {
+    use memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_TASK_LEASE_MS;
+    for elapsed in [250, 251] {
+        let fixture = Fixture::open(CASES[0].sources);
+        fixture.clock.store(fixture.now + elapsed, Ordering::SeqCst);
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut peer = Peer::start().await;
+        let server = {
+            let (ledger, identity, claim_id) = (
+                Arc::clone(&fixture.ledger),
+                fixture.identity.clone(),
+                fixture.claim.claim_id.clone(),
+            );
+            let (clock, seen) = (Arc::clone(&fixture.clock), Arc::clone(&seen));
+            peer.serve_script_with(
+                vec![text_response(
+                    r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+                )],
+                move |_| {
+                    let now = clock.load(Ordering::SeqCst);
+                    *seen.lock().unwrap() = ledger
+                        .live_memory_reviewer_claim_expiry(PROJECT, &identity, &claim_id, now)
+                        .unwrap();
+                    Box::pin(async {})
+                },
+            )
+        };
+        let settled = fixture
+            .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+        let expected = if elapsed == 250 {
+            fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS
+        } else {
+            fixture.now + elapsed + MEMORY_REVIEWER_TASK_LEASE_MS
+        };
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(expected),
+            "{elapsed} ms elapsed"
+        );
+    }
+}
+
 /// A model profile the request encoder refuses is a configuration fault: the run reports it unavailable and leaves the receipt open, instead of durably abstaining the job as budget exhaustion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_invalid_model_profile_is_unavailable_not_budget_exhaustion() {

@@ -20,8 +20,8 @@ use kernel::{
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{MemoryReviewerJob, MemoryReviewerJobInput, ReviewTarget};
 use memory_store::memory_reviewer_ledger::{
-    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerRefusal,
-    MemoryReviewerReceipt,
+    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MEMORY_REVIEWER_TASK_LEASE_MS, MemoryReviewerAttemptTerminal,
+    MemoryReviewerLedgerRefusal, MemoryReviewerReceipt,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -49,6 +49,8 @@ const _: () =
     assert!(MAX_ACTIVE_PER_HOST < host_runtime::model_execution::config::MAX_BACKEND_PROCESSES);
 /// The supervisor key's task kind for MemoryReviewer attempts.
 pub const MEMORY_REVIEWER_TASK_KIND: &str = "memory_reviewer_review";
+/// How much of a full task lease may have elapsed before an attempt renews it. A lease granted inside this window, such as the claim's own acquisition just before the run, covers the attempt and the settlement reserve less at most this slack (the reserve stays at least 9.75 s), and renewing it would cost a durable write to move its expiry by no more than the slack.
+const LEASE_RENEWAL_SLACK_MS: i64 = 250;
 /// Retained supervisor keys one attempt probes past before launching under a colliding one.
 const MAX_KEY_PROBES: u32 = 64;
 
@@ -424,25 +426,70 @@ fn marker_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-impl Run<'_> {
-    /// The task lease is shorter than a run: one attempt plus the settlement reserve. A live worker renews before each attempt; a lease that will not renew is another worker's fence, and the run ends without settling.
-    fn renew_claim(&self) -> Result<(), InvestigationError> {
-        let claim = self.context.claim;
+/// The renewal of one run's task claim, borrowing only what the ledger write needs, so it can run beside the Kernel reads of a read batch.
+struct ClaimRenewal<'a> {
+    ledger: &'a MemoryStore,
+    project: &'a str,
+    causal_identity: &'a str,
+    claim: &'a TaskClaim,
+    authority_generation: i64,
+    now_ms: &'a (dyn Fn() -> i64 + Send + Sync),
+}
+
+impl ClaimRenewal<'_> {
+    fn renew(&self) -> Result<(), InvestigationError> {
+        let now = (self.now_ms)();
+        let live = self
+            .ledger
+            .live_memory_reviewer_claim_expiry(
+                self.project,
+                self.causal_identity,
+                &self.claim.claim_id,
+                now,
+            )
+            .map_err(|error| InvestigationError::Store(error.to_string()))?;
+        // A remaining lease longer than a full one means the clock stepped back since it was granted; that lease is renewed like a stale one.
+        if live.is_some_and(|expires_at| {
+            (MEMORY_REVIEWER_TASK_LEASE_MS - LEASE_RENEWAL_SLACK_MS..=MEMORY_REVIEWER_TASK_LEASE_MS)
+                .contains(&(expires_at - now))
+        }) {
+            return Ok(());
+        }
         match self
-            .coordinator
             .ledger
             .renew_memory_reviewer_task(
-                &self.context.job.project,
-                &claim.claim_id,
-                &claim.worker_instance,
-                claim.slot,
-                i64::try_from(self.context.receipt.authority_generation).unwrap_or(i64::MAX),
-                (self.coordinator.now_ms)(),
+                self.project,
+                &self.claim.claim_id,
+                &self.claim.worker_instance,
+                self.claim.slot,
+                self.authority_generation,
+                now,
             )
             .map_err(|error| InvestigationError::Store(error.to_string()))?
         {
             memory_store::NoteEvalRenewOutcome::Renewed { .. } => Ok(()),
             _ => Err(InvestigationError::Fenced),
+        }
+    }
+}
+
+impl<'a> Run<'a> {
+    /// The task lease is shorter than a run: one attempt plus the settlement reserve. A live worker starts each attempt under a fresh lease: one with at most [`LEASE_RENEWAL_SLACK_MS`] elapsed, as a claim just acquired or renewed alongside the previous read batch is, is used as it stands, and any other is renewed first. A lease that will not renew is another worker's fence, and the run ends without settling.
+    fn renew_claim(&self) -> Result<(), InvestigationError> {
+        self.claim_renewal().renew()
+    }
+
+    /// Borrows only the run's shared references, so the renewal can run while the run itself is borrowed mutably.
+    fn claim_renewal(&self) -> ClaimRenewal<'a> {
+        let (coordinator, job, receipt) =
+            (self.coordinator, self.context.job, self.context.receipt);
+        ClaimRenewal {
+            ledger: &coordinator.ledger,
+            project: &job.project,
+            causal_identity: &job.causal_identity,
+            claim: self.context.claim,
+            authority_generation: i64::try_from(receipt.authority_generation).unwrap_or(i64::MAX),
+            now_ms: &*coordinator.now_ms,
         }
     }
 
@@ -512,19 +559,26 @@ impl Run<'_> {
             };
             match step {
                 Step::ReadBatch { operations } => {
+                    // The next attempt's lease renewal writes the Memory Store while the batch reads the Kernel, so the two run side by side. Its outcome is not consulted here: the freshness check before that attempt decides, renewing again when the batch outlasted the slack or this renewal did not take.
                     let ended = tokio::task::block_in_place(|| {
-                        for operation in operations {
-                            if cancel.is_cancelled() {
-                                return Err(InvestigationError::Cancelled);
+                        let renewal = self.claim_renewal();
+                        std::thread::scope(|scope| {
+                            // A thread the host cannot spawn leaves the renewal to the pre-attempt check.
+                            let _ =
+                                std::thread::Builder::new().spawn_scoped(scope, || renewal.renew());
+                            for operation in operations {
+                                if cancel.is_cancelled() {
+                                    return Err(InvestigationError::Cancelled);
+                                }
+                                let now = (self.coordinator.now_ms)();
+                                if now >= self.context.receipt.execution_cutoff_ms {
+                                    return Ok(Some(RunResult::Exhausted));
+                                }
+                                self.execute(&mut broker, operation, now);
                             }
-                            let now = (self.coordinator.now_ms)();
-                            if now >= self.context.receipt.execution_cutoff_ms {
-                                return Ok(Some(RunResult::Exhausted));
-                            }
-                            self.execute(&mut broker, operation, now);
-                        }
-                        broker.accounting.end_batch();
-                        Ok(None)
+                            broker.accounting.end_batch();
+                            Ok(None)
+                        })
                     })?;
                     if let Some(result) = ended {
                         return self.settle(&broker, result);
