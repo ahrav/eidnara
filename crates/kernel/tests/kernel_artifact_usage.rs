@@ -475,3 +475,113 @@ fn the_open_census_sums_every_shard_when_shards_outnumber_its_workers() {
     store.forget_artifact_usage_for_test();
     assert_eq!(reported(&store), expected, "the fallback walk agrees");
 }
+
+/// Runs one maintenance pass with `race` called between its reconciliation
+/// walk and the comparison, and returns whether the writer lock was free
+/// there.
+fn maintain_with_race(
+    store: &KernelStore,
+    race: impl FnOnce(&KernelStore) + Send + 'static,
+) -> bool {
+    let writer_free = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    store.on_next_artifact_reconciliation_for_test({
+        let writer_free = std::sync::Arc::clone(&writer_free);
+        move |store| {
+            let free = store.writer_is_free_for_test();
+            writer_free.store(free, std::sync::atomic::Ordering::SeqCst);
+            if free {
+                race(store);
+            }
+        }
+    });
+    store.run_staging_maintenance(0).unwrap();
+    writer_free.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    let purged = store.ingest_artifact(request("purged", b"secret")).unwrap();
+    store.ingest_artifact(request("kept", b"kept")).unwrap();
+
+    // A publication lands after the walk returned and before the comparison.
+    assert!(
+        maintain_with_race(&store, |store| {
+            store.ingest_artifact(request("raced", b"raced")).unwrap();
+        }),
+        "writers proceed while maintenance walks the object tree"
+    );
+    assert_usage_matches_walk(&store, root.path(), "publication raced the walk");
+    store
+        .ingest_artifact(request("after-publish", b"one"))
+        .unwrap();
+
+    // So does an unlink.
+    assert!(maintain_with_race(&store, move |store| {
+        store
+            .delete_artifact(purge("raced", &purged.digest))
+            .unwrap();
+    }));
+    assert_usage_matches_walk(&store, root.path(), "unlink raced the walk");
+    store
+        .ingest_artifact(request("after-unlink", b"two"))
+        .unwrap();
+
+    // A pass a mutation raced settles nothing, so the next pass audits.
+    fs::write(root.path().join("artifacts/objects/stray"), b"drift").unwrap();
+    store.run_staging_maintenance(0).unwrap();
+    let error = store.ingest_artifact(request("refused", b"x")).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+}
+
+/// An unreadable directory below `objects`, or `None` when this process
+/// reads it anyway because it ignores mode bits.
+fn unreadable_shard(root: &Path) -> Option<std::path::PathBuf> {
+    let shard = root.join("artifacts/objects/zz");
+    fs::create_dir(&shard).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&shard).is_ok() {
+        fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("privileged process bypassed mode bits; failed walk not exercised");
+        return None;
+    }
+    Some(shard)
+}
+
+#[test]
+fn a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    store.ingest_artifact(request("one", b"1234")).unwrap();
+    let Some(shard) = unreadable_shard(root.path()) else {
+        return;
+    };
+    store.run_staging_maintenance(0).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+    store.ingest_artifact(request("two", b"56")).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "after a failed reconciliation walk");
+
+    // Admission that needs a walk still fails closed when the walk fails.
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o000)).unwrap();
+    store.forget_artifact_usage_for_test();
+    let error = store.ingest_artifact(request("three", b"78")).unwrap_err();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+}
+
+#[test]
+fn an_open_whose_census_fails_admits_once_a_later_walk_succeeds() {
+    let root = tempfile::tempdir().unwrap();
+    drop(KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap());
+    let Some(shard) = unreadable_shard(root.path()) else {
+        return;
+    };
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+    seed_domain(&store);
+    store.ingest_artifact(request("one", b"1234")).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "ingest after a failed census");
+}

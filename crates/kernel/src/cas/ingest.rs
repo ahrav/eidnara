@@ -23,9 +23,8 @@ use super::{
 use crate::current_time_ms;
 use crate::durable_fs::{
     MAX_CONCURRENT_SYNCS, PublishOutcome, StorageError, classify_errno, classify_io,
-    create_new_file, durable_unlink, open_regular_nofollow, publish_noreplace_between_locked,
-    sync_all_concurrently, sync_directory, sync_publish_directories_with, temp_name, unlink_temp,
-    write_and_sync,
+    create_new_file, durable_unlink, open_regular_nofollow, sync_all_concurrently, sync_directory,
+    sync_publish_directories_with, temp_name, unlink_temp, write_and_sync,
 };
 use crate::envelope::{ObjectRow, PendingChange, check_fence, commit_with_writer};
 use crate::object_write::map_write_error;
@@ -480,18 +479,16 @@ impl KernelStore {
         let publish = if faults.rename {
             Err(injected_storage_error())
         } else {
-            publish_noreplace_between_locked(tmp, &temp_name, &shard, &prepared.digest[2..])
+            self.publish_counted_object(tmp, &temp_name, &shard, &prepared.digest[2..], byte_length)
         };
         let published_new = match publish {
             Ok(PublishOutcome::Published) => {
                 staged.consume();
-                self.count_published_artifact(byte_length);
                 true
             }
             // A retained temp link makes the object's link count two, which
             // `verify_object` rejects.
             Ok(PublishOutcome::PublishedTempRetained) => {
-                self.count_published_artifact(byte_length);
                 if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
@@ -918,22 +915,22 @@ impl KernelStore {
         };
         for (index, prepared) in prepared.iter().enumerate() {
             let byte_length = prepared.bytes.len() as u64;
-            match publish_noreplace_between_locked(
-                tmp,
-                &names[index],
-                &shards[index],
-                &prepared.digest[2..],
-            )
-            .map_err(storage)?
+            match self
+                .publish_counted_object(
+                    tmp,
+                    &names[index],
+                    &shards[index],
+                    &prepared.digest[2..],
+                    byte_length,
+                )
+                .map_err(storage)?
             {
                 PublishOutcome::Published => {
                     staged[index].consume();
-                    self.count_published_artifact(byte_length);
                     published_new[index] = true;
                 }
                 // A retained temp link makes the object's link count two, which `verify_object` rejects. The batch syncs the temporary directory after every publication, which makes these unlinks durable.
                 PublishOutcome::PublishedTempRetained => {
-                    self.count_published_artifact(byte_length);
                     published_new[index] = true;
                     unlink_temp(tmp, &names[index]).map_err(storage)?;
                     staged[index].consume();

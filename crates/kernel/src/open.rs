@@ -152,11 +152,12 @@ pub struct KernelStore {
     pub(super) staged_artifacts: std::sync::atomic::AtomicUsize,
     pub(super) artifact_cap: u64,
     /// Bytes below `objects`, seeded by the walk before startup recovery and kept
-    /// current under the writer lock by every publication and unlink. `None`
-    /// until a walk succeeds and after an unlink whose outcome is unknown.
-    pub(super) artifact_usage: Mutex<Option<u64>>,
+    /// current under the writer lock by every publication and unlink.
+    pub(super) artifact_usage: Mutex<crate::cas::ArtifactUsage>,
     #[cfg(feature = "test-support")]
     pub(super) artifact_census_walks: std::sync::atomic::AtomicUsize,
+    #[cfg(feature = "test-support")]
+    pub(super) reconciliation_hook: Mutex<Option<crate::cas::ReconciliationHook>>,
     /// The store root and the artifact tree's `objects` and `tmp` children,
     /// opened `NOFOLLOW` when the store opened and held for its lifetime. Every
     /// later directory open resolves below one of them rather than re-resolving
@@ -409,9 +410,11 @@ impl KernelStore {
             #[cfg(feature = "test-support")]
             staged_artifacts: std::sync::atomic::AtomicUsize::new(0),
             artifact_cap,
-            artifact_usage: Mutex::new(None),
+            artifact_usage: Mutex::new(crate::cas::ArtifactUsage::default()),
             #[cfg(feature = "test-support")]
             artifact_census_walks: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(feature = "test-support")]
+            reconciliation_hook: Mutex::new(None),
             root_directory,
             objects_directory: artifact_directories.objects,
             tmp_directory: artifact_directories.tmp,
@@ -482,6 +485,11 @@ impl KernelStore {
             return Err(KernelError::InvalidRestore);
         }
         Ok(writer)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn writer_is_free_for_test(&self) -> bool {
+        self.writer.try_lock().is_ok()
     }
 
     /// `Mutex::lock` has no timeout, so a bounded caller polls instead of
