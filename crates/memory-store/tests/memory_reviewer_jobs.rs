@@ -1537,6 +1537,68 @@ fn an_enqueued_page_keeps_the_scan_audit_of_its_references() {
     );
 }
 
+#[test]
+fn an_enqueued_reference_is_the_row_reservation_and_activation_write() {
+    let columns = |store: &MemoryStore| {
+        store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT allowance_bytes, receipt_charge_bytes FROM memory_reviewer_jobs",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    let identity = inputs("cand-1").causal_identity().unwrap();
+    let selected_dir = tempfile::tempdir().unwrap();
+    let selected = MemoryStore::open(&descriptor(selected_dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: None,
+    };
+    let frozen = selected
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let outcome = selected
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, EnqueueOutcome::Enqueued { jobs: 1, .. }),
+        "{outcome:?}"
+    );
+    let produced_dir = tempfile::tempdir().unwrap();
+    let produced = MemoryStore::open(&descriptor(produced_dir.path())).unwrap();
+    reserved(
+        produced
+            .reserve_memory_reviewer_job("proj", &producer("f1"), &inputs("cand-1"), NOW + 1)
+            .unwrap(),
+    );
+    let activated = produced
+        .activate_memory_reviewer_job(
+            "proj",
+            &identity,
+            &producer("f1"),
+            &MemoryReviewerJobInput {
+                subject: subject("cand-1"),
+                starting_references: Vec::new(),
+                question_template: "extracted_facts".to_string(),
+            },
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        selected
+            .lookup_memory_reviewer_job("proj", &identity)
+            .unwrap()
+            .as_ref(),
+        Some(&activated)
+    );
+    assert_eq!(columns(&selected), columns(&produced));
+}
+
 /// A page that reaches its deadline between the slot's sweep and its enqueue is recorded as the slot's failure inside the enqueue transaction, not refused back to the caller for another retry.
 #[test]
 fn an_enqueue_at_or_after_the_page_deadline_records_the_failed_slot() {
