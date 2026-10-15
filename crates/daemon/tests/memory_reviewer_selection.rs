@@ -725,7 +725,7 @@ fn a_cited_row_becoming_unavailable_after_an_abstention_reconsiders_the_target_o
     assert!(fixture.select(MEMORY_CLASSES, None).references.is_empty());
 }
 
-/// The linked rows are bounded at the selector: with more citations than `MAX_LINKED_EVIDENCE`, the inputs carry the descriptor's evidence and the newest eight, so re-citing a row already in the window changes nothing and one more new citation reconsiders the target once.
+/// The selector's causal inputs carry the descriptor's evidence and at most `MAX_LINKED_EVIDENCE` linked rows, the most recently cited within the event window. Re-citing a row already in the set keeps the set while every row of it stays inside that window; one more new citation changes the causal identity, so the next selection reconsiders the target once.
 #[test]
 fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
     use daemon::memory_reviewer::selection::MAX_LINKED_EVIDENCE;
