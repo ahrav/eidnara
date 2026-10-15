@@ -313,6 +313,7 @@ fn bytes_added_outside_the_store_fail_the_next_admission_closed() {
     store.ingest_artifact(request("one", b"1234")).unwrap();
     fs::write(root.path().join("artifacts/objects/stray"), b"drift").unwrap();
     store.run_staging_maintenance(0).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "latched after bytes added");
     let error = store.ingest_artifact(request("two", b"56")).unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
     drop(store);
@@ -331,6 +332,7 @@ fn bytes_removed_outside_the_store_fail_the_next_admission_closed() {
     let handle = store.ingest_artifact(request("one", b"1234")).unwrap();
     fs::remove_file(object_path(root.path(), &handle.digest)).unwrap();
     store.run_staging_maintenance(0).unwrap();
+    assert_usage_matches_walk(&store, root.path(), "latched after bytes removed");
     let error = store.ingest_artifact(request("two", b"56")).unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
 }

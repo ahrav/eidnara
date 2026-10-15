@@ -119,7 +119,7 @@ sources because only one exists.
   the same transaction is replaced by a process-local count. The count is an
   `Option<u64>` under its own mutex and is changed only while the writer lock
   is held. The open walk seeds it before startup recovery. Each publication
-  adds the published length ([`count_published_artifact`][usage-publish]).
+  adds the published length ([`publish_counted_object`][usage-publish]).
   Each object unlink goes through [`unlink_counted_object`][usage-unlink],
   which subtracts the `st_size` read before the unlink once the durable
   unlink succeeds; a failed unlink leaves the count unknown, and a removal
@@ -283,20 +283,20 @@ sources because only one exists.
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
 [t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
 [t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
-[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
-[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L48-L73
-[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L81-L121
-[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L99-L107
-[open-seed]: ../../../../../crates/kernel/src/open.rs#L432
-[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L459-L464
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L42-L49
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L56-L78
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L86-L110
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L122-L169
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L173-L181
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L435
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L462-L467
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
-[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1520-L1684
-[walk-concurrent]: ../../../../../crates/kernel/src/cas/ingest.rs#L1542-L1594
-[open-census]: ../../../../../crates/kernel/src/open.rs#L319
-[usage-seed]: ../../../../../crates/kernel/src/cas/usage.rs#L88-L108
-[usage-census]: ../../../../../crates/kernel/src/cas/usage.rs#L169-L190
+[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1517-L1684
+[walk-concurrent]: ../../../../../crates/kernel/src/cas/ingest.rs#L1539-L1591
+[open-census]: ../../../../../crates/kernel/src/open.rs#L320
+[usage-seed]: ../../../../../crates/kernel/src/cas/usage.rs#L136-L156
+[usage-census]: ../../../../../crates/kernel/src/cas/usage.rs#L243-L264
 [t-oracle-head]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L112-L134
 [usage-tree-change]: ../../../../../crates/kernel/src/cas/usage.rs#L22-L35
@@ -305,6 +305,6 @@ sources because only one exists.
 [usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L158-L169
 [daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [sample-interval]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
-[t-usage-raced]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L502
-[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L554
-[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L576
+[t-usage-raced]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L504
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L556
+[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L578
