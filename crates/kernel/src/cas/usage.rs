@@ -21,12 +21,19 @@ use crate::{KernelError, KernelStore};
 
 /// The counted bytes below `objects`, `None` until a walk succeeds and after
 /// an unlink whose outcome is unknown, beside the number of publications and
-/// unlinks applied to the tree since the store opened.
+/// unlinks applied to the tree since the store opened. `raced_reconciliations`
+/// counts consecutive comparisons deferred because `tree_changes` moved
+/// between a reconciliation's snapshot and its comparison.
 #[derive(Debug, Default)]
 pub(crate) struct ArtifactUsage {
     bytes: Option<u64>,
     tree_changes: u64,
+    raced_reconciliations: u8,
 }
+
+/// After this many consecutive deferrals, the next reconciliation acquires the
+/// writer lock before taking its snapshot and walking the tree.
+const MAX_RACED_RECONCILIATIONS: u8 = 3;
 
 impl ArtifactUsage {
     fn record_tree_change(&mut self) {
@@ -115,22 +122,41 @@ impl KernelStore {
     /// filesystem change through its tree-change record. Once this thread
     /// holds the writer lock no change is half-applied, so an unchanged
     /// tree-change number proves the walk saw the tree the count describes; a
-    /// changed one leaves the comparison to the next reconciliation. With no
+    /// changed one leaves the comparison to the next reconciliation. After
+    /// [`MAX_RACED_RECONCILIATIONS`] deferrals in a row the next
+    /// reconciliation takes the writer lock before its snapshot and holds it
+    /// across the walk, so that comparison runs. With no
     /// count held the walk becomes the count. A disagreement is drift: the
     /// fail-closed state latches and the walk replaces the count, so admission
     /// stays refused while the health sampler reports the bytes on disk.
     pub(crate) fn reconcile_artifact_usage(&self) {
+        let conclusive = self.counted_usage().raced_reconciliations >= MAX_RACED_RECONCILIATIONS;
+        let mut writer = None;
+        if conclusive {
+            let Ok(held) = self.lock_writer() else {
+                return;
+            };
+            writer = Some(held);
+        }
         let changes = self.counted_usage().tree_changes;
         let walked = self.walk_artifact_usage();
         #[cfg(feature = "test-support")]
         self.run_reconciliation_hook();
-        let Ok(_writer) = self.lock_writer() else {
-            return;
-        };
+        if writer.is_none() {
+            let Ok(held) = self.lock_writer() else {
+                return;
+            };
+            writer = Some(held);
+        }
         let mut usage = self.counted_usage();
         if usage.tree_changes == changes {
+            usage.raced_reconciliations = 0;
             self.settle_census(&mut usage, walked);
+        } else {
+            usage.raced_reconciliations = usage.raced_reconciliations.saturating_add(1);
         }
+        drop(usage);
+        drop(writer);
     }
 
     /// [`reconcile_artifact_usage`](Self::reconcile_artifact_usage) with the

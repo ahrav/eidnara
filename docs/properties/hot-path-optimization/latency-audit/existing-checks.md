@@ -468,6 +468,8 @@ would change.
 | [`a_walk_counts_only_regular_files_at_both_levels`][t-usage-file-set] | The fallback walk and the census at open both count a top-level file and a shard object and skip symlinks and nested directories. | unaudited |
 | [`the_open_census_sums_every_shard_when_shards_outnumber_its_workers`][t-usage-census] | With 256 shards and up to 64 census workers, the census at open, a maintenance reconciliation, and the fallback walk each equal the independent sum; open takes one walk. | unaudited |
 | [`a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_it`][t-usage-raced] | The writer lock is free after the maintenance walk returns; an ingest and a purge landed there leave usage equal to the walk and admission open, and the next pass still latches on a stray file. | unaudited |
+| [`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound] | With a stray file under `objects`, three maintenance passes each raced by an ingest leave admission open; the fourth holds the writer across its walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`an_admission_walk_short_of_descriptors_counts_the_tree_one_shard_at_a_time`][t-usage-descriptors] | With 128 shards and the soft descriptor limit eight above the descriptors in use, an admission with no count held walks the tree and admits; the walk becomes the count. | unaudited |
 | [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk] | A maintenance walk that hits an unreadable directory keeps the count and admission; with no count held the same failure refuses with `IngestionFailClosed`. | unaudited |
 | [`an_open_whose_census_fails_admits_once_a_later_walk_succeeds`][t-usage-failed-census] | A census at open that hits an unreadable directory latches nothing; the first ingest after the directory is readable walks, admits, and matches the walk. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
@@ -483,8 +485,9 @@ calls `run_staging_maintenance`, so GC reclaim and the maintenance
 reconciliation run in production); a test that the health sampler's
 lock-free count read and `check_budget`'s locked read agree under
 concurrent ingest; a restore that finds drift; a durable unlink whose
-directory sync fails, which leaves the count unknown; a census that fails
-with `EMFILE` or `ENFILE` rather than `EACCES`, which no fault seam injects.
+directory sync fails, which leaves the count unknown; a census at open that
+runs the descriptor table out, which the descriptor test exercises only on
+the admission walk.
 
 ## Wildcard and cross-cutting
 
@@ -783,8 +786,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-usage-file-set]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L423
 [t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L450
 [t-usage-raced]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L504
-[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L556
-[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L578
+[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L542
+[t-usage-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L45
+[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L595
+[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L617
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426

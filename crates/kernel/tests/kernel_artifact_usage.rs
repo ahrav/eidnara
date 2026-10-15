@@ -538,6 +538,45 @@ fn a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_
     assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
 }
 
+#[test]
+fn drift_latches_once_raced_reconciliations_reach_their_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 64).unwrap();
+    seed_domain(&store);
+    fs::write(root.path().join("artifacts/objects/stray"), b"drift").unwrap();
+
+    // A writer stands ready to publish inside every pass's window. The first
+    // three passes walk without the writer, so the publication defers each
+    // comparison and admission stays open on the counted bytes. The fourth
+    // pass holds the writer across its walk, so the publication waits, the
+    // comparison is conclusive, and the stray file latches the store.
+    let mut writer_free = Vec::new();
+    for pass in 0..4u8 {
+        writer_free.push(maintain_with_race(&store, move |store| {
+            store
+                .ingest_artifact(request(&format!("raced-{pass}"), &[b'r', pass]))
+                .unwrap();
+        }));
+        if pass < 3 {
+            store
+                .ingest_artifact(request(&format!("open-{pass}"), &[b'o', pass]))
+                .unwrap();
+        }
+    }
+    let error = store.ingest_artifact(request("refused", b"x")).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ArtifactErrorKind::IngestionFailClosed,
+        "drift latches on the first pass past the raced bound"
+    );
+    assert_eq!(
+        writer_free,
+        [true, true, true, false],
+        "three raced passes walk without the writer; the conclusive pass holds it"
+    );
+    assert_usage_matches_walk(&store, root.path(), "latched on the conclusive walk");
+}
+
 /// An unreadable directory below `objects`, or `None` when this process
 /// reads it anyway because it ignores mode bits.
 fn unreadable_shard(root: &Path) -> Option<std::path::PathBuf> {

@@ -1546,6 +1546,21 @@ pub(super) fn regular_file_bytes(
 /// keep more reads queued. A failure other than exhaustion outranks an
 /// exhaustion, because only the former latches the store.
 pub(super) fn regular_file_bytes_concurrently(objects: &File) -> Result<u64, StorageError> {
+    match regular_file_bytes_on_workers(objects) {
+        Err(error) if descriptors_ran_out(&error) => regular_file_bytes(objects, &|| false)
+            .map(|bytes| bytes.expect("an uncancellable walk completes")),
+        walked => walked,
+    }
+}
+
+fn descriptors_ran_out(error: &StorageError) -> bool {
+    error.raw_os_error().is_some_and(|code| {
+        code == rustix::io::Errno::MFILE.raw_os_error()
+            || code == rustix::io::Errno::NFILE.raw_os_error()
+    })
+}
+
+fn regular_file_bytes_on_workers(objects: &File) -> Result<u64, StorageError> {
     let (mut bytes, shards) =
         top_level_entries(objects, &|| false)?.expect("an uncancellable walk completes");
     let next_shard = std::sync::atomic::AtomicUsize::new(0);

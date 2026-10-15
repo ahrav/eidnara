@@ -256,6 +256,40 @@ sources because only one exists.
   no publication or unlink overlapped, holds the writer lock only for the
   comparison, and a failed walk is no evidence against the count.
 
+### Q: Does a writer that overlaps every maintenance pass defer drift detection without bound, and does a census that runs the descriptor table out latch the store?
+
+- Sources examined: [`reconcile_artifact_usage`][usage-reconcile-bounded]
+  and its [deferral counter][usage-raced-counter],
+  [`regular_file_bytes_concurrently`][walk-concurrent] and its
+  [descriptor fallback][walk-descriptors], [`check_budget`][check-budget],
+  the two review findings on PR #1043, and the [usage tests][t-usage].
+- Findings: Both findings held against the code as reviewed. A pass whose
+  tree-change number moved during its walk settled nothing and kept no record
+  of having deferred, so with a stray file on disk and an ingest landing
+  inside every pass's window, four passes in a row left admission open
+  ([`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound]
+  failed with `unwrap_err()` on an admitted handle before the change). The
+  count now carries the number of consecutive deferred comparisons; after
+  three, the next reconciliation takes the writer lock before its snapshot
+  and holds it across the walk, so that comparison runs and the stray file
+  latches on the fourth pass. The census workers each hold one shard
+  descriptor at a time, so a soft `RLIMIT_NOFILE` within sixty-four of the
+  descriptors in use made the admission walk fail with `EMFILE`, which
+  `check_budget` maps to `IngestionFailClosed` and latches
+  ([`an_admission_walk_short_of_descriptors_counts_the_tree_one_shard_at_a_time`][t-usage-descriptors]
+  failed with `artifact ingestion is fail-closed until the store is reopened`
+  before the change). `EMFILE` or `ENFILE` from a worker now repeats the walk
+  on the calling thread, which holds one shard descriptor, and the walk
+  becomes the count. The deferral counter is one `u8` beside the count and
+  the tree-change number under the same mutex.
+- Missing evidence: A census at open that runs the descriptor table out; the
+  descriptor test lowers the limit after open and exercises the admission
+  walk. A walk whose single-threaded repeat also fails with `EMFILE`, which
+  still latches.
+- Conclusion: resolved with answer - a writer defers drift detection by at
+  most three maintenance passes, and a census short of descriptors counts the
+  tree one shard at a time.
+
 [ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
 [ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
 [ingest-commit]: ../../../../../crates/kernel/src/cas/ingest.rs#L580-L595
@@ -283,28 +317,33 @@ sources because only one exists.
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
 [t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
 [t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
-[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L42-L49
-[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L56-L78
-[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L86-L110
-[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L122-L169
-[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L173-L181
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L49-L56
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L63-L85
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L93-L117
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L132-L195
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L199-L207
 [open-seed]: ../../../../../crates/kernel/src/open.rs#L435
 [recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L462-L467
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
-[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1517-L1684
-[walk-concurrent]: ../../../../../crates/kernel/src/cas/ingest.rs#L1539-L1591
+[walk-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L1517-L1699
+[walk-concurrent]: ../../../../../crates/kernel/src/cas/ingest.rs#L1539-L1606
 [open-census]: ../../../../../crates/kernel/src/open.rs#L320
-[usage-seed]: ../../../../../crates/kernel/src/cas/usage.rs#L136-L156
-[usage-census]: ../../../../../crates/kernel/src/cas/usage.rs#L243-L264
+[usage-seed]: ../../../../../crates/kernel/src/cas/usage.rs#L162-L182
+[usage-census]: ../../../../../crates/kernel/src/cas/usage.rs#L269-L290
 [t-oracle-head]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
-[usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L112-L134
-[usage-tree-change]: ../../../../../crates/kernel/src/cas/usage.rs#L22-L35
-[usage-publish-counted]: ../../../../../crates/kernel/src/cas/usage.rs#L51-L78
-[usage-unlink-change]: ../../../../../crates/kernel/src/cas/usage.rs#L80-L110
-[usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L158-L169
+[usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L119-L160
+[usage-tree-change]: ../../../../../crates/kernel/src/cas/usage.rs#L22-L42
+[usage-publish-counted]: ../../../../../crates/kernel/src/cas/usage.rs#L58-L85
+[usage-unlink-change]: ../../../../../crates/kernel/src/cas/usage.rs#L87-L117
+[usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L184-L195
 [daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
 [sample-interval]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
 [t-usage-raced]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L504
-[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L556
-[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L578
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L595
+[t-usage-failed-census]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L617
+[usage-reconcile-bounded]: ../../../../../crates/kernel/src/cas/usage.rs#L119-L160
+[usage-raced-counter]: ../../../../../crates/kernel/src/cas/usage.rs#L22-L36
+[walk-descriptors]: ../../../../../crates/kernel/src/cas/ingest.rs#L1548-L1561
+[t-usage-raced-bound]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L542
+[t-usage-descriptors]: ../../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L45
