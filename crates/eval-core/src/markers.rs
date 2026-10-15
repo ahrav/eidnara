@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 65] = [
+pub const MARKERS: [Marker; 66] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -193,6 +193,10 @@ pub const MARKERS: [Marker; 65] = [
     Marker {
         name: "flt_liveness_bounds_met_with_faults_armed",
         test: "crates/daemon/tests/eval_fault.rs::liveness_bounds_are_met_with_outside_core_faults_armed",
+    },
+    Marker {
+        name: "sls_reviewer_passes_bounded_with_projection_locked",
+        test: "crates/daemon/tests/eval_fault.rs::the_reviewer_arm_settles_every_fed_job_within_its_bound",
     },
     Marker {
         name: "flt_corruption_detected_at_quiescence",

@@ -144,7 +144,7 @@ fn lane(bound: u64, met_at: Option<u64>, holds: bool) -> LaneProgress {
         met_at,
         stalled_at: None,
         holds_at_bound: holds,
-        fresh_commits: 4,
+        fresh_work: 4,
         blocked: None,
     }
 }
@@ -155,18 +155,43 @@ fn liveness() -> LivenessReport {
             families: [StoreFamily::Memory, StoreFamily::SearchProjection]
                 .into_iter()
                 .collect(),
-            lanes: [Lane::CatchUpEpisodes, Lane::EmbeddingPasses]
-                .into_iter()
-                .collect(),
+            lanes: [
+                Lane::CatchUpEpisodes,
+                Lane::EmbeddingPasses,
+                Lane::MaterializationEpisodes,
+            ]
+            .into_iter()
+            .collect(),
         },
         outside_core: ["ingest-write".to_string()].into_iter().collect(),
         armed_at_bound: ["ingest-write".to_string()].into_iter().collect(),
         lanes: [
             (Lane::CatchUpEpisodes, lane(64, Some(3), true)),
             (Lane::EmbeddingPasses, lane(32, Some(2), true)),
+            (Lane::MaterializationEpisodes, lane(16, Some(1), true)),
         ]
         .into_iter()
         .collect(),
+        permanent_stalls: vec![],
+    }
+}
+
+/// The reviewer arm as the runner lays it out: the kernel and the memory
+/// store in its core, the projection lock outside it, so the two arms
+/// together drive every lane once.
+fn reviewer_arm() -> LivenessReport {
+    LivenessReport {
+        core: HealthyCore {
+            families: [StoreFamily::Kernel, StoreFamily::Memory]
+                .into_iter()
+                .collect(),
+            lanes: [Lane::ReviewerCoordinatorPasses].into_iter().collect(),
+        },
+        outside_core: ["projection-lock".to_string()].into_iter().collect(),
+        armed_at_bound: ["projection-lock".to_string()].into_iter().collect(),
+        lanes: [(Lane::ReviewerCoordinatorPasses, lane(8, Some(1), true))]
+            .into_iter()
+            .collect(),
         permanent_stalls: vec![],
     }
 }
@@ -197,6 +222,13 @@ fn report() -> FaultReport {
                     },
                 )
             },
+            FaultEpisode {
+                scope: FaultScope {
+                    store: StoreFamily::SearchProjection,
+                    operation: "write".to_string(),
+                },
+                ..episode("projection-lock", FaultAction::ExternalLockHolder)
+            },
         ],
         barriers: vec![barrier("kill")],
         cuts: cut_receipts(
@@ -216,7 +248,14 @@ fn report() -> FaultReport {
             .into_iter()
             .collect(),
         ),
-        coverage: coverage(&["lost-ack", "kill", "ingest-write", "acknowledged", "r11"]),
+        coverage: coverage(&[
+            "lost-ack",
+            "kill",
+            "ingest-write",
+            "projection-lock",
+            "acknowledged",
+            "r11",
+        ]),
         effects,
         expected_refusals: vec![RecordedRefusal {
             episode: "r11".to_string(),
@@ -224,7 +263,7 @@ fn report() -> FaultReport {
             production_error: "DeletionUnpropagated { commit_seq: 7 }".to_string(),
         }],
         safety_checks_while_armed: 5,
-        liveness: Some(liveness()),
+        liveness: vec![liveness(), reviewer_arm()],
         markers: BTreeSet::new(),
         envelope: {
             let mut envelope = Envelope::new(limits());
@@ -703,7 +742,7 @@ fn liveness_is_unmet_at_the_bound_or_when_a_fault_healed() {
     idle.lanes
         .get_mut(&Lane::EmbeddingPasses)
         .unwrap()
-        .fresh_commits = 0;
+        .fresh_work = 0;
     assert!(
         matches!(
             idle.verdict(&bounds()),
@@ -803,7 +842,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         "a barrier from another cut does not place the kill at its declared cut"
     );
     let mut ghost = report.clone();
-    let live = ghost.liveness.as_mut().unwrap();
+    let live = &mut ghost.liveness[0];
     live.outside_core.insert("ghost".to_string());
     live.armed_at_bound.insert("ghost".to_string());
     assert_eq!(
@@ -861,10 +900,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         "an evidenced refusal recorded against an episode declaring another refusal"
     );
     let mut stalled_elsewhere = report.clone();
-    stalled_elsewhere
-        .liveness
-        .as_mut()
-        .unwrap()
+    stalled_elsewhere.liveness[0]
         .permanent_stalls
         .push(RecordedRefusal {
             episode: "lost-ack".to_string(),
@@ -880,12 +916,7 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
     );
     let mut stalled_only = report.clone();
     let stall = stalled_only.expected_refusals.remove(0);
-    stalled_only
-        .liveness
-        .as_mut()
-        .unwrap()
-        .permanent_stalls
-        .push(stall);
+    stalled_only.liveness[0].permanent_stalls.push(stall);
     stalled_only.validate(&profile()).expect(
         "a permanent stall recorded against its expected_refusal episode is the record that episode needs",
     );
@@ -904,9 +935,67 @@ fn a_fault_report_round_trips_and_refuses_what_it_cannot_prove() {
         parse_fault_report(&extra, &profile()),
         Err(FaultReportError::Shape(_))
     ));
-    let mut liveness_less = report;
-    liveness_less.liveness = None;
-    liveness_less.validate(&profile()).unwrap();
+    let mut liveness_less = report.clone();
+    liveness_less.liveness.clear();
+    assert_eq!(
+        liveness_less.validate(&profile()),
+        Err(FaultReportError::Liveness(LivenessRefused::LaneNotDriven {
+            lane: Lane::CatchUpEpisodes
+        })),
+        "a report with no liveness arm has no progress evidence for any lane"
+    );
+    let mut reviewer_less = report.clone();
+    reviewer_less.liveness.pop();
+    assert_eq!(
+        reviewer_less.validate(&profile()),
+        Err(FaultReportError::Liveness(LivenessRefused::LaneNotDriven {
+            lane: Lane::ReviewerCoordinatorPasses
+        })),
+        "a lane no arm drives is missing evidence, not a pass"
+    );
+    let mut healed_second = report.clone();
+    healed_second.liveness[1].armed_at_bound.clear();
+    assert_eq!(
+        healed_second.validate(&profile()),
+        Err(FaultReportError::Liveness(LivenessRefused::FaultHealed {
+            episode: "projection-lock".to_string()
+        })),
+        "every arm is judged, not only the first"
+    );
+    let mut faulted_second = report.clone();
+    faulted_second.liveness[1]
+        .core
+        .families
+        .insert(StoreFamily::SearchProjection);
+    assert_eq!(
+        faulted_second.validate(&profile()),
+        Err(FaultReportError::CoreFamilyFaulted {
+            episode: "projection-lock".to_string(),
+            store: StoreFamily::SearchProjection,
+        }),
+        "the second arm's outside-core fault is checked against its own core"
+    );
+    let mut v1 = report.clone();
+    v1.schema = "eval-suite-c-fault-report/v1".to_string();
+    assert!(
+        matches!(
+            v1.validate(&profile()),
+            Err(FaultReportError::SchemaMismatch { .. })
+        ),
+        "a v1 report carried one optional liveness report, not one per arm"
+    );
+    let mut twice = report;
+    twice.liveness[1].core.lanes.insert(Lane::CatchUpEpisodes);
+    twice.liveness[1]
+        .lanes
+        .insert(Lane::CatchUpEpisodes, lane(64, Some(1), true));
+    assert_eq!(
+        twice.validate(&profile()),
+        Err(FaultReportError::Liveness(LivenessRefused::LaneInTwoArms {
+            lane: Lane::CatchUpEpisodes
+        })),
+        "each lane is one arm's to drive"
+    );
     let _ = (
         PublicationFaultKind::LoseLocalCommit,
         BTreeMap::<String, u64>::new(),
@@ -935,7 +1024,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     no_fault.episodes.clear();
     no_fault.barriers.clear();
     no_fault.coverage = CutCoverage::default();
-    no_fault.liveness = None;
+    no_fault.liveness.clear();
     assert_eq!(
         no_fault.validate(&p),
         Err(FaultReportError::NoEpisode),
@@ -946,7 +1035,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     refusal_only.barriers.clear();
     refusal_only.coverage = coverage(&["r11"]);
     refusal_only.effects = EffectLedger::default();
-    refusal_only.liveness = None;
+    refusal_only.liveness.clear();
     assert_eq!(
         refusal_only.validate(&p),
         Err(FaultReportError::NoEpisode),
@@ -986,7 +1075,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
     );
     let mut refusal_armed = ok.clone();
     {
-        let live = refusal_armed.liveness.as_mut().unwrap();
+        let live = &mut refusal_armed.liveness[0];
         live.core.families = [StoreFamily::Kernel].into_iter().collect();
         live.outside_core = ["r11".to_string()].into_iter().collect();
         live.armed_at_bound = ["r11".to_string()].into_iter().collect();
@@ -1158,10 +1247,7 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
         })
     );
     let mut stalled_ghost = ok.clone();
-    stalled_ghost
-        .liveness
-        .as_mut()
-        .unwrap()
+    stalled_ghost.liveness[0]
         .permanent_stalls
         .push(RecordedRefusal {
             episode: "ghost".to_string(),
@@ -1712,6 +1798,14 @@ fn a_parsed_report_cannot_claim_what_no_run_recorded() {
             action
         );
     }
+    let completion = FaultAction::ReviewerCompletionLoseReply;
+    assert_eq!(completion.heal(), Heal::Consumed);
+    assert_eq!(completion.family(), Some(StoreFamily::Memory));
+    assert!(completion.loses_reply());
+    assert_eq!(
+        serde_json::to_value(&completion).unwrap(),
+        serde_json::json!({"kind": "reviewer_completion_lose_reply"})
+    );
     let mut read_back_yet_unknown = EffectLedger::default();
     read_back_yet_unknown.attempt("rb");
     read_back_yet_unknown.lose_reply("rb", "lost-ack").unwrap();

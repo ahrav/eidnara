@@ -3,21 +3,17 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use daemon::memory_reviewer::activation::{
-    ACTIVATION_DIR, BEDROCK_IDENTITY_SCHEMA, IDENTITY_RECORD, IDENTITY_SCHEMA, LiveIdentity,
-    bedrock_credential_identity,
+    ACTIVATION_DIR, BEDROCK_IDENTITY_SCHEMA, IDENTITY_RECORD, bedrock_credential_identity,
 };
 use daemon::memory_reviewer::coordinator::{InvestigationPermits, Rejection};
 use daemon::memory_reviewer::handoff::review_binding;
 use daemon::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
 use daemon::memory_reviewer::model_request::{Endpoint, Providers};
-use daemon::memory_reviewer::steps::STEP_VERSION;
 use daemon::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
-use host_runtime::model_execution::backend::LlmExecutionBackend;
 use host_runtime::model_execution::supervisor::Supervisor;
 use kernel::KernelStore;
 use memory_store::MemoryStore;
@@ -27,6 +23,9 @@ use memory_store::memory_reviewer_jobs::{
 };
 use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
 use sha2::Digest;
+use support::memory_reviewer_gate::{
+    Deployment, NoPublicModel, activation_record, write_activation_record,
+};
 use support::tls_peer::{Peer, json_response, text_response};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -38,20 +37,6 @@ const REGION: &str = "us-east-1";
 const SECRET: &str = "sk-test-credential";
 /// The keyed identity the host's selection file would record for `CREDENTIAL`.
 const CREDENTIAL_IDENTITY: &str = "hmac-of-credential-under-the-incarnation-key";
-
-/// Internal launches need a backend only for public runs; the MemoryReviewer's sender speaks to the peer itself.
-struct NoPublicModel;
-
-impl LlmExecutionBackend for NoPublicModel {
-    fn execute(
-        &self,
-        _request: host_runtime::model_execution::backend::BackendRequest,
-        _events: host_runtime::model_execution::backend::EventSink,
-        _cancel: CancellationToken,
-    ) -> host_runtime::model_execution::backend::BackendFuture {
-        Box::pin(async { unreachable!("no public run is started") })
-    }
-}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -263,37 +248,18 @@ impl Rig {
         credential: &str,
         credential_fingerprint: &str,
     ) -> serde_json::Value {
-        let provider = self.peer.sender().provider_identity();
-        serde_json::json!({
-            "schema": IDENTITY_SCHEMA,
-            "model": "claude-test",
-            "prompt_template_version": LiveIdentity::prompt_template_version(),
-            "step_schema_version": STEP_VERSION,
-            "scanner_ruleset_version": LiveIdentity::scanner_ruleset_version(),
-            "egress_policy_version": context_core::memory_reviewer_policy_union::MEMORY_REVIEWER_POLICY_UNION_VERSION,
-            "kernel_baseline_digest": kernel::kernel_baseline_digest().unwrap(),
-            "memstore_baseline_digest": memory_store::baseline_digest(),
-            "kernel_incarnation": self.kernel_incarnation,
-            "memstore_incarnation": self.store.memory_reviewer_store_incarnation().unwrap(),
-            "provider": provider,
-            "credential": credential,
-            "credential_fingerprint": credential_fingerprint,
-            "provider_retention": {
-                "attested_by": "deployment owner",
-                "attested_on": "2026-09-18",
-                "retention_terms": "test peer; nothing leaves the host",
-                "finite_work_exposure_acknowledged": true
-            }
+        activation_record(&Deployment {
+            model: "claude-test",
+            kernel_incarnation: &self.kernel_incarnation,
+            memstore_incarnation: &self.store.memory_reviewer_store_incarnation().unwrap(),
+            provider: &self.peer.sender().provider_identity(),
+            credential,
+            credential_fingerprint,
         })
     }
 
     fn write_activation_record(&self, record: serde_json::Value) {
-        let dir = self.home.join(ACTIVATION_DIR);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = dir.join(IDENTITY_RECORD);
-        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_activation_record(&self.home, &record);
     }
 
     /// A Memory Classifier job whose subject is a Normal, remote-allowed commit published under this project's scope, so its run reaches the provider.

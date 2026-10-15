@@ -17,6 +17,8 @@ pub mod flock;
 pub mod git_repo;
 pub mod kernel_daemon;
 pub mod memory_reviewer_corpus;
+#[cfg(unix)]
+pub mod memory_reviewer_gate;
 pub mod memory_reviewer_publish;
 pub mod packing;
 pub mod projection_gate;

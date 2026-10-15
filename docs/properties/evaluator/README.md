@@ -1828,9 +1828,12 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   `generate`.
 - `a_lost_reply_stays_unknown_until_readback_at_after_recovery`
   (`flt-lost-ack-expected-is-admissible-set`; marker
-  `flt_lost_reply_unknown_until_readback`): three lost replies (a local
-  commit, an acknowledgement, a committed-then-lost publication) are
-  `unknown` until the closed files are read back by identity before reopen;
+  `flt_lost_reply_unknown_until_readback`): four lost replies (a local
+  commit, an acknowledgement, a committed-then-lost publication, and a
+  reviewer receipt completion whose read-back `storage::after_commit_for_test`
+  refuses) are `unknown` until the closed files are read back by identity
+  before reopen; the reviewer completion reads back `applied` from the closed
+  memory store's `memory_reviewer_receipts`;
   the local commit and the acknowledgement are read back in a recovery that
   follows each reply-loss episode before any later catch-up, and each reads
   back `applied`, the state the seam's contract fixed before the read-back;
@@ -1900,10 +1903,31 @@ job under `EIDNARA_EVAL_S0_BUDGET_MS`):
   only when the live `canonical_claims` descriptors are exactly the newest
   decision's two, by the kernel's identity encoding of its object id and
   revision (`claims_materialized` receipted once per materialization step);
-  `fresh_commits` is the kernel tip's advance across each feed; the reviewer
-  coordinator lane is declared outside the core
-  (`sls-liveness-memory-reviewer-work-bounded` is not exercised here); R11 is
-  listed as the permanent stall.
+  `fresh_work` is the kernel tip's advance across each feed; the reviewer
+  coordinator lane is the reviewer arm's; R11 is listed as the permanent
+  stall.
+- `the_reviewer_arm_settles_every_fed_job_within_its_bound`
+  (`sls-liveness-memory-reviewer-work-bounded`,
+  `flt-liveness-mode-bounded-progress-permanent-faults`; marker
+  `sls_reviewer_passes_bounded_with_projection_locked`): a second liveness
+  arm on its own root whose core is the kernel, the memory store, and the
+  production `Worker::pass` behind an open activation gate; an external
+  `BEGIN IMMEDIATE` on the search projection is armed for the whole window
+  and at the bound; each of the profile's `reviewer_coordinator_passes` steps
+  activates one fresh History Summarizer job and runs one pass, and the lane
+  holds when no job is Ready and every fed job has settled; it holds from
+  step 1 with `fresh_work` equal to the bound. The staged subjects are
+  default-Sensitive, so every run settles as a policy-blocked abstention and
+  the memory store records no attempt marker. The worker never opens the
+  projection, so the lock shares no resource with the core.
+- `a_reviewer_window_behind_a_closed_gate_is_unmet_at_its_bound`: the same
+  window with no activation record settles nothing; the lane never meets its
+  predicate, records the closed gate as its block, and the verdict is
+  `LivenessUnmet` while the projection lock stayed armed.
+- `a_reviewer_completion_that_never_committed_reads_back_not_applied`: a
+  receipt that began and never completed reads back `not_applied` from the
+  closed memory store, so the reviewer completion's `applied` read-back is
+  not a constant.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 - `a_lost_reply_episode_that_does_not_reach_its_target_is_refused`: a
@@ -2114,10 +2138,10 @@ and `rid-tokenizer-accounting-profile-bound-per-run` are in
 
 ## Gaps recorded here
 
-- `sls-liveness-memory-reviewer-work-bounded`: the fault campaign's liveness
-  mode declares the reviewer coordinator outside its healthy core because the
-  drive has no scripted model peer; its bound is in the approved profile but
-  no campaign drives that lane yet.
+- `sls-liveness-memory-reviewer-work-bounded`: the reviewer arm's jobs are
+  default-Sensitive History Summarizer subjects, so every pass settles by
+  policy abstention before any request; a reviewer pass that sends to a
+  provider is not driven inside a liveness window.
 - The OpenCode cassette is bound to the environment that recorded it: the
   system prompt embeds the working directory, today's date, and the user's
   instruction files, so record and replay must share a checkout, a day, and a
