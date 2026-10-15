@@ -124,9 +124,11 @@ sources because only one exists.
   which subtracts the `st_size` read before the unlink once the durable
   unlink succeeds; a failed unlink leaves the count unknown, and a removal
   larger than the count leaves it unknown and latches.
-  [`reconcile_artifact_usage`][usage-reconcile] walks under the writer lock
-  at the end of every recovery (open and restore) and every maintenance
-  pass. With no count it seeds one. With a
+  [`reconcile_artifact_usage`][usage-reconcile] walks outside the writer
+  lock, then takes the lock to compare the tree-change number and settle the
+  result. Recovery (open and restore) runs it when the open census seeded no
+  count or recovery left the count different from that seed; every
+  maintenance pass runs it. With no count it seeds one. With a
   count it compares, and a disagreement latches the CAS fail-closed state
   and replaces the count with the walk, so the health sampler reports the
   bytes on disk. The drift action is the latch: the next admission is
@@ -179,10 +181,11 @@ sources because only one exists.
   divides the shard directories among up to 64 threads, a count sized for
   reads in flight, and at open it runs on its own thread beside the database
   open. Until `open` returns, the opening thread is the store's only user, so
-  the census counts the tree the writer lock would have seen, and the seed settles it through the same path as a
-  reconciliation: a count held and disagreeing latches, an exhaustion
-  leaves the count unknown, and any other failure latches. A failure other
-  than exhaustion from any worker outranks an exhaustion from another. The
+  the census counts the tree the writer lock would have seen, and the seed
+  settles it through the same path as a reconciliation: a count held and
+  disagreeing latches, and a failed walk leaves the count as it stood. A
+  failure other than exhaustion from any worker outranks an exhaustion from
+  another. The
   cancellable fallback walk the sampler takes with no count held stays on
   the caller's thread and polls before every entry as before. Probe: warm
   open fell from about 186 ms to about 31 ms and cold open from about

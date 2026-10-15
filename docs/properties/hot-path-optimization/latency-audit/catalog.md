@@ -2007,7 +2007,8 @@ lock: the kernel store has no spare mutable column and a new table or column
 is a format break, so the durable counter the specification named is
 replaced by a count the [open walk][open-seed] seeds before startup
 recovery. [`reconcile_artifact_usage`][usage-reconcile] re-walks the tree at
-the end of every recovery and every [maintenance pass][maintenance] without
+the end of a [recovery][recover] that seeded no count or changed the count
+the census seeded, and of every [maintenance pass][maintenance], without
 holding the writer lock across the walk, then takes the writer lock and
 compares only when no publication or unlink recorded a [tree
 change][usage-tree-change] since the walk began; with a count held, a walk
@@ -3266,7 +3267,7 @@ evaluation of this area and its disposition are recorded in
 [maintenance]: ../../../../crates/kernel/src/retention.rs#L197
 [restore]: ../../../../crates/kernel/src/backup.rs#L422-L424
 [busy]: ../../../../crates/daemon/src/kernel_routes/state.rs#L290-L295
-[route-ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L255
+[route-ingest]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L577
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
