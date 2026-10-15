@@ -1941,3 +1941,73 @@ fn linked_decision_evidence_breaks_ties_by_evidence_id() {
     assert_eq!(linked(8), vec![a.clone(), b]);
     assert_eq!(linked(1), vec![a]);
 }
+
+/// A batch read answers each decision, in order, exactly as its own read at the same snapshot does, including a decision unknown at that snapshot and one with no citations.
+#[test]
+fn a_batch_linked_evidence_read_answers_each_decision_as_its_own_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let own = ingest_evidence(&store, "own", '1');
+    store
+        .commit(intent("decision-1", '2'), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                evidence_id: Some(own.clone()),
+                ..decision(1)
+            })?;
+            envelope.insert_decision(decision(2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let before = store.tip().unwrap();
+    let first = ingest_evidence(&store, "first", '3');
+    cite(&store, "first", '4', &first);
+    let other = ingest_evidence(&store, "other", '5');
+    cite_all(&store, "decision-2", "other", '6', &[Some(&other)]);
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    let decisions = [
+        "decision-object-1",
+        "decision-object-unknown",
+        "decision-object-2",
+        "decision-object-1",
+    ];
+    for requested in [before, store.tip().unwrap()] {
+        for max in [1, 8] {
+            let max = std::num::NonZeroUsize::new(max).unwrap();
+            let batch = store
+                .linked_decision_evidence_batch_within_budget(&decisions, requested, max, &budget)
+                .unwrap();
+            let singles: Vec<_> = decisions
+                .iter()
+                .map(|decision| {
+                    store
+                        .linked_decision_evidence_within_budget(decision, requested, max, &budget)
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(batch, singles, "at {requested} bounded by {max}");
+        }
+    }
+    let at_tip = store
+        .linked_decision_evidence_batch_within_budget(
+            &decisions,
+            store.tip().unwrap(),
+            std::num::NonZeroUsize::new(8).unwrap(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(at_tip[0].len(), 2);
+    assert!(at_tip[1].is_empty(), "an unknown decision cites nothing");
+    assert_eq!(at_tip[2].len(), 1);
+    assert!(
+        store
+            .linked_decision_evidence_batch_within_budget(
+                &[],
+                store.tip().unwrap(),
+                std::num::NonZeroUsize::new(8).unwrap(),
+                &budget,
+            )
+            .unwrap()
+            .is_empty()
+    );
+}

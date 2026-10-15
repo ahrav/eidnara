@@ -566,7 +566,10 @@ impl KernelStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
-        let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
+        let limit = i64::try_from(max_rows.get())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        // A literal bound keeps the cached statement valid across calls; SQLite expires a statement whose `LIMIT` parameter is rebound.
         let sql = format!(
             "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
                     o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
@@ -575,19 +578,14 @@ impl KernelStore {
                AND {live}
                AND o.object_id>?3
              ORDER BY o.object_id
-             LIMIT ?4",
+             LIMIT {limit}",
             rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
             live = Descriptors::LiveAtEnd.predicate("?2", "0"),
         );
         let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
         let raw: Vec<LiveDescriptorRaw> = statement
             .query_map(
-                rusqlite::params![
-                    class.code(),
-                    requested,
-                    after.unwrap_or(""),
-                    limit.saturating_add(1)
-                ],
+                rusqlite::params![class.code(), requested, after.unwrap_or("")],
                 |row| {
                     Ok(LiveDescriptorRaw {
                         object_id: row.get(0)?,

@@ -289,6 +289,27 @@ impl KernelStore {
         max: std::num::NonZeroUsize,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        let mut linked = self.linked_decision_evidence_batch_within_budget(
+            &[decision_object_id],
+            requested,
+            max,
+            budget,
+        )?;
+        Ok(linked.pop().unwrap_or_default())
+    }
+
+    /// [`Self::linked_decision_evidence_within_budget`] for each of `decision_object_ids`, in order, read in one transaction at snapshot `requested`, so a caller judging many decisions pays one reader wait and one snapshot check.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::linked_decision_evidence_within_budget`].
+    pub fn linked_decision_evidence_batch_within_budget(
+        &self,
+        decision_object_ids: &[&str],
+        requested: i64,
+        max: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<Vec<LinkedEvidence>>, KernelError> {
         let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -296,8 +317,9 @@ impl KernelStore {
         snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max.get()).unwrap_or(i64::MAX);
         let window = limit.saturating_mul(LINKED_EVENT_WINDOW);
-        let rows = tx
-            .prepare_cached(
+        // The bounds are literals, so the cached statement stays prepared across calls: SQLite records a parameter that bounds a `LIMIT` and expires the statement whenever that parameter is rebound.
+        let linked = tx
+            .prepare_cached(&format!(
                 "WITH decision AS (
                      SELECT decision_id, evidence_id, created_commit_seq FROM decisions
                       WHERE object_id=?1 AND created_commit_seq<=?2
@@ -307,7 +329,7 @@ impl KernelStore {
                        JOIN decision d ON d.decision_id=e.decision_id
                       WHERE e.commit_seq<=?2
                       ORDER BY e.event_ordinal DESC
-                      LIMIT ?4
+                      LIMIT {window}
                  ),
                  cited AS (
                      SELECT evidence_id, created_commit_seq AS cited_at FROM decision
@@ -321,24 +343,26 @@ impl KernelStore {
                           GROUP BY evidence_id) c
                    JOIN evidence_meta m ON m.evidence_id=c.evidence_id
                   ORDER BY c.cited_at DESC, c.evidence_id
-                  LIMIT ?3",
-            )
+                  LIMIT {limit}",
+            ))
             .and_then(|mut statement| {
-                statement
-                    .query_map(
-                        rusqlite::params![decision_object_id, requested, limit, window],
-                        |row| {
-                            Ok(LinkedEvidence {
-                                evidence_id: row.get(0)?,
-                                live: row.get(1)?,
-                            })
-                        },
-                    )?
+                decision_object_ids
+                    .iter()
+                    .map(|decision_object_id| {
+                        statement
+                            .query_map(rusqlite::params![decision_object_id, requested], |row| {
+                                Ok(LinkedEvidence {
+                                    evidence_id: row.get(0)?,
+                                    live: row.get(1)?,
+                                })
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(crate::map_sqlite)?;
         tx.commit().map_err(crate::map_sqlite)?;
-        Ok(rows)
+        Ok(linked)
     }
 
     /// Returns decision-payload sizes in bytes at snapshot `requested`, keyed by `object_id`: the query reads `length(decision_payload)` only, so a caller can bound how many full payloads it materializes before asking for any of them.
@@ -400,11 +424,8 @@ pub(crate) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, 
         return Err(KernelError::InvalidInput);
     }
     let tip = tx
-        .query_row(
-            "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
+        .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
         .map_err(|_| KernelError::Io)?;
     if requested > tip {
         return Err(KernelError::FutureSnapshot);
