@@ -317,7 +317,9 @@ Exercised: yes - `crates/daemon/tests/query_route.rs`
 `the_lexical_ranking_bounds_report_every_scope_they_skip`, and
 `a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves`,
 `crates/daemon/src/query_route.rs`
-`a_response_bound_below_the_empty_envelope_is_refused_at_installation`, and
+`a_response_bound_below_the_empty_envelope_is_refused_at_installation`,
+`crates/daemon/tests/query_route_exact.rs`
+`an_exact_page_larger_than_one_kernel_batch_is_refused_at_installation`, and
 `crates/daemon/tests/query_route_handler.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read`.
 Guarantee: Every bound in `QueryRouteLimits` is checked before the work it
@@ -352,7 +354,9 @@ whose common probe and budget-skipped probe both apply reports `common_terms`
 with `also: ["rank_budget"]`, so every skipped scope is named; a query over `query_bytes` is refused as
 invalid at the handler and again by `classify`; a `validation_batch` over the
 kernel's candidate maximum is refused by `set_query_route_limits` and installs
-nothing; a `response_bytes` one below the floor is refused by `validate` with
+nothing; an `exact_page_rows` over that maximum is refused by `validate`, and
+one equal to it answers a certified whole-request selector directly; a
+`response_bytes` one below the floor is refused by `validate` with
 the floor named, and one above the wire body maximum is refused with the
 maximum named. `always` because each bound must hold on every request.
 Fault/timing angle: None; saturation is reached by shrinking one limit at a

@@ -116,3 +116,17 @@ tracing the window.
 [publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1392-L1404
 [t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
 [fixture-arm]: ../../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
+
+## Dated note (2026-10-14, #1040)
+
+Every line anchor above is as of the recorded head of the investigation. At
+the #1040 head every daemon transform and exact-length response takes the
+direct path through `settle_prepared_via` (`crates/daemon/src/lib.rs:13445`),
+so the window this record describes opens on every such response, and the
+record is `default-production`. The `direct_fill` fixture arm
+(`crates/host-runtime/tests/support/mod.rs:509`) is the marker test's
+vehicle, not the only reach.
+`a_direct_frame_serializes_after_its_handler_has_ended`
+(`crates/host-runtime/tests/direct_frames.rs:103`) counts a serializer that
+runs after a drop guard in its handler future has fired and asserts the count
+is one; the record is `Exercised: yes`.

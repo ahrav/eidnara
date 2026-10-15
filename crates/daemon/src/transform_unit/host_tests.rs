@@ -9,12 +9,18 @@ const PANIC_CANARY: &str = "CANARY-TRANSFORM-PANIC-7a5e";
 const PANIC_CHILD_ENV: &str = "EIDNARA_TRANSFORM_PANIC_CHILD";
 const PROBE_BODY: &[u8] = b"resident-probe";
 
+struct SettleGate {
+    reached: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
 struct ObservedHandler {
     handler: Handler,
     activated: Mutex<Option<oneshot::Sender<()>>>,
     probe: Mutex<Option<oneshot::Sender<RequestCtx>>>,
     request_seen: Mutex<Option<oneshot::Sender<(CancelSignal, usize)>>>,
     gone: Mutex<Option<oneshot::Sender<(RouteHandle, usize)>>>,
+    settle_gate: Arc<Mutex<Option<SettleGate>>>,
 }
 
 impl HostHandler for ObservedHandler {
@@ -70,7 +76,13 @@ impl HostHandler for ObservedHandler {
             let (ingress_bytes, _) = ctx.body.ingress_charge_for_test();
             let _ = seen.send((ctx.cancel_signal(), ingress_bytes));
         }
-        self.handler.handle(ctx).await
+        let outcome = self.handler.handle(ctx).await;
+        let gate = self.settle_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.release.await;
+        }
+        outcome
     }
 
     async fn route_gone(&self, route: RouteHandle) {
@@ -99,6 +111,7 @@ struct DaemonHost {
     request_seen: oneshot::Receiver<(CancelSignal, usize)>,
     gone: oneshot::Receiver<(RouteHandle, usize)>,
     error_published: oneshot::Receiver<(u16, usize)>,
+    settle_gate: Arc<Mutex<Option<SettleGate>>>,
     join: tokio::task::JoinHandle<Result<(), HostError>>,
     stop_on_drop: tokio_util::sync::DropGuard,
     _dir: tempfile::TempDir,
@@ -116,12 +129,14 @@ impl DaemonHost {
         let (probe_tx, probe_rx) = oneshot::channel();
         let (seen_tx, request_seen) = oneshot::channel();
         let (gone_tx, gone) = oneshot::channel();
+        let settle_gate = Arc::new(Mutex::new(None));
         let observed = ObservedHandler {
             handler,
             activated: Mutex::new(Some(activated)),
             probe: Mutex::new(Some(probe_tx)),
             request_seen: Mutex::new(Some(seen_tx)),
             gone: Mutex::new(Some(gone_tx)),
+            settle_gate: Arc::clone(&settle_gate),
         };
         let mut config = HostConfig {
             data_dir: Some(dir.path().join("host")),
@@ -198,20 +213,42 @@ impl DaemonHost {
             request_seen,
             gone,
             error_published,
+            settle_gate,
             join,
             stop_on_drop,
             _dir: dir,
         }
     }
 
+    fn hold_next_settled(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, settled) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        *self.settle_gate.lock().unwrap() = Some(SettleGate {
+            reached,
+            release: released,
+        });
+        (settled, release)
+    }
+
+    fn transform_body(&self) -> Vec<u8> {
+        serde_json::to_vec(&request(vec![ck("m1", 1, "durable host transform")])).unwrap()
+    }
+
     async fn transform(&self) -> ResponseStream {
         watchdog(self.client.request_stream(
             self.route,
-            serde_json::to_vec(&request(vec![ck("m1", 1, "durable host transform")])).unwrap(),
+            self.transform_body(),
             RequestOptions::default(),
         ))
         .await
         .unwrap()
+    }
+
+    /// A successful probe releases its reservation before returning.
+    fn scratch_is_free(&self) -> bool {
+        self.probe
+            .try_reserve_resident(self.probe.resident_capacity())
+            .is_some()
     }
 
     fn assert_scratch_released(&self) {
@@ -369,6 +406,39 @@ async fn route_close_keeps_binding_and_scratch_until_transform_finishes() {
 #[tokio::test(flavor = "current_thread")]
 async fn request_cancel_waits_for_committed_transform_and_releases_scratch() {
     interrupt_held_transform(Interruption::RequestCancel).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_settled_direct_response_holds_its_decode_charges_until_it_publishes() {
+    let host = DaemonHost::start(Box::new(|| {})).await;
+    host.assert_scratch_released();
+    let (mut settled, release) = host.hold_next_settled();
+    let response = {
+        let response =
+            host.client
+                .request(host.route, host.transform_body(), RequestOptions::default());
+        tokio::pin!(response);
+        watchdog(async {
+            tokio::select! {
+                result = &mut settled => result.expect("the handler settles the transform"),
+                result = &mut response => panic!("the response published before release: {result:?}"),
+            }
+        })
+        .await;
+        assert!(
+            !host.scratch_is_free(),
+            "the decode charges stay held while the settled response waits to publish"
+        );
+        release.send(()).unwrap();
+        watchdog(response).await.unwrap()
+    };
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(
+        body["operations"].is_array(),
+        "the transform settles as a recipe"
+    );
+    host.assert_scratch_released();
+    host.stop().await;
 }
 
 #[tokio::test(flavor = "current_thread")]

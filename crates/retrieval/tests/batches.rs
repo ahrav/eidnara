@@ -10,12 +10,13 @@ use kernel::Sensitivity;
 use kernel::source_identity::{Occurrence, Span};
 use retrieval::batch::{
     BatchBounds, BatchFault, BatchOutcome, BatchStatus, Invalidation, MutationIdentity,
-    ProjectionBatch, VectorGeneration, apply_batch, apply_batch_with_fault_for_test, batch_status,
+    ProjectionBatch, ProjectionCheckpoint, VectorGeneration, apply_batch,
+    apply_batch_with_fault_for_test, batch_status, read_checkpoint, read_identity_and_checkpoint,
     register_generation,
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
-    TombstoneReason, install_identity, message_cleanup, read_occurrence,
+    TombstoneReason, install_identity, message_cleanup, read_identity, read_occurrence,
 };
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
@@ -2587,4 +2588,52 @@ fn rows_map_to_a_batch_at_the_window_edges_and_selected_text_persists_under_its_
             Ok(())
         })
         .unwrap();
+}
+
+/// The joined read returns what `read_identity` and `read_checkpoint` return before an identity is installed, before the first batch commits, and after it commits.
+#[test]
+fn the_joined_identity_and_checkpoint_read_equals_the_separate_reads() {
+    type Read = Option<(ProjectionIdentity, Option<ProjectionCheckpoint>)>;
+    let reads = |store: &SqliteStore| -> (Read, Read) {
+        store
+            .with_conn(|conn| {
+                let joined = read_identity_and_checkpoint(conn).unwrap();
+                let separate = read_identity(conn).unwrap().map(|identity| {
+                    let checkpoint =
+                        read_checkpoint(conn, &identity.kernel_incarnation_id).unwrap();
+                    (identity, checkpoint)
+                });
+                Ok((joined, separate))
+            })
+            .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    assert_eq!(reads(&store), (None, None));
+
+    setup(&store);
+    let (joined, separate) = reads(&store);
+    assert_eq!(joined, Some((identity(), None)));
+    assert_eq!(joined, separate);
+
+    let empty = ProjectionBatch {
+        identity: mutation(5, 7),
+        records: vec![],
+        invalidations: vec![],
+        generation_id: Some(GENERATION),
+    };
+    assert_eq!(apply(&store, &empty, 11).unwrap().checkpoint_commit_seq, 7);
+    let (joined, separate) = reads(&store);
+    assert_eq!(
+        joined,
+        Some((
+            identity(),
+            Some(ProjectionCheckpoint {
+                snapshot_commit_seq: 5,
+                checkpoint_commit_seq: 7,
+                hold_id: HOLD.to_string(),
+            })
+        ))
+    );
+    assert_eq!(joined, separate);
 }

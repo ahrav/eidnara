@@ -12,7 +12,7 @@ use host_runtime::generation::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
-use retrieval::batch::{VectorGeneration, read_checkpoint};
+use retrieval::batch::{VectorGeneration, read_checkpoint, read_identity_and_checkpoint};
 use retrieval::coverage::{
     CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active_visiting,
     verify_pages,
@@ -1210,13 +1210,29 @@ impl SearchReader {
         budget: &EvalBudget,
         read: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, BuildError> {
-        if !self.usable() {
-            return Err(BuildError::Invalid("pinned read unavailable"));
-        }
+        let deadline = self.pinned_deadline(budget)?;
+        Ok(self.family.projection.read_within(deadline, read)?)
+    }
+
+    /// [`Self::read`] whose connection wait and statements also end once `budget` is exhausted.
+    fn read_interruptible<T>(
+        &self,
+        budget: &EvalBudget,
+        read: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, BuildError> {
+        let deadline = self.pinned_deadline(budget)?;
+        let stop = budget.clone();
         Ok(self
             .family
             .projection
-            .read_within(deadline(budget)?, read)?)
+            .read_until(deadline, move || stop.is_exhausted(), read)?)
+    }
+
+    fn pinned_deadline(&self, budget: &EvalBudget) -> Result<std::time::Instant, BuildError> {
+        if !self.usable() {
+            return Err(BuildError::Invalid("pinned read unavailable"));
+        }
+        deadline(budget)
     }
 
     /// The inventory epoch binds completeness certificates to the family's kernel incarnation, the kernel lease epoch, the seed digest, and the consumer ID.
@@ -1268,8 +1284,13 @@ impl SearchReader {
             return Err(ProjectionError::IdentityMismatch.into());
         }
         let checkpoint = self
-            .read(budget, |conn| {
-                read_checkpoint(conn, &seed.kernel_incarnation_id)
+            .read_interruptible(budget, |conn| match read_identity_and_checkpoint(conn)? {
+                Some((identity, checkpoint))
+                    if identity.kernel_incarnation_id == seed.kernel_incarnation_id =>
+                {
+                    Ok(checkpoint)
+                }
+                _ => Err(ProjectionError::IdentityMismatch),
             })?
             .ok_or(BuildError::Invalid("the family has no applied prefix"))?;
         let complete_through = checkpoint.checkpoint_commit_seq;
