@@ -148,7 +148,13 @@ impl fmt::Debug for LeaseSpan<'_> {
 
 const WORD: usize = size_of::<u64>();
 
+/// Words each copy step moves.
 const WORDS_PER_STEP: usize = 4;
+
+const STEP_BYTES: usize = WORDS_PER_STEP * WORD;
+
+// The aarch64 step kernels move exactly two 128-bit registers.
+const _: () = assert!(STEP_BYTES == 32);
 
 /// Per-byte atomic access width for a shared-memory range.
 ///
@@ -224,27 +230,29 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
     let shape = AccessShape::of(source, destination.len());
     let (head, rest) = destination.split_at_mut(shape.head);
     let (words, tail) = rest.split_at_mut(shape.words * WORD);
-    let (steps, single_words) = words
-        .as_chunks_mut::<WORD>()
-        .0
-        .as_chunks_mut::<WORDS_PER_STEP>();
+    let words = words.as_chunks_mut::<WORD>().0;
+    // Single words up to a `STEP_BYTES`-aligned source address align every step load; each word
+    // keeps the address and width `shape` assigns.
+    let lead = (source.wrapping_add(shape.head).addr().wrapping_neg() % STEP_BYTES) / WORD;
+    let (lead_words, words) = words.split_at_mut(lead.min(words.len()));
+    let (steps, single_words) = words.as_chunks_mut::<WORDS_PER_STEP>();
     // SAFETY: `shape` partitions exactly `[0, destination.len())`, which the caller keeps
     // valid for reads and writes with no Rust reference over it. The word region starts at
-    // `source.add(shape.head)`, an 8-aligned address, and `steps` then `single_words` cover
-    // its `shape.words` words in order, so `word` stays 8-aligned, every `from_ptr` lies
-    // entirely within the range, and `word` ends at most one past it.
+    // `source.add(shape.head)`, an 8-aligned address, and `lead_words`, `steps`, then
+    // `single_words` cover its `shape.words` words in order, so `word` stays 8-aligned, every
+    // `from_ptr` and step lies entirely within the range, and `word` ends at most one past it.
     unsafe {
         for (offset, byte) in head.iter_mut().enumerate() {
             byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
         }
         let mut word = source.add(shape.head);
+        for chunk in lead_words {
+            let value = AtomicU64::from_ptr(word.cast()).load(Ordering::Relaxed);
+            *chunk = value.to_ne_bytes().map(MaybeUninit::new);
+            word = word.add(WORD);
+        }
         for step in steps {
-            let loaded: [u64; WORDS_PER_STEP] = std::array::from_fn(|index| {
-                AtomicU64::from_ptr(word.add(index * WORD).cast()).load(Ordering::Relaxed)
-            });
-            for (chunk, value) in step.iter_mut().zip(loaded) {
-                *chunk = value.to_ne_bytes().map(MaybeUninit::new);
-            }
+            copy_step_out(word, step);
             word = word.add(WORDS_PER_STEP * WORD);
         }
         for chunk in single_words {
@@ -254,6 +262,46 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
         }
         for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
             byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
+        }
+    }
+}
+
+/// Copies the `WORDS_PER_STEP` aligned words at `source` into `step`. Each arena word is read by
+/// one aligned 64-bit single-copy-atomic access at the address and width `AccessShape` assigns:
+/// a relaxed `AtomicU64` load, or on aarch64 outside Miri one `ldp q`. Arm ARM B2.2.1 treats
+/// each register of a load pair separately, and a 128-bit SIMD&FP read of a 64-bit-aligned
+/// address as a pair of single-copy-atomic 64-bit reads.
+///
+/// # Safety
+/// `source` is 8-aligned and `source..source.add(STEP_BYTES)` lies in a range
+/// `copy_out_uninit`'s caller keeps valid for reads and writes with no Rust reference over it.
+#[inline(always)]
+unsafe fn copy_step_out(source: *mut u8, step: &mut [[MaybeUninit<u8>; WORD]; WORDS_PER_STEP]) {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    // SAFETY: `source` is 8-aligned and its `STEP_BYTES` lie in the caller's valid range, and
+    // `step` is `STEP_BYTES` of ordinary writable memory, where an unaligned SIMD store is
+    // valid. The asm behaves as `WORDS_PER_STEP` relaxed `AtomicU64` loads followed by plain
+    // stores of the loaded, initialized values into `step`, so a concurrent same-shape store is
+    // a stale read, not a data race.
+    unsafe {
+        std::arch::asm!(
+            "ldp {lo:q}, {hi:q}, [{source}]",
+            "stp {lo:q}, {hi:q}, [{destination}]",
+            source = in(reg) source,
+            destination = in(reg) step.as_mut_ptr(),
+            lo = out(vreg) _,
+            hi = out(vreg) _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    {
+        // SAFETY: every word start is 8-aligned and lies inside the caller's valid range.
+        let loaded: [u64; WORDS_PER_STEP] = std::array::from_fn(|index| unsafe {
+            AtomicU64::from_ptr(source.add(index * WORD).cast()).load(Ordering::Relaxed)
+        });
+        for (chunk, value) in step.iter_mut().zip(loaded) {
+            *chunk = value.to_ne_bytes().map(MaybeUninit::new);
         }
     }
 }
@@ -282,10 +330,7 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
         }
         let mut word = destination.add(shape.head);
         for step in steps {
-            for (index, chunk) in step.iter().enumerate() {
-                AtomicU64::from_ptr(word.add(index * WORD).cast())
-                    .store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
-            }
+            copy_step_in(step, word);
             word = word.add(WORDS_PER_STEP * WORD);
         }
         for chunk in single_words {
@@ -294,6 +339,43 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
         }
         for (offset, byte) in shape.tail_range().zip(tail.iter()) {
             AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Stores the `WORDS_PER_STEP` words of `step` to the aligned arena words at `destination`.
+/// Each arena word is written by one aligned 64-bit single-copy-atomic access at the address
+/// and width `AccessShape` assigns: a relaxed `AtomicU64` store, or on aarch64 outside Miri one
+/// `stp q`. Arm ARM B2.2.1 treats each register of a store pair separately, and a 128-bit
+/// SIMD&FP write to a 64-bit-aligned address as a pair of single-copy-atomic 64-bit writes.
+///
+/// # Safety
+/// `destination` is 8-aligned and `destination..destination.add(STEP_BYTES)` lies in a range
+/// `copy_in`'s caller keeps valid for reads and writes with no Rust reference over it.
+#[inline(always)]
+unsafe fn copy_step_in(step: &[[u8; WORD]; WORDS_PER_STEP], destination: *mut u8) {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    // SAFETY: `step` is `STEP_BYTES` of ordinary readable memory, where an unaligned SIMD load
+    // is valid, and `destination` is 8-aligned with its `STEP_BYTES` in the caller's valid
+    // range. The asm behaves as plain loads of `step` followed by `WORDS_PER_STEP` relaxed
+    // `AtomicU64` stores of those words, so a concurrent same-shape load observes whole words.
+    unsafe {
+        std::arch::asm!(
+            "ldp {lo:q}, {hi:q}, [{source}]",
+            "stp {lo:q}, {hi:q}, [{destination}]",
+            source = in(reg) step.as_ptr(),
+            destination = in(reg) destination,
+            lo = out(vreg) _,
+            hi = out(vreg) _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    for (index, chunk) in step.iter().enumerate() {
+        // SAFETY: every word start is 8-aligned and lies inside the caller's valid range.
+        unsafe {
+            AtomicU64::from_ptr(destination.add(index * WORD).cast())
+                .store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
         }
     }
 }
@@ -573,16 +655,16 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        AccessShape, LeaseError, LeaseSpan, PayloadLease, WORD, WORDS_PER_STEP, copy_in, copy_out,
-        copy_out_uninit, observers,
+        AccessShape, LeaseError, LeaseSpan, PayloadLease, STEP_BYTES, WORD, WORDS_PER_STEP,
+        copy_in, copy_out, copy_out_uninit, observers,
     };
     use crate::backend::retained::Retained;
     use std::mem::MaybeUninit;
 
-    /// Copy lengths below this reach two full word steps followed by up to three single words
-    /// at every shift. The uninitialized copy test round-trips each length through `copy_in`
-    /// and `copy_out_uninit`, so it covers every loop of both kernels.
-    const COPY_LENGTHS: usize = (2 * WORDS_PER_STEP + 4) * WORD;
+    /// Copy lengths below this reach a full head, a full lead, two full word steps, and up to
+    /// three single words at every shift. The uninitialized copy test round-trips each length
+    /// through `copy_in` and `copy_out_uninit`, so it covers every loop of both kernels.
+    const COPY_LENGTHS: usize = (2 * WORDS_PER_STEP + 7) * WORD;
 
     pub(crate) use super::retained_fixture;
 
@@ -738,12 +820,16 @@ mod tests {
 
     /// The zero-fill-free copy initializes every destination byte at every source alignment
     /// and length. The destination starts uninitialized, so under Miri a byte the copy
-    /// skipped is an uninitialized read when the result is compared.
+    /// skipped is an uninitialized read when the result is compared. `STEP_BYTES` consecutive
+    /// shifts reach every head length and every count of single words before the first
+    /// step-aligned word, whatever the buffer's own alignment. Outside Miri, a second copy into
+    /// a sentinel-filled buffer exposes a skipped byte in the aarch64 step kernels, which Miri
+    /// cannot run.
     #[test]
     fn copy_out_uninit_initializes_every_byte_at_every_alignment_and_length() {
         use std::sync::atomic::AtomicU8;
-        let source: Vec<u8> = (0..128u8).collect();
-        for shared_shift in 0..16 {
+        let source: Vec<u8> = (0..COPY_LENGTHS as u8).collect();
+        for shared_shift in 0..STEP_BYTES {
             for len in 0..COPY_LENGTHS {
                 let shared: Vec<AtomicU8> = (0..len + shared_shift)
                     .map(|_| AtomicU8::new(0xff))
@@ -762,6 +848,12 @@ mod tests {
                     back.set_len(len);
                 }
                 assert_eq!(back, source[..len], "shift {shared_shift} len {len}");
+                if !cfg!(miri) {
+                    let mut sentinel = vec![0xa5_u8; len];
+                    // SAFETY: as above; `copy_out` writes all `len` bytes of `sentinel`.
+                    unsafe { copy_out(shared_ptr.add(shared_shift), &mut sentinel) };
+                    assert_eq!(sentinel, source[..len], "shift {shared_shift} len {len}");
+                }
             }
         }
     }
@@ -886,8 +978,17 @@ mod tests {
         const LEN: usize = 62;
         let rounds = if cfg!(miri) { 4 } else { 64 };
         let shared: [AtomicU64; 9] = std::array::from_fn(|_| AtomicU64::new(0x1111_1111_1111_1111));
+        /// Stops the writer when the reader returns or panics, so a failed assertion fails the
+        /// test instead of leaving the scope waiting on a writer that never stops.
+        struct StopOnDrop<'flag>(&'flag AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
         let stop = AtomicBool::new(false);
         std::thread::scope(|scope| {
+            let _stop_writer = StopOnDrop(&stop);
             scope.spawn(|| {
                 let base = shared.as_ptr().cast_mut().cast::<u8>();
                 let mut value = 0x11u8;
@@ -902,6 +1003,7 @@ mod tests {
             // SAFETY: `shared` is live for both calls and no `&[u8]` or `&mut [u8]` is formed
             // over it; the atomics are the only accesses.
             let span = unsafe { LeaseSpan::new(base.add(SHIFT), LEN) }.unwrap();
+            let shape = AccessShape::of(base.wrapping_add(SHIFT), LEN);
             let mut copy = [0u8; LEN];
             for _ in 0..rounds {
                 for index in 0..LEN {
@@ -910,13 +1012,21 @@ mod tests {
                 }
                 span.copy_to(&mut copy).unwrap();
                 assert!(copy.iter().all(|byte| *byte == 0x11 || *byte == 0x22));
+                // The writer stores one value per word, so a single-copy-atomic word read
+                // returns eight equal bytes.
+                let words = &copy[shape.head..shape.head + shape.words * WORD];
+                for word in words.as_chunks::<WORD>().0 {
+                    assert!(
+                        word.iter().all(|byte| *byte == word[0]),
+                        "torn word {word:x?}"
+                    );
+                }
                 let sum = span.checksum();
                 assert!(
                     sum >= 0x11 * LEN as u64 && sum <= 0x22 * LEN as u64,
                     "{sum}"
                 );
             }
-            stop.store(true, Ordering::Relaxed);
         });
     }
 }
