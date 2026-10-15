@@ -327,8 +327,18 @@ fn check_identity(value: &str) -> Result<(), MemoryReviewerJobRefusal> {
     Ok(())
 }
 
-fn digest_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+/// Feeds serialized bytes into a SHA-256 state.
+struct HashingWriter(Sha256);
+
+impl std::io::Write for HashingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl ReviewTarget {
@@ -369,12 +379,26 @@ impl ReviewTarget {
 impl CausalInputs {
     /// Sorted, deduplicated, and validated; identity derives from this form.
     fn normalized(mut self) -> Result<Self, MemoryReviewerJobRefusal> {
-        self.target.validate()?;
-        check_identity(&self.question_template)?;
         self.signals.sort();
         self.signals.dedup();
         self.required_evidence.sort();
         self.required_evidence.dedup();
+        self.check_normalized()?;
+        Ok(self)
+    }
+
+    /// Whether both lists are strictly ascending, so [`Self::normalized`] would leave them unchanged.
+    fn is_normalized(&self) -> bool {
+        self.signals.is_sorted_by(|left, right| left < right)
+            && self
+                .required_evidence
+                .is_sorted_by(|left, right| left < right)
+    }
+
+    /// The checks [`Self::normalized`] applies to its sorted, deduplicated form.
+    fn check_normalized(&self) -> Result<(), MemoryReviewerJobRefusal> {
+        self.target.validate()?;
+        check_identity(&self.question_template)?;
         // One availability per evidence id; a producer that reports both is inconsistent, not causally distinct.
         if self
             .required_evidence
@@ -399,7 +423,7 @@ impl CausalInputs {
             check_identity(name)?;
             check_identity(version)?;
         }
-        Ok(self)
+        Ok(())
     }
 
     /// Digest of everything but the target.
@@ -411,24 +435,35 @@ impl CausalInputs {
             required_evidence: &'a [EvidenceAvailability],
             policy_versions: &'a BTreeMap<String, String>,
         }
-        let bytes = serde_json::to_vec(&Fingerprint {
-            question_template: &self.question_template,
-            signals: &self.signals,
-            required_evidence: &self.required_evidence,
-            policy_versions: &self.policy_versions,
-        })
+        let mut writer = HashingWriter(Sha256::new());
+        serde_json::to_writer(
+            &mut writer,
+            &Fingerprint {
+                question_template: &self.question_template,
+                signals: &self.signals,
+                required_evidence: &self.required_evidence,
+                policy_versions: &self.policy_versions,
+            },
+        )
         .map_err(|_| MemoryReviewerJobRefusal::InvalidRequest)?;
-        Ok(digest_hex(&bytes))
+        Ok(format!("{:x}", writer.0.finalize()))
     }
 
-    /// The causal review identity: target digest joined with the fingerprint.
+    /// The causal review identity: the digest of the target's JSON joined by the unit separator with the fingerprint, over the normalized form.
     pub fn causal_identity(&self) -> Result<String, MemoryReviewerJobRefusal> {
-        let normalized = self.clone().normalized()?;
-        let target = normalized.target.encode()?;
-        let fingerprint = normalized.fingerprint()?;
-        Ok(digest_hex(
-            format!("{target}\u{1f}{fingerprint}").as_bytes(),
-        ))
+        let owned;
+        let normalized = if self.is_normalized() {
+            self.check_normalized()?;
+            self
+        } else {
+            owned = self.clone().normalized()?;
+            &owned
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(normalized.target.encode()?.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(normalized.fingerprint()?.as_bytes());
+        Ok(format!("{:x}", hasher.finalize()))
     }
 
     /// Every caller string, scanned raw at the transaction ceiling before any of it is serialized. The trigger scans stored columns too, but a keyed-JSON credential escaped inside `target_json`, `input_json`, or `page_json` is past the detector, and fingerprinted fields never reach a column at all.
@@ -542,13 +577,10 @@ pub(crate) fn load_memory_reviewer_job(
     project: &str,
     causal_identity: &str,
 ) -> rusqlite::Result<Option<MemoryReviewerJob>> {
-    conn.query_row(
-        &format!(
-            "SELECT {JOB_COLUMNS} FROM memory_reviewer_jobs WHERE project = ?1 AND causal_identity = ?2"
-        ),
-        params![project, causal_identity],
-        job_from_row,
-    )
+    conn.prepare_cached(&format!(
+        "SELECT {JOB_COLUMNS} FROM memory_reviewer_jobs WHERE project = ?1 AND causal_identity = ?2"
+    ))?
+    .query_row(params![project, causal_identity], job_from_row)
     .optional()
 }
 
@@ -1809,6 +1841,25 @@ impl MemoryStore {
         check_project(project)?;
         self.inner
             .with_conn(|conn| load_memory_reviewer_job(conn, project, causal_identity))
+            .map_err(Into::into)
+    }
+
+    pub fn memory_reviewer_jobs_exist(
+        &self,
+        project: &str,
+        causal_identities: &[&str],
+    ) -> Result<Vec<bool>, MemoryStoreError> {
+        check_project(project)?;
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM memory_reviewer_jobs WHERE project = ?1 AND causal_identity = ?2)",
+                )?;
+                causal_identities
+                    .iter()
+                    .map(|identity| statement.query_row(params![project, identity], |row| row.get(0)))
+                    .collect()
+            })
             .map_err(Into::into)
     }
 

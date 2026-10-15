@@ -1833,3 +1833,97 @@ fn a_terminal_page_releases_the_scan_audit_of_its_references() {
         "only the identities the compact row still retains keep their audit"
     );
 }
+
+/// Persisted jobs are keyed by their causal identity: the SHA-256 of the target's JSON, a unit separator, and the fingerprint's hex digest, over the sorted and deduplicated inputs. These values are pinned, and input order or duplicates do not move them.
+#[test]
+fn causal_identities_are_pinned_and_independent_of_input_order() {
+    let staged = inputs("cand-1");
+    assert_eq!(
+        staged.causal_identity().unwrap(),
+        "587a1bcb26fbe6b1a9aa52b6566c0ff1d1b51653ddf0bf76e3dfdbac686d5513"
+    );
+    let mut shuffled = staged.clone();
+    shuffled.signals.reverse();
+    shuffled.signals.push("drift".to_string());
+    shuffled
+        .required_evidence
+        .push(shuffled.required_evidence[0].clone());
+    assert_eq!(shuffled.causal_identity(), staged.causal_identity());
+    let memory = CausalInputs {
+        target: ReviewTarget::Memory {
+            object_id: "m\u{e9}mo \"1\"".to_string(),
+            source_revision: 7,
+        },
+        required_evidence: vec![
+            EvidenceAvailability {
+                evidence_id: "ev-b".to_string(),
+                available: false,
+            },
+            EvidenceAvailability {
+                evidence_id: "ev-a".to_string(),
+                available: true,
+            },
+        ],
+        ..inputs("unused")
+    };
+    assert_eq!(
+        memory.causal_identity().unwrap(),
+        "cd8b7c7d454b69d6b555bef7fde8c0ca189977c15aad096b1f8121a53b23c5fc"
+    );
+    let mut conflicting = memory.clone();
+    conflicting.required_evidence.push(EvidenceAvailability {
+        evidence_id: "ev-a".to_string(),
+        available: false,
+    });
+    assert_eq!(
+        conflicting.causal_identity(),
+        Err(MemoryReviewerJobRefusal::InvalidRequest),
+        "one evidence id with two availabilities has no identity"
+    );
+    // The same conflict already in ascending order is refused too.
+    conflicting.required_evidence = vec![
+        EvidenceAvailability {
+            evidence_id: "ev-a".to_string(),
+            available: false,
+        },
+        EvidenceAvailability {
+            evidence_id: "ev-a".to_string(),
+            available: true,
+        },
+    ];
+    assert_eq!(
+        conflicting.causal_identity(),
+        Err(MemoryReviewerJobRefusal::InvalidRequest)
+    );
+}
+
+/// The selector's deduplication read answers every identity of a batch in request order, within its project only.
+#[test]
+fn job_existence_answers_each_identity_in_request_order_within_its_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let held = reserved(
+        store
+            .reserve_memory_reviewer_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    )
+    .causal_identity;
+    let absent = inputs("cand-2").causal_identity().unwrap();
+    assert_eq!(
+        store
+            .memory_reviewer_jobs_exist("proj", &[&held, &absent, &held])
+            .unwrap(),
+        vec![true, false, true]
+    );
+    assert_eq!(
+        store.memory_reviewer_jobs_exist("other", &[&held]).unwrap(),
+        vec![false],
+        "another project's job is not this project's"
+    );
+    assert!(
+        store
+            .memory_reviewer_jobs_exist("proj", &[])
+            .unwrap()
+            .is_empty()
+    );
+}

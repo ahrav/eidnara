@@ -277,7 +277,7 @@ impl KernelStore {
         Ok(targets)
     }
 
-    /// The evidence the decision at `decision_object_id` cites at snapshot `requested`: its own `evidence_id` and the evidence of its newest events, most recently cited first, ties in evidence-id order, at most `max` rows. Each row says whether the evidence was live at `requested`. The read walks the decision's events newest first in primary-key order and stops after the newest [`LINKED_EVENT_WINDOW`] × `max` at or before `requested`, so its work is bounded by that window and the events newer than the snapshot, whatever the decision's history; a decision that re-cites the same evidence heavily inside that window can return fewer than `max` rows. A decision unknown at `requested` cites nothing; one retired at `requested` still reports the citations it made. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    /// The evidence the decision at `decision_object_id` cites at snapshot `requested`: its own `evidence_id` and the evidence of its newest events, most recently cited first, ties in evidence-id order, at most `max` rows. Each row says whether the evidence was live at `requested`. The read walks the decision's events newest first in primary-key order and stops after the newest [`LINKED_EVENT_WINDOW`] × `max` at or before `requested`, so its work is bounded by that window and the events newer than the snapshot, whatever the decision's history. It stops sooner once `max` rows carry citations newer than the next event, which no older event can change; a decision that re-cites the same evidence heavily inside that window can return fewer than `max` rows. A decision unknown at `requested` cites nothing; one retired at `requested` still reports the citations it made. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
@@ -289,13 +289,37 @@ impl KernelStore {
         max: std::num::NonZeroUsize,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        let mut rows = self.linked_decisions_evidence_within_budget(
+            &[decision_object_id],
+            requested,
+            max,
+            budget,
+        )?;
+        Ok(rows.pop().unwrap_or_default())
+    }
+
+    /// [`Self::linked_decision_evidence_within_budget`] for each of `decision_object_ids`, in request order, all read in one snapshot transaction; the work is that read's bound once per id.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::linked_decision_evidence_within_budget`].
+    pub fn linked_decisions_evidence_within_budget(
+        &self,
+        decision_object_ids: &[&str],
+        requested: i64,
+        max: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<Vec<LinkedEvidence>>, KernelError> {
         let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(crate::map_sqlite)?;
         snapshot_tip(&tx, requested)?;
-        let rows =
-            linked_evidence(&tx, decision_object_id, requested, max).map_err(crate::map_sqlite)?;
+        let rows = decision_object_ids
+            .iter()
+            .map(|decision_object_id| linked_evidence(&tx, decision_object_id, requested, max))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(crate::map_sqlite)?;
         tx.commit().map_err(crate::map_sqlite)?;
         Ok(rows)
     }
@@ -398,15 +422,15 @@ fn linked_evidence(
     };
     // Each evidence id with its latest citation and liveness.
     let mut cited: Vec<(String, i64, bool)> = Vec::new();
-    let mut cite = |evidence_id: String, cited_at: i64, live: bool| {
-        if let Some(entry) = cited.iter_mut().find(|(id, ..)| *id == evidence_id) {
+    let cite = |cited: &mut Vec<(String, i64, bool)>, evidence_id: &str, cited_at, live| {
+        if let Some(entry) = cited.iter_mut().find(|(id, ..)| id == evidence_id) {
             entry.1 = entry.1.max(cited_at);
         } else {
-            cited.push((evidence_id, cited_at, live));
+            cited.push((evidence_id.to_string(), cited_at, live));
         }
     };
-    if let Some((evidence_id, live)) = own {
-        cite(evidence_id, created, live);
+    if let Some((evidence_id, live)) = &own {
+        cite(&mut cited, evidence_id, created, *live);
     }
     let mut events = tx.prepare_cached(
         "SELECT m.evidence_id, e.commit_seq,
@@ -416,11 +440,16 @@ fn linked_evidence(
           ORDER BY e.event_ordinal DESC",
     )?;
     let mut rows = events.query(rusqlite::params![decision_id, requested])?;
-    // Stepping stops at the window, so the walk reads no older event.
+    // Stepping stops at the window, so the walk reads no older event. An append takes its decision's next ordinal in its own commit, and events are never updated or deleted, so commit sequences never rise along the walk: once `max` ids are cited after this event's commit, no later row can enter or reorder them, and the walk stops there.
     for _ in 0..max.get().saturating_mul(LINKED_EVENT_WINDOW) {
         let Some(row) = rows.next()? else { break };
-        if let Some(evidence_id) = row.get::<_, Option<String>>(0)? {
-            cite(evidence_id, row.get(1)?, row.get(2)?);
+        let cited_at: i64 = row.get(1)?;
+        let settled = cited.iter().filter(|(_, at, _)| *at > cited_at).count() >= max.get();
+        if settled {
+            break;
+        }
+        if let Some(evidence_id) = row.get_ref(0)?.as_str_or_null()? {
+            cite(&mut cited, evidence_id, cited_at, row.get(2)?);
         }
     }
     cited.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));

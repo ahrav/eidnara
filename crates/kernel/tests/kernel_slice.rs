@@ -1983,3 +1983,151 @@ fn linked_decision_evidence_reads_only_the_newest_event_window() {
     cite_all(&store, "decision-1", "one-more", '6', &[None]);
     assert_eq!(linked(), vec![recent], "one event past the window");
 }
+
+/// The batch read returns, in request order, what each decision's own read returns at the same snapshot: repeats, unknown ids, and an empty request included.
+#[test]
+fn linked_decisions_evidence_answers_each_decision_as_its_own_read_does() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let own = ingest_evidence(&store, "own", '1');
+    store
+        .commit(intent("decisions", '2'), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                evidence_id: Some(own.clone()),
+                ..decision(1)
+            })?;
+            envelope.insert_decision(decision(2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let first = ingest_evidence(&store, "first", '3');
+    cite_all(&store, "decision-2", "first", '4', &[Some(&first)]);
+    let at_first = store.tip().unwrap();
+    let second = ingest_evidence(&store, "second", '5');
+    cite_all(&store, "decision-1", "second", '6', &[Some(&second)]);
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    let max = std::num::NonZeroUsize::new(8).unwrap();
+    let ids = [
+        "decision-object-2",
+        "unknown",
+        "decision-object-1",
+        "decision-object-2",
+    ];
+    for requested in [at_first, store.tip().unwrap()] {
+        let batch = store
+            .linked_decisions_evidence_within_budget(&ids, requested, max, &budget)
+            .unwrap();
+        let single: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                store
+                    .linked_decision_evidence_within_budget(id, requested, max, &budget)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(batch, single);
+    }
+    assert_eq!(
+        store
+            .linked_decisions_evidence_within_budget(&ids, store.tip().unwrap(), max, &budget)
+            .unwrap()[2]
+            .iter()
+            .map(|row| row.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        [second.as_str(), own.as_str()]
+    );
+    assert!(
+        store
+            .linked_decisions_evidence_within_budget(&[], store.tip().unwrap(), max, &budget)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.linked_decisions_evidence_within_budget(&ids, store.tip().unwrap() + 1, max, &budget),
+        Err(KernelError::FutureSnapshot)
+    );
+}
+
+/// The read agrees with the specified model at every snapshot and bound: walk the newest `LINKED_EVENT_WINDOW` × `max` events at or before the snapshot, keep each cited id at its latest citation with the decision's own evidence cited at its creation, and order by that citation newest first, ties by evidence id. Commits carry one to three events, so citations tie, and evidence repeats, so ids move to the front.
+#[test]
+fn linked_decision_evidence_matches_the_window_model_under_seeded_citations() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let pool: Vec<String> = (0..10)
+        .map(|n| ingest_evidence(&store, &format!("pool-{n}"), '1'))
+        .collect();
+    store
+        .commit(intent("decision-1", '2'), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                evidence_id: Some(pool[0].clone()),
+                ..decision(1)
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let created = store.tip().unwrap();
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    // Every appended event as (commit sequence, cited evidence), oldest first.
+    let mut events: Vec<(i64, Option<String>)> = Vec::new();
+    let mut snapshots = vec![created];
+    for commit in 0..40 {
+        let cited: Vec<Option<&str>> = (0..=next(3))
+            .map(|_| {
+                let pick = next(12);
+                (pick < 10).then(|| pool[usize::try_from(pick).unwrap()].as_str())
+            })
+            .collect();
+        cite_all(
+            &store,
+            "decision-1",
+            &format!("seeded-{commit}"),
+            '3',
+            &cited,
+        );
+        let tip = store.tip().unwrap();
+        events.extend(cited.iter().map(|id| (tip, id.map(str::to_string))));
+        snapshots.push(tip);
+    }
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    for &requested in &snapshots {
+        for max in [1usize, 2, 3, 8] {
+            let mut cited: Vec<(String, i64)> = vec![(pool[0].clone(), created)];
+            for (at, id) in events
+                .iter()
+                .rev()
+                .filter(|(at, _)| *at <= requested)
+                .take(max * kernel::LINKED_EVENT_WINDOW)
+            {
+                let Some(id) = id else { continue };
+                match cited.iter_mut().find(|(known, _)| known == id) {
+                    Some(entry) => entry.1 = entry.1.max(*at),
+                    None => cited.push((id.clone(), *at)),
+                }
+            }
+            cited.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+            cited.truncate(max);
+            let expected: Vec<(String, bool)> =
+                cited.into_iter().map(|(id, _)| (id, true)).collect();
+            let actual: Vec<(String, bool)> = store
+                .linked_decision_evidence_within_budget(
+                    "decision-object-1",
+                    requested,
+                    std::num::NonZeroUsize::new(max).unwrap(),
+                    &budget,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.evidence_id, row.live))
+                .collect();
+            assert_eq!(actual, expected, "snapshot {requested}, max {max}");
+        }
+    }
+}

@@ -730,3 +730,79 @@ fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
     let page = fixture.select(MEMORY_CLASSES, None);
     assert_eq!(Fixture::targets(&page), vec![target]);
 }
+
+/// One batch fingerprints its permitted decision-derived rows together, so each selected target carries its own decision's citations even with denied rows and a row the ledger cannot bind sorted between them; a held row is passed while the others are still selected with their own inputs.
+#[test]
+fn a_batch_pairs_each_target_with_its_own_linked_evidence() {
+    let fixture = Fixture::open();
+    let derived = |key: &str, provenance: Option<kernel::RepositoryProvenance>| {
+        let object_id = fixture.publish_derived_over(
+            key,
+            "canonical_claims",
+            "object_id",
+            "decision_summary",
+            provenance,
+        );
+        let evidence = fixture.evidence(&format!("for-{}", &key[..2]));
+        fixture.link(key, &evidence);
+        object_id
+    };
+    let permitted: BTreeMap<String, String> = ["p0", "p1", "p2"]
+        .into_iter()
+        .map(|key| (derived(key, Some(repository(key))), key.to_string()))
+        .collect();
+    let denied: Vec<String> = ["d0", "d1", "d2"]
+        .into_iter()
+        .map(|key| derived(key, None))
+        .collect();
+    let unbindable = derived(&format!("u{}", "u".repeat(299)), Some(repository("u")));
+    assert!(
+        denied
+            .iter()
+            .chain([&unbindable])
+            .any(|id| permitted.keys().any(|p| id < p)),
+        "a passed row sorts before a selected one, so a misaligned read would show"
+    );
+    let selected = |page: &memory_store::memory_reviewer_jobs::FrozenSelectionPage| {
+        page.references
+            .iter()
+            .map(|inputs| {
+                let ReviewTarget::Memory { object_id, .. } = &inputs.target else {
+                    panic!("{:?}", inputs.target)
+                };
+                let evidence: Vec<(String, bool)> = inputs
+                    .required_evidence
+                    .iter()
+                    .map(|e| (e.evidence_id.clone(), e.available))
+                    .collect();
+                (object_id.clone(), evidence)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let page = fixture.select(MEMORY_CLASSES, None);
+    let expected: BTreeMap<String, Vec<(String, bool)>> = permitted
+        .iter()
+        .map(|(object_id, key)| {
+            (
+                object_id.clone(),
+                vec![
+                    (format!("evidence-{key}"), true),
+                    (format!("linked-for-{key}"), true),
+                ],
+            )
+        })
+        .collect();
+    assert_eq!(selected(&page), expected);
+    let (held_id, _) = permitted.iter().next().unwrap();
+    let held = page
+        .references
+        .iter()
+        .find(|inputs| {
+            matches!(&inputs.target, ReviewTarget::Memory { object_id, .. } if object_id == held_id)
+        })
+        .unwrap();
+    fixture.reserve(held, "slot-held");
+    let mut rest = expected.clone();
+    rest.remove(held_id);
+    assert_eq!(selected(&fixture.select(MEMORY_CLASSES, None)), rest);
+}
