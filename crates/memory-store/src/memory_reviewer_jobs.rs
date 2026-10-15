@@ -933,7 +933,7 @@ pub(crate) fn settle_memory_reviewer_reservation(
     )
 }
 
-/// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
+/// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`enqueue_frozen_selection_in_tx`], the expiry sweep, or [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
 pub fn freeze_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -1049,13 +1049,7 @@ pub fn complete_frozen_selection_in_tx(
     }
     let existing = load_selection(conn, project, slot_id, selection_attempt)?
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))?;
-    if existing.state != FrozenSelectionState::Frozen {
-        return Err(refuse(MemoryReviewerJobRefusal::Terminal));
-    }
-    if existing.selection_deadline_ms <= now_ms {
-        return Err(refuse(MemoryReviewerJobRefusal::Expired));
-    }
-    retire_frozen_page_in_tx(conn, project, slot_id, selection_attempt, state, now_ms)?;
+    complete_loaded_frozen_selection_in_tx(conn, &existing, state, now_ms)?;
     Ok(FrozenSelection {
         state,
         page: existing
@@ -1063,6 +1057,29 @@ pub fn complete_frozen_selection_in_tx(
             .filter(|_| state == FrozenSelectionState::Enqueued),
         ..existing
     })
+}
+
+/// The caller must load `existing` in the same transaction, so the completion checks judge that transaction's selection state.
+fn complete_loaded_frozen_selection_in_tx(
+    conn: &GuardedConn<'_>,
+    existing: &FrozenSelection,
+    state: FrozenSelectionState,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    if existing.state != FrozenSelectionState::Frozen {
+        return Err(refuse(MemoryReviewerJobRefusal::Terminal));
+    }
+    if existing.selection_deadline_ms <= now_ms {
+        return Err(refuse(MemoryReviewerJobRefusal::Expired));
+    }
+    retire_frozen_page_in_tx(
+        conn,
+        &existing.project,
+        &existing.slot_id,
+        &existing.selection_attempt,
+        state,
+        now_ms,
+    )
 }
 
 /// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released. The scan audit of the references is retired with them unless they became jobs (`Enqueued`), whose rows keep the same identities for the store incarnation and so keep their audit. Callers decide whether the deadline permits it.
@@ -1252,12 +1269,9 @@ pub fn enqueue_frozen_selection_in_tx(
             now_ms,
         )?;
     }
-    // The row read above is frozen and inside its deadline in this transaction, which is all the pre-deadline completion checks.
-    retire_frozen_page_in_tx(
+    complete_loaded_frozen_selection_in_tx(
         conn,
-        project,
-        &selection.slot_id,
-        &selection.selection_attempt,
+        &existing,
         FrozenSelectionState::Enqueued,
         now_ms,
     )?;
@@ -1732,7 +1746,7 @@ impl MemoryStore {
         )
     }
 
-    /// Standalone terminal transition for `Expired` and `FailedSlot`, which move no cursor. `Enqueued` is refused here: the slot's cursor advance must commit with the transition, which only [`complete_frozen_selection_in_tx`] inside the caller's transaction can do.
+    /// Standalone terminal transition for `Expired` and `FailedSlot`, which move no cursor. `Enqueued` is refused here: the slot's cursor advance must commit with the transition, which [`enqueue_frozen_selection_in_tx`] does inside the caller's transaction.
     pub fn complete_frozen_selection(
         &self,
         project: &str,
