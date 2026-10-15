@@ -166,3 +166,48 @@ deadline arm and the owned `into_parts` cases only.
 [wire63]: ../../../../host-wire-protocol.md#L314
 [hr-terminal]: ../../../host-runtime/catalog.md#req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame
 [hr-pubfail]: ../../../host-runtime/catalog.md#req-a-a-response-publication-failure-never-reaches-the-settling-path
+
+## Dated note (2026-10-14, #1040)
+
+Every line anchor above is as of the recorded head of the investigation. At
+the #1040 head the direct path has a production sender: the daemon's
+`settle_prepared_via` (`crates/daemon/src/lib.rs:13445`) routes every
+transform and exact-length response through `settle_direct_with` (`:13412`)
+and `RequestCtx::output_from_direct_write`
+(`crates/host-runtime/src/handler.rs:565`) to `reserve_direct`
+(`crates/host-runtime/src/dispatch.rs:574`); JSON and emitted bodies keep the
+owned path through `settle_prepared_with` (`lib.rs:13351`). The record is
+`default-production` and `Exercised: yes`.
+
+Both investigation questions are resolved. A serializer failure on the direct
+path closes the connection: the daemon measures every direct body before
+reserving it and `write_measured` writes the same immutable source at that
+length, so a publication-time mismatch is a writer-integrity fault, while a
+measurement failure settles the request as `encode_failed` before any
+reservation. Two charges cover a direct frame until commit: the egress charge
+of the measured length plus header covers the ring bytes, and the decode's
+scratch charges travel with the response through `PreparedOutcome::holding`
+(`crates/daemon/src/dispatch.rs:415`), owned by the serializer closure until
+it runs or the queued frame drops. A body failure increments
+`direct_serialize_failure.observed` in `host.status`
+(`crates/host-runtime/src/ring_transport.rs:444-445`); a refused commit does
+not.
+
+The fault arms and the charge are tested:
+`a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure`
+(`ring_transport.rs:3709`) holds the charge at body plus header while the
+frame waits and serializes and returns it after an exact, underfilled,
+overfilled, failed, or panicking serializer;
+`a_failed_direct_serializer_publishes_nothing_and_returns_its_charge`
+(`crates/host-runtime/tests/direct_frames.rs:28`) drives the four
+`direct_fill` fault arms (`tests/support/mod.rs:509`) through a real host;
+`transform_and_exact_bodies_settle_direct_with_the_owned_bytes`
+(`lib.rs:18890`),
+`a_held_response_keeps_its_request_charges_until_its_direct_serializer_runs`
+(`:18925`), and
+`direct_settlement_reserves_the_measured_length_and_stops_when_cancelled`
+(`:18964`) cover the daemon branch and its charges;
+`a_settled_direct_response_holds_its_decode_charges_until_it_publishes`
+(`crates/daemon/src/transform_unit/host_tests.rs:412`) holds a real
+transform response between `handle` and publication. The remaining untested
+arm is a queued direct frame dropped by generation retirement.

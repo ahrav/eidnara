@@ -81,6 +81,7 @@ pub mod search_writer;
 pub mod selection;
 pub mod served_json;
 pub mod session_resolver;
+mod staged_body;
 mod tail_hygiene;
 pub mod terse_text_compression;
 mod token_cache;
@@ -8957,6 +8958,7 @@ impl HandlerCore {
             .fold_authority_intent(channel)
             .filter(|authority| authority.bind_seq == Some(bind_seq))
             .unwrap_or_else(|| BindingAuthority::detached(&binding));
+        let charges: Arc<[host_runtime::wire::ByteCharge]> = entry.meter.take_charges().into();
         let intake = PassIntake {
             store,
             parsed,
@@ -8975,13 +8977,14 @@ impl HandlerCore {
                 core_started_at,
             },
             held: PassHold {
-                _charges: entry.meter.take_charges(),
+                _charges: Arc::clone(&charges),
                 _page_apply: page_apply,
                 _lane: lane,
             },
         };
         // From here the pass's store work runs on the blocking pool. The resident charges the
         // decode took travel with the pass, so the bytes stay charged while a thread uses them.
+        // The response output shares them too and retains them after the pass completes.
         let core = Arc::clone(entry.core);
         let signal = entry.runner.cancel_signal();
         let outcome = entry
@@ -8992,11 +8995,13 @@ impl HandlerCore {
             }))
             .await;
         let carry = match outcome {
-            Ok(UnitOutcome::Terminal(outcome)) => return outcome,
+            Ok(UnitOutcome::Terminal(outcome)) => return outcome.holding(charges),
             Ok(UnitOutcome::Continue(carry)) => *carry,
             Err(failed) => return unit_failed_error(failed),
         };
-        self.finish_emergency_pass(entry, carry).await
+        self.finish_emergency_pass(entry, carry)
+            .await
+            .holding(charges)
     }
 
     /// Waits for a unit permit on the async side, where the wait is abortable; the permit
@@ -13117,6 +13122,12 @@ impl CompositeComponent for Handler {
             },
         };
         let (_, outcome) = self.dispatch_body(&entry, body).await;
+        let charges = meter.take_charges();
+        let outcome = if charges.is_empty() {
+            outcome
+        } else {
+            outcome.holding(charges.into())
+        };
         settle_prepared(&ctx, outcome).await
     }
 
@@ -13357,51 +13368,120 @@ where
     };
     let measured = match output.measure() {
         Ok(measured) => measured,
-        Err(error) => {
-            return PreparedSettlement::Error {
-                code: "encode_failed".to_owned(),
-                message: error.to_string(),
-            };
-        }
+        Err(error) => return PreparedSettlement::encode_failed(&error),
     };
     if cancelled() {
-        return PreparedSettlement::Error {
-            code: "request_cancelled".to_owned(),
-            message: "request was cancelled before output reservation".to_owned(),
-        };
+        return PreparedSettlement::cancelled("reservation");
     }
-    let mut body = match reserve(measured.len()).await {
-        Ok(body) => body,
-        Err(()) => {
-            return PreparedSettlement::Error {
-                code: "output_unavailable".to_owned(),
-                message: "response output reservation is unavailable".to_owned(),
-            };
-        }
+    let Ok(mut body) = reserve(measured.len()).await else {
+        return PreparedSettlement::output_unavailable();
     };
     if cancelled() {
-        return PreparedSettlement::Error {
-            code: "request_cancelled".to_owned(),
-            message: "request was cancelled before output encoding".to_owned(),
-        };
+        return PreparedSettlement::cancelled("encoding");
     }
     if let Err(error) = measured.write_to(&mut body) {
-        return PreparedSettlement::Error {
-            code: "encode_failed".to_owned(),
-            message: error.to_string(),
-        };
+        return PreparedSettlement::encode_failed(&error);
     }
     PreparedSettlement::Response(body)
 }
 
+impl<W> PreparedSettlement<W> {
+    fn encode_failed(error: &crate::dispatch::PreparedOutputError) -> Self {
+        Self::Error {
+            code: "encode_failed".to_owned(),
+            message: error.to_string(),
+        }
+    }
+
+    fn cancelled(stage: &str) -> Self {
+        Self::Error {
+            code: "request_cancelled".to_owned(),
+            message: format!("request was cancelled before output {stage}"),
+        }
+    }
+
+    fn output_unavailable() -> Self {
+        Self::Error {
+            code: "output_unavailable".to_owned(),
+            message: "response output reservation is unavailable".to_owned(),
+        }
+    }
+}
+
+/// Settles a transform or exact-length body on the direct-serialize path: the reservation takes the measured length and a serializer that owns the immutable source, and the transport writes the body into the frame at publication under the egress charge for that length. A cancellation observed once the reservation returns drops it unpublished.
+async fn settle_direct_with<W, Reserve, Reserved, Cancelled>(
+    output: PreparedOutput,
+    mut cancelled: Cancelled,
+    reserve: Reserve,
+) -> PreparedSettlement<W>
+where
+    Reserve: FnOnce(usize, host_runtime::DirectWrite) -> Reserved,
+    Reserved: std::future::Future<Output = Result<W, ()>>,
+    Cancelled: FnMut() -> bool,
+{
+    let len = match output.measure() {
+        Ok(measured) => measured.len(),
+        Err(error) => return PreparedSettlement::encode_failed(&error),
+    };
+    if cancelled() {
+        return PreparedSettlement::cancelled("reservation");
+    }
+    let serializer: host_runtime::DirectWrite = Box::new(move |destination| {
+        output
+            .write_measured(len, destination)
+            .map(drop)
+            .map_err(std::io::Error::other)
+    });
+    let Ok(body) = reserve(len, serializer).await else {
+        return PreparedSettlement::output_unavailable();
+    };
+    if cancelled() {
+        return PreparedSettlement::cancelled("encoding");
+    }
+    PreparedSettlement::Response(body)
+}
+
+/// Transform and exact-length bodies take the direct-serialize path; every other outcome, JSON and emitted bodies included, takes the owned path.
+async fn settle_prepared_via<W, Owned, OwnedReserved, Direct, DirectReserved, Cancelled>(
+    outcome: PreparedOutcome,
+    cancelled: Cancelled,
+    reserve_owned: Owned,
+    reserve_direct: Direct,
+) -> PreparedSettlement<W>
+where
+    W: std::io::Write,
+    Owned: FnOnce(usize) -> OwnedReserved,
+    OwnedReserved: std::future::Future<Output = Result<W, ()>>,
+    Direct: FnOnce(usize, host_runtime::DirectWrite) -> DirectReserved,
+    DirectReserved: std::future::Future<Output = Result<W, ()>>,
+    Cancelled: FnMut() -> bool,
+{
+    match outcome {
+        PreparedOutcome::Response(output) if output.serializes_directly() => {
+            settle_direct_with(output, cancelled, reserve_direct).await
+        }
+        outcome => settle_prepared_with(outcome, cancelled, reserve_owned).await,
+    }
+}
+
 async fn settle_prepared(ctx: &RequestCtx, outcome: PreparedOutcome) -> RequestOutcome {
-    match settle_prepared_with(
-        outcome,
-        || ctx.is_cancelled(),
-        |len| async move { ctx.reserve_output(len).await.map_err(|_| ()) },
+    request_outcome(
+        settle_prepared_via(
+            outcome,
+            || ctx.is_cancelled(),
+            |len| async move { ctx.reserve_output(len).await.map_err(|_| ()) },
+            |len, serializer| async move {
+                ctx.output_from_direct_write(len, serializer)
+                    .await
+                    .map_err(|_| ())
+            },
+        )
+        .await,
     )
-    .await
-    {
+}
+
+fn request_outcome(settlement: PreparedSettlement<host_runtime::OutputBuffer>) -> RequestOutcome {
+    match settlement {
         PreparedSettlement::Response(body) => RequestOutcome::Response {
             body,
             binary: false,
@@ -18719,6 +18799,225 @@ mod tests {
             "serde streamed into the reservation ({writes} writes); a single \
              write_all would mean a fully encoded body existed before it"
         );
+    }
+
+    /// A transform recipe whose bytes the settlement tests compare across both paths.
+    fn direct_transform() -> PreparedOutput {
+        PreparedOutput::transform_recipe(
+            serde_json::json!({"status": "ok", "operations": null, "z": [1, 2]}),
+            vec![
+                crate::dispatch::RecipeSegment::Keep(crate::dispatch::PreparedSegment::exact(
+                    Arc::from(&br#"{"op":"keep","count":2}"#[..]),
+                )),
+                crate::dispatch::RecipeSegment::Insert(vec![
+                    crate::dispatch::PreparedSegment::exact(Arc::from(&br#"{"role":"user"}"#[..])),
+                ]),
+            ],
+        )
+        .expect("the recipe is valid")
+    }
+
+    /// The owned path's bytes for `output`, the oracle the direct path must equal.
+    async fn owned_bytes(output: PreparedOutput) -> Vec<u8> {
+        let PreparedSettlement::Response(body) = settle_prepared_with(
+            PreparedOutcome::Response(output),
+            || false,
+            |len| std::future::ready(Ok::<_, ()>(Vec::with_capacity(len))),
+        )
+        .await
+        else {
+            panic!("the owned path settles");
+        };
+        body
+    }
+
+    /// Only transform and exact-length bodies take the direct path; JSON and emitted bodies stay owned.
+    #[test]
+    fn only_transform_and_exact_bodies_serialize_directly() {
+        struct Fixed;
+        impl crate::dispatch::Emit for Fixed {
+            fn emit(
+                &self,
+                destination: &mut dyn std::io::Write,
+            ) -> Result<(), crate::dispatch::PreparedOutputError> {
+                destination.write_all(b"{}")?;
+                Ok(())
+            }
+        }
+        assert!(direct_transform().serializes_directly());
+        assert!(PreparedOutput::cached_bytes(b"x".to_vec()).serializes_directly());
+        assert!(!PreparedOutput::json(json!({"a": 1})).serializes_directly());
+        assert!(!PreparedOutput::emit(Arc::new(Fixed)).serializes_directly());
+    }
+
+    /// Which reservation a settlement took, and the bytes it produced.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Reserved {
+        Owned(Vec<u8>),
+        Direct(Vec<u8>),
+    }
+
+    /// Settles `outcome` through the production branch, recording which reservation it took; the direct serializer runs as the transport would at publication.
+    async fn settle_recording(outcome: PreparedOutcome) -> Option<Reserved> {
+        let reservation = std::cell::RefCell::new(None);
+        let settlement = settle_prepared_via(
+            outcome,
+            || false,
+            |len| {
+                *reservation.borrow_mut() = Some("owned");
+                std::future::ready(Ok::<_, ()>(Vec::with_capacity(len)))
+            },
+            |len, serializer| {
+                *reservation.borrow_mut() = Some("direct");
+                let mut written = Vec::with_capacity(len);
+                let result = serializer(&mut written).map(|()| written);
+                std::future::ready(result.map_err(drop))
+            },
+        )
+        .await;
+        let PreparedSettlement::Response(bytes) = settlement else {
+            return None;
+        };
+        match reservation.into_inner() {
+            Some("direct") => Some(Reserved::Direct(bytes)),
+            Some(_) => Some(Reserved::Owned(bytes)),
+            None => None,
+        }
+    }
+
+    /// The production branch sends transform and exact-length bodies to the direct reservation with the owned path's bytes, and JSON and emitted bodies to the owned reservation.
+    #[tokio::test]
+    async fn transform_and_exact_bodies_settle_direct_with_the_owned_bytes() {
+        struct Fixed;
+        impl crate::dispatch::Emit for Fixed {
+            fn emit(
+                &self,
+                destination: &mut dyn std::io::Write,
+            ) -> Result<(), crate::dispatch::PreparedOutputError> {
+                destination.write_all(b"{}")?;
+                Ok(())
+            }
+        }
+        for output in [
+            direct_transform(),
+            PreparedOutput::cached_bytes(b"exact-body".to_vec()),
+        ] {
+            let expected = owned_bytes(output.clone()).await;
+            assert_eq!(
+                settle_recording(PreparedOutcome::Response(output)).await,
+                Some(Reserved::Direct(expected))
+            );
+        }
+        for output in [
+            PreparedOutput::json(json!({"a": [1, 2]})),
+            PreparedOutput::emit(Arc::new(Fixed)),
+        ] {
+            let expected = owned_bytes(output.clone()).await;
+            assert_eq!(
+                settle_recording(PreparedOutcome::Response(output)).await,
+                Some(Reserved::Owned(expected))
+            );
+        }
+    }
+
+    /// Charges a response holds travel with its direct serializer and return once it runs; a retained clone and an error outcome hold none.
+    #[tokio::test]
+    async fn a_held_response_keeps_its_request_charges_until_its_direct_serializer_runs() {
+        let pool = TestPool::with_capacity(64);
+        let charges = || -> Arc<[host_runtime::wire::ByteCharge]> { Arc::from([pool.hold(64)]) };
+        let free = || pool.try_reserve(64).is_some();
+
+        let PreparedOutcome::Response(output) =
+            PreparedOutcome::Response(direct_transform()).holding(charges())
+        else {
+            panic!("a response stays a response");
+        };
+        let retained = output.clone();
+        let settlement = settle_direct_with(
+            output,
+            || false,
+            |len, serializer| std::future::ready(Ok::<_, ()>((len, serializer))),
+        )
+        .await;
+        let PreparedSettlement::Response((len, serializer)) = settlement else {
+            panic!("a direct settlement returns the reservation");
+        };
+        assert!(!free(), "the queued serializer holds the request charges");
+        let mut written = Vec::with_capacity(len);
+        serializer(&mut written).expect("the serializer writes the measured body");
+        assert!(
+            free(),
+            "the charges return once the serializer has run, while a retained clone lives"
+        );
+        assert_eq!(written, owned_bytes(retained).await);
+
+        let error = PreparedOutcome::Error {
+            code: "invalid".to_owned(),
+            message: "bad".to_owned(),
+        }
+        .holding(charges());
+        assert!(free(), "an error outcome returns the charges at once");
+        drop(error);
+    }
+
+    /// A direct settlement reserves exactly the measured length, and a cancellation before or after the reservation settles `request_cancelled`.
+    #[tokio::test]
+    async fn direct_settlement_reserves_the_measured_length_and_stops_when_cancelled() {
+        let output = PreparedOutput::cached_bytes(b"exact-body".to_vec());
+        let settlement = settle_direct_with(
+            output,
+            || false,
+            |len, serializer| std::future::ready(Ok::<_, ()>((len, serializer))),
+        )
+        .await;
+        let PreparedSettlement::Response((len, serializer)) = settlement else {
+            panic!("a direct settlement returns the reservation");
+        };
+        assert_eq!(len, 10);
+        drop(serializer);
+
+        let reservations = AtomicUsize::new(0);
+        for cancel_at in [1, 2] {
+            let checks = AtomicUsize::new(0);
+            let cancelled = settle_direct_with::<(), _, _, _>(
+                direct_transform(),
+                || checks.fetch_add(1, Ordering::SeqCst) + 1 == cancel_at,
+                |_, _| {
+                    reservations.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await;
+            assert!(matches!(
+                cancelled,
+                PreparedSettlement::Error { ref code, .. } if code == "request_cancelled"
+            ));
+        }
+        assert_eq!(
+            reservations.load(Ordering::SeqCst),
+            1,
+            "only the later cancellation reserved first"
+        );
+    }
+
+    /// A serializer asked for a length other than the measured one writes no more than that length and reports the mismatch, so the ring aborts the reservation.
+    #[test]
+    fn a_body_written_at_another_length_is_refused() {
+        let output = PreparedOutput::cached_bytes(b"exact-body".to_vec());
+        let mut short = Vec::new();
+        assert!(matches!(
+            output.write_measured(4, &mut short),
+            Err(crate::dispatch::PreparedOutputError::Write(_))
+        ));
+        assert!(short.len() <= 4);
+        let mut long = Vec::new();
+        assert!(matches!(
+            output.write_measured(11, &mut long),
+            Err(crate::dispatch::PreparedOutputError::LengthMismatch {
+                measured: 11,
+                written: 10
+            })
+        ));
     }
 
     #[tokio::test]

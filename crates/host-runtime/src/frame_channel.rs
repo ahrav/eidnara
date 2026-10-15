@@ -151,21 +151,17 @@ pub enum InboundEvent {
     Rejected(RejectedFrame),
 }
 
-pub(crate) type DirectSerializer =
-    Box<dyn FnOnce(&mut dyn io::Write) -> io::Result<()> + Send + 'static>;
+/// Writes a direct frame's body into its ring reservation at publication.
+pub type DirectWrite = Box<dyn FnOnce(&mut dyn io::Write) -> io::Result<()> + Send + 'static>;
 
 pub struct DirectFrame {
     header: [u8; crate::wire::HEADER_LEN],
     body_len: usize,
-    serializer: DirectSerializer,
+    serializer: DirectWrite,
 }
 
 impl DirectFrame {
-    pub(crate) fn new(
-        header: EnvelopeHeader,
-        body_len: usize,
-        serializer: DirectSerializer,
-    ) -> Self {
+    pub(crate) fn new(header: EnvelopeHeader, body_len: usize, serializer: DirectWrite) -> Self {
         Self {
             header: header.encode(),
             body_len,

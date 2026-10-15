@@ -40,6 +40,24 @@ pub const RING_PROFILE: &str = shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE
 #[doc(hidden)]
 pub type PublishHook = Arc<dyn Fn(FrameType, u16) + Send + Sync>;
 
+/// What one endpoint's publisher reports to: the publish hook and the transport-wide count of
+/// direct frames whose body failed to serialize.
+#[derive(Clone, Default)]
+struct PublishObservers {
+    hook: Option<PublishHook>,
+    direct_serialize_failures: Arc<AtomicU64>,
+}
+
+impl PublishObservers {
+    #[cfg(test)]
+    fn with_hook(hook: PublishHook) -> Self {
+        Self {
+            hook: Some(hook),
+            ..Self::default()
+        }
+    }
+}
+
 pub fn ring_profile() -> TargetProfile {
     shm_transport::profile::host_payload_pool_profile()
         .expect("static shared-memory profile is valid")
@@ -160,6 +178,9 @@ pub struct RingTransport {
     /// Shared with each endpoint thread so a caught panic is counted after
     /// the thread has already left `run_endpoint`.
     endpoint_panics: Arc<AtomicU64>,
+    /// Shared with each endpoint's publisher, which counts a direct frame whose serializer
+    /// failed, panicked, or wrote other than its declared length.
+    direct_serialize_failures: Arc<AtomicU64>,
     publish_hook: Mutex<Option<PublishHook>>,
 }
 
@@ -283,6 +304,7 @@ impl RingTransport {
             refusals: Mutex::new(std::collections::BTreeMap::new()),
             backings: Arc::new(BackingRegistry::default()),
             endpoint_panics: Arc::new(AtomicU64::new(0)),
+            direct_serialize_failures: Arc::new(AtomicU64::new(0)),
             publish_hook: Mutex::new(None),
         }
     }
@@ -419,6 +441,9 @@ impl RingTransport {
                 "by_resource": refusals,
             },
             "endpoint_panic": {"observed": self.endpoint_panics.load(Ordering::Acquire)},
+            "direct_serialize_failure": {
+                "observed": self.direct_serialize_failures.load(Ordering::Acquire),
+            },
         })
     }
 
@@ -478,7 +503,10 @@ impl RingTransport {
         let profile = Arc::clone(&self.profile);
         let worker_root = root.clone();
         let worker_read_cancel = read_cancel.clone();
-        let publish_hook = self.publish_hook.lock().expect("publish hook lock").clone();
+        let observers = PublishObservers {
+            hook: self.publish_hook.lock().expect("publish hook lock").clone(),
+            direct_serialize_failures: Arc::clone(&self.direct_serialize_failures),
+        };
         let endpoint_panics = Arc::clone(&self.endpoint_panics);
         let backing_registry = Arc::clone(&self.backings);
         let panic_root = root.clone();
@@ -527,7 +555,7 @@ impl RingTransport {
                         frame_deadline,
                         worker_root,
                         worker_read_cancel,
-                        publish_hook,
+                        observers,
                     ))
                 }));
                 if outcome.is_err() {
@@ -717,7 +745,7 @@ async fn run_endpoint(
     frame_deadline: Duration,
     root: CancellationToken,
     read_cancel: CancellationToken,
-    publish_hook: Option<PublishHook>,
+    observers: PublishObservers,
 ) {
     let discard = queue.discard.clone();
     let finish = queue.finish.clone();
@@ -753,7 +781,7 @@ async fn run_endpoint(
             return;
         }
     };
-    let mut publisher = Publisher::new(&rings.first, queue_capacity, frame_deadline, publish_hook);
+    let mut publisher = Publisher::new(&rings.first, queue_capacity, frame_deadline, observers);
     // One descriptor depth of receives after `read_cancel` covers every frame committed before it.
     let post_cancel_depth =
         usize::try_from(rings.second.grant().geometry().descriptor_depth()).unwrap_or(usize::MAX);
@@ -1173,6 +1201,7 @@ struct Publisher {
     frame_deadline: Duration,
     terminal_capacity: u64,
     hook: Option<PublishHook>,
+    direct_serialize_failures: Arc<AtomicU64>,
     /// Terminal credit held per block until the block physically returns.
     credits: Vec<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
@@ -1182,7 +1211,7 @@ impl Publisher {
         ring: &Ring,
         capacity: usize,
         frame_deadline: Duration,
-        hook: Option<PublishHook>,
+        observers: PublishObservers,
     ) -> Self {
         let geometry = ring.geometry();
         let mut credits = Vec::with_capacity(geometry.block_count() as usize);
@@ -1194,7 +1223,8 @@ impl Publisher {
             terminal_capacity: geometry
                 .class(shm_transport::pool::BlockClass::Terminal)
                 .body_capacity(),
-            hook,
+            hook: observers.hook,
+            direct_serialize_failures: observers.direct_serialize_failures,
             credits,
         }
     }
@@ -1382,8 +1412,15 @@ impl Publisher {
             written,
             credit,
         } = frame;
+        let failures = &self.direct_serialize_failures;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match direct {
-            Some(direct) => publish_direct(reservation, direct, body_len, deadline),
+            Some(direct) => {
+                publish_direct(reservation, direct, body_len, deadline).map_err(|failure| {
+                    if failure == DirectFailure::Body {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            }
             None => publish_owned(reservation, &bytes, &tail, body_len, deadline),
         }));
         if !matches!(result, Ok(Ok(()))) {
@@ -1403,18 +1440,32 @@ impl Publisher {
     }
 }
 
+/// Why a direct frame did not publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectFailure {
+    /// The serializer returned an error, panicked, or wrote other than the declared length.
+    Body,
+    /// The body was written whole and the commit was refused, as past the frame deadline.
+    Commit,
+}
+
 fn publish_direct(
     mut reservation: ProducerReservation<'_>,
     direct: DirectFrame,
     body_len: usize,
     deadline: StdInstant,
-) -> Result<(), ()> {
-    let result = crate::panic_boundary::redact_sync(|| {
-        let mut writer = ReservationWriter(&mut reservation);
-        direct.serialize(&mut writer)
-    });
-    result.map_err(|_| ())?;
-    commit_before(reservation, body_len, deadline)
+) -> Result<(), DirectFailure> {
+    let mut writer = ReservationWriter {
+        reservation: &mut reservation,
+        written: 0,
+    };
+    let serialized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::panic_boundary::redact_sync(|| direct.serialize(&mut writer))
+    }));
+    if !matches!(serialized, Ok(Ok(()))) || writer.written != body_len {
+        return Err(DirectFailure::Body);
+    }
+    commit_before(reservation, body_len, deadline).map_err(|()| DirectFailure::Commit)
 }
 
 fn publish_owned(
@@ -1443,16 +1494,21 @@ fn commit_before(
     Ok(())
 }
 
-struct ReservationWriter<'reservation, 'ring>(&'reservation mut ProducerReservation<'ring>);
+struct ReservationWriter<'reservation, 'ring> {
+    reservation: &'reservation mut ProducerReservation<'ring>,
+    /// Bytes the reservation accepted, compared with the declared length after serialization.
+    written: usize,
+}
 
 impl io::Write for ReservationWriter<'_, '_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes).map_err(|_| {
+        self.reservation.write(bytes).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::WriteZero,
                 "shared-memory reservation exhausted",
             )
         })?;
+        self.written += bytes.len();
         Ok(bytes.len())
     }
 
@@ -2162,7 +2218,12 @@ mod tests {
         let consumer = rings.first.attachment().unwrap().attach().unwrap();
         let ordinary = exhaust_smallest_class(&rings.first, &consumer);
         let controls = exhaust_control_class(&rings.first, &consumer);
-        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            4,
+            Duration::from_secs(5),
+            PublishObservers::default(),
+        );
         publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
         publisher.push(frame(FrameType::Ping, 0, 5, b""));
         publisher.push(frame(FrameType::Error, 0, 5, b"{}"));
@@ -2192,7 +2253,12 @@ mod tests {
         let consumer = rings.first.attachment().unwrap().attach().unwrap();
         let ordinary = exhaust_smallest_class(&rings.first, &consumer);
         let mut terminals = exhaust_terminal_class(&rings.first, &consumer);
-        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            4,
+            Duration::from_secs(5),
+            PublishObservers::default(),
+        );
         publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
         publisher.push(frame(FrameType::Error, 9, 2, b"{}"));
         publisher
@@ -2222,7 +2288,12 @@ mod tests {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let consumer = rings.first.attachment().unwrap().attach().unwrap();
         let mut held = exhaust_smallest_class(&rings.first, &consumer);
-        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(5), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            1,
+            Duration::from_secs(5),
+            PublishObservers::default(),
+        );
         publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
         publisher.pump(&rings.first).expect("blocked pump");
         let (inventory, bound) = publisher.blocked_head().expect("the head is blocked");
@@ -2249,7 +2320,12 @@ mod tests {
         let consumer = rings.first.attachment().unwrap().attach().unwrap();
         let held = exhaust_smallest_class(&rings.first, &consumer);
         // One blocked ordinary ticket with a short deadline.
-        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_millis(300), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            1,
+            Duration::from_millis(300),
+            PublishObservers::default(),
+        );
         publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
         publisher.pump(&rings.first).expect("blocked pump");
         assert!(publisher.has_pending());
@@ -2317,7 +2393,12 @@ mod tests {
         });
         // The publisher is full with one blocked ordinary ticket, so no queued frame can
         // move it.
-        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(5), Some(hook));
+        let mut publisher = Publisher::new(
+            &rings.first,
+            1,
+            Duration::from_secs(5),
+            PublishObservers::with_hook(hook),
+        );
         publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
         publisher.pump(&rings.first).expect("blocked pump");
         assert!(publisher.has_pending() && !publisher.can_accept());
@@ -2407,7 +2488,12 @@ mod tests {
             receive_one(
                 &rings,
                 &mut queue,
-                &mut Publisher::new(&rings.first, 1, Duration::from_secs(1), None),
+                &mut Publisher::new(
+                    &rings.first,
+                    1,
+                    Duration::from_secs(1),
+                    PublishObservers::default()
+                ),
                 &capacity_fd(&rings),
                 &inbound,
                 &ByteBudget::new(1024),
@@ -2452,7 +2538,12 @@ mod tests {
         // A held charge leaves the budget genuinely waiting; a zero-capacity budget would refuse the frame outright.
         let budget = ByteBudget::new(1);
         let _held = budget.try_charge(1).expect("hold the only byte");
-        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(1), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            1,
+            Duration::from_secs(1),
+            PublishObservers::default(),
+        );
         let capacity = capacity_fd(&rings);
         let receive = receive_one(
             &rings,
@@ -2506,7 +2597,12 @@ mod tests {
         let _held = budget.try_charge(1).expect("hold the only byte");
         let root = CancellationToken::new();
         let read_cancel = CancellationToken::new();
-        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(1), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            1,
+            Duration::from_secs(1),
+            PublishObservers::default(),
+        );
         let capacity = capacity_fd(&rings);
         let receive = receive_one(
             &rings,
@@ -3256,9 +3352,10 @@ mod tests {
             .first
             .try_reserve(1, direct.header())
             .expect("reservation");
-        assert!(
-            publish_direct(reservation, direct, 1, deadline).is_err(),
-            "a serializer that finishes after the deadline must not publish"
+        assert_eq!(
+            publish_direct(reservation, direct, 1, deadline),
+            Err(DirectFailure::Commit),
+            "a serializer that finishes after the deadline must not publish, and its whole body is not a serializer failure"
         );
         let attached = rings.first.attachment().unwrap().attach().unwrap();
         assert!(
@@ -3447,7 +3544,7 @@ mod tests {
             &rings.first,
             tokio::sync::Semaphore::MAX_PERMITS,
             Duration::from_secs(1),
-            None,
+            PublishObservers::default(),
         );
         assert!(publisher.can_accept());
         assert_eq!(publisher.pending.capacity(), 0);
@@ -3496,7 +3593,12 @@ mod tests {
         let hook: PublishHook = Arc::new(move |ty, channel| {
             observed.lock().unwrap().push((ty, channel));
         });
-        let mut publisher = Publisher::new(&rings.first, 16, Duration::from_secs(5), Some(hook));
+        let mut publisher = Publisher::new(
+            &rings.first,
+            16,
+            Duration::from_secs(5),
+            PublishObservers::with_hook(hook),
+        );
         // Ordinary data of the exhausted class blocks at the head.
         publisher.push(frame(FrameType::StreamData, 7, 1, b"data"));
         // Behind it: a Ping, an unrelated error terminal, this stream's own terminal, a second
@@ -3569,7 +3671,12 @@ mod tests {
                 writer.write_all(b"abc")
             }),
         );
-        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            4,
+            Duration::from_secs(5),
+            PublishObservers::default(),
+        );
         publisher.push(OutboundFrame {
             bytes: Vec::new(),
             tail: Vec::new(),
@@ -3597,13 +3704,110 @@ mod tests {
         assert_eq!(lease.to_vec().unwrap(), b"abc");
     }
 
+    /// T3: a direct frame's egress charge is exactly its body plus header while the frame waits for ring capacity and while it serializes, and returns only once the frame publishes; a serializer that underfills, overfills, fails, or panics publishes nothing and returns the charge.
+    #[test]
+    fn a_direct_frame_holds_body_plus_header_until_commit_or_returns_it_on_failure() {
+        const LEN: usize = 3;
+        let charged = LEN + crate::wire::HEADER_LEN;
+        let header = EnvelopeHeader {
+            len: LEN as u32,
+            ty: FrameType::Response,
+            flags: Flags::new(false, Priority::Interactive, true),
+            channel: 7,
+            epoch: 1,
+            corr: 4,
+        };
+        let arms: [(&str, crate::frame_channel::DirectWrite); 5] = [
+            ("exact", Box::new(|writer| writer.write_all(b"abc"))),
+            ("underfill", Box::new(|writer| writer.write_all(b"ab"))),
+            ("overflow", Box::new(|writer| writer.write_all(b"abcd"))),
+            (
+                "error",
+                Box::new(|writer| {
+                    writer.write_all(b"a")?;
+                    Err(io::Error::other("injected"))
+                }),
+            ),
+            (
+                "panic",
+                Box::new(|writer| {
+                    writer.write_all(b"a")?;
+                    panic!("injected serializer panic")
+                }),
+            ),
+        ];
+        for (arm, serializer) in arms {
+            let rings = DuplexRing::create(&ring_profile()).unwrap();
+            let consumer = rings.first.attachment().unwrap().attach().unwrap();
+            let held = exhaust_smallest_class(&rings.first, &consumer);
+            let budget = ByteBudget::new(1024);
+            let charge = budget.try_charge(charged).unwrap();
+            let charged_while = |budget: &ByteBudget| 1024 - budget.available();
+            let during = Arc::new(AtomicU64::new(u64::MAX));
+            let (probe, observed) = (budget.clone(), Arc::clone(&during));
+            let serializer: crate::frame_channel::DirectWrite = Box::new(move |writer| {
+                observed.store((1024 - probe.available()) as u64, Ordering::SeqCst);
+                serializer(writer)
+            });
+            let observers = PublishObservers::default();
+            let failures = Arc::clone(&observers.direct_serialize_failures);
+            let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), observers);
+            publisher.push(OutboundFrame {
+                bytes: Vec::new(),
+                tail: Vec::new(),
+                direct: Some(DirectFrame::new(header, LEN, serializer)),
+                charge,
+                written: None,
+                credit: None,
+            });
+            publisher.pump(&rings.first).expect("blocked pump");
+            assert_eq!(charged_while(&budget), charged, "{arm}: held while pending");
+            drop(held);
+            let pumped = publisher.pump(&rings.first);
+            assert_eq!(
+                during.load(Ordering::SeqCst),
+                charged as u64,
+                "{arm}: held while serializing"
+            );
+            assert_eq!(
+                charged_while(&budget),
+                0,
+                "{arm}: returned after the attempt"
+            );
+            assert!(!publisher.has_pending(), "{arm}");
+            let received = consumer.try_receive().unwrap();
+            if arm == "exact" {
+                pumped.expect("exact publishes");
+                assert_eq!(received.expect("published").to_vec().unwrap(), b"abc");
+                assert_eq!(failures.load(Ordering::SeqCst), 0, "{arm}: nothing failed");
+            } else {
+                assert!(pumped.is_err(), "{arm}: the failure reaches the endpoint");
+                assert_eq!(
+                    failures.load(Ordering::SeqCst),
+                    1,
+                    "{arm}: the failed body is counted once"
+                );
+                assert!(received.is_none(), "{arm}: no partial frame is visible");
+                assert!(
+                    rings.first.try_reserve(LEN, header.encode()).is_ok(),
+                    "{arm}: the aborted reservation leaves its slot reusable"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_terminal_credit_returns_with_its_block_not_with_settlement() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let consumer = rings.first.attachment().unwrap().attach().unwrap();
         let credits = Arc::new(tokio::sync::Semaphore::new(1));
         let credit = credits.clone().try_acquire_owned().unwrap();
-        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            4,
+            Duration::from_secs(5),
+            PublishObservers::default(),
+        );
         let mut terminal = frame(FrameType::Error, 7, 1, br#"{"code":"x","message":"y"}"#);
         terminal.credit = Some(credit);
         publisher.push(terminal);
@@ -3675,7 +3879,12 @@ mod tests {
             hook_wait.lock().unwrap().recv().unwrap();
         });
         let credits = Arc::new(tokio::sync::Semaphore::new(2));
-        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), Some(hook));
+        let mut publisher = Publisher::new(
+            &rings.first,
+            4,
+            Duration::from_secs(5),
+            PublishObservers::with_hook(hook),
+        );
         for corr in 1..=2 {
             let mut terminal = frame(FrameType::Error, 7, corr, br#"{"code":"x","message":"y"}"#);
             terminal.credit = Some(credits.clone().try_acquire_owned().unwrap());
@@ -3711,7 +3920,12 @@ mod tests {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let consumer = rings.first.attachment().unwrap().attach().unwrap();
         let held = exhaust_smallest_class(&rings.first, &consumer);
-        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_millis(10), None);
+        let mut publisher = Publisher::new(
+            &rings.first,
+            4,
+            Duration::from_millis(10),
+            PublishObservers::default(),
+        );
         publisher.push(frame(FrameType::StreamData, 7, 1, b"late"));
         publisher.pump(&rings.first).expect("blocked pump");
         std::thread::sleep(Duration::from_millis(30));
@@ -3792,7 +4006,12 @@ mod tests {
             receive_one(
                 &rings,
                 &mut queue,
-                &mut Publisher::new(&rings.first, 1, Duration::from_secs(1), None),
+                &mut Publisher::new(
+                    &rings.first,
+                    1,
+                    Duration::from_secs(1),
+                    PublishObservers::default()
+                ),
                 &capacity_fd(&rings),
                 &inbound,
                 &budget,

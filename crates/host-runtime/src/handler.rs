@@ -333,7 +333,7 @@ pub struct OutputBuffer {
 
 pub(crate) struct DirectOutput {
     pub(crate) len: usize,
-    pub(crate) serializer: crate::frame_channel::DirectSerializer,
+    pub(crate) serializer: crate::frame_channel::DirectWrite,
 }
 
 pub(crate) enum OutputParts {
@@ -555,6 +555,17 @@ impl RequestCtx {
         &self,
         exact_len: usize,
         serializer: impl FnOnce(&mut dyn io::Write) -> io::Result<()> + Send + 'static,
+    ) -> Result<OutputBuffer, StreamClosed> {
+        self.stream
+            .reserve_direct(exact_len, Box::new(serializer))
+            .await
+    }
+
+    /// [`Self::output_from_writer`] for a serializer the caller already boxed.
+    pub async fn output_from_direct_write(
+        &self,
+        exact_len: usize,
+        serializer: crate::frame_channel::DirectWrite,
     ) -> Result<OutputBuffer, StreamClosed> {
         self.stream.reserve_direct(exact_len, serializer).await
     }
