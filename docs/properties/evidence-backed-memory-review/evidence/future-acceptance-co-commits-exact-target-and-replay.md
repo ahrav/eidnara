@@ -15,13 +15,16 @@ the settlement contents and identity.
 `crates/kernel/src/review_acceptance.rs` - `settlement_intent` derives the
 reserved-producer key from the project digest, proposal id, payload digest,
 generation, and both incarnations, each length-prefixed, and the request digest
-from the key. `accept_review_proposal` checks the caller's receipt and then the
-settlement receipt under the writer lock before `commit_with_writer` runs
-`apply`; a refusal inside `apply` aborts the commit. `apply` reads the row
-through `selected_review_row_in`, validates the review hold and every disclosed
-input through `validate_review_evidence_in`, checks every union member in
-`member_stands`, checks the target in `target_stands`, applies the action, and
-records the settlement through `Envelope::record_reserved_receipt`.
+from the key. `accept_review_proposal` checks the live Kernel incarnation
+against the run's, then the caller's receipt and then the settlement receipt
+under the writer lock before `commit_with_writer` runs `apply`; a refusal inside
+`apply` aborts the commit. The caller's receipt records the settlement key it
+committed, and a replay under that key reads the settlement receipt. `apply`
+reads the row through `bound_review_row_in`, validates the review hold and
+every disclosed input through `validate_review_evidence_in`, checks every union
+member in `member_stands`, checks the target in `target_stands` with the
+members' eligibility in one batch, applies the action, and records the
+settlement through `Envelope::record_reserved_receipt`.
 
 `crates/kernel/src/envelope.rs` - `record_reserved_receipt` and
 `recorded_receipt`. `crates/kernel/src/slice/write.rs` -

@@ -1500,3 +1500,78 @@ fn retiring_an_approval_reports_the_dependents_its_cascade_demoted() {
     };
     assert_eq!((granted_authority_before, demoted, deferred), (true, 1, 0));
 }
+
+/// The caller key that committed an acceptance replays that settlement under the same key, after the review hold ends too, and the same key naming another target conflicts, for each action that targets a memory.
+#[test]
+fn the_committing_caller_key_replays_its_own_settlement_and_conflicts_for_another_target() {
+    let fixture = Fixture::open();
+    for (job, action, text) in [
+        ("job-retain", ProposalAction::Retain, None),
+        (
+            "job-revise",
+            ProposalAction::Revise,
+            Some("bun builds and tests the workspace"),
+        ),
+        ("job-retire", ProposalAction::Retire, None),
+    ] {
+        let object = format!("decision-{job}");
+        let descriptor = fixture.decision(&object);
+        let staged = fixture.propose_over(job, action, &object, &descriptor, text);
+        let key = format!("caller-{job}");
+        let first = fixture.accept(&key, &staged).unwrap();
+        assert!(!first.replayed);
+        let tip = fixture.store.tip().unwrap();
+        let again = fixture.accept(&key, &staged).unwrap();
+        assert_eq!(
+            (again.replayed, &again.settlement),
+            (true, &first.settlement)
+        );
+        assert_eq!(
+            fixture.store.tip().unwrap(),
+            tip,
+            "a replay commits nothing"
+        );
+        fixture.release_review_hold(&staged);
+        let after_hold = fixture.accept(&key, &staged).unwrap();
+        assert_eq!(
+            (after_hold.replayed, &after_hold.settlement),
+            (true, &first.settlement)
+        );
+        let other = ProposalTarget::StagedCandidate {
+            candidate_id: "another".to_string(),
+        };
+        assert_eq!(
+            fixture.accept_as(&key, &staged, staged.run.clone(), other),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Conflict))
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+    }
+}
+
+/// A run naming another Kernel incarnation than the live store's is refused `Unavailable` before any replay or caller-key check, and writes nothing.
+#[test]
+fn a_run_of_another_kernel_incarnation_is_unavailable_before_any_replay() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Retain,
+        "decision-a",
+        &descriptor,
+        None,
+    );
+    fixture.accept("caller-1", &staged).unwrap();
+    let tip = fixture.store.tip().unwrap();
+    let elsewhere = MemoryReviewerHoldBinding {
+        kernel_incarnation: "f".repeat(32),
+        ..staged.run.clone()
+    };
+    for key in ["caller-1", "caller-2"] {
+        assert_eq!(
+            fixture.accept_as(key, &staged, elsewhere.clone(), staged.target.clone()),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Unavailable)),
+            "{key}"
+        );
+    }
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+}

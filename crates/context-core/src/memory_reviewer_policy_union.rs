@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use crate::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
+use crate::canonical_json::{ContractError, canonical_json_encode, protocol_digest_of_canonical};
 
 pub const MEMORY_REVIEWER_POLICY_UNION_VERSION: u32 = 1;
 pub const MEMORY_REVIEWER_POLICY_UNION_PROTOCOL: &str = "eidnara-memory_reviewer-policy-union-v1";
@@ -88,9 +88,10 @@ impl PolicyUnion {
             "v": MEMORY_REVIEWER_POLICY_UNION_VERSION,
             "members": encoded.into_iter().map(|(_, value)| value).collect::<Vec<_>>(),
         });
+        let canonical = canonical_json_encode(&value)?;
         Ok(EncodedPolicyUnion {
-            canonical: canonical_json_encode(&value)?,
-            digest: protocol_digest(MEMORY_REVIEWER_POLICY_UNION_PROTOCOL, &value)?,
+            digest: protocol_digest_of_canonical(MEMORY_REVIEWER_POLICY_UNION_PROTOCOL, &canonical),
+            canonical,
             members: self.members.len(),
         })
     }

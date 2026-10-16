@@ -126,12 +126,19 @@ fn lower_hex(bytes: &[u8]) -> String {
 
 /// Hashes `<protocol>\n<canonical JSON>` without materializing the joined string.
 pub fn protocol_digest(protocol: &str, value: &Value) -> Result<String, ContractError> {
-    let canonical = canonical_json_encode(value)?;
+    Ok(protocol_digest_of_canonical(
+        protocol,
+        &canonical_json_encode(value)?,
+    ))
+}
+
+/// [`protocol_digest`] of a value whose canonical JSON encoding is `canonical`.
+pub fn protocol_digest_of_canonical(protocol: &str, canonical: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(protocol.as_bytes());
     hasher.update(b"\n");
     hasher.update(canonical.as_bytes());
-    Ok(lower_hex(&hasher.finalize()))
+    lower_hex(&hasher.finalize())
 }
 
 /// Computes the digest a MemoryClassifier receipt binds its request to, over the

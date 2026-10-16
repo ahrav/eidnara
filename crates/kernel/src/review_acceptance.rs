@@ -1,6 +1,6 @@
 //! Exact-target acceptance of a MemoryReviewer proposal. One Kernel envelope validates the selected proposal row bound to the run, its live review hold, every input the run disclosed, the full policy union with each owner live and served to a local reader of the project, and the proposal's exact target, then applies the proposal's action and records one proposal-level settlement beside it.
 //!
-//! The settlement is a receipt under the reserved producer [`SETTLEMENT_PRODUCER`]. Its key is a versioned, length-delimited derivation over the project digest, the proposal id, its payload digest, the receipt generation, and both store incarnations; the caller's operation key is not part of it, and its request digest is derived here from that key. A second acceptance of one proposal under any caller key therefore replays the first settlement, and that replay is checked before the review hold, the queue deadline, or the payload is read. The caller's own intent keeps its usual meaning: a key that committed an acceptance replays only that acceptance, and the same key for other input conflicts.
+//! The settlement is a receipt under the reserved producer [`SETTLEMENT_PRODUCER`]. Its key is a versioned, length-delimited derivation over the project digest, the proposal id, its payload digest, the receipt generation, and both store incarnations; the caller's operation key is not part of it, and its request digest is derived here from that key. A second acceptance of one proposal under any caller key therefore replays the first settlement, and that replay is checked before the review hold, the queue deadline, or the payload is read. The caller's own intent keeps its usual meaning: a key that committed an acceptance replays only that acceptance, and the same key for other input conflicts. The caller's receipt records the settlement key it committed, so the settlement itself is stored once.
 //!
 //! Create inserts one decision whose identity derives from the settlement key and admits it as `ModelInference` with `MemoryClassifierInference` taint under `EventKind::Other`. Revise writes a fresh successor that keeps the predecessor's domain and source identity at the next source revision and is admitted on its own. Retire runs the existing retirement and its authority cascade. Retain and no-change write nothing canonical. Create and revise cite each supporting evidence row through a decision event, so the support stays durable after the review hold ends.
 
@@ -211,11 +211,14 @@ impl KernelStore {
             .map_err(|_| AcceptanceRefusal::Invalid)?;
         let settlement = settlement_intent(&acceptance.run, &acceptance.proposal)?;
         let mut writer = self.lock_writer()?;
-        // The settlement replay comes before the hold, the deadline, or the payload: a settled proposal answers its settlement whatever has expired since. A caller key with a receipt falls through, so the commit path replays it under its fence and alignment repair.
+        // The settlement replay comes before the hold, the deadline, or the payload: a settled proposal answers its settlement whatever has expired since. A caller key with a receipt falls through, so the commit path replays it under its fence and alignment repair. A store whose live incarnation is not the run's refuses `Unavailable` before either receipt is read.
         {
             let tx = writer
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(map_sqlite)?;
+            if super::open::database_incarnation_id_via(&tx)? != acceptance.run.kernel_incarnation {
+                return Err(AcceptanceRefusal::Unavailable.into());
+            }
             let caller = match recorded_receipt(&tx, acceptance.intent.clone()) {
                 Err(KernelError::Conflict) => return Err(AcceptanceRefusal::Conflict.into()),
                 other => other?,
@@ -234,12 +237,14 @@ impl KernelStore {
             }
         }
         let mut refusal = None;
+        let mut applied = None;
+        // The caller's receipt records the settlement key it committed, which names the run's project, the proposal, its payload digest, the receipt generation, and both incarnations; the settlement itself is recorded once, under that key.
         let receipt = commit_with_writer(
             &mut writer,
             self.lease_epoch(),
             acceptance.intent.clone(),
             |envelope| {
-                apply(envelope, acceptance, &settlement).map_err(|error| {
+                let recorded = apply(envelope, acceptance, &settlement).map_err(|error| {
                     // Every refusal is classified inside `apply`; a store conflict there is a moved row, never the caller's key.
                     refusal = Some(match error {
                         AcceptanceError::Refused(code) => code,
@@ -247,32 +252,42 @@ impl KernelStore {
                         AcceptanceError::Store(error) => return error,
                     });
                     KernelError::Conflict
-                })
+                })?;
+                applied = Some(recorded);
+                Ok(settlement.operation_key.clone())
             },
             || Ok(()),
         );
-        match receipt {
-            Ok(receipt) => {
-                let recorded = decode(&receipt.result)?;
-                // A caller key replays only the acceptance it committed: the same proposal at the same target.
-                if receipt.replayed
-                    && (recorded.proposal_id != acceptance.proposal.candidate_id
-                        || recorded.payload_digest != acceptance.proposal.payload_digest
-                        || recorded.receipt_generation != acceptance.run.generation
-                        || recorded.project_digest != acceptance.run.project_digest
-                        || recorded.kernel_incarnation != acceptance.run.kernel_incarnation
-                        || recorded.memstore_incarnation != acceptance.run.memstore_incarnation
-                        || recorded.target != acceptance.target)
-                {
-                    return Err(AcceptanceRefusal::Conflict.into());
-                }
-                Ok(AcceptanceOutcome {
-                    settlement: recorded,
-                    replayed: receipt.replayed,
+        let receipt = match receipt {
+            Ok(receipt) => receipt,
+            Err(error) => return Err(refusal.map_or(AcceptanceError::Store(error), Into::into)),
+        };
+        if !receipt.replayed {
+            return applied
+                .map(|settlement| AcceptanceOutcome {
+                    settlement,
+                    replayed: false,
                 })
-            }
-            Err(error) => Err(refusal.map_or(AcceptanceError::Store(error), Into::into)),
+                .ok_or(AcceptanceError::Store(KernelError::Io));
         }
+        // A caller key replays only the acceptance it committed: the same proposal at the same target.
+        if receipt.result != settlement.operation_key {
+            return Err(AcceptanceRefusal::Conflict.into());
+        }
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(map_sqlite)?;
+        let recorded = recorded_receipt(&tx, settlement)?
+            .map(|receipt| decode(&receipt.result))
+            .transpose()?
+            .ok_or(AcceptanceError::Store(KernelError::Io))?;
+        if recorded.target != acceptance.target {
+            return Err(AcceptanceRefusal::Conflict.into());
+        }
+        Ok(AcceptanceOutcome {
+            settlement: recorded,
+            replayed: true,
+        })
     }
 }
 
@@ -382,27 +397,32 @@ struct Validated {
     support: Vec<String>,
     /// The store clock the hold was judged at; the support events are stamped with it.
     now: i64,
+    /// The objects the policy-union members must have served to a local reader, each flagged when it is a descriptor; they are judged in one batch with the target.
+    served: Vec<(EligibilityCandidate, bool)>,
+    /// The candidate ids of the staged-subject members, each already proven this job's sealed subject row at its digest.
+    subjects: Vec<String>,
 }
 
-/// Validates and applies one acceptance inside its envelope and records the settlement receipt; returns the settlement's JSON for the caller's receipt.
+/// Validates and applies one acceptance inside its envelope and records the settlement receipt; returns the recorded settlement.
 fn apply(
     envelope: &mut Envelope<'_>,
     acceptance: &ProposalAcceptance,
     settlement_key: &CommitIntent,
-) -> Result<String, AcceptanceError> {
+) -> Result<Settlement, AcceptanceError> {
     let validated = validate(envelope, acceptance)?;
     let proposal = &validated.proposal;
     let effect = match (proposal.action, &proposal.target) {
         (ProposalAction::Retain | ProposalAction::NoChange, ProposalTarget::Memory(target)) => {
-            target_stands(envelope, &validated.project, target)?;
+            target_stands(envelope, &validated, target)?;
             SettlementEffect::Unchanged
         }
         (ProposalAction::NoChange, ProposalTarget::StagedCandidate { candidate_id }) => {
-            subject_stands(envelope, acceptance, candidate_id)?;
+            subject_stands(envelope, acceptance, &validated, candidate_id)?;
+            members_served(envelope, &validated, None)?;
             SettlementEffect::Unchanged
         }
         (ProposalAction::Retire, ProposalTarget::Memory(target)) => {
-            target_stands(envelope, &validated.project, target)?;
+            target_stands(envelope, &validated, target)?;
             let retirement = envelope
                 .retire_decision_with_cascade(&target.object_id)
                 .map_err(action_refusal)?;
@@ -416,7 +436,7 @@ fn apply(
             }
         }
         (ProposalAction::Revise, ProposalTarget::Memory(target)) => {
-            let predecessor = target_stands(envelope, &validated.project, target)?;
+            let predecessor = target_stands(envelope, &validated, target)?;
             revise(
                 envelope,
                 &validated,
@@ -425,7 +445,8 @@ fn apply(
             )?
         }
         (ProposalAction::Create, ProposalTarget::StagedCandidate { candidate_id }) => {
-            subject_stands(envelope, acceptance, candidate_id)?;
+            subject_stands(envelope, acceptance, &validated, candidate_id)?;
+            members_served(envelope, &validated, None)?;
             create(
                 envelope,
                 acceptance,
@@ -452,7 +473,7 @@ fn apply(
     };
     let encoded = serde_json::to_string(&settlement).map_err(|_| KernelError::Io)?;
     envelope.record_reserved_receipt(settlement_key.clone(), &encoded)?;
-    Ok(encoded)
+    Ok(settlement)
 }
 
 /// Everything an action depends on except its target: the row bound to this run, its dependency record, every disclosed input under the live review hold, and every policy-union member.
@@ -461,10 +482,7 @@ fn validate(
     acceptance: &ProposalAcceptance,
 ) -> Result<Validated, AcceptanceError> {
     let run = &acceptance.run;
-    let incarnation = super::open::database_incarnation_id_via(envelope.tx)?;
-    if incarnation != run.kernel_incarnation {
-        return Err(AcceptanceRefusal::Unavailable.into());
-    }
+    // `accept_review_proposal` checked the live incarnation under this writer guard, and the row read checks it against the reference again.
     let row = bound_review_row_in(
         envelope.tx,
         &acceptance.proposal,
@@ -517,8 +535,9 @@ fn validate(
     let project = ProjectScope::new(&run.project_digest).map_err(|_| AcceptanceRefusal::Invalid)?;
     let union = PolicyUnion::decode(&dependencies.union_canonical, &dependencies.union_digest)
         .or_else(|_| changed())?;
+    let mut served = Vec::new();
     for member in union.members() {
-        member_stands(envelope, acceptance, &project, &proposal, member)?;
+        member_stands(envelope, acceptance, &proposal, member, &mut served)?;
     }
     let mut support: Vec<String> = proposal
         .support
@@ -533,6 +552,12 @@ fn validate(
         project,
         support,
         now,
+        served,
+        subjects: union
+            .members()
+            .filter(|member| member.kind == "staged_subject")
+            .map(|member| member.id.clone())
+            .collect(),
     })
 }
 
@@ -581,10 +606,29 @@ fn served(
         }))
 }
 
-/// The target decision is live and served at exactly the proposal's tokens: the same object, kind, and source revision, and no change after the commit the proposer observed. Returns its state.
+/// Every object the policy-union members named, and `target` when there is one, is served to a local reader of the project, judged in one batch at the envelope's snapshot.
+fn members_served(
+    envelope: &Envelope<'_>,
+    validated: &Validated,
+    target: Option<EligibilityCandidate>,
+) -> Result<(), AcceptanceError> {
+    let mut candidates = validated.served.clone();
+    if let Some(target) = target.map(|target| (target, false))
+        && !candidates.contains(&target)
+    {
+        candidates.push(target);
+    }
+    if candidates.is_empty() || served(envelope, &validated.project, &candidates)? {
+        Ok(())
+    } else {
+        changed()
+    }
+}
+
+/// The target decision is live and served at exactly the proposal's tokens: the same object, kind, and source revision, and no change after the commit the proposer observed. Its eligibility is judged with the policy-union members'. Returns its state.
 fn target_stands(
     envelope: &Envelope<'_>,
-    project: &ProjectScope,
+    validated: &Validated,
     target: &CanonicalTarget,
 ) -> Result<ObjectState, AcceptanceError> {
     if target.known_as_of >= envelope.commit_seq || target.commit_token > target.known_as_of {
@@ -597,21 +641,18 @@ fn target_stands(
         || state.object.invalidated_commit_seq.is_some()
         || state.object.source_revision != target.source_revision
         || state.latest_change_commit_seq != Some(target.commit_token)
-        || !served(
-            envelope,
-            project,
-            &[(
-                EligibilityCandidate {
-                    object_id: target.object_id.clone(),
-                    source_revision: target.source_revision,
-                    artifact_digest: None,
-                },
-                false,
-            )],
-        )?
     {
         return changed();
     }
+    members_served(
+        envelope,
+        validated,
+        Some(EligibilityCandidate {
+            object_id: target.object_id.clone(),
+            source_revision: target.source_revision,
+            artifact_digest: None,
+        }),
+    )?;
     Ok(state)
 }
 
@@ -659,11 +700,20 @@ fn subject_row_stands(
     }
 }
 
+/// The staged subject a create or no-change names stands: a staged-subject member already proved it at its digest, or it is this job's sealed subject row at whatever digest it is stored.
 fn subject_stands(
     envelope: &Envelope<'_>,
     acceptance: &ProposalAcceptance,
+    validated: &Validated,
     candidate_id: &str,
 ) -> Result<(), AcceptanceError> {
+    if validated
+        .subjects
+        .iter()
+        .any(|subject| subject == candidate_id)
+    {
+        return Ok(());
+    }
     subject_row_stands(envelope, acceptance, candidate_id, None)
 }
 
@@ -671,9 +721,9 @@ fn subject_stands(
 fn member_stands(
     envelope: &Envelope<'_>,
     acceptance: &ProposalAcceptance,
-    project: &ProjectScope,
     proposal: &ReviewProposal,
     member: &PolicyUnionMember,
+    served: &mut Vec<(EligibilityCandidate, bool)>,
 ) -> Result<(), AcceptanceError> {
     let stands = match (
         member.kind.as_str(),
@@ -685,9 +735,9 @@ fn member_stands(
                 proposal.policy_dependencies.question_template;
             member.id == "extracted_facts"
         }
-        ("native_source", None, None) => descriptor_stands(envelope, project, member, None)?,
+        ("native_source", None, None) => descriptor_stands(envelope, member, None, served)?,
         ("canonical_source", Some(owner), Some(owner_revision)) => {
-            descriptor_stands(envelope, project, member, Some((owner, owner_revision)))?
+            descriptor_stands(envelope, member, Some((owner, owner_revision)), served)?
         }
         ("staged_subject", None, None) => {
             subject_row_stands(envelope, acceptance, &member.id, Some(&member.revision))?;
@@ -709,12 +759,12 @@ fn member_stands(
     if stands { Ok(()) } else { changed() }
 }
 
-/// A native or canonical descriptor member is a live descriptor at its revision whose class agrees with the member kind; a canonical one's detail names `owner` in its class's leading identity field, and the owner is a live decision at `owner_revision`. Both pass the batch eligibility judgement for a local reader.
+/// A native or canonical descriptor member is a live descriptor at its revision whose class agrees with the member kind; a canonical one's detail names `owner` in its class's leading identity field, and the owner is a live decision at `owner_revision`. Both are queued on `served` for the batch eligibility judgement for a local reader.
 fn descriptor_stands(
     envelope: &Envelope<'_>,
-    project: &ProjectScope,
     member: &PolicyUnionMember,
     owner: Option<(&str, &str)>,
+    served: &mut Vec<(EligibilityCandidate, bool)>,
 ) -> Result<bool, AcceptanceError> {
     let Ok(revision) = member.revision.parse::<i64>() else {
         return Ok(false);
@@ -744,14 +794,14 @@ fn descriptor_stands(
     if state.object.invalidated_commit_seq.is_some() || state.object.source_revision != revision {
         return Ok(false);
     }
-    let mut candidates = vec![(
+    let descriptor = (
         EligibilityCandidate {
             object_id: member.id.clone(),
             source_revision: revision,
             artifact_digest: Some(detail.artifact_digest.clone()),
         },
         true,
-    )];
+    );
     match owner {
         None => {
             if decision_derived(class) {
@@ -778,7 +828,7 @@ fn descriptor_stands(
             {
                 return Ok(false);
             }
-            candidates.push((
+            served.push((
                 EligibilityCandidate {
                     object_id: owner.to_string(),
                     source_revision: owner_revision,
@@ -788,7 +838,8 @@ fn descriptor_stands(
             ));
         }
     }
-    served(envelope, project, &candidates)
+    served.push(descriptor);
+    Ok(true)
 }
 
 /// The descriptor classes whose leading identity field names an originating decision.
