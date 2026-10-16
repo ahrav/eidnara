@@ -129,6 +129,21 @@ paused clock; it is not flaky by construction but is slow.
 - Conclusion: needs human input. The catalog's `Confidence` line attributes
   the test to `local_embeddings_jobs.rs`; it lives in `local_embeddings_protocol.rs:415`.
 
+### Q: Is the waiter boundary test runnable under the ring cap? (after the single-ring rewrite)
+
+- Sources examined: `tests/local_embeddings_protocol.rs:493`.
+- Findings: the test opens one client and one route and sends the running
+  query and all 31 boundary waiters as separate correlations on it, so one
+  ring carries every maximal query. It waits until
+  `waiting_queries_for_test()` reports all 31 waiters parked behind the
+  running query with the engine gate closed, then releases the gate and
+  collects 32 responses by correlation, with inference run once per query.
+  The test is no longer ignored. A negative control at `max_waiting_queries`
+  of 30 never reaches 31 parked waiters and fails the wait.
+- Missing evidence: none for the waiter boundary.
+- Conclusion: resolved with answer - one client exercises the boundary within
+  the ring cap.
+
 ### Q: Is the byte boundary exact for the sum, not just the single item?
 
 - Sources examined: `src/local_embeddings/jobs.rs:313`, `:358-359`, `:376`, `:456`.

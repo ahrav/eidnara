@@ -10398,9 +10398,12 @@ Required faults and enabling state: Boundary-sized admission; completion under c
 Confidence: medium - [evidence](evidence/local_embeddings-admission-boundaries-are-exact.md). `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/local_embeddings_jobs.rs`).
 Existing check: The tests named above; unaudited.
 Impact: A lost or silently duplicated embedding job.
-Open questions:
-
-- Whether `boundary_waiters_with_maximal_texts_are_all_admitted` (`crates/host-runtime/tests/local_embeddings_protocol.rs:415`, a query-waiter admission test, not a job-table test) should be rewritten for the eight-ring admission cap or dropped; it is `#[ignore]` with that reason (`:412-414`). (needs human input)
+Open questions: None. The query-waiter boundary test
+`boundary_waiters_with_maximal_texts_are_all_admitted`
+(`crates/host-runtime/tests/local_embeddings_protocol.rs:493`) now drives all
+32 maximal queries over one client and one route, so it opens one ring under
+the eight-ring admission cap and runs by default; it is evidence for the
+waiter boundary, not for this job-table record.
 
 ### local_embeddings-degrades-to-disabled-and-keeps-the-context-routable
 
