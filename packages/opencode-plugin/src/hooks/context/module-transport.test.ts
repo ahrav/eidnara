@@ -976,6 +976,41 @@ describe("generation-sensitive not-sent outcomes", () => {
         ).rejects.toBe(refusal);
     });
 
+    test("an over-limit body refusal propagates without route or connection turnover", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const refusal = new HostCallError(
+            "not_sent",
+            "frame body length 67108865 exceeds max 67108864",
+            "frame_body_too_large",
+        );
+        fakeRoute(transport, () => Promise.reject(refusal));
+        let invalidations = 0;
+        transport.invalidateConnection = async () => {
+            invalidations += 1;
+        };
+        const before = transport.connectionGeneration;
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).rejects.toBe(refusal);
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+            }),
+        ).rejects.toBe(refusal);
+        expect(invalidations).toBe(0);
+        expect(transport.connectionGeneration).toBe(before);
+    });
+
     test("a stale route handle reports a generation change", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let route: RouteHandle | undefined;
