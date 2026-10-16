@@ -15,13 +15,13 @@ use super::memory_reviewer_hold::validate_review_evidence_in;
 use super::review_staging::bound_review_row_in;
 use super::{
     AdmissionDecision, AdmissionEvent, AdmissionRequest, ArtifactDestination, CachedSql,
-    CanonicalTarget, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionSpec,
-    EligibilityCandidate, EligibilityVerdict, EventKind, KernelError, KernelStore,
-    MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldRefusal, ObjectState,
-    ObservationPayload, ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION,
-    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError,
-    ReviewReadRefusal, ReviewStagedReference, Sensitivity, SourceClass, SourceDescriptorDetail,
-    TaintClass, current_time_ms, map_sqlite, provisional_result_identity,
+    CanonicalTarget, DecisionPayload, DecisionSpec, EligibilityCandidate, EligibilityVerdict,
+    EventKind, KernelError, KernelStore, MemoryReviewerHoldBinding, MemoryReviewerHoldError,
+    MemoryReviewerHoldRefusal, ObjectState, ObservationPayload, ProjectScope, ProposalAction,
+    ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner, ReviewPayload, ReviewProposal,
+    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStagedReference, Sensitivity,
+    SourceClass, SourceDescriptorDetail, TaintClass, current_time_ms, map_sqlite,
+    provisional_result_identity,
 };
 use crate::scope::load_scope_terms;
 use crate::source_identity::{OccurrenceClass, identity_digest};
@@ -37,6 +37,8 @@ pub const ACCEPTED_SOURCE_KIND: &str = "memory_reviewer_proposal";
 const ACCEPTED_DECISION_KIND: &str = "memory_reviewer_create";
 /// `event_kind` of the decision event that cites one supporting evidence row.
 const SUPPORT_EVENT_KIND: &str = "memory_reviewer_support";
+/// `event_payload.summary` of each support event.
+const SUPPORT_EVENT_SUMMARY: &str = "supporting evidence of the accepted proposal";
 /// The decision kind that makes a decision an approval; model-written text never carries it.
 const APPROVAL_DECISION_KIND: &str = "adr_accepted";
 /// The classes every accepted create or revise is admitted under.
@@ -930,21 +932,15 @@ fn admit(
     support: &[String],
     now: i64,
 ) -> Result<AdmittedState, AcceptanceError> {
-    for evidence_id in support {
-        envelope
-            .append_decision_event(
-                &ids.decision_id,
-                DecisionEventSpec {
-                    event_kind: SUPPORT_EVENT_KIND.to_string(),
-                    payload: DecisionEventPayload {
-                        summary: "supporting evidence of the accepted proposal".to_string(),
-                    },
-                    evidence_id: Some(evidence_id.clone()),
-                    recorded_at: now,
-                },
-            )
-            .map_err(action_refusal)?;
-    }
+    envelope
+        .append_decision_citations(
+            &ids.decision_id,
+            SUPPORT_EVENT_KIND,
+            SUPPORT_EVENT_SUMMARY,
+            support,
+            now,
+        )
+        .map_err(action_refusal)?;
     let decision = envelope
         .record_admission(AdmissionRequest {
             candidate_id: None,

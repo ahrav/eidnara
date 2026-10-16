@@ -702,6 +702,84 @@ fn create_inserts_one_decision_admitted_as_model_inference_with_durable_support(
 }
 
 #[test]
+fn create_cites_each_support_row_in_its_own_ordered_event() {
+    let fixture = Fixture::open();
+    let subject = fixture.subject("job-1");
+    let mut support = Vec::new();
+    let mut members = Vec::new();
+    for key in ["support-c", "support-a", "support-b"] {
+        let (evidence, digest) = fixture.ingest(key);
+        members.push(PolicyUnionMember {
+            kind: "temporary_capture".to_string(),
+            id: evidence.clone(),
+            revision: digest,
+            owner_id: None,
+            owner_revision: None,
+        });
+        support.push(evidence);
+    }
+    let staged = fixture.propose(
+        "job-1",
+        ProposalAction::Create,
+        ProposalTarget::StagedCandidate {
+            candidate_id: subject,
+        },
+        Some("bun builds the workspace"),
+        &support,
+        members,
+    );
+    let outcome = fixture.accept("caller-1", &staged).unwrap();
+    let SettlementEffect::Created { object_id, .. } = &outcome.settlement.effect else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    let connection =
+        rusqlite::Connection::open(fixture._directory.path().join("kernel.sqlite")).unwrap();
+    // One event per supporting row, in evidence-id order, at consecutive ordinals of the acceptance commit.
+    let events = connection
+        .prepare(
+            "SELECT e.event_ordinal,e.event_kind,e.evidence_id,e.commit_seq
+             FROM decision_events e JOIN decisions d ON d.decision_id=e.decision_id
+             WHERE d.object_id=?1 ORDER BY e.event_ordinal",
+        )
+        .unwrap()
+        .query_map([object_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let commit_seq = outcome.settlement.commit_seq;
+    assert_eq!(
+        events,
+        ["support-a", "support-b", "support-c"]
+            .into_iter()
+            .zip(1..)
+            .map(|(key, ordinal)| (
+                ordinal,
+                "memory_reviewer_support".to_string(),
+                format!("evidence-{key}"),
+                commit_seq
+            ))
+            .collect::<Vec<_>>()
+    );
+    // Each citation is its own change record of the decision.
+    let appended: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM change_event
+             WHERE commit_seq=?1 AND object_id=?2 AND change_kind='decision_event_append'",
+            rusqlite::params![commit_seq, object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(appended, 3);
+}
+
+#[test]
 fn revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target() {
     let fixture = Fixture::open();
     // An accepted ADR verifies `decision-a`, so it serves automatically before the revise.
