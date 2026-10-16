@@ -68,10 +68,11 @@ that CI runs via `cargo test --workspace --all-targets`
   a poll 250 ms after readiness returns `module_restarted` (`:272`).
 
 `boundary_waiters_with_maximal_texts_are_all_admitted` is in
-`tests/local_embeddings_protocol.rs:415-468`, not `local_embeddings_jobs.rs`. It is `#[ignore]`
-(`:412-414`) because it opens 33 ring clients and `MAX_RING_RESIDENT_BYTES`
-(`src/ring_transport.rs:58`, 1 GiB) admits at most eight rings per process
-(`:60-67`). It also concerns query-waiter admission, not the job table.
+`tests/local_embeddings_protocol.rs:493`, not `local_embeddings_jobs.rs`. It
+runs by default: one client and one route carry the running query and all 31
+boundary waiters, so it opens one ring under `MAX_RING_RESIDENT_BYTES`
+(`src/ring_transport.rs`, 1 GiB, at most eight rings per process). It concerns
+query-waiter admission, not the job table.
 
 ## Failure scenario
 
@@ -128,6 +129,7 @@ paused clock; it is not flaky by construction but is slow.
   host-level test at all, given the configuration-time check.
 - Conclusion: needs human input. The catalog's `Confidence` line attributes
   the test to `local_embeddings_jobs.rs`; it lives in `local_embeddings_protocol.rs:415`.
+  Superseded by the single-ring entry below.
 
 ### Q: Is the waiter boundary test runnable under the ring cap? (after the single-ring rewrite)
 
@@ -138,8 +140,9 @@ paused clock; it is not flaky by construction but is slow.
   `waiting_queries_for_test()` reports all 31 waiters parked behind the
   running query with the engine gate closed, then releases the gate and
   collects 32 responses by correlation, with inference run once per query.
-  The test is no longer ignored. A negative control at `max_waiting_queries`
-  of 30 never reaches 31 parked waiters and fails the wait.
+  The test is no longer ignored. A manual negative control, run once and
+  reverted, set `max_waiting_queries` to 30: the 31st waiter is refused, the
+  count never reaches 31, and the wait fails.
 - Missing evidence: none for the waiter boundary.
 - Conclusion: resolved with answer - one client exercises the boundary within
   the ring cap.

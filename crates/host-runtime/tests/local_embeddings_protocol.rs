@@ -514,7 +514,14 @@ async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
         tokio::task::yield_now().await;
     }
     // Each waiter retains its decoded maximal text while the closed engine gate makes all boundary+1 charges coexist in the scratch pool.
-    yield_until(|| component.waiting_queries_for_test() == BOUNDARY).await;
+    // Thirty-one maximal bodies decode before they park, so the wait allows more yields than
+    // `yield_until`'s default.
+    for _ in 0..100_000 {
+        if component.waiting_queries_for_test() == BOUNDARY {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert_eq!(
         component.waiting_queries_for_test(),
         BOUNDARY,
@@ -531,7 +538,11 @@ async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
     while terminals.len() < corrs.len() {
         let frame = client.frame_within(BUDGET).await.expect("query terminal");
         if corrs.contains(&frame.corr) {
-            terminals.insert(frame.corr, frame);
+            let corr = frame.corr;
+            assert!(
+                terminals.insert(corr, frame).is_none(),
+                "duplicate terminal for correlation {corr}"
+            );
         }
     }
     for corr in &corrs {
