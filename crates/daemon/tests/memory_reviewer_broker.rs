@@ -2344,9 +2344,9 @@ fn a_resolved_canonical_or_promoted_subject_still_refuses_the_remote_destination
     }
 }
 
-/// The rest of the refusal matrix for decision-derived subjects. A stored identity whose leading field is missing or empty names no decision, so resolution refuses it as unsupported. A resolved subject whose artifact class tightens refuses the read with zero bytes, for the local destination as well as the remote one, and one whose artifact was deleted cannot be held, so its run reads nothing.
+/// A decision-derived descriptor whose stored identity has a missing or empty leading field names no decision, so resolution refuses it as unsupported. The Kernel refuses such an identity at publication; the test rewrites the stored row to reach the defensive branch.
 #[test]
-fn a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_before_disclosure() {
+fn a_missing_or_empty_decision_identity_is_unsupported() {
     let fixture = Fixture::open();
     for (key, identity) in [
         ("missing", serde_json::json!([])),
@@ -2355,6 +2355,7 @@ fn a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_bef
         let owner = format!("decision-{key}");
         fixture.decision(&owner);
         let (object, _) = derived(&fixture, key, OccurrenceClass::CanonicalClaims, &owner);
+        fixture.resolve(&object).unwrap();
         corrupt_detail(&fixture, &object, |detail| detail["identity"] = identity);
         assert_eq!(
             resolution_refusal(fixture.resolve(&object).unwrap_err()),
@@ -2362,21 +2363,39 @@ fn a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_bef
             "{key} identity"
         );
     }
+}
 
-    fixture.decision("decision-tightened");
-    let (tightened, tightened_evidence) = derived(
+/// A resolved decision-derived subject whose artifact class tightens after resolution refuses the read with zero bytes, for the local destination as well as the remote one; the same subject read before the change discloses its bytes.
+#[test]
+fn a_class_tightened_after_resolution_refuses_every_destination() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let (object, evidence) = derived(
         &fixture,
-        "tightened",
+        "promoted",
         OccurrenceClass::PromotedMemory,
-        "decision-tightened",
+        "decision-a",
     );
-    let subject = fixture.resolve(&tightened).unwrap();
+    let subject = fixture.resolve(&object).unwrap();
+    let read = |destination| {
+        let mut broker =
+            fixture.broker_for(PROJECT, std::slice::from_ref(&evidence.0), destination);
+        let alias = broker.aliases.issue(subject.clone());
+        let code = broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .err()
+            .map(|refusal| refusal.code);
+        (code, broker.accounting.model_visible_bytes())
+    };
+    let (before, bytes) = read(kernel::ArtifactDestination::Local);
+    assert_eq!(before, None);
+    assert!(bytes > 0, "the subject is readable before the change");
     // Ingesting the same bytes under a Secret assertion tightens every row of the digest.
     fixture
         .store
         .ingest_artifact(ArtifactIngestRequest {
             intent: intent("tighten"),
-            payload: b"tightened: a form of decision-tightened".to_vec(),
+            payload: b"promoted: a form of decision-a".to_vec(),
             evidence_id: "evidence-tighten".to_string(),
             object_id: "evidence-object-tighten".to_string(),
             object_kind: "evidence".to_string(),
@@ -2392,31 +2411,42 @@ fn a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_bef
             provenance: None,
         })
         .unwrap();
-    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&tightened_evidence.0));
-    let alias = broker.aliases.issue(subject);
-    assert_eq!(
-        broker
-            .read(&fixture.store, alias.as_str(), None, fixture.now)
-            .unwrap_err()
-            .code,
-        RefusalCode::PolicyBlocked,
-        "a tightened class refuses the local destination"
-    );
-    assert_eq!(broker.accounting.model_visible_bytes(), 0);
+    for destination in [
+        kernel::ArtifactDestination::Local,
+        kernel::ArtifactDestination::Remote,
+    ] {
+        assert_eq!(
+            read(destination),
+            (Some(RefusalCode::PolicyBlocked), 0),
+            "{destination:?}"
+        );
+    }
+}
 
-    fixture.decision("decision-deleted");
-    let (deleted, deleted_evidence) = derived(
+/// A decision-derived subject whose evidence is deleted after resolution cannot be held, and the coordinator takes the execution hold before it builds a broker, so the run reads nothing. A fresh resolution still binds the descriptor, whose hold is what refuses.
+#[test]
+fn a_deleted_artifact_refuses_the_execution_hold() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let (object, evidence) = derived(
         &fixture,
-        "deleted",
+        "claim",
         OccurrenceClass::CanonicalClaims,
-        "decision-deleted",
+        "decision-a",
     );
-    let subject = fixture.resolve(&deleted).unwrap();
+    let hold = |fixture: &Fixture| {
+        fixture.store.acquire_execution_hold(
+            &fixture.hold_binding(PROJECT),
+            std::slice::from_ref(&evidence.0),
+            fixture.now + HOUR_MS,
+        )
+    };
+    fixture.resolve(&object).unwrap();
     fixture
         .store
         .delete_artifact(kernel::ArtifactDeletionRequest {
-            intent: intent("delete-deleted"),
-            identity: kernel::ArtifactDeletionIdentity::EvidenceId(deleted_evidence.0.clone()),
+            intent: intent("delete-claim"),
+            identity: kernel::ArtifactDeletionIdentity::EvidenceId(evidence.0.clone()),
             kind: kernel::ArtifactDeletionKind::Delete,
             operator_id: None,
             target_locator: None,
@@ -2424,20 +2454,16 @@ fn a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_bef
             deleted_at: fixture.now,
         })
         .unwrap();
-    // The run holds its subject's evidence before any read, and a deleted artifact cannot be held, so the run stops with no broker and no byte read.
+    let after = fixture.resolve(&object);
+    assert!(
+        matches!(after, Ok(ReferenceExpectation::CanonicalSource { .. })),
+        "{after:?}"
+    );
     assert!(matches!(
-        fixture.store.acquire_execution_hold(
-            &fixture.hold_binding(PROJECT),
-            std::slice::from_ref(&deleted_evidence.0),
-            fixture.now + HOUR_MS,
-        ),
+        hold(&fixture),
         Err(kernel::MemoryReviewerHoldError::Refused(
             kernel::MemoryReviewerHoldRefusal::UnavailableEvidence
         ))
-    ));
-    assert!(matches!(
-        subject,
-        ReferenceExpectation::CanonicalSource { .. }
     ));
 }
 

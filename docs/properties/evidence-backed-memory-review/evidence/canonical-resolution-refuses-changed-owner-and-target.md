@@ -34,17 +34,20 @@ decision revision, evidence object as owner refused by `proposal_target` and by
 the broker with zero bytes),
 `canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both`,
 `a_canonical_owner_must_be_a_live_decision`,
-`a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_before_disclosure`
-(a stored identity with a missing or empty leading field refuses `Unsupported`
-at resolution; the same bytes ingested under `Secret` after resolution refuse
-the local read `PolicyBlocked` with zero bytes; deleted evidence refuses the
-execution hold `UnavailableEvidence`, so the run reads nothing).
+`a_missing_or_empty_decision_identity_is_unsupported` (a stored identity with a
+missing or empty leading field refuses `Unsupported` at resolution),
+`a_class_tightened_after_resolution_refuses_every_destination` (a subject
+readable before the change refuses `PolicyBlocked` with zero bytes on both
+destinations once the same bytes are ingested under `Secret`),
+`a_deleted_artifact_refuses_the_execution_hold` (deleted evidence refuses the
+hold `UnavailableEvidence`; the coordinator takes the hold before it builds a
+broker, so the run reads nothing).
 
 `crates/daemon/tests/memory_reviewer_worker.rs` -
-`a_fixture_canonical_claim_reaches_a_readable_proposal_targeting_its_decision`:
+`fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision`:
 through the production selector, slot enqueue, and worker, the proposal over a
-canonical descriptor targets the decision at its exact tokens, not the
-descriptor.
+canonical or promoted descriptor targets the decision at its exact tokens, not
+the descriptor.
 
 ## Failure scenario
 
@@ -75,6 +78,11 @@ assert the broker refuses before disclosure with zero model-visible bytes.
 Insert a second scope whose project term names another project, a decision in
 that scope, and an in-scope descriptor naming it; assert resolution binds the
 decision and the broker refuses the read `Scope` with zero model-visible bytes.
+Rewrite a stored descriptor identity to drop or empty its leading field; assert
+`Unsupported`. Read a resolved subject, ingest the same bytes under `Secret`,
+and read again on both destinations; assert `PolicyBlocked` with zero bytes.
+Delete a resolved subject's evidence; assert the execution hold refuses
+`UnavailableEvidence`.
 
 ## Investigation log
 

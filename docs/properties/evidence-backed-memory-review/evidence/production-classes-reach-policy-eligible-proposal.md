@@ -38,22 +38,24 @@ model-visible bytes.
 `production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator`:
 the production `ClaimMaterializer`, run `LocalOnly` as `search_lifecycle_owner`
 runs it, publishes two `canonical_claims` forms and one `promoted_memory` form
-of one decision. Each names the decision, is `Allowed` locally, and is denied
-Remote (`SensitiveRemote` or `ProviderRestricted`). `select_review_targets`
+of one decision. Each names the decision, is permitted to a local reader, and
+is denied Remote (`SensitiveRemote`; the selector's surface verdict is
+`ProviderSensitive`). `select_review_targets`
 over `MEMORY_CLASSES` with no class override returns an empty page with no
 cursor. The same causal inputs, enqueued through the selection slot's frozen
 page, run in the production worker to `owner_sensitive` receipts with no
-attempt row, zero connections, a refused selected read, and Kernel object
+attempt row, zero connections, a `not_selected` read, and Kernel object
 states equal before and after.
 
 `crates/daemon/tests/memory_reviewer_worker.rs` -
-`a_fixture_canonical_claim_reaches_a_readable_proposal_targeting_its_decision`:
-a fixture witness, not production eligibility. The descriptor's evidence
-carries repository provenance the test supplies. The same selector, slot
-enqueue, and worker produce a `Complete` receipt and a readable `retain`
-proposal whose `CanonicalTarget` names the decision's object id, source
-revision, and last-change commit token, and cites the descriptor's evidence;
-the Kernel tip does not move.
+`fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision`:
+a fixture witness, not production eligibility. Each descriptor's evidence
+carries repository provenance the test supplies. For a `canonical_claims` and a
+`promoted_memory` form of one decision, the same selector, slot enqueue, and
+worker produce `Complete` receipts and readable `retain` proposals whose
+`CanonicalTarget` names the decision's object id, source revision, and
+last-change commit token, each citing its own form's evidence; the Kernel tip
+does not move.
 
 `crates/daemon/tests/memory_reviewer_selection.rs` -
 `the_production_classes_are_walked_in_order_and_a_cursor_resumes_in_the_second_class`.
