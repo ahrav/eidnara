@@ -44,3 +44,10 @@ Check semantics: `reachable` - the code point that reports a completed real exch
   witness constructs and what it leaves unconstructed.
 - Missing evidence: the Rust client's cross-process run is still owed under #552 and passes to this task's combined matrix if #552 closes first; a native/TypeScript daemon-level witness on a runtime that reports the detachment capability remains a recorded gap; the capability witness records artifact and runtime identity for every skip.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: The TypeScript client over the native addon now runs against a separate host process at the 64 MiB maximum in both directions, refuses one byte over as `not_sent`, survives close, reconnect, and restart, and is required in the native CI job.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

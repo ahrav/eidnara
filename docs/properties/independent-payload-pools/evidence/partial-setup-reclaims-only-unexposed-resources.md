@@ -44,3 +44,10 @@ Check semantics: `always` - after a setup failure before the grant is sent, `sna
   witness constructs and what it leaves unconstructed.
 - Missing evidence: the last implementation task injects a descriptor-duplication failure in the combined matrix.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: `fail_next_descriptor_transfer` fails the endpoint after `worker_descriptor` duplicated its six descriptors and before they are handed to the caller; the duplicates close unsent and the accounting returns to its prior value, after which a one-connection limit admits again.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

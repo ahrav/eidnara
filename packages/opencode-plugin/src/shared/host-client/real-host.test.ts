@@ -49,7 +49,7 @@ async function startHost(dataDir: string): Promise<RunningHost> {
 }
 
 async function stopHost(host: RunningHost): Promise<void> {
-    if (host.child.exitCode !== null) return;
+    if (host.child.exitCode !== null || host.child.signalCode !== null) return;
     const exited = new Promise<void>((resolve) => host.child.once("exit", () => resolve()));
     host.child.kill("SIGTERM");
     await exited;
@@ -160,5 +160,41 @@ describe("TypeScript client against a real host process", () => {
             expect(sharedMemory(await third.hostStatus()).activation.completed).toBe(1);
         },
         240_000,
+    );
+
+    it.skipIf(!RUNNABLE)(
+        "a host that stops after a request was published reports outcome_unknown, and a fresh client recovers on a restarted host",
+        async () => {
+            const dataDir = mkdtempSync(join(tmpdir(), "eidnara-real-host-stop-"));
+            dataDirs.push(dataDir);
+            const host = await startHost(dataDir);
+            const client = await connect(host);
+            const route = await client.routeOpen(ECHO, IDENTITY);
+            (await client.requestBinary(route, Uint8Array.of(1))).release();
+
+            // A frozen host cannot consume or answer; killing it after publication leaves the
+            // request's outcome unknown to the client.
+            const pid = host.child.pid as number;
+            process.kill(pid, "SIGSTOP");
+            const published = client.requestBinary(route, Uint8Array.of(2), { timeoutMs: 30_000 });
+            const rejected = published.then(
+                () => null,
+                (error: unknown) => error as { kind?: string },
+            );
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            const exited = new Promise<void>((resolve) => host.child.once("exit", () => resolve()));
+            process.kill(pid, "SIGKILL");
+            await exited;
+            const failure = await rejected;
+            expect(failure?.kind).toBe("outcome_unknown");
+
+            const restarted = await startHost(dataDir);
+            const fresh = await connect(restarted);
+            const freshRoute = await fresh.routeOpen(ECHO, IDENTITY);
+            const echoed = await fresh.requestBinary(freshRoute, Uint8Array.of(3));
+            expect([...leaseBytes(echoed)]).toEqual([3]);
+            echoed.release();
+        },
+        120_000,
     );
 });

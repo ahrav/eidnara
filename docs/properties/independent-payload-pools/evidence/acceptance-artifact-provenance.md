@@ -54,3 +54,10 @@ invalidated. At the #989 head, the grant is 124 bytes and carries no layout
 version, the lifecycle page carries no layout version, and the setup grant and
 activation carry no descriptor schema or wire version. Line anchors into files
 #989 changed are as of their earlier recorded head.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: The addon carries a source digest computed by `build.rs`, and the claimed-target capability witness recomputes it from the checkout; a stale build fails with a named message.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

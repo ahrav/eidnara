@@ -856,6 +856,7 @@ jobs:
             lease::tests::to_vec_copies_every_body_length_without_a_zero_fill
             lease::tests::a_span_length_mismatch_refuses_before_writing_any_byte
             backend::ring::miri::descriptor_snapshot_is_copied_out_field_by_field_and_validated
+            backend::ring::miri::descriptor_copy_races_a_concurrent_slot_rewrite
             backend::ring::miri::completion_cell_publication_is_monotonic
             backend::ring::miri::lifecycle_snapshot_sees_a_write_made_through_the_raw_page
           )

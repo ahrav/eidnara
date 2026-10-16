@@ -43,3 +43,10 @@ Check semantics: `always` - every `SendFailure` maps to exactly one of the two o
   witness constructs and what it leaves unconstructed.
 - Missing evidence: the combined daemon matrix for native stop/restart.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: A request published to a frozen real host whose process is then killed is reported to the TypeScript caller as `outcome_unknown`; a fresh client completes a request on a restarted host.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

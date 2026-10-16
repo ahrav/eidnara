@@ -43,3 +43,10 @@ Check semantics: `always` - `cleanup_env` never calls `Ring` methods other than 
   witness constructs and what it leaves unconstructed.
 - Missing evidence: late-finalizer witnesses remain open within #550.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: Constructing the worker witness on Node aborted the process: `cleanup_env` ran `close_channel`, whose alias sweep called `napi_get_reference_value` during environment teardown with no handle scope. `cleanup_env` now makes no N-API call; alias-holding channels are quarantined and leaked with their charge. The witness passes on Node and Bun. The late-finalizer witness found Bun counting a leak for every detach because Bun runs the finalizer inside `napi_detach_arraybuffer`, before `released` was stored; `detach` now stores it first and clears it on failure.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

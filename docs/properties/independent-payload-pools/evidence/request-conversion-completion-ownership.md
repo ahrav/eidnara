@@ -43,3 +43,10 @@ Check semantics: `always` - a lease moved into blocking work returns only after 
   witness constructs and what it leaves unconstructed.
 - Missing evidence: none for this task
 - Conclusion: resolved with answer.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: The test-support `inbound_copy_gate` holds the production copy in `dispatch_request` for bodies of one length. Under the hold, `Cancel`, a route close, and shutdown each wait, `host.status` reports one outstanding return, and release settles the request as `cancelled` with the block returned.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

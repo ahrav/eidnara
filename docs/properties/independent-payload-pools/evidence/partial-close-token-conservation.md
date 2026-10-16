@@ -45,3 +45,10 @@ Check semantics: `always` - every token is released or retained exactly once acr
   witness constructs and what it leaves unconstructed.
 - Missing evidence: a `deliver` callback that closes its channel (marker `native.reentrant_close`) and environment termination; only the injected detach and deletion failures are constructed.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: `runReentrantClose` closes the channel from its own delivery callback; the close detaches the delivered alias and consumes its return authority once, so the later `release` is refused and the reference count is unchanged. `runEnvironmentExit` terminates a worker environment with and without a held alias.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.
