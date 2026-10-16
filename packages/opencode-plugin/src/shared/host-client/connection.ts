@@ -635,6 +635,7 @@ export class ConnectionGeneration {
         let ticket: FrameSendTicket;
         const guardedBody: DirectFrameBody = {
             byteLength: body.byteLength,
+            ...(body.bytes === undefined ? {} : { bytes: body.bytes }),
             fill: (cursor) => {
                 this.producing = true;
                 try {

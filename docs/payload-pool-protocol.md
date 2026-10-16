@@ -315,7 +315,10 @@ Before parsing, they validate the copied header against the copied body length.
 The producer's raw-pointer escape is `ProducerReservation::segment`, whose span
 is exactly the caller's bound; the consumer's is `PayloadLease::body`, whose
 span is exactly the declared body. The native addon aliases those spans as
-external `ArrayBuffer`s and detaches them before commit and before return.
+external `ArrayBuffer`s and detaches them before commit and before return. A
+body of at most 256 KiB that JavaScript holds in an unshared `ArrayBuffer`,
+outside every addon segment, publishes without a producer alias: the addon
+copies it into the reservation through `ProducerReservation::write`.
 Concurrent non-atomic JavaScript writes to a span the peer is reading are a
 protocol violation the shape does not cover. Two rules exclude them: the addon
 detaches every alias before publish and before return, and the runtime refuses

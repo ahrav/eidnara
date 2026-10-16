@@ -369,3 +369,68 @@ pub(crate) fn detach_value(env: &Env, value: Unknown<'_>) -> Result<bool> {
 pub(crate) fn leak_diagnostics() -> u64 {
     LEAK_DIAGNOSTICS.load(Ordering::Relaxed)
 }
+
+pub(crate) struct UnsharedBytes {
+    data: *const u8,
+    len: usize,
+}
+
+impl UnsharedBytes {
+    pub(crate) fn of(env: &Env, value: Unknown<'_>) -> Result<Self> {
+        let mut kind = 0;
+        let mut len = 0;
+        let mut data = std::ptr::null_mut();
+        let mut buffer = std::ptr::null_mut();
+        let mut offset = 0;
+        // SAFETY: `value` is a live value in `env` for the duration of this call.
+        check(
+            unsafe {
+                sys::napi_get_typedarray_info(
+                    env.raw(),
+                    value.raw(),
+                    &mut kind,
+                    &mut len,
+                    &mut data,
+                    &mut buffer,
+                    &mut offset,
+                )
+            },
+            "body must be a Uint8Array",
+        )?;
+        if kind != sys::TypedarrayType::uint8_array {
+            return Err(Error::new(Status::InvalidArg, "body must be a Uint8Array"));
+        }
+        let mut unshared = false;
+        // SAFETY: `buffer` is the live backing of `value`.
+        check(
+            unsafe { sys::napi_is_arraybuffer(env.raw(), buffer, &mut unshared) },
+            "body backing probe failed",
+        )?;
+        if !unshared {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "body must not share its backing",
+            ));
+        }
+        Ok(Self {
+            data: data.cast_const().cast(),
+            len,
+        })
+    }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// # Safety
+    /// No JavaScript may run between [`UnsharedBytes::of`] and the last use of the slice, so
+    /// nothing detaches, resizes, or writes the backing while Rust reads it.
+    pub(crate) unsafe fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `napi_get_typedarray_info` reported `len` readable bytes at `data` in an
+        // unshared backing, and the caller keeps JavaScript from running while the slice lives.
+        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+    }
+}

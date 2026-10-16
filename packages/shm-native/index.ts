@@ -188,6 +188,12 @@ interface NativeAddon {
         fill: (segments: Uint8Array[]) => number,
         beforePublish: () => void,
     ): void;
+    produceBytes(
+        channel: number,
+        header: Uint8Array,
+        body: Uint8Array,
+        beforePublish: () => void,
+    ): void;
     reserve(
         channel: number,
         capacity: number,
@@ -387,13 +393,28 @@ function isBun(): boolean {
     return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 }
 
+/** Backings of every segment the addon has handed out; they alias shared memory. */
+const leasedBuffers = new WeakSet<ArrayBuffer>();
+
 function protect(segments: readonly Uint8Array[]): void {
     for (const segment of segments) {
         if (!(segment.buffer instanceof ArrayBuffer)) {
             throw new Error("external segment lacks ArrayBuffer backing");
         }
+        leasedBuffers.add(segment.buffer);
         if (markLeasedBuffers) markAsUntransferable(segment.buffer);
     }
+}
+
+/**
+ * Largest body the addon copies itself. Its word-sized atomic stores keep pace with a
+ * JavaScript copy while the body fits in a core's private cache; a larger body copies faster
+ * through the runtime's streaming copy into the producer view.
+ */
+export const ADDON_COPY_MAX_BYTES = 256 * 1024;
+
+function privatelyBacked(bytes: Uint8Array): boolean {
+    return bytes.buffer instanceof ArrayBuffer && !leasedBuffers.has(bytes.buffer);
 }
 
 const PROBE_BYTES = 31;
@@ -901,15 +922,34 @@ export class NativeChannel {
      * way the host does: a pure-header `Cancel`, `Ping`, `Pong`, or `Goodbye` takes the
      * control reserve, a terminal that fits takes the terminal reserve, and everything else is
      * ordinary. An exhausted inventory throws `RING_FULL_MESSAGE` with nothing charged.
+     *
+     * `bytes`, when it holds exactly `capacity` bytes over a private `ArrayBuffer` and
+     * `capacity` is at most `ADDON_COPY_MAX_BYTES`, is the frame body: the addon copies it into
+     * the reservation and `fill` does not run.
      */
     produce(
         header: Uint8Array,
         capacity: number,
         fill: (cursor: ProducerCursor) => void,
         beforePublish?: () => void,
+        bytes?: Uint8Array,
     ): void {
         this.assertOpen();
         assertUint32Argument("capacity", capacity);
+        if (
+            bytes !== undefined &&
+            capacity <= ADDON_COPY_MAX_BYTES &&
+            bytes.byteLength === capacity &&
+            privatelyBacked(bytes)
+        ) {
+            this.native.produceBytes(
+                this.id,
+                privateBytes(header),
+                bytes,
+                beforePublish ?? (() => {}),
+            );
+            return;
+        }
         this.native.produce(
             this.id,
             privateBytes(header),

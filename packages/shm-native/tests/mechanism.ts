@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
+    ADDON_COPY_MAX_BYTES,
     assertUint32Argument,
     NativeChannel,
     nativeWireConstants,
@@ -109,6 +110,12 @@ interface RawAttachAddon {
             segments: Uint8Array[],
         ) => void,
     ): boolean;
+    produceBytes(
+        channel: number,
+        header: Uint8Array,
+        body: unknown,
+        beforePublish: () => void,
+    ): void;
     watch(channel: number, callback: () => void): void;
     readinessHandled(): boolean;
     release(channel: number, token: number): void;
@@ -868,6 +875,78 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.wakesAfterReturn).toBe(3);
     });
 
+    test("a capacity wake that lands while a dispatch runs starts a later dispatch", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child so the callback under test is the process-wide reactor's own.
+        const script = join(scratch, "capacity-wake-during-dispatch.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const DEPTH = ${GRANT_ORDINARY_DESCRIPTORS};\n` +
+                `const pair = addon.createTestPair();\n` +
+                `const header = (corr) => { const b = new Uint8Array(20); const v = new DataView(b.buffer); v.setUint32(0, 1, true); v.setUint16(6, 1, true); v.setUint32(8, 1, true); v.setBigUint64(12, BigInt(corr), true); return b; };\n` +
+                `const publish = (channel, corr) => addon.produce(channel, header(corr), 1, (s) => { s[0][0] = corr & 0xff; return 1; }, () => {});\n` +
+                `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n` +
+                `const report = { dispatches: 0, stage: 0 };\n` +
+                `const onReady = () => {\n` +
+                `  report.dispatches += 1;\n` +
+                `  try {\n` +
+                `    while (addon.poll(pair.first, (token) => addon.release(pair.first, token)));\n` +
+                `    if (report.stage === 1) {\n` +
+                `      report.stage = 2;\n` +
+                `      // The peer consumes one descriptor while this dispatch runs, so the parked producer's capacity doorbell rings now, and this dispatch does not re-arm it.\n` +
+                `      report.consumedDuringDispatch = addon.poll(pair.second, (token) => addon.release(pair.second, token));\n` +
+                `    } else if (report.stage === 2) {\n` +
+                `      report.stage = 3;\n` +
+                `      try { publish(pair.first, DEPTH + 1); report.publishedAfterWake = "published"; } catch (error) { report.publishedAfterWake = error.message; }\n` +
+                `    }\n` +
+                `  } finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
+                `};\n` +
+                `addon.watch(pair.first, onReady);\n` +
+                `for (let corr = 1; corr <= DEPTH; corr += 1) publish(pair.first, corr);\n` +
+                `try { publish(pair.first, DEPTH + 1); report.full = "published"; } catch (error) { report.full = error.message; }\n` +
+                `report.armed = addon.armCapacity(pair.first, header(DEPTH + 1), 1);\n` +
+                `report.stage = 1;\n` +
+                `// Inbound data for the producer's channel starts the dispatch the capacity wake lands in.\n` +
+                `publish(pair.second, 1);\n` +
+                `const deadline = Date.now() + 2000;\n` +
+                `while (report.stage !== 3 && Date.now() < deadline) await sleep(1);\n` +
+                `while (addon.poll(pair.second, (token) => addon.release(pair.second, token)));\n` +
+                `addon.close(pair.first);\n` +
+                `addon.close(pair.second);\n` +
+                `console.log(JSON.stringify(report));\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            dispatches: number;
+            stage: number;
+            full: string;
+            armed: boolean;
+            consumedDuringDispatch: boolean;
+            publishedAfterWake?: string;
+        };
+        expect(report.full).toBe(RING_FULL_MESSAGE);
+        expect(report.armed).toBe(true);
+        expect(report.consumedDuringDispatch).toBe(true);
+        // The wake recorded during the first dispatch starts a second one, where the freed
+        // descriptor admits the frame.
+        expect(report.stage).toBe(3);
+        expect(report.publishedAfterWake).toBe("published");
+        expect(report.dispatches).toBeGreaterThanOrEqual(2);
+    });
+
     test("injected detach and deletion failures quarantine the backing and conserve tokens", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
@@ -1224,5 +1303,136 @@ describe("raw N-API descriptor boundary", () => {
             validRawDescriptor(),
             /shared-memory attachment failed/,
         );
+    });
+});
+
+/** A `Response` header on route channel 1, epoch 1, correlation 1, declaring `len` bytes. */
+function responseHeader(len: number): Uint8Array {
+    const header = new Uint8Array(20);
+    const view = new DataView(header.buffer);
+    view.setUint32(0, len, true);
+    view.setUint8(4, 3);
+    view.setUint16(6, 1, true);
+    view.setUint32(8, 1, true);
+    view.setBigUint64(12, 1n, true);
+    return header;
+}
+
+function patternedBody(length: number): Uint8Array {
+    return Uint8Array.from({ length }, (_, index) => (index * 37 + 5) & 0xff);
+}
+
+function receivedBytes(channel: NativeChannel): number[] {
+    let received: number[] | null = null;
+    expect(
+        channel.drainOne((lease) => {
+            received = [...lease.segment(0)];
+            lease.release();
+        }),
+    ).toBe(true);
+    return received ?? [];
+}
+
+describe("addon-copied producer bodies", () => {
+    test("a private body publishes through the addon copy without running fill", () => {
+        const addon = loadRawAddon();
+        if (!probeCapabilities().available || !supportsMechanismTests(addon)) return;
+        const pair = NativeChannel.createTestPair();
+        try {
+            const body = patternedBody(61);
+            const refsBefore = addon.activeExternalRefCount();
+            let fills = 0;
+            let publishes = 0;
+            pair.first.produce(
+                responseHeader(body.byteLength),
+                body.byteLength,
+                () => {
+                    fills += 1;
+                },
+                () => {
+                    publishes += 1;
+                },
+                body,
+            );
+            expect(fills).toBe(0);
+            expect(publishes).toBe(1);
+            expect(addon.activeExternalRefCount()).toBe(refsBefore);
+            expect(receivedBytes(pair.second)).toEqual([...body]);
+        } finally {
+            pair.first.close();
+            pair.second.close();
+        }
+    });
+
+    test("shared, leased, and oversized bodies publish through fill", () => {
+        if (!probeCapabilities().available) return;
+        const pair = NativeChannel.createTestPair();
+        try {
+            const shared = new Uint8Array(new SharedArrayBuffer(8));
+            shared.set(patternedBody(8));
+            const oversized = patternedBody(ADDON_COPY_MAX_BYTES + 1);
+            for (const body of [shared, oversized]) {
+                let fills = 0;
+                pair.first.produce(
+                    responseHeader(body.byteLength),
+                    body.byteLength,
+                    (cursor) => {
+                        fills += 1;
+                        cursor.write(body);
+                    },
+                    undefined,
+                    body,
+                );
+                expect(fills).toBe(1);
+                expect(receivedBytes(pair.second)).toEqual([...body]);
+            }
+            // A received segment aliases the peer's shared mapping, so publishing it onward
+            // copies it in JavaScript through `fill`.
+            const original = patternedBody(13);
+            pair.first.produce(responseHeader(13), 13, (cursor) => cursor.write(original));
+            let fills = 0;
+            expect(
+                pair.second.drainOne((lease) => {
+                    const segment = lease.segment(0);
+                    pair.second.produce(
+                        responseHeader(13),
+                        13,
+                        (cursor) => {
+                            fills += 1;
+                            cursor.write(segment);
+                        },
+                        undefined,
+                        segment,
+                    );
+                    lease.release();
+                }),
+            ).toBe(true);
+            expect(fills).toBe(1);
+            expect(receivedBytes(pair.first)).toEqual([...original]);
+        } finally {
+            pair.first.close();
+            pair.second.close();
+        }
+    });
+
+    test("the addon copy refuses a body that is not a Uint8Array before reserving", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const pair = addon.createTestPair();
+        try {
+            for (const body of [new Uint16Array(2), new DataView(new ArrayBuffer(4)), "body"]) {
+                let published = 0;
+                expect(() =>
+                    addon.produceBytes(pair.first, responseHeader(4), body, () => {
+                        published += 1;
+                    }),
+                ).toThrow(/body must be a Uint8Array/);
+                expect(published).toBe(0);
+            }
+            expect(addon.poll(pair.second, () => {})).toBe(false);
+        } finally {
+            addon.close(pair.first);
+            addon.close(pair.second);
+        }
     });
 });
