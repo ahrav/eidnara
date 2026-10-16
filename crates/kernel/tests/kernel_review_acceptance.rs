@@ -702,6 +702,82 @@ fn create_inserts_one_decision_admitted_as_model_inference_with_durable_support(
 }
 
 #[test]
+fn a_capture_member_stands_only_live_at_its_digest_whether_or_not_it_was_disclosed() {
+    let fixture = Fixture::open();
+    let (support, support_digest) = fixture.ingest("support");
+    let (other, other_digest) = fixture.ingest("other");
+    let (gone, gone_digest) = fixture.ingest("gone");
+    fixture
+        .store
+        .commit(intent("retire-gone"), |envelope| {
+            envelope.retire_evidence("evidence-object-gone")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let capture = |id: &str, revision: &str| PolicyUnionMember {
+        kind: "temporary_capture".to_string(),
+        id: id.to_string(),
+        revision: revision.to_string(),
+        owner_id: None,
+        owner_revision: None,
+    };
+    let create = |job: &str, members: Vec<PolicyUnionMember>| {
+        let subject = fixture.subject(job);
+        fixture.propose(
+            job,
+            ProposalAction::Create,
+            ProposalTarget::StagedCandidate {
+                candidate_id: subject,
+            },
+            Some("bun builds the workspace"),
+            std::slice::from_ref(&support),
+            members,
+        )
+    };
+    let refused = |key: &str, staged: &Staged| {
+        let tip = fixture.store.tip().unwrap();
+        let error = fixture.accept(key, staged).unwrap_err();
+        assert_eq!(
+            fixture.store.tip().unwrap(),
+            tip,
+            "a refusal commits nothing"
+        );
+        error
+    };
+    let changed = AcceptanceError::Refused(AcceptanceRefusal::Changed);
+    let staged = create("job-1", vec![capture(&support, &other_digest)]);
+    assert_eq!(
+        refused("caller-1", &staged),
+        changed,
+        "a disclosed capture named at another digest"
+    );
+    let staged = create(
+        "job-2",
+        vec![
+            capture(&support, &support_digest),
+            capture(&gone, &gone_digest),
+        ],
+    );
+    assert_eq!(
+        refused("caller-2", &staged),
+        changed,
+        "an undisclosed capture whose evidence was retired"
+    );
+    let staged = create(
+        "job-3",
+        vec![
+            capture(&support, &support_digest),
+            capture(&other, &other_digest),
+        ],
+    );
+    let outcome = fixture.accept("caller-3", &staged).unwrap();
+    assert!(
+        matches!(outcome.settlement.effect, SettlementEffect::Created { .. }),
+        "an undisclosed capture live at its digest stands"
+    );
+}
+
+#[test]
 fn create_cites_each_support_row_in_its_own_ordered_event() {
     let fixture = Fixture::open();
     let subject = fixture.subject("job-1");
