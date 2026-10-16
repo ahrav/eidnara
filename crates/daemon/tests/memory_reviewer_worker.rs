@@ -1735,6 +1735,20 @@ async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal
     assert_eq!(before, after);
 }
 
+/// The positive control validates the connection counter used by the zero-connection witnesses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unserved_peer_counts_a_connection_it_never_answered() {
+    let mut peer = Peer::start().await;
+    assert_eq!(peer.connection_count(), 0);
+    drop(std::net::TcpStream::connect(("127.0.0.1", peer.port)).unwrap());
+    assert_eq!(peer.connection_count(), 1);
+    assert_eq!(
+        peer.connection_count(),
+        1,
+        "a drained connection is counted once"
+    );
+}
+
 // Both witnesses below describe the closed production gate; opening it must rewrite them, and a constant assertion makes that a compile error rather than a silent pass.
 const _: () = assert!(!PRODUCTION_SELECTION_OPEN);
 
@@ -1742,7 +1756,7 @@ const _: () = assert!(!PRODUCTION_SELECTION_OPEN);
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator() {
     use daemon::memory_reviewer::settlement::ReadRefusal;
-    let rig = Rig::open().await;
+    let mut rig = Rig::open().await;
     let now = now_ms();
     let decision = rig.materialize_decision(now);
     let descriptors = rig.live_descriptors(MEMORY_CLASSES);
@@ -1895,7 +1909,11 @@ async fn production_classes_are_refused_the_remote_model_at_selection_and_in_the
             read.map(|_| ())
         );
     }
-    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        rig.peer.connection_count(),
+        0,
+        "no connection, accepted or queued"
+    );
     assert_eq!(
         rig.kernel.object_states(&objects).unwrap(),
         (tip_before, before),
