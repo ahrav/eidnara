@@ -150,7 +150,7 @@ Lenses for this change: over-engineering, complexity, testing, Rust code review,
 | The Kernel union check judged liveness and revision only; a hidden or quarantined owner, a descriptor that no longer names its owner, a staged subject of another binding or past its deadline, and an unknown dependency-record version passed | gap | fixed: `descriptor_stands` reads the descriptor detail and requires the owner in its leading identity field, the owner and target pass the batch eligibility judgement for a local reader, `subject_row_stands` reads the subject through the bound-row path, and the record version must match; `a_quarantined_owner_refuses_without_being_invalidated` |
 | The retirement cascade counts had no witness | gap | fixed: `retiring_an_approval_reports_the_dependents_its_cascade_demoted` |
 | No cleanup, purge, deadline, concurrency, or per-action target tests | gap | fixed: the tests added to `kernel_review_acceptance.rs` |
-| The Kernel change passed the 1,000-line hard maximum | bias | split: create and revise, with their admission and support citations, land in the next stacked change; this one refuses them as `unsupported` |
+| The Kernel change passed the 1,000-line hard maximum | bias | split: create and revise, with their admission and support citations, land in a second stacked change that adds them to the same envelope |
 | A caller-key replay returned whatever its key stored, even for another proposal | gap | fixed: a replayed caller receipt must name the same proposal, run, and target, or the call conflicts; tested |
 | A store `Conflict` inside the envelope was reported as caller-key reuse | gap | fixed: it is a changed input; the caller-key conflict comes only from the pre-check |
 | A row bound to another project could answer `changed` or `review_expired` and so reveal its state | gap | fixed: `bound_review_row_in` compares the stored binding before sealing, deadline, or digest and answers `Missing` otherwise |
@@ -161,6 +161,19 @@ Lenses for this change: over-engineering, complexity, testing, Rust code review,
 | The stored settlement had no version | gap | fixed: `Settlement.version`; an unknown version is a store failure |
 | Settlement replay under a new caller key records no receipt for that key | bias | kept and documented: only a key that committed an acceptance is bound |
 | The review hold stays in place after settlement | bias | kept: the record's open question asks the owner; support stays cited through decision events |
+
+## Kernel acceptance: create and revise
+
+The reviews of the first Kernel change covered this code before the split; the findings that touch it are dispositioned in the table above. The split itself changed no reviewed line of `create`, `revise`, or `admit`.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| `predecessor_disposition`, `source_class`, and `taint_class` never vary | bias | kept: #579 Q32 names them in the settlement record; the two classes now come from the constants the admission request uses |
+| A revise of an `adr_accepted` target would give model-written text the approval kind | gap | fixed: refused `changed`; `an_approval_is_not_revised_into_model_written_text` |
+| The revise test could not show a maturity drop (its predecessor was a candidate), asserted no disposition, visibility, taint, scope, kind, or support, and no stale second revise | gap | fixed: the predecessor is verified and auto-served first; the successor's stored admission, scope, kind, citation, and a refused second revise are asserted |
+| A missing decision row after `target_stands` was reported as a moved target | refinement | fixed: a store failure |
+| One acceptance read the clock twice | refinement | fixed: `Validated.now` |
+| `ACCEPTED_DECISION_KIND` and `SUPPORT_EVENT_KIND` were public with no outside user | refinement | fixed: private |
 
 ## Gaps queued
 

@@ -152,6 +152,16 @@ impl Fixture {
     }
 
     fn decision_of_kind(&self, object: &str, kind: &str) -> (String, String) {
+        self.decision_admitted(object, kind, admission(object))
+    }
+
+    /// [`Self::decision`] of `kind`, admitted by `request`.
+    fn decision_admitted(
+        &self,
+        object: &str,
+        kind: &str,
+        request: AdmissionRequest,
+    ) -> (String, String) {
         let (evidence, digest) = self.ingest(object);
         let mut descriptor = None;
         self.store
@@ -174,7 +184,7 @@ impl Fixture {
                     source_revision: 1,
                     sensitivity: Sensitivity::Normal,
                 })?;
-                envelope.record_admission(admission(object))?;
+                envelope.record_admission(request)?;
                 let outcome = envelope
                     .publish_source_descriptor(&SourceDescriptorRequest {
                         occurrence: Occurrence {
@@ -424,7 +434,33 @@ impl Fixture {
             proposal: staged.reference.clone(),
             selected_at: self.now,
             target,
+            scope_id: Some(SCOPE.to_string()),
         }
+    }
+
+    /// The effective maturity of `object`'s latest admission.
+    fn maturity(&self, object: &str) -> String {
+        rusqlite::Connection::open(self._directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT effective_maturity FROM admission_decisions WHERE subject_object_id=?1
+                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+                [object],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The scope and kind of `object`'s decision row.
+    fn decision_row(&self, object: &str) -> (Option<String>, String) {
+        rusqlite::Connection::open(self._directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT scope_id,decision_kind FROM decisions WHERE object_id=?1",
+                [object],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
     }
 
     /// Runs `sql` against the store's database file directly.
@@ -555,10 +591,280 @@ fn retain_settles_once_without_a_canonical_change_and_replays_across_keys_and_af
         proposal: staged.reference.clone(),
         selected_at: fixture.now,
         target: staged.target.clone(),
+        scope_id: None,
     });
     assert_eq!(
         reused,
         Err(AcceptanceError::Refused(AcceptanceRefusal::Conflict))
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+}
+
+#[test]
+fn create_inserts_one_decision_admitted_as_model_inference_with_durable_support() {
+    let fixture = Fixture::open();
+    let subject = fixture.subject("job-1");
+    let (support, support_digest) = fixture.ingest("support");
+    let staged = fixture.propose(
+        "job-1",
+        ProposalAction::Create,
+        ProposalTarget::StagedCandidate {
+            candidate_id: subject.clone(),
+        },
+        Some("bun builds the workspace"),
+        std::slice::from_ref(&support),
+        vec![PolicyUnionMember {
+            kind: "temporary_capture".to_string(),
+            id: support.clone(),
+            revision: support_digest,
+            owner_id: None,
+            owner_revision: None,
+        }],
+    );
+    let outcome = fixture.accept("caller-1", &staged).unwrap();
+    let SettlementEffect::Created {
+        object_id,
+        admission,
+    } = &outcome.settlement.effect
+    else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    // The admission actually recorded: model inference at the candidate ceiling, explicit-only, whatever the outcome word.
+    assert_eq!(
+        (
+            admission.source_class.as_str(),
+            admission.taint_class.as_str(),
+            admission.effective_maturity.as_str(),
+            admission.disposition.as_str(),
+            admission.visibility.as_str(),
+        ),
+        (
+            "model_inference",
+            "memory_classifier_inference",
+            "candidate",
+            "active",
+            "explicit_labeled"
+        )
+    );
+    let state = fixture.state(object_id);
+    assert_eq!(
+        (
+            state.object.object_kind.as_str(),
+            state.object.source_kind.as_str(),
+            state.object.source_id.as_str(),
+            state.object.source_revision,
+            state.object.invalidated_commit_seq,
+        ),
+        (
+            "decision",
+            kernel::ACCEPTED_SOURCE_KIND,
+            staged.reference.candidate_id.as_str(),
+            1,
+            None
+        )
+    );
+    // Explicit retrieval serves it; automatic retrieval respects the candidate ceiling.
+    assert!(fixture.served(object_id, Surface::ExplicitSearch));
+    assert!(!fixture.served(object_id, Surface::AutoInject));
+    // The support is cited by the decision itself, so it outlives the review hold.
+    let linked = fixture
+        .store
+        .linked_decision_evidence_within_budget(
+            object_id,
+            fixture.store.tip().unwrap(),
+            std::num::NonZeroUsize::new(8).unwrap(),
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        linked
+            .iter()
+            .map(|link| link.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![support.as_str()]
+    );
+    fixture.release_review_hold(&staged);
+    let retired = fixture.store.commit(intent("retire-support"), |envelope| {
+        envelope.retire_evidence("evidence-object-support")?;
+        Ok(String::new())
+    });
+    assert_eq!(
+        retired.unwrap_err(),
+        kernel::KernelError::Conflict,
+        "cited support is kept"
+    );
+    // A second acceptance replays: one decision, not two.
+    let replay = fixture.accept("caller-2", &staged).unwrap();
+    assert_eq!(
+        (replay.replayed, &replay.settlement),
+        (true, &outcome.settlement)
+    );
+}
+
+#[test]
+fn revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target() {
+    let fixture = Fixture::open();
+    // An accepted ADR verifies `decision-a`, so it serves automatically before the revise.
+    fixture.decision_of_kind("decision-adr", "adr_accepted");
+    let mut adr = admission("decision-adr");
+    adr.event.kind = EventKind::AcceptedAdr;
+    fixture
+        .store
+        .commit(intent("adr"), |envelope| {
+            envelope.record_admission(adr)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let mut verified = admission("decision-a");
+    verified.source_class = Some(SourceClass::ModelInference);
+    verified.taint_class = Some(TaintClass::AssistantInference);
+    verified.event.kind = EventKind::Verify;
+    verified.event.approval_object_id = Some("decision-adr".to_string());
+    let descriptor = fixture.decision_admitted("decision-a", "architecture", verified);
+    assert_eq!(fixture.maturity("decision-a"), "verified");
+    assert!(fixture.served("decision-a", Surface::AutoInject));
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Revise,
+        "decision-a",
+        &descriptor,
+        Some("bun builds and tests the workspace"),
+    );
+    let predecessor = fixture.state("decision-a");
+    // The caller's scope is for a create; a revise keeps the predecessor's.
+    let outcome = fixture
+        .store
+        .accept_review_proposal(&ProposalAcceptance {
+            scope_id: Some("project:b".to_string()),
+            ..fixture.acceptance(
+                "caller-1",
+                &staged,
+                staged.run.clone(),
+                staged.target.clone(),
+            )
+        })
+        .unwrap();
+    let SettlementEffect::Revised {
+        object_id,
+        predecessor_object_id,
+        predecessor_source_revision,
+        source_revision,
+        predecessor_disposition,
+        admission,
+    } = &outcome.settlement.effect
+    else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    assert_ne!(object_id, "decision-a", "a fresh successor, never a fold");
+    assert_eq!(
+        (
+            predecessor_object_id.as_str(),
+            *predecessor_source_revision,
+            *source_revision,
+            predecessor_disposition.as_str(),
+        ),
+        ("decision-a", 1, 2, "superseded")
+    );
+    let successor = fixture.state(object_id);
+    assert_eq!(
+        (
+            successor.object.domain_id.as_str(),
+            successor.object.source_kind.as_str(),
+            successor.object.source_id.as_str(),
+            successor.object.source_revision,
+        ),
+        (
+            predecessor.object.domain_id.as_str(),
+            predecessor.object.source_kind.as_str(),
+            predecessor.object.source_id.as_str(),
+            2
+        ),
+        "domain and source identity are preserved at the next revision"
+    );
+    let replaced = fixture.state("decision-a");
+    assert!(replaced.object.invalidated_commit_seq.is_some());
+    assert_eq!(
+        replaced.object.superseded_by.as_deref(),
+        Some(object_id.as_str())
+    );
+    assert_eq!(
+        fixture.decision_row(object_id),
+        (Some(SCOPE.to_string()), "architecture".to_string()),
+        "scope and kind come from the predecessor"
+    );
+    // The predecessor was verified; the successor is admitted on its own as a model-inference candidate.
+    assert_eq!(
+        (
+            admission.effective_maturity.as_str(),
+            admission.disposition.as_str(),
+            admission.visibility.as_str(),
+            admission.source_class.as_str(),
+            admission.taint_class.as_str(),
+        ),
+        (
+            "candidate",
+            "active",
+            "explicit_labeled",
+            "model_inference",
+            "memory_classifier_inference"
+        )
+    );
+    assert_eq!(fixture.maturity(object_id), "candidate");
+    assert!(fixture.served(object_id, Surface::ExplicitSearch));
+    assert!(!fixture.served(object_id, Surface::AutoInject));
+    assert!(!fixture.served("decision-a", Surface::ExplicitSearch));
+    let linked = fixture
+        .store
+        .linked_decision_evidence_within_budget(
+            object_id,
+            fixture.store.tip().unwrap(),
+            std::num::NonZeroUsize::new(8).unwrap(),
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        linked
+            .iter()
+            .map(|link| link.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![descriptor.1.as_str()],
+        "the successor cites the proposal's support"
+    );
+    // A second revise over the superseded target is stale and is not redirected to the successor.
+    let second = fixture.propose_over(
+        "job-2",
+        ProposalAction::Revise,
+        "decision-a",
+        &descriptor,
+        Some("another revision"),
+    );
+    let tip = fixture.store.tip().unwrap();
+    let successor_before = fixture.state(object_id);
+    assert_eq!(
+        fixture.accept("caller-2", &second),
+        Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
+    );
+    assert_eq!(
+        (fixture.store.tip().unwrap(), fixture.state(object_id)),
+        (tip, successor_before)
+    );
+}
+
+#[test]
+fn an_approval_is_not_revised_into_model_written_text() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision_of_kind("decision-adr", "adr_accepted");
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Revise,
+        "decision-adr",
+        &descriptor,
+        Some("rewritten"),
+    );
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture.accept("caller", &staged),
+        Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
     );
     assert_eq!(fixture.store.tip().unwrap(), tip);
 }
@@ -788,12 +1094,13 @@ fn a_settlement_survives_a_reopen_and_replays_under_a_new_key() {
     );
 }
 
-/// Each action that targets a memory checks the exact target itself: a decision event after the proposal read the target refuses retain and retire alike.
+/// Each action that targets a memory checks the exact target itself: a decision event after the proposal read the target refuses retain, revise, and retire alike.
 #[test]
 fn every_memory_action_refuses_a_target_that_moved_after_the_proposal() {
     let fixture = Fixture::open();
     for (index, (action, text)) in [
         (ProposalAction::Retain, None),
+        (ProposalAction::Revise, Some("revised")),
         (ProposalAction::Retire, None),
     ]
     .into_iter()
@@ -870,9 +1177,8 @@ fn a_quarantined_owner_refuses_without_being_invalidated() {
     assert_eq!(fixture.store.tip().unwrap(), tip);
 }
 
-/// No-change on a staged subject settles without a write once the subject still stands; create and revise are refused as unsupported and write nothing.
 #[test]
-fn no_change_on_a_subject_settles_and_create_and_revise_are_unsupported() {
+fn create_needs_a_scope_of_the_runs_project_and_no_change_on_a_subject_writes_nothing() {
     let fixture = Fixture::open();
     let support = fixture.ingest("support").0;
     let propose = |job: &str, action, text| {
@@ -888,6 +1194,29 @@ fn no_change_on_a_subject_settles_and_create_and_revise_are_unsupported() {
             vec![],
         )
     };
+    let staged = propose("job-1", ProposalAction::Create, Some("created"));
+    let tip = fixture.store.tip().unwrap();
+    for (scope, refusal) in [
+        (None, AcceptanceRefusal::Invalid),
+        (
+            Some("project:b".to_string()),
+            AcceptanceRefusal::Unavailable,
+        ),
+        (
+            Some("scope-missing".to_string()),
+            AcceptanceRefusal::Unavailable,
+        ),
+    ] {
+        let acceptance = ProposalAcceptance {
+            scope_id: scope,
+            ..fixture.acceptance("caller", &staged, staged.run.clone(), staged.target.clone())
+        };
+        assert_eq!(
+            fixture.store.accept_review_proposal(&acceptance),
+            Err(AcceptanceError::Refused(refusal))
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+    }
     let unchanged = propose("job-2", ProposalAction::NoChange, None);
     let outcome = fixture.accept("caller-2", &unchanged).unwrap();
     assert_eq!(outcome.settlement.effect, SettlementEffect::Unchanged);
@@ -898,23 +1227,6 @@ fn no_change_on_a_subject_settles_and_create_and_revise_are_unsupported() {
         fixture.accept("caller-3", &gone),
         Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
     );
-    let create = propose("job-1", ProposalAction::Create, Some("created"));
-    let descriptor = fixture.decision("decision-a");
-    let revise = fixture.propose_over(
-        "job-4",
-        ProposalAction::Revise,
-        "decision-a",
-        &descriptor,
-        Some("revised"),
-    );
-    for staged in [&create, &revise] {
-        let tip = fixture.store.tip().unwrap();
-        assert_eq!(
-            fixture.accept("caller", staged),
-            Err(AcceptanceError::Refused(AcceptanceRefusal::Unsupported))
-        );
-        assert_eq!(fixture.store.tip().unwrap(), tip);
-    }
 }
 
 /// The queue deadline is judged against the selection time: a selection at or after it is refused, while a settled proposal replays whatever the selection time.
@@ -963,19 +1275,30 @@ fn a_selection_past_the_queue_deadline_is_expired_but_a_settlement_still_replays
     );
 }
 
-/// After acceptance, the review hold's end, the staged row's cleanup, and a purge of the disclosed evidence leave the settlement replayable.
+/// After acceptance, the review hold's end, the staged row's cleanup, and a purge of the cited support leave the decision and its settlement in place, and the revised decision's original evidence stays its own.
 #[test]
-fn cleanup_and_purge_after_acceptance_keep_the_settlement() {
+fn cleanup_and_purge_after_acceptance_keep_the_settlement_and_the_originals() {
     let fixture = Fixture::open();
     let descriptor = fixture.decision("decision-a");
     let staged = fixture.propose_over(
         "job-1",
-        ProposalAction::Retain,
+        ProposalAction::Revise,
         "decision-a",
         &descriptor,
-        None,
+        Some("revised text"),
     );
     let outcome = fixture.accept("caller-1", &staged).unwrap();
+    let SettlementEffect::Revised { object_id, .. } = &outcome.settlement.effect else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    // The predecessor's own descriptor is an independent original: the revise neither retired nor rewrote it.
+    assert!(
+        fixture
+            .state(&descriptor.0)
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
     fixture.release_review_hold(&staged);
     let run = provisional_result_identity("job-1", 1).extraction_run_id;
     fixture.execute(&format!(
@@ -998,19 +1321,48 @@ fn cleanup_and_purge_after_acceptance_keep_the_settlement() {
         (replay.replayed, &replay.settlement),
         (true, &outcome.settlement)
     );
+    assert!(
+        fixture
+            .state(object_id)
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
+    assert!(fixture.served(object_id, Surface::ExplicitSearch));
+    let linked = fixture
+        .store
+        .linked_decision_evidence_within_budget(
+            object_id,
+            fixture.store.tip().unwrap(),
+            std::num::NonZeroUsize::new(8).unwrap(),
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        linked
+            .iter()
+            .map(|link| (link.evidence_id.as_str(), link.live))
+            .collect::<Vec<_>>(),
+        vec![(descriptor.1.as_str(), false)],
+        "the citation stays, naming purged evidence"
+    );
 }
 
 /// Two callers accepting one proposal at once settle it once: one applies, the other replays the same settlement.
 #[test]
 fn concurrent_acceptances_of_one_proposal_settle_it_once() {
     let fixture = Fixture::open();
-    let descriptor = fixture.decision("decision-a");
-    let staged = fixture.propose_over(
+    let subject = fixture.subject("job-1");
+    let support = fixture.ingest("support").0;
+    let staged = fixture.propose(
         "job-1",
-        ProposalAction::Retire,
-        "decision-a",
-        &descriptor,
-        None,
+        ProposalAction::Create,
+        ProposalTarget::StagedCandidate {
+            candidate_id: subject,
+        },
+        Some("created once"),
+        std::slice::from_ref(&support),
+        vec![],
     );
     let outcomes: Vec<_> = std::thread::scope(|scope| {
         let handles: Vec<_> = ["caller-a", "caller-b"]
@@ -1032,6 +1384,16 @@ fn concurrent_acceptances_of_one_proposal_settle_it_once() {
         "exactly one acceptance applies"
     );
     assert_eq!(outcomes[0].settlement, outcomes[1].settlement);
+    let decisions: i64 =
+        rusqlite::Connection::open(fixture._directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM object_registry WHERE source_id=?1",
+                [staged.reference.candidate_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(decisions, 1, "one decision for the proposal");
 }
 
 /// A caller key replays only the acceptance it committed: the same key and digest for another proposal conflicts.

@@ -49,7 +49,7 @@ Every slug the seven residual tickets own, plus the semantic-evidence slug #592 
 | `guarded-request-handoff-precedes-network-polling` | #731 | yes |
 | `material-claims-require-exact-cited-byte-support` | #592 | yes |
 | `future-acceptance-co-commits-exact-target-and-replay` | #597 | yes |
-| `future-correction-keeps-kernel-maturity-and-retrieval` | #597 | no |
+| `future-correction-keeps-kernel-maturity-and-retrieval` | #597 | yes |
 
 ## Records
 
@@ -378,7 +378,7 @@ Open questions:
 Type: safety
 Reachability: test-only - `KernelStore::accept_review_proposal` has no daemon caller in this change; only `crates/kernel/tests/kernel_review_acceptance.rs` constructs an acceptance
 Status: active
-Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` accepts retain, no-change, and retire proposals and refuses create and revise as unsupported, including the retirement of an approval with a dependent; races two acceptances of one proposal; replays under a second caller key, after the review hold is released, after the row is deleted and the support purged, after a reopen, and at a selection past the queue deadline; reuses a caller key with other input and for another proposal; and refuses a moved target for each memory action, a quarantined owner, a caller target that differs from the proposal's, another project's run, a released hold, a selection at the queue deadline or before sealing, deleted evidence, evidence reclassified `Secret`, a retired union owner, and a deleted subject
+Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` accepts retain, no-change, create, revise, and retire proposals, including the retirement of an approval with a dependent; races two acceptances of one proposal; replays under a second caller key, after the review hold is released, after the row is deleted and the support purged, after a reopen, and at a selection past the queue deadline; reuses a caller key with other input and for another proposal; and refuses a moved target for each memory action, a quarantined owner, a caller target that differs from the proposal's, another project's run, a released hold, a selection at the queue deadline or before sealing, deleted evidence, evidence reclassified `Secret`, a retired union owner, a deleted subject, and a create scope that is missing or names another project
 Guarantee: An acceptance either applies the selected proposal's action at its exact target and records one proposal-level settlement in the same Kernel envelope, or writes nothing; a settled proposal answers that settlement under any caller key before any expirable state is read, and a reused caller key with other input conflicts.
 Check: `always` - after every acceptance, either the tip and `review_settlement` are unchanged and the call refused, or the action's canonical effect and the settlement receipt share one `commit_seq`; a call for a settled proposal returns `replayed` with the recorded settlement and moves no tip; asserted on every acceptance because a partial or duplicate application is a canonical corruption
 Fault/timing angle: the proposal's target, a disclosed input, or a union owner changes between the read the caller made and the envelope; the review hold ends after settlement and before a retry
@@ -388,6 +388,21 @@ Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - every test
 Impact: An application that committed without its settlement, or a settlement without its application, would let a retry apply a proposal twice or report one that never applied
 Open questions:
 - Whether the review hold should be released inside the settlement envelope (needs human input)
+
+### future-correction-keeps-kernel-maturity-and-retrieval
+
+Type: safety
+Reachability: test-only - as `future-acceptance-co-commits-exact-target-and-replay`
+Status: active
+Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` revises a verified, auto-served decision, refuses a revise of an approval and a second revise of a superseded target, and creates a decision from a staged subject
+Guarantee: A decision an accepted create or revise writes is admitted on its own as `ModelInference` with `MemoryClassifierInference` taint, inherits no maturity, is served to explicit search and not to automatic surfaces while it is a candidate, and a revise supersedes its predecessor through a fresh successor that keeps domain and source identity at the next source revision.
+Check: `always` - the settlement's admitted state is the stored admission (`candidate`, `explicit_labeled`), `judge_surface_eligibility_within_budget` permits `ExplicitSearch` and refuses `AutoInject` for the new decision, the successor's object id differs from the predecessor's, and the predecessor is invalidated with `superseded_by` naming the successor
+Fault/timing angle: none
+Required faults and enabling state: a decision verified through an accepted ADR as the revise target; an `adr_accepted` decision as a refused target; a sealed staged subject as the create target
+Confidence: high - [evidence](evidence/future-correction-keeps-kernel-maturity-and-retrieval.md). Verified against `visibility_row` in `crates/kernel/src/admission.rs` and the stored admission row
+Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - `create_inserts_one_decision_admitted_as_model_inference_with_durable_support`, `revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target`
+Impact: A revised memory that inherited its predecessor's maturity, or folded into a survivor, would grant model inference the authority of the decision it replaced
+Open questions: None.
 
 ## Relationship map
 
@@ -423,7 +438,9 @@ network (`guarded-request-handoff-precedes-network-polling`).
 `unknown-dispatch-does-not-authorize-resend` is the same conservatism for
 attempts: missing evidence is consumption, never headroom.
 
-`future-acceptance-co-commits-exact-target-and-replay` consumes the selected row and
+The two application records share one envelope: `future-acceptance-co-commits-exact-target-and-replay`
+is the envelope's all-or-nothing contract, and `future-correction-keeps-kernel-maturity-and-retrieval`
+is what a create or revise inside it may write. Both consume the selected row and
 policy union that `uncited-owner-lineage-remains-read-authority` revalidates for a reader.
 
 `observer-route-does-not-change-background-rosters` sits upstream of every

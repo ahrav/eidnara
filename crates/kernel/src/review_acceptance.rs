@@ -2,7 +2,7 @@
 //!
 //! The settlement is a receipt under the reserved producer [`SETTLEMENT_PRODUCER`]. Its key is a versioned, length-delimited derivation over the project digest, the proposal id, its payload digest, the receipt generation, and both store incarnations; the caller's operation key is not part of it, and its request digest is derived here from that key. A second acceptance of one proposal under any caller key therefore replays the first settlement, and that replay is checked before the review hold, the queue deadline, or the payload is read. The caller's own intent keeps its usual meaning: a key that committed an acceptance replays only that acceptance, and the same key for other input conflicts.
 //!
-//! Retire runs the existing retirement and its authority cascade. Retain and no-change write nothing canonical. Create and revise are refused as unsupported.
+//! Create inserts one decision whose identity derives from the settlement key and admits it as `ModelInference` with `MemoryClassifierInference` taint under `EventKind::Other`. Revise writes a fresh successor that keeps the predecessor's domain and source identity at the next source revision and is admitted on its own. Retire runs the existing retirement and its authority cascade. Retain and no-change write nothing canonical. Create and revise cite each supporting evidence row through a decision event, so the support stays durable after the review hold ends.
 
 use context_core::memory_reviewer_policy_union::{PolicyUnion, PolicyUnionMember};
 use rusqlite::{OptionalExtension, TransactionBehavior};
@@ -14,13 +14,16 @@ use super::envelope::{CommitIntent, Envelope, commit_with_writer, recorded_recei
 use super::memory_reviewer_hold::validate_review_evidence_in;
 use super::review_staging::bound_review_row_in;
 use super::{
-    ArtifactDestination, CachedSql, CanonicalTarget, EligibilityCandidate, EligibilityVerdict,
-    KernelError, KernelStore, MemoryReviewerHoldBinding, MemoryReviewerHoldError,
-    MemoryReviewerHoldRefusal, ObjectState, ObservationPayload, ProjectScope, ProposalAction,
-    ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner, ReviewPayload, ReviewProposal,
-    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStagedReference, Sensitivity,
-    SourceDescriptorDetail, current_time_ms, map_sqlite, provisional_result_identity,
+    AdmissionDecision, AdmissionEvent, AdmissionRequest, ArtifactDestination, CachedSql,
+    CanonicalTarget, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionSpec,
+    EligibilityCandidate, EligibilityVerdict, EventKind, KernelError, KernelStore,
+    MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldRefusal, ObjectState,
+    ObservationPayload, ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION,
+    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError,
+    ReviewReadRefusal, ReviewStagedReference, Sensitivity, SourceClass, SourceDescriptorDetail,
+    TaintClass, current_time_ms, map_sqlite, provisional_result_identity,
 };
+use crate::scope::load_scope_terms;
 use crate::source_identity::{OccurrenceClass, identity_digest};
 
 /// The reserved producer every settlement receipt is recorded under.
@@ -28,7 +31,20 @@ pub const SETTLEMENT_PRODUCER: &str = "eidnara-kernel/memory-reviewer-settlement
 const SETTLEMENT_KEY_VERSION: &str = "memory-reviewer-settlement-v1";
 /// Version of the [`Settlement`] shape a receipt stores.
 pub const SETTLEMENT_VERSION: u32 = 1;
-/// One explicit acceptance of the proposal a completed receipt selects. The daemon copies every field but `intent` from the trusted receipt.
+/// `source_kind` of a decision an accepted create inserts; its `source_id` is the proposal id.
+pub const ACCEPTED_SOURCE_KIND: &str = "memory_reviewer_proposal";
+/// `decision_kind` of a decision an accepted create inserts.
+const ACCEPTED_DECISION_KIND: &str = "memory_reviewer_create";
+/// `event_kind` of the decision event that cites one supporting evidence row.
+const SUPPORT_EVENT_KIND: &str = "memory_reviewer_support";
+/// The decision kind that makes a decision an approval; model-written text never carries it.
+const APPROVAL_DECISION_KIND: &str = "adr_accepted";
+/// The classes every accepted create or revise is admitted under.
+const ACCEPTED_SOURCE_CLASS: SourceClass = SourceClass::ModelInference;
+const ACCEPTED_TAINT_CLASS: TaintClass = TaintClass::MemoryClassifierInference;
+const ADMISSION_REASON: &str = "memory reviewer proposal accepted";
+
+/// One explicit acceptance of the proposal a completed receipt selects. The daemon copies every field but `intent` and `scope_id` from the trusted receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposalAcceptance {
     /// The caller's idempotency intent; its key never enters the settlement identity.
@@ -41,6 +57,8 @@ pub struct ProposalAcceptance {
     pub selected_at: i64,
     /// The target the caller read and accepts; it must equal the proposal's.
     pub target: ProposalTarget,
+    /// The live scope a created decision is scoped to; it must name the run's project. Required for create and ignored otherwise.
+    pub scope_id: Option<String>,
 }
 
 /// What one acceptance did, keyed by its proposal. A refused acceptance records nothing.
@@ -68,6 +86,19 @@ pub struct Settlement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SettlementEffect {
+    Created {
+        object_id: String,
+        admission: AdmittedState,
+    },
+    Revised {
+        object_id: String,
+        predecessor_object_id: String,
+        predecessor_source_revision: i64,
+        source_revision: i64,
+        /// Always `superseded`: the predecessor is invalidated and names the successor.
+        predecessor_disposition: String,
+        admission: AdmittedState,
+    },
     Retired {
         object_id: String,
         object_kind: String,
@@ -78,6 +109,31 @@ pub enum SettlementEffect {
     },
     /// Retain and no-change: no canonical write, TTL refresh, maturity change, or corroboration.
     Unchanged,
+}
+
+/// The admission the decision a create or revise wrote received, which may be a denial on a correct store. Disposition, maturity, visibility, and sensitivity are the stored decision's; source and taint class are the classes the admission was recorded under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedState {
+    pub disposition: String,
+    pub effective_maturity: String,
+    pub visibility: String,
+    pub source_class: String,
+    pub taint_class: String,
+    pub sensitivity_class: String,
+}
+
+impl AdmittedState {
+    fn of(decision: &AdmissionDecision) -> Self {
+        Self {
+            disposition: decision.disposition.as_str().to_string(),
+            effective_maturity: decision.effective_maturity.as_str().to_string(),
+            visibility: decision.visibility.as_str().to_string(),
+            source_class: ACCEPTED_SOURCE_CLASS.as_str().to_string(),
+            taint_class: ACCEPTED_TAINT_CLASS.as_str().to_string(),
+            sensitivity_class: decision.sensitivity.as_str().to_string(),
+        }
+    }
 }
 
 /// A settlement and whether it was recorded by an earlier acceptance.
@@ -102,10 +158,7 @@ pub enum AcceptanceRefusal {
     /// The caller reused its operation key for other input.
     #[error("conflict")]
     Conflict,
-    /// The action is one this build does not apply.
-    #[error("unsupported")]
-    Unsupported,
-    /// A malformed binding, reference, or intent, a reserved caller producer, or a selection time before the row was sealed.
+    /// A malformed binding, reference, or intent, a reserved caller producer, a selection time before the row was sealed, or a create without a scope.
     #[error("invalid")]
     Invalid,
 }
@@ -321,10 +374,14 @@ fn action_refusal(error: KernelError) -> AcceptanceError {
     }
 }
 
-/// What validation proved: the proposal and the project it is judged in.
+/// What validation proved: the proposal, the project it is judged in, and its deduplicated support.
 struct Validated {
     proposal: ReviewProposal,
+    domain_id: String,
     project: ProjectScope,
+    support: Vec<String>,
+    /// The store clock the hold was judged at; the support events are stamped with it.
+    now: i64,
 }
 
 /// Validates and applies one acceptance inside its envelope and records the settlement receipt; returns the settlement's JSON for the caller's receipt.
@@ -358,8 +415,23 @@ fn apply(
                 deferred: retirement.deferred,
             }
         }
-        (ProposalAction::Create | ProposalAction::Revise, _) => {
-            return Err(AcceptanceRefusal::Unsupported.into());
+        (ProposalAction::Revise, ProposalTarget::Memory(target)) => {
+            let predecessor = target_stands(envelope, &validated.project, target)?;
+            revise(
+                envelope,
+                &validated,
+                &AcceptedIds::new(settlement_key),
+                predecessor,
+            )?
+        }
+        (ProposalAction::Create, ProposalTarget::StagedCandidate { candidate_id }) => {
+            subject_stands(envelope, acceptance, candidate_id)?;
+            create(
+                envelope,
+                acceptance,
+                &validated,
+                &AcceptedIds::new(settlement_key),
+            )?
         }
         // Staging admits only legal action and target pairs, so a stored row with another pair is corruption.
         _ => return Err(KernelError::Io.into()),
@@ -448,10 +520,39 @@ fn validate(
     for member in union.members() {
         member_stands(envelope, acceptance, &project, &proposal, member)?;
     }
+    let mut support: Vec<String> = proposal
+        .support
+        .iter()
+        .map(|cited| cited.evidence_id.clone())
+        .collect();
+    support.sort_unstable();
+    support.dedup();
     Ok(Validated {
+        domain_id: row.binding.domain_id,
         proposal: *proposal,
         project,
+        support,
+        now,
     })
+}
+
+/// The object and decision ids an accepted create or revise writes, derived from the settlement key so one proposal names one decision.
+struct AcceptedIds {
+    object_id: String,
+    decision_id: String,
+}
+
+impl AcceptedIds {
+    fn new(settlement_key: &CommitIntent) -> Self {
+        let object_id = format!(
+            "memreview-decision-{}",
+            identity_digest(settlement_key.operation_key.as_bytes())
+        );
+        Self {
+            decision_id: format!("{object_id}-decision"),
+            object_id,
+        }
+    }
 }
 
 /// Whether the batch verdicts let a local reader of `project` see each object: every one `Ok`, except a descriptor, which no surface serves and whose bytes the evidence check already judged.
@@ -696,4 +797,168 @@ const fn decision_derived(class: OccurrenceClass) -> bool {
         class,
         OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
     )
+}
+
+/// The proposal's text: staging admits create and revise only with text, so a sealed row without it is corruption.
+fn proposal_text(proposal: &ReviewProposal) -> Result<String, AcceptanceError> {
+    proposal
+        .new_text
+        .clone()
+        .ok_or(AcceptanceError::Store(KernelError::Io))
+}
+
+/// A derived object id is unused: a settlement key is unique per proposal, so a row under it is corruption, never a survivor to fold into.
+fn fresh(envelope: &Envelope<'_>, object_id: &str) -> Result<(), AcceptanceError> {
+    match envelope.object_state(object_id)? {
+        None => Ok(()),
+        Some(_) => Err(KernelError::Io.into()),
+    }
+}
+
+/// Inserts the decision an accepted create names, scoped to the caller's scope, which must name the run's project, then admits it.
+fn create(
+    envelope: &mut Envelope<'_>,
+    acceptance: &ProposalAcceptance,
+    validated: &Validated,
+    ids: &AcceptedIds,
+) -> Result<SettlementEffect, AcceptanceError> {
+    let scope_id = acceptance
+        .scope_id
+        .as_deref()
+        .ok_or(AcceptanceRefusal::Invalid)?;
+    if !validated
+        .project
+        .names_project(load_scope_terms(envelope.tx, scope_id)?.as_deref())
+    {
+        return Err(AcceptanceRefusal::Unavailable.into());
+    }
+    fresh(envelope, &ids.object_id)?;
+    envelope
+        .insert_decision(DecisionSpec {
+            decision_id: ids.decision_id.clone(),
+            object_id: ids.object_id.clone(),
+            domain_id: validated.domain_id.clone(),
+            proposition_id: None,
+            scope_id: Some(scope_id.to_string()),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: ACCEPTED_DECISION_KIND.to_string(),
+            payload: DecisionPayload {
+                summary: proposal_text(&validated.proposal)?,
+                rationale: String::new(),
+            },
+            source_kind: ACCEPTED_SOURCE_KIND.to_string(),
+            source_id: acceptance.proposal.candidate_id.clone(),
+            source_revision: 1,
+            sensitivity: Sensitivity::Sensitive,
+        })
+        .map_err(action_refusal)?;
+    let admission = admit(envelope, ids, &validated.support, validated.now)?;
+    Ok(SettlementEffect::Created {
+        object_id: ids.object_id.clone(),
+        admission,
+    })
+}
+
+/// Writes the successor of `predecessor` with the proposal's text as its summary, then admits it on its own. The successor keeps the predecessor's domain, source identity, kind, proposition, scope, and anchor; its support is the proposal's, cited through decision events, so it carries no rationale or direct evidence of its own. An approval is not revised: model-written text never carries the approval kind.
+fn revise(
+    envelope: &mut Envelope<'_>,
+    validated: &Validated,
+    ids: &AcceptedIds,
+    predecessor: ObjectState,
+) -> Result<SettlementEffect, AcceptanceError> {
+    let predecessor_id = predecessor.object.object_id.clone();
+    let (proposition_id, scope_id, anchor_id, decision_kind): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = envelope
+        .tx
+        .query_row_cached(
+            "SELECT proposition_id,scope_id,anchor_id,decision_kind FROM decisions
+             WHERE object_id=?1",
+            [predecessor_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(map_sqlite)?
+        .ok_or(KernelError::Io)?;
+    if decision_kind == APPROVAL_DECISION_KIND {
+        return changed();
+    }
+    fresh(envelope, &ids.object_id)?;
+    let source_revision = predecessor.object.source_revision + 1;
+    envelope
+        .supersede_decision(
+            &predecessor_id,
+            DecisionSpec {
+                decision_id: ids.decision_id.clone(),
+                object_id: ids.object_id.clone(),
+                domain_id: predecessor.object.domain_id.clone(),
+                proposition_id,
+                scope_id,
+                anchor_id,
+                evidence_id: None,
+                decision_kind,
+                payload: DecisionPayload {
+                    summary: proposal_text(&validated.proposal)?,
+                    rationale: String::new(),
+                },
+                source_kind: predecessor.object.source_kind.clone(),
+                source_id: predecessor.object.source_id.clone(),
+                source_revision,
+                sensitivity: Sensitivity::Sensitive,
+            },
+        )
+        .map_err(action_refusal)?;
+    let admission = admit(envelope, ids, &validated.support, validated.now)?;
+    Ok(SettlementEffect::Revised {
+        object_id: ids.object_id.clone(),
+        predecessor_object_id: predecessor_id,
+        predecessor_source_revision: predecessor.object.source_revision,
+        source_revision,
+        predecessor_disposition: "superseded".to_string(),
+        admission,
+    })
+}
+
+/// Cites each supporting evidence row through a decision event, then admits the decision as model inference with no prior authority.
+fn admit(
+    envelope: &mut Envelope<'_>,
+    ids: &AcceptedIds,
+    support: &[String],
+    now: i64,
+) -> Result<AdmittedState, AcceptanceError> {
+    for evidence_id in support {
+        envelope
+            .append_decision_event(
+                &ids.decision_id,
+                DecisionEventSpec {
+                    event_kind: SUPPORT_EVENT_KIND.to_string(),
+                    payload: DecisionEventPayload {
+                        summary: "supporting evidence of the accepted proposal".to_string(),
+                    },
+                    evidence_id: Some(evidence_id.clone()),
+                    recorded_at: now,
+                },
+            )
+            .map_err(action_refusal)?;
+    }
+    let decision = envelope
+        .record_admission(AdmissionRequest {
+            candidate_id: None,
+            subject_object_id: Some(ids.object_id.clone()),
+            source_class: Some(ACCEPTED_SOURCE_CLASS),
+            taint_class: Some(ACCEPTED_TAINT_CLASS),
+            event: AdmissionEvent {
+                kind: EventKind::Other,
+                trigger_object_id: None,
+                approval_object_id: None,
+                evidence_id: None,
+                reason: ADMISSION_REASON.to_string(),
+            },
+        })
+        .map_err(action_refusal)?;
+    Ok(AdmittedState::of(&decision))
 }
