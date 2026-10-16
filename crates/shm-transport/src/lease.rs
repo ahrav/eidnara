@@ -232,7 +232,7 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
         }
         for (word_start, chunk) in shape.word_starts().zip(words.as_chunks_mut::<WORD>().0) {
             let word = AtomicU64::from_ptr(source.add(word_start).cast()).load(Ordering::Relaxed);
-            *chunk = word.to_ne_bytes().map(MaybeUninit::new);
+            chunk.write_copy_of_slice(&word.to_ne_bytes());
         }
         for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
             byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
