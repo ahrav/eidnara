@@ -274,12 +274,27 @@ struct AcceptanceRecord {
     evidence: String,
 }
 
-/// Reads the acceptance record under `home` and admits acceptance only when it is owner-only, of its schema, names a reviewed evidence record, and binds exactly the live store pair.
-pub fn read_acceptance_gate(
+/// `read_acceptance_gate` requires an owner-only acceptance record with schema 1 and a nonempty evidence reference of at most `MAX_ATTESTATION_FIELD_BYTES` bytes. After validating the record, it calls `live_pair` for `(kernel incarnation, memory store incarnation)` and admits acceptance when both identities match, returning that pair. Callback errors propagate as the outer error; gate refusals return as the inner error.
+pub fn read_acceptance_gate<E>(
     home: &Path,
-    kernel_incarnation: &str,
-    memstore_incarnation: &str,
-) -> Result<(), Closed> {
+    live_pair: impl FnOnce() -> Result<(String, String), E>,
+) -> Result<Result<(String, String), Closed>, E> {
+    let record = match read_acceptance_record(home) {
+        Ok(record) => record,
+        Err(closed) => return Ok(Err(closed)),
+    };
+    let (kernel_incarnation, memstore_incarnation) = live_pair()?;
+    if record.kernel_incarnation != kernel_incarnation {
+        return Ok(Err(Closed::IdentityMismatch("kernel incarnation")));
+    }
+    if record.memstore_incarnation != memstore_incarnation {
+        return Ok(Err(Closed::IdentityMismatch("memory store incarnation")));
+    }
+    Ok(Ok((kernel_incarnation, memstore_incarnation)))
+}
+
+/// `read_acceptance_record` requires owner-only permissions, schema 1, and a nonempty evidence reference of at most [`MAX_ATTESTATION_FIELD_BYTES`].
+fn read_acceptance_record(home: &Path) -> Result<AcceptanceRecord, Closed> {
     let bytes = match read_owner_only_record(&home.join(ACTIVATION_DIR), ACCEPTANCE_RECORD) {
         Ok(RecordRead::Bytes(bytes)) => bytes,
         Ok(RecordRead::Absent) => return Err(Closed::Missing),
@@ -293,13 +308,7 @@ pub fn read_acceptance_gate(
     {
         return Err(Closed::Malformed);
     }
-    if record.kernel_incarnation != kernel_incarnation {
-        return Err(Closed::IdentityMismatch("kernel incarnation"));
-    }
-    if record.memstore_incarnation != memstore_incarnation {
-        return Err(Closed::IdentityMismatch("memory store incarnation"));
-    }
-    Ok(())
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -352,11 +361,19 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// The acceptance record is its own gate: absent, group-readable, of another schema, without an evidence reference, or naming another store pair, it admits nothing; only an owner-only record for the live pair admits acceptance.
+    /// `read_acceptance_gate` requires an owner-only acceptance record with schema 1 and a nonempty evidence reference before reading the live pair. Matching identities return that pair; identity mismatches close the gate, and live-pair read errors propagate as the outer error.
     #[test]
     fn the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair() {
         let home = tempfile::tempdir().unwrap();
-        let gate = || read_acceptance_gate(home.path(), "kernel-1", "memstore-1");
+        let pair_reads = std::cell::Cell::new(0);
+        let gate_for = |memstore: &str| {
+            read_acceptance_gate(home.path(), || {
+                pair_reads.set(pair_reads.get() + 1);
+                Ok::<_, ()>(("kernel-1".to_string(), memstore.to_string()))
+            })
+            .unwrap()
+        };
+        let gate = || gate_for("memstore-1");
         assert_eq!(gate(), Err(Closed::Missing));
         let write_acceptance = |value: serde_json::Value, mode: u32| {
             let dir = home.path().join(ACTIVATION_DIR);
@@ -383,14 +400,27 @@ mod tests {
         assert_eq!(gate(), Err(Closed::Malformed));
         write_acceptance(record(1, "kernel-1", ""), 0o600);
         assert_eq!(gate(), Err(Closed::Malformed));
+        assert_eq!(
+            pair_reads.get(),
+            0,
+            "the stores are read only for a valid record"
+        );
         write_acceptance(record(1, "kernel-2", "reviewed"), 0o600);
         assert_eq!(gate(), Err(Closed::IdentityMismatch("kernel incarnation")));
         write_acceptance(record(1, "kernel-1", "reviewed"), 0o600);
         assert_eq!(
-            read_acceptance_gate(home.path(), "kernel-1", "memstore-2"),
+            gate_for("memstore-2"),
             Err(Closed::IdentityMismatch("memory store incarnation"))
         );
-        assert_eq!(gate(), Ok(()));
+        assert_eq!(
+            gate(),
+            Ok(("kernel-1".to_string(), "memstore-1".to_string()))
+        );
+        assert_eq!(pair_reads.get(), 3);
+        assert_eq!(
+            read_acceptance_gate(home.path(), || Err::<(String, String), _>("store")),
+            Err("store")
+        );
     }
 
     /// A matching, attested record yields the approval bound to the live pair and the named credential's fingerprint; each identity term that differs closes the gate naming that term; a missing acknowledgement, an unknown credential, a group-readable record, and an absent record close it too.

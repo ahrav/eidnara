@@ -289,27 +289,29 @@ impl HandlerCore {
             let scope = bound.review_scope()?;
             // The owner's acceptance record is its own gate: the disclosure record, open or not, admits no acceptance.
             let home = home.ok_or("disabled")?;
-            let kernel_incarnation = scope
-                .kernel
-                .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::new(
-                    Some(std::time::Instant::now() + GATE_READ_BUDGET),
-                    Arc::default(),
-                ))
-                .map_err(|_| "store_unavailable")?;
-            let memstore_incarnation = scope
-                .ledger
-                .memory_reviewer_store_incarnation()
-                .map_err(|_| "store_unavailable")?;
-            super::activation::read_acceptance_gate(
-                &home,
-                &kernel_incarnation,
-                &memstore_incarnation,
-            )
-            .map_err(|_| "disabled")?;
+            // `read_acceptance_gate` requires an owner-only acceptance record with schema 1 and a nonempty evidence reference before reading the stores.
+            let (kernel_incarnation, memstore_incarnation) =
+                super::activation::read_acceptance_gate(&home, || {
+                    let kernel_incarnation = scope
+                        .kernel
+                        .database_incarnation_id_within_budget(
+                            &kernel::applicability::EvalBudget::new(
+                                Some(std::time::Instant::now() + GATE_READ_BUDGET),
+                                Arc::default(),
+                            ),
+                        )
+                        .map_err(|_| "store_unavailable")?;
+                    let memstore_incarnation = scope
+                        .ledger
+                        .memory_reviewer_store_incarnation()
+                        .map_err(|_| "store_unavailable")?;
+                    Ok::<_, &'static str>((kernel_incarnation, memstore_incarnation))
+                })?
+                .map_err(|_| "disabled")?;
             accept_selected_proposal(
                 &scope.kernel,
                 &scope.ledger,
-                &kernel_incarnation,
+                (&kernel_incarnation, &memstore_incarnation),
                 &scope.project,
                 &parsed.causal_identity,
                 &parsed.operation_key,
