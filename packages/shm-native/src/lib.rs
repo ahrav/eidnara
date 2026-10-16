@@ -554,6 +554,12 @@ pub fn qualified_test_profile() -> &'static str {
     PROFILE
 }
 
+/// FNV-1a digest of the sources this addon was built from, computed by `build.rs`.
+#[napi]
+pub fn source_digest() -> &'static str {
+    env!("EIDNARA_SHM_NATIVE_SOURCE_DIGEST")
+}
+
 #[napi]
 pub fn create_external_probe<'env>(env: &'env Env, length: u32) -> Result<Unknown<'env>> {
     napi_buffers::create_owned_probe(env, length as usize)

@@ -24,6 +24,9 @@ mod dispatch;
 mod file_mode;
 #[doc(hidden)]
 pub mod frame_channel;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod inbound_copy_gate;
 mod instance;
 mod panic_boundary;
 mod routing;

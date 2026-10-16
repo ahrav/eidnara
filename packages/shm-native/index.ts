@@ -24,6 +24,8 @@ export interface NativeArtifactIdentity {
     buildTarget: string;
     napiVersion: number;
     qualifiedTestProfile: string;
+    /** FNV-1a digest of the sources the addon was built from; see `build.rs`. */
+    sourceDigest: string;
 }
 
 /**
@@ -39,6 +41,7 @@ export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
         buildTarget: native.buildTarget(),
         napiVersion: native.napiVersion(),
         qualifiedTestProfile: native.qualifiedTestProfile(),
+        sourceDigest: native.sourceDigest(),
     };
 }
 
@@ -149,6 +152,7 @@ interface NativeAddon {
     buildProfile(): string;
     buildTarget(): string;
     qualifiedTestProfile(): string;
+    sourceDigest(): string;
     estimateTokens?: (text: string) => number;
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
