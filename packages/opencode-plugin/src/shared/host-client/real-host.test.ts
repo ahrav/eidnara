@@ -78,10 +78,30 @@ async function connect(host: RunningHost): Promise<HostClient> {
     return client;
 }
 
+/** Byte `index` is `(index * 131 + 7) & 0xff`, which repeats every 256 bytes. Prefix copies
+ * preserve the 256-byte pattern, including when the final copy is truncated at `length`. */
 function patterned(length: number): Uint8Array {
     const bytes = new Uint8Array(length);
-    for (let index = 0; index < length; index++) bytes[index] = (index * 131 + 7) & 0xff;
+    const period = Math.min(length, 256);
+    for (let index = 0; index < period; index++) bytes[index] = (index * 131 + 7) & 0xff;
+    for (let filled = period; filled < length; filled *= 2) bytes.copyWithin(filled, 0, filled);
     return bytes;
+}
+
+function leaseEquals(
+    lease: { segmentCount: number; segment(index: number): Uint8Array },
+    expected: Uint8Array,
+): boolean {
+    let offset = 0;
+    for (let index = 0; index < lease.segmentCount; index++) {
+        const segment = lease.segment(index);
+        const end = offset + segment.byteLength;
+        if (end > expected.byteLength) return false;
+        const view = Buffer.from(segment.buffer, segment.byteOffset, segment.byteLength);
+        if (!view.equals(expected.subarray(offset, end))) return false;
+        offset = end;
+    }
+    return offset === expected.byteLength;
 }
 
 function leaseBytes(lease: { segmentCount: number; segment(index: number): Uint8Array }): Buffer {
@@ -96,11 +116,7 @@ function sharedMemory(status: { sharedMemory?: Record<string, unknown> }): Recor
 }
 
 afterEach(async () => {
-    for (const client of clients.splice(0)) {
-        try {
-            client.close();
-        } catch {}
-    }
+    for (const client of clients.splice(0)) client.close();
     for (const host of hosts.splice(0)) await stopHost(host);
     for (const dir of dataDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -132,7 +148,7 @@ describe("TypeScript client against a real host process", () => {
             const body = patterned(MAX_FRAME_BODY_LEN);
             const held = await client.requestBinary(route, body, { timeoutMs: 120_000 });
             expect(held.byteLength).toBe(MAX_FRAME_BODY_LEN);
-            expect(leaseBytes(held).equals(Buffer.from(body))).toBe(true);
+            expect(leaseEquals(held, body)).toBe(true);
 
             const over = client.requestBinary(route, new Uint8Array(MAX_FRAME_BODY_LEN + 1));
             await expect(over).rejects.toMatchObject({
@@ -143,7 +159,7 @@ describe("TypeScript client against a real host process", () => {
             // The held maximum response stays readable after its connection closes and is
             // returned exactly once.
             client.close();
-            expect(leaseBytes(held).equals(Buffer.from(body))).toBe(true);
+            expect(leaseEquals(held, body)).toBe(true);
             expect(held.release()).toBe(true);
             expect(held.release()).toBe(false);
 
