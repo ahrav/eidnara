@@ -139,6 +139,7 @@ adequacy, Rust code review, and documentation verification.
 | The Git witness's doc comment and the operations document named the production-class witness as wholly gated | refinement | fixed: both name the positive witness as gated and point at the refusal and fixture witnesses |
 | The forced inputs are built in the test rather than by the selector's private `causal_inputs` | bias | kept: the selector refuses these rows, so no selector output exists to reuse; the test pins each input the derivation uses and the precondition that keeps linked evidence empty |
 | The refusal witness forces jobs the production selector refuses | bias | kept: the selector's eligibility-first contract is #593's; the forced jobs show the coordinator's refusal for any job that reaches it, such as one admitted before a class tightened |
+| The refusal witness's zero-connection assertion read a counter that only a serving task increments, and the witness starts none, so a client connection would leave it at zero | gap | fixed: the witness reads `Peer::connection_count`, which also drains the unserved listener's accept queue; `an_unserved_peer_counts_a_connection_it_never_answered` is its positive control |
 
 ## Kernel acceptance
 
