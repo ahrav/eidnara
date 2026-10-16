@@ -112,13 +112,27 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
                     cache_creation_input_tokens: 2_000,
                 },
             });
+            const passesBeforeTurn = h.readRustPasses().length;
             await h.sendPrompt(sessionId, `eidnara_reduce pressure turn ${i}: ${h.ballast(2_500)}`);
-            await Bun.sleep(200);
-            const busted = h
-                .readRustPasses()
+            // Each pressure prompt logs at least one pass; waiting for it keeps a late HARD line
+            // from being attributed to the next turn.
+            const passes = await h.waitForRustPasses(passesBeforeTurn + 1);
+            const busted = passes
                 .slice(passesBeforePressure)
                 .some((pass) => pass.decision === "HARD");
-            if (!busted || drainedOnBust) continue;
+            if (drainedOnBust) continue;
+            if (!busted) {
+                const status = (await h.host.primaryStatus(
+                    sessionId,
+                    h.env.workdir,
+                    "session.status",
+                )) as ModuleStatus;
+                expect(
+                    status.pending_drop_count ?? 0,
+                    "the drop stays pending through deferred passes",
+                ).toBeGreaterThan(0);
+                continue;
+            }
             // The first producer-backed bust must consume the drop; a later pressure turn draining
             // it would hide a stalled ledger.
             const deadline = Date.now() + 10_000;
@@ -152,7 +166,8 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
         expect(finalStatus.history_segment_count ?? 0).toBeGreaterThan(0);
         expect(await h.host.backendRequestCount()).toBeGreaterThan(0);
         const finalWire = h.lastMainWireSerialized();
-        // The deterministic fixture summarizer publishes a segment headed by the ordinals it covers.
+        // The deterministic fixture summarizer publishes a segment headed by the ordinals it
+        // covers. The wire is JSON-serialized, so `\\n` matches its escaped newline.
         expect(finalWire).toMatch(/<session-history>\\n## \d+-\d+ · /);
     }, 300_000);
 });

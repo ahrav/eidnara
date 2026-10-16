@@ -1102,8 +1102,13 @@ jobs:
           for drill in 2 3 5; do
             bun run --cwd packages/e2e-tests mutation:rust-fm "$drill"
           done
-          git diff --exit-code -- packages/e2e-tests/mutations \
-            packages/e2e-tests/incidents
+          # Every drill restores the source it mutated and writes no record, so
+          # the tree the drills touch must be unchanged and free of new files.
+          drill_paths="packages/e2e-tests packages/opencode-plugin/src"
+          test -z "$(git status --porcelain -- $drill_paths)" || {
+            git status --porcelain -- $drill_paths
+            exit 1
+          }
 
   # The scale report runs only when dispatched with a driver. A GitHub-hosted
   # `ubuntu-latest` runner is the reference host (#825 D21); the report's

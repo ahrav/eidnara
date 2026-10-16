@@ -3,7 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
-import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
+import {
+    exitIfMeasureOnly,
+    reportMutationInventorySync,
+    syncMutationInventory,
+} from "./mutation-inventory";
 
 type CommandResult = { exit_status: number; output: string };
 
@@ -70,14 +74,7 @@ if (revertedRerun.exit_status !== 0) {
     throw new Error("RUST_HISTORY_SUMMARIZER_TYPED_FAILURE: reverted test did not pass");
 }
 
-// A CI measurement checks red-under-mutation and green-after-revert without writing or
-// syncing any record; only a deliberate local run updates `mutations/`.
-if (process.env.EIDNARA_MUTATION_MEASURE_ONLY === "1") {
-    console.log(
-        "measured RUST-HISTORY_SUMMARIZER-DIRECT-BACKEND: red under mutation, green after revert; no record written",
-    );
-    process.exit(0);
-}
+exitIfMeasureOnly("RUST-HISTORY_SUMMARIZER-DIRECT-BACKEND");
 
 writeFileSync(
     resolve(e2eRoot, "mutations/rust-history_summarizer-producer.json"),

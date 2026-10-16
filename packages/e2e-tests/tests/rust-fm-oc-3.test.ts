@@ -64,11 +64,14 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
         const passes = await h.waitForRustPasses(recoveryStart + RECOVERY_PASSES);
         const recovery = passes.slice(recoveryStart);
         // A reconnect retry repeats the pass for the prompt it retries, so the ceiling counts
-        // prompts: each pass serves one prompt's input, and at most one retry joins each.
-        expect(new Set(recovery.map((pass) => pass.inputCount)).size).toBeLessThanOrEqual(
-            RECOVERY_PASSES,
-        );
-        expect(recovery.length).toBeLessThanOrEqual(2 * RECOVERY_PASSES);
+        // prompts: passes group by the input they served, one group per prompt, and at most
+        // one retry joins each.
+        const passesPerPrompt = new Map<number, number>();
+        for (const pass of recovery) {
+            passesPerPrompt.set(pass.inputCount, (passesPerPrompt.get(pass.inputCount) ?? 0) + 1);
+        }
+        expect(passesPerPrompt.size).toBeLessThanOrEqual(RECOVERY_PASSES);
+        for (const count of passesPerPrompt.values()) expect(count).toBeLessThanOrEqual(2);
         const firstRecovered = recovery.findIndex((pass) => pass.servedFrom === "transform");
         expect(firstRecovered).toBeGreaterThanOrEqual(0);
         // Self-healing holds only if no pass falls back to raw after the transform first serves one.

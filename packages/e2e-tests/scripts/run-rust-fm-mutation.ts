@@ -3,7 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
-import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
+import {
+    exitIfMeasureOnly,
+    reportMutationInventorySync,
+    syncMutationInventory,
+} from "./mutation-inventory";
 
 type MutationCase = {
     name: string;
@@ -38,20 +42,20 @@ const mutations: Record<string, MutationCase[]> = {
                 : "rust transform failed; serving the input unchanged:",
             error,
         );`,
+            // The voids keep the mutated build free of unused-binding errors.
             replacement: "        void servedLastApplied;\n        void error;",
             expectedFailingTest: "continues through the outage with a loud module failure",
         },
     ],
     "3": [
         {
-            name: "FM_OC_3_SILENT_LAST_APPLIED_FAILURE",
+            name: "FM_OC_3_STICKY_FALLBACK",
             source: pluginTransform,
-            // An outage pass that serves the last applied output stops naming the module
-            // failure, so the outage is no longer loud.
-            oldText:
-                '? "rust transform failed; serving the last applied output with the messages appended since:"',
-            replacement:
-                '? "rust pass degraded; serving the last applied output with the messages appended since:"',
+            // A session that has failed once stops attempting the transform, so every pass
+            // after the restart keeps serving the last applied output.
+            oldText: "            const directory = await source.preflight();",
+            replacement: `            if (state.failureCount > 0) throw new Error("sticky outage fallback");
+            const directory = await source.preflight();`,
             expectedFailingTest:
                 "serves passes from transform again after the host restarts, without restarting the session",
         },
@@ -165,14 +169,7 @@ for (const mutation of mutations[drill]) {
     });
 }
 
-// A CI measurement checks red-under-mutation and green-after-revert without writing or
-// syncing any record; only a deliberate local run updates `mutations/`.
-if (process.env.EIDNARA_MUTATION_MEASURE_ONLY === "1") {
-    console.log(
-        `measured FM-OC-${drill}: red under mutation, green after revert; no record written`,
-    );
-    process.exit(0);
-}
+exitIfMeasureOnly(`FM-OC-${drill}`);
 
 const recordPath = resolve(e2eRoot, `mutations/fm-oc-${drill}.json`);
 writeFileSync(
