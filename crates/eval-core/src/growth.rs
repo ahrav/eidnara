@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::checkpoint::StoreFamily;
-use crate::fault::{ExpectedRefusal, RecordedRefusal};
+use crate::fault::{EpisodeRefused, ExpectedRefusal, FaultEpisode, RecordedRefusal};
 
 pub const GROWTH_REPORT_SCHEMA: &str = "eval-suite-c-growth-report/v2";
 const GROWTH_RESULT_DIGEST_PROTOCOL: &str = "eval-suite-c-growth-report-result/v2";
@@ -786,9 +786,11 @@ pub struct GrowthReport {
     pub ledger: GrowthLedger,
     pub mix: SwarmMix,
     pub expected_refusals: Vec<RecordedRefusal>,
-    pub fault_episodes: u64,
+    /// The fault episodes the campaign ran, each triggered at a sampled step.
+    pub episodes: Vec<FaultEpisode>,
     pub safety_checks_while_armed: u64,
-    /// The fault episodes' declared cuts and their receipts.
+    /// The episodes' declared cuts and their receipts; the declared set is
+    /// exactly the episode ids.
     pub coverage: crate::fault::CutCoverage,
     pub markers: BTreeSet<String>,
     pub envelope: crate::Envelope,
@@ -806,16 +808,22 @@ pub enum GrowthReportError {
     Growth(GrowthRefused),
     Mix(MixIncomplete),
     SafetyNeverChecked,
-    /// A declared cut with no receipt, or a receipt for an undeclared one.
+    /// No quiescence in the ledger ran a reviewer coordinator pass.
+    ReviewerNeverPassed,
+    Episode(EpisodeRefused),
+    /// An episode triggered at a step the ledger never sampled.
+    EpisodeNotSampled {
+        episode: String,
+        step: u32,
+    },
+    /// A declared cut with no receipt, a receipt for an undeclared one, or
+    /// an episode whose id was not declared as a cut.
     Coverage(crate::fault::CoverageRefused),
     /// Fault episodes ran but no cut was declared for them.
     FaultedWithoutCuts,
-    /// The declared cuts are not one per fault episode.
-    CutsDisagree {
-        declared: u64,
-        episodes: u64,
+    CutNotAnEpisode {
+        cut: String,
     },
-    /// `fault_episodes` and the mix's `fault_episode` count disagree.
     FaultEpisodesDisagree {
         declared: u64,
         exercised: u64,
@@ -887,7 +895,7 @@ impl GrowthReport {
             return Err(GrowthReportError::EnvelopeBoundsNotApproved);
         }
         self.mix.complete().map_err(GrowthReportError::Mix)?;
-        let faulted = self.fault_episodes > 0 || self.mix.exercised(Operation::FaultEpisode);
+        let faulted = !self.episodes.is_empty() || self.mix.exercised(Operation::FaultEpisode);
         if faulted && self.safety_checks_while_armed == 0 {
             return Err(GrowthReportError::SafetyNeverChecked);
         }
@@ -897,9 +905,10 @@ impl GrowthReport {
             .get(&Operation::FaultEpisode)
             .copied()
             .unwrap_or(0);
-        if self.fault_episodes != exercised {
+        let declared = self.episodes.len() as u64;
+        if declared != exercised {
             return Err(GrowthReportError::FaultEpisodesDisagree {
-                declared: self.fault_episodes,
+                declared,
                 exercised,
             });
         }
@@ -909,13 +918,6 @@ impl GrowthReport {
         self.coverage
             .verdict()
             .map_err(GrowthReportError::Coverage)?;
-        let declared = self.coverage.declared.len() as u64;
-        if declared != self.fault_episodes {
-            return Err(GrowthReportError::CutsDisagree {
-                declared,
-                episodes: self.fault_episodes,
-            });
-        }
         if let Some(marker) = self
             .markers
             .iter()
@@ -987,6 +989,45 @@ impl GrowthReport {
                     .check_samples(&self.quota, &self.bounds)
                     .map_err(GrowthReportError::Growth)?;
             }
+        }
+        // A complete mix exercised quota pressure, which hands work to the
+        // coordinator, so the ledger witnesses at least one reviewer pass.
+        if self
+            .ledger
+            .samples
+            .iter()
+            .all(|s| s.progress.reviewer_passes == 0)
+        {
+            return Err(GrowthReportError::ReviewerNeverPassed);
+        }
+        crate::fault::validate_episodes(&self.episodes).map_err(GrowthReportError::Episode)?;
+        for episode in &self.episodes {
+            if !self.coverage.declared.contains(&episode.id) {
+                return Err(GrowthReportError::Coverage(
+                    crate::fault::CoverageRefused::UndeclaredCut {
+                        cut: episode.id.clone(),
+                    },
+                ));
+            }
+            if !self
+                .ledger
+                .samples
+                .iter()
+                .any(|s| s.step == episode.trigger_step)
+            {
+                return Err(GrowthReportError::EpisodeNotSampled {
+                    episode: episode.id.clone(),
+                    step: episode.trigger_step,
+                });
+            }
+        }
+        if let Some(cut) = self
+            .coverage
+            .declared
+            .iter()
+            .find(|cut| !self.episodes.iter().any(|e| &e.id == *cut))
+        {
+            return Err(GrowthReportError::CutNotAnEpisode { cut: cut.clone() });
         }
         Ok(())
     }

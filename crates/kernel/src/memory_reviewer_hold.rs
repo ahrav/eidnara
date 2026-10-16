@@ -13,8 +13,10 @@ use super::backup::release_capture_pin_in_tx;
 use super::cas::ArtifactHandle;
 use super::envelope::{Sensitivity, check_fence};
 use super::redaction::identity;
+use super::retention::StagingTerminalState;
 use super::review_staging::{
-    REVIEW_PROPOSAL_KIND, ReviewPayload, check_digest, provisional_result_identity,
+    REVIEW_PROPOSAL_KIND, ReviewPayload, ReviewStageError, ReviewStagedReference,
+    ReviewStagingSpec, check_digest, provisional_result_identity,
 };
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
@@ -209,6 +211,14 @@ pub struct ActiveReviewHold {
     pub binding: MemoryReviewerHoldBinding,
 }
 
+/// A proposal staged and sealed by [`KernelStore::stage_sealed_review_proposal`], with the outcome of its retention transfer.
+#[derive(Debug)]
+pub struct SealedReviewProposal {
+    pub reference: ReviewStagedReference,
+    /// The review hold the transfer committed, or why the transfer refused while the sealed proposal committed without it.
+    pub review_hold: Result<MemoryReviewerHold, MemoryReviewerHoldError>,
+}
+
 pub(crate) struct StoredHold {
     expires_at: i64,
     released: bool,
@@ -287,26 +297,34 @@ impl KernelStore {
         review: &MemoryReviewerHoldBinding,
         review_expires_at: i64,
     ) -> Result<MemoryReviewerHold, MemoryReviewerHoldError> {
-        execution.validate()?;
-        review.validate()?;
-        let execution_hold_id =
-            identity(execution_hold_id).map_err(|_| MemoryReviewerHoldRefusal::InvalidRequest)?;
-        let expected = provisional_result_identity(&execution.subject, execution.generation);
-        if review.generation != execution.generation
-            || review.subject != expected.candidate_id
-            || execution.generation != review.generation
-            || execution.project_digest != review.project_digest
-            || execution.kernel_incarnation != review.kernel_incarnation
-            || execution.memstore_incarnation != review.memstore_incarnation
-        {
-            return Err(MemoryReviewerHoldRefusal::InvalidRequest.into());
-        }
+        let execution_hold_id = transfer_target(execution_hold_id, execution, review)?;
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
-        self.check_incarnation(&tx, review)?;
+        let hold = self.transfer_in(
+            &tx,
+            &execution_hold_id,
+            execution,
+            review,
+            review_expires_at,
+        )?;
+        tx.commit().map_err(sqlite)?;
+        Ok(hold)
+    }
+
+    /// The fenced write of [`Self::transfer_execution_to_review`] for a validated `execution_hold_id`, inside the caller's transaction.
+    fn transfer_in(
+        &self,
+        tx: &Transaction<'_>,
+        execution_hold_id: &str,
+        execution: &MemoryReviewerHoldBinding,
+        review: &MemoryReviewerHoldBinding,
+        review_expires_at: i64,
+    ) -> Result<MemoryReviewerHold, MemoryReviewerHoldError> {
+        let expected = provisional_result_identity(&execution.subject, execution.generation);
+        self.check_incarnation(tx, review)?;
         // The clock is read under the writer: a wait behind another writer must not let a lapsed deadline through.
         let now = current_time_ms();
         if review_expires_at <= now {
@@ -314,10 +332,10 @@ impl KernelStore {
         }
         // A transfer whose result was lost is retried: the binding's live review hold is the committed answer, and nothing is written again.
         if let Some((review_hold_id, expires_at, _)) =
-            live_hold_of(&tx, MemoryReviewerHoldKind::Review, review, now)?
+            live_hold_of(tx, MemoryReviewerHoldKind::Review, review, now)?
         {
             return admit_totals(
-                &tx,
+                tx,
                 &review_hold_id,
                 MemoryReviewerHoldKind::Review,
                 expires_at,
@@ -349,8 +367,8 @@ impl KernelStore {
             return Err(MemoryReviewerHoldRefusal::InvalidRequest.into());
         }
         load_valid_hold(
-            &tx,
-            &execution_hold_id,
+            tx,
+            execution_hold_id,
             MemoryReviewerHoldKind::Execution,
             execution,
             now,
@@ -362,17 +380,17 @@ impl KernelStore {
             return Err(MemoryReviewerHoldRefusal::InvalidRequest.into());
         };
         for reference in &proposal.policy_dependencies.disclosed_inputs {
-            if !is_covered(&tx, &execution_hold_id, &reference.evidence_id)? {
+            if !is_covered(tx, execution_hold_id, &reference.evidence_id)? {
                 return Err(MemoryReviewerHoldRefusal::NotCovered.into());
             }
         }
         let review_hold_id = insert_pin(
-            &tx,
+            tx,
             MemoryReviewerHoldKind::Review,
             review,
             review_expires_at,
             self.lease_epoch(),
-            Some(&execution_hold_id),
+            Some(execution_hold_id),
         )?;
         // New reference rows: the schema forbids re-parenting an active reference, and the review hold outlives the execution hold.
         tx.execute_cached(
@@ -401,16 +419,70 @@ impl KernelStore {
         )
         .map_err(sqlite)?;
         let hold = admit_totals(
-            &tx,
+            tx,
             &review_hold_id,
             MemoryReviewerHoldKind::Review,
             review_expires_at,
         )?;
-        if !release_capture_pin_in_tx(&tx, &execution_hold_id, now)? {
+        if !release_capture_pin_in_tx(tx, execution_hold_id, now)? {
             return Err(MemoryReviewerHoldRefusal::Released.into());
         }
-        tx.commit().map_err(sqlite)?;
         Ok(hold)
+    }
+
+    /// [`Self::stage_review_input`], [`Self::finish_staging_run`] as completed at the spec's `recorded_at`, and [`Self::transfer_execution_to_review`] to a review hold expiring [`REVIEW_EXPIRY_MAX_MS`] after the row's creation, in one envelope: a settled proposal and its retention commit together. The transfer runs under a savepoint, so a refused transfer leaves the proposal staged and sealed exactly as the three separate calls do, and its refusal is returned beside the reference. A refused staging or seal writes nothing.
+    pub fn stage_sealed_review_proposal(
+        &self,
+        spec: ReviewStagingSpec,
+        execution_hold_id: &str,
+        execution: &MemoryReviewerHoldBinding,
+        review: &MemoryReviewerHoldBinding,
+    ) -> Result<SealedReviewProposal, ReviewStageError> {
+        let store = |error| ReviewStageError::Store(map_sqlite(error));
+        let sealed_at = spec.recorded_at;
+        let (candidate, text) = spec.prepare()?;
+        let mut writer = self.lock_writer().map_err(ReviewStageError::Store)?;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store)?;
+        let reference = self.stage_review_in(&tx, &candidate, &text)?;
+        KernelStore::finish_staging_run_in(
+            &tx,
+            &candidate.extraction_run_id,
+            StagingTerminalState::Completed,
+            sealed_at,
+        )
+        .map_err(ReviewStageError::Store)?;
+        let created_at: i64 = tx
+            .query_row_cached(
+                "SELECT created_at FROM candidates WHERE candidate_id=?1",
+                [reference.candidate_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(store)?;
+        tx.execute_batch("SAVEPOINT retention_transfer")
+            .map_err(store)?;
+        let review_hold =
+            transfer_target(execution_hold_id, execution, review).and_then(|hold_id| {
+                self.transfer_in(
+                    &tx,
+                    &hold_id,
+                    execution,
+                    review,
+                    created_at.saturating_add(REVIEW_EXPIRY_MAX_MS),
+                )
+            });
+        tx.execute_batch(if review_hold.is_ok() {
+            "RELEASE retention_transfer"
+        } else {
+            "ROLLBACK TO retention_transfer; RELEASE retention_transfer"
+        })
+        .map_err(store)?;
+        tx.commit().map_err(store)?;
+        Ok(SealedReviewProposal {
+            reference,
+            review_hold,
+        })
     }
 
     /// The review hold owned by `binding` that is unreleased and unexpired; released and expired holds return `None`. A purge-degraded hold is returned like [`Self::transfer_execution_to_review`] returns it: it protects nothing and validation under it refuses, but it is the binding's committed hold and the id its owner must release.
@@ -631,6 +703,28 @@ impl KernelStore {
         }
         Ok(())
     }
+}
+
+/// The execution hold id [`KernelStore::transfer_execution_to_review`] releases, once both bindings are valid and `review` names the proposal `execution`'s generation stages.
+fn transfer_target(
+    execution_hold_id: &str,
+    execution: &MemoryReviewerHoldBinding,
+    review: &MemoryReviewerHoldBinding,
+) -> Result<String, MemoryReviewerHoldError> {
+    execution.validate()?;
+    review.validate()?;
+    let execution_hold_id =
+        identity(execution_hold_id).map_err(|_| MemoryReviewerHoldRefusal::InvalidRequest)?;
+    let expected = provisional_result_identity(&execution.subject, execution.generation);
+    if review.generation != execution.generation
+        || review.subject != expected.candidate_id
+        || execution.project_digest != review.project_digest
+        || execution.kernel_incarnation != review.kernel_incarnation
+        || execution.memstore_incarnation != review.memstore_incarnation
+    {
+        return Err(MemoryReviewerHoldRefusal::InvalidRequest.into());
+    }
+    Ok(execution_hold_id)
 }
 
 /// Whether `hold_id` carries an unreleased reference to `evidence_id`.

@@ -35,7 +35,9 @@ same identity, or abandons the sealed one.
 
 ## Timing windows and dependencies
 
-Process loss after `stage_review_input` and `transfer_execution_to_review`,
+Process loss after the Kernel envelope that stages, seals, and transfers
+retention (`stage_sealed_review_proposal`; `stage_review_input` and
+`transfer_execution_to_review` when settlement adopts an already sealed row),
 before `complete_memory_reviewer_receipt`; process loss after the marker's
 `Complete` terminal, before staging.
 

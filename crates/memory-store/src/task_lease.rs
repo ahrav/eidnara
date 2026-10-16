@@ -230,15 +230,16 @@ pub(crate) fn module_authority_tx(
     kind: &TaskLeaseKind,
     project: &str,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
-    tx.query_row(
+    tx.prepare_cached(
         "SELECT generation, note_eval_protocol_epoch
            FROM authority
           WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
           ORDER BY context_store_uuid
           LIMIT 1",
-        params![project, kind.authority_domain],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
+    )?
+    .query_row(params![project, kind.authority_domain], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
     .optional()
 }
 
@@ -248,14 +249,11 @@ fn load_claim_tx(
     project: &str,
     claim_id: &str,
 ) -> rusqlite::Result<Option<ClaimRow>> {
-    tx.query_row(
-        &format!(
-            "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
+    tx.prepare_cached(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
               WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3"
-        ),
-        params![project, kind.task_kind, claim_id],
-        claim_from_row,
-    )
+    ))?
+    .query_row(params![project, kind.task_kind, claim_id], claim_from_row)
     .optional()
 }
 
@@ -270,21 +268,21 @@ fn mark_terminal_tx(
     response: &str,
     now_ms: i64,
 ) -> rusqlite::Result<usize> {
-    tx.execute(
+    tx.prepare_cached(
         "UPDATE note_eval_claims
             SET terminal_kind = ?1, completion_id = COALESCE(?2, completion_id),
                 terminal_response = ?3, terminal_at_ms = ?4
           WHERE project = ?5 AND task_kind = ?6 AND claim_id = ?7 AND terminal_kind IS NULL",
-        params![
-            terminal_kind,
-            completion_id,
-            response,
-            now_ms,
-            project,
-            kind.task_kind,
-            claim_id
-        ],
-    )
+    )?
+    .execute(params![
+        terminal_kind,
+        completion_id,
+        response,
+        now_ms,
+        project,
+        kind.task_kind,
+        claim_id
+    ])
 }
 
 /// Terminally fence one task's active claim so in-flight work loses its
@@ -297,19 +295,19 @@ pub(crate) fn fence_task_claims_tx(
     terminal_kind: &str,
     now_ms: i64,
 ) -> rusqlite::Result<usize> {
-    tx.execute(
+    tx.prepare_cached(
         "UPDATE note_eval_claims
             SET terminal_kind = ?1, terminal_response = ?2, terminal_at_ms = ?3
           WHERE project = ?4 AND task_kind = ?5 AND note_id = ?6 AND terminal_kind IS NULL",
-        params![
-            terminal_kind,
-            kind_response(terminal_kind),
-            now_ms,
-            project,
-            kind.task_kind,
-            note_id
-        ],
-    )
+    )?
+    .execute(params![
+        terminal_kind,
+        kind_response(terminal_kind),
+        now_ms,
+        project,
+        kind.task_kind,
+        note_id
+    ])
 }
 
 /// Terminally fence the active claims of every kind fenced on `domain` in a
@@ -324,21 +322,37 @@ pub(crate) fn fence_project_claims_tx(
 ) -> rusqlite::Result<usize> {
     let mut fenced = 0;
     for kind in kinds.iter().filter(|kind| kind.authority_domain == domain) {
-        fenced += tx.execute(
-            "UPDATE note_eval_claims
+        fenced += tx
+            .prepare_cached(
+                "UPDATE note_eval_claims
                 SET terminal_kind = ?1, terminal_response = ?2, terminal_at_ms = ?3
               WHERE project = ?4 AND task_kind = ?5 AND terminal_kind IS NULL",
-            params![
+            )?
+            .execute(params![
                 terminal_kind,
                 kind_response(terminal_kind),
                 now_ms,
                 project,
                 kind.task_kind
-            ],
-        )?;
+            ])?;
     }
     Ok(fenced)
 }
+
+/// Nulls the responses of terminal claims past their completion-replay window; `idx_note_eval_claims_unredacted` holds exactly the rows it can change.
+const REDACT_TERMINAL_RESPONSES_SQL: &str = "UPDATE note_eval_claims SET terminal_response = NULL
+      WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
+        AND terminal_response IS NOT NULL
+        AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3";
+
+/// Terminal claims past their retention, read by age through `idx_note_eval_claims_terminal_age`.
+const EXPIRED_TERMINAL_CLAIMS_SQL: &str = "SELECT claim_id FROM note_eval_claims
+      WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
+        AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3";
+
+const DELETE_EXPIRED_TERMINAL_CLAIMS_SQL: &str = "DELETE FROM note_eval_claims
+      WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
+        AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3";
 
 /// Ledger garbage collection: expire overdue active claims, tombstone expired
 /// `no_work` decisions (`decision = ''` keeps replay identity), then null the
@@ -352,31 +366,35 @@ fn collect_ledgers_tx(
     project: &str,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
-    tx.execute(
+    tx.prepare_cached(
         "UPDATE note_eval_claims
             SET terminal_kind = 'expired', terminal_response = ?1, terminal_at_ms = ?2
           WHERE project = ?3 AND task_kind = ?4 AND terminal_kind IS NULL AND expires_at <= ?2",
-        params![kind_response("expired"), now_ms, project, kind.task_kind],
-    )?;
-    tx.execute(
+    )?
+    .execute(params![
+        kind_response("expired"),
+        now_ms,
+        project,
+        kind.task_kind
+    ])?;
+    tx.prepare_cached(
         "UPDATE note_eval_acquisitions SET decision = ''
           WHERE project = ?1 AND task_kind = ?2 AND decision <> '' AND expires_at <= ?3",
-        params![project, kind.task_kind, now_ms],
-    )?;
-    tx.execute(
-        "UPDATE note_eval_claims SET terminal_response = NULL
-          WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
-            AND terminal_response IS NOT NULL
-            AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3",
-        params![project, kind.task_kind, now_ms - kind.response_redact_ms],
-    )?;
+    )?
+    .execute(params![project, kind.task_kind, now_ms])?;
+    tx.prepare_cached(REDACT_TERMINAL_RESPONSES_SQL)?
+        .execute(params![
+            project,
+            kind.task_kind,
+            now_ms - kind.response_redact_ms
+        ])?;
     // Reclaim rows, not just columns. Blanking `decision`/`terminal_response`
     // stops a row counting toward the cap but leaves it on disk forever, so both
     // ledgers would grow without bound - one acquisition row per poll, including
     // every idle no-work poll - and the per-poll GC and cap counts would degrade
     // into ever-longer scans.
     let expired_acquisitions = {
-        let mut statement = tx.prepare(
+        let mut statement = tx.prepare_cached(
             "SELECT acquisition_id FROM note_eval_acquisitions
               WHERE project = ?1 AND task_kind = ?2 AND decision = '' AND expires_at <= ?3",
         )?;
@@ -397,17 +415,17 @@ fn collect_ledgers_tx(
             &acquisition_owner_key(kind, &acquisition_id),
         )?;
     }
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM note_eval_acquisitions
           WHERE project = ?1 AND task_kind = ?2 AND decision = '' AND expires_at <= ?3",
-        params![project, kind.task_kind, now_ms - kind.no_work_retention_ms],
-    )?;
+    )?
+    .execute(params![
+        project,
+        kind.task_kind,
+        now_ms - kind.no_work_retention_ms
+    ])?;
     let expired_claims = {
-        let mut statement = tx.prepare(
-            "SELECT claim_id FROM note_eval_claims
-              WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
-                AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3",
-        )?;
+        let mut statement = tx.prepare_cached(EXPIRED_TERMINAL_CLAIMS_SQL)?;
 
         statement
             .query_map(
@@ -425,12 +443,12 @@ fn collect_ledgers_tx(
             &claim_owner_key(kind, &claim_id),
         )?;
     }
-    tx.execute(
-        "DELETE FROM note_eval_claims
-          WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NOT NULL
-            AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?3",
-        params![project, kind.task_kind, now_ms - kind.terminal_retention_ms],
-    )?;
+    tx.prepare_cached(DELETE_EXPIRED_TERMINAL_CLAIMS_SQL)?
+        .execute(params![
+            project,
+            kind.task_kind,
+            now_ms - kind.terminal_retention_ms
+        ])?;
     Ok(())
 }
 
@@ -465,19 +483,19 @@ fn rebind_claim_tx<T>(
     // Persisting it keeps the replay guarantee: a retry of that id hits the
     // acquisition-keyed lookup and replays this rebind instead of re-entering
     // slot recovery and extending the lease again.
-    tx.execute(
+    tx.prepare_cached(
         "UPDATE note_eval_claims
             SET registration_generation = ?1, expires_at = ?2, acquisition_id = ?3
           WHERE project = ?4 AND task_kind = ?5 AND claim_id = ?6 AND terminal_kind IS NULL",
-        params![
-            registration_generation,
-            expires_at,
-            acquisition_id,
-            project,
-            kind.task_kind,
-            claim.claim_id
-        ],
-    )?;
+    )?
+    .execute(params![
+        registration_generation,
+        expires_at,
+        acquisition_id,
+        project,
+        kind.task_kind,
+        claim.claim_id
+    ])?;
     claim.registration_generation = registration_generation;
     claim.expires_at = expires_at;
     claim.acquisition_id = acquisition_id.to_string();
@@ -529,11 +547,11 @@ impl MemoryStore {
             let tx = coordinated.tx;
             collect_ledgers_tx(tx, kind, project, now_ms)?;
             let replayed_claim = tx
-                .query_row(
-                    &format!(
-                        "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
+                .prepare_cached(&format!(
+                    "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
                           WHERE project = ?1 AND task_kind = ?2 AND acquisition_id = ?3"
-                    ),
+                ))?
+                .query_row(
                     params![project, kind.task_kind, acquisition_id],
                     claim_from_row,
                 )
@@ -564,12 +582,13 @@ impl MemoryStore {
                 .map(WriteDisposition::Replay);
             }
             let replayed_decision = tx
-                .query_row(
+                .prepare_cached(
                     "SELECT decision FROM note_eval_acquisitions
                       WHERE project = ?1 AND task_kind = ?2 AND acquisition_id = ?3",
-                    params![project, kind.task_kind, acquisition_id],
-                    |row| row.get::<_, String>(0),
-                )
+                )?
+                .query_row(params![project, kind.task_kind, acquisition_id], |row| {
+                    row.get::<_, String>(0)
+                })
                 .optional()?;
             if let Some(decision) = replayed_decision {
                 return Ok(WriteDisposition::Replay(if decision.is_empty() {
@@ -593,12 +612,12 @@ impl MemoryStore {
                 ));
             };
             let slot_claim = tx
-                .query_row(
-                    &format!(
-                        "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
+                .prepare_cached(&format!(
+                    "SELECT {CLAIM_COLUMNS} FROM note_eval_claims
                           WHERE project = ?1 AND task_kind = ?2 AND evaluator_instance = ?3
                             AND evaluator_slot = ?4 AND terminal_kind IS NULL"
-                    ),
+                ))?
+                .query_row(
                     params![project, kind.task_kind, evaluator_instance, evaluator_slot],
                     claim_from_row,
                 )
@@ -645,33 +664,33 @@ impl MemoryStore {
                         return Ok(WriteDisposition::Replay(LeaseAcquireOutcome::Invalid));
                     }
                     LeaseSelected::NoWork { cycle_exhausted } => {
-                        let live: i64 = tx.query_row(
-                            "SELECT COUNT(*) FROM note_eval_acquisitions
+                        let live: i64 = tx
+                            .prepare_cached(
+                                "SELECT COUNT(*) FROM note_eval_acquisitions
                           WHERE project = ?1 AND task_kind = ?2 AND decision <> ''",
-                            params![project, kind.task_kind],
-                            |row| row.get(0),
-                        )?;
+                            )?
+                            .query_row(params![project, kind.task_kind], |row| row.get(0))?;
                         if live >= kind.ledger_cap {
                             return Ok(WriteDisposition::Replay(LeaseAcquireOutcome::Busy));
                         }
-                        tx.execute(
+                        tx.prepare_cached(
                             "INSERT INTO note_eval_acquisitions(
                              project, task_kind, acquisition_id, decision, created_at_ms,
                              expires_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                            params![
-                                project,
-                                kind.task_kind,
-                                acquisition_id,
-                                if cycle_exhausted {
-                                    "no_work_exhausted"
-                                } else {
-                                    "no_work"
-                                },
-                                now_ms,
-                                now_ms + kind.no_work_retention_ms
-                            ],
-                        )?;
+                        )?
+                        .execute(params![
+                            project,
+                            kind.task_kind,
+                            acquisition_id,
+                            if cycle_exhausted {
+                                "no_work_exhausted"
+                            } else {
+                                "no_work"
+                            },
+                            now_ms,
+                            now_ms + kind.no_work_retention_ms
+                        ])?;
                         coordinated.domain_owner(
                             "project",
                             project,
@@ -693,12 +712,12 @@ impl MemoryStore {
             // would return Busy and all evaluation would stall until rows aged
             // out. Terminal-row volume is bounded by deletion in
             // `collect_ledgers_tx` instead.
-            let live: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM note_eval_claims
+            let live: i64 = tx
+                .prepare_cached(
+                    "SELECT COUNT(*) FROM note_eval_claims
                   WHERE project = ?1 AND task_kind = ?2 AND terminal_kind IS NULL",
-                params![project, kind.task_kind],
-                |row| row.get(0),
-            )?;
+                )?
+                .query_row(params![project, kind.task_kind], |row| row.get(0))?;
             if live >= kind.ledger_cap {
                 return Ok(WriteDisposition::Replay(LeaseAcquireOutcome::Busy));
             }
@@ -739,32 +758,32 @@ impl MemoryStore {
                     .transaction_identity(field_id, value)
                     .map_err(redaction_error)?;
             }
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO note_eval_claims(
                      claim_id, project, task_kind, note_id, phase, acquisition_id,
                      evaluator_instance, evaluator_slot, registration_generation,
                      source_revision, state_version, policy_version, protocol_epoch,
                      authority_generation, expires_at, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![
-                    claim.claim_id,
-                    project,
-                    kind.task_kind,
-                    claim.note_id,
-                    claim.phase,
-                    claim.acquisition_id,
-                    claim.evaluator_instance,
-                    claim.evaluator_slot,
-                    claim.registration_generation,
-                    claim.source_revision,
-                    claim.state_version,
-                    claim.policy_version,
-                    claim.protocol_epoch,
-                    claim.authority_generation,
-                    claim.expires_at,
-                    now_ms,
-                ],
-            )?;
+            )?
+            .execute(params![
+                claim.claim_id,
+                project,
+                kind.task_kind,
+                claim.note_id,
+                claim.phase,
+                claim.acquisition_id,
+                claim.evaluator_instance,
+                claim.evaluator_slot,
+                claim.registration_generation,
+                claim.source_revision,
+                claim.state_version,
+                claim.policy_version,
+                claim.protocol_epoch,
+                claim.authority_generation,
+                claim.expires_at,
+                now_ms,
+            ])?;
             coordinated.domain_owner("project", project, claim_owner_key(kind, &claim.claim_id));
             Ok(WriteDisposition::Applied(LeaseAcquireOutcome::Claim {
                 claim,
@@ -832,13 +851,18 @@ impl MemoryStore {
                     _ => return Ok(LeaseRenewOutcome::AuthorityChanged),
                 }
                 let expires_at = now_ms + kind.lease_ms;
-                tx.execute(
+                tx.prepare_cached(
                     "UPDATE note_eval_claims
                         SET expires_at = ?1
                       WHERE project = ?2 AND task_kind = ?3 AND claim_id = ?4
                         AND terminal_kind IS NULL",
-                    params![expires_at, project, kind.task_kind, claim_id],
-                )?;
+                )?
+                .execute(params![
+                    expires_at,
+                    project,
+                    kind.task_kind,
+                    claim_id
+                ])?;
                 Ok(LeaseRenewOutcome::Renewed { expires_at })
             })()?;
             Ok(if tx.total_changes() > before {
@@ -1026,5 +1050,51 @@ impl MemoryStore {
             )?;
             Ok(WriteDisposition::Applied(LeaseAbandonOutcome::Abandoned))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DELETE_EXPIRED_TERMINAL_CLAIMS_SQL, EXPIRED_TERMINAL_CLAIMS_SQL,
+        REDACT_TERMINAL_RESPONSES_SQL,
+    };
+    use crate::MemoryStore;
+
+    /// Ledger collection runs on every acquisition, so its terminal-claim reads seek by age and touch only the claims they redact or delete.
+    #[test]
+    fn ledger_collection_seeks_terminal_claims_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "eidnara-task-lease-plan");
+        for (sql, index) in [
+            (
+                REDACT_TERMINAL_RESPONSES_SQL,
+                "idx_note_eval_claims_unredacted",
+            ),
+            (
+                EXPIRED_TERMINAL_CLAIMS_SQL,
+                "idx_note_eval_claims_terminal_age",
+            ),
+            (
+                DELETE_EXPIRED_TERMINAL_CLAIMS_SQL,
+                "idx_note_eval_claims_terminal_age",
+            ),
+        ] {
+            let plan: Vec<String> = store
+                .inner
+                .with_conn_unfenced(|conn| {
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+                        .query_map(rusqlite::params!["project", "kind", 0_i64], |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect()
+                })
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains(index) && step.contains("terminal_at_ms<?")),
+                "{sql}: {plan:?}"
+            );
+        }
     }
 }

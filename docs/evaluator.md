@@ -2862,15 +2862,22 @@ is a claim about at least two.
 
 `GrowthReport` (`eval-suite-c-growth-report/v2`) is what one campaign
 publishes: identity, profile digest, claim boundary, the quota read, the
-bounds, the ledger, the mix, expected refusals, fault-episode and
-safety-check counts (`SafetyNeverChecked` when either the fault-episode count
+bounds, the ledger, the mix, expected refusals, the fault episodes it ran and
+its safety-check count (`SafetyNeverChecked` when either an episode is listed
 or the mix records a fault episode and no safety check ran while armed;
-`FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
-differ), the fault episodes' cut coverage (`Coverage(IncompleteCoverage)`
+`ReviewerNeverPassed` when no sample's progress witness records a reviewer
+coordinator pass, since a complete mix exercised quota pressure, which hands
+work to the coordinator;
+`FaultEpisodesDisagree` when the listed episodes and the mix's `fault_episode`
+tally differ; `Episode` for a duplicate or malformed episode, as the fault
+report refuses them), the episodes' cut coverage (`Coverage(IncompleteCoverage)`
 for a declared cut with no receipt, `FaultedWithoutCuts` when fault episodes
-ran and no cut was declared, `CutsDisagree { declared, episodes }` when the
-declared cuts are not one per fault episode, so a missing coverage witness
-cannot read as sustainability success),
+ran and no cut was declared; the declared set is derived from the episodes:
+`Coverage(UndeclaredCut)` for an episode whose id is not declared,
+`CutNotAnEpisode { cut }` for a declared cut that is not a listed episode,
+and `EpisodeNotSampled { episode, step }` for an episode triggered at a step
+no sample records, so a receipted set of the right size cannot stand in for
+the episodes that ran),
 markers, and envelope. `validate(contract)` requires `eval_run_id` and
 `profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
 as the Suite B report does; the manifest derives the run id and names the
@@ -2902,7 +2909,7 @@ each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
 keeps steps, commit sequence, row and object counts, and headroom, so a
 concurrent campaign that saw another campaign's commits does not match its
-serial digest; the digest protocol is `eval-suite-c-growth-report-result/v1`.
+serial digest; the digest protocol is `eval-suite-c-growth-report-result/v2`.
 
 ## Aging shell
 
@@ -3308,8 +3315,10 @@ so the worker passes over it whatever its lease, and a coordinator pass
 cannot change what the begun jobs hold. The store
 refuses a reservation past `MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT`
 pending jobs, so an admission that brings the pending count to that cap is
-settled by abstention as well (a handed one by the coordinator at once, whose
-passes count toward the next quiescence's witness); the pending queue then holds one slot free and
+settled by abstention as well (a handed one by the coordinator at once; its
+passes count toward the next quiescence's witness and draw on that
+quiescence's `reviewer_coordinator_passes`, so the drain's own settle runs
+only what the cap-triggered one left); the pending queue then holds one slot free and
 every later admission becomes a permanent receipt charge, which is how a long
 history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
@@ -3334,7 +3343,15 @@ files are measured: an open commits a new fence epoch and runs startup
 maintenance, so a sample taken after it would not be the history's own.
 `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
-in place, and the ledger then gives no leak verdict.
+in place, and the ledger then gives no leak verdict. Every sample builds its
+progress witness at the moment it is taken: the projection's checkpoint as
+the files hold it, the catch-up episodes and coordinator passes accumulated
+since the last recorded sample, and whether every handed job has settled;
+recording the sample drains both accumulators. So a second sample with no
+drain between witnesses no further work, a sample after a restore witnesses
+the reopen's bootstrap plus whatever ran since the last recorded sample, and
+a cap-triggered settle's passes reach the ledger through whichever sample
+follows, the restore's own, the next step's, or the final one.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
 and the bounds scaled from the message count (with a per-commit store-byte
@@ -3354,7 +3371,12 @@ admits nothing, and the campaign continues; any other refusal stops the run
 with `RunError::Admission`. An S0 history never reaches the quota, and the
 report says zero. Two campaigns run from one checkout on two roots, each with
 its own reviewer peer on an OS-allocated port, publish the same result digest
-as their serial runs; a fixture that shares a root or a port is refused. The
+as their serial runs; `run_with(config, opened)` calls `opened` once the peer
+listens and before the first step, and the concurrent pair waits there on a
+barrier, so both ports are held at once and the pair's ports are disjoint; a
+fixture that shares a root or a port is refused. The
+serial pair is compared without its ports: each serial run releases its peer
+port before the next binds, so the OS may hand the second the same port. The
 campaign records no cassette, so its `cassette_namespaces` is empty and the
 isolation check covers roots, publish directories, and ports.
 The `growth` subcommand takes the `aging` flags plus `--mode

@@ -238,11 +238,11 @@ the [check inventory](existing-checks.md).
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
 | T1-T2 | default-production | [`process_limits`][process-limits] runs at host startup; every inbound frame calls [`to_vec`][to-vec] and every outbound frame calls `copy_in`. |
 | T3-T4 | default-production | The daemon's `settle_prepared_via` sends every transform and exact-length response through `settle_direct_with` and `RequestCtx::output_from_direct_write` to [`reserve_direct`][reserve-direct]; the fault arms need the `direct_fill` [fixture arm][fixture-arm], which reaches the same reservation through [`output_from_writer`][from-writer]. |
-| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget]; GC and purge decrements have no daemon caller. |
-| G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
+| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], every store open seeds the count from one census walk and reconciles only when that census failed or recovery changed the count, and the daemon's [memory-reviewer sweep][daemon-maintenance] runs a GC pass and its reconciliation; purge has no daemon caller. |
+| G3 | default-production | Cleanup, startup recovery, GC reclaim, and the retried GC unlink run in the daemon; the purge decrement runs only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The memory_classifier schedule [defaults to `None`][sched-default]; conditional notes need a cron on the note. |
-| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14634-14647`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
+| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:15119`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the deterministic abort seam is `#[cfg(test)]` [`after_transform_commit`][unit-after-hook]. |
 | W12 | default-production | Transform units use [the guarded host runner][unit-runner-live]. [`kernel_routes::blocking`][blocking] still runs without that guard; the panic itself is the injected fault. |
 
@@ -1929,48 +1929,61 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Cap error, invalidated-retained bytes, reclaim, and the
-inclusive payload limit have tests; none covers dedup at exactly the cap or a
-refusal after an unrecovered orphan publish.
+Exercised: yes - The [usage tests][t-usage] cover dedup at exactly the cap,
+a refusal that leaves no reservation row and no object, and a refusal that
+counts an unrecovered orphan publish; the cap error, invalidated-retained
+bytes, reclaim, and the inclusive payload limit keep their earlier tests.
 Guarantee: No ingest publishes bytes that would raise the on-disk regular-file
-sum under `objects` above `artifact_cap`, and a refused ingest leaves no
-reservation row and no published object.
+sum under `objects` above `artifact_cap` while every byte under `objects`
+changed through the store since the last conclusive reconciliation, and a
+refused ingest leaves no reservation row and no published object. Bytes
+changed outside the store are drift: the count follows them at the next
+conclusive reconciliation, which latches admission closed
+([`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown]).
 Check: `always` - For every ingest, [`check_budget`][check-budget] runs under
 the exclusive [writer lock][lock-writer] before the reservation row, the
-shard creation, and the publish rename ([`:407-416`][ingest-lock]); it refuses
-with [`Capacity`][cap-error] carrying `usage` and `cap` when
-`usage + byte_length > artifact_cap`, adds zero for a digest already present
-([`object_is_present`][present]), and counts invalidated-but-retained objects
-because [`regular_file_bytes`][walk] reads the filesystem, not
-`evidence_meta`. `always` because the cap is a hard promise with no admission
-on the failure arm.
+shard creation, and the publish rename ([`:410-419`][ingest-lock]); it reads
+the [writer-lock count][usage-count] and refuses with [`Capacity`][cap-error]
+carrying `usage` and `cap` when `usage + byte_length > artifact_cap`, adds
+zero for a digest already present ([`object_is_present`][present]), and
+counts invalidated-but-retained objects because the count follows the
+filesystem through every [publication][usage-publish] and
+[unlink][usage-unlink], not `evidence_meta`. A count the reconciliation walk
+contradicted latches the [fail-closed state][latch], and
+[`ingest_artifact_inner`][ingest] refuses with `IngestionFailClosed` before
+it stages anything. `always` because the cap is a hard promise with no
+admission on the failure arm.
 Fault/timing angle: The temp file is written and synced under `tmp`
-([`:379-405`][ingest-temp]) before the lock and the check, so `tmp` bytes are
-never counted and a refused ingest still cost one full write; two ingests
-serialize on the writer lock, so the walk cannot race a concurrent publish,
-but it does race the health sampler's lock-free walk. A counter consulted
-here instead of the walk must be updated inside the same lock scope that
-publishes or unlinks, or it admits over the cap by whatever it lags.
+([`:378-404`][ingest-temp]) before the lock and the check, so `tmp` bytes are
+never counted and a refused ingest still cost one full write. Every count
+update runs inside the writer lock that publishes or unlinks, so the count
+cannot lag a publish. Bytes changed outside the store are invisible to the
+count until a [reconciliation walk][usage-reconcile] at open, restore
+recovery, or maintenance compares them and latches. A walk that fails
+settles nothing, so it leaves a held count and admission as they were; an
+admission that holds no count walks under the writer lock and refuses with
+`IngestionFailClosed` when that walk fails.
 Required faults and enabling state: A store at `cap - 1` receiving a two-byte
 payload; the same digest re-ingested at the cap; an invalidated reference
 whose bytes remain; a crash between publish and reference commit followed by
 a second ingest before recovery.
 Confidence: high - [Evidence](evidence/artifact-admission-fails-closed-against-on-disk-object-bytes.md).
-[`ingest_artifact_inner`][ingest], the lock order, the budget walk summing
-[`st_size`][stat-bytes], and the [4 GiB default][cap-default] are
-source-verified.
+[`ingest_artifact_inner`][ingest], the lock order, the count read in
+`check_budget`, and the [4 GiB default][cap-default] are source-verified.
 Existing check: [CAS checks](existing-checks.md#cas-usage-accounting) cover
-the cap error, retained bytes, reclaim, the inclusive limit, and the daemon
-route at the cap; all unaudited.
-Impact: A counter that lags admits bytes over the cap, or a refusal leaves a
+the cap error, retained bytes, reclaim, the inclusive limit, the daemon
+route at the cap, and the usage tests; all unaudited.
+Impact: A count that lags admits bytes over the cap, or a refusal leaves a
 reservation behind.
 Open questions:
 
 - The daemon maps `Capacity` to [`StoreBusy`][busy], a retryable class, while
-  the only production paths that lower usage are failed-ingest cleanup and
-  startup recovery ([`run_staging_maintenance`][maintenance] and
-  [`delete_artifact`][delete] have no daemon caller). Is "busy" the intended
-  classification of a cap that only a restart or an operator relieves?
+  the production paths that lower usage are failed-ingest cleanup, startup
+  recovery, and the GC pass of the daemon's [memory-reviewer
+  sweep][daemon-maintenance] through [`run_staging_maintenance`][maintenance]
+  ([`delete_artifact`][delete] has no daemon caller), and GC frees only
+  invalidated bytes past their grace. Is "busy" the intended classification
+  of a cap that only such a reclaim, a restart, or an operator relieves?
   (needs human input)
 
 ### reported-artifact-usage-equals-on-disk-object-bytes-after-recovery
@@ -1978,75 +1991,137 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - The fault-injection oracle asserts the equality after
-every fault point and after a second recovery; no test compares two
-independent usage sources because only the walk exists.
+Exercised: yes - The [usage tests][t-usage] compare the reported usage with
+an independent `st_size` walk after publish, dedup, cleanup, startup
+recovery, reclaim, purge, a failed unlink, and its retry, inject drift
+both ways, land an ingest and a purge between a reconciliation walk and its
+comparison, and fail a reconciliation walk and an open census; the
+fault-injection oracle still asserts the equality after every fault point
+and after a second recovery.
 Guarantee: Reported artifact usage never drifts from the bytes actually on
 disk once recovery has run, whatever crash window preceded it.
 Check: `always` - At every quiescent point (after `KernelStore::open`
 completes [`recover_interrupted_work`][recover], and after each ingest,
 cleanup, GC pass, or purge returns with the writer lock released), the usage
 the store reports through [`artifact_budget_facts`][facts] and the usage
-`check_budget` admits against both equal an independent sum of `st_size`
-over regular files under `objects` and its shard directories. `always`
-because the [fault-injection oracle][t-oracle] asserts exactly this equality,
-and a durable counter turns it from a tautology into the drift check.
+`check_budget` admits against are the same [count][usage-count], and it
+equals an independent sum of `st_size` over regular files under `objects`
+and its subdirectories, provided every byte under `objects` changed through
+the store since the last conclusive reconciliation. A byte changed outside
+the store is drift: an unlink then subtracts the size on disk rather than
+the size counted
+([`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown]),
+and the equality resumes at the next conclusive reconciliation, which
+latches. The count lives in process memory under the writer
+lock: the kernel store has no spare mutable column and a new table or column
+is a format break, so the durable counter the specification named is
+replaced by a count the [open walk][open-seed] seeds before startup
+recovery. [`reconcile_artifact_usage`][usage-reconcile] re-walks the tree at
+the end of a [recovery][recover] that seeded no count or changed the count
+the census seeded, and of every [maintenance pass][maintenance], without
+holding the writer lock across the walk, then takes the writer lock and
+compares only when no publication or unlink recorded a [tree
+change][usage-tree-change] since the walk began; with a count held, a walk
+that disagrees latches the [fail-closed state][latch], so drift is detected
+at the next conclusive reconciliation and the admission after it is
+refused. `always`
+because the [usage tests][t-usage] and the [fault-injection
+oracle][t-oracle] assert exactly this equality.
 Fault/timing angle: Every path that changes on-disk object bytes is a
 filesystem operation beside, not inside, a SQLite transaction: publish by
 rename after the [reservation row][ingest-reservation] commits and before the
-reference commits ([`:476-526`][ingest-publish],
-[`:580-595`][ingest-commit]); unlink inside a fenced write in
+reference commits ([`:475-523`][ingest-publish],
+[`:577-592`][ingest-commit]); unlink inside a fenced write in
 [`cleanup_failed_reference`][cleanup], [`reclaim_candidate`][reclaim-cand]
-(reading the size it removes in [`unlink_artifact`][unlink-artifact]), and
-[`complete_pending_purge_locked`][purge-unlink]; a dedup hit or a failed
-publish only [releases the row][release-res]. A crash after the rename and
-before the reference commit leaves bytes the walk counts and a `Live`
+(through [`unlink_artifact`][unlink-artifact]), and
+[`complete_pending_purge_locked`][purge-unlink], each through
+[`unlink_counted_object`][usage-unlink]; a dedup hit or a failed publish only
+[releases the row][release-res]. The count follows the filesystem, not the
+transactions: a publication adds its bytes when the rename succeeds, and an
+unlink subtracts the `st_size` it read before removing the file once the
+durable unlink succeeds. A crash after the rename and before the reference
+commit leaves bytes the next open's seed walk counts and a `Live`
 reservation that [`prepare_startup_cas_recovery`][startup] promotes and
-[`run_artifact_recovery`][recovery] unlinks; a crash after an unlink and
-before its commit leaves a row without bytes that recovery retires
-([`:109-136`][startup-unreachable]). A counter written in the transaction
-over-reports in the second window and under-reports in the first until
-recovery reconciles it; the walk is correct in both because it is the
-reconciliation. The [restore path][restore] and tests writing
-[directly to disk][t-orphan] bypass any counter. The health sampler walks
-without the writer lock, so equality is claimed only at quiescence.
+[`run_artifact_recovery`][recovery] unlinks against that count; a crash after
+an unlink and before its commit leaves a row without bytes that recovery
+retires ([`:109-136`][startup-unreachable]). A failed unlink leaves the count
+unknown, so the next reader walks; a removal larger than the count leaves it
+unknown and latches. A reconciliation that finds drift latches and replaces
+the count with the walk, so admission stays refused while the sampler reports
+the bytes on disk; only a new store admits again. In production the
+reconciliation runs at open, at restore, and after the GC pass of every
+[memory-reviewer sweep][daemon-maintenance], which repeats every 30 s when
+idle and every 5 s after a pass that advanced, with up to four maintenance
+calls a slice ([`SAMPLE_INTERVAL`][sample-interval]); the daemon has no purge
+caller. A clean open walks once: the
+[census][usage-census] starts on a thread of its own once the layout and any
+interrupted restore are settled ([`:320`][open-census]), runs beside the
+database open, and [seeds the count][usage-seed] before startup recovery;
+until `open` returns, the opening thread is the store's only user, so that
+walk counts the tree the writer lock would have seen. Open walks again after
+recovery when the census failed or recovery changed the count. Every
+uncancellable walk
+divides the shard directories among up to [64 threads][walk-workers]
+([`regular_file_bytes_concurrently`][walk-concurrent]); the count it settles
+is the same sum, and a failure other than exhaustion outranks an exhaustion
+from another worker, so an admission walk that would have latched still
+latches. A census or reconciliation walk that fails, for any reason, settles
+nothing: a held count stays, and an admission that finds none walks again
+under the writer lock. The reconciliation walk runs without the writer lock.
+Each publication and unlink holds the writer lock from its filesystem change
+through its [tree-change record][usage-tree-change], so once the
+reconciliation holds the writer lock no change is half-applied: an unchanged
+tree-change number proves its walk saw the tree the count describes, and a
+changed one leaves the comparison to the next pass. A maintenance pass holds
+the writer lock only for that comparison, except after three deferred
+comparisons in a row, when the next pass takes the writer lock before its
+snapshot and holds it across the walk, so a writer that overlaps every pass
+delays drift detection by at most three passes
+([`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound]).
+A census walk whose workers run the descriptor table out (`EMFILE` or
+`ENFILE`) repeats on the calling thread with one shard descriptor, and the
+workers number at most one per sixteen descriptors of the soft limit
+([`regular_file_bytes_concurrently`][walk-concurrent]). A walk that settles
+advances a settlement number, and a reconciliation whose snapshot predates
+it leaves the newer census in place
+([`a_census_settled_during_an_older_walk_is_kept`][t-usage-settled-order]).
+The [restore path][restore] runs recovery and its reconciliation against the
+count it held; tests writing [directly to disk][t-orphan] do so before the
+store opens. The health sampler reads the count without the writer lock
+([`reported_artifact_usage`][usage-reported]) and walks lock-free only while
+no count is held, so equality with the walk is claimed only at quiescence.
 Required faults and enabling state: The six ingest fault points and three GC
 fault points in [`cas_fault_injection.rs`][t-faults]; SIGKILL at the
 [post-reservation and post-publish crash barriers][t-crash]; an object added
-or removed under `objects` by something other than the store.
+or removed under `objects` by something other than the store; a publication
+or unlink between a reconciliation walk and its comparison; a directory
+below `objects` that a reconciliation walk or the open census cannot read.
 Confidence: high - [Evidence](evidence/reported-artifact-usage-equals-on-disk-object-bytes-after-recovery.md).
-Every byte-changing path and both recovery branches are source-verified; GC
-and purge reclamation are reached only by tests and benches.
+Every byte-changing path, both recovery branches, and every count update are
+source-verified; GC reclamation runs in the daemon's memory-reviewer sweep,
+and purge is reached only by tests and benches.
 Existing check: [CAS checks](existing-checks.md#cas-usage-accounting) include
-the semantic oracle, `recover_twice`, the orphan reconciliation, the
-cancelled walk, and the retired live reservation; all unaudited.
-Impact: A durable counter silently diverges from the disk and either refuses
-valid ingests or admits over the cap.
-Open questions:
-
-- Is the walk retained as a periodic or startup reconciliation, and what is
-  the fail-closed action on `counter != walk`: refuse ingest, latch the CAS
-  failure ([`latch_cas_failure`][latch]), or adopt the walk value? (needs
-  human input)
-- [`regular_file_bytes`][walk] counts a root-level regular file and any file
-  in any subdirectory, while GC's [`scan_objects`][scan-objects] skips
-  non-canonical shards; which definition does a counter follow? (needs human
-  input)
+the usage tests, the semantic oracle, `recover_twice`, the orphan
+reconciliation, the fallback walk's cancellation, and the retired live
+reservation; all unaudited.
+Impact: The count silently diverges from the disk and either refuses valid
+ingests or admits over the cap.
+Open questions: None.
 
 ### artifact-byte-decrement-paths-are-exercised
 
 Type: reachability
-Reachability: test-only
+Reachability: default-production
 Status: active
-Exercised: partial - The fault tables and crash windows assert state
-convergence, not a usage delta per path.
-Guarantee: Every decrement path a durable counter must observe is reached
-with bytes at stake before the counter ships.
+Exercised: yes - [`kernel_artifact_usage.rs`][t-usage] reaches all five
+markers with a non-zero independent byte delta.
+Guarantee: Every decrement path the count must observe is reached with bytes
+at stake.
 Check: `sometimes` - A campaign records the independent `st_size` sum over
-`objects` ([`regular_file_bytes`][walk]) before and after each path that
-removes object bytes, with the writer lock released at both readings, under
-one constant marker per path
-(`artifact-byte-decrement-paths-are-exercised-cleanup`, `-recovery`,
+`objects` before and after each path that removes object bytes, with the
+writer lock released at both readings, except that the cleanup reading
+before is taken at the `AfterPublish` hook, under one constant marker per
+path (`artifact-byte-decrement-paths-are-exercised-cleanup`, `-recovery`,
 `-reclaim`, `-purge`, `-retry`), and each marker fires at least once with a
 non-zero byte delta: [`cleanup_failed_reference`][cleanup] after a
 [`PublishOutcome::Published`][ingest-publish] followed by a reference-commit
@@ -2056,21 +2131,22 @@ object past its grace; [`complete_pending_purge_locked`][purge-unlink]
 unlinking a purged digest; and a GC unlink that fails and is retried.
 `sometimes` because these are operational states, and executing the unlink
 lines with a zero-byte candidate would not exercise the accounting.
-Fault/timing angle: At HEAD only cleanup and startup recovery run in
-production; GC and purge decrements are reached only when a caller is added,
-so a counter validated against the walk in production traffic never sees
-them.
+Fault/timing angle: At HEAD cleanup, startup recovery, and the GC reclaim
+and retry run in production, GC through the daemon's [memory-reviewer
+sweep][daemon-maintenance]; the purge decrement is reached only when a
+caller is added, so the production reconciliation never sees it.
 Required faults and enabling state: `ArtifactIngestFault::AfterEvents` after a
-new publish; a SIGKILL child at `INGEST_CRASH_POINT`; an invalidated
-reference aged past `RESERVATION_MS`; a purge request;
+new publish; a writer that stops after `AfterPublish` (the usage test panics
+in the hook; the SIGKILL child at `INGEST_CRASH_POINT` constructs the same
+state); an invalidated reference aged past its grace; a purge request;
 `ArtifactGcFault::Unlink`.
 Confidence: high - [Evidence](evidence/artifact-byte-decrement-paths-are-exercised.md).
-The five unlink sites and the absence of daemon callers for GC and purge are
-source-verified.
-Existing check: [CAS fault tables](existing-checks.md#cas-usage-accounting)
-exercise the fault points and crash windows; all unaudited and none records
-a per-path delta.
-Impact: A counter ships validated against paths that never decremented it.
+The five unlink sites, the daemon's GC caller, and the absence of a daemon
+purge caller are source-verified.
+Existing check: [Usage tests][t-usage] fire each marker; the
+[CAS fault tables](existing-checks.md#cas-usage-accounting) exercise the
+fault points and crash windows; all unaudited.
+Impact: The count ships validated against paths that never decremented it.
 Open questions: None.
 
 ## Wildcard and cross-cutting
@@ -2381,96 +2457,179 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - Vixie semantics, extreme instants, and a fixture-zone
-golden exist; none covers DST or an unsatisfiable expression.
+Exercised: yes - [The differential tests][t-cron-diff] compare the
+field-jumping search with a frozen copy of the minute stepper over random
+expressions, twelve zones, and random instants from 1800 to 2100 and caps; at
+spring-forward and fall-back instants; at the full cap for
+calendar-impossible expressions; at a cap one minute short of an occurrence;
+from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937,
+and 2026 in each zone; at a shift that lands civil time just past a jump's
+target; in a zone with a 30-minute daylight window, searched minute by minute
+on both sides of 1970; and at the edges of chrono's representable range. A
+recording zone shows every offset lookup falls within the cap, including
+when the skip runs past it and when a fall-back places the match before a
+probe.
+[Component tests][t-cron-parts] compare the byte parser with a frozen copy of
+the `&str` parser, the month-at-a-time date scan with a day-by-day scan, and
+the stack-built jitter seed with the formatted one.
 Guarantee: A field-jumping search never fires a schedule at a different
 instant, never fires one the stepper would never fire, and never runs past
 the cap.
 Check: `always` - For every expression [`parse_cron`][parse] accepts, every
-`after_ms`, every `max_search_ms`, and both `Utc` and `Local` across DST
-transitions, a replacement returns the same `Option<i64>` as a frozen
-test-only copy of [`next_occurrence`][stepper] as it reads at HEAD (the
-function itself is replaced by the change and cannot remain the oracle),
-including `None` for
-unsatisfiable-but-valid expressions within the cap and `None` at
-unrepresentable instants; [`next_cron_occurrence`][occurrence] keeps the
-`ms != 0` filter. `always` because the scheduler consumes the value directly
-as its due time.
+`after_ms`, every `max_search_ms`, and every zone, [`next_occurrence`][stepper]
+returns the same `Option<i64>` as the test-only
+[`frozen_minute_stepper`][t-cron-frozen], a verbatim copy of the minute stepper
+it replaced, including `None` for unsatisfiable-but-valid expressions within
+the cap and `None` at unrepresentable instants;
+[`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter, and
+`parse_cron` accepts exactly the expressions the `&str` parser accepted, with
+the same masks. Every zone lookup of the search falls on an epoch minute
+after `after_ms` and at or before the cap; a probe may pass a match that an
+offset change places before it, and the bisection returns to that minute.
+Without a zone lookup, a [date bound][cron-bound] moves the cursor to the first
+epoch minute that could reach the first listed civil minute still reachable
+under any offset chrono represents (just under a day either way); it returns
+`None` when no listed date falls before the cap, or at once when
+[no date can ever match][cron-never], and it is taken again once that civil
+minute becomes unreachable. From each minute the search then
+[skips][cron-skip] to the next listed minute today, to the first listed time
+of a matching date within two days, or to the next civil midnight. How far a
+skip may run depends on what the zone's [`CronZone`][cron-zone] impl claims:
+`Never` (UTC and fixed offsets) skips straight to the target; `HourApart`
+stops the skip at the first minute whose offset differs, found by
+[probes][cron-advance] every [`OFFSET_PROBE_MS`][cron-probe] (one hour) and
+bisection, and at the bound's horizon and the cap; `Unbounded` visits every
+minute. [`Local`][cron-local] claims `HourApart` when `TZ` is unset or names a
+zone file and `Unbounded` when `TZ` holds a POSIX rule, which may place offset
+changes minutes apart. `always` because the scheduler consumes the value
+directly as its due time.
 Fault/timing angle: The stepper evaluates local civil fields for each epoch
 minute, so a spring-forward gap skips that day and a fall-back overlap
-matches the earlier instant; `parse_cron` accepts day-of-month 1..31
-independent of month, so `0 0 30 2 *` is valid and unsatisfiable and pays
-the full [`MAX_SEARCH_MS`][cap] (4 x 366 days) on the scheduler task
-([`next_due`][sched-due]); [`matches_day`][vixie] implements Vixie OR
+matches the earlier instant first; the jump is exact while the offset holds,
+because civil time then moves with epoch time. The `HourApart` claim is a
+property of the zone data: `zdump` over the 599 zones of tzdata 2026c, and a
+parse of the chrono-tz 0.10.4 tables, put the closest two transitions about
+6.9 days apart (America/Cambridge_Bay, 2000). A custom zone file under
+`/etc/localtime` with shorter offset runs is outside that evidence.
+`parse_cron` accepts day-of-month 1..31 independent of month, so
+`0 0 30 2 *` is valid and unsatisfiable within the full
+[`MAX_SEARCH_MS`][cap] (4 x 366 days) on the scheduler task
+([`next_due`][sched-due]); the search returns `None` for it before any zone
+lookup. A satisfiable expression whose next date is far pays hourly probes
+only across the window of about a day plus the zone's offset before its
+first reachable civil minute, because an offset of almost a day could bring
+any earlier minute there. [`matches_day`][vixie] implements Vixie OR
 semantics.
-Required faults and enabling state: A `Local` zone with DST; expressions such
-as `30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
-`0 0 29 2 *`; `after_ms` at the `i64` extremes.
+Required faults and enabling state: A zone with DST; expressions such as
+`30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
+`0 0 29 2 *`; a zone whose offset changes sit less than an hour apart;
+`after_ms` at the `i64` extremes and at chrono's range edges.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
-The parser, the stepper, the cap, the conditional-note ceiling
-([`:236-239`][note-cap]), and the config acceptance
+The parser, the search, the cap, the conditional-note ceiling
+([`:642-671`][note-cap]), and the config acceptance
 ([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the Vixie test, the extreme-instant test, and the golden; all unaudited.
+list the differential and component tests, the Vixie test, the
+extreme-instant test, and the golden; all unaudited.
 Impact: A scheduled task fires at the wrong instant or never.
 Open questions:
 
 - Should validation reject calendar-impossible dates instead? That is a
   config-acceptance change outside a latency change. (needs human input)
+- Should zone files claim offset runs longer than an hour, or POSIX rules be
+  classified by the runs they define? Under the current claims the search
+  costs about one `Local` lookup per hour of its last day; a six-day probe
+  cut New York's weekly search from about 2.4 us to 0.48 us in a local probe,
+  but a custom zone file or rule with shorter runs would break the stepper
+  equality. (needs human input)
 
 ### effective-config-reads-observe-a-tier-change-by-the-next-pass
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - The mtime cache and the three raise-only tests exist;
-none covers override staleness or two project roots sharing one cache.
+Exercised: yes - [The memo tests][t-memo] edit each tier and rewrite the
+guidance override with its mtime restored, each against a populated memo,
+alternate a hostile and a quiet project root on one cache, serve a rejected
+user tier's admitted fallback from the memo, assert per-key warnings repeat
+on a memo hit, and
+assert that an unread source, an oversized merge, a deduplicated chain whose
+retained capacity exceeds the bound, a model-TTL map whose B-tree nodes
+carry it past the bound, a tier whose entry is a dangling final symlink, a
+tier relinked to a target carrying its cached mtime, and a tier whose
+directory is exchanged between its stamp and its read are never memoized,
+and that a settled tier with a future mtime is; the mtime test and the three
+raise-only tests still pass.
 Guarantee: A config edit takes effect within one pass, as today, and a
 project tier can never gain privilege through a stale or cross-project cache
 entry.
-Check: `always` - After the user tier, the project tier, or the configured
-guidance override file changes on disk (mtime advance for the tiers; any
-content change for the override, which HEAD re-reads on every call), the
-next [`effective_config`][eff-cfg] call for that `project_root` returns the
-merge of the new contents; a cache is keyed by `(user_path, project_root)`
-and mtimes; [`merge_tiers_with_warnings`][merge] including
-[`ProjectRaiseOnly`][raise-only] is applied to the fresh contents unchanged;
-and bind-frozen `SessionBinding.config` stays frozen. `always` because
+Check: `always` - After the user tier or the project tier changes on disk
+with a new mtime, or the configured guidance override file is rewritten on
+disk, the next [`effective_config`][eff-cfg] call for that `project_root`
+returns the merge of the new contents. The
+[merged memo][memo] records a [`SourceIdentity`][identity] for the user tier,
+the project tier, whose path names its root, and the override: the path and,
+without following a final symlink, its device, inode, length, modification
+time, and change time. It [serves][memo-serves] a load only when all of them
+match a fresh `stat`. A merge is [memoized][memo-store] only when every
+source was read, each source's stamp taken before its read equals the stamp
+of the file the read opened (the descriptor's `fstat`, or on a
+[`read_tier_cached`][tier-cached] hit the followed `stat` that matched its
+mtime), and every source's change time is more than
+[`RECENT_CHANGE_MARGIN`][memo-margin] (1 s) before the load began, so a
+rewrite inside one coarse timestamp tick after the memoized read cannot keep
+the stamp; the change time alone gates this because every write and
+attribute change moves it, while a future modification time set by a tool or
+a skewed clock settles with it. A tier rewritten with its mtime restored
+misses the memo on its changed ctime and then takes
+[`read_tier_cached`][tier-cached]'s mtime fast path, which returns the cached
+`Value`, as the [mtime test][t-mtime] asserts; that is the tier staleness
+contract at HEAD, unchanged by the memo.
+[`merge_tiers_with_warnings`][merge] including [`ProjectRaiseOnly`][raise-only]
+runs on every miss unchanged, a hit returns the stored merge and warnings, and
+bind-frozen `SessionBinding.config` stays frozen. `always` because
 [`prepare_history_summarizer_fire`][call-fire] calls it on every non-subagent pass
 whose state load succeeds, has no `pending_rewrite`, and has no live
-history_summarizer completion pending (`lib.rs:8462-8474`, `:5287-5325`), and
-[`bind`][call-bind] calls it on every route bind; the check is on each call,
-not on each pass.
+history_summarizer completion pending, and [`bind`][call-bind] calls it on
+every route bind; the check is on each call, not on each pass.
 Fault/timing angle: A tier edit between two passes; two routes on different
-project roots alternating, which re-reads the file every call because one
-`ConfigCache` holds one project tier ([`read_tier_cached`][tier-cached]);
-the override edited without touching a tier
-([`resolve_user_guidance_override`][guidance] does a full read per call with
-no mtime gate). The staleness contract at HEAD already ignores a same-mtime
-edit.
+project roots alternating, which replaces the one-entry memo and re-reads the
+project tier every call because one `ConfigCache` holds one project tier
+([`read_tier_cached`][tier-cached]), so the payoff holds for one active root;
+the override edited without touching a tier. Every identity is taken before
+its read, so a rewrite racing the read leaves an identity the next load does
+not match, and a source whose pre-read stamp differs from the file the read
+opened is not memoized: a file that appears or disappears between the two, a
+directory exchanged under the path between the two (which moves no file's
+inode or change time, so swapping it back would otherwise match the stamp
+and replay the other file's contents), a dangling link, a link with a
+target (which fails the `NOFOLLOW` read), and a link placed over a cached
+tier pointing at a target that carries the cached mtime (which the tier
+cache serves from its value while the stamp names the link).
+A tier or override whose read failed is never memoized, so a transient
+failure is retried on the next load. The memo is bounded by
+[`MERGED_CONFIG_RETAINED_BYTES_BOUND`][memo-bound], declared in the daemon's
+retained-resident total; the estimate counts every vector and string at its
+capacity and charges each model-TTL map entry its share of a partially
+filled B-tree node, and a merge whose estimate exceeds the bound is served
+unmemoized.
 Required faults and enabling state: A user or project tier rewritten with a
 later mtime; `prompt_surface.guidance_override_path` configured and its file
-edited; two project roots bound at once.
+rewritten with its mtime restored; two project roots bound at once.
 Confidence: high - [Evidence](evidence/effective-config-reads-observe-a-tier-change-by-the-next-pass.md).
-[`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn]
-with its deep clone at [`:288`][eff-clone], the per-pass callers
-([`:5064`][call-reattach], [`:5325`][call-fire-caller], [`:5642`][call-wrapup]), and
-the bind freeze ([`:12363`][call-bind], [binding doc][binding-doc]) are
-source-verified.
+[`effective_for_project`][eff-proj], [`effective_from_sources`][eff-warn],
+the memo, the per-pass callers ([`:5141`][call-reattach],
+[`:5550`][call-fire-caller], [`:5956`][call-wrapup]), and the bind freeze
+([`:13074`][call-bind], [binding doc][binding-doc]) are source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the mtime test and the three privilege tests; all unaudited. Unit tests
-built with `fixed_config` (`lib.rs:4119`, returned at `:4813-4815`) bypass the
-cache and cannot exercise this record.
+list the memo tests, the mtime test, and the three privilege tests; all
+unaudited. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
+[`effective_config`][eff-cfg]) bypass the cache and cannot exercise this
+record.
 Impact: An edit is ignored for the life of the daemon, or a project tier
 reads another project's cached values.
-Open questions:
-
-- The doc at [config.rs:266-267][eff-warn-doc] says tier read failures are
-  reported on every load so a long-running daemon keeps surfacing them; a
-  merged cache silences the repeat. Keep that behavior? (needs human input)
-- Should the history_summarizer read the bind-frozen config, removing the per-pass
-  merge entirely? (needs human input)
+Open questions: None.
 
 ### committed-transform-bookkeeping-is-applied-or-recomputed
 
@@ -2733,12 +2892,12 @@ Open questions:
 Type: reachability
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - The scheduler tests drive [`next_due`][sched-due]
-through a [`ScriptedHost`][sched-scripted] with a `*/15 * * * *` project and
-a [`ManualClock`][sched-clock]
-([`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] and its
-siblings); no campaign marker records that a tick evaluated a configured
-cron, and the conditional-note consumer has the fixture-zone golden only.
+Exercised: yes - [`a_tick_evaluates_the_configured_cron_schedule_of_a_module_project`][t-sched-marker]
+reaches the marker: a `ScriptedHost` project in `MODULE` authority with a
+`*/15 * * * *` schedule, ticked on a [`ManualClock`][sched-clock], leaves the
+scheduler's `next_due` entry for that project holding the schedule and an
+instant other than `i64::MAX`; [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron]
+and its siblings drive the same path to a run.
 Guarantee: A schedule-preservation campaign reaches a scheduler tick that
 evaluates a configured cron, so W6's differential runs on instants the
 scheduler consumes rather than on a scheduler that never sees a schedule.
@@ -2754,8 +2913,8 @@ lines execute every [`IDLE_POLL`][sched-idle] on a default campaign while the
 list is empty, so `reachable` would be trivially satisfied.
 Fault/timing angle: The schedule [defaults to `None`][sched-default], and
 [`scheduled_projects`][sched-projects] drops any project whose schedule is
-`None` (`schedule: schedule?` at [`:14634-14647`][sched-filter]) or whose memories
-authority is not `MODULE` ([`:14617-14622`][sched-authority]), so a default
+`None` (`let schedule = schedule?;` at [`:15119`][sched-filter]) or whose memories
+authority is not `MODULE` ([`:15095-15100`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
@@ -2770,8 +2929,8 @@ Confidence: high - [Evidence](evidence/cron-schedule-is-evaluated-for-a-configur
 The filter, the `next_due` call sites, the default, and the fixtures are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the scheduler cron test beside the stepper tests; all unaudited; none
-records a marker.
+list the marker test and the scheduler cron test beside the stepper tests;
+all unaudited.
 Impact: W6 passes on a scheduler that never evaluates a schedule.
 Open questions: None.
 
@@ -2865,22 +3024,22 @@ oracle. The following notes define the evidence to request, not tickets.
 | [T2][t2] | Done: the zero-fill-free `to_vec` and its Miri witnesses landed; a mismatched span is witnessed at `copy_to_uninit`. |
 | [T3][t3] | Underfill, overflow, error, and panic are covered in-crate and through a real host; the failure classification and charge class are decided. Add a queued direct frame dropped by generation retirement. |
 | [T4][t4] | The marker test observes a serializer that runs after its handler ended. Lengthen the window with held egress when the marker misses it. |
-| [G1][g1] | Dedup at exactly the cap; second ingest before orphan recovery. |
-| [G2][g2] | Keep the walk as the oracle; compare a counter against it at every quiescent point. |
-| [G3][g3] | Record a usage delta per decrement path with bytes at stake. |
+| [G1][g1] | Done: dedup at exactly the cap and a second ingest before orphan recovery are covered by the usage tests. |
+| [G2][g2] | Done: the walk is the oracle and the reconciliation; the usage tests compare the count against it at every quiescent point. |
+| [G3][g3] | Done: the usage tests record a non-zero byte delta per decrement path. |
 | [W1][w1] | Choose the size class and the manifest form; run through `Handler::handle`. |
 | [W2][w2] | Tie the TypeScript key list to the Rust struct; assert what each field brackets. |
 | [W3][w3] | Whole-module scan and SOFT/tag/nudge accounting checks exist. Recheck the declared-bytes sum if cache sizing changes. |
 | [W4][w4] | Differential bounded-versus-whole over rules, limits, and edge-margin inputs. |
 | [W5][w5] | Reuse the frozen reference; add a format-change-across-restart case. |
-| [W6][w6] | Differential against the stepper over DST and unsatisfiable expressions. |
-| [W7][w7] | Edit tiers and the override between passes; alternate two project roots. |
+| [W6][w6] | Done: the differential tests compare the field-jumping search with the frozen stepper over DST and unsatisfiable expressions. |
+| [W7][w7] | Done: the memo tests edit tiers and the override between loads and alternate two project roots. |
 | [W8][w8] | Abort between commit and bookkeeping; read the next pass's derived inputs. |
 | [W9][w9] | Frozen direct-estimator reference and threshold comparison exist; preserve them when changing pressure logic. |
 | [W10][w10] | Three active witnesses exist; the dead update-count witness is retired with its disjunct. |
 | [W11][w11] | Trigger an abort through the interleave hook or its successor. |
 | [W12][w12] | Panic with a sentinel inside a `kernel_routes::blocking` closure from a child process; capture stderr and the terminal; repeat on the runtime worker as the control. |
-| [W13][w13] | Give a `ScriptedHost` project a schedule and tick past its instant; record the project, schedule, `now_ms`, and computed instant at the `next_due` call. |
+| [W13][w13] | Done: the marker test ticks a scheduled `ScriptedHost` project and reads the computed instant from the scheduler. |
 
 Timing schedules for C3, T3, T4, W8, and W11 may need
 `/testing:deterministic-simulation-testing` after seam selection. Existing
@@ -3177,40 +3336,58 @@ evaluation of this area and its disposition are recorded in
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L509-L544
 [ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
-[ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L361
-[ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L379-L405
-[ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L407-L416
-[ingest-reservation]: ../../../../crates/kernel/src/cas/ingest.rs#L424-L471
-[ingest-publish]: ../../../../crates/kernel/src/cas/ingest.rs#L476-L526
-[ingest-commit]: ../../../../crates/kernel/src/cas/ingest.rs#L580-L595
-[check-budget]: ../../../../crates/kernel/src/cas/ingest.rs#L665
-[release-res]: ../../../../crates/kernel/src/cas/ingest.rs#L756-L772
-[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779
-[stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1206-L1208
-[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1233
-[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1290
+[ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L364
+[ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L378-L404
+[ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L410-L419
+[ingest-reservation]: ../../../../crates/kernel/src/cas/ingest.rs#L423-L470
+[ingest-publish]: ../../../../crates/kernel/src/cas/ingest.rs#L475-L523
+[ingest-commit]: ../../../../crates/kernel/src/cas/ingest.rs#L577-L592
+[check-budget]: ../../../../crates/kernel/src/cas/ingest.rs#L947
+[release-res]: ../../../../crates/kernel/src/cas/ingest.rs#L1036-L1052
+[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1059
+[stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1495-L1497
+[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1522
+[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1728
 [startup]: ../../../../crates/kernel/src/cas/gc.rs#L102
 [startup-unreachable]: ../../../../crates/kernel/src/cas/gc.rs#L109-L136
 [reclaim-cand]: ../../../../crates/kernel/src/cas/gc.rs#L239
 [recovery]: ../../../../crates/kernel/src/cas/gc.rs#L330
 [unlink-artifact]: ../../../../crates/kernel/src/cas/gc.rs#L442
-[scan-objects]: ../../../../crates/kernel/src/cas/gc.rs#L662
+[scan-objects]: ../../../../crates/kernel/src/cas/gc.rs#L663
 [purge-unlink]: ../../../../crates/kernel/src/cas/deletion.rs#L535
 [delete]: ../../../../crates/kernel/src/cas/deletion.rs#L239
 [cap-default]: ../../../../crates/kernel/src/cas/mod.rs#L24
 [cap-error]: ../../../../crates/kernel/src/cas/mod.rs#L318-L325
-[latch]: ../../../../crates/kernel/src/cas/mod.rs#L571
-[recover]: ../../../../crates/kernel/src/open.rs#L419
-[lock-writer]: ../../../../crates/kernel/src/open.rs#L433-L442
+[latch]: ../../../../crates/kernel/src/cas/mod.rs#L631
+[recover]: ../../../../crates/kernel/src/open.rs#L462-L467
+[lock-writer]: ../../../../crates/kernel/src/open.rs#L479-L488
 [facts]: ../../../../crates/kernel/src/facts.rs#L145
-[maintenance]: ../../../../crates/kernel/src/retention.rs#L186
+[maintenance]: ../../../../crates/kernel/src/retention.rs#L197
 [restore]: ../../../../crates/kernel/src/backup.rs#L422-L424
 [busy]: ../../../../crates/daemon/src/kernel_routes/state.rs#L290-L295
-[route-ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L256
+[route-ingest]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L577
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
-[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L602-L642
+[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
+[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L52-L59
+[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L66-L88
+[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L96-L120
+[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L135-L204
+[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L208-L216
+[open-seed]: ../../../../crates/kernel/src/open.rs#L435
+[open-census]: ../../../../crates/kernel/src/open.rs#L320
+[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L170-L190
+[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L278-L299
+[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1539-L1608
+[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1701
+[t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L41-L45
+[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
+[t-usage-grown]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L395
+[t-usage-settled-order]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L609
+[daemon-maintenance]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[sample-interval]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
 
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7
@@ -3281,30 +3458,35 @@ evaluation of this area and its disposition are recorded in
 [diff-header]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
 [cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
-[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L125
-[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L152
-[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L166
-[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L208
-[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L216
-[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L236-L239
-[sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L454
-[sched-default]: ../../../../crates/daemon/src/config.rs#L127
-[sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
-[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4848
-[binding-doc]: ../../../../crates/daemon/src/lib.rs#L239-L240
-[call-reattach]: ../../../../crates/daemon/src/lib.rs#L5101
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5305
-[call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5362
-[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5679
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L12427
-[eff-proj]: ../../../../crates/daemon/src/config.rs#L242
-[eff-warn-doc]: ../../../../crates/daemon/src/config.rs#L266-L267
-[eff-warn]: ../../../../crates/daemon/src/config.rs#L268
-[eff-clone]: ../../../../crates/daemon/src/config.rs#L288
-[tier-cached]: ../../../../crates/daemon/src/config.rs#L368
-[guidance]: ../../../../crates/daemon/src/config.rs#L414
-[merge]: ../../../../crates/daemon/src/config.rs#L716
-[raise-only]: ../../../../crates/daemon/src/config.rs#L740
+[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L120-L175
+[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L188
+[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L366
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L622
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L630
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671
+[sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
+[sched-default]: ../../../../crates/daemon/src/config.rs#L152
+[sched-accept]: ../../../../crates/daemon/src/config.rs#L1226-L1244
+[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4880-L4889
+[binding-doc]: ../../../../crates/daemon/src/lib.rs#L236-L247
+[call-reattach]: ../../../../crates/daemon/src/lib.rs#L5141
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5443
+[call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5550
+[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5956
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L13074
+[eff-proj]: ../../../../crates/daemon/src/config.rs#L471-L481
+[eff-warn]: ../../../../crates/daemon/src/config.rs#L515-L638
+[tier-cached]: ../../../../crates/daemon/src/config.rs#L725-L761
+[merge]: ../../../../crates/daemon/src/config.rs#L1085
+[raise-only]: ../../../../crates/daemon/src/config.rs#L885-L887
+[memo]: ../../../../crates/daemon/src/config.rs#L371-L468
+[memo-serves]: ../../../../crates/daemon/src/config.rs#L388-L395
+[memo-store]: ../../../../crates/daemon/src/config.rs#L606-L636
+[memo-bound]: ../../../../crates/daemon/src/config.rs#L282
+[memo-margin]: ../../../../crates/daemon/src/config.rs#L287
+[identity]: ../../../../crates/daemon/src/config.rs#L312-L369
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2701-L3106
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2644-L2682
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
@@ -3324,16 +3506,27 @@ evaluation of this area and its disposition are recorded in
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38750
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
-[sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L281
-[sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L302
-[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L72
-[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L536
-[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L626
-[sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L462
-[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14662
-[sched-authority]: ../../../../crates/daemon/src/lib.rs#L14681-L14686
-[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14698-L14711
+[sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327
+[sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351
+[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L86
+[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L939-L952
+[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L929-L937
+[sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
+[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
+[t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078-L2565
+[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078
+[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2623-L2791
+[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L525-L560
+[cron-bound]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L465-L506
+[cron-never]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L381-L393
+[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L567-L606
+[cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
+[cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
+[cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L15071-L15140
+[sched-authority]: ../../../../crates/daemon/src/lib.rs#L15095-L15100
+[sched-filter]: ../../../../crates/daemon/src/lib.rs#L15119
 
 Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
 `SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,

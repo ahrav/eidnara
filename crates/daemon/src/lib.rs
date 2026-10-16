@@ -2565,7 +2565,8 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
-    + memory_capture::RETAINED_BYTES_BOUND;
+    + memory_capture::RETAINED_BYTES_BOUND
+    + config::MERGED_CONFIG_RETAINED_BYTES_BOUND;
 
 const NATIVE_OUTPUT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const NATIVE_OUTPUT_ENTRY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
@@ -4879,10 +4880,10 @@ impl HandlerCore {
         )
     }
 
-    fn effective_config(&self, project_root: &Path) -> DaemonConfig {
+    fn effective_config(&self, project_root: &Path) -> Arc<DaemonConfig> {
         #[cfg(test)]
         if let Some(config) = &self.fixed_config {
-            return config.clone();
+            return Arc::new(config.clone());
         }
         self.config
             .lock()
@@ -5986,7 +5987,7 @@ impl HandlerCore {
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
                 project_memory: self.project_memory_read(binding, &cfg, now),
-                model_chain: cfg.model_chain,
+                model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
                 ),
@@ -13087,7 +13088,7 @@ impl CompositeComponent for Handler {
                 harness: identity.harness,
                 session: identity.session,
                 model_key: None,
-                config,
+                config: Arc::unwrap_or_clone(config),
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
                 credential_fingerprints: identity.credential_fingerprints,
                 context_capabilities,

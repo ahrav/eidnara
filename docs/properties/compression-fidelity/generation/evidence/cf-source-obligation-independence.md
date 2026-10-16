@@ -81,11 +81,13 @@ The future harness is missing; explicitly none found for these combined checks.
 ## Investigation log
 
 ### Q: Can existing fixtures replace independent human obligations?
-- Sources examined: The golden and Curator corpus functions cited above.
-- Findings: They provide deterministic patterns; the Curator classifier uses
-  fixture-specific words and does not implement general semantic reasoning.
+- Sources examined: The golden and MemoryReviewer corpus functions cited above.
+- Findings: They provide deterministic patterns; the MemoryReviewer corpus
+  declares each judgment as exact spans per case and implements no general
+  semantic reasoning.
 - Missing evidence: A reviewed C1-C6 corpus and an implemented admission check.
-- Conclusion: Unresolved, needs the planned corpus; reuse patterns, not a judge.
+- Conclusion: Unresolved, needs the planned corpus; reuse the declaration
+  pattern, not a classifier.
 
 ### Q: Who approves which native revisions and material spans?
 - Sources examined: Plan:66-68,91-106,270-271.
