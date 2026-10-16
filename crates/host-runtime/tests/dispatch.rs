@@ -1767,6 +1767,74 @@ async fn terminal_credits_bound_admission_and_return_with_the_settled_block() {
     host.shutdown_gracefully().await;
 }
 
+/// A request body of at most `INLINE_COPY_MAX_BYTES` is copied on its dispatch task and never
+/// waits at the blocking-copy gate, while one byte more takes the blocking thread the gate holds.
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn a_body_at_the_inline_limit_copies_on_the_dispatch_task_and_one_byte_more_blocks() {
+    use host_runtime::inbound_copy_gate::{INLINE_COPY_MAX_BYTES, hold_inbound_copies_of_len};
+
+    fn echo_body_of_len(len: usize) -> Vec<u8> {
+        let base = mode_body(serde_json::json!({"mode": "echo", "pad": ""})).len();
+        let body = mode_body(serde_json::json!({"mode": "echo", "pad": "p".repeat(len - base)}));
+        assert_eq!(body.len(), len);
+        body
+    }
+
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "inline-limit")
+        .await
+        .expect("route");
+
+    let inline = echo_body_of_len(INLINE_COPY_MAX_BYTES);
+    let hold = hold_inbound_copies_of_len(u32::try_from(inline.len()).unwrap());
+    let corr = client.next_corr();
+    client
+        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, channel, epoch, corr, &inline)
+        .await
+        .expect("send");
+    let (_, terminal) = client
+        .frames_until_corr(corr, BUDGET)
+        .await
+        .expect("an inline copy settles while copies of its length are held");
+    assert_eq!(terminal.ty, TY_RESPONSE);
+    assert_eq!(hold.started(), 0, "the inline copy never reaches the gate");
+    drop(hold);
+
+    let blocking = echo_body_of_len(INLINE_COPY_MAX_BYTES + 1);
+    let hold = hold_inbound_copies_of_len(u32::try_from(blocking.len()).unwrap());
+    let corr = client.next_corr();
+    client
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &blocking,
+        )
+        .await
+        .expect("send");
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while hold.started() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the copy one byte over the inline limit never reached the gate"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    hold.release();
+    let (_, terminal) = client
+        .frames_until_corr(corr, BUDGET)
+        .await
+        .expect("the released copy settles");
+    assert_eq!(terminal.ty, TY_RESPONSE);
+    drop(hold);
+    host.shutdown_gracefully().await;
+}
+
 /// The production inbound copy is request-scoped blocking work: while it is held on its
 /// blocking thread, `Cancel`, a route close, and shutdown each wait for it, the transport block
 /// it reads stays outstanding, and the block returns once the copy completes.
@@ -1793,7 +1861,7 @@ async fn cancel_route_close_and_shutdown_wait_for_the_held_production_inbound_co
             .route_open(LINKED_MODULE_ID, ROOT, "opencode", interruption)
             .await
             .expect("route");
-        let pad = format!("{interruption}-{}", "p".repeat(4096));
+        let pad = format!("{interruption}-{}", "p".repeat(128 * 1024));
         let body = mode_body(serde_json::json!({"mode": "echo", "pad": pad}));
         let hold = hold_inbound_copies_of_len(u32::try_from(body.len()).unwrap());
         let corr = client.next_corr();

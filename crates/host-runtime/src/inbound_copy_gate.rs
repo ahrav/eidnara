@@ -21,6 +21,10 @@ static STATE: Mutex<State> = Mutex::new(State {
 });
 static CHANGED: Condvar = Condvar::new();
 
+/// Largest request body whose private copy runs on its dispatch task. A held copy of that
+/// length never reaches this gate; one byte more takes the blocking thread the gate holds.
+pub const INLINE_COPY_MAX_BYTES: usize = crate::dispatch::INLINE_PRIVATE_COPY_MAX_BYTES;
+
 /// Holds every inbound copy of a `len`-byte body until [`InboundCopyHold::release`] or drop.
 pub struct InboundCopyHold(());
 
