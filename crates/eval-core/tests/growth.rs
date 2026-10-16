@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 
 use eval_core::{
-    CampaignResources, ClaimBoundary, Coverage, CutCoverage, Envelope, EnvelopeExceeded,
-    ExpectedRefusal, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode,
-    GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused,
-    LivenessBounds, MixIncomplete, Operation, QuiescenceProgress, RecordedRefusal, Resource,
-    ResourceLimits, ResourceSample, ReviewerQuota, StoreBytes, StoreFamily, SwarmMix,
+    CampaignResources, ClaimBoundary, Coverage, CoverageRefused, CutCoverage, Envelope,
+    EnvelopeExceeded, EpisodeRefused, ExpectedRefusal, FaultAction, FaultEpisode, FaultScope,
+    GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger, GrowthMode, GrowthRefused,
+    GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused, LivenessBounds,
+    MixIncomplete, Operation, QuiescenceProgress, RecordedRefusal, Resource, ResourceLimits,
+    ResourceSample, ReviewerQuota, SearchEpisodeFault, StoreBytes, StoreFamily, SwarmMix,
     digests_match_serial, isolated, parse_growth_report,
 };
 
@@ -128,6 +129,28 @@ fn mix() -> SwarmMix {
     mix
 }
 
+/// A lost-acknowledgement episode triggered at `step`, as the growth shell
+/// declares one.
+fn lost_ack(step: u32) -> FaultEpisode {
+    let action = FaultAction::SearchEpisode {
+        fault: SearchEpisodeFault::LoseAcknowledgementReply,
+    };
+    FaultEpisode {
+        id: format!("growth-ack-lost-{step}"),
+        trigger_step: step,
+        scope: FaultScope {
+            store: StoreFamily::SearchProjection,
+            operation: "acknowledge".to_string(),
+        },
+        heal: action.heal(),
+        action,
+        layer_contract:
+            "search_catchup::EpisodeFault: the acknowledgement commits, its reply is lost"
+                .to_string(),
+        kill: None,
+    }
+}
+
 fn report() -> GrowthReport {
     let ledger = ledger();
     let mut envelope = Envelope::new(limits());
@@ -142,12 +165,12 @@ fn report() -> GrowthReport {
         ledger,
         mix: mix(),
         expected_refusals: Vec::new(),
-        fault_episodes: 1,
+        episodes: vec![lost_ack(2)],
         safety_checks_while_armed: 2,
         coverage: {
             let mut coverage = CutCoverage::default();
-            coverage.declare("growth-ack-lost-4");
-            coverage.receipt("growth-ack-lost-4").unwrap();
+            coverage.declare("growth-ack-lost-2");
+            coverage.receipt("growth-ack-lost-2").unwrap();
             coverage
         },
         markers: BTreeSet::new(),
@@ -782,11 +805,10 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
     miscounted.coverage.receipt("growth-ack-lost-9").unwrap();
     assert_eq!(
         miscounted.validate(&contract()),
-        Err(GrowthReportError::CutsDisagree {
-            declared: 2,
-            episodes: 1,
+        Err(GrowthReportError::CutNotAnEpisode {
+            cut: "growth-ack-lost-9".to_string(),
         }),
-        "every fault episode declares exactly its own cut"
+        "every declared cut is an episode that ran"
     );
     let mut v1 = report.clone();
     v1.schema = "eval-suite-c-growth-report/v1".to_string();
@@ -833,7 +855,7 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         Err(GrowthReportError::SafetyNeverChecked)
     );
     let mut uncounted = report.clone();
-    uncounted.fault_episodes = 0;
+    uncounted.episodes.clear();
     uncounted.safety_checks_while_armed = 0;
     assert_eq!(
         uncounted.validate(&contract()),
@@ -841,7 +863,7 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         "the mix exercised a fault episode, so a zero episode count cannot waive the safety check"
     );
     let mut faultless = report.clone();
-    faultless.fault_episodes = 0;
+    faultless.episodes.clear();
     assert_eq!(
         faultless.validate(&contract()),
         Err(GrowthReportError::FaultEpisodesDisagree {
@@ -1050,6 +1072,59 @@ fn a_growth_report_round_trips_and_its_digest_ignores_measurements() {
         parse_growth_report(&extra, &contract()),
         Err(GrowthReportError::Shape(_))
     ));
+}
+
+#[test]
+fn declared_cuts_name_the_episodes_that_ran_not_merely_their_count() {
+    let report = report();
+    report.validate(&contract()).unwrap();
+    let mut forged = report.clone();
+    forged.coverage = CutCoverage::default();
+    forged.coverage.declare("forged");
+    forged.coverage.receipt("forged").unwrap();
+    assert_eq!(
+        forged.validate(&contract()),
+        Err(GrowthReportError::Coverage(
+            CoverageRefused::UndeclaredCut {
+                cut: "growth-ack-lost-2".to_string(),
+            }
+        )),
+        "one receipted cut per episode is not coverage when the cut names no episode that ran"
+    );
+    let mut unsampled = report.clone();
+    unsampled.episodes[0].trigger_step = 9;
+    assert_eq!(
+        unsampled.validate(&contract()),
+        Err(GrowthReportError::EpisodeNotSampled {
+            episode: "growth-ack-lost-2".to_string(),
+            step: 9,
+        }),
+        "an episode fires at a step the ledger sampled"
+    );
+    let mut duplicated = report.clone();
+    duplicated.episodes.push(lost_ack(2));
+    duplicated.mix.record(Operation::FaultEpisode);
+    assert_eq!(
+        duplicated.validate(&contract()),
+        Err(GrowthReportError::Episode(
+            EpisodeRefused::DuplicateEpisode {
+                id: "growth-ack-lost-2".to_string(),
+            }
+        ))
+    );
+}
+
+#[test]
+fn a_report_whose_ledger_never_ran_a_reviewer_pass_is_refused() {
+    let mut idle = report();
+    for sample in &mut idle.ledger.samples {
+        sample.progress.reviewer_passes = 0;
+    }
+    assert_eq!(
+        idle.validate(&contract()),
+        Err(GrowthReportError::ReviewerNeverPassed),
+        "quota pressure hands work to the coordinator, so a complete ledger witnesses a pass"
+    );
 }
 
 #[test]

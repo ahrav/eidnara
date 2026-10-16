@@ -151,10 +151,13 @@ pub struct KernelStore {
     #[cfg(feature = "test-support")]
     pub(super) staged_artifacts: std::sync::atomic::AtomicUsize,
     pub(super) artifact_cap: u64,
-    /// Bytes below `objects` as counted under the writer lock, kept current by every publication and forgotten by every unlink, so ingestion walks the tree only after a removal or at the first ingest since open.
+    /// Bytes below `objects`, seeded by the walk before startup recovery and kept
+    /// current under the writer lock by every publication and unlink.
     pub(super) artifact_usage: Mutex<crate::cas::ArtifactUsage>,
     #[cfg(feature = "test-support")]
     pub(super) artifact_census_walks: std::sync::atomic::AtomicUsize,
+    #[cfg(feature = "test-support")]
+    pub(super) reconciliation_hook: Mutex<Option<crate::cas::ReconciliationHook>>,
     /// The store root and the artifact tree's `objects` and `tmp` children,
     /// opened `NOFOLLOW` when the store opened and held for its lifetime. Every
     /// later directory open resolves below one of them rather than re-resolving
@@ -314,6 +317,7 @@ impl KernelStore {
         } else {
             super::backup::reap_orphan_restore_recovery(&db_path, &root_directory)?;
         }
+        let census = super::cas::ArtifactCensus::start(&artifact_directories.objects);
 
         // The database is opened by pathname below, so the root is checked once
         // more before the pathname is used for anything that could write.
@@ -409,6 +413,8 @@ impl KernelStore {
             artifact_usage: Mutex::new(crate::cas::ArtifactUsage::default()),
             #[cfg(feature = "test-support")]
             artifact_census_walks: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(feature = "test-support")]
+            reconciliation_hook: Mutex::new(None),
             root_directory,
             objects_directory: artifact_directories.objects,
             tmp_directory: artifact_directories.tmp,
@@ -426,10 +432,12 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
+        store.seed_artifact_usage(census);
+        let seeded_walk = store.held_artifact_usage();
         // A purge unlink that cannot complete keeps its pending row for maintenance
         // to retry; refusing to open over it would take the whole store offline
         // for one object, so the count is not an open failure.
-        store.recover_interrupted_work()?;
+        store.recover_interrupted_work(seeded_walk)?;
         Ok(store)
     }
 
@@ -437,14 +445,26 @@ impl KernelStore {
     /// now serves: expired staging leases, abandoned ingestion reservations, and
     /// purges that committed but never unlinked their bytes. Runs when a store
     /// opens and again after a restore installs a different database, since the
-    /// restored history carries its own interrupted work. Returns how many
+    /// restored history carries its own interrupted work. Then reconciles the
+    /// counted artifact usage with a walk of the object tree. Returns how many
     /// pending purge unlinks could not be completed.
+    ///
+    /// `seeded_walk` is the count from the walk `open` takes before recovery.
+    /// A recovery that leaves the count equal to it skips the reconciliation
+    /// walk; `None` always reconciles.
     ///
     /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
     /// explicit call, so opening a store is not a destructive act.
-    pub(super) fn recover_interrupted_work(&self) -> Result<usize, KernelError> {
+    pub(super) fn recover_interrupted_work(
+        &self,
+        seeded_walk: Option<u64>,
+    ) -> Result<usize, KernelError> {
         self.abandon_expired_staging_runs(crate::current_time_ms())?;
-        self.run_artifact_recovery(crate::current_time_ms())
+        let unfinished_purges = self.run_artifact_recovery(crate::current_time_ms())?;
+        if seeded_walk.is_none() || self.held_artifact_usage() != seeded_walk {
+            self.reconcile_artifact_usage();
+        }
+        Ok(unfinished_purges)
     }
 
     /// Returns the lease epoch stamped into writer-fence transactions.
@@ -465,6 +485,11 @@ impl KernelStore {
             return Err(KernelError::InvalidRestore);
         }
         Ok(writer)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn writer_is_free_for_test(&self) -> bool {
+        self.writer.try_lock().is_ok()
     }
 
     /// `Mutex::lock` has no timeout, so a bounded caller polls instead of

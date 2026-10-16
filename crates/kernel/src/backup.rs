@@ -489,7 +489,7 @@ impl KernelStore {
         let source_seq = self.install_backup(backup_path, fault, hook)?;
         // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them.
         // A purge the restored history owes whose bytes are still readable is a failure of this restore, not a deferred chore, because the caller was promised those bytes are gone before the call returns.
-        if self.recover_interrupted_work()? > 0 {
+        if self.recover_interrupted_work(None)? > 0 {
             return Err(KernelError::Io);
         }
         Ok(source_seq)

@@ -231,6 +231,7 @@ impl KernelStore {
         // commits and releases the writer before the sweep begins.
         drop(writer);
         let artifact_gc = self.run_artifact_gc(now, hook, faults)?;
+        self.reconcile_artifact_usage();
         Ok(StagingMaintenanceResult {
             abandoned_runs,
             deleted_runs,

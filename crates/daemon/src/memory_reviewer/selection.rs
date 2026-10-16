@@ -115,10 +115,7 @@ pub fn select_review_targets(
     budget: &EvalBudget,
 ) -> Result<FrozenSelectionPage, SelectionError> {
     let SelectionScope {
-        project,
-        ledger_project,
-        classes,
-        policy_versions,
+        project, classes, ..
     } = *scope;
     let kernel = SelectionError::Kernel;
     if classes.is_empty() {
@@ -168,24 +165,22 @@ pub fn select_review_targets(
                 .map_err(kernel)?
                 .verdicts
         };
-        let class = classes[cursor.class_index];
-        for (row, verdict) in page.rows.iter().zip(verdicts) {
+        let selectable = selectable(
+            store,
+            ledger,
+            scope,
+            classes[cursor.class_index],
+            &page.rows,
+            &verdicts,
+            tip,
+            budget,
+        )?;
+        for (row, inputs) in page.rows.iter().zip(selectable) {
             // The cursor passes a row only after it is selected or skipped; a full page stops before the row that would not fit, so that row is examined first next time.
             if references.len() >= MAX_SELECTION_REFERENCES {
                 return Ok(finish(references, Some(cursor)));
             }
-            if verdict.permits() {
-                let linked = linked_evidence(store, class, row, tip, budget).map_err(kernel)?;
-                if let Some((inputs, causal_identity)) =
-                    causal_inputs(row, &linked, policy_versions)
-                    && ledger
-                        .lookup_memory_reviewer_job(ledger_project, &causal_identity)
-                        .map_err(|error| SelectionError::Ledger(error.to_string()))?
-                        .is_none()
-                {
-                    references.push(inputs);
-                }
-            }
+            references.extend(inputs);
             cursor.after = Some(row.object_id.clone());
         }
         if page.next.is_none() {
@@ -207,18 +202,63 @@ fn finish(references: Vec<CausalInputs>, cursor: Option<Cursor>) -> FrozenSelect
     }
 }
 
-/// The evidence a decision-derived descriptor's originating decision cites at `tip`, itself or through its events, bounded by [`MAX_LINKED_EVIDENCE`]; a native descriptor links none. This is the bounded enumeration that lets newly linked or newly retired evidence reconsider a target at an unchanged revision; unrelated writes, clocks, and selection attempts never enter it.
-fn linked_evidence(
+/// For each of `rows`, its causal inputs when it is selectable: permitted by its verdict, bindable by the ledger, and holding no job at those inputs. One Kernel read at `tip` returns the linked evidence of every permitted decision-derived row, and one ledger read answers every job lookup, so a failure of either read fails the whole batch, rows past the point where the page fills included.
+#[allow(clippy::too_many_arguments)] // Splitting the call would split the batch's reads.
+fn selectable(
     store: &KernelStore,
+    ledger: &MemoryStore,
+    scope: &SelectionScope<'_>,
     class: OccurrenceClass,
-    row: &LiveDescriptor,
+    rows: &[LiveDescriptor],
+    verdicts: &[kernel::SurfaceVerdict],
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Vec<LinkedEvidence>, kernel::KernelError> {
-    let Some(decision) = super::broker::originating_decision(class, &row.detail.identity) else {
-        return Ok(Vec::new());
+) -> Result<Vec<Option<CausalInputs>>, SelectionError> {
+    // Per row: `None` when its verdict denies it, otherwise its originating decision if it has one.
+    let permitted: Vec<Option<Option<&str>>> = rows
+        .iter()
+        .zip(verdicts)
+        .map(|(row, verdict)| {
+            verdict
+                .permits()
+                .then(|| super::broker::originating_decision(class, &row.detail.identity))
+        })
+        .collect();
+    let decisions: Vec<&str> = permitted.iter().flatten().flatten().copied().collect();
+    let mut linked = if decisions.is_empty() {
+        Vec::new()
+    } else {
+        store
+            .linked_decisions_evidence_within_budget(&decisions, tip, MAX_LINKED_EVIDENCE, budget)
+            .map_err(SelectionError::Kernel)?
+    }
+    .into_iter();
+    let bound: Vec<Option<(CausalInputs, String)>> = rows
+        .iter()
+        .zip(permitted)
+        .map(|(row, decision)| {
+            let links = decision?.and_then(|_| linked.next()).unwrap_or_default();
+            causal_inputs(row, &links, scope.policy_versions)
+        })
+        .collect();
+    let identities: Vec<&str> = bound
+        .iter()
+        .flatten()
+        .map(|(_, identity)| identity.as_str())
+        .collect();
+    let held = if identities.is_empty() {
+        Vec::new()
+    } else {
+        ledger
+            .memory_reviewer_jobs_exist(scope.ledger_project, &identities)
+            .map_err(|error| SelectionError::Ledger(error.to_string()))?
     };
-    store.linked_decision_evidence_within_budget(decision, tip, MAX_LINKED_EVIDENCE, budget)
+    debug_assert_eq!(held.len(), identities.len());
+    let mut held = held.into_iter();
+    Ok(bound
+        .into_iter()
+        .map(|bound| bound.and_then(|(inputs, _)| (held.next() == Some(false)).then_some(inputs)))
+        .collect())
 }
 
 /// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available together with each `linked` row and its liveness, and the caller's policy versions. The descriptor's own evidence is live while the descriptor is, so it keeps that availability when its decision also cites it. A linked id longer than the ledger's identity bound is left out, since no job could carry it, so one such citation cannot hide a reviewable target. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
