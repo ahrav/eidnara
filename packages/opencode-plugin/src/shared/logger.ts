@@ -7,7 +7,7 @@ const isTestEnv = process.env.NODE_ENV === "test";
 
 let buffer: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
-const FLUSH_INTERVAL_MS = 500;
+export const FLUSH_INTERVAL_MS = 500;
 const BUFFER_SIZE_LIMIT = 50;
 const MAX_FIELD_CHARS = 2048;
 

@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { RustTestHarness } from "../src/rust-harness";
+import { RustPassCursor } from "../src/rust-pass-cursor";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 interface ModuleStatus {
@@ -99,9 +100,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
             "queued eidnara_reduce drop must be pending before the bust",
         ).toBeGreaterThan(0);
 
-        // Pressure turns grow the session past the execute threshold. The drop stays pending
-        // through deferred passes and drains on the first producer-backed bust.
-        const passesBeforePressure = h.readRustPasses().length;
+        const passCursor = await RustPassCursor.settle(h);
         let drainedOnBust = false;
         for (let i = 5; i <= 10; i += 1) {
             h.mock.setDefault({
@@ -112,14 +111,9 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
                     cache_creation_input_tokens: 2_000,
                 },
             });
-            const passesBeforeTurn = h.readRustPasses().length;
             await h.sendPrompt(sessionId, `eidnara_reduce pressure turn ${i}: ${h.ballast(2_500)}`);
-            // Each pressure prompt logs at least one pass; waiting for it keeps a late HARD line
-            // from being attributed to the next turn.
-            const passes = await h.waitForRustPasses(passesBeforeTurn + 1);
-            const busted = passes
-                .slice(passesBeforePressure)
-                .some((pass) => pass.decision === "HARD");
+            const passes = await passCursor.next();
+            const busted = passes.slice(passCursor.start).some((pass) => pass.decision === "HARD");
             if (drainedOnBust) continue;
             if (!busted) {
                 const status = (await h.host.primaryStatus(
