@@ -876,6 +876,15 @@ impl Ring {
         }
     }
 
+    /// `has_data` checks for a published frame using `consumed_local` and the verified
+    /// published cursor. A published-cursor verification error quarantines the ring.
+    pub fn has_data(&self) -> Result<bool, RingError> {
+        if self.is_quarantined() {
+            return Err(RingError::Quarantined);
+        }
+        self.data_available()
+    }
+
     fn data_available(&self) -> Result<bool, RingError> {
         let consumed = self.consumed_local.get();
         let published = self
@@ -3328,6 +3337,30 @@ mod tests {
             "everything reads as published"
         );
         assert!(inventory.classes.iter().all(|class| class.free == 0));
+    }
+
+    /// `has_data` follows the shared cursors through publication and receipt without touching
+    /// a doorbell, and a quarantined ring reports `Quarantined`.
+    #[test]
+    fn has_data_tracks_publication_and_receipt_from_the_cursors() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        let doorbell_before = consumer.syscall_counters().doorbell;
+        assert_eq!(consumer.has_data(), Ok(false));
+        publish(&producer, b"one");
+        publish(&producer, b"two");
+        assert_eq!(consumer.has_data(), Ok(true));
+        drop(receive(&consumer));
+        assert_eq!(consumer.has_data(), Ok(true), "one frame still waits");
+        drop(receive(&consumer));
+        assert_eq!(consumer.has_data(), Ok(false));
+        assert_eq!(
+            consumer.syscall_counters().doorbell,
+            doorbell_before,
+            "the check reads only shared memory"
+        );
+        consumer.enter_quarantine();
+        assert_eq!(consumer.has_data(), Err(RingError::Quarantined));
     }
 
     #[test]

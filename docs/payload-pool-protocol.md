@@ -294,7 +294,11 @@ bytes in this crate is:
   orderings above.
 - `copy_in` and `copy_out`: relaxed atomic stores and loads of the width
   `AccessShape` derives from the absolute address and length, so two parties
-  touching the same range agree on every byte's width.
+  touching the same range agree on every byte's width. A large `copy_in`
+  prefetches its destination lines for writing; a prefetch accesses no memory.
+  A large `copy_out` stores into its private destination with non-temporal
+  stores and fences them before it returns; its shared-side loads keep the
+  same shape.
 - `LeaseSpan::read_byte`, `copy_to`, and `checksum`, which use the same shape.
 
 No `&[u8]` or `&mut [u8]` over the arena is ever formed. A copy stabilizes the
