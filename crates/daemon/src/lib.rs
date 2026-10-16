@@ -2827,6 +2827,8 @@ pub struct HandlerCore {
     local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
     /// The Model Execution supervisor and startup credentials MemoryReviewer runs use; without them the worker never starts and accepted candidates stay recorded as not admitted.
     memory_reviewer_host: Mutex<Option<Arc<memory_reviewer::worker::MemoryReviewerHost>>>,
+    /// The data home the owner's MemoryReviewer records live under, known once the SQLite store opens; `review.accept` reads the acceptance record there.
+    memory_reviewer_home: Arc<std::sync::OnceLock<std::path::PathBuf>>,
     source_health: Mutex<Option<host_runtime::model_execution::source_health::SourceHealthCell>>,
     memory_reviewer_permits: Arc<memory_reviewer::coordinator::InvestigationPermits>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
@@ -3745,6 +3747,7 @@ impl Handler {
             kernel: Arc::clone(&kernel),
             memory_reviewer_status: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
+            memory_reviewer_home: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
             pending_storage: Mutex::new(None),
@@ -3839,6 +3842,10 @@ impl HandlerCore {
         self.store.lock().expect("store slot mutex").clone()
     }
 
+    fn memory_reviewer_home(&self) -> Option<std::path::PathBuf> {
+        self.memory_reviewer_home.get().cloned()
+    }
+
     fn admission(&self) -> TaskAdmission {
         TaskAdmission {
             gate: Arc::clone(&self.spawn_gate),
@@ -3897,6 +3904,7 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
         let memory_reviewer_status = Arc::clone(&self.memory_reviewer_status);
+        let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
         let memory_reviewer_host = self
             .memory_reviewer_host
             .lock()
@@ -3958,6 +3966,10 @@ impl HandlerCore {
                 // SQLite supplies the path that derives the kernel root.
                 match (opened, &descriptor.backend) {
                     (true, StorageBackend::Sqlite { path }) => {
+                        if let Some(home) = memory_reviewer::worker::Worker::home_of(path) {
+                            // One store opens per handler, so the home is set once.
+                            let _ = memory_reviewer_home.set(home);
+                        }
                         kernel
                             .open(kernel_routes::kernel_root_for(path), policy, cancel.clone())
                             .await;
@@ -4260,6 +4272,7 @@ impl Handler {
             kernel: Arc::clone(&kernel),
             memory_reviewer_status: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
+            memory_reviewer_home: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
             pending_storage: Mutex::new(None),
@@ -14172,6 +14185,7 @@ impl HandlerCore {
                 edit_receipts::CONFIRM => self.handle_retrieval_confirm(channel, request),
                 memory_reviewer::wire::LIST => self.handle_review_list(channel, request).await,
                 memory_reviewer::wire::READ => self.handle_review_read(channel, request).await,
+                memory_reviewer::wire::ACCEPT => self.handle_review_accept(channel, request).await,
                 search_lifecycle_wire::STATUS => {
                     self.handle_search_lifecycle_status(channel, request)
                 }

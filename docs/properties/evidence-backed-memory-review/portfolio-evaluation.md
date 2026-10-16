@@ -175,6 +175,26 @@ The reviews of the first Kernel change covered this code before the split; the f
 | One acceptance read the clock twice | refinement | fixed: `Validated.now` |
 | `ACCEPTED_DECISION_KIND` and `SUPPORT_EVENT_KIND` were public with no outside user | refinement | fixed: private |
 
+## Explicit acceptance caller
+
+Lenses for this change: over-engineering, complexity, testing, Rust code review, security review, and documentation verification.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The receipt copy duplicated the read path's checks, so the two could drift in which receipt they trust | refinement | fixed: `copy_selected_receipt` serves both; `AcceptRefusal::Receipt` reuses `ReadRefusal` |
+| A receipt bound to a replaced Kernel answered `unavailable` where a read answers `incarnation_mismatch` | gap | fixed: the daemon compares the receipt's Kernel incarnation with the live one |
+| The gate's incarnation read waited on the reader pool without bound | gap | fixed: a five-second budget, answering `store_unavailable` |
+| No test pinned the `review.accept` terminal set to 7.8 | gap | fixed: `every_review_accept_terminal_is_a_documented_literal` |
+| Missing wire cases: an unknown job, replay after the hold, key bounds, a non-ASCII key, an extra target field, `v`, no tip move while closed, the Memory Store mismatch | gap | fixed: added to the wire and activation tests |
+| The doc said "printable" for 0x21 to 0x7E, located the gate before body validation, left one capability gate in the section intro, and left observational routes and the conflict scope unstated | gap | fixed: 7.8 and the operations document |
+| A create needs the project scope a kernel route materializes; a project with no kernel commit yet answers `unavailable` | bias | kept and documented: acceptance writes nothing on refusal, so it does not materialize the scope itself |
+| The disclosure record in the wire test is not a valid open record | bias | kept: the acceptance path never reads it, and the record says so; an open disclosure gate needs the whole worker deployment |
+| Gate refusal reasons are not reported | bias | kept: the owner decided a closed acceptance gate answers `disabled` |
+| A request already past the gate completes after the record is removed | bias | kept and documented |
+| `memory_reviewer_home` was a mutex for a value set once | refinement | fixed: `OnceLock` |
+| A redundant job lookup before acceptance | refinement | fixed: the receipt copy answers `not_selected` |
+| The acceptance record type and constants were public with no outside user | refinement | fixed: private |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

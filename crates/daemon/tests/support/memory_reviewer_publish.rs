@@ -278,10 +278,40 @@ pub fn publish(
     begun: &BegunJob,
     now: i64,
 ) -> ReviewProposal {
-    let settled =
-        settle_proposal(kernel, store, digest, kernel_incarnation, begun, now, None).unwrap();
+    publish_proposal(
+        kernel,
+        store,
+        digest,
+        kernel_incarnation,
+        begun,
+        now,
+        proposal(),
+    )
+}
+
+/// [`publish`] of `proposal` in place of the fixed one.
+pub fn publish_proposal(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    digest: &str,
+    kernel_incarnation: &str,
+    begun: &BegunJob,
+    now: i64,
+    proposal: ReviewProposal,
+) -> ReviewProposal {
+    let settled = settle_with(
+        kernel,
+        store,
+        digest,
+        kernel_incarnation,
+        begun,
+        now,
+        None,
+        proposal.clone(),
+    )
+    .unwrap();
     assert!(matches!(settled, Settled::Published(_)), "{settled:?}");
-    proposal()
+    proposal
 }
 
 /// [`publish`] up to the settlement's own answer, with `before_completion` run after the Kernel work and before the Memory Store completion.
@@ -293,6 +323,29 @@ pub fn settle_proposal(
     begun: &BegunJob,
     now: i64,
     before_completion: Option<&dyn Fn()>,
+) -> Result<Settled, SettlementError> {
+    settle_with(
+        kernel,
+        store,
+        digest,
+        kernel_incarnation,
+        begun,
+        now,
+        before_completion,
+        proposal(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_with(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    digest: &str,
+    kernel_incarnation: &str,
+    begun: &BegunJob,
+    now: i64,
+    before_completion: Option<&dyn Fn()>,
+    proposal: ReviewProposal,
 ) -> Result<Settled, SettlementError> {
     let hold_binding = MemoryReviewerHoldBinding {
         project_digest: digest.to_string(),
@@ -368,7 +421,7 @@ pub fn settle_proposal(
         now_ms: &move || now,
         before_completion_for_test: before_completion,
     }
-    .settle(&broker, RunResult::Proposal(Box::new(proposal())))
+    .settle(&broker, RunResult::Proposal(Box::new(proposal)))
 }
 
 /// The memory domain every production Kernel commits before a job can exist; holds pin the commit snapshot.

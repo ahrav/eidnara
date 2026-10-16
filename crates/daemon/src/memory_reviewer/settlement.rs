@@ -859,6 +859,60 @@ pub fn list_review_outcomes(
     Ok(ReviewOutcomePage { outcomes, next })
 }
 
+/// What a reader or acceptor copies from the job's completed receipt before it enters the Kernel: the selected row's reference, the run binding the row and its holds are owned under, and the completion time the row's queue deadline is judged against.
+struct CopiedSelection {
+    reference: ReviewStagedReference,
+    run: MemoryReviewerHoldBinding,
+    selected_at: i64,
+}
+
+/// Copies the trusted selection from the job's receipt: the receipt must be complete with a selection at its own generation and provisional identity, under the live Memory Store incarnation. The Memory Store reads end before this returns.
+fn copy_selected_receipt(
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+) -> Result<CopiedSelection, ReadRefusal> {
+    let store = |error: memory_store::MemoryStoreError| ReadRefusal::Store(error.to_string());
+    let receipt = ledger
+        .lookup_memory_reviewer_receipt(project, causal_identity)
+        .map_err(store)?
+        .ok_or(ReadRefusal::NotSelected)?;
+    let live_memstore = ledger.memory_reviewer_store_incarnation().map_err(store)?;
+    let (selected_generation, selection, selected_at) =
+        match (receipt.terminal, receipt.selected, receipt.completed_at_ms) {
+            (
+                Some(MemoryReviewerReceiptTerminal::Complete),
+                Some((generation, selection)),
+                Some(at),
+            ) => (generation, selection, at),
+            _ => return Err(ReadRefusal::NotSelected),
+        };
+    if receipt.database_incarnation_id != live_memstore {
+        return Err(ReadRefusal::IncarnationMismatch);
+    }
+    if selected_generation != receipt.generation
+        || selection.candidate_id
+            != provisional_result_identity(causal_identity, receipt.generation).candidate_id
+    {
+        return Err(ReadRefusal::SelectionMismatch);
+    }
+    Ok(CopiedSelection {
+        reference: ReviewStagedReference {
+            database_incarnation_id: receipt.kernel_incarnation_id.clone(),
+            candidate_id: selection.candidate_id,
+            payload_digest: selection.payload_digest,
+        },
+        run: MemoryReviewerHoldBinding {
+            project_digest: selection.project_digest,
+            kernel_incarnation: receipt.kernel_incarnation_id,
+            memstore_incarnation: receipt.database_incarnation_id,
+            subject: causal_identity.to_string(),
+            generation: receipt.generation,
+        },
+        selected_at,
+    })
+}
+
 /// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. The row's queue deadline is judged against the receipt's completion time, which the Memory Store fenced against that same deadline, so a result selected while its queue was live stays readable afterward exactly as long as its review hold is live and every disclosed input still passes local policy.
 pub fn read_selected_proposal(
     store: &KernelStore,
@@ -898,47 +952,17 @@ fn read_selected_proposal_inner(
     now: i64,
     after_hold_lookup: Option<&dyn Fn()>,
 ) -> Result<SelectedProposal, ReadRefusal> {
-    let receipt = ledger
-        .lookup_memory_reviewer_receipt(project, causal_identity)
-        .map_err(|error| ReadRefusal::Store(error.to_string()))?
-        .ok_or(ReadRefusal::NotSelected)?;
+    let copied = copy_selected_receipt(ledger, project, causal_identity)?;
     let attempts = ledger
         .list_memory_reviewer_attempts(project, causal_identity)
         .map_err(|error| ReadRefusal::Store(error.to_string()))?;
-    let live_memstore = ledger
-        .memory_reviewer_store_incarnation()
-        .map_err(|error| ReadRefusal::Store(error.to_string()))?;
     // The Memory Store is released; everything below is the Kernel's.
-    let (selected_generation, selection, selected_at) =
-        match (receipt.terminal, receipt.selected, receipt.completed_at_ms) {
-            (
-                Some(MemoryReviewerReceiptTerminal::Complete),
-                Some((generation, selection)),
-                Some(at),
-            ) => (generation, selection, at),
-            _ => return Err(ReadRefusal::NotSelected),
-        };
-    if receipt.database_incarnation_id != live_memstore {
-        return Err(ReadRefusal::IncarnationMismatch);
-    }
-    if selected_generation != receipt.generation
-        || selection.candidate_id
-            != provisional_result_identity(causal_identity, receipt.generation).candidate_id
-    {
-        return Err(ReadRefusal::SelectionMismatch);
-    }
-    let reference = ReviewStagedReference {
-        database_incarnation_id: receipt.kernel_incarnation_id.clone(),
-        candidate_id: selection.candidate_id.clone(),
-        payload_digest: selection.payload_digest.clone(),
-    };
-    let run = MemoryReviewerHoldBinding {
-        project_digest: selection.project_digest.clone(),
-        kernel_incarnation: receipt.kernel_incarnation_id.clone(),
-        memstore_incarnation: receipt.database_incarnation_id.clone(),
-        subject: causal_identity.to_string(),
-        generation: receipt.generation,
-    };
+    let CopiedSelection {
+        reference,
+        run,
+        selected_at,
+    } = copied;
+    let selection_candidate = reference.candidate_id.clone();
     let refused = |error| match error {
         ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
             ReadRefusal::IncarnationMismatch
@@ -969,7 +993,7 @@ fn read_selected_proposal_inner(
         return Err(ReadRefusal::Kernel(ReviewReadRefusal::DecodeRefused));
     };
     let review = MemoryReviewerHoldBinding {
-        subject: selection.candidate_id.clone(),
+        subject: selection_candidate,
         ..run.clone()
     };
     let hold = store
@@ -1039,4 +1063,68 @@ fn read_selected_proposal_inner(
         proposal: *proposal,
         review_expires_at: hold.expires_at,
     })
+}
+
+/// Producer of the caller intent an acceptance commits under; the caller's own key is scoped under its project and job.
+const ACCEPTANCE_PRODUCER: &str = "eidnara-daemon/review-accept";
+
+/// Why an acceptance was neither applied nor replayed: the receipt refused as it refuses a read, or the Kernel refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptRefusal {
+    Receipt(ReadRefusal),
+    Kernel(kernel::AcceptanceRefusal),
+}
+
+/// Accepts the proposal the job's completed receipt selects, or replays the settlement an earlier acceptance of it recorded. The receipt is copied and the Memory Store released before the Kernel is entered, and a receipt bound to another Kernel incarnation than `live_kernel` is an incarnation mismatch, as for a read. The Kernel then checks the settlement before the review hold, the queue deadline, or the payload, and applies the proposal at `target` in one envelope. A create is scoped to the project's own scope, `project:<digest>`. `operation_key` is the caller's idempotency key, scoped under this project and job: reused there for another target, it conflicts.
+pub fn accept_selected_proposal(
+    store: &KernelStore,
+    ledger: &MemoryStore,
+    live_kernel: &str,
+    project: &str,
+    causal_identity: &str,
+    operation_key: &str,
+    target: &kernel::ProposalTarget,
+) -> Result<kernel::AcceptanceOutcome, AcceptRefusal> {
+    use sha2::Digest;
+    let CopiedSelection {
+        reference,
+        run,
+        selected_at,
+    } = copy_selected_receipt(ledger, project, causal_identity).map_err(AcceptRefusal::Receipt)?;
+    if run.kernel_incarnation != live_kernel {
+        return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
+    }
+    let request = serde_json::json!({
+        "causal_identity": causal_identity,
+        "target": target,
+    })
+    .to_string();
+    let scope_id = format!("project:{}", run.project_digest);
+    let acceptance = kernel::ProposalAcceptance {
+        intent: kernel::CommitIntent {
+            producer: ACCEPTANCE_PRODUCER.to_string(),
+            operation_key: format!(
+                "{}:{project}#{}:{causal_identity}#{}:{operation_key}",
+                project.len(),
+                causal_identity.len(),
+                operation_key.len()
+            ),
+            request_digest: format!("{:x}", sha2::Sha256::digest(request.as_bytes())),
+            actor: "memory-reviewer".to_string(),
+            cause: "explicit acceptance".to_string(),
+        },
+        run,
+        proposal: reference,
+        selected_at,
+        target: target.clone(),
+        scope_id: Some(scope_id),
+    };
+    store
+        .accept_review_proposal(&acceptance)
+        .map_err(|error| match error {
+            kernel::AcceptanceError::Refused(refusal) => AcceptRefusal::Kernel(refusal),
+            kernel::AcceptanceError::Store(error) => {
+                AcceptRefusal::Receipt(ReadRefusal::Store(error.to_string()))
+            }
+        })
 }

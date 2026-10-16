@@ -178,3 +178,11 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_caller_key_reused_for_another_proposal_conflicts` | same | the same caller key and digest for another proposal conflicts and settles nothing; a caller claiming the settlement producer is `invalid` | unaudited |
 | `a_moved_target_another_project_a_released_hold_and_changed_evidence_refuse_and_write_nothing` | same | `changed` for a touched target, a redirected target, deleted and tightened evidence, and a retired owner; `unavailable` for another project's run; `invalid` for a run of another job; `review_expired` for a released hold; no tip move and no settlement for each | unaudited |
 | `a_settlement_survives_a_reopen_and_replays_under_a_new_key` | same | the settlement replays from a reopened store | unaudited |
+
+## Explicit acceptance
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `crates/daemon/tests/memory_reviewer_wire.rs` | `disabled` beside a disclosure record and under another pair's record, with no tip move; a selected create settles into a decision scoped to the bound project's `project-scopes` scope; another key replays; the first key for another target conflicts; another target is `changed`; an unknown job is `not_selected` with a 128-byte key admitted; a replay after the review hold ends; removing the record is `disabled` and the decision stands; strict bodies, including a 129-byte or non-ASCII key, an extra target field, and `v` | unaudited |
+| `every_review_accept_terminal_is_a_documented_literal` | `crates/daemon/src/memory_reviewer/wire.rs` | the terminal set `accept_terminal` produces equals the literals the 7.8 paragraph lists | unaudited |
+| `the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` | `crates/daemon/src/memory_reviewer/activation.rs` | absent, beside a disclosure record, group-readable, other schema, empty evidence, other Kernel incarnation, other Memory Store incarnation, and a matching record | unaudited |

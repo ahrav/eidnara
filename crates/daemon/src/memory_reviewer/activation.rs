@@ -260,6 +260,48 @@ pub fn evaluate(record: &RuntimeIdentityRecord, live: &LiveIdentity) -> Result<A
     })
 }
 
+/// The deployment owner's acceptance record, `acceptance.json` beside the disclosure record. It is a separate gate: a disclosure record, open or not, never admits acceptance.
+pub const ACCEPTANCE_RECORD: &str = "acceptance.json";
+const ACCEPTANCE_SCHEMA: u32 = 1;
+
+/// The owner's acceptance record as written: the store pair it admits acceptance for, and the owner's reference to the reviewed actual-evidence record that justified it. Removing the record, or replacing either store, stops acceptance.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptanceRecord {
+    schema: u32,
+    kernel_incarnation: String,
+    memstore_incarnation: String,
+    evidence: String,
+}
+
+/// Reads the acceptance record under `home` and admits acceptance only when it is owner-only, of its schema, names a reviewed evidence record, and binds exactly the live store pair.
+pub fn read_acceptance_gate(
+    home: &Path,
+    kernel_incarnation: &str,
+    memstore_incarnation: &str,
+) -> Result<(), Closed> {
+    let bytes = match read_owner_only_record(&home.join(ACTIVATION_DIR), ACCEPTANCE_RECORD) {
+        Ok(RecordRead::Bytes(bytes)) => bytes,
+        Ok(RecordRead::Absent) => return Err(Closed::Missing),
+        Ok(RecordRead::Refused(reason)) => return Err(Closed::Refused(reason)),
+        Err(error) => return Err(Closed::Unreadable(error.0)),
+    };
+    let record: AcceptanceRecord = serde_json::from_slice(&bytes).map_err(|_| Closed::Malformed)?;
+    if record.schema != ACCEPTANCE_SCHEMA
+        || record.evidence.is_empty()
+        || record.evidence.len() > MAX_ATTESTATION_FIELD_BYTES
+    {
+        return Err(Closed::Malformed);
+    }
+    if record.kernel_incarnation != kernel_incarnation {
+        return Err(Closed::IdentityMismatch("kernel incarnation"));
+    }
+    if record.memstore_incarnation != memstore_incarnation {
+        return Err(Closed::IdentityMismatch("memory store incarnation"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -308,6 +350,47 @@ mod tests {
         let path = dir.join(IDENTITY_RECORD);
         std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// The acceptance record is its own gate: absent, group-readable, of another schema, without an evidence reference, or naming another store pair, it admits nothing; only an owner-only record for the live pair admits acceptance.
+    #[test]
+    fn the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair() {
+        let home = tempfile::tempdir().unwrap();
+        let gate = || read_acceptance_gate(home.path(), "kernel-1", "memstore-1");
+        assert_eq!(gate(), Err(Closed::Missing));
+        let write_acceptance = |value: serde_json::Value, mode: u32| {
+            let dir = home.path().join(ACTIVATION_DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = dir.join(ACCEPTANCE_RECORD);
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let record = |schema: u32, kernel: &str, evidence: &str| {
+            serde_json::json!({
+                "schema": schema,
+                "kernel_incarnation": kernel,
+                "memstore_incarnation": "memstore-1",
+                "evidence": evidence,
+            })
+        };
+        // A disclosure record beside it changes nothing.
+        write(home.path(), &record(1, "kernel-1", "reviewed"), 0o600);
+        assert_eq!(gate(), Err(Closed::Missing));
+        write_acceptance(record(1, "kernel-1", "reviewed"), 0o640);
+        assert!(matches!(gate(), Err(Closed::Refused(_))));
+        write_acceptance(record(2, "kernel-1", "reviewed"), 0o600);
+        assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(record(1, "kernel-1", ""), 0o600);
+        assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(record(1, "kernel-2", "reviewed"), 0o600);
+        assert_eq!(gate(), Err(Closed::IdentityMismatch("kernel incarnation")));
+        write_acceptance(record(1, "kernel-1", "reviewed"), 0o600);
+        assert_eq!(
+            read_acceptance_gate(home.path(), "kernel-1", "memstore-2"),
+            Err(Closed::IdentityMismatch("memory store incarnation"))
+        );
+        assert_eq!(gate(), Ok(()));
     }
 
     /// A matching, attested record yields the approval bound to the live pair and the named credential's fingerprint; each identity term that differs closes the gate naming that term; a missing acknowledgement, an unknown credential, a group-readable record, and an absent record close it too.

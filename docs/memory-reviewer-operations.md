@@ -3,7 +3,7 @@
 Status: current system document for the MemoryReviewer lifecycle boundary
 Scope: activation, status, review reads, backup and restore, exposure bounds, evaluation evidence, and property traceability for the proposal-only milestone
 
-This document describes how a deployment owner and an operator run the MemoryReviewer as it exists: a reviewer that stages proposals, plus a Kernel acceptance path that applies one selected proposal at its exact target (section 4, Kernel acceptance). No daemon route or command calls that path in this milestone, so the deployed reviewer stays proposal-only. `docs/host-wire-protocol.md` is the normative wire contract; where this document names a wire field, that document governs.
+This document describes how a deployment owner and an operator run the MemoryReviewer as it exists: a reviewer that stages proposals, plus a Kernel acceptance path that applies one selected proposal at its exact target (section 4, Kernel acceptance). The routed `review.accept` operation calls that path only while the deployment owner's acceptance record admits it (section 2, Acceptance record); no record ships, so a deployment stays proposal-only until its owner writes one. `docs/host-wire-protocol.md` is the normative wire contract; where this document names a wire field, that document governs.
 
 ## 1. What runs and what never runs
 
@@ -11,7 +11,7 @@ The MemoryReviewer worker is one task per data home. Each pass it reads the depl
 
 Two producers feed the queue. The History Summarizer reserves a job for each accepted fact set before it publishes the chunk, and activates the job as part of that publication; the Memory Classifier enqueues bounded selection pages of canonical memories. Both paths are exercised by real-store tests named in section 8.
 
-No running component writes a canonical memory, promotes a proposal, or invents provenance. A default-`Sensitive` subject, which every History Summarizer subject is, never reaches the remote model: the run abstains by policy before any request and records that abstention.
+No background component writes a canonical memory, promotes a proposal, or invents provenance; only an explicit `review.accept` under the owner's acceptance record writes one. A default-`Sensitive` subject, which every History Summarizer subject is, never reaches the remote model: the run abstains by policy before any request and records that abstention.
 
 ## 2. Activation (Q36, Q38)
 
@@ -45,6 +45,16 @@ Every term is compared against the live deployment on every pass and again befor
 The status block reports only the closed kind (`identity_mismatch`), never which term differs. The term and the deployment's live value are written to the daemon's log, `<data home>/.eidnara-coordination/eidnara.log`, once per distinct reason: `daemon: memory_reviewer activation gate closed: activation record names another kernel incarnation; the live value is <id>`. Every identity term is reported this way, so a draft record can be corrected one term at a time from the log. The credential is not: a name the sender does not dial with closes the gate as `unknown_credential`, and a mismatched identity logs only `activation record names another credential`, with no live value. The owner copies the identity from the selection file named above. The compiled versions and digests are not published on any other operator surface. Nothing reads the record except the worker; there is no operator command that writes it, and the daemon never writes one.
 
 The credential is read from the startup envelope's credentials, never from the process environment. The host always hands the daemon its Model Execution supervisor and the envelope's credentials; a record naming a credential the sender does not dial with closes the gate as `unknown_credential`. Until the daemon has committed its harness selection for this start, no credential identity exists and the gate reports `unreadable`.
+
+### Acceptance record
+
+Acceptance has its own gate, separate from disclosure. `review.accept` answers `disabled` until the owner writes
+
+```
+<data home>/memory_reviewer-activation/acceptance.json
+```
+
+under the same owner-only rules as the runtime identity record. It is JSON with exactly `schema` (`1`), `kernel_incarnation` and `memstore_incarnation` (the live store pair), and `evidence` (the owner's reference to the reviewed actual-evidence record that justified acceptance, 1 to 256 bytes). It is read on every acceptance. A missing, group-readable, malformed, or other-pair record closes the gate; an open or closed disclosure record changes nothing about it. Removing the record is the stop path: an acceptance that starts after the removal answers `disabled`, and settlements already recorded stand. Replacing either store changes the pair, so a restore or a new incarnation needs a new record. No record ships, and #596's owner-authorized actual-model evidence, which such a record is to cite, is not yet recorded.
 
 ### Bedrock: schema 2
 
@@ -156,9 +166,13 @@ Create and revise cite each supporting evidence row through a `memory_reviewer_s
 
 The settlement is one receipt under the reserved producer `eidnara-kernel/memory-reviewer-settlement`, keyed by a versioned, length-delimited derivation over the project digest, proposal id, payload digest, generation, and both incarnations. The caller's key is not part of it and the request digest is derived from the key, so an acceptance of a settled proposal under any caller key replays the first settlement, before the review hold, the queue deadline, or the payload is read. A caller key that committed an acceptance replays only that acceptance; the same key for other input conflicts. A key that only received a replay is not recorded. A refused acceptance writes nothing; a missing row, a row bound to another project or job, a row of another Kernel incarnation, and a non-proposal row all refuse as one `unavailable` answer before anything else about the row is judged.
 
+### Explicit acceptance over the wire
+
+`review.accept` carries the job's causal identity, the caller's operation key, and the target `review.read` returned. The daemon checks the owner's acceptance record against the live store pair, copies the completed receipt (its selection, generation, completion time, and both incarnations) from the Memory Store, and releases it before entering the Kernel, which runs the Kernel acceptance above. A create is scoped to the bound project's scope, `project:<digest>`, which a kernel route materializes on its first commit; until one has, a create answers `unavailable`. Any route bound to the project may accept, an observational one included: the owner's record and the connection key are the authority. The caller's key is scoped under the project and job; the request digest covers the causal identity and target. The answer is the settlement, or one closed terminal; wire document 7.8 lists them.
+
 ### Observational routes
 
-A route bound with harness `cli` is observational. It authorizes and resolves its project exactly as any route does, so `review.list` and `review.read` work through it under the existing project authorization, and its session is torn down on close like any other. `host.status` is unaffected: it is a bearer-authenticated channel-0 operation (wire document 7.6) that reads no route binding. It takes no part in background work: the MemoryReviewer worker's project list, the scheduler's root, harness, and schedule selection, and the search maintenance roster read one participating view from which observational bindings are removed before the newest binding on each root is chosen. An observer opened beside a live scheduled harness therefore never replaces that harness's binding, a root bound only by observers contributes nothing, and closing an observer reveals no binding the views were not already reporting. A MODULE-authority project whose only live routes are observational stays dormant: a Ready job waits for a participating route, not for the gate.
+A route bound with harness `cli` is observational. It authorizes and resolves its project exactly as any route does, so `review.list`, `review.read`, and `review.accept` work through it under the existing project authorization, and its session is torn down on close like any other. `host.status` is unaffected: it is a bearer-authenticated channel-0 operation (wire document 7.6) that reads no route binding. It takes no part in background work: the MemoryReviewer worker's project list, the scheduler's root, harness, and schedule selection, and the search maintenance roster read one participating view from which observational bindings are removed before the newest binding on each root is chosen. An observer opened beside a live scheduled harness therefore never replaces that harness's binding, a root bound only by observers contributes nothing, and closing an observer reveals no binding the views were not already reporting. A MODULE-authority project whose only live routes are observational stays dormant: a Ready job waits for a participating route, not for the gate.
 
 `harness` is a claim the client makes on `route.open` and remains scoping metadata; the `cli` value selects observation and grants nothing.
 
@@ -352,6 +366,7 @@ The parent property portfolio was not published before dependent implementation,
 | Shutdown joins owned work before store release | `memory_reviewer_coordinator::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`; `memory_reviewer_worker::a_cancelled_worker_loop_returns_before_the_stores_are_released`; the daemon's `shutdown_cancels_and_joins_tracked_*` tests |
 | Cleanup is finite and kind-specific | `memory_reviewer::lifecycle` maintenance test |
 | Review outcomes list and read only through the receipt-selected path | `crates/daemon/tests/memory_reviewer_wire.rs` |
+| `review.accept` answers `disabled` until the owner's acceptance record names the live pair, whatever the disclosure record says; then settles the selected proposal, replays it under another key, conflicts on a reused key, refuses a redirected target, and stops when the record is removed | `memory_reviewer_wire::review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record`; `memory_reviewer::activation::tests::the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` |
 | Kernel acceptance applies each action at its exact target with its actual admission and retirement cascade, settles one proposal once under concurrent callers, replays its settlement across caller keys, a reopen, a released hold, row cleanup, a purge, and a late selection, conflicts on a reused caller key, and refuses a moved or quarantined target or owner, another project or job, a released hold, a selection past the queue deadline, deleted or tightened evidence, and a create scope of another project, each without writing | `crates/kernel/tests/kernel_review_acceptance.rs` |
 
-Acceptance activation remains blocked: the Kernel acceptance path has no caller, no acceptance protocol version, and no owner-reviewed actual-evidence corpus gate.
+Acceptance activation remains closed: `review.accept` (wire document 7.8) applies proposals only under the owner's acceptance record (section 2), and no owner-reviewed actual-evidence record exists to cite in one.

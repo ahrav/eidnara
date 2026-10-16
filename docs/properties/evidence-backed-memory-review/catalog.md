@@ -50,6 +50,7 @@ Every slug the seven residual tickets own, plus the semantic-evidence slug #592 
 | `material-claims-require-exact-cited-byte-support` | #592 | yes |
 | `future-acceptance-co-commits-exact-target-and-replay` | #597 | yes |
 | `future-correction-keeps-kernel-maturity-and-retrieval` | #597 | yes |
+| `future-acceptance-needs-version-and-evidence-gates` | #597 | yes |
 
 ## Records
 
@@ -376,7 +377,7 @@ Open questions:
 ### future-acceptance-co-commits-exact-target-and-replay
 
 Type: safety
-Reachability: test-only - `KernelStore::accept_review_proposal` has no daemon caller in this change; only `crates/kernel/tests/kernel_review_acceptance.rs` constructs an acceptance
+Reachability: explicit-config-only - `review.accept` reaches `KernelStore::accept_review_proposal` only while the owner's `acceptance.json` names the live store pair, and none ships
 Status: active
 Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` accepts retain, no-change, create, revise, and retire proposals, including the retirement of an approval with a dependent; races two acceptances of one proposal; replays under a second caller key, after the review hold is released, after the row is deleted and the support purged, after a reopen, and at a selection past the queue deadline; reuses a caller key with other input and for another proposal; and refuses a moved target for each memory action, a quarantined owner, a caller target that differs from the proposal's, another project's run, a released hold, a selection at the queue deadline or before sealing, deleted evidence, evidence reclassified `Secret`, a retired union owner, a deleted subject, and a create scope that is missing or names another project
 Guarantee: An acceptance either applies the selected proposal's action at its exact target and records one proposal-level settlement in the same Kernel envelope, or writes nothing; a settled proposal answers that settlement under any caller key before any expirable state is read, and a reused caller key with other input conflicts.
@@ -392,7 +393,7 @@ Open questions:
 ### future-correction-keeps-kernel-maturity-and-retrieval
 
 Type: safety
-Reachability: test-only - as `future-acceptance-co-commits-exact-target-and-replay`
+Reachability: explicit-config-only - as `future-acceptance-co-commits-exact-target-and-replay`
 Status: active
 Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` revises a verified, auto-served decision, refuses a revise of an approval and a second revise of a superseded target, and creates a decision from a staged subject
 Guarantee: A decision an accepted create or revise writes is admitted on its own as `ModelInference` with `MemoryClassifierInference` taint, inherits no maturity, is served to explicit search and not to automatic surfaces while it is a candidate, and a revise supersedes its predecessor through a fresh successor that keeps domain and source identity at the next source revision.
@@ -403,6 +404,22 @@ Confidence: high - [evidence](evidence/future-correction-keeps-kernel-maturity-a
 Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - `create_inserts_one_decision_admitted_as_model_inference_with_durable_support`, `revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target`
 Impact: A revised memory that inherited its predecessor's maturity, or folded into a survivor, would grant model inference the authority of the decision it replaced
 Open questions: None.
+
+### future-acceptance-needs-version-and-evidence-gates
+
+Type: safety
+Reachability: explicit-config-only - `review.accept` is routed in every daemon; it applies anything only under the owner's `acceptance.json`
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_wire.rs::review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` accepts under no record beside a disclosure record (one the acceptance path never reads), under a record for another pair, under the live pair, after the review hold ends, and after the record is removed, asserting no tip move while closed; `memory_reviewer::activation` unit tests cover absent, group-readable, other-schema, evidence-less, other-Kernel, and other-Memory-Store records
+Guarantee: An explicit acceptance applies or replays a settlement only while an owner-only acceptance record of its schema, naming a reviewed evidence reference, binds the live Kernel and Memory Store incarnations; a disclosure record, open or not, admits no acceptance, and removing the acceptance record stops acceptance at once.
+Check: `always` - every `review.accept` answered while `read_acceptance_gate` refuses is `{"kind":"terminal","terminal":"disabled"}` and moves no Kernel tip; asserted on every request because application authority must never follow from disclosure approval, completion, or caller selection
+Fault/timing angle: the record is removed or the stores are replaced between two acceptances; a request already past the gate when the record is removed completes
+Required faults and enabling state: a disclosure record with no acceptance record; an acceptance record naming another Kernel incarnation; record removal after a settlement
+Confidence: high - [evidence](evidence/future-acceptance-needs-version-and-evidence-gates.md). Verified the gate is read on every request before the receipt is copied, and `every_review_accept_terminal_is_a_documented_literal` pins the terminal set to wire document 7.8
+Existing check: `crates/daemon/tests/memory_reviewer_wire.rs::review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record`; `crates/daemon/src/memory_reviewer/activation.rs::tests::the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair`; `crates/daemon/src/memory_reviewer/wire.rs::tests::every_review_accept_terminal_is_a_documented_literal`
+Impact: Acceptance opened by a disclosure approval would let model proposals write canonical memory without the owner's evidence review
+Open questions:
+- Which actual-evidence record the owner reviews before writing `acceptance.json`, once #596's U4 evidence exists (needs human input)
 
 ## Relationship map
 
