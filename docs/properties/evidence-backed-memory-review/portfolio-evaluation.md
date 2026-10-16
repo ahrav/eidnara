@@ -174,6 +174,7 @@ The reviews of the first Kernel change covered this code before the split; the f
 | A missing decision row after `target_stands` was reported as a moved target | refinement | fixed: a store failure |
 | One acceptance read the clock twice | refinement | fixed: `Validated.now` |
 | `ACCEPTED_DECISION_KIND` and `SUPPORT_EVENT_KIND` were public with no outside user | refinement | fixed: private |
+| Support cited only through decision events was outside the served sensitivity fold, so a support row tightened to `Secret` after acceptance left the decision served | gap | fixed: the served read joins the strictest support evidence once per object and folds its live class; `an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today`, and `support_citation_cost_does_not_scale_with_own_history` for the read cost |
 
 ## Gaps queued
 

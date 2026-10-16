@@ -146,6 +146,28 @@ impl Fixture {
         (handle.evidence_id, handle.digest)
     }
 
+    fn tighten(&self, key: &str) {
+        self.store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("tighten-{key}")),
+                payload: format!("claim {key}").into_bytes(),
+                evidence_id: format!("evidence-tighten-{key}"),
+                object_id: format!("evidence-object-tighten-{key}"),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "conversation".to_string(),
+                source_id: format!("src/tighten-{key}"),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Secret,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+    }
+
     /// An admitted, scoped decision with one canonical descriptor over its own evidence; returns the descriptor and the evidence.
     fn decision(&self, object: &str) -> (String, String) {
         self.decision_of_kind(object, "architecture")
@@ -856,6 +878,64 @@ fn create_cites_each_support_row_in_its_own_ordered_event() {
 }
 
 #[test]
+fn an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today() {
+    let fixture = Fixture::open();
+    let subject = fixture.subject("job-1");
+    let mut support = Vec::new();
+    let mut members = Vec::new();
+    for key in ["support-a", "support-b"] {
+        let (evidence, digest) = fixture.ingest(key);
+        members.push(PolicyUnionMember {
+            kind: "temporary_capture".to_string(),
+            id: evidence.clone(),
+            revision: digest,
+            owner_id: None,
+            owner_revision: None,
+        });
+        support.push(evidence);
+    }
+    let staged = fixture.propose(
+        "job-1",
+        ProposalAction::Create,
+        ProposalTarget::StagedCandidate {
+            candidate_id: subject,
+        },
+        Some("bun builds the workspace"),
+        &support,
+        members,
+    );
+    let outcome = fixture.accept("caller-1", &staged).unwrap();
+    let SettlementEffect::Created { object_id, .. } = &outcome.settlement.effect else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    assert!(fixture.served(object_id, Surface::ExplicitSearch));
+    fixture.tighten("support-b");
+    assert!(
+        !fixture.served(object_id, Surface::ExplicitSearch),
+        "a created decision is withheld once its second support row reads secret"
+    );
+
+    let descriptor = fixture.decision("decision-a");
+    let staged = fixture.propose_over(
+        "job-2",
+        ProposalAction::Revise,
+        "decision-a",
+        &descriptor,
+        Some("bun builds and tests the workspace"),
+    );
+    let outcome = fixture.accept("caller-2", &staged).unwrap();
+    let SettlementEffect::Revised { object_id, .. } = &outcome.settlement.effect else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    assert!(fixture.served(object_id, Surface::ExplicitSearch));
+    fixture.tighten("decision-a");
+    assert!(
+        !fixture.served(object_id, Surface::ExplicitSearch),
+        "a revised successor is withheld once the support it cites reads secret"
+    );
+}
+
+#[test]
 fn revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target() {
     let fixture = Fixture::open();
     // An accepted ADR verifies `decision-a`, so it serves automatically before the revise.
@@ -1162,26 +1242,7 @@ fn a_moved_target_another_project_a_released_hold_and_changed_evidence_refuse_an
     // Disclosed evidence reclassified Secret.
     let d = fixture.decision("decision-d");
     let staged = fixture.propose_over("job-d", ProposalAction::Retain, "decision-d", &d, None);
-    fixture
-        .store
-        .ingest_artifact(ArtifactIngestRequest {
-            intent: intent("tighten-d"),
-            payload: b"claim decision-d".to_vec(),
-            evidence_id: "evidence-tighten-d".to_string(),
-            object_id: "evidence-object-tighten-d".to_string(),
-            object_kind: "evidence".to_string(),
-            domain_id: DOMAIN.to_string(),
-            source_kind: "conversation".to_string(),
-            source_id: "src/tighten-d".to_string(),
-            source_revision: 1,
-            media_type: "text/plain".to_string(),
-            retention_class: "canonical".to_string(),
-            retain_until: None,
-            asserted_sensitivity: Sensitivity::Secret,
-            provider_egress: ProviderEgress::RemoteAllowed,
-            provenance: None,
-        })
-        .unwrap();
+    fixture.tighten("decision-d");
     assert_eq!(
         refused(&staged, staged.run.clone(), staged.target.clone()),
         changed

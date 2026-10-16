@@ -9,6 +9,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::admission::SUPPORT_EVENT_KIND;
 use super::eligibility::judge_in_tx;
 use super::envelope::{
     CommitIntent, Envelope, RedactedIntent, commit_redacted_with_writer, recorded_receipt,
@@ -38,8 +39,6 @@ pub const SETTLEMENT_VERSION: u32 = 1;
 pub const ACCEPTED_SOURCE_KIND: &str = "memory_reviewer_proposal";
 /// `decision_kind` of a decision an accepted create inserts.
 const ACCEPTED_DECISION_KIND: &str = "memory_reviewer_create";
-/// `event_kind` of the decision event that cites one supporting evidence row.
-const SUPPORT_EVENT_KIND: &str = "memory_reviewer_support";
 /// `event_payload.summary` of each support event.
 const SUPPORT_EVENT_SUMMARY: &str = "supporting evidence of the accepted proposal";
 /// The decision kind that makes a decision an approval; model-written text never carries it.

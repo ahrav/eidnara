@@ -394,14 +394,14 @@ Open questions:
 Type: safety
 Reachability: test-only - as `future-acceptance-co-commits-exact-target-and-replay`
 Status: active
-Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` revises a verified, auto-served decision, refuses a revise of an approval and a second revise of a superseded target, and creates a decision from a staged subject
-Guarantee: A decision an accepted create or revise writes is admitted on its own as `ModelInference` with `MemoryClassifierInference` taint, inherits no maturity, is served to explicit search and not to automatic surfaces while it is a candidate, and a revise supersedes its predecessor through a fresh successor that keeps domain and source identity at the next source revision.
-Check: `always` - the settlement's admitted state is the stored admission (`candidate`, `explicit_labeled`), `judge_surface_eligibility_within_budget` permits `ExplicitSearch` and refuses `AutoInject` for the new decision, the successor's object id differs from the predecessor's, and the predecessor is invalidated with `superseded_by` naming the successor
-Fault/timing angle: none
-Required faults and enabling state: a decision verified through an accepted ADR as the revise target; an `adr_accepted` decision as a refused target; a sealed staged subject as the create target
-Confidence: high - [evidence](evidence/future-correction-keeps-kernel-maturity-and-retrieval.md). Verified against `visibility_row` in `crates/kernel/src/admission.rs` and the stored admission row
-Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - `create_inserts_one_decision_admitted_as_model_inference_with_durable_support`, `revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target`
-Impact: A revised memory that inherited its predecessor's maturity, or folded into a survivor, would grant model inference the authority of the decision it replaced
+Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` revises a verified, auto-served decision, refuses a revise of an approval and a second revise of a superseded target, creates a decision from a staged subject, and tightens a created and a revised decision's support to `Secret` after acceptance
+Guarantee: A decision an accepted create or revise writes is admitted on its own as `ModelInference` with `MemoryClassifierInference` taint, inherits no maturity, is served to explicit search and not to automatic surfaces while it is a candidate, serves no lower than the strictest class its cited support reads today, and a revise supersedes its predecessor through a fresh successor that keeps domain and source identity at the next source revision.
+Check: `always` - the settlement's admitted state is the stored admission (`candidate`, `explicit_labeled`), `judge_surface_eligibility_within_budget` permits `ExplicitSearch` and refuses `AutoInject` for the new decision and refuses `ExplicitSearch` once a support row reads `Secret`, the successor's object id differs from the predecessor's, and the predecessor is invalidated with `superseded_by` naming the successor
+Fault/timing angle: a classification merge tightens a support row after the acceptance commit
+Required faults and enabling state: a decision verified through an accepted ADR as the revise target; an `adr_accepted` decision as a refused target; a sealed staged subject as the create target; a re-ingest of a support row's bytes asserted `Secret`
+Confidence: high - [evidence](evidence/future-correction-keeps-kernel-maturity-and-retrieval.md). Verified against `visibility_row` and `strictest_support_evidence_sql` in `crates/kernel/src/admission.rs` and the stored admission row
+Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - `create_inserts_one_decision_admitted_as_model_inference_with_durable_support`, `revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target`, `an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today`
+Impact: A revised memory that inherited its predecessor's maturity, or folded into a survivor, would grant model inference the authority of the decision it replaced; a decision served below its support's current class would disclose model text written from evidence later found secret
 Open questions: None.
 
 ## Relationship map
