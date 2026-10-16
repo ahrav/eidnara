@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 use std::{fmt, io};
@@ -163,7 +163,8 @@ pub struct RingTransport {
     publish_hook: Mutex<Option<PublishHook>>,
     /// Test hook: the next endpoint fails after duplicating its descriptors and before handing
     /// them to the caller, the last point at which nothing has been exposed to a peer.
-    fail_next_descriptor_transfer: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_next_descriptor_transfer: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) struct PreparedRing {
@@ -287,7 +288,8 @@ impl RingTransport {
             backings: Arc::new(BackingRegistry::default()),
             endpoint_panics: Arc::new(AtomicU64::new(0)),
             publish_hook: Mutex::new(None),
-            fail_next_descriptor_transfer: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_descriptor_transfer: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -448,6 +450,7 @@ impl RingTransport {
 
     /// Test hook: the next `prepare` duplicates its descriptors and then fails before
     /// returning them, as a failed grant transfer would.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn fail_next_descriptor_transfer(&self) {
         self.fail_next_descriptor_transfer
@@ -493,6 +496,7 @@ impl RingTransport {
         let publish_hook = self.publish_hook.lock().expect("publish hook lock").clone();
         let endpoint_panics = Arc::clone(&self.endpoint_panics);
         let backing_registry = Arc::clone(&self.backings);
+        #[cfg(any(test, feature = "test-support"))]
         let fail_transfer = Arc::clone(&self.fail_next_descriptor_transfer);
         let panic_root = root.clone();
         let panic_retired = queue.retired.clone();
@@ -522,10 +526,11 @@ impl RingTransport {
                 };
                 rings.retain_charge(Arc::clone(&backing_admission));
                 backing_registry.register(&rings);
-                let transfer = worker_descriptor(&rings).and_then(|transfer| {
+                let transfer = worker_descriptor(&rings);
+                // The duplicated descriptors close with the discarded value, unsent.
+                #[cfg(any(test, feature = "test-support"))]
+                let transfer = transfer.and_then(|transfer| {
                     if fail_transfer.swap(false, Ordering::AcqRel) {
-                        // The duplicated descriptors close here, unsent.
-                        drop(transfer);
                         Err(())
                     } else {
                         Ok(transfer)

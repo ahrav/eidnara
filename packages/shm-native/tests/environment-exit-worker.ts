@@ -1,8 +1,10 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { NativeChannel, type NativeReceiveLease } from "../index.ts";
 
-// Attaches a channel pair inside the worker's own environment, receives one lease, and either
-// releases it or keeps its alias reachable while the worker's environment is torn down.
+// Attaches a channel pair inside the worker's own environment and receives one lease. Mode
+// `closed` releases the lease and closes both channels, `open` releases the lease and leaves
+// both channels for the cleanup hook, and `kept` keeps the lease's alias reachable while the
+// worker's environment is torn down.
 function header(length: number): Uint8Array {
     const bytes = new Uint8Array(20);
     const view = new DataView(bytes.buffer);
@@ -25,9 +27,9 @@ pair.second.drainOne((value) => {
 });
 const alias = lease?.segment(0);
 const aliasBytes = alias?.byteLength ?? -1;
-const keepAlias = (workerData as { keepAlias: boolean }).keepAlias;
-if (!keepAlias) {
-    lease?.release();
+const mode = (workerData as { mode: "closed" | "open" | "kept" }).mode;
+if (mode !== "kept") lease?.release();
+if (mode === "closed") {
     pair.first.close();
     pair.second.close();
 }

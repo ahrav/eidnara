@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -38,6 +38,7 @@ async function startHost(dataDir: string): Promise<RunningHost> {
     });
     const lines = createInterface({ input: child.stdout as NodeJS.ReadableStream });
     const connectionFile = await new Promise<string>((resolve, reject) => {
+        child.once("error", reject);
         child.once("exit", (code) => reject(new Error(`host exited before READY: ${code}`)));
         lines.on("line", (line) => {
             if (line.startsWith("READY ")) resolve(line.slice("READY ".length));
@@ -51,8 +52,24 @@ async function startHost(dataDir: string): Promise<RunningHost> {
 async function stopHost(host: RunningHost): Promise<void> {
     if (host.child.exitCode !== null || host.child.signalCode !== null) return;
     const exited = new Promise<void>((resolve) => host.child.once("exit", () => resolve()));
+    // A host a test stopped with SIGSTOP acts on SIGTERM only once continued.
+    host.child.kill("SIGCONT");
     host.child.kill("SIGTERM");
     await exited;
+}
+
+/** Waits until every thread of `pid` is in the stopped state, so the host cannot run. */
+async function waitUntilStopped(pid: number): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+        const tasks = readdirSync(`/proc/${pid}/task`);
+        const states = tasks.map(
+            (task) => readFileSync(`/proc/${pid}/task/${task}/stat`, "utf8").split(") ")[1]?.[0],
+        );
+        if (states.every((state) => state === "T" || state === "t")) return;
+        if (Date.now() > deadline) throw new Error(`host ${pid} did not stop: ${states.join("")}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
 }
 
 async function connect(host: RunningHost): Promise<HostClient> {
@@ -63,8 +80,7 @@ async function connect(host: RunningHost): Promise<HostClient> {
 
 function patterned(length: number): Uint8Array {
     const bytes = new Uint8Array(length);
-    for (let index = 0; index < length; index += 4096) bytes[index] = (index / 4096) & 0xff;
-    bytes[length - 1] = 0xa5;
+    for (let index = 0; index < length; index++) bytes[index] = (index * 131 + 7) & 0xff;
     return bytes;
 }
 
@@ -101,7 +117,7 @@ describe("TypeScript client against a real host process", () => {
     });
 
     it.skipIf(!RUNNABLE)(
-        "activates the sole profile, echoes the maximum body both ways, refuses one byte over, and recovers across close and restart",
+        "activates the sole profile, echoes the maximum body both ways, refuses one byte over before publication, and recovers across close and restart",
         async () => {
             const dataDir = mkdtempSync(join(tmpdir(), "eidnara-real-host-"));
             dataDirs.push(dataDir);
@@ -176,6 +192,7 @@ describe("TypeScript client against a real host process", () => {
             // request's outcome unknown to the client.
             const pid = host.child.pid as number;
             process.kill(pid, "SIGSTOP");
+            await waitUntilStopped(pid);
             const published = client.requestBinary(route, Uint8Array.of(2), { timeoutMs: 30_000 });
             const rejected = published.then(
                 () => null,
@@ -187,6 +204,11 @@ describe("TypeScript client against a real host process", () => {
             await exited;
             const failure = await rejected;
             expect(failure?.kind).toBe("outcome_unknown");
+            // A request issued after the connection is gone is refused before publication:
+            // its route belonged to the lost connection.
+            await expect(client.requestBinary(route, Uint8Array.of(4))).rejects.toMatchObject({
+                name: "StaleRouteHandleError",
+            });
 
             const restarted = await startHost(dataDir);
             const fresh = await connect(restarted);

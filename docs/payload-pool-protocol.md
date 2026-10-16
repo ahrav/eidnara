@@ -224,13 +224,14 @@ A return after endpoint exit publishes only into the retired pool's cells.
 
 The addon's environment cleanup hook runs while the JavaScript environment is
 torn down, when no JavaScript runs and no handle scope is open, so it makes no
-N-API call. A channel with no alias says goodbye and drops its mapping. A
-channel that still holds a producer alias, a leased view, or a stranded view
-cannot detach it there: both pools are quarantined, the channel keeps its
-charge and its reference count, and the mapping is leaked for process exit to
-reclaim. External finalizers record only whether their view was detached; a
-runtime may run one inside the detach call itself, so the addon marks the view
-released before detaching and clears the mark if the detach fails.
+N-API call that needs either. A channel with no alias says goodbye and drops its
+mapping. A channel that still holds a producer alias, a leased view, or a
+stranded view cannot detach it there: both pools are quarantined, the channel
+keeps its charge and its reference count, and the mapping is leaked until
+process exit, which outlives a worker thread's environment. External
+finalizers record only whether their view was detached; a runtime may run one
+inside the detach call itself, so the addon marks a view released before every
+detach and clears the mark if the detach fails.
 
 ## 8. Wake channels
 
@@ -312,8 +313,16 @@ is exactly the caller's bound; the consumer's is `PayloadLease::body`, whose
 span is exactly the declared body. The native addon aliases those spans as
 external `ArrayBuffer`s and detaches them before commit and before return.
 Concurrent non-atomic JavaScript writes to a span the peer is reading are a
-protocol violation the shape does not cover; the addon's detach-before-publish
-rule is what excludes them.
+protocol violation the shape does not cover. Two rules exclude them: the addon
+detaches every alias before publish and before return, and the runtime refuses
+to transfer a leased buffer to another isolate before that detach (Node refuses
+external buffers itself). Bun 1.3.14 reports no transfer prevention, so there a
+transferred alias escapes detachment and can write only into storage the
+receiver then copies privately and validates, never into a Rust reference. A
+shifted overlapping access, where two accessors partition the same bytes with
+different widths, can only come from a protocol-violating peer in another
+process, outside the Rust abstract machine; its effect is torn bytes in a
+private copy.
 
 ## 11. Ordering promises
 

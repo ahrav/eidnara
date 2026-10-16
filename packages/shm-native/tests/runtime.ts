@@ -9,6 +9,8 @@ import {
     NativeChannel,
     NativeStartupError,
     nativeLeakDiagnostics,
+    nativeTeardownDiagnostics,
+    setReferenceFailpoint,
     type NativeDescriptor,
     type NativeReceiveLease,
     probeCapabilities,
@@ -77,8 +79,10 @@ if (result.available) {
     runNativeLifecycle();
     runReentrantClose();
     await runLateFinalizer();
-    await runEnvironmentExit(false);
-    await runEnvironmentExit(true);
+    runReferenceCreationFailure();
+    await runEnvironmentExit("closed");
+    await runEnvironmentExit("open");
+    await runEnvironmentExit("kept");
 } else {
     assert.ok(result.reason && result.reason.length > 0);
 }
@@ -316,33 +320,61 @@ function runReentrantClose(): void {
     pair.first.close();
 }
 
-/** Views a released lease detached are finalized later by the collector; the finalizer
- * returns nothing and reports no leak, so every block was returned once, by the release. */
+/** A view whose reference creation fails is detached before the error returns: the block
+ * comes back, no reference stays counted, and the finalizer reports no leak on any runtime,
+ * including Bun, which runs the finalizer inside the detach call. */
+function runReferenceCreationFailure(): void {
+    const pair = NativeChannel.createTestPair();
+    const leaks = nativeLeakDiagnostics();
+    const refs = activeExternalRefs();
+    fill(pair.first, 4, 3);
+    setReferenceFailpoint(1);
+    try {
+        assert.throws(
+            () => pair.second.drainOne(() => {}),
+            /external reference creation failpoint/,
+        );
+    } finally {
+        setReferenceFailpoint(0);
+    }
+    assert.equal(activeExternalRefs(), refs);
+    fill(pair.first, 1, 4);
+    receive(pair.second).release();
+    forceGc();
+    assert.equal(nativeLeakDiagnostics(), leaks, "native.reference_creation_failed");
+    pair.first.close();
+    pair.second.close();
+}
+
+/** Views a released lease detached are finalized by the runtime, during the detach (Bun) or
+ * later by the collector (Node); every finalizer reports no leak, and the class refills
+ * exactly once, so no finalizer returned a block. */
 async function runLateFinalizer(): Promise<void> {
     const pair = NativeChannel.createTestPair();
     const leaks = nativeLeakDiagnostics();
     const refs = activeExternalRefs();
+    const finalized = nativeTeardownDiagnostics().finalizedViews;
     const count = pair.smallestClassCount;
-    let collected = 0;
-    const registry = new FinalizationRegistry(() => {
-        collected += 1;
-    });
     (() => {
         for (let index = 0; index < count; index++) {
             fill(pair.first, 1, index);
-            const lease = receive(pair.second);
-            registry.register(lease.segment(0).buffer, index);
-            lease.release();
+            receive(pair.second).release();
         }
     })();
-    for (let attempt = 0; attempt < 100 && collected < count; attempt++) {
+    for (
+        let attempt = 0;
+        attempt < 200 && nativeTeardownDiagnostics().finalizedViews - finalized < count;
+        attempt++
+    ) {
         forceGc();
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(collected, count, "native.late_finalizer_over_released_view");
+    assert.ok(
+        nativeTeardownDiagnostics().finalizedViews - finalized >= count,
+        "native.late_finalizer_over_released_view",
+    );
     assert.equal(nativeLeakDiagnostics(), leaks);
     assert.equal(activeExternalRefs(), refs);
-    // The class fills exactly once more: no finalizer returned a block a second time.
     const held: NativeReceiveLease[] = [];
     for (let index = 0; index < count; index++) {
         fill(pair.first, 1, index);
@@ -354,14 +386,14 @@ async function runLateFinalizer(): Promise<void> {
     pair.second.close();
 }
 
-/** A worker environment that exits while it holds an alias runs the addon's cleanup hook,
- * which makes no N-API call: the channel is quarantined with its reference still counted,
- * and the process and this environment's channels are unaffected. */
-async function runEnvironmentExit(keepAlias: boolean): Promise<void> {
-    const channels = activeNativeChannels();
+/** A worker environment exit runs the addon's cleanup hook, which makes no N-API call that
+ * needs a handle scope: channels without an alias are closed and dropped, and a channel that
+ * still holds an alias is quarantined and leaked with its reference still counted. */
+async function runEnvironmentExit(mode: "closed" | "open" | "kept"): Promise<void> {
     const refs = activeExternalRefs();
+    const before = nativeTeardownDiagnostics();
     const worker = new Worker(new URL("./environment-exit-worker.ts", import.meta.url), {
-        workerData: { keepAlias },
+        workerData: { mode },
     });
     const message = new Promise<{ aliasBytes: number }>((resolve) => {
         worker.once("message", resolve);
@@ -371,14 +403,18 @@ async function runEnvironmentExit(keepAlias: boolean): Promise<void> {
     });
     assert.equal((await message).aliasBytes, 5);
     assert.equal(await exit, 0);
-    assert.equal(activeNativeChannels(), channels);
-    if (keepAlias) {
-        assert.equal(
-            activeExternalRefs(),
-            refs + 1,
-            "native.environment_exit_with_aliases",
-        );
-    } else {
+    const after = nativeTeardownDiagnostics();
+    assert.equal(after.cleanupRuns - before.cleanupRuns, 1, `${mode}: the cleanup hook ran`);
+    const closed = after.closedChannels - before.closedChannels;
+    const quarantined = after.quarantinedChannels - before.quarantinedChannels;
+    if (mode === "closed") {
+        assert.deepEqual([closed, quarantined], [0, 0]);
         assert.equal(activeExternalRefs(), refs);
+    } else if (mode === "open") {
+        assert.deepEqual([closed, quarantined], [2, 0]);
+        assert.equal(activeExternalRefs(), refs);
+    } else {
+        assert.deepEqual([closed, quarantined], [1, 1], "native.environment_exit_with_aliases");
+        assert.equal(activeExternalRefs(), refs + 1);
     }
 }

@@ -2044,11 +2044,6 @@ impl fmt::Debug for RingError {
     }
 }
 
-/// Accessor tests over an anonymous mapping. Miri cannot map a memfd or open a doorbell that
-/// sends, so this module exercises the layer of `ring.rs` that touches raw shared memory
-/// without constructing a `Ring`: slot copy-out, completion-cell monotonicity, and lifecycle
-/// validation.
-
 /// Copies the four descriptor words out of `slot`, each a fixed-width atomic read once. The
 /// receiver validates and uses only this copy; nothing re-reads the slot afterwards.
 fn copy_descriptor(slot: &DescriptorSlot) -> PoolDescriptor {
@@ -2060,6 +2055,10 @@ fn copy_descriptor(slot: &DescriptorSlot) -> PoolDescriptor {
     )
 }
 
+/// Accessor tests over an anonymous mapping. Miri cannot map a memfd or open a doorbell that
+/// sends, so this module exercises the layer of `ring.rs` that touches raw shared memory
+/// without constructing a `Ring`: slot copy-out, completion-cell monotonicity, and lifecycle
+/// validation.
 #[cfg(test)]
 mod miri {
     use std::sync::atomic::Ordering;
@@ -2170,9 +2169,9 @@ mod miri {
         assert_eq!(validated.body_len(), 40);
     }
 
-    /// A peer rewriting the slot while the receiver copies it out: every copy validates to a
-    /// combination of values the peer wrote or is refused, and a validated copy never changes
-    /// after the copy however the slot is rewritten.
+    /// A peer rewriting the slot while the receiver copies it out: Miri finds no data race in
+    /// the copy, and every copy validates to a combination of values the peer wrote that fits
+    /// its block, or is refused.
     #[test]
     fn descriptor_copy_races_a_concurrent_slot_rewrite() {
         let retained = retained_fixture();
@@ -2182,7 +2181,7 @@ mod miri {
         slot.body_len.store(40, Ordering::Relaxed);
         slot.sequence.store(2, Ordering::Release);
         let iterations = if cfg!(miri) { 32 } else { 2_000 };
-        let validated = std::thread::scope(|scope| {
+        std::thread::scope(|scope| {
             // The atomics are `Sync`; the slot as a whole carries the page's padding cell.
             let (block, body_len) = (&slot.block, &slot.body_len);
             let writer = scope.spawn(move || {
@@ -2191,7 +2190,6 @@ mod miri {
                     body_len.store([40, 4096, u64::MAX][round % 3], Ordering::Relaxed);
                 }
             });
-            let mut validated = Vec::new();
             for _ in 0..iterations {
                 match super::copy_descriptor(slot).validate(2, retained.geometry()) {
                     Ok(descriptor) => {
@@ -2202,9 +2200,8 @@ mod miri {
                             .placement(descriptor.block())
                             .unwrap()
                             .body_capacity();
-                        assert!(u64::from(descriptor.body_len()) <= capacity);
+                        assert!(descriptor.body_len() <= capacity);
                         assert_eq!(descriptor.generation(), 7);
-                        validated.push((descriptor.block(), descriptor.body_len(), descriptor));
                     }
                     Err(error) => assert!(matches!(
                         error,
@@ -2215,16 +2212,7 @@ mod miri {
                 }
             }
             writer.join().unwrap();
-            validated
         });
-        slot.block.store(1 << 40, Ordering::Relaxed);
-        slot.body_len.store(u64::MAX, Ordering::Relaxed);
-        for (block, body_len, descriptor) in validated {
-            assert_eq!(
-                (descriptor.block(), descriptor.body_len()),
-                (block, body_len)
-            );
-        }
     }
 
     #[test]

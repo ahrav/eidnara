@@ -1055,11 +1055,9 @@ pub async fn dispatch_request<H: HostHandler>(
                 Ok(frame.into_private())
             }
         } else {
-            #[cfg(feature = "test-support")]
             let body_len = header.len;
             ledgers
                 .run_blocking(move || {
-                    #[cfg(feature = "test-support")]
                     crate::inbound_copy_gate::pass(body_len);
                     frame.into_private()
                 })

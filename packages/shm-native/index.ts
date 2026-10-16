@@ -41,7 +41,9 @@ export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
         buildTarget: native.buildTarget(),
         napiVersion: native.napiVersion(),
         qualifiedTestProfile: native.qualifiedTestProfile(),
-        sourceDigest: native.sourceDigest(),
+        // An addon built before the digest existed reports none, so the stale-build check
+        // fails with its rebuild hint instead of a missing-export error.
+        sourceDigest: native.sourceDigest?.() ?? "none",
     };
 }
 
@@ -152,7 +154,7 @@ interface NativeAddon {
     buildProfile(): string;
     buildTarget(): string;
     qualifiedTestProfile(): string;
-    sourceDigest(): string;
+    sourceDigest?(): string;
     estimateTokens?: (text: string) => number;
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
@@ -163,6 +165,8 @@ interface NativeAddon {
     setExternalViewFailpoint(call: number): void;
     setDetachFailpoint(call: number): void;
     setDeleteFailpoint(call: number): void;
+    setReferenceFailpoint(call: number): void;
+    teardownDiagnostics(): number[];
     workerLimit(): number;
     activeChannelCount(): number;
     attach(descriptor: NativeDescriptor): number;
@@ -1085,6 +1089,29 @@ export function setDetachFailpoint(call: number): void {
 /** Test hook: the `call`th reference deletion from now fails; `0` disarms. */
 export function setDeleteFailpoint(call: number): void {
     addon()?.setDeleteFailpoint(call);
+}
+
+/** Test hook: the `call`th external reference creation from now fails; `0` disarms. */
+export function setReferenceFailpoint(call: number): void {
+    addon()?.setReferenceFailpoint(call);
+}
+
+/** Process-wide counts of environment teardown and view finalization, for witnesses. */
+export interface NativeTeardownDiagnostics {
+    /** Environment cleanup hook runs. */
+    cleanupRuns: number;
+    /** Alias-free channels a cleanup hook closed and dropped. */
+    closedChannels: number;
+    /** Alias-holding channels a cleanup hook quarantined and leaked until process exit. */
+    quarantinedChannels: number;
+    /** Borrowed external views whose finalizer has run. */
+    finalizedViews: number;
+}
+
+export function nativeTeardownDiagnostics(): NativeTeardownDiagnostics {
+    const [cleanupRuns = 0, closedChannels = 0, quarantinedChannels = 0, finalizedViews = 0] =
+        addon()?.teardownDiagnostics() ?? [];
+    return { cleanupRuns, closedChannels, quarantinedChannels, finalizedViews };
 }
 
 export function activeNativeChannels(): number {

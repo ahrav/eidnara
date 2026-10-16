@@ -11,6 +11,7 @@ use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
@@ -110,6 +111,14 @@ struct Channel {
 /// them.
 static ACTIVE_GRANTS: Mutex<BTreeSet<Vec<u8>>> = Mutex::new(BTreeSet::new());
 
+/// Environment cleanup hook runs, process-wide.
+static CLEANUP_RUNS: AtomicU64 = AtomicU64::new(0);
+/// Alias-free channels the cleanup hook closed and dropped.
+static CLEANUP_CLOSED_CHANNELS: AtomicU64 = AtomicU64::new(0);
+/// Alias-holding channels the cleanup hook quarantined and leaked with their mapping. The
+/// mapping and its charge persist until process exit, also after a worker thread ends.
+static CLEANUP_QUARANTINED_CHANNELS: AtomicU64 = AtomicU64::new(0);
+
 struct GrantReservation {
     grants: [Vec<u8>; 2],
 }
@@ -129,6 +138,14 @@ impl GrantReservation {
         Ok(Self {
             grants: [first, second],
         })
+    }
+}
+
+impl Channel {
+    /// Whether a JavaScript view of this channel's storage may still be attached: such a
+    /// channel keeps its entry and its mapping until every alias is detached.
+    fn holds_aliases(&self) -> bool {
+        !(self.producers.is_empty() && self.active.is_empty() && self.stranded.is_empty())
     }
 }
 
@@ -473,11 +490,12 @@ fn allocate_token<T>(next: &mut u32, in_use: &HashMap<u32, T>) -> Option<u32> {
 }
 
 /// Runs while the environment is torn down, when JavaScript cannot run and no handle scope
-/// is open, so it makes no N-API call. An alias-free channel says goodbye and drops its
-/// mapping. A channel that still holds an alias cannot detach it here: it is quarantined,
-/// keeps its charge, and is leaked with its mapping, because process exit owns reclamation
-/// of storage a view may still reach.
+/// is open, so it makes no N-API call that needs either. An alias-free channel says goodbye
+/// and drops its mapping. A channel that still holds an alias cannot detach it here: it is
+/// quarantined, keeps its charge, and is leaked with its mapping until process exit, which
+/// outlives a worker thread's environment.
 fn cleanup_env(_raw_env: usize) {
+    CLEANUP_RUNS.fetch_add(1, Ordering::Relaxed);
     REGISTRY.with(|registry| {
         if let Ok(mut registry) = registry.try_borrow_mut() {
             if let Some(mut reactor) = registry.reactor.take() {
@@ -489,13 +507,13 @@ fn cleanup_env(_raw_env: usize) {
                 if let Some(mut setup) = channel.setup.take() {
                     setup::goodbye(&mut setup);
                 }
-                let holds_aliases = !(channel.producers.is_empty()
-                    && channel.active.is_empty()
-                    && channel.stranded.is_empty());
-                if holds_aliases {
+                if channel.holds_aliases() {
                     channel.to_host.enter_quarantine();
                     channel.from_host.enter_quarantine();
+                    CLEANUP_QUARANTINED_CHANNELS.fetch_add(1, Ordering::Relaxed);
                     std::mem::forget(channel);
+                } else {
+                    CLEANUP_CLOSED_CHANNELS.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -660,6 +678,25 @@ pub fn set_detach_failpoint(call: u32) {
 #[napi]
 pub fn set_delete_failpoint(call: u32) {
     napi_buffers::set_delete_failpoint(call);
+}
+
+/// Makes the `call`th external reference creation from now fail; `0` disarms.
+#[napi]
+pub fn set_reference_failpoint(call: u32) {
+    napi_buffers::set_reference_failpoint(call);
+}
+
+/// Process-wide teardown counts: `[cleanup hook runs, alias-free channels the hook closed,
+/// alias-holding channels the hook quarantined and leaked, borrowed views finalized]`.
+#[napi]
+pub fn teardown_diagnostics() -> Vec<u32> {
+    let clamp = |value: u64| value.min(u64::from(u32::MAX)) as u32;
+    vec![
+        clamp(CLEANUP_RUNS.load(Ordering::Relaxed)),
+        clamp(CLEANUP_CLOSED_CHANNELS.load(Ordering::Relaxed)),
+        clamp(CLEANUP_QUARANTINED_CHANNELS.load(Ordering::Relaxed)),
+        clamp(napi_buffers::finalized_views()),
+    ]
 }
 
 #[napi]
@@ -1826,9 +1863,10 @@ pub fn close(env: &Env, channel_id: u32) -> Result<()> {
 }
 
 fn finish_close(registry: &mut Registry, channel_id: u32, result: Result<()>) -> Result<()> {
-    let retained = registry.channels.get(&channel_id).is_some_and(|channel| {
-        !(channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty())
-    });
+    let retained = registry
+        .channels
+        .get(&channel_id)
+        .is_some_and(Channel::holds_aliases);
     if retained {
         return result;
     }

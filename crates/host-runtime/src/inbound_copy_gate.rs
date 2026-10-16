@@ -8,7 +8,6 @@
 
 use std::sync::{Condvar, Mutex, PoisonError};
 
-#[derive(Default)]
 struct State {
     held_len: Option<u32>,
     started: usize,
@@ -25,9 +24,17 @@ static CHANGED: Condvar = Condvar::new();
 /// Holds every inbound copy of a `len`-byte body until [`InboundCopyHold::release`] or drop.
 pub struct InboundCopyHold(());
 
-/// Starts holding copies of `len`-byte request bodies.
+/// Starts holding copies of `len`-byte request bodies. One hold may be active per process.
+///
+/// # Panics
+///
+/// Panics when another hold is active.
 pub fn hold_inbound_copies_of_len(len: u32) -> InboundCopyHold {
     let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+    assert!(
+        state.held_len.is_none(),
+        "another inbound copy hold is active"
+    );
     *state = State {
         held_len: Some(len),
         started: 0,

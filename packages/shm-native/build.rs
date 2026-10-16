@@ -7,26 +7,32 @@
 
 use std::path::{Path, PathBuf};
 
-/// Workspace-relative inputs of the addon's own code: directories are walked recursively.
+/// Workspace-relative inputs that shape the addon's code: the addon and the two workspace
+/// crates it links, their build scripts and the tokenizer's embedded assets, and the
+/// workspace manifest, lockfile, toolchain, and Cargo configuration. Directories are walked
+/// recursively. `tests/source-digest.ts` reads this list from this file.
 const SOURCE_INPUTS: &[&str] = &[
+    ".cargo/config.toml",
     "Cargo.lock",
+    "Cargo.toml",
     "crates/shm-transport/Cargo.toml",
     "crates/shm-transport/src",
     "crates/tokenizer/Cargo.toml",
+    "crates/tokenizer/assets",
+    "crates/tokenizer/build.rs",
     "crates/tokenizer/src",
     "packages/shm-native/Cargo.toml",
     "packages/shm-native/build.rs",
     "packages/shm-native/src",
+    "rust-toolchain.toml",
 ];
 
 fn collect(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) {
     let path = root.join(relative);
     if path.is_dir() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
+        let entries = std::fs::read_dir(&path)
             .expect("source directory is readable")
-            .map(|entry| relative.join(entry.expect("source entry is readable").file_name()))
-            .collect();
-        entries.sort();
+            .map(|entry| relative.join(entry.expect("source entry is readable").file_name()));
         for entry in entries {
             collect(root, &entry, files);
         }

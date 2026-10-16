@@ -4,18 +4,14 @@ import { join } from "node:path";
 /**
  * Recomputes the digest `build.rs` stamps into the addon: FNV-1a (32-bit) over every listed
  * input, walked in sorted workspace-relative path order, hashing each path, a NUL, its bytes,
- * and a NUL. Keep the input list identical to `SOURCE_INPUTS` in `build.rs`.
+ * and a NUL. The input list is read from `build.rs` itself, so the two cannot drift.
  */
-const SOURCE_INPUTS = [
-    "Cargo.lock",
-    "crates/shm-transport/Cargo.toml",
-    "crates/shm-transport/src",
-    "crates/tokenizer/Cargo.toml",
-    "crates/tokenizer/src",
-    "packages/shm-native/Cargo.toml",
-    "packages/shm-native/build.rs",
-    "packages/shm-native/src",
-];
+function sourceInputs(root: string): string[] {
+    const script = readFileSync(join(root, "packages/shm-native/build.rs"), "utf8");
+    const list = /const SOURCE_INPUTS: &\[&str\] = &\[([^\]]*)\];/.exec(script)?.[1];
+    if (list === undefined) throw new Error("build.rs declares no SOURCE_INPUTS list");
+    return [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
+}
 
 function collect(root: string, relative: string, files: string[]): void {
     const path = join(root, relative);
@@ -39,10 +35,9 @@ function fnv1a(hash: number, bytes: Uint8Array): number {
 
 export function checkoutSourceDigest(root: string): string {
     const files: string[] = [];
-    for (const input of SOURCE_INPUTS) collect(root, input, files);
-    // Rust sorts paths component-wise; with these inputs a byte-wise sort of the joined
-    // strings orders them the same way.
-    files.sort((left, right) => compareComponents(left, right));
+    for (const input of sourceInputs(root)) collect(root, input, files);
+    // Matches Rust's component-wise `Path` ordering.
+    files.sort(compareComponents);
     const nul = new Uint8Array([0]);
     let hash = 0x811c_9dc5;
     for (const file of files) {

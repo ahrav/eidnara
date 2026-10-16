@@ -45,3 +45,12 @@ Check semantics: `always` - `rg` over `crates/shm-transport/src` finds no `slice
   witness constructs and what it leaves unconstructed.
 - Missing evidence: safe-over-unsafe then unsafe-review for the shifted-overlap and JavaScript-writer exclusions.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised`, the code they drive, and the
+  handoff review reports.
+- Findings: Section 10 of the protocol now names both JavaScript-writer exclusions, the runtime's transfer prevention beside detach-before-publish, and bounds Bun 1.3.14's `none` to torn bytes in a private copy; it scopes a shifted overlap to a protocol-violating peer in another process. The unsafe-review and safe-over-unsafe handoff returned SAFETY: APPROVED-BOUNDARY with that wording as its condition.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.
+
