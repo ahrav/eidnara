@@ -26,7 +26,7 @@ export const PLUGIN_PASS_LOG_TIMING: RustPassCursorTiming = {
  * returns can omit that prompt's lines. Waiting `flushIntervalMs + settleMarginMs` before the
  * read puts every line a completed prompt produced, including a retry's repeat, in the result.
  */
-export async function settledRustPasses(
+async function settledRustPasses(
     log: RustPassLog,
     timing: RustPassCursorTiming = PLUGIN_PASS_LOG_TIMING,
 ): Promise<RustPassLine[]> {
@@ -74,5 +74,17 @@ export class RustPassCursor {
         );
         this.seen = lines.length;
         return lines;
+    }
+
+    /**
+     * Returns the lines a completed step produced, read after the flush window. A count wait
+     * can return before a reconnect retry's repeat reaches the file, leaving that line to
+     * satisfy the next step's wait; the settled read ties every line to the step that made it.
+     */
+    async settledStep(): Promise<RustPassLine[]> {
+        const passes = await settledRustPasses(this.log, this.timing);
+        const step = passes.slice(this.seen);
+        this.seen = passes.length;
+        return step;
     }
 }

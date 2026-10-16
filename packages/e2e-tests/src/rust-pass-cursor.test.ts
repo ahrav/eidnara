@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { parseRustPassLine, type RustPassLine } from "./rust-harness";
-import { RustPassCursor, type RustPassLog, settledRustPasses } from "./rust-pass-cursor";
+import { RustPassCursor, type RustPassLog } from "./rust-pass-cursor";
 
 function bufferedPassLog(): RustPassLog & {
     write(decision: string, inputCount?: number): void;
@@ -76,14 +76,20 @@ describe("RustPassCursor", () => {
         await expect(cursor.next(1, { timeoutMs: 50 })).rejects.toThrow(/>= 1 rust passes/);
     });
 
-    it("a settled read includes a prompt's buffered pass when a retry's extra line already met the count", async () => {
+    it("a step's read keeps its retry's buffered repeat out of the next step's wait", async () => {
         const log = bufferedPassLog();
-        // Six prompts returned; prompt 1 retried once, so six lines are visible while prompt 6's pass is still buffered.
-        for (const inputCount of [1, 1, 2, 3, 4, 5]) log.write("HARD", inputCount);
+        const cursor = await RustPassCursor.settle(log, TIMING);
+        log.write("HARD", 1);
         log.flushNow();
-        log.write("HARD", 6);
+        // The reconnect retry repeats prompt 1's pass; its line is still buffered when the prompt returns.
+        log.write("HARD", 1);
         log.flushAfter(20);
-        const passes = await settledRustPasses(log, TIMING);
-        expect(passes.map((pass) => pass.inputCount)).toEqual([1, 1, 2, 3, 4, 5, 6]);
+        const first = await cursor.settledStep();
+        expect(first.map((pass) => pass.inputCount)).toEqual([1, 1]);
+
+        log.write("HARD", 2);
+        log.flushAfter(20);
+        const second = await cursor.settledStep();
+        expect(second.map((pass) => pass.inputCount)).toEqual([2]);
     });
 });

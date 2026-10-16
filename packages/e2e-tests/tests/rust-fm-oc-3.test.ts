@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { RustTestHarness } from "../src/rust-harness";
-import { settledRustPasses } from "../src/rust-pass-cursor";
+import { type RustPassLine, RustTestHarness } from "../src/rust-harness";
+import { RustPassCursor } from "../src/rust-pass-cursor";
 import {
     assertLoudModuleFailure,
     assertMessagesHaveNoPlaceholders,
@@ -48,9 +48,9 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
         assertLoudModuleFailure(h, sessionId);
 
         await h.host.restartHost();
-        // The last outage pass may still sit in the logger buffer; a settled read keeps it out of the recovery window.
-        const settledOutage = await settledRustPasses(h);
-        const recoveryStart = settledOutage.length;
+        // The settled baseline keeps a buffered outage pass out of the recovery window.
+        const passCursor = await RustPassCursor.settle(h);
+        const recovery: RustPassLine[] = [];
         for (let i = 1; i <= RECOVERY_PASSES; i += 1) {
             h.mock.setDefault({
                 text: `FM-OC-3 recovery assistant ${i}`,
@@ -61,22 +61,15 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
                 },
             });
             await h.sendPrompt(sessionId, `FM-OC-3 recovery turn ${i}: ${h.ballast(400)}`);
+            // A prompt's pass lines are produced before it returns, so the settled read ties each
+            // of them to this turn: every turn logs one pass, a reconnect retry repeats it once,
+            // and a turn served unchanged without a pass cannot hide behind another turn's retry.
+            const turn = await passCursor.settledStep();
+            expect(turn.length, `recovery turn ${i} logged a pass`).toBeGreaterThanOrEqual(1);
+            expect(turn.length, `recovery turn ${i} retried at most once`).toBeLessThanOrEqual(2);
+            recovery.push(...turn);
         }
 
-        // Every recovery prompt has returned, so each pass line it produced is written or buffered.
-        // A settled read takes all of them: a count wait could end on a retry's extra line while
-        // the final prompt's pass, and with it a late raw fallback, was still in the buffer.
-        const recovery = (await settledRustPasses(h)).slice(recoveryStart);
-        expect(recovery.length).toBeGreaterThanOrEqual(RECOVERY_PASSES);
-        // A reconnect retry repeats the pass for the prompt it retries, so the ceiling counts
-        // prompts: passes group by the input they served, one group per prompt, and at most
-        // one retry joins each.
-        const passesPerPrompt = new Map<number, number>();
-        for (const pass of recovery) {
-            passesPerPrompt.set(pass.inputCount, (passesPerPrompt.get(pass.inputCount) ?? 0) + 1);
-        }
-        expect(passesPerPrompt.size).toBeLessThanOrEqual(RECOVERY_PASSES);
-        for (const count of passesPerPrompt.values()) expect(count).toBeLessThanOrEqual(2);
         const firstRecovered = recovery.findIndex((pass) => pass.servedFrom === "transform");
         expect(firstRecovered).toBeGreaterThanOrEqual(0);
         // Self-healing holds only if no pass falls back to raw after the transform first serves one.
