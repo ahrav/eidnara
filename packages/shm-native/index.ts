@@ -193,7 +193,7 @@ interface NativeAddon {
         header: Uint8Array,
         body: Uint8Array,
         beforePublish: () => void,
-    ): void;
+    ): boolean;
     reserve(
         channel: number,
         capacity: number,
@@ -925,7 +925,8 @@ export class NativeChannel {
      *
      * `bytes`, when it holds exactly `capacity` bytes over a private `ArrayBuffer` and
      * `capacity` is at most `ADDON_COPY_MAX_BYTES`, is the frame body: the addon copies it into
-     * the reservation and `fill` does not run.
+     * the reservation and `fill` does not run. A body the addon finds inside a live shared
+     * mapping publishes through `fill`.
      */
     produce(
         header: Uint8Array,
@@ -940,14 +941,14 @@ export class NativeChannel {
             bytes !== undefined &&
             capacity <= ADDON_COPY_MAX_BYTES &&
             bytes.byteLength === capacity &&
-            privatelyBacked(bytes)
-        ) {
+            privatelyBacked(bytes) &&
             this.native.produceBytes(
                 this.id,
                 privateBytes(header),
                 bytes,
                 beforePublish ?? (() => {}),
-            );
+            )
+        ) {
             return;
         }
         this.native.produce(

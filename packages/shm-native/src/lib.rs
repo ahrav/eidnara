@@ -1197,10 +1197,8 @@ pub fn produce(
     })
 }
 
-/// Publishes `body`, a `Uint8Array` over an unshared `ArrayBuffer`, as one frame. The addon
-/// copies the bytes into the reservation through `ProducerReservation::write`, so the
-/// reservation owns an independent copy of `body`; `before_publish` runs after the copy and
-/// before the commit.
+/// Publishes `body`, a `Uint8Array` over an unshared `ArrayBuffer`, as one frame. Returns
+/// `false` before reserving a frame when `UnsharedBytes::of` returns `None`.
 #[napi]
 pub fn produce_bytes(
     env: &Env,
@@ -1208,12 +1206,14 @@ pub fn produce_bytes(
     header: Buffer,
     body: Unknown<'_>,
     before_publish: Function<(), ()>,
-) -> Result<()> {
+) -> Result<bool> {
     let header: [u8; WIRE_HEADER_BYTES] = header
         .as_ref()
         .try_into()
         .map_err(|_| error("wire header has invalid length"))?;
-    let body = napi_buffers::UnsharedBytes::of(env, body)?;
+    let Some(body) = napi_buffers::UnsharedBytes::of(env, body)? else {
+        return Ok(false);
+    };
     let body_len = body.len();
     REGISTRY.with(|registry| {
         let mut registry = registry
@@ -1242,7 +1242,7 @@ pub fn produce_bytes(
         reservation
             .commit(body_len)
             .map_err(|_| error("producer underfill or invalid commit"))?;
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -1642,12 +1642,10 @@ pub fn readiness_handled() -> bool {
             };
             let progressed = channel.next_lease != channel.dispatched_lease;
             channel.dispatched_lease = channel.next_lease;
-            // `poll` armed the drained ring and consumed its doorbell token, so only data
-            // published since then needs a dispatch; its doorbell edge already fired.
             if channel.data_armed {
                 match channel.from_host.has_data() {
-                    Ok(false) => {}
-                    Ok(true) => reactor.mark_ready(channel_id),
+                    Ok(true) if progressed => reactor.mark_ready(channel_id),
+                    Ok(_) => {}
                     Err(_) => reactor.unregister(channel_id),
                 }
                 continue;

@@ -3339,6 +3339,22 @@ mod tests {
         assert!(inventory.classes.iter().all(|class| class.free == 0));
     }
 
+    #[test]
+    fn a_live_ring_mapping_is_reported_as_shared_memory() {
+        use crate::backend::retained::overlaps_live_shared_mapping;
+        let (producer, consumer) = pair(tiny_geometry());
+        for ring in [&producer, &consumer] {
+            let body = ring.retained().body_ptr(0, 1).unwrap();
+            assert!(overlaps_live_shared_mapping(body, 1));
+            assert!(overlaps_live_shared_mapping(body.wrapping_sub(1), 2));
+        }
+        let private = [0u8; 64];
+        assert!(!overlaps_live_shared_mapping(
+            private.as_ptr(),
+            private.len()
+        ));
+    }
+
     /// `has_data` follows the shared cursors through publication and receipt without touching
     /// a doorbell, and a quarantined ring reports `Quarantined`.
     #[test]

@@ -115,7 +115,7 @@ interface RawAttachAddon {
         header: Uint8Array,
         body: unknown,
         beforePublish: () => void,
-    ): void;
+    ): boolean;
     watch(channel: number, callback: () => void): void;
     readinessHandled(): boolean;
     release(channel: number, token: number): void;
@@ -284,6 +284,68 @@ describe("readiness dispatch", () => {
             first.second.close();
             second.first.close();
             second.second.close();
+        }
+    });
+
+    test("a dropped handler on a drained, armed channel earns no further dispatch", async () => {
+        if (!probeCapabilities().available) return;
+        const header = new Uint8Array(20);
+        const view = new DataView(header.buffer);
+        view.setUint32(0, 0, true);
+        view.setUint8(4, 3);
+        view.setUint16(6, 1, true);
+        view.setUint32(8, 1, true);
+        const armed = NativeChannel.createTestPair();
+        const observer = NativeChannel.createTestPair();
+        let armedCalls = 0;
+        let dropped = 0;
+        let observerCalls = 0;
+        const delivered: number[] = [];
+        const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+        armed.second.startReadiness(
+            () => {
+                armedCalls += 1;
+                if (armedCalls === 1) {
+                    while (armed.second.drainOne((lease) => lease.release())) {}
+                    return;
+                }
+                throw new Error("handler fails before polling");
+            },
+            () => {
+                dropped += 1;
+            },
+        );
+        observer.second.startReadiness(() => {
+            observerCalls += 1;
+        });
+        try {
+            armed.first.produce(header, 0, () => {});
+            const firstDeadline = Date.now() + 1_000;
+            while (armedCalls < 1 && Date.now() < firstDeadline) await sleep(1);
+            expect(armedCalls).toBe(1);
+            armed.first.produce(header, 0, () => {});
+            const dropDeadline = Date.now() + 1_000;
+            while (dropped < 1 && Date.now() < dropDeadline) await sleep(1);
+            expect(dropped).toBe(1);
+            const settled = observerCalls;
+            await sleep(100);
+            expect(observerCalls - settled).toBeLessThanOrEqual(2);
+            armed.second.startReadiness(() => {
+                while (
+                    armed.second.drainOne((lease) => {
+                        delivered.push(lease.byteLength);
+                        lease.release();
+                    })
+                ) {}
+            });
+            const redeliveryDeadline = Date.now() + 1_000;
+            while (delivered.length < 1 && Date.now() < redeliveryDeadline) await sleep(1);
+            expect(delivered).toEqual([0]);
+        } finally {
+            armed.first.close();
+            armed.second.close();
+            observer.first.close();
+            observer.second.close();
         }
     });
 
@@ -1407,6 +1469,51 @@ describe("addon-copied producer bodies", () => {
                     lease.release();
                 }),
             ).toBe(true);
+            expect(fills).toBe(1);
+            expect(receivedBytes(pair.first)).toEqual([...original]);
+        } finally {
+            pair.first.close();
+            pair.second.close();
+        }
+    });
+
+    test("a segment alias transferred to a fresh ArrayBuffer publishes through fill", () => {
+        if (!probeCapabilities().available) return;
+        const pair = NativeChannel.createTestPair();
+        try {
+            const original = patternedBody(13);
+            pair.first.produce(responseHeader(13), 13, (cursor) => cursor.write(original));
+            let fills = 0;
+            let transferred = false;
+            expect(
+                pair.second.drainOne((lease) => {
+                    const segment = lease.segment(0);
+                    let moved: ArrayBuffer;
+                    try {
+                        moved = structuredClone(segment.buffer, {
+                            transfer: [segment.buffer],
+                        }) as ArrayBuffer;
+                    } catch {
+                        lease.release();
+                        return;
+                    }
+                    transferred = true;
+                    const alias = new Uint8Array(moved);
+                    expect([...alias]).toEqual([...original]);
+                    pair.second.produce(
+                        responseHeader(13),
+                        13,
+                        (cursor) => {
+                            fills += 1;
+                            cursor.write(alias);
+                        },
+                        undefined,
+                        alias,
+                    );
+                    lease.release();
+                }),
+            ).toBe(true);
+            if (!transferred) return;
             expect(fills).toBe(1);
             expect(receivedBytes(pair.first)).toEqual([...original]);
         } finally {

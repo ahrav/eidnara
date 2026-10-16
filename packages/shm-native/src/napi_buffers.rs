@@ -376,7 +376,9 @@ pub(crate) struct UnsharedBytes {
 }
 
 impl UnsharedBytes {
-    pub(crate) fn of(env: &Env, value: Unknown<'_>) -> Result<Self> {
+    /// `None` when any byte of the body lies in a live shared mapping, which a peer may write
+    /// while Rust reads it.
+    pub(crate) fn of(env: &Env, value: Unknown<'_>) -> Result<Option<Self>> {
         let mut kind = 0;
         let mut len = 0;
         let mut data = std::ptr::null_mut();
@@ -412,10 +414,11 @@ impl UnsharedBytes {
                 "body must not share its backing",
             ));
         }
-        Ok(Self {
-            data: data.cast_const().cast(),
-            len,
-        })
+        let data: *const u8 = data.cast_const().cast();
+        if shm_transport::backend::retained::overlaps_live_shared_mapping(data, len) {
+            return Ok(None);
+        }
+        Ok(Some(Self { data, len }))
     }
 
     pub(crate) const fn len(&self) -> usize {
@@ -430,7 +433,8 @@ impl UnsharedBytes {
             return &[];
         }
         // SAFETY: `napi_get_typedarray_info` reported `len` readable bytes at `data` in an
-        // unshared backing, and the caller keeps JavaScript from running while the slice lives.
+        // unshared backing outside every live shared mapping, and the caller keeps JavaScript
+        // from running while the slice lives.
         unsafe { std::slice::from_raw_parts(self.data, self.len) }
     }
 }
