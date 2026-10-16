@@ -117,18 +117,24 @@ paused clock; it is not flaky by construction but is slow.
 
 ### Q: Rewrite or drop the ignored `boundary_waiters` test for the ring cap?
 
-- Sources examined: `tests/local_embeddings_protocol.rs:378-468`;
-  `src/ring_transport.rs:57-66`; the record's `Confidence` line.
-- Findings: the test is ignored with the ring-cap reason (`:412-414`). Its
-  subject is `max_waiting_queries` (`WAITER_BOUNDARY`, `:385`) and the query
+This entry describes the tree before the single-ring rewrite. Its line
+references are pinned to revision `d633e0010` and do not resolve at HEAD;
+the entry below supersedes it.
+
+- Sources examined: `tests/local_embeddings_protocol.rs:425-493` at
+  `d633e0010`; `src/ring_transport.rs:68` at `d633e0010`; the record's
+  `Confidence` line.
+- Findings: the test is ignored with the ring-cap reason (`:490-492`). Its
+  subject is `max_waiting_queries` (`WAITER_BOUNDARY`, `:435`) and the query
   admission semaphore, not the job table's count or byte caps. The adjacent
-  non-ignored test at `:387-409` covers the configuration boundary for
+  non-ignored test at `:437-488` covers the configuration boundary for
   waiters. Whether a multiplexed single-ring rewrite is feasible depends on
   whether one client can hold 33 concurrent in-flight queries.
 - Missing evidence: a decision on whether the waiter runtime path needs a
   host-level test at all, given the configuration-time check.
 - Conclusion: needs human input. The catalog's `Confidence` line attributes
-  the test to `local_embeddings_jobs.rs`; it lives in `local_embeddings_protocol.rs:415`.
+  the test to `local_embeddings_jobs.rs`; it lives in
+  `local_embeddings_protocol.rs:493` at `d633e0010`.
   Superseded by the single-ring entry below.
 
 ### Q: Is the waiter boundary test runnable under the ring cap? (after the single-ring rewrite)
