@@ -19,12 +19,12 @@ use super::review_staging::bound_review_row_in;
 use super::{
     AdmissionDecision, AdmissionEvent, AdmissionRequest, ArtifactDestination, CachedSql,
     CanonicalTarget, DecisionPayload, DecisionSpec, EligibilityCandidate, EligibilityVerdict,
-    EventKind, KernelError, KernelStore, MemoryReviewerHoldBinding, MemoryReviewerHoldError,
-    MemoryReviewerHoldRefusal, ObjectState, ObservationPayload, ProjectScope, ProposalAction,
-    ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner, ReviewPayload, ReviewProposal,
-    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStagedReference, Sensitivity,
-    SourceClass, SourceDescriptorDetail, TaintClass, current_time_ms, map_sqlite,
-    provisional_result_identity,
+    EventKind, HeldEvidence, KernelError, KernelStore, MemoryReviewerHoldBinding,
+    MemoryReviewerHoldError, MemoryReviewerHoldRefusal, ObjectState, ObservationPayload,
+    ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner,
+    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal,
+    ReviewStagedReference, Sensitivity, SourceClass, SourceDescriptorDetail, TaintClass,
+    current_time_ms, map_sqlite, provisional_result_identity,
 };
 use crate::scope::load_scope_terms;
 use crate::source_identity::{OccurrenceClass, identity_digest};
@@ -418,19 +418,34 @@ fn apply(
     settlement_key: &CommitIntent,
     settlement: &RedactedIntent,
 ) -> Result<(Settlement, String), AcceptanceError> {
-    let validated = validate(envelope, acceptance)?;
+    let mut judged = Vec::new();
+    let validated = validate(envelope, acceptance, &mut judged)?;
     let proposal = &validated.proposal;
-    let effect = match (proposal.action, &proposal.target) {
-        (ProposalAction::Retain | ProposalAction::NoChange, ProposalTarget::Memory(target)) => {
-            target_stands(envelope, &validated.project, target)?;
-            SettlementEffect::Unchanged
-        }
-        (ProposalAction::NoChange, ProposalTarget::StagedCandidate { candidate_id }) => {
+    // Every check reads before any write: the target or subject stands, then one eligibility judgement covers the target and every descriptor member.
+    let predecessor = match (proposal.action, &proposal.target) {
+        (
+            ProposalAction::Retain
+            | ProposalAction::NoChange
+            | ProposalAction::Retire
+            | ProposalAction::Revise,
+            ProposalTarget::Memory(target),
+        ) => Some(target_stands(envelope, target, &mut judged)?),
+        (
+            ProposalAction::NoChange | ProposalAction::Create,
+            ProposalTarget::StagedCandidate { candidate_id },
+        ) => {
             subject_stands(envelope, acceptance, candidate_id)?;
-            SettlementEffect::Unchanged
+            None
         }
-        (ProposalAction::Retire, ProposalTarget::Memory(target)) => {
-            target_stands(envelope, &validated.project, target)?;
+        // Staging admits only legal action and target pairs, so a stored row with another pair is corruption.
+        _ => return Err(KernelError::Io.into()),
+    };
+    if !served(envelope, &validated.project, &judged)? {
+        return changed();
+    }
+    let effect = match (proposal.action, &proposal.target, predecessor) {
+        (ProposalAction::Retain | ProposalAction::NoChange, _, _) => SettlementEffect::Unchanged,
+        (ProposalAction::Retire, ProposalTarget::Memory(target), _) => {
             let retirement = envelope
                 .retire_decision_with_cascade(&target.object_id)
                 .map_err(action_refusal)?;
@@ -443,25 +458,18 @@ fn apply(
                 deferred: retirement.deferred,
             }
         }
-        (ProposalAction::Revise, ProposalTarget::Memory(target)) => {
-            let predecessor = target_stands(envelope, &validated.project, target)?;
-            revise(
-                envelope,
-                &validated,
-                &AcceptedIds::new(settlement_key),
-                predecessor,
-            )?
-        }
-        (ProposalAction::Create, ProposalTarget::StagedCandidate { candidate_id }) => {
-            subject_stands(envelope, acceptance, candidate_id)?;
-            create(
-                envelope,
-                acceptance,
-                &validated,
-                &AcceptedIds::new(settlement_key),
-            )?
-        }
-        // Staging admits only legal action and target pairs, so a stored row with another pair is corruption.
+        (ProposalAction::Revise, _, Some(predecessor)) => revise(
+            envelope,
+            &validated,
+            &AcceptedIds::new(settlement_key),
+            predecessor,
+        )?,
+        (ProposalAction::Create, _, _) => create(
+            envelope,
+            acceptance,
+            &validated,
+            &AcceptedIds::new(settlement_key),
+        )?,
         _ => return Err(KernelError::Io.into()),
     };
     let run = &acceptance.run;
@@ -483,10 +491,11 @@ fn apply(
     Ok((recorded, encoded))
 }
 
-/// Everything an action depends on except its target: the row bound to this run, its dependency record, every disclosed input under the live review hold, and every policy-union member.
+/// Everything an action depends on except its target: the row bound to this run, its dependency record, every disclosed input under the live review hold, and every policy-union member. The eligibility each descriptor member needs is appended to `judged` for the caller's one judgement.
 fn validate(
     envelope: &Envelope<'_>,
     acceptance: &ProposalAcceptance,
+    judged: &mut Vec<(EligibilityCandidate, bool)>,
 ) -> Result<Validated, AcceptanceError> {
     let run = &acceptance.run;
     let incarnation = super::open::database_incarnation_id_via(envelope.tx)?;
@@ -546,7 +555,7 @@ fn validate(
     let union = PolicyUnion::decode(&dependencies.union_canonical, &dependencies.union_digest)
         .or_else(|_| changed())?;
     for member in union.members() {
-        member_stands(envelope, acceptance, &project, &proposal, member)?;
+        member_stands(envelope, acceptance, &proposal, &held, member, judged)?;
     }
     let mut support: Vec<String> = proposal
         .support
@@ -583,12 +592,15 @@ impl AcceptedIds {
     }
 }
 
-/// Whether the batch verdicts let a local reader of `project` see each object: every one `Ok`, except a descriptor, which no surface serves and whose bytes the evidence check already judged.
+/// Whether the batch verdicts let a local reader of `project` see each object: every one `Ok`, except a descriptor, which no surface serves and whose bytes the evidence check already judged. Verdicts are per object, so one batch judges what separate batches would.
 fn served(
     envelope: &Envelope<'_>,
     project: &ProjectScope,
     candidates: &[(EligibilityCandidate, bool)],
 ) -> Result<bool, AcceptanceError> {
+    if candidates.is_empty() {
+        return Ok(true);
+    }
     let judged: Vec<EligibilityCandidate> = candidates
         .iter()
         .map(|(candidate, _)| candidate.clone())
@@ -609,11 +621,11 @@ fn served(
         }))
 }
 
-/// The target decision is live and served at exactly the proposal's tokens: the same object, kind, and source revision, and no change after the commit the proposer observed. Returns its state.
+/// The target decision is live at exactly the proposal's tokens: the same object, kind, and source revision, and no change after the commit the proposer observed. Its eligibility is appended to `judged`. Returns its state.
 fn target_stands(
     envelope: &Envelope<'_>,
-    project: &ProjectScope,
     target: &CanonicalTarget,
+    judged: &mut Vec<(EligibilityCandidate, bool)>,
 ) -> Result<ObjectState, AcceptanceError> {
     if target.known_as_of >= envelope.commit_seq || target.commit_token > target.known_as_of {
         return changed();
@@ -625,21 +637,17 @@ fn target_stands(
         || state.object.invalidated_commit_seq.is_some()
         || state.object.source_revision != target.source_revision
         || state.latest_change_commit_seq != Some(target.commit_token)
-        || !served(
-            envelope,
-            project,
-            &[(
-                EligibilityCandidate {
-                    object_id: target.object_id.clone(),
-                    source_revision: target.source_revision,
-                    artifact_digest: None,
-                },
-                false,
-            )],
-        )?
     {
         return changed();
     }
+    judged.push((
+        EligibilityCandidate {
+            object_id: target.object_id.clone(),
+            source_revision: target.source_revision,
+            artifact_digest: None,
+        },
+        false,
+    ));
     Ok(state)
 }
 
@@ -695,13 +703,14 @@ fn subject_stands(
     subject_row_stands(envelope, acceptance, candidate_id, None)
 }
 
-/// One policy-union member still stands as the run read it, judged the way a reader's revalidation judges it: the question template is the proposal's; a descriptor is live at its revision and still names its decision owner, which is live, served, and at the owner revision; a staged subject is this job's sealed row at its digest; and a capture is live, unpurged evidence at its digest.
+/// One policy-union member still stands as the run read it, judged the way a reader's revalidation judges it: the question template is the proposal's; a descriptor is live at its revision and still names its decision owner, which is live and at the owner revision, and both are appended to `judged` for the serving judgement; a staged subject is this job's sealed row at its digest; and a capture is live, unpurged evidence at its digest. A disclosed capture is judged from `held`, which the hold check loaded in this envelope under the same predicate, in evidence-id order.
 fn member_stands(
     envelope: &Envelope<'_>,
     acceptance: &ProposalAcceptance,
-    project: &ProjectScope,
     proposal: &ReviewProposal,
+    held: &[HeldEvidence],
     member: &PolicyUnionMember,
+    judged: &mut Vec<(EligibilityCandidate, bool)>,
 ) -> Result<(), AcceptanceError> {
     let stands = match (
         member.kind.as_str(),
@@ -713,36 +722,42 @@ fn member_stands(
                 proposal.policy_dependencies.question_template;
             member.id == "extracted_facts"
         }
-        ("native_source", None, None) => descriptor_stands(envelope, project, member, None)?,
+        ("native_source", None, None) => descriptor_stands(envelope, member, None, judged)?,
         ("canonical_source", Some(owner), Some(owner_revision)) => {
-            descriptor_stands(envelope, project, member, Some((owner, owner_revision)))?
+            descriptor_stands(envelope, member, Some((owner, owner_revision)), judged)?
         }
         ("staged_subject", None, None) => {
             subject_row_stands(envelope, acceptance, &member.id, Some(&member.revision))?;
             true
         }
-        ("temporary_capture", None, None) => envelope
-            .tx
-            .query_row_cached(
-                "SELECT EXISTS(SELECT 1 FROM evidence_meta e
-                 WHERE e.evidence_id=?1 AND e.artifact_digest=?2 AND e.invalidated_commit_seq IS NULL
-                   AND NOT EXISTS(SELECT 1 FROM artifact_purge_tombstones t
-                                  WHERE t.artifact_digest=e.artifact_digest))",
-                rusqlite::params![member.id, member.revision],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(map_sqlite)?,
+        ("temporary_capture", None, None) => {
+            match held.binary_search_by(|evidence| evidence.evidence_id.as_str().cmp(&member.id)) {
+                Ok(index) => held[index].artifact_digest == member.revision,
+                Err(_) => envelope
+                    .tx
+                    .query_row_cached(
+                        "SELECT EXISTS(SELECT 1 FROM evidence_meta e
+                         WHERE e.evidence_id=?1 AND e.artifact_digest=?2
+                           AND e.invalidated_commit_seq IS NULL
+                           AND NOT EXISTS(SELECT 1 FROM artifact_purge_tombstones t
+                                          WHERE t.artifact_digest=e.artifact_digest))",
+                        rusqlite::params![member.id, member.revision],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(map_sqlite)?,
+            }
+        }
         _ => false,
     };
     if stands { Ok(()) } else { changed() }
 }
 
-/// A native or canonical descriptor member is a live descriptor at its revision whose class agrees with the member kind; a canonical one's detail names `owner` in its class's leading identity field, and the owner is a live decision at `owner_revision`. Both pass the batch eligibility judgement for a local reader.
+/// A native or canonical descriptor member is a live descriptor at its revision whose class agrees with the member kind; a canonical one's detail names `owner` in its class's leading identity field, and the owner is a live decision at `owner_revision`. Both are appended to `judged`, which must pass the batch eligibility judgement for a local reader.
 fn descriptor_stands(
     envelope: &Envelope<'_>,
-    project: &ProjectScope,
     member: &PolicyUnionMember,
     owner: Option<(&str, &str)>,
+    judged: &mut Vec<(EligibilityCandidate, bool)>,
 ) -> Result<bool, AcceptanceError> {
     let Ok(revision) = member.revision.parse::<i64>() else {
         return Ok(false);
@@ -772,14 +787,14 @@ fn descriptor_stands(
     if state.object.invalidated_commit_seq.is_some() || state.object.source_revision != revision {
         return Ok(false);
     }
-    let mut candidates = vec![(
+    let descriptor = (
         EligibilityCandidate {
             object_id: member.id.clone(),
             source_revision: revision,
             artifact_digest: Some(detail.artifact_digest.clone()),
         },
         true,
-    )];
+    );
     match owner {
         None => {
             if decision_derived(class) {
@@ -806,7 +821,8 @@ fn descriptor_stands(
             {
                 return Ok(false);
             }
-            candidates.push((
+            judged.push(descriptor);
+            judged.push((
                 EligibilityCandidate {
                     object_id: owner.to_string(),
                     source_revision: owner_revision,
@@ -814,9 +830,11 @@ fn descriptor_stands(
                 },
                 false,
             ));
+            return Ok(true);
         }
     }
-    served(envelope, project, &candidates)
+    judged.push(descriptor);
+    Ok(true)
 }
 
 /// The descriptor classes whose leading identity field names an originating decision.

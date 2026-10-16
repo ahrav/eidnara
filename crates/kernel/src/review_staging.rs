@@ -957,13 +957,13 @@ pub(crate) fn bound_review_row_in(
     check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
     check_digest(&reference.payload_digest).map_err(|_| ReviewReadError::Invalid)?;
     let row = stored_review_row(tx, reference)?;
-    let bound = decode_witness(&row.witness).is_some_and(|(binding, _)| {
-        binding.project_digest == project_digest && binding.owner == *owner
-    });
-    if !bound {
+    let Some(witness) = decode_witness(&row.witness)
+        .filter(|(binding, _)| binding.project_digest == project_digest && binding.owner == *owner)
+    else {
         return Err(ReviewReadRefusal::Missing.into());
-    }
-    let (row, sealed_at, binding, dependencies) = judge_stored_row(row, reference, selected_at)?;
+    };
+    let (row, sealed_at, binding, dependencies) =
+        judge_decoded_row(row, reference, selected_at, Some(witness))?;
     if selected_at < sealed_at {
         return Err(ReviewReadError::Invalid);
     }
@@ -1020,6 +1020,24 @@ fn judge_stored_row(
     ),
     ReviewReadError,
 > {
+    judge_decoded_row(row, reference, live_at, None)
+}
+
+/// [`judge_stored_row`] with the row's witness already decoded by the caller, or `None` to decode it here.
+fn judge_decoded_row(
+    row: StoredReviewRow,
+    reference: &ReviewStagedReference,
+    live_at: i64,
+    witness: Option<(ReviewBinding, Option<ReviewDependencies>)>,
+) -> Result<
+    (
+        StoredReviewRow,
+        i64,
+        ReviewBinding,
+        Option<ReviewDependencies>,
+    ),
+    ReviewReadError,
+> {
     // The schema pairs `terminal_state` with `terminal_at`, so a completed row always carries its timestamp.
     let sealed_at = match (
         row.run_terminal.as_deref(),
@@ -1036,8 +1054,9 @@ fn judge_stored_row(
     if identity_digest(&row.payload) != reference.payload_digest {
         return Err(ReviewReadRefusal::Changed.into());
     }
-    let (binding, dependencies) =
-        decode_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
+    let (binding, dependencies) = witness
+        .or_else(|| decode_witness(&row.witness))
+        .ok_or(ReviewReadRefusal::ScopeMismatch)?;
     Ok((row, sealed_at, binding, dependencies))
 }
 
