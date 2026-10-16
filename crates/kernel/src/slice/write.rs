@@ -236,7 +236,7 @@ impl Envelope<'_> {
         })
     }
 
-    /// Appends one event of `event_kind` and `summary` citing each of `evidence_ids`, in order, to one live decision. The rows, ordinals, and change records equal one [`Self::append_decision_event`] per id; the decision, its first ordinal, and the shared text are resolved once.
+    /// Appends one event of `event_kind` and `summary` citing each of `evidence_ids`, in order, to one live decision. The rows, ordinals, and change records equal one [`Self::append_decision_event`] per id; the decision, its first ordinal, the shared text, and the liveness of every cited evidence row are resolved once. Every id is checked as an identity before any is checked live.
     pub(crate) fn append_decision_citations(
         &mut self,
         decision_id: &str,
@@ -259,20 +259,18 @@ impl Envelope<'_> {
                 recorded_at,
             })?;
             let payload = stored_event_payload(&shared.summary)?;
-            let mut events = Vec::with_capacity(evidence_ids.len());
-            for evidence_id in evidence_ids {
-                let evidence_id = identity_field(evidence_id)?;
-                require_live(
-                    envelope.tx,
-                    "evidence_meta",
-                    "evidence_id",
-                    &evidence_id.text,
-                )?;
-                events.push(RedactedEvent {
+            let cited = evidence_ids
+                .iter()
+                .map(|evidence_id| identity_field(evidence_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            require_live_evidence(envelope.tx, &cited)?;
+            let events: Vec<RedactedEvent> = cited
+                .into_iter()
+                .map(|evidence_id| RedactedEvent {
                     evidence_id: Some(evidence_id),
                     ..shared.clone()
-                });
-            }
+                })
+                .collect();
             let object = load_live_decision_object(envelope.tx, &decision_id.text)?;
             let first = next_event_ordinal(envelope.tx, &decision_id.text)?;
             for (ordinal, event) in (first..).zip(&events) {
@@ -314,20 +312,27 @@ impl Envelope<'_> {
                 ],
             )
             .map_err(map_write_error)?;
-        let owner_id = format!("{}:{ordinal}", decision_id.text);
-        let mut event_fields = vec![
-            ("decision_id".to_string(), decision_id.clone()),
-            ("event_kind".to_string(), event.kind.clone()),
-            ("event_payload.summary".to_string(), event.summary.clone()),
-        ];
-        push_optional(&mut event_fields, "evidence_id", &event.evidence_id);
-        record_fields(
-            self.tx,
-            "decision_events",
-            &owner_id,
-            &event_fields,
-            self.commit_seq,
-        )?;
+        // A field without detections records no row, so only fields with detections are carried.
+        let mut event_fields = Vec::new();
+        for (name, field) in [
+            ("decision_id", Some(decision_id)),
+            ("event_kind", Some(&event.kind)),
+            ("event_payload.summary", Some(&event.summary)),
+            ("evidence_id", event.evidence_id.as_ref()),
+        ] {
+            if let Some(field) = field.filter(|field| !field.detections.is_empty()) {
+                event_fields.push((name.to_string(), field.clone()));
+            }
+        }
+        if !event_fields.is_empty() {
+            record_fields(
+                self.tx,
+                "decision_events",
+                &format!("{}:{ordinal}", decision_id.text),
+                &event_fields,
+                self.commit_seq,
+            )?;
+        }
         self.changes.push(PendingChange {
             object,
             kind: DECISION_EVENT_APPEND_KIND,
@@ -1141,6 +1146,33 @@ fn require_live(
         .optional()
         .map_err(crate::map_sqlite)?
         .ok_or(KernelError::NotFound)
+}
+
+fn require_live_evidence(
+    tx: &Transaction<'_>,
+    evidence_ids: &[RedactedField],
+) -> Result<(), KernelError> {
+    let ids = serde_json::to_string(
+        &evidence_ids
+            .iter()
+            .map(|field| field.text.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| KernelError::InvalidInput)?;
+    let live = tx
+        .query_row_cached(
+            "SELECT COUNT(*) FROM json_each(?1) j
+             JOIN evidence_meta e ON e.evidence_id=j.value
+             WHERE e.invalidated_commit_seq IS NULL",
+            [ids],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(crate::map_sqlite)?;
+    if usize::try_from(live).ok() == Some(evidence_ids.len()) {
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
+    }
 }
 
 /// The ordinal the next event of `decision_id` takes: one past the current maximum, or 1.
