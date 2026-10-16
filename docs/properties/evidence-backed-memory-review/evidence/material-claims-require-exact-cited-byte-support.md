@@ -57,7 +57,7 @@ repositories, expecting two.
 ### Q: production-resolved retain over a canonical memory
 - Sources examined: `crates/daemon/src/memory_reviewer/selection.rs`
   (`PRODUCTION_SELECTION_OPEN`);
-  `crates/daemon/tests/memory_reviewer_coordinator.rs::a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model`.
+  `crates/daemon/tests/memory_reviewer_worker.rs::production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator`.
 - Findings: a canonical subject resolves and abstains `owner_sensitive` for a
   remote model; no decision representation is Remote-eligible.
 - Missing evidence: an owner-approved Remote-eligible decision representation.

@@ -33,7 +33,18 @@ rows equal before and after),
 decision revision, evidence object as owner refused by `proposal_target` and by
 the broker with zero bytes),
 `canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both`,
-`a_canonical_owner_must_be_a_live_decision`.
+`a_canonical_owner_must_be_a_live_decision`,
+`a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_before_disclosure`
+(a stored identity with a missing or empty leading field refuses `Unsupported`
+at resolution; the same bytes ingested under `Secret` after resolution refuse
+the local read `PolicyBlocked` with zero bytes; deleted evidence refuses the
+execution hold `UnavailableEvidence`, so the run reads nothing).
+
+`crates/daemon/tests/memory_reviewer_worker.rs` -
+`a_fixture_canonical_claim_reaches_a_readable_proposal_targeting_its_decision`:
+through the production selector, slot enqueue, and worker, the proposal over a
+canonical descriptor targets the decision at its exact tokens, not the
+descriptor.
 
 ## Failure scenario
 
@@ -78,4 +89,5 @@ decision and the broker refuses the read `Scope` with zero model-visible bytes.
   empty-value branch is a defense against corruption, not a reachable input.
 - Missing evidence: none.
 - Conclusion: resolved with answer; the refusal is defensive and the
-  publication check is the reachable guard.
+  publication check is the reachable guard. The defensive branch is witnessed
+  by rewriting the stored identity in place.

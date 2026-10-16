@@ -2316,31 +2316,129 @@ fn a_moved_missing_stale_or_wrong_kind_owner_refuses_the_subject_and_the_target(
 }
 
 #[test]
-fn a_resolved_canonical_subject_still_refuses_the_remote_destination() {
+fn a_resolved_canonical_or_promoted_subject_still_refuses_the_remote_destination() {
     let fixture = Fixture::open();
     fixture.decision("decision-a");
-    let (claim, claim_evidence) = derived(
+    // Each artifact asserts Normal and RemoteAllowed, and carries no repository provenance; the store's own rule keeps it Sensitive, so the destination the production coordinator binds refuses it with zero bytes. This is the abstention a scheduled production job settles on, and why the production gate stays closed.
+    for (key, class) in [
+        ("claim", OccurrenceClass::CanonicalClaims),
+        ("promoted", OccurrenceClass::PromotedMemory),
+    ] {
+        let (object, evidence) = derived(&fixture, key, class, "decision-a");
+        let subject = fixture.resolve(&object).unwrap();
+        let mut remote = fixture.broker_for(
+            PROJECT,
+            std::slice::from_ref(&evidence.0),
+            kernel::ArtifactDestination::Remote,
+        );
+        let alias = remote.aliases.issue(subject);
+        assert_eq!(
+            remote
+                .read(&fixture.store, alias.as_str(), None, fixture.now)
+                .unwrap_err()
+                .code,
+            RefusalCode::PolicyBlocked,
+            "{class:?}"
+        );
+        assert_eq!(remote.accounting.model_visible_bytes(), 0, "{class:?}");
+    }
+}
+
+/// The rest of the refusal matrix for decision-derived subjects. A stored identity whose leading field is missing or empty names no decision, so resolution refuses it as unsupported. A resolved subject whose artifact class tightens refuses the read with zero bytes, for the local destination as well as the remote one, and one whose artifact was deleted cannot be held, so its run reads nothing.
+#[test]
+fn a_malformed_identity_a_tightened_class_or_an_unavailable_artifact_refuses_before_disclosure() {
+    let fixture = Fixture::open();
+    for (key, identity) in [
+        ("missing", serde_json::json!([])),
+        ("empty", serde_json::json!([["object_id", ""]])),
+    ] {
+        let owner = format!("decision-{key}");
+        fixture.decision(&owner);
+        let (object, _) = derived(&fixture, key, OccurrenceClass::CanonicalClaims, &owner);
+        corrupt_detail(&fixture, &object, |detail| detail["identity"] = identity);
+        assert_eq!(
+            resolution_refusal(fixture.resolve(&object).unwrap_err()),
+            RefusalCode::Unsupported,
+            "{key} identity"
+        );
+    }
+
+    fixture.decision("decision-tightened");
+    let (tightened, tightened_evidence) = derived(
         &fixture,
-        "claim",
-        OccurrenceClass::CanonicalClaims,
-        "decision-a",
+        "tightened",
+        OccurrenceClass::PromotedMemory,
+        "decision-tightened",
     );
-    // The artifact asserts Normal and RemoteAllowed, and carries no repository provenance; the store's own rule keeps it Sensitive, so the destination the production coordinator binds refuses it with zero bytes. This is the abstention a scheduled production job settles on, and why the production gate stays closed.
-    let subject = fixture.resolve(&claim).unwrap();
-    let mut remote = fixture.broker_for(
-        PROJECT,
-        std::slice::from_ref(&claim_evidence.0),
-        kernel::ArtifactDestination::Remote,
-    );
-    let alias = remote.aliases.issue(subject);
+    let subject = fixture.resolve(&tightened).unwrap();
+    // Ingesting the same bytes under a Secret assertion tightens every row of the digest.
+    fixture
+        .store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("tighten"),
+            payload: b"tightened: a form of decision-tightened".to_vec(),
+            evidence_id: "evidence-tighten".to_string(),
+            object_id: "evidence-object-tighten".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "conversation".to_string(),
+            source_id: "src/tighten".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Secret,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&tightened_evidence.0));
+    let alias = broker.aliases.issue(subject);
     assert_eq!(
-        remote
+        broker
             .read(&fixture.store, alias.as_str(), None, fixture.now)
             .unwrap_err()
             .code,
-        RefusalCode::PolicyBlocked
+        RefusalCode::PolicyBlocked,
+        "a tightened class refuses the local destination"
     );
-    assert_eq!(remote.accounting.model_visible_bytes(), 0);
+    assert_eq!(broker.accounting.model_visible_bytes(), 0);
+
+    fixture.decision("decision-deleted");
+    let (deleted, deleted_evidence) = derived(
+        &fixture,
+        "deleted",
+        OccurrenceClass::CanonicalClaims,
+        "decision-deleted",
+    );
+    let subject = fixture.resolve(&deleted).unwrap();
+    fixture
+        .store
+        .delete_artifact(kernel::ArtifactDeletionRequest {
+            intent: intent("delete-deleted"),
+            identity: kernel::ArtifactDeletionIdentity::EvidenceId(deleted_evidence.0.clone()),
+            kind: kernel::ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: fixture.now,
+        })
+        .unwrap();
+    // The run holds its subject's evidence before any read, and a deleted artifact cannot be held, so the run stops with no broker and no byte read.
+    assert!(matches!(
+        fixture.store.acquire_execution_hold(
+            &fixture.hold_binding(PROJECT),
+            std::slice::from_ref(&deleted_evidence.0),
+            fixture.now + HOUR_MS,
+        ),
+        Err(kernel::MemoryReviewerHoldError::Refused(
+            kernel::MemoryReviewerHoldRefusal::UnavailableEvidence
+        ))
+    ));
+    assert!(matches!(
+        subject,
+        ReferenceExpectation::CanonicalSource { .. }
+    ));
 }
 
 /// A revalidation reuses a source's last pass only at the Kernel state it passed at: inside a classification window the generation is unstable, so the full judgement runs and refuses, and once the window closes the advanced generation forces the full judgement again.

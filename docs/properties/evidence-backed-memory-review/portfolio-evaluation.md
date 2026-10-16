@@ -19,7 +19,7 @@ reviews found and how each finding was dispositioned.
 | `related_memories` decoded the class twice for one row | refinement | fixed: `expectation` calls `originating_decision` with the class it already parsed |
 | The new integration test file duplicated the broker fixture | refinement | fixed: the tests moved into `memory_reviewer_broker.rs` and reuse its fixture |
 | The `commit_token` oracle used the same formula as the implementation over a decision with one commit | gap | fixed: a second commit appends a decision event so the last change differs from creation |
-| No coordinator-level witness exercised `resolve_subject` through `open` for a canonical subject | gap | fixed: `a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model` |
+| No coordinator-level witness exercised `resolve_subject` through `open` for a canonical subject | gap | fixed: a coordinator test, later replaced by the worker witness `production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator` over both classes |
 | The scheduler gate test derived its expectation from the gate constant, so flipping the gate changed nothing | gap | fixed: a constant assertion on the gate plus a fixed expected task list |
 | Canonical before/after equality was asserted only on the Git path | gap | fixed: tracked registry rows compared before and after in both broker tests |
 | The wrong-kind owner refusal at the broker is `Scope`, not a kind-specific code, because the evidence object is unscoped | bias | kept: the Kernel judges scope before kind; `proposal_target` supplies the kind refusal, and the evidence file records the ordering |
