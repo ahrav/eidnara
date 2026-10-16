@@ -56,7 +56,7 @@ Every slug the seven residual tickets own, plus the semantic-evidence slug #592 
 Type: reachability
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - no Remote-eligible representation of a canonical or promoted artifact exists, so no run over a production class can reach a selected proposal; `PRODUCTION_SELECTION_OPEN` is `false`. The fixture witness `fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision` exercises every step of the path with test-supplied provenance
+Exercised: partial - the fixture witness `fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision` exercises every step of the path with test-supplied provenance; no Remote-eligible representation of a canonical or promoted artifact exists, so no run over a production class can reach a selected proposal, and `PRODUCTION_SELECTION_OPEN` is `false`
 Guarantee: When production selection is open, a job over `canonical_claims` or `promoted_memory` reaches a receipt-selected, readable, non-abstaining proposal only through a genuinely eligible originating decision under existing policy, with the request ledger, disclosed bytes, and selected receipt inspectable.
 Check: `sometimes` - a campaign with production selection open must produce at least one completed receipt whose selected proposal targets a decision reached through `ReferenceExpectation::CanonicalSource`; the situation, not the branch, is what matters, and it cannot occur while the gate is closed
 Fault/timing angle: none

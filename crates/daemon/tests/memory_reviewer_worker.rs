@@ -1943,6 +1943,7 @@ async fn fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting
         decision.as_str(),
         decision_state.object.source_revision,
         decision_state.latest_change_commit_seq.unwrap(),
+        tip_before,
     );
     rig.enqueue_selection(&page, now);
 
@@ -1987,27 +1988,34 @@ async fn fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting
             (
                 target.object_id.as_str(),
                 target.source_revision,
-                target.commit_token
+                target.commit_token,
+                target.known_as_of,
             ),
             expected_target,
             "{:?} targets the originating decision at its exact tokens",
             inputs.target
         );
-        assert!(
-            target.commit_token <= target.known_as_of && target.known_as_of <= tip_before,
-            "{target:?} against tip {tip_before}"
+        let cited_here: Vec<_> = proposal
+            .support
+            .iter()
+            .map(|reference| reference.evidence_id.clone())
+            .collect();
+        let own_form: Vec<_> = inputs
+            .required_evidence
+            .iter()
+            .map(|evidence| evidence.evidence_id.clone())
+            .collect();
+        assert_eq!(
+            cited_here, own_form,
+            "{:?} cites its own form's evidence",
+            inputs.target
         );
-        cited.extend(
-            proposal
-                .support
-                .iter()
-                .map(|reference| reference.evidence_id.clone()),
-        );
+        cited.extend(cited_here);
     }
     cited.sort();
     let mut expected_cited = evidence;
     expected_cited.sort();
-    assert_eq!(cited, expected_cited, "each proposal cites its own form");
+    assert_eq!(cited, expected_cited, "the two forms cite the two fixtures");
     assert_eq!(
         rig.kernel.object_states(&objects).unwrap(),
         (tip_before, before),
