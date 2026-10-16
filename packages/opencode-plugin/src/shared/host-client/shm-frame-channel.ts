@@ -683,15 +683,20 @@ export class ShmFrameChannel implements SetupFrameChannel {
      * The configured frame limit and integer validity are enforced before
      * any budget charge or native call: a non-safe length (`NaN`, negative,
      * fractional) would poison `ByteBudget.used`, and the shared-memory
-     * path must reject the same over-limit bodies TCP rejects.
+     * path must reject the same over-limit bodies TCP rejects. An over-limit
+     * body is a `not_sent` refusal with the wire's `frame_body_too_large`
+     * code, so a caller sees the same classification the Rust client reports.
      */
     private assertBodyBounds(byteLength: number): void {
-        if (
-            !Number.isSafeInteger(byteLength) ||
-            byteLength < 0 ||
-            byteLength > this.options.maxBodyLen
-        ) {
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
             throw new RangeError("producer capacity is outside frame bounds");
+        }
+        if (byteLength > this.options.maxBodyLen) {
+            throw new HostCallError(
+                "not_sent",
+                `frame body length ${byteLength} exceeds max ${this.options.maxBodyLen}`,
+                "frame_body_too_large",
+            );
         }
     }
 

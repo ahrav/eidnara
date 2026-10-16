@@ -1,0 +1,164 @@
+import { afterEach, describe, expect, it } from "bun:test";
+import { type ChildProcess, spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { probeCapabilities } from "@eidnara/shm-native";
+import { IDENTITY } from "./__tests__/fake-daemon";
+import { HostClient } from "./client";
+import { MAX_FRAME_BODY_LEN } from "./protocol";
+
+/**
+ * Cross-process witness for the TypeScript client over the native addon: a real host
+ * process (`crates/host-runtime/examples/local_embeddings_host.rs`, whose primary component
+ * echoes each body) serves the sole payload-pool profile to `HostClient`.
+ *
+ * `EIDNARA_REAL_HOST_BIN` names the built example. With `EIDNARA_REQUIRE_REAL_HOST=1` a
+ * missing binary or an unavailable channel fails the suite instead of skipping it.
+ */
+const HOST_BIN = process.env.EIDNARA_REAL_HOST_BIN;
+const REQUIRED = process.env.EIDNARA_REQUIRE_REAL_HOST === "1";
+const CHANNEL = probeCapabilities();
+const RUNNABLE = HOST_BIN !== undefined && HOST_BIN !== "" && CHANNEL.available;
+const ECHO = { kind: "tool_provider", module_id: "context" } as const;
+
+interface RunningHost {
+    child: ChildProcess;
+    connectionFile: string;
+}
+
+const hosts: RunningHost[] = [];
+const clients: HostClient[] = [];
+const dataDirs: string[] = [];
+
+async function startHost(dataDir: string): Promise<RunningHost> {
+    const child = spawn(HOST_BIN as string, [dataDir, "-"], {
+        stdio: ["ignore", "pipe", "inherit"],
+    });
+    const lines = createInterface({ input: child.stdout as NodeJS.ReadableStream });
+    const connectionFile = await new Promise<string>((resolve, reject) => {
+        child.once("exit", (code) => reject(new Error(`host exited before READY: ${code}`)));
+        lines.on("line", (line) => {
+            if (line.startsWith("READY ")) resolve(line.slice("READY ".length));
+        });
+    });
+    const host = { child, connectionFile };
+    hosts.push(host);
+    return host;
+}
+
+async function stopHost(host: RunningHost): Promise<void> {
+    if (host.child.exitCode !== null) return;
+    const exited = new Promise<void>((resolve) => host.child.once("exit", () => resolve()));
+    host.child.kill("SIGTERM");
+    await exited;
+}
+
+async function connect(host: RunningHost): Promise<HostClient> {
+    const client = await HostClient.connect({ connectionFile: host.connectionFile });
+    clients.push(client);
+    return client;
+}
+
+function patterned(length: number): Uint8Array {
+    const bytes = new Uint8Array(length);
+    for (let index = 0; index < length; index += 4096) bytes[index] = (index / 4096) & 0xff;
+    bytes[length - 1] = 0xa5;
+    return bytes;
+}
+
+function leaseBytes(lease: { segmentCount: number; segment(index: number): Uint8Array }): Buffer {
+    const parts: Uint8Array[] = [];
+    for (let index = 0; index < lease.segmentCount; index++) parts.push(lease.segment(index));
+    return Buffer.concat(parts);
+}
+
+function sharedMemory(status: { sharedMemory?: Record<string, unknown> }): Record<string, any> {
+    expect(status.sharedMemory).toBeDefined();
+    return status.sharedMemory as Record<string, any>;
+}
+
+afterEach(async () => {
+    for (const client of clients.splice(0)) {
+        try {
+            client.close();
+        } catch {}
+    }
+    for (const host of hosts.splice(0)) await stopHost(host);
+    for (const dir of dataDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe("TypeScript client against a real host process", () => {
+    it("names why it skips", () => {
+        if (RUNNABLE) return;
+        const reason =
+            HOST_BIN === undefined || HOST_BIN === ""
+                ? "EIDNARA_REAL_HOST_BIN is unset"
+                : `shared-memory channel unavailable: ${CHANNEL.reason}`;
+        console.warn(`real-host witness skipped: ${reason}`);
+        expect(REQUIRED).toBe(false);
+    });
+
+    it.skipIf(!RUNNABLE)(
+        "activates the sole profile, echoes the maximum body both ways, refuses one byte over, and recovers across close and restart",
+        async () => {
+            const dataDir = mkdtempSync(join(tmpdir(), "eidnara-real-host-"));
+            dataDirs.push(dataDir);
+            const host = await startHost(dataDir);
+            const client = await connect(host);
+            const first = sharedMemory(await client.hostStatus());
+            expect(first.artifact).toEqual({ profile: "host-payload-pool" });
+            expect(first.activation.completed).toBe(1);
+            expect(first.returns.live_backings).toBe(2);
+
+            const route = await client.routeOpen(ECHO, IDENTITY);
+            const body = patterned(MAX_FRAME_BODY_LEN);
+            const held = await client.requestBinary(route, body, { timeoutMs: 120_000 });
+            expect(held.byteLength).toBe(MAX_FRAME_BODY_LEN);
+            expect(leaseBytes(held).equals(Buffer.from(body))).toBe(true);
+
+            const over = client.requestBinary(route, new Uint8Array(MAX_FRAME_BODY_LEN + 1));
+            await expect(over).rejects.toMatchObject({
+                kind: "not_sent",
+                code: "frame_body_too_large",
+            });
+
+            // The held maximum response stays readable after its connection closes and is
+            // returned exactly once.
+            client.close();
+            expect(leaseBytes(held).equals(Buffer.from(body))).toBe(true);
+            expect(held.release()).toBe(true);
+            expect(held.release()).toBe(false);
+
+            // A second client on the same host attaches fresh backing; the first generation
+            // retires and its backing is released.
+            const second = await connect(host);
+            const reroute = await second.routeOpen(ECHO, IDENTITY);
+            const echoed = await second.requestBinary(reroute, Uint8Array.of(1, 2, 3));
+            expect([...leaseBytes(echoed)]).toEqual([1, 2, 3]);
+            echoed.release();
+            const deadline = Date.now() + 10_000;
+            for (;;) {
+                const shm = sharedMemory(await second.hostStatus());
+                expect(shm.activation.completed).toBe(2);
+                if (shm.reclamation.completed === 1 && shm.returns.released_backings === 2) break;
+                expect(Date.now()).toBeLessThan(deadline);
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            second.close();
+
+            // A restarted host publishes a new connection file; a new client completes a
+            // request against it.
+            await stopHost(host);
+            const restarted = await startHost(dataDir);
+            const third = await connect(restarted);
+            const restartedRoute = await third.routeOpen(ECHO, IDENTITY);
+            const after = await third.requestBinary(restartedRoute, Uint8Array.of(9));
+            expect([...leaseBytes(after)]).toEqual([9]);
+            after.release();
+            expect(sharedMemory(await third.hostStatus()).activation.completed).toBe(1);
+        },
+        240_000,
+    );
+});

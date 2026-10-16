@@ -1005,8 +1005,15 @@ jobs:
       - name: Build and test the addon
         # The addon loads a release build of the cdylib; the package tests
         # then drive the setup handshake, ring geometry, buffer bounds, and
-        # detachment through N-API.
+        # detachment through N-API. The plugin's real-host witness dials the
+        # echo host example as a separate process and fails if it cannot.
+        env:
+          EIDNARA_REAL_HOST_BIN: "${{ github.workspace }}\
+            /target/debug/examples/local_embeddings_host"
+          EIDNARA_REQUIRE_REAL_HOST: "1"
         run: |
+          cargo +1.98 build -p host-runtime --example local_embeddings_host \
+            --locked
           bun run --cwd packages/shm-native build:native
           bun run --cwd packages/shm-native build:js
           bun run --cwd packages/shm-native typecheck
