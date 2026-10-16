@@ -6,9 +6,7 @@ use std::collections::BTreeMap;
 
 use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
 use daemon::harness_sources::SourcePublisher;
-use daemon::memory_reviewer::selection::{
-    MAX_EXAMINED_PER_PAGE, MEMORY_CLASSES, SelectionScope, select_review_targets,
-};
+use daemon::memory_reviewer::selection::{MEMORY_CLASSES, SelectionScope, select_review_targets};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass};
 use kernel::{
@@ -398,44 +396,42 @@ fn targets_with_a_job_and_targets_the_remote_fold_denies_are_passed_over() {
     );
 }
 
+/// The production classes are walked in their fixed order, canonical claims before promoted memories, each in object-id order, and a cursor into the second class resumes there. The fixture's evidence carries repository provenance so the Remote fold admits it; production descriptors are refused the Remote destination, which `memory_reviewer_worker::production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator` witnesses.
 #[test]
-fn the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors_are_not_selected()
-{
+fn the_production_classes_are_walked_in_order_and_a_cursor_resumes_in_the_second_class() {
     let fixture = Fixture::open();
-    // Canonical-claim and promoted-memory descriptors over evidence without verified provenance are Sensitive by the store's own rule; the remote fold denies them and the walk passes them without a job, through both classes.
-    for key in ["a", "b"] {
-        fixture.publish_derived(key, "canonical_claims", "object_id", "decision_summary");
-    }
-    fixture.publish_derived("p", "promoted_memory", "decision_object_id", "summary");
-    let tip = fixture.store.tip().unwrap();
-    for class in MEMORY_CLASSES {
-        let rows = fixture
-            .store
-            .live_source_descriptors(
-                *class,
-                tip,
-                None,
-                std::num::NonZeroUsize::new(8).unwrap(),
-                &EvalBudget::unbounded(),
+    let mut claims: Vec<String> = ["a", "b"]
+        .into_iter()
+        .map(|key| {
+            fixture.publish_derived_over(
+                key,
+                "canonical_claims",
+                "object_id",
+                "decision_summary",
+                Some(&repository(key)),
             )
-            .unwrap();
-        assert!(
-            !rows.rows.is_empty(),
-            "{class:?} has a live descriptor to walk"
-        );
-    }
+        })
+        .collect();
+    claims.sort();
+    let promoted = fixture.publish_derived_over(
+        "p",
+        "promoted_memory",
+        "decision_object_id",
+        "summary",
+        Some(&repository("p")),
+    );
     let page = fixture.select(MEMORY_CLASSES, None);
-    assert!(page.references.is_empty());
+    assert_eq!(
+        Fixture::targets(&page),
+        [claims, vec![promoted.clone()]].concat()
+    );
     assert_eq!(
         page.next_cursor, None,
         "both classes were walked to the end in one page"
     );
-    // The class order is fixed: a cursor into the second class resumes there and ends the pass.
     let page = fixture.select(MEMORY_CLASSES, Some("1\u{1f}"));
-    assert!(page.references.is_empty());
+    assert_eq!(Fixture::targets(&page), vec![promoted]);
     assert_eq!(page.next_cursor, None);
-    let _ = MAX_EXAMINED_PER_PAGE;
-    let _: Option<CausalInputs> = None;
 }
 
 /// The Memory Classifier's binding for one firing.

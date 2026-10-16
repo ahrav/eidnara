@@ -30,15 +30,35 @@ provenance only for `git_commits`; `crates/kernel/src/envelope.rs` refuses
 
 `crates/daemon/tests/memory_reviewer_broker.rs` -
 `canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it`
-and `a_resolved_canonical_subject_still_refuses_the_remote_destination`.
+and `a_resolved_canonical_or_promoted_subject_still_refuses_the_remote_destination`:
+both classes refuse `PolicyBlocked` on the Remote destination with zero
+model-visible bytes.
 
-`crates/daemon/tests/memory_reviewer_coordinator.rs` -
-`a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model`:
-the coordinator resolves a canonical `ReviewTarget::Memory` subject and settles
-`owner_sensitive` with zero connections.
+`crates/daemon/tests/memory_reviewer_worker.rs` -
+`production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator`:
+the production `ClaimMaterializer`, run `LocalOnly` as `search_lifecycle_owner`
+runs it, publishes two `canonical_claims` forms and one `promoted_memory` form
+of one decision. Each names the decision, is permitted to a local reader, and
+is denied Remote (`SensitiveRemote`; the selector's surface verdict is
+`ProviderSensitive`). `select_review_targets`
+over `MEMORY_CLASSES` with no class override returns an empty page with no
+cursor. The same causal inputs, enqueued through the selection slot's frozen
+page, run in the production worker to `owner_sensitive` receipts with no
+attempt row, zero connections, a `not_selected` read, and Kernel object
+states equal before and after.
+
+`crates/daemon/tests/memory_reviewer_worker.rs` -
+`fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision`:
+a fixture witness, not production eligibility. Each descriptor's evidence
+carries repository provenance the test supplies. For a `canonical_claims` and a
+`promoted_memory` form of one decision, the same selector, slot enqueue, and
+worker produce `Complete` receipts and readable `retain` proposals whose
+`CanonicalTarget` names the decision's object id, source revision, and
+last-change commit token, each citing its own form's evidence; the Kernel tip
+does not move.
 
 `crates/daemon/tests/memory_reviewer_selection.rs` -
-`the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors_are_not_selected`.
+`the_production_classes_are_walked_in_order_and_a_cursor_resumes_in_the_second_class`.
 
 ## Failure scenario
 
@@ -62,6 +82,8 @@ selection page, a claimed job, and a scripted model response that proposes.
 Assert the selected receipt, the readable proposal whose target names the
 decision, the request ledger, and canonical before/after equality. Until that
 representation exists, the campaign records this situation as not constructed.
+The fixture witness above constructs every step except the representation: its
+provenance is test-supplied, so it proves the path, not the eligibility.
 
 ## Investigation log
 

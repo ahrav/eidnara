@@ -106,7 +106,7 @@ pub struct SelectionScope<'a> {
     pub policy_versions: &'a std::collections::BTreeMap<String, String>,
 }
 
-/// Selects at most [`MAX_SELECTION_REFERENCES`] review targets for `scope` from `cursor`. A target is selected when its descriptor is live and eligible for a local reader in the project's scope and no review job exists at its causal inputs; every other live descriptor is passed.
+/// Selects at most [`MAX_SELECTION_REFERENCES`] review targets for `scope` from `cursor`. A target is selected when its descriptor is live, the Kernel's Remote fold permits it in the project's scope, and no review job exists at its causal inputs; every other live descriptor is passed, including a locally readable one whose artifact the Remote destination denies.
 pub fn select_review_targets(
     store: &KernelStore,
     ledger: &MemoryStore,
