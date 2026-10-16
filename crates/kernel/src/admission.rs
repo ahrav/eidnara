@@ -1116,20 +1116,21 @@ impl Envelope<'_> {
 
     /// Quarantine, contradiction, rejection, and supersession break an approval's
     /// authority exactly as revocation does, so dependents still citing it follow.
+    /// Returns how many dependents were demoted and how many were deferred, both zero when the subject still grants authority.
     pub(super) fn demote_dependents_if_authority_lost(
         &mut self,
         subject_object_id: Option<&str>,
         reason: &str,
-    ) -> Result<(), KernelError> {
+    ) -> Result<(usize, usize), KernelError> {
         let Some(subject) = subject_object_id else {
-            return Ok(());
+            return Ok((0, 0));
         };
         if validate_approval(self, Some(subject), None)? {
-            return Ok(());
+            return Ok((0, 0));
         }
         let subject = subject.to_string();
-        self.demote_authority_dependents(&subject, reason)?;
-        Ok(())
+        let (decisions, deferred) = self.demote_authority_dependents(&subject, reason)?;
+        Ok((decisions.len(), deferred))
     }
 
     /// Writes a decision without the caller-event restrictions of

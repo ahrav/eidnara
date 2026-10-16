@@ -140,6 +140,27 @@ adequacy, Rust code review, and documentation verification.
 | The forced inputs are built in the test rather than by the selector's private `causal_inputs` | bias | kept: the selector refuses these rows, so no selector output exists to reuse; the test pins each input the derivation uses and the precondition that keeps linked evidence empty |
 | The refusal witness forces jobs the production selector refuses | bias | kept: the selector's eligibility-first contract is #593's; the forced jobs show the coordinator's refusal for any job that reaches it, such as one admitted before a class tightened |
 
+## Kernel acceptance
+
+Lenses for this change: over-engineering, complexity, testing, Rust code review, idempotency and unknown outcomes, and Rust design review.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The Kernel union check judged liveness and revision only; a hidden or quarantined owner, a descriptor that no longer names its owner, a staged subject of another binding or past its deadline, and an unknown dependency-record version passed | gap | fixed: `descriptor_stands` reads the descriptor detail and requires the owner in its leading identity field, the owner and target pass the batch eligibility judgement for a local reader, `subject_row_stands` reads the subject through the bound-row path, and the record version must match; `a_quarantined_owner_refuses_without_being_invalidated` |
+| The retirement cascade counts had no witness | gap | fixed: `retiring_an_approval_reports_the_dependents_its_cascade_demoted` |
+| No cleanup, purge, deadline, concurrency, or per-action target tests | gap | fixed: the tests added to `kernel_review_acceptance.rs` |
+| The Kernel change passed the 1,000-line hard maximum | bias | split: create and revise, with their admission and support citations, land in the next stacked change; this one refuses them as `unsupported` |
+| A caller-key replay returned whatever its key stored, even for another proposal | gap | fixed: a replayed caller receipt must name the same proposal, run, and target, or the call conflicts; tested |
+| A store `Conflict` inside the envelope was reported as caller-key reuse | gap | fixed: it is a changed input; the caller-key conflict comes only from the pre-check |
+| A row bound to another project could answer `changed` or `review_expired` and so reveal its state | gap | fixed: `bound_review_row_in` compares the stored binding before sealing, deadline, or digest and answers `Missing` otherwise |
+| A Kernel admission refusal of the action (barred lineage, retired parent) surfaced as a store failure | gap | fixed: `action_refusal` maps it to `changed` |
+| The caller-receipt pre-check replayed without the fence check and alignment repair | refinement | fixed: a caller receipt falls through to `commit_with_writer`, which replays it |
+| A selection time before sealing passed the deadline check | gap | fixed: `invalid` |
+| `apply` mixed validation and five action arms; ids were formatted in five places; error mappings used wildcards; a `Cell` side channel | refinement | fixed: `validate`, explicit mappings, a captured `Option` |
+| The stored settlement had no version | gap | fixed: `Settlement.version`; an unknown version is a store failure |
+| Settlement replay under a new caller key records no receipt for that key | bias | kept and documented: only a key that committed an acceptance is bound |
+| The review hold stays in place after settlement | bias | kept: the record's open question asks the owner; support stays cited through decision events |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

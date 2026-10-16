@@ -932,62 +932,113 @@ impl KernelStore {
         check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
         check_digest(&reference.payload_digest).map_err(|_| ReviewReadError::Invalid)?;
         let reader = self.lock_reader().map_err(ReviewReadError::Store)?;
-        let incarnation =
-            super::open::database_incarnation_id_via(&reader).map_err(ReviewReadError::Store)?;
-        if incarnation != reference.database_incarnation_id {
-            return Err(ReviewReadRefusal::IncarnationMismatch.into());
-        }
-        let row = reader
-            .query_row_cached(
-                "SELECT c.payload,c.provenance_witness,c.sensitivity_class,c.candidate_kind,
-                        c.created_at,c.lease_expires_at,c.terminal_state,c.terminal_at,
-                        r.terminal_state
-                 FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
-                 WHERE c.candidate_id=?1",
-                [reference.candidate_id.as_str()],
-                |row| {
-                    Ok(StoredReviewRow {
-                        payload: row.get(0)?,
-                        witness: row.get(1)?,
-                        sensitivity: row.get(2)?,
-                        candidate_kind: row.get(3)?,
-                        created_at: row.get(4)?,
-                        deadline_at: row.get(5)?,
-                        candidate_terminal: row.get(6)?,
-                        terminal_at: row.get(7)?,
-                        run_terminal: row.get(8)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|error| ReviewReadError::Store(map_sqlite(error)))?
-            .ok_or(ReviewReadRefusal::Missing)?;
+        let row = stored_review_row(&reader, reference)?;
         drop(reader);
         let live_at = if live {
             live_at.max(current_time_ms())
         } else {
             live_at
         };
-        // The schema pairs `terminal_state` with `terminal_at`, so a completed row always carries its timestamp.
-        let sealed_at = match (
-            row.run_terminal.as_deref(),
-            row.candidate_terminal.as_deref(),
-            row.terminal_at,
-        ) {
-            (Some("completed"), Some("completed"), Some(sealed_at)) => sealed_at,
-            (None, None, _) => return Err(ReviewReadRefusal::Unsealed.into()),
-            _ => return Err(ReviewReadRefusal::Abandoned.into()),
-        };
-        if row.deadline_at <= live_at {
-            return Err(ReviewReadRefusal::Expired.into());
-        }
-        if identity_digest(&row.payload) != reference.payload_digest {
-            return Err(ReviewReadRefusal::Changed.into());
-        }
-        let (binding, dependencies) =
-            decode_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
-        Ok((row, sealed_at, binding, dependencies))
+        judge_stored_row(row, reference, live_at)
     }
+}
+
+/// The sealed review row `reference` names, read in `tx`. The row's stored binding must name `project_digest` and `owner` before anything else about it is judged, so a caller learns nothing about a row bound elsewhere: such a row, like a missing one, is `Missing`. A selected read then judges it against `selected_at` exactly as [`KernelStore::read_selected_review_input`] does, and a `selected_at` before the row was sealed is `Invalid`.
+pub(crate) fn bound_review_row_in(
+    tx: &Transaction<'_>,
+    reference: &ReviewStagedReference,
+    project_digest: &str,
+    owner: &ReviewOwner,
+    selected_at: i64,
+) -> Result<ReviewStagedRow, ReviewReadError> {
+    if selected_at < 0 {
+        return Err(ReviewReadError::Invalid);
+    }
+    check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
+    check_digest(&reference.payload_digest).map_err(|_| ReviewReadError::Invalid)?;
+    let row = stored_review_row(tx, reference)?;
+    let bound = decode_witness(&row.witness).is_some_and(|(binding, _)| {
+        binding.project_digest == project_digest && binding.owner == *owner
+    });
+    if !bound {
+        return Err(ReviewReadRefusal::Missing.into());
+    }
+    let (row, sealed_at, binding, dependencies) = judge_stored_row(row, reference, selected_at)?;
+    if selected_at < sealed_at {
+        return Err(ReviewReadError::Invalid);
+    }
+    KernelStore::decode_staged_row(row, sealed_at, binding, dependencies)
+}
+
+/// The stored row at `reference`'s candidate id, after checking that `conn` is the incarnation `reference` names.
+fn stored_review_row(
+    conn: &rusqlite::Connection,
+    reference: &ReviewStagedReference,
+) -> Result<StoredReviewRow, ReviewReadError> {
+    let incarnation =
+        super::open::database_incarnation_id_via(conn).map_err(ReviewReadError::Store)?;
+    if incarnation != reference.database_incarnation_id {
+        return Err(ReviewReadRefusal::IncarnationMismatch.into());
+    }
+    conn.query_row_cached(
+        "SELECT c.payload,c.provenance_witness,c.sensitivity_class,c.candidate_kind,
+                c.created_at,c.lease_expires_at,c.terminal_state,c.terminal_at,
+                r.terminal_state
+         FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
+         WHERE c.candidate_id=?1",
+        [reference.candidate_id.as_str()],
+        |row| {
+            Ok(StoredReviewRow {
+                payload: row.get(0)?,
+                witness: row.get(1)?,
+                sensitivity: row.get(2)?,
+                candidate_kind: row.get(3)?,
+                created_at: row.get(4)?,
+                deadline_at: row.get(5)?,
+                candidate_terminal: row.get(6)?,
+                terminal_at: row.get(7)?,
+                run_terminal: row.get(8)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| ReviewReadError::Store(map_sqlite(error)))?
+    .ok_or_else(|| ReviewReadRefusal::Missing.into())
+}
+
+/// A row is readable when it is sealed, its deadline is strictly after `live_at`, and its bytes are the ones `reference` names.
+fn judge_stored_row(
+    row: StoredReviewRow,
+    reference: &ReviewStagedReference,
+    live_at: i64,
+) -> Result<
+    (
+        StoredReviewRow,
+        i64,
+        ReviewBinding,
+        Option<ReviewDependencies>,
+    ),
+    ReviewReadError,
+> {
+    // The schema pairs `terminal_state` with `terminal_at`, so a completed row always carries its timestamp.
+    let sealed_at = match (
+        row.run_terminal.as_deref(),
+        row.candidate_terminal.as_deref(),
+        row.terminal_at,
+    ) {
+        (Some("completed"), Some("completed"), Some(sealed_at)) => sealed_at,
+        (None, None, _) => return Err(ReviewReadRefusal::Unsealed.into()),
+        _ => return Err(ReviewReadRefusal::Abandoned.into()),
+    };
+    if row.deadline_at <= live_at {
+        return Err(ReviewReadRefusal::Expired.into());
+    }
+    if identity_digest(&row.payload) != reference.payload_digest {
+        return Err(ReviewReadRefusal::Changed.into());
+    }
+    let (binding, dependencies) =
+        decode_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
+    Ok((row, sealed_at, binding, dependencies))
 }
 
 /// Names the replay outcome before the shared stager runs: a terminal run is `Terminal`, a lapsed deadline is `Expired`, and different stored bytes, kind, witness, or deadline are `Changed`. Any remaining stager conflict is also `Changed`.

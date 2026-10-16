@@ -36,7 +36,7 @@ code surface. Slugs assigned to a later ticket appear in the index with no
 record until that ticket lands. Landed so far: #725 (canonical resolution), #726 (private result expiry),
 #727 (broker-free recovery), #728 (observational routes), #729 (exact
 integers at the client seam), #730 (the review command), #731 (cumulative
-response budgets), and #592 (the semantic evidence corpus).
+response budgets), #592 (the semantic evidence corpus), and #597 (Kernel acceptance).
 
 ## Landed by
 
@@ -50,6 +50,7 @@ response budgets), and #592 (the semantic evidence corpus).
 | #730 | `completed-outcome-pages-have-live-keyset-semantics`, `shared-path-fixture-reaches-selected-readable-proposal`, `reference-only-cli-outcomes-preserve-meaning`, `review-cli-owns-one-replay-free-connection`, `review-cli-validates-byte-exact-inert-payloads`, `review-cli-preserves-shared-kernel-refusal-shapes`, `status-freshness-never-defaults-unknown-to-zero`, `status-counts-preserve-overlapping-ledger-populations` |
 | #731 | `provider-response-budget-is-cumulative-per-job`, `attempt-ledger-preserves-cross-generation-ceilings`, `guarded-request-handoff-precedes-network-polling` |
 | #592 | `material-claims-require-exact-cited-byte-support` |
+| #597 | `future-acceptance-co-commits-exact-target-and-replay` |
 
 Slugs the specification assigns to other units (history lineage, lifecycle and
 retention, gate and status truth beyond the two status records above, semantic

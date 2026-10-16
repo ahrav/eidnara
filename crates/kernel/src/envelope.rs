@@ -571,13 +571,31 @@ impl Envelope<'_> {
         self.guarded(|envelope| envelope.record_receipt_inner(intent, result))
     }
 
+    /// [`Self::record_receipt`] for a receipt the store writes on its own behalf under a reserved producer, which no caller intent may name.
+    pub(crate) fn record_reserved_receipt(
+        &mut self,
+        intent: CommitIntent,
+        result: &str,
+    ) -> Result<(), KernelError> {
+        if !intent
+            .producer
+            .starts_with(CommitIntent::RESERVED_PRODUCER_PREFIX)
+        {
+            return Err(KernelError::InvalidInput);
+        }
+        self.guarded(|envelope| envelope.insert_receipt(RedactedIntent::new(intent)?, result))
+    }
+
     fn record_receipt_inner(
         &mut self,
         intent: CommitIntent,
         result: &str,
     ) -> Result<(), KernelError> {
         intent.refuse_reserved_producer()?;
-        let intent = RedactedIntent::new(intent)?;
+        self.insert_receipt(RedactedIntent::new(intent)?, result)
+    }
+
+    fn insert_receipt(&mut self, intent: RedactedIntent, result: &str) -> Result<(), KernelError> {
         if stored_receipt(self.tx, &intent)?.is_some() {
             return Err(KernelError::Conflict);
         }
@@ -1228,6 +1246,14 @@ fn read_snapshot_on<T>(
     let result = read(&tx, tip)?;
     tx.commit().map_err(map_sqlite)?;
     Ok((tip, result))
+}
+
+/// The receipt recorded under `intent` as `tx` sees it, for a caller or reserved producer alike; `Conflict` when the key is recorded under another digest.
+pub(crate) fn recorded_receipt(
+    tx: &Transaction<'_>,
+    intent: CommitIntent,
+) -> Result<Option<CommitReceipt>, KernelError> {
+    stored_receipt(tx, &RedactedIntent::new(intent)?)
 }
 
 /// The receipt a repeat of `intent` replays; a stored key under a different

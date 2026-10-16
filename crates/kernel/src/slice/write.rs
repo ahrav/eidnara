@@ -481,6 +481,15 @@ impl Envelope<'_> {
     /// Invalidates a live decision and demotes dependents if its authority is lost.
     pub fn retire_decision(&mut self, object_id: &str) -> Result<RetirementOutcome, KernelError> {
         self.guarded(|envelope| envelope.retire_slice_object(object_id, "decision", "decisions"))
+            .map(|retirement| retirement.outcome)
+    }
+
+    /// [`Self::retire_decision`] with the cascade it ran: whether the decision granted authority before it was invalidated, and how many dependents were demoted and deferred.
+    pub(crate) fn retire_decision_with_cascade(
+        &mut self,
+        object_id: &str,
+    ) -> Result<SliceRetirement, KernelError> {
+        self.guarded(|envelope| envelope.retire_slice_object(object_id, "decision", "decisions"))
     }
 
     /// Invalidates a live observation without deleting its historical row.
@@ -503,6 +512,7 @@ impl Envelope<'_> {
         self.guarded(|envelope| {
             envelope.retire_slice_object(object_id, "observation", "observations")
         })
+        .map(|retirement| retirement.outcome)
     }
 
     /// Invalidates a live evidence object without deleting its historical row. Rejects retirement while a live observation, decision (including its events), or asserted edge cites the evidence.
@@ -558,7 +568,7 @@ impl Envelope<'_> {
         object_id: &str,
         object_kind: &'static str,
         table: &'static str,
-    ) -> Result<RetirementOutcome, KernelError> {
+    ) -> Result<SliceRetirement, KernelError> {
         let object_id = identity_field(object_id)?;
         let mut object = load_live_typed_object(self.tx, &object_id.text, object_kind)?;
         // Retiring an accepted decision withdraws any authority it granted, so its
@@ -577,14 +587,32 @@ impl Envelope<'_> {
             redactions: vec![("object_id".to_string(), object_id.clone())],
             audit: None,
         });
-        if granted_before {
-            self.demote_dependents_if_authority_lost(Some(&object_id.text), "authority retired")?;
-        }
-        Ok(RetirementOutcome {
-            object_id: object_id.text,
-            object_kind: object_kind.to_string(),
+        let (demoted, deferred) = if granted_before {
+            self.demote_dependents_if_authority_lost(Some(&object_id.text), "authority retired")?
+        } else {
+            (0, 0)
+        };
+        Ok(SliceRetirement {
+            outcome: RetirementOutcome {
+                object_id: object_id.text,
+                object_kind: object_kind.to_string(),
+            },
+            invalidated_commit_seq: self.commit_seq,
+            granted_before,
+            demoted,
+            deferred,
         })
     }
+}
+
+/// One retirement and the authority cascade it ran.
+pub(crate) struct SliceRetirement {
+    pub(crate) outcome: RetirementOutcome,
+    pub(crate) invalidated_commit_seq: i64,
+    /// Whether the object granted authority before it was invalidated.
+    pub(crate) granted_before: bool,
+    pub(crate) demoted: usize,
+    pub(crate) deferred: usize,
 }
 
 impl RedactedDecision {

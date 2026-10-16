@@ -3,7 +3,7 @@
 Status: current system document for the MemoryReviewer lifecycle boundary
 Scope: activation, status, review reads, backup and restore, exposure bounds, evaluation evidence, and property traceability for the proposal-only milestone
 
-This document describes how a deployment owner and an operator run the MemoryReviewer as it exists: a proposal-only reviewer that stages proposals and never accepts one. Acceptance has no code path in this milestone. `docs/host-wire-protocol.md` is the normative wire contract; where this document names a wire field, that document governs.
+This document describes how a deployment owner and an operator run the MemoryReviewer as it exists: a reviewer that stages proposals, plus a Kernel acceptance path that applies one selected proposal at its exact target (section 4, Kernel acceptance). No daemon route or command calls that path in this milestone, so the deployed reviewer stays proposal-only. `docs/host-wire-protocol.md` is the normative wire contract; where this document names a wire field, that document governs.
 
 ## 1. What runs and what never runs
 
@@ -11,7 +11,7 @@ The MemoryReviewer worker is one task per data home. Each pass it reads the depl
 
 Two producers feed the queue. The History Summarizer reserves a job for each accepted fact set before it publishes the chunk, and activates the job as part of that publication; the Memory Classifier enqueues bounded selection pages of canonical memories. Both paths are exercised by real-store tests named in section 8.
 
-Nothing in this milestone writes a canonical memory, promotes a proposal, or invents provenance. A default-`Sensitive` subject, which every History Summarizer subject is, never reaches the remote model: the run abstains by policy before any request and records that abstention.
+No running component writes a canonical memory, promotes a proposal, or invents provenance. A default-`Sensitive` subject, which every History Summarizer subject is, never reaches the remote model: the run abstains by policy before any request and records that abstention.
 
 ## 2. Activation (Q36, Q38)
 
@@ -134,6 +134,24 @@ A takeover advances the generation, so a successor adopts only a result of its o
 The record widens the witness a proposal row is stored under. A binary from before this release decodes a witness only in its own shape, so it refuses every proposal row this release stages (`scope_mismatch` on read, and a settlement retry on that binary cannot recover its own sealed row). No schema baseline changes, so the store opens, but the rollback rule in section 5 still applies: an earlier binary runs only against the backup pair it wrote, never against a live family this release has staged into.
 
 The sweep closes an in-progress receipt at the earlier of its run deadline and its job's queue deadline. Each lifecycle pass then reconciles the review holds of the live Memory Store incarnation: a hold whose result no completed receipt selects and no in-progress receipt can still select is released, so the hold and its quota charge end at the next pass rather than at the review expiry. The transfer had already moved each MemoryReviewer capture's `retain_until` to that expiry, and the release does not move it back: the capture's evidence and artifact bytes stay until the capture sweep retires them after `retain_until`, whether or not a hold still pins them. Selected results keep their holds; holds of another store incarnation, such as a restored Kernel's beside a replaced store, are left alone; nothing is rescued, refreshed, or accepted by this pass.
+
+### Kernel acceptance
+
+`KernelStore::accept_review_proposal` applies the proposal a completed receipt selects. The caller passes what it copied from the trusted receipt (the run binding with project digest, both incarnations, the job's causal identity, and the generation; the selected row's id and payload digest; the completion time), the target it read, and its own idempotency intent. One Kernel envelope then:
+
+- reads the sealed row only once its stored binding names the run's project and job generation, then judges its queue deadline against the completion time;
+- requires the caller's target to equal the proposal's, and a memory target to be the live decision at exactly the proposal's object, source revision, and last-change commit token, still served to a local reader of the project;
+- requires the live review hold to cover every disclosed input, cited or not, each still live, unpurged, and not `Secret`;
+- requires every policy-union member to stand: each descriptor live at its revision and still naming its decision owner, each owner a live decision at its owner revision that a local reader of the project is served, each staged subject this job's sealed row at its digest, each capture live at its digest;
+- applies the action and records the settlement.
+
+| Action | Canonical effect |
+| --- | --- |
+| `retire` | The existing decision retirement and its authority cascade |
+| `retain`, `no_change` | None: no canonical write, TTL refresh, maturity change, or corroboration |
+| `create`, `revise` | Refused as `unsupported`; nothing is written |
+
+The settlement is one receipt under the reserved producer `eidnara-kernel/memory-reviewer-settlement`, keyed by a versioned, length-delimited derivation over the project digest, proposal id, payload digest, generation, and both incarnations. The caller's key is not part of it and the request digest is derived from the key, so an acceptance of a settled proposal under any caller key replays the first settlement, before the review hold, the queue deadline, or the payload is read. A caller key that committed an acceptance replays only that acceptance; the same key for other input conflicts. A key that only received a replay is not recorded. A refused acceptance writes nothing; a missing row, a row bound to another project or job, a row of another Kernel incarnation, and a non-proposal row all refuse as one `unavailable` answer before anything else about the row is judged.
 
 ### Observational routes
 
@@ -331,5 +349,6 @@ The parent property portfolio was not published before dependent implementation,
 | Shutdown joins owned work before store release | `memory_reviewer_coordinator::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`; `memory_reviewer_worker::a_cancelled_worker_loop_returns_before_the_stores_are_released`; the daemon's `shutdown_cancels_and_joins_tracked_*` tests |
 | Cleanup is finite and kind-specific | `memory_reviewer::lifecycle` maintenance test |
 | Review outcomes list and read only through the receipt-selected path | `crates/daemon/tests/memory_reviewer_wire.rs` |
+| Kernel acceptance applies retain, no-change, and retire at the exact target with the retirement cascade, refuses create and revise as unsupported, settles one proposal once under concurrent callers, replays its settlement across caller keys, a reopen, a released hold, row cleanup, a purge, and a late selection, conflicts on a reused caller key, and refuses a moved or quarantined target or owner, another project or job, a released hold, a selection past the queue deadline, and deleted or tightened evidence, each without writing | `crates/kernel/tests/kernel_review_acceptance.rs` |
 
-Acceptance activation remains blocked: there is no acceptance code, no acceptance protocol version, and no owner-reviewed actual-evidence corpus gate, and this milestone adds none.
+Acceptance activation remains blocked: the Kernel acceptance path has no caller, no acceptance protocol version, and no owner-reviewed actual-evidence corpus gate.
