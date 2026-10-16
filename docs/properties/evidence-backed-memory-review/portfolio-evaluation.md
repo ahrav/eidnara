@@ -181,7 +181,7 @@ Lenses for this change: over-engineering, complexity, testing, Rust code review,
 
 | Finding | Class | Disposition |
 | --- | --- | --- |
-| The receipt copy duplicated the read path's checks, so the two could drift in which receipt they trust | refinement | fixed: `copy_selected_receipt` serves both; `AcceptRefusal::Receipt` reuses `ReadRefusal` |
+| The receipt copy duplicated the read path's checks, so the two could drift in which receipt they trust | refinement | fixed: `copy_selection` serves both; `AcceptRefusal::Receipt` reuses `ReadRefusal` |
 | A receipt bound to a replaced Kernel answered `unavailable` where a read answers `incarnation_mismatch` | gap | fixed: the daemon compares the receipt's Kernel incarnation with the live one |
 | The gate's incarnation read waited on the reader pool without bound | gap | fixed: a five-second budget, answering `store_unavailable` |
 | No test pinned the `review.accept` terminal set to 7.8 | gap | fixed: `every_review_accept_terminal_is_a_documented_literal` |

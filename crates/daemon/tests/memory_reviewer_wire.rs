@@ -558,10 +558,15 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         "the decision is scoped to the bound project"
     );
 
-    // Another key replays the same settlement; the first key for another target conflicts.
+    // Another key replays the same settlement, and so does the committing key; the first key for another target conflicts.
     let replay = daemon.call(accept("caller-2", &target)).await;
     assert_eq!(replay["replayed"], json!(true));
     assert_eq!(&replay["settlement"], settlement);
+    let own = daemon.call(accept("caller-1", &target)).await;
+    assert_eq!(
+        (&own["replayed"], &own["settlement"]),
+        (&json!(true), settlement)
+    );
     let other = json!({ "kind": "staged_candidate", "candidate_id": "another" });
     assert_eq!(
         daemon.call(accept("caller-1", &other)).await,

@@ -1093,23 +1093,24 @@ pub enum AcceptRefusal {
     Kernel(kernel::AcceptanceRefusal),
 }
 
-/// Accepts the proposal the job's completed receipt selects. `live_pair` identifies the expected Kernel and Memory Store incarnations; a receipt bound to a different incarnation yields `IncarnationMismatch`. The function copies the receipt and releases the Memory Store before entering the Kernel. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. `operation_key` is scoped to the project and job; reusing it for a different target causes a conflict.
+/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. `operation_key` is scoped to the project and job; reusing it for a different target causes a conflict.
 pub fn accept_selected_proposal(
     store: &KernelStore,
-    ledger: &MemoryStore,
-    live_pair: (&str, &str),
+    receipt: Option<MemoryReviewerReceipt>,
+    expected: (&str, &str),
     project: &str,
     causal_identity: &str,
     operation_key: &str,
     target: &kernel::ProposalTarget,
 ) -> Result<kernel::AcceptanceOutcome, AcceptRefusal> {
     use sha2::Digest;
-    let (live_kernel, live_memstore) = live_pair;
+    let (live_kernel, live_memstore) = expected;
     let CopiedSelection {
         reference,
         run,
         selected_at,
-    } = lookup_receipt(ledger, project, causal_identity)
+    } = receipt
+        .ok_or(ReadRefusal::NotSelected)
         .and_then(|receipt| copy_selection(receipt, live_memstore, causal_identity))
         .map_err(AcceptRefusal::Receipt)?;
     if run.kernel_incarnation != live_kernel {

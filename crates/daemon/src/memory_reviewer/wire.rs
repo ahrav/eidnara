@@ -11,7 +11,7 @@ use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::blocking;
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 use host_runtime::RouteHandle;
-use memory_store::memory_reviewer_ledger::MAX_RECEIPT_PAGE;
+use memory_store::memory_reviewer_ledger::{MAX_RECEIPT_PAGE, MemoryReviewerReceipt};
 use memory_store::{MemoryStore, MemoryStoreError};
 
 use super::settlement::{
@@ -160,6 +160,34 @@ impl Bound {
             project,
         })
     }
+
+    /// [`Self::review_scope`] with the Memory Store incarnation and `causal_identity`'s receipt copied from the authority's own read, so the store is released before the Kernel is entered.
+    fn review_scope_with_receipt(
+        self,
+        causal_identity: &str,
+    ) -> Result<(ReviewScope, String, Option<MemoryReviewerReceipt>), &'static str> {
+        let read = self.ledger.module_authority_with_memory_reviewer_receipt(
+            &self.root,
+            "memories",
+            causal_identity,
+        );
+        let (row, copied) = match read {
+            Ok(Some((row, incarnation, receipt))) => (Some(row), Some((incarnation, receipt))),
+            Ok(None) => (None, None),
+            Err(_) => return Err("store_unavailable"),
+        };
+        let project = authority_project(Ok(crate::memories_authority(row)))?;
+        let (incarnation, receipt) = copied.ok_or("disabled")?;
+        Ok((
+            ReviewScope {
+                kernel: self.kernel,
+                ledger: self.ledger,
+                project,
+            },
+            incarnation,
+            receipt,
+        ))
+    }
 }
 
 impl HandlerCore {
@@ -285,39 +313,48 @@ impl HandlerCore {
             return outcome;
         }
         let home = self.memory_reviewer_home();
+        let held = Arc::clone(&self.memory_reviewer_acceptance_record);
         let accepted = blocking(move || {
-            let scope = bound.review_scope()?;
-            // The owner's acceptance record is its own gate: the disclosure record, open or not, admits no acceptance.
-            let home = home.ok_or("disabled")?;
-            // `read_acceptance_gate` requires an owner-only acceptance record with schema 1 and a nonempty evidence reference before reading the stores.
-            let (kernel_incarnation, memstore_incarnation) =
-                super::activation::read_acceptance_gate(&home, || {
-                    let kernel_incarnation = scope
-                        .kernel
-                        .database_incarnation_id_within_budget(
-                            &kernel::applicability::EvalBudget::new(
-                                Some(std::time::Instant::now() + GATE_READ_BUDGET),
-                                Arc::default(),
-                            ),
-                        )
-                        .map_err(|_| "store_unavailable")?;
-                    let memstore_incarnation = scope
-                        .ledger
-                        .memory_reviewer_store_incarnation()
-                        .map_err(|_| "store_unavailable")?;
-                    Ok::<_, &'static str>((kernel_incarnation, memstore_incarnation))
-                })?
+            // The owner's acceptance record is its own gate: the disclosure record, open or not, admits no acceptance. It reads no store, so it is read first and a sound record's Memory Store inputs come from the authority's own read; the route's state is still answered before the gate.
+            let record = home
+                .as_deref()
+                .map(|home| super::activation::read_acceptance_record(home, &held));
+            let (scope, copied) = match &record {
+                Some(Ok(_)) => {
+                    let (scope, incarnation, receipt) =
+                        bound.review_scope_with_receipt(&parsed.causal_identity)?;
+                    (scope, Some((incarnation, receipt)))
+                }
+                _ => (bound.review_scope()?, None),
+            };
+            let record = record.ok_or("disabled")?.map_err(|_| "disabled")?;
+            let (memstore_incarnation, receipt) = copied.ok_or("disabled")?;
+            record
+                .admits_memory_store(&memstore_incarnation)
                 .map_err(|_| "disabled")?;
+            // The Kernel checks its live incarnation against the one the record names before it reads anything else, so an acceptance it answers ran under an open gate. A refusal reads the live Kernel incarnation, so a closed gate answers `disabled` before any other terminal.
             accept_selected_proposal(
                 &scope.kernel,
-                &scope.ledger,
-                (&kernel_incarnation, &memstore_incarnation),
+                receipt,
+                (record.kernel_incarnation(), &memstore_incarnation),
                 &scope.project,
                 &parsed.causal_identity,
                 &parsed.operation_key,
                 &parsed.target,
             )
-            .map_err(|refusal| accept_terminal(&refusal))
+            .or_else(|refusal| {
+                let kernel_incarnation = scope
+                    .kernel
+                    .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::new(
+                        Some(std::time::Instant::now() + GATE_READ_BUDGET),
+                        Arc::default(),
+                    ))
+                    .map_err(|_| "store_unavailable")?;
+                record
+                    .admits(&kernel_incarnation, &memstore_incarnation)
+                    .map_err(|_| "disabled")?;
+                Err(accept_terminal(&refusal))
+            })
         })
         .await;
         match accepted {

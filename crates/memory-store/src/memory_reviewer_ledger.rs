@@ -20,8 +20,9 @@ use crate::task_lease::{
     redaction_error,
 };
 use crate::{
-    MemoryStore, MemoryStoreError, NOTE_EVAL_NO_WORK_RETENTION_MS, NOTE_EVAL_RESPONSE_REDACT_MS,
-    NOTE_EVAL_TERMINAL_RETENTION_MS, WriteDisposition, active_scan_owner_key,
+    AuthorityRow, MemoryStore, MemoryStoreError, NOTE_EVAL_NO_WORK_RETENTION_MS,
+    NOTE_EVAL_RESPONSE_REDACT_MS, NOTE_EVAL_TERMINAL_RETENTION_MS, WriteDisposition,
+    active_scan_owner_key,
 };
 
 /// Run deadline measured from the first claim.
@@ -1639,6 +1640,28 @@ impl MemoryStore {
         self.inner
             .with_conn(|conn| load_receipt(conn, project, causal_identity))
             .map_err(Into::into)
+    }
+
+    /// [`Self::module_authority_for_route`] for `domain`, together with [`Self::memory_reviewer_store_incarnation`] and the receipt [`Self::lookup_memory_reviewer_receipt`] finds for `causal_identity` under the found row's project, all from one `with_conn` read.
+    pub fn module_authority_with_memory_reviewer_receipt(
+        &self,
+        route_project_root: &str,
+        domain: &str,
+        causal_identity: &str,
+    ) -> Result<Option<(AuthorityRow, String, Option<MemoryReviewerReceipt>)>, MemoryStoreError>
+    {
+        let Some((row, (incarnation, receipt))) =
+            self.module_authority_for_route_then(route_project_root, domain, |conn, row| {
+                Ok((
+                    store_incarnation_in_tx(conn)?,
+                    load_receipt(conn, &row.project, causal_identity)?,
+                ))
+            })?
+        else {
+            return Ok(None);
+        };
+        check_project(&row.project)?;
+        Ok(Some((row, incarnation, receipt)))
     }
 
     pub fn list_memory_reviewer_attempts(
