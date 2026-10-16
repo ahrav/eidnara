@@ -291,6 +291,8 @@ pub struct Envelope<'tx> {
     pub(super) causality_objects: HashMap<String, String>,
     /// Capture evidence id to the `localfileobj:` row this envelope wrote for it.
     pub(super) local_file_objects: HashMap<String, String>,
+    /// The last receipt result this envelope recorded and its redaction, so a commit whose own result is that text reuses the redaction.
+    receipt_redaction: Option<(String, RedactedField)>,
     poisoned: Option<KernelError>,
 }
 
@@ -574,7 +576,7 @@ impl Envelope<'_> {
     /// [`Self::record_receipt`] for a receipt the store writes on its own behalf under a reserved producer, which no caller intent may name.
     pub(crate) fn record_reserved_receipt(
         &mut self,
-        intent: CommitIntent,
+        intent: &RedactedIntent,
         result: &str,
     ) -> Result<(), KernelError> {
         if !intent
@@ -583,7 +585,7 @@ impl Envelope<'_> {
         {
             return Err(KernelError::InvalidInput);
         }
-        self.guarded(|envelope| envelope.insert_receipt(RedactedIntent::new(intent)?, result))
+        self.guarded(|envelope| envelope.insert_receipt(intent, result))
     }
 
     fn record_receipt_inner(
@@ -592,15 +594,15 @@ impl Envelope<'_> {
         result: &str,
     ) -> Result<(), KernelError> {
         intent.refuse_reserved_producer()?;
-        self.insert_receipt(RedactedIntent::new(intent)?, result)
+        self.insert_receipt(&RedactedIntent::new(intent)?, result)
     }
 
-    fn insert_receipt(&mut self, intent: RedactedIntent, result: &str) -> Result<(), KernelError> {
-        if stored_receipt(self.tx, &intent)?.is_some() {
+    fn insert_receipt(&mut self, intent: &RedactedIntent, result: &str) -> Result<(), KernelError> {
+        if stored_receipt(self.tx, intent)?.is_some() {
             return Err(KernelError::Conflict);
         }
-        let receipt_id = operation_identity(&intent);
-        let result = redact(result)?;
+        let receipt_id = operation_identity(intent);
+        let redacted = redact(result)?;
         self.tx
             .execute_cached(
                 "INSERT INTO operation_receipts(
@@ -612,7 +614,7 @@ impl Envelope<'_> {
                     intent.operation_key,
                     intent.request_digest,
                     self.commit_seq,
-                    result.text.as_bytes(),
+                    redacted.text.as_bytes(),
                     current_time_ms(),
                 ],
             )
@@ -622,9 +624,11 @@ impl Envelope<'_> {
             "operation_receipt",
             &receipt_id,
             "result_payload",
-            &result,
+            &redacted,
             Some(self.commit_seq),
-        )
+        )?;
+        self.receipt_redaction = Some((result.to_string(), redacted));
+        Ok(())
     }
 
     /// Succession is judged before invalidation because a superseded object is
@@ -849,6 +853,7 @@ impl KernelStore {
                     descriptor_objects: HashMap::new(),
                     causality_objects: HashMap::new(),
                     local_file_objects: HashMap::new(),
+                    receipt_redaction: None,
                     poisoned: None,
                 },
             })
@@ -1258,7 +1263,7 @@ pub(crate) fn recorded_receipt(
 
 /// The receipt a repeat of `intent` replays; a stored key under a different
 /// digest is `Conflict`, since the caller reused an identity for other bytes.
-fn stored_receipt(
+pub(crate) fn stored_receipt(
     tx: &Transaction<'_>,
     intent: &RedactedIntent,
 ) -> Result<Option<CommitReceipt>, KernelError> {
@@ -1344,6 +1349,7 @@ fn commit_prepared_with_writer(
         descriptor_objects: HashMap::new(),
         causality_objects: HashMap::new(),
         local_file_objects: HashMap::new(),
+        receipt_redaction: None,
         poisoned: None,
     };
     let result = operation(&mut envelope)?;
@@ -1361,7 +1367,10 @@ fn commit_prepared_with_writer(
         .changes
         .iter()
         .any(|change| change.kind == OBSERVATION_INSERT_KIND);
-    let result = redact(&result)?;
+    let result = match envelope.receipt_redaction.take() {
+        Some((text, redacted)) if text == result => redacted,
+        _ => redact(&result)?,
+    };
 
     let payloads = envelope
         .changes
@@ -1539,7 +1548,23 @@ pub(super) fn commit_with_writer(
     operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
     after_events: impl FnOnce() -> Result<(), KernelError>,
 ) -> Result<CommitReceipt, KernelError> {
-    let intent = RedactedIntent::new(intent)?;
+    commit_redacted_with_writer(
+        writer,
+        lease_epoch,
+        RedactedIntent::new(intent)?,
+        operation,
+        after_events,
+    )
+}
+
+/// [`commit_with_writer`] for an intent the caller already redacted.
+pub(super) fn commit_redacted_with_writer(
+    writer: &mut Connection,
+    lease_epoch: u64,
+    intent: RedactedIntent,
+    operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
+    after_events: impl FnOnce() -> Result<(), KernelError>,
+) -> Result<CommitReceipt, KernelError> {
     let transaction_id = operation_identity(&intent);
     commit_prepared_with_writer(
         writer,
@@ -1586,7 +1611,7 @@ fn truncate_alignment_projection(tx: &Transaction<'_>) -> Result<usize, KernelEr
     Ok(removed)
 }
 
-struct RedactedIntent {
+pub(crate) struct RedactedIntent {
     producer: String,
     operation_key: String,
     request_digest: String,
@@ -1595,7 +1620,7 @@ struct RedactedIntent {
 }
 
 impl RedactedIntent {
-    fn new(intent: CommitIntent) -> Result<Self, KernelError> {
+    pub(crate) fn new(intent: CommitIntent) -> Result<Self, KernelError> {
         if !context_core::canonical_json::is_lower_hex(&intent.request_digest, 64)
             || intent.producer.trim().is_empty()
             || intent.operation_key.trim().is_empty()

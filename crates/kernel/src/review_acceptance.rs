@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::eligibility::judge_in_tx;
-use super::envelope::{CommitIntent, Envelope, commit_with_writer, recorded_receipt};
+use super::envelope::{
+    CommitIntent, Envelope, RedactedIntent, commit_redacted_with_writer, recorded_receipt,
+    stored_receipt,
+};
 use super::memory_reviewer_hold::validate_review_evidence_in;
 use super::review_staging::bound_review_row_in;
 use super::{
@@ -211,51 +214,73 @@ impl KernelStore {
             .intent
             .refuse_reserved_producer()
             .map_err(|_| AcceptanceRefusal::Invalid)?;
-        let settlement = settlement_intent(&acceptance.run, &acceptance.proposal)?;
+        let settlement_key = settlement_intent(&acceptance.run, &acceptance.proposal)?;
         let mut writer = self.lock_writer()?;
         // The settlement replay comes before the hold, the deadline, or the payload: a settled proposal answers its settlement whatever has expired since. A caller key with a receipt falls through, so the commit path replays it under its fence and alignment repair.
-        {
+        // Each intent is redacted once: the replay checks and the commit share it.
+        let (caller, mut settlement) = {
             let tx = writer
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(map_sqlite)?;
-            let caller = match recorded_receipt(&tx, acceptance.intent.clone()) {
+            let caller = RedactedIntent::new(acceptance.intent.clone())?;
+            let replay = match stored_receipt(&tx, &caller) {
                 Err(KernelError::Conflict) => return Err(AcceptanceRefusal::Conflict.into()),
                 other => other?,
             };
-            if caller.is_none()
-                && let Some(receipt) = recorded_receipt(&tx, settlement.clone())?
-            {
-                let recorded = decode(&receipt.result)?;
-                if recorded.target != acceptance.target {
-                    return Err(AcceptanceRefusal::Changed.into());
+            let mut settlement = None;
+            if replay.is_none() {
+                let redacted = RedactedIntent::new(settlement_key.clone())?;
+                if let Some(receipt) = stored_receipt(&tx, &redacted)? {
+                    let recorded = decode(&receipt.result)?;
+                    if recorded.target != acceptance.target {
+                        return Err(AcceptanceRefusal::Changed.into());
+                    }
+                    return Ok(AcceptanceOutcome {
+                        settlement: recorded,
+                        replayed: true,
+                    });
                 }
-                return Ok(AcceptanceOutcome {
-                    settlement: recorded,
-                    replayed: true,
-                });
+                settlement = Some(redacted);
             }
-        }
+            (caller, settlement)
+        };
         let mut refusal = None;
-        let receipt = commit_with_writer(
+        let mut applied = None;
+        let receipt = commit_redacted_with_writer(
             &mut writer,
             self.lease_epoch(),
-            acceptance.intent.clone(),
+            caller,
             |envelope| {
-                apply(envelope, acceptance, &settlement).map_err(|error| {
-                    // Every refusal is classified inside `apply`; a store conflict there is a moved row, never the caller's key.
-                    refusal = Some(match error {
-                        AcceptanceError::Refused(code) => code,
-                        AcceptanceError::Store(KernelError::Conflict) => AcceptanceRefusal::Changed,
-                        AcceptanceError::Store(error) => return error,
-                    });
-                    KernelError::Conflict
-                })
+                let settlement = match settlement.take() {
+                    Some(settlement) => settlement,
+                    None => RedactedIntent::new(settlement_key.clone())?,
+                };
+                let (recorded, encoded) = apply(envelope, acceptance, &settlement_key, &settlement)
+                    .map_err(|error| {
+                        // Every refusal is classified inside `apply`; a store conflict there is a moved row, never the caller's key.
+                        refusal = Some(match error {
+                            AcceptanceError::Refused(code) => code,
+                            AcceptanceError::Store(KernelError::Conflict) => {
+                                AcceptanceRefusal::Changed
+                            }
+                            AcceptanceError::Store(error) => return error,
+                        });
+                        KernelError::Conflict
+                    })?;
+                applied = Some((recorded, encoded.clone()));
+                Ok(encoded)
             },
             || Ok(()),
         );
         match receipt {
             Ok(receipt) => {
-                let recorded = decode(&receipt.result)?;
+                // A fresh commit stores the settlement it applied unless redaction changed its text.
+                let recorded = match applied {
+                    Some((recorded, encoded)) if !receipt.replayed && receipt.result == encoded => {
+                        recorded
+                    }
+                    _ => decode(&receipt.result)?,
+                };
                 // A caller key replays only the acceptance it committed: the same proposal at the same target.
                 if receipt.replayed
                     && (recorded.proposal_id != acceptance.proposal.candidate_id
@@ -386,12 +411,13 @@ struct Validated {
     now: i64,
 }
 
-/// Validates and applies one acceptance inside its envelope and records the settlement receipt; returns the settlement's JSON for the caller's receipt.
+/// Validates and applies one acceptance inside its envelope and records the settlement receipt under `settlement`, the redaction of `settlement_key`; returns the settlement and its JSON for the caller's receipt.
 fn apply(
     envelope: &mut Envelope<'_>,
     acceptance: &ProposalAcceptance,
     settlement_key: &CommitIntent,
-) -> Result<String, AcceptanceError> {
+    settlement: &RedactedIntent,
+) -> Result<(Settlement, String), AcceptanceError> {
     let validated = validate(envelope, acceptance)?;
     let proposal = &validated.proposal;
     let effect = match (proposal.action, &proposal.target) {
@@ -439,7 +465,7 @@ fn apply(
         _ => return Err(KernelError::Io.into()),
     };
     let run = &acceptance.run;
-    let settlement = Settlement {
+    let recorded = Settlement {
         version: SETTLEMENT_VERSION,
         proposal_id: acceptance.proposal.candidate_id.clone(),
         payload_digest: acceptance.proposal.payload_digest.clone(),
@@ -452,9 +478,9 @@ fn apply(
         commit_seq: envelope.commit_seq,
         effect,
     };
-    let encoded = serde_json::to_string(&settlement).map_err(|_| KernelError::Io)?;
-    envelope.record_reserved_receipt(settlement_key.clone(), &encoded)?;
-    Ok(encoded)
+    let encoded = serde_json::to_string(&recorded).map_err(|_| KernelError::Io)?;
+    envelope.record_reserved_receipt(settlement, &encoded)?;
+    Ok((recorded, encoded))
 }
 
 /// Everything an action depends on except its target: the row bound to this run, its dependency record, every disclosed input under the live review hold, and every policy-union member.
