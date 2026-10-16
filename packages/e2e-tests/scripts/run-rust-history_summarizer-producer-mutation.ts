@@ -70,6 +70,15 @@ if (revertedRerun.exit_status !== 0) {
     throw new Error("RUST_HISTORY_SUMMARIZER_TYPED_FAILURE: reverted test did not pass");
 }
 
+// A CI measurement checks red-under-mutation and green-after-revert without writing or
+// syncing any record; only a deliberate local run updates `mutations/`.
+if (process.env.EIDNARA_MUTATION_MEASURE_ONLY === "1") {
+    console.log(
+        "measured RUST-HISTORY_SUMMARIZER-DIRECT-BACKEND: red under mutation, green after revert; no record written",
+    );
+    process.exit(0);
+}
+
 writeFileSync(
     resolve(e2eRoot, "mutations/rust-history_summarizer-producer.json"),
     `${JSON.stringify(

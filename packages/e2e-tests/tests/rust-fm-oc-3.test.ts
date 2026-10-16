@@ -24,8 +24,7 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
         await h?.dispose();
     });
 
-    // Quarantined (E2E triage): six recovery prompts log seven pass lines after the restart (one reconnect retry), so the pass-count ceiling fails while the self-heal invariant itself (no raw after transform) holds; the ceiling needs to count prompts, not passes. Tracked in the transport PR description.
-    it.skip("serves passes from transform again after the host restarts, without restarting the session", async () => {
+    it("serves passes from transform again after the host restarts, without restarting the session", async () => {
         const sessionId = await h.createSession();
         await driveToSteadyState(h, sessionId, 2);
         const healthyVersions = h
@@ -64,7 +63,12 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
         // Every recovery prompt has returned, so its pass line is due; waiting for all of them keeps a late raw fallback observable.
         const passes = await h.waitForRustPasses(recoveryStart + RECOVERY_PASSES);
         const recovery = passes.slice(recoveryStart);
-        expect(recovery.length).toBeLessThanOrEqual(RECOVERY_PASSES);
+        // A reconnect retry repeats the pass for the prompt it retries, so the ceiling counts
+        // prompts: each pass serves one prompt's input, and at most one retry joins each.
+        expect(new Set(recovery.map((pass) => pass.inputCount)).size).toBeLessThanOrEqual(
+            RECOVERY_PASSES,
+        );
+        expect(recovery.length).toBeLessThanOrEqual(2 * RECOVERY_PASSES);
         const firstRecovered = recovery.findIndex((pass) => pass.servedFrom === "transform");
         expect(firstRecovered).toBeGreaterThanOrEqual(0);
         // Self-healing holds only if no pass falls back to raw after the transform first serves one.

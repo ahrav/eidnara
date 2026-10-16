@@ -73,6 +73,15 @@ if (revertedRerun.exit_status !== 0) {
     throw new Error("EIDNARA_REDUCE_UNKNOWN_TARGET: reverted eidnara_reduce drill did not pass");
 }
 
+// A CI measurement checks red-under-mutation and green-after-revert without writing or
+// syncing any record; only a deliberate local run updates `mutations/`.
+if (process.env.EIDNARA_MUTATION_MEASURE_ONLY === "1") {
+    console.log(
+        "measured RUST-CTX-REDUCE-ROUNDTRIP: red under mutation, green after revert; no record written",
+    );
+    process.exit(0);
+}
+
 const record = {
     drill: "RUST-CTX-REDUCE-ROUNDTRIP",
     command,

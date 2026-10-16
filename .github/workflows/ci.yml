@@ -1054,6 +1054,18 @@ jobs:
         # `release/harness-closures/` names. The suite skips itself, with the
         # reason printed, when the shared-memory channel cannot start on the
         # runner's Bun; OpenCode embeds Bun, so the probe predicts the plugin.
+        # Runtime choice: the lane stays on the Bun pin above. The channel
+        # needs external buffers, exact bounds, detachment, and cleanup hooks,
+        # which Bun 1.3.14 provides; `markAsUntransferable` only adds transfer
+        # prevention, which the addon reports instead of gating on, because
+        # detaching every alias before publish and return bounds a transferred
+        # alias to torn bytes in a private copy (docs/payload-pool-protocol.md
+        # section 10). Moving the pin or adding a Node lane would test a
+        # runtime OpenCode does not embed.
+        # The mutation drills run as a measurement: each must go red under its
+        # mutation and green after the revert, and
+        # `EIDNARA_MUTATION_MEASURE_ONLY=1` keeps them from writing or syncing
+        # any record under `packages/e2e-tests/mutations/`.
         # The fixture contract probe requires the built native addon;
         # `check:repo` does not build it.
         # The Pi smoke fails if Node, the Pi package, or the built extension is
@@ -1084,6 +1096,14 @@ jobs:
           bun run --cwd packages/e2e-tests test:fixture-contract
           bun run --cwd packages/e2e-tests validate-mode-manifest
           bun run --cwd packages/e2e-tests test:rust
+          export EIDNARA_MUTATION_MEASURE_ONLY=1
+          bun run --cwd packages/e2e-tests mutation:rust-eidnara-reduce
+          bun run --cwd packages/e2e-tests mutation:rust-history_summarizer
+          for drill in 2 3 5; do
+            bun run --cwd packages/e2e-tests mutation:rust-fm "$drill"
+          done
+          git diff --exit-code -- packages/e2e-tests/mutations \
+            packages/e2e-tests/incidents
 
   # The scale report runs only when dispatched with a driver. A GitHub-hosted
   # `ubuntu-latest` runner is the reference host (#825 D21); the report's

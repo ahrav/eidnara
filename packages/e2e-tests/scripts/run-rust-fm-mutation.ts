@@ -31,18 +31,27 @@ const mutations: Record<string, MutationCase[]> = {
         {
             name: "FM_OC_2_RUNG_DELETION",
             source: pluginTransform,
-            oldText:
-                'sessionLog(sessionId, "rust transform failed; serving the input unchanged:", error);',
-            replacement: "",
+            oldText: `        sessionLog.warn(
+            sessionId,
+            servedLastApplied
+                ? "rust transform failed; serving the last applied output with the messages appended since:"
+                : "rust transform failed; serving the input unchanged:",
+            error,
+        );`,
+            replacement: "        void servedLastApplied;\n        void error;",
             expectedFailingTest: "continues through the outage with a loud module failure",
         },
     ],
     "3": [
         {
-            name: "FM_OC_3_RUNG_SWAP",
+            name: "FM_OC_3_SILENT_LAST_APPLIED_FAILURE",
             source: pluginTransform,
-            oldText: "if (needFullSync || nativeContentOmitted) {",
-            replacement: "if (nativeContentOmitted) {",
+            // An outage pass that serves the last applied output stops naming the module
+            // failure, so the outage is no longer loud.
+            oldText:
+                '? "rust transform failed; serving the last applied output with the messages appended since:"',
+            replacement:
+                '? "rust pass degraded; serving the last applied output with the messages appended since:"',
             expectedFailingTest:
                 "serves passes from transform again after the host restarts, without restarting the session",
         },
@@ -51,8 +60,10 @@ const mutations: Record<string, MutationCase[]> = {
         {
             name: "FM_OC_5_RUNG_SWAP",
             source: pluginTransform,
-            oldText: 'servedFrom = "raw";',
-            replacement: 'servedFrom = "transform";',
+            oldText: `                const servedLastApplied = serveLastApplied();
+                if (servedLastApplied) servedFrom = "last_applied";`,
+            replacement: `                const servedLastApplied = serveLastApplied();
+                servedFrom = "transform";`,
             expectedFailingTest: "continues through a transport timeout and recovers after SIGCONT",
         },
     ],
@@ -152,6 +163,15 @@ for (const mutation of mutations[drill]) {
         },
         adequacy_finding: null,
     });
+}
+
+// A CI measurement checks red-under-mutation and green-after-revert without writing or
+// syncing any record; only a deliberate local run updates `mutations/`.
+if (process.env.EIDNARA_MUTATION_MEASURE_ONLY === "1") {
+    console.log(
+        `measured FM-OC-${drill}: red under mutation, green after revert; no record written`,
+    );
+    process.exit(0);
 }
 
 const recordPath = resolve(e2eRoot, `mutations/fm-oc-${drill}.json`);
