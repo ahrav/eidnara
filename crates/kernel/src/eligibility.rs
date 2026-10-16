@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::Transaction;
 
-use crate::admission::{EgressCandidate, EgressSnapshot, Surface, egress_candidates_tx};
+use crate::admission::{
+    ArtifactFacts, EgressCandidate, EgressSnapshot, Surface, egress_candidates_tx,
+};
 use crate::cas::{ArtifactDestination, ArtifactEligibility, is_artifact_digest};
 use crate::claim_facts::{
     ClaimFactBounds, ClaimFacts, ClaimFactsError, KnownServed, ServedFacts, WantedOccurrences,
@@ -15,7 +17,7 @@ use crate::scope::{
     CanonicalScope, Dimension, MatchOutcome, ScopeMatchContext, ScopeTermSpec, UnknownGraph,
     load_scope_terms, scope_matches,
 };
-use crate::{KernelError, KernelStore, SurfaceVisibility};
+use crate::{KernelError, KernelStore, ObjectState, SurfaceVisibility};
 
 /// One batch holds a reader for one registry read plus one verdict per candidate, so the count bounds how long a single call occupies the pool.
 pub const MAX_ELIGIBILITY_CANDIDATES: usize = 1024;
@@ -258,6 +260,42 @@ pub(crate) fn judge_in_tx(
     .collect())
 }
 
+/// `judge_with_states_in_tx` returns the registry state used for each verdict so callers can reuse it for kind or change-token checks.
+pub(crate) fn judge_with_states_in_tx(
+    tx: &Transaction<'_>,
+    tip: i64,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    candidates: &[EligibilityCandidate],
+) -> Result<Vec<(EligibilityVerdict, Option<ObjectState>)>, KernelError> {
+    let named: Vec<(&str, Option<&str>)> = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.object_id.as_str(),
+                candidate.artifact_digest.as_deref(),
+            )
+        })
+        .collect();
+    let facts = egress_candidates_tx(tx, tip, &named, destination, ArtifactFacts::WhenServed)?;
+    let mut scopes = ScopeVerdicts {
+        project,
+        verdicts: HashMap::new(),
+    };
+    candidates
+        .iter()
+        .zip(facts)
+        .map(|(candidate, facts)| {
+            let scope_id = facts
+                .state
+                .as_ref()
+                .and_then(|state| state.scope_id.as_deref());
+            let in_scope = scopes.matches(tx, scope_id)?;
+            Ok((judge(candidate, &facts, destination, in_scope), facts.state))
+        })
+        .collect()
+}
+
 /// The batch verdicts at the widest surface, each paired with the visibility
 /// `surface` gives the object from the same serving read. An object no row
 /// serves is `Hidden` on every surface whatever its batch verdict says. On
@@ -293,7 +331,7 @@ fn judge_surface_served_in_tx<'c>(
             )
         })
         .collect();
-    let facts = egress_candidates_tx(tx, tip, &named, destination)?;
+    let facts = egress_candidates_tx(tx, tip, &named, destination, ArtifactFacts::WhenServed)?;
     let mut scopes = ScopeVerdicts {
         project,
         verdicts: HashMap::new(),

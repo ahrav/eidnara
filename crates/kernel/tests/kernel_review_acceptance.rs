@@ -929,6 +929,60 @@ fn a_stale_descriptor_or_a_hidden_owner_beside_the_target_refuses_and_writes_not
     assert_eq!(refused(&hidden), changed);
 }
 
+#[test]
+fn an_owner_at_another_revision_or_a_target_at_another_change_token_refuses_and_writes_nothing() {
+    let fixture = Fixture::open();
+    let owner = fixture.decision("decision-e");
+    let union = |owner_revision: &str| {
+        vec![PolicyUnionMember {
+            kind: "canonical_source".to_string(),
+            id: owner.0.clone(),
+            revision: "1".to_string(),
+            owner_id: Some("decision-e".to_string()),
+            owner_revision: Some(owner_revision.to_string()),
+        }]
+    };
+    let stale_owner = fixture.propose(
+        "job-stale-owner",
+        ProposalAction::Retain,
+        fixture.memory_target("decision-e"),
+        None,
+        std::slice::from_ref(&owner.1),
+        union("2"),
+    );
+    let ProposalTarget::Memory(mut target) = fixture.memory_target("decision-e") else {
+        unreachable!()
+    };
+    target.commit_token -= 1;
+    let stale_token = fixture.propose(
+        "job-stale-token",
+        ProposalAction::Retire,
+        ProposalTarget::Memory(target),
+        None,
+        std::slice::from_ref(&owner.1),
+        union("1"),
+    );
+    for staged in [&stale_owner, &stale_token] {
+        let tip = fixture.store.tip().unwrap();
+        assert_eq!(
+            fixture.accept("caller", staged),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
+        );
+        assert_eq!(
+            fixture.store.tip().unwrap(),
+            tip,
+            "a refusal commits nothing"
+        );
+    }
+    assert!(
+        fixture
+            .state("decision-e")
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
+}
+
 /// No-change on a staged subject settles without a write once the subject still stands; create and revise are refused as unsupported and write nothing.
 #[test]
 fn no_change_on_a_subject_settles_and_create_and_revise_are_unsupported() {
