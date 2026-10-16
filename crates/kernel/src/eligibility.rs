@@ -36,7 +36,7 @@ pub enum EligibilityVerdict {
     ProviderSensitive,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EligibilityCandidate {
     pub object_id: String,
     pub source_revision: i64,

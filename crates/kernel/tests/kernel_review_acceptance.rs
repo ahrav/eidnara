@@ -870,6 +870,65 @@ fn a_quarantined_owner_refuses_without_being_invalidated() {
     assert_eq!(fixture.store.tip().unwrap(), tip);
 }
 
+#[test]
+fn a_stale_descriptor_or_a_hidden_owner_beside_the_target_refuses_and_writes_nothing() {
+    let fixture = Fixture::open();
+    let owner = fixture.decision("decision-e");
+    fixture.decision("decision-f");
+    let propose = |job: &str, action, new_text: Option<&str>, revision: &str| {
+        fixture.propose(
+            job,
+            action,
+            fixture.memory_target("decision-f"),
+            new_text,
+            std::slice::from_ref(&owner.1),
+            vec![PolicyUnionMember {
+                kind: "canonical_source".to_string(),
+                id: owner.0.clone(),
+                revision: revision.to_string(),
+                owner_id: Some("decision-e".to_string()),
+                owner_revision: Some("1".to_string()),
+            }],
+        )
+    };
+    let standing = propose("job-standing", ProposalAction::Retain, None, "1");
+    let stale = propose("job-stale", ProposalAction::Retain, None, "2");
+    let stale_revise = propose("job-revise", ProposalAction::Revise, Some("revised"), "2");
+    let hidden = propose("job-hidden", ProposalAction::Retain, None, "1");
+    let refused = |staged: &Staged| {
+        let tip = fixture.store.tip().unwrap();
+        let error = fixture.accept("caller", staged).unwrap_err();
+        assert_eq!(
+            fixture.store.tip().unwrap(),
+            tip,
+            "a refusal commits nothing"
+        );
+        error
+    };
+    let changed = AcceptanceError::Refused(AcceptanceRefusal::Changed);
+    assert_eq!(
+        fixture
+            .accept("caller-standing", &standing)
+            .unwrap()
+            .settlement
+            .effect,
+        SettlementEffect::Unchanged
+    );
+    assert_eq!(refused(&stale), changed);
+    assert_eq!(refused(&stale_revise), changed);
+    let mut quarantine = admission("decision-e");
+    quarantine.event.kind = EventKind::Quarantine;
+    fixture
+        .store
+        .commit(intent("quarantine-e"), |envelope| {
+            envelope.record_admission(quarantine)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert!(fixture.served("decision-f", Surface::ExplicitSearch));
+    assert_eq!(refused(&hidden), changed);
+}
+
 /// No-change on a staged subject settles without a write once the subject still stands; create and revise are refused as unsupported and write nothing.
 #[test]
 fn no_change_on_a_subject_settles_and_create_and_revise_are_unsupported() {
