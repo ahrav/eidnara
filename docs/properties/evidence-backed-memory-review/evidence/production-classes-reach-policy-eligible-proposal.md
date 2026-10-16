@@ -96,6 +96,7 @@ provenance is test-supplied, so it proves the path, not the eligibility.
   promoted summary with `provenance: None`; ingest stores them `Sensitive`;
   Remote egress refuses `Sensitive`. The broker test asserts `PolicyBlocked`
   for the canonical form on the Remote destination.
-- Missing evidence: an owner decision on which decision bytes may go Remote and
-  which Kernel-owned proof retains them `Normal`.
-- Conclusion: needs human input.
+- Missing evidence: none for the current question. The owner chose that no
+  decision bytes go Remote.
+- Conclusion: resolved with answer; the gate stays closed and the positive
+  witness stays unconstructed while that choice stands.

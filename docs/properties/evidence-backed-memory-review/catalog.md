@@ -68,7 +68,7 @@ Confidence: high - [evidence](evidence/production-classes-reach-policy-eligible-
 Existing check: `crates/daemon/tests/memory_reviewer_broker.rs::canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it` covers resolution; `a_resolved_canonical_or_promoted_subject_still_refuses_the_remote_destination` covers the Remote refusal; `crates/daemon/tests/memory_reviewer_worker.rs::production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator` covers the production refusal at selection and in the coordinator; `fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision` covers the fixture positive path; `crates/daemon/tests/memory_reviewer_selection.rs::the_production_classes_are_walked_in_order_and_a_cursor_resumes_in_the_second_class` covers the class order; `crates/daemon/src/lib.rs::memory_reviewer_review_selection_is_not_scheduled_while_production_selection_is_closed` covers the scheduler gate
 Impact: A positive result claimed without this witness would report scripted Git-only coverage as production eligibility
 Open questions:
-- Which decision bytes may reach the Remote destination, and which Kernel-owned proof binds them to the decision's id, revision, and scope (needs human input)
+- Which decision bytes may reach the Remote destination, and which Kernel-owned proof binds them to the decision's id, revision, and scope: the owner's current choice is none, so the witness is not constructed while that choice stands
 
 ### canonical-resolution-refuses-changed-owner-and-target
 
