@@ -3870,3 +3870,61 @@ fn response_usage_columns_are_bounded_and_written_once_at_the_schema() {
         }
     );
 }
+
+#[test]
+fn the_live_claim_expiry_reads_this_jobs_claim_without_writing() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let live = |claim: &str, now: i64| {
+        fixture
+            .store
+            .live_memory_reviewer_claim_expiry(PROJECT, &fixture.identity, claim, now)
+            .unwrap()
+    };
+    assert_eq!(
+        live(&claim, T0 + 1),
+        Some(T0 + MEMORY_REVIEWER_TASK_LEASE_MS)
+    );
+    // A renewal moves the expiry the read reports; the read itself extends nothing.
+    assert!(matches!(
+        fixture
+            .store
+            .renew_memory_reviewer_task(
+                PROJECT,
+                &claim,
+                "worker-a",
+                0,
+                fixture.registration,
+                T0 + 7
+            )
+            .unwrap(),
+        memory_store::NoteEvalRenewOutcome::Renewed { .. }
+    ));
+    assert_eq!(
+        live(&claim, T0 + 8),
+        Some(T0 + 7 + MEMORY_REVIEWER_TASK_LEASE_MS)
+    );
+    assert_eq!(
+        live(&claim, T0 + 9),
+        Some(T0 + 7 + MEMORY_REVIEWER_TASK_LEASE_MS)
+    );
+    // At its expiry the claim is no longer live, and a claim on another job never is.
+    assert_eq!(live(&claim, T0 + 7 + MEMORY_REVIEWER_TASK_LEASE_MS), None);
+    let job_b = ready_job(&fixture.store, "cand-b");
+    let LeaseAcquireOutcome::Claim { claim: claim_b, .. } = fixture
+        .store
+        .acquire_memory_reviewer_task(
+            PROJECT,
+            "acq-b",
+            "worker-b",
+            1,
+            fixture.registration,
+            &job_b,
+            T0 + 10,
+        )
+        .unwrap()
+    else {
+        panic!("job B is claimed")
+    };
+    assert_eq!(live(&claim_b.claim_id, T0 + 11), None);
+}

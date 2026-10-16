@@ -2342,3 +2342,53 @@ fn a_resolved_canonical_subject_still_refuses_the_remote_destination() {
     );
     assert_eq!(remote.accounting.model_visible_bytes(), 0);
 }
+
+/// A revalidation reuses a source's last pass only at the Kernel state it passed at: inside a classification window the generation is unstable, so the full judgement runs and refuses, and once the window closes the advanced generation forces the full judgement again.
+#[test]
+fn a_revalidation_pass_is_reused_only_at_the_kernel_state_it_passed_at() {
+    let fixture = Fixture::open();
+    let text = "a native message";
+    let evidence = fixture.ingest("native", text.as_bytes(), false);
+    let identity = [
+        ("project_id", "proj-a"),
+        ("harness", "opencode"),
+        ("session_id", "sess-01"),
+        ("message_id", "msg-001"),
+        ("block_index", "0"),
+    ];
+    let (object, tuple) = fixture.descriptor(Publish {
+        key: "native",
+        class: "messages",
+        representation: "text",
+        identity: &identity,
+        evidence: &evidence,
+        buffer: text,
+        span: None,
+    });
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&evidence.0));
+    let alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: evidence.1.clone(),
+        evidence_id: evidence.0.clone(),
+        occurrence_tuple: tuple,
+    });
+    broker
+        .read(&fixture.store, alias.as_str(), None, fixture.now)
+        .unwrap();
+    let revalidate =
+        |broker: &EvidenceBroker| broker.revalidate(&fixture.store, alias.as_str(), fixture.now);
+    assert_eq!(revalidate(&broker), Ok(Some(evidence.0.clone())));
+    let tip = fixture.store.tip().unwrap();
+    {
+        let _window = fixture.store.hold_classification_change_for_test();
+        assert_eq!(
+            revalidate(&broker).unwrap_err().code,
+            RefusalCode::Store,
+            "a snapshot taken during a classification change is not a pass"
+        );
+    }
+    assert_eq!(fixture.store.tip().unwrap(), tip, "no commit moved the tip");
+    assert_eq!(revalidate(&broker), Ok(Some(evidence.0.clone())));
+}

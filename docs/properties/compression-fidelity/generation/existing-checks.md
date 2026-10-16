@@ -100,8 +100,9 @@ incident or a waiver of U5's witness and dependency requirements.
 | Joint producer/hint guidance capability review | None found. Existing four-asset guidance checks do not cover these owners together or record manual judgments against registry configurations. |
 | U5 witnessed correction acceptance | None found for prior named failure, fresh same-case semantic review, required-obligation regression checks, and disclosed rubric/serving effects as one correction gate. |
 
-The [MemoryReviewer corpus:44-70][curator-corpus] separates sources, scripts, and
-expectations, but `judge` uses fixture-specific substring rules. It is a reuse
+The [MemoryReviewer corpus][curator-corpus] separates sources, scripts, and
+expectations and declares every judgment as exact spans per case; those
+declarations are fixture-specific. It is a reuse
 lead, not a fidelity oracle or evidence of a human-reviewed generation baseline.
 The private [TestProducer::start:22431-22466][lib] records each attempt's
 system text, user prompt, and model since U2 (#719), which is the complete

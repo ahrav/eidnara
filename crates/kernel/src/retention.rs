@@ -113,11 +113,22 @@ impl KernelStore {
         let run_id = identity(extraction_run_id)?;
         let mut writer = self.lock_writer()?;
         let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
-        let run = load_run_lifecycle(&tx, &run_id)?.ok_or(KernelError::NotFound)?;
+        Self::finish_staging_run_in(&tx, &run_id, state, terminal_at)?;
+        tx.commit().map_err(map_sqlite)
+    }
+
+    /// The terminal write of [`Self::finish_staging_run`] for a validated `run_id`, inside the caller's fenced transaction.
+    pub(super) fn finish_staging_run_in(
+        tx: &Transaction<'_>,
+        run_id: &str,
+        state: StagingTerminalState,
+        terminal_at: i64,
+    ) -> Result<(), KernelError> {
+        let run = load_run_lifecycle(tx, run_id)?.ok_or(KernelError::NotFound)?;
         if run.terminal_state.is_some() {
             return Err(KernelError::Conflict);
         }
-        let candidate_heartbeat = latest_active_candidate_heartbeat(&tx, &run_id)?;
+        let candidate_heartbeat = latest_active_candidate_heartbeat(tx, run_id)?;
         if terminal_at
             < run
                 .started_at
@@ -131,19 +142,19 @@ impl KernelStore {
         if terminal_at >= run.lease_expires_at || run.lease_expires_at <= crate::current_time_ms() {
             return Err(KernelError::Conflict);
         }
-        tx.execute(
+        tx.execute_cached(
             "UPDATE extraction_runs SET terminal_state=?1,terminal_at=?2
              WHERE extraction_run_id=?3 AND terminal_state IS NULL",
             params![state.as_str(), terminal_at, run_id],
         )
         .map_err(map_sqlite)?;
-        tx.execute(
+        tx.execute_cached(
             "UPDATE candidates SET terminal_state=?1,terminal_at=?2
              WHERE extraction_run_id=?3 AND terminal_state IS NULL",
             params![state.as_str(), terminal_at, run_id],
         )
         .map_err(map_sqlite)?;
-        tx.commit().map_err(map_sqlite)
+        Ok(())
     }
 
     /// Atomically marks every active run whose lease expires at or before `now` as abandoned.
@@ -259,7 +270,7 @@ fn load_run_lifecycle(
     tx: &Transaction<'_>,
     extraction_run_id: &str,
 ) -> Result<Option<RunLifecycle>, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at,provenance_witness
          FROM extraction_runs WHERE extraction_run_id=?1",
         [extraction_run_id],
@@ -282,7 +293,7 @@ fn latest_active_candidate_heartbeat(
     tx: &Transaction<'_>,
     extraction_run_id: &str,
 ) -> Result<i64, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT COALESCE(MAX(heartbeat_at),0) FROM candidates
          WHERE extraction_run_id=?1 AND terminal_state IS NULL",
         [extraction_run_id],

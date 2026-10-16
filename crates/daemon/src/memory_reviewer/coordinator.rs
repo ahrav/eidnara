@@ -20,8 +20,8 @@ use kernel::{
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{MemoryReviewerJob, MemoryReviewerJobInput, ReviewTarget};
 use memory_store::memory_reviewer_ledger::{
-    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerRefusal,
-    MemoryReviewerReceipt,
+    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MEMORY_REVIEWER_TASK_LEASE_MS, MemoryReviewerAttemptTerminal,
+    MemoryReviewerLedgerRefusal, MemoryReviewerReceipt,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -49,6 +49,8 @@ const _: () =
     assert!(MAX_ACTIVE_PER_HOST < host_runtime::model_execution::config::MAX_BACKEND_PROCESSES);
 /// The supervisor key's task kind for MemoryReviewer attempts.
 pub const MEMORY_REVIEWER_TASK_KIND: &str = "memory_reviewer_review";
+/// How much of a full task lease may have elapsed before an attempt renews it. A lease granted inside this window, such as the claim's own acquisition just before the run, covers the attempt and the settlement reserve less at most this slack (the reserve stays at least 9.75 s), and renewing it would cost a durable write to move its expiry by no more than the slack.
+const LEASE_RENEWAL_SLACK_MS: i64 = 250;
 /// Retained supervisor keys one attempt probes past before launching under a colliding one.
 const MAX_KEY_PROBES: u32 = 64;
 
@@ -248,6 +250,15 @@ impl Coordinator {
             .execution_cutoff_ms
             .saturating_sub((self.now_ms)());
         let cutoff = Instant::now() + Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
+        let renewal = Arc::new(ClaimRenewal {
+            ledger: Arc::clone(&self.ledger),
+            project: context.job.project.clone(),
+            causal_identity: context.job.causal_identity.clone(),
+            claim: context.claim.clone(),
+            authority_generation: i64::try_from(context.receipt.authority_generation)
+                .unwrap_or(i64::MAX),
+            now_ms: Arc::clone(&self.now_ms),
+        });
         let mut run = Run {
             coordinator: self,
             context,
@@ -259,6 +270,8 @@ impl Coordinator {
             discovery: RelatedMemoryDiscovery::new(""),
             cutoff,
             marker_token: marker_token(),
+            renewal,
+            side_renewal: None,
         };
         let settled = run
             .investigate(prepared.subject, prepared.starting, cancel)
@@ -415,6 +428,8 @@ struct Run<'a> {
     cutoff: Instant,
     /// Random per run and never in any evidence, so a marker inside disclosed bytes cannot pass as a boundary the host drew.
     marker_token: String,
+    renewal: Arc<ClaimRenewal>,
+    side_renewal: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Sixteen hex digits of OS entropy for the run's alias markers.
@@ -424,26 +439,64 @@ fn marker_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-impl Run<'_> {
-    /// The task lease is shorter than a run: one attempt plus the settlement reserve. A live worker renews before each attempt; a lease that will not renew is another worker's fence, and the run ends without settling.
-    fn renew_claim(&self) -> Result<(), InvestigationError> {
-        let claim = self.context.claim;
+/// Owned inputs let a `'static` task renew the claim independently of the run's lifetime.
+struct ClaimRenewal {
+    ledger: Arc<MemoryStore>,
+    project: String,
+    causal_identity: String,
+    claim: TaskClaim,
+    authority_generation: i64,
+    now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
+}
+
+impl ClaimRenewal {
+    fn renew(&self) -> Result<(), InvestigationError> {
+        let now = (self.now_ms)();
+        let live = self
+            .ledger
+            .live_memory_reviewer_claim_expiry(
+                &self.project,
+                &self.causal_identity,
+                &self.claim.claim_id,
+                now,
+            )
+            .map_err(|error| InvestigationError::Store(error.to_string()))?;
+        // A remaining lease longer than a full one means the clock stepped back since it was granted; that lease is renewed like a stale one.
+        if live.is_some_and(|expires_at| {
+            (MEMORY_REVIEWER_TASK_LEASE_MS - LEASE_RENEWAL_SLACK_MS..=MEMORY_REVIEWER_TASK_LEASE_MS)
+                .contains(&(expires_at - now))
+        }) {
+            return Ok(());
+        }
         match self
-            .coordinator
             .ledger
             .renew_memory_reviewer_task(
-                &self.context.job.project,
-                &claim.claim_id,
-                &claim.worker_instance,
-                claim.slot,
-                i64::try_from(self.context.receipt.authority_generation).unwrap_or(i64::MAX),
-                (self.coordinator.now_ms)(),
+                &self.project,
+                &self.claim.claim_id,
+                &self.claim.worker_instance,
+                self.claim.slot,
+                self.authority_generation,
+                now,
             )
             .map_err(|error| InvestigationError::Store(error.to_string()))?
         {
             memory_store::NoteEvalRenewOutcome::Renewed { .. } => Ok(()),
             _ => Err(InvestigationError::Fenced),
         }
+    }
+}
+
+impl Run<'_> {
+    /// Awaiting `side_renewal` lets the freshness check observe the lease left by that task. Cancellation while awaiting `side_renewal` returns `Cancelled`. The freshness check accepts leases with zero through [`LEASE_RENEWAL_SLACK_MS`] elapsed; other leases require renewal. A rejected renewal returns `Fenced`.
+    async fn renew_claim(&mut self, cancel: &CancellationToken) -> Result<(), InvestigationError> {
+        if let Some(side) = self.side_renewal.take() {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(InvestigationError::Cancelled),
+                _ = side => {}
+            }
+        }
+        self.renewal.renew()
     }
 
     async fn investigate(
@@ -486,7 +539,7 @@ impl Run<'_> {
             if (self.coordinator.now_ms)() >= self.context.receipt.execution_cutoff_ms {
                 return self.settle_now(RunResult::Exhausted).await;
             }
-            self.renew_claim()?;
+            self.renew_claim(cancel).await?;
             let attempt_index = u32::try_from(round).unwrap_or(u32::MAX);
             let attempt = self.attempt(attempt_index, cancel).await?;
             // A cancellation that landed while the attempt completed still belongs to the owner: no result of that attempt settles the receipt.
@@ -512,6 +565,13 @@ impl Run<'_> {
             };
             match step {
                 Step::ReadBatch { operations } => {
+                    // Batch execution can finish while lease renewal remains pending on the blocking pool.
+                    if !cancel.is_cancelled() {
+                        let renewal = Arc::clone(&self.renewal);
+                        self.side_renewal = Some(tokio::task::spawn_blocking(move || {
+                            let _ = renewal.renew();
+                        }));
+                    }
                     let ended = tokio::task::block_in_place(|| {
                         for operation in operations {
                             if cancel.is_cancelled() {

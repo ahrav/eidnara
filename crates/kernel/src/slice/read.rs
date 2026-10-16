@@ -1,7 +1,7 @@
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 
 use super::{DecisionPayload, ObservationPayload};
-use crate::{KernelError, KernelStore, Sensitivity};
+use crate::{CachedSql, KernelError, KernelStore, Sensitivity};
 
 /// Decision visible at a requested commit sequence.
 ///
@@ -383,7 +383,7 @@ pub(crate) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, 
         return Err(KernelError::InvalidInput);
     }
     let tip = tx
-        .query_row(
+        .query_row_cached(
             "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
             [],
             |row| row.get::<_, i64>(0),
@@ -615,7 +615,7 @@ fn load_observation_for_object(
     requested: i64,
     object_id: &str,
 ) -> Result<Option<ObservationRow>, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         &format!(
             "{OBSERVATION_SELECT}
              WHERE object_id=?2 AND created_commit_seq<=?1

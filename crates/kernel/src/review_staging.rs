@@ -712,7 +712,7 @@ pub(super) fn is_review_kind(candidate_kind: &str) -> bool {
 }
 
 impl ReviewStagingSpec {
-    fn prepare(self) -> Result<(RedactedCandidate, String), ReviewStageRefusal> {
+    pub(super) fn prepare(self) -> Result<(RedactedCandidate, String), ReviewStageRefusal> {
         let store_now = current_time_ms();
         let skew_ceiling = store_now
             .checked_add(MAX_STAGING_CLOCK_SKEW_MS)
@@ -790,20 +790,31 @@ impl KernelStore {
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| ReviewStageError::Store(map_sqlite(error)))?;
-        check_fence(&tx, self.lease_epoch()).map_err(ReviewStageError::Store)?;
+        let reference = self.stage_review_in(&tx, &candidate, &text)?;
+        tx.commit()
+            .map_err(|error| ReviewStageError::Store(map_sqlite(error)))?;
+        Ok(reference)
+    }
+
+    /// The fenced staging write of [`Self::stage_review_input`] inside the caller's immediate transaction, which commits it.
+    pub(super) fn stage_review_in(
+        &self,
+        tx: &Transaction<'_>,
+        candidate: &RedactedCandidate,
+        text: &str,
+    ) -> Result<ReviewStagedReference, ReviewStageError> {
+        check_fence(tx, self.lease_epoch()).map_err(ReviewStageError::Store)?;
         let database_incarnation_id =
-            super::open::database_incarnation_id_via(&tx).map_err(ReviewStageError::Store)?;
-        classify_replay(&tx, &candidate)?;
-        self.stage_prepared_candidate(&tx, &candidate)
+            super::open::database_incarnation_id_via(tx).map_err(ReviewStageError::Store)?;
+        classify_replay(tx, candidate)?;
+        self.stage_prepared_candidate(tx, candidate)
             .map_err(|error| match error {
                 KernelError::Conflict => ReviewStageRefusal::Changed.into(),
                 other => ReviewStageError::Store(other),
             })?;
-        tx.commit()
-            .map_err(|error| ReviewStageError::Store(map_sqlite(error)))?;
         Ok(ReviewStagedReference {
             database_incarnation_id,
-            candidate_id: candidate.candidate_id,
+            candidate_id: candidate.candidate_id.clone(),
             payload_digest: identity_digest(text.as_bytes()),
         })
     }

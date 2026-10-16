@@ -3,6 +3,13 @@
 Every claim-bearing check in the tree that touches this catalog's records.
 Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
+## Semantic evidence corpus
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `corpus_*` (thirteen cases) | `crates/daemon/tests/memory_reviewer_coordinator.rs` | each case's cited bytes, score (valid and off-side citations, warranted and unwarranted claims, independent support), origin groups, limitations, and unchanged target tokens equal its declarations; the `[0,40)` prefix and an off-side citation score as valid citations and unsupported claims; the whole commit and a span of it are one origin and byte-identical commits in two repositories are two | unaudited |
+| `the_corpus_covers_every_relation_once` | same | thirteen distinct labels; retain, retire, revise, no change, and abstention each appear | unaudited |
+
 ## Canonical resolution and target binding
 
 | Check | Location | Covers | Status |
@@ -12,6 +19,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_resolved_canonical_subject_still_refuses_the_remote_destination` | same | the Remote destination refuses a resolved canonical artifact `PolicyBlocked` with zero bytes | unaudited |
 | `canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both` | same | shared origin across the two forms; Remote `PolicyBlocked`; decision retirement revokes both forms; stale native revision refused | unaudited |
 | `a_canonical_owner_must_be_a_live_decision` | same | a scoped observation as owner refuses `ExpectationChanged` | unaudited |
+| `a_revalidation_pass_is_reused_only_at_the_kernel_state_it_passed_at` | same | a source's last revalidation pass is reused only at the Kernel egress state it passed at; inside a classification window the full judgement runs and refuses, and an advanced generation after the window forces the full judgement again | unaudited |
 | `a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | a canonical `ReviewTarget::Memory` subject reaches the coordinator, resolves, and settles `owner_sensitive` with zero connections, no attempt, and the decision and descriptor rows live | unaudited |
 | `the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors_are_not_selected` | `crates/daemon/tests/memory_reviewer_selection.rs` | the production walk passes Sensitive canonical descriptors without a job, through both classes and from a mid-walk cursor | unaudited |
 | `memory_reviewer_review_selection_is_not_scheduled_while_production_selection_is_closed` | `crates/daemon/src/lib.rs` | an open activation gate schedules no `MemoryReviewerReviewSelection` while `PRODUCTION_SELECTION_OPEN` is `false`; a constant assertion forces the test to change when the gate opens | unaudited |
@@ -24,6 +32,10 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
 | `review_transfer_acquires_before_releasing_and_moves_only_live_memory_reviewer_references` | `crates/kernel/tests/kernel_memory_reviewer_holds.rs` | candidate and run deadlines equal the queue deadline after transfer; live read at the deadline is `Expired`; selected read with a selection inside the window succeeds past the deadline, and one at the deadline refuses | unaudited |
+| `one_envelope_stages_seals_and_moves_retention_to_the_review_hold` | same | one Kernel envelope seals the proposal, writes the review hold over the disclosed input, and releases the execution hold in one commit; a sealed run refuses a second envelope before writing | unaudited |
+| `a_refused_transfer_leaves_the_proposal_sealed_and_the_execution_hold_live` | same | a transfer refused under its savepoint commits the sealed row, writes no review hold, and leaves the execution hold and its pins unchanged | unaudited |
+| `a_transfer_refused_after_its_writes_rolls_back_to_the_savepoint` | same | a refusal at the transfer's last step rolls back the review pin and references it inserted | unaudited |
+| `a_refused_seal_writes_nothing_of_the_envelope` | same | sealing at an instant earlier than an unsealed staging's heartbeat is refused and the envelope writes nothing | unaudited |
 | `an_unselected_transferred_result_expires_with_its_queue_and_its_hold_is_reconciled` | `crates/daemon/tests/memory_reviewer_settlement.rs` | hold outlives the queue on its own clock; row keeps the queue deadline; reconciler keeps a pending hold; sweep closes the receipt `expired` at the run deadline; list shows the terminal; read is `not_selected`; reconciler releases the orphaned hold once and finds nothing twice; a late completion is fenced | unaudited |
 | `a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel` | same | selection leaves the row deadline; `completed_at_ms` is the settlement clock; a sweep at the queue deadline leaves the complete receipt, its completion time, its selection, and its read untouched; read past the queue deadline succeeds while the hold is live and refuses `review_expired` at its expiry; live read past the deadline is `Expired`; reconciler leaves the selected hold | unaudited |
 | `kernel_results_stay_private_until_the_receipt_selects_them` | same | sealed row readable by identity, public read `not_selected`, list empty; same-generation recovery reuses the hold; abstaining recovery releases it | unaudited |
@@ -40,6 +52,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | --- | --- | --- | --- |
 | `a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request` | `crates/daemon/tests/memory_reviewer_settlement.rs` | the staged record's union and marker; adoption under a fresh broker publishes the byte-identical reference with no added attempt; a second adopt is fenced; a takeover at generation 2 completes `unknown` and leaves the generation-1 row sealed | unaudited |
 | `a_result_sealed_before_its_transfer_is_adopted_under_an_empty_execution_hold` | same | a row sealed before its transfer, the lost run's hold released, and a replacement hold covering nothing: adoption extends the hold over the record's inputs and publishes; the same window with a retired input abstains `expectation_changed`; with no hold at all it abstains `budget_exhausted` | unaudited |
+| `a_sealed_untransferred_row_is_adopted_and_transferred_by_a_live_settlement` | same | a live settlement that finds its proposal sealed by an earlier attempt with retention not yet moved adopts the byte-identical row and transfers retention; a sealed row with other bytes conflicts and moves nothing | unaudited |
 | `a_durable_result_whose_lineage_moved_or_lacks_a_record_is_not_adopted` | same | retired cited source abstains `expectation_changed` and releases the hold; edited union bytes abstain; a record joined to an attempt index the ledger lacks abstains; a record removed from the witness abstains; a completed marker with no row completes `unknown` | unaudited |
 | `a_selected_read_refuses_when_an_uncited_member_no_longer_stands` | same | retiring an uncited disclosed source after selection refuses the read `dependency_refused`; the receipt is unchanged | unaudited |
 | `the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_ancestry` | same | a fabricated canonical member reaches the row's ancestry and the read refuses it | unaudited |
@@ -50,6 +63,10 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send` | same | a cancelled marker on a resumed run completes `unknown` with zero connections | unaudited |
 | `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt` | same | a recheck-lapsed `not_dispatched` marker admits one request and a second, completed attempt | unaudited |
 | `a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstaining` | same | a project at its active-hold cap refuses the resumed run's replacement hold; the run returns the Kernel refusal with the receipt still open and zero connections, and adopts the sealed reference once the cap clears | unaudited |
+| `a_fresh_claim_carries_the_first_attempt_and_an_aged_one_is_renewed_before_the_next` | same | a claim acquired just before the run carries its first attempt with no renewal write; once provider time has aged the lease, the claim is renewed before the next attempt at the clock the read batch ran under | unaudited |
+| `a_lease_at_the_slack_boundary_is_used_and_one_past_it_is_renewed` | same | the freshness window is inclusive: a lease with exactly the slack elapsed carries the attempt, and one a millisecond older is renewed first | unaudited |
+| `a_run_cancelled_during_a_read_batch_returns_without_waiting_on_its_side_renewal` | same | cancellation during a read batch returns `Cancelled` while the renewal spawned beside the batch is still stalled before its lease-expiry read | unaudited |
+| `the_live_claim_expiry_reads_this_jobs_claim_without_writing` | `crates/memory-store/tests/memory_reviewer_ledger.rs` | the expiry read reports the live claim's expiry and extends nothing; a renewal moves it; at its expiry the claim is not live, and a claim on another job never is | unaudited |
 | `decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest` | `crates/context-core/src/memory_reviewer_policy_union.rs` | decode refuses a wrong digest, edited bytes, whitespace, and another version | unaudited |
 
 ## Observational routes
