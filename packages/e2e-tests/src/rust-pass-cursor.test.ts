@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { parseRustPassLine, type RustPassLine } from "./rust-harness";
-import { RustPassCursor, type RustPassLog } from "./rust-pass-cursor";
+import { RustPassCursor, type RustPassLog, settledRustPasses } from "./rust-pass-cursor";
 
 function bufferedPassLog(): RustPassLog & {
-    write(decision: string): void;
+    write(decision: string, inputCount?: number): void;
     flushNow(): void;
     flushAfter(ms: number): void;
 } {
@@ -24,8 +24,10 @@ function bufferedPassLog(): RustPassLog & {
             }
             throw new Error(`waitFor timed out (${opts.label})`);
         },
-        write(decision) {
-            const pass = parseRustPassLine(`[eidnara] rust pass: decision=${decision} in=1`);
+        write(decision, inputCount = 1) {
+            const pass = parseRustPassLine(
+                `[eidnara] rust pass: decision=${decision} in=${inputCount}`,
+            );
             if (!pass) throw new Error("pass line no longer parses");
             buffered.push(pass);
         },
@@ -72,5 +74,16 @@ describe("RustPassCursor", () => {
         const log = bufferedPassLog();
         const cursor = await RustPassCursor.settle(log, TIMING);
         await expect(cursor.next(1, { timeoutMs: 50 })).rejects.toThrow(/>= 1 rust passes/);
+    });
+
+    it("a settled read includes a prompt's buffered pass when a retry's extra line already met the count", async () => {
+        const log = bufferedPassLog();
+        // Six prompts returned; prompt 1 retried once, so six lines are visible while prompt 6's pass is still buffered.
+        for (const inputCount of [1, 1, 2, 3, 4, 5]) log.write("HARD", inputCount);
+        log.flushNow();
+        log.write("HARD", 6);
+        log.flushAfter(20);
+        const passes = await settledRustPasses(log, TIMING);
+        expect(passes.map((pass) => pass.inputCount)).toEqual([1, 1, 2, 3, 4, 5, 6]);
     });
 });

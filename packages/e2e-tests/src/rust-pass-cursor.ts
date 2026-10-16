@@ -22,10 +22,22 @@ export const PLUGIN_PASS_LOG_TIMING: RustPassCursorTiming = {
 };
 
 /**
- * The plugin logger flushes buffered pass lines on a timer, so a count read just after a
- * prompt returns can omit that prompt's lines, and a later step's wait would return on them
- * before its own pass reaches the file. Settling waits `flushIntervalMs + settleMarginMs`
- * before reading the baseline, so buffered lines from completed steps count toward it.
+ * The plugin logger flushes buffered pass lines on a timer, so a read just after a prompt
+ * returns can omit that prompt's lines. Waiting `flushIntervalMs + settleMarginMs` before the
+ * read puts every line a completed prompt produced, including a retry's repeat, in the result.
+ */
+export async function settledRustPasses(
+    log: RustPassLog,
+    timing: RustPassCursorTiming = PLUGIN_PASS_LOG_TIMING,
+): Promise<RustPassLine[]> {
+    await Bun.sleep(timing.flushIntervalMs + timing.settleMarginMs);
+    return log.readRustPasses();
+}
+
+/**
+ * A count read just after a prompt returns can omit that prompt's buffered lines, and a later
+ * step's wait would return on them before its own pass reaches the file. Settling reads the
+ * baseline through `settledRustPasses`, so buffered lines from completed steps count toward it.
  */
 export class RustPassCursor {
     private seen: number;
@@ -43,8 +55,8 @@ export class RustPassCursor {
         log: RustPassLog,
         timing: RustPassCursorTiming = PLUGIN_PASS_LOG_TIMING,
     ): Promise<RustPassCursor> {
-        await Bun.sleep(timing.flushIntervalMs + timing.settleMarginMs);
-        return new RustPassCursor(log, timing, log.readRustPasses().length);
+        const settled = await settledRustPasses(log, timing);
+        return new RustPassCursor(log, timing, settled.length);
     }
 
     async next(passes = 1, opts: { timeoutMs?: number } = {}): Promise<RustPassLine[]> {
