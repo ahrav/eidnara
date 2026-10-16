@@ -15,13 +15,24 @@ the settlement contents and identity.
 `crates/kernel/src/review_acceptance.rs` - `settlement_intent` derives the
 reserved-producer key from the project digest, proposal id, payload digest,
 generation, and both incarnations, each length-prefixed, and the request digest
-from the key. `accept_review_proposal` checks the caller's receipt and then the
-settlement receipt under the writer lock before `commit_with_writer` runs
-`apply`; a refusal inside `apply` aborts the commit. `apply` reads the row
-through `selected_review_row_in`, validates the review hold and every disclosed
-input through `validate_review_evidence_in`, checks every union member in
-`member_stands`, checks the target in `target_stands`, applies the action, and
-records the settlement through `Envelope::record_reserved_receipt`.
+from the key; it refuses a reference whose Kernel incarnation is not the run's.
+`accept_review_proposal` maps a malformed caller intent to `invalid` through
+`intent_refusal`, then reads the caller's receipt and the settlement receipt
+under the writer lock before `commit_intent_with_writer` runs `apply`. A caller
+receipt replays only when it shares its `commit_seq` with the settlement
+receipt, and the replay answers the settlement receipt; any other caller
+receipt conflicts. A refusal inside `apply` aborts the commit. `apply` reads the
+row through `bound_review_row_in`, validates the review hold and every
+disclosed input through `validate_review_evidence_in` into `Disclosed`, checks
+every union member in `member_stands`, checks the target in `target_stands`,
+applies the action, and records the settlement through
+`Envelope::record_reserved_receipt`. `member_stands` requires the question
+template member at `ProposalAcceptance::question_template_revision`, and a
+capture member to be a disclosed input of the MemoryReviewer capture retention
+class at its digest with `retain_until` after the hold check's clock, matching
+the daemon's revalidation in `crates/daemon/src/memory_reviewer/dependencies.rs`
+(`revalidate`, `expectation`) and
+`crates/daemon/src/memory_reviewer/broker.rs` (`revalidate_under`).
 
 `crates/kernel/src/envelope.rs` - `record_reserved_receipt` and
 `recorded_receipt`. `crates/kernel/src/slice/write.rs` -

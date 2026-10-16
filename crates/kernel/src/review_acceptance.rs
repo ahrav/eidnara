@@ -17,11 +17,12 @@ use super::memory_reviewer_hold::validate_review_evidence_in;
 use super::review_staging::bound_review_row_in;
 use super::{
     ArtifactDestination, CachedSql, CanonicalTarget, EligibilityCandidate, EligibilityVerdict,
-    KernelError, KernelStore, MemoryReviewerHoldBinding, MemoryReviewerHoldError,
-    MemoryReviewerHoldRefusal, ObjectState, ObservationPayload, ProjectScope, ProposalAction,
-    ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner, ReviewPayload, ReviewProposal,
-    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStagedReference, Sensitivity,
-    SourceDescriptorDetail, current_time_ms, map_sqlite, provisional_result_identity,
+    HeldEvidence, KernelError, KernelStore, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
+    MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldRefusal, ObjectState,
+    ObservationPayload, ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION,
+    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError,
+    ReviewReadRefusal, ReviewStagedReference, Sensitivity, SourceDescriptorDetail, current_time_ms,
+    map_sqlite, provisional_result_identity,
 };
 use crate::source_identity::{OccurrenceClass, identity_digest};
 
@@ -43,6 +44,8 @@ pub struct ProposalAcceptance {
     pub selected_at: i64,
     /// The target the caller read and accepts; it must equal the proposal's.
     pub target: ProposalTarget,
+    /// The revision of the question template the caller runs; the union's template member must carry it.
+    pub question_template_revision: String,
 }
 
 /// What one acceptance did, keyed by its proposal. A refused acceptance records nothing.
@@ -158,23 +161,22 @@ impl KernelStore {
             .intent
             .refuse_reserved_producer()
             .map_err(|_| AcceptanceRefusal::Invalid)?;
-        let settlement = settlement_intent(&acceptance.run, &acceptance.proposal)?;
+        let settlement =
+            PreparedIntent::new(settlement_intent(&acceptance.run, &acceptance.proposal)?)?;
+        let caller = PreparedIntent::new(acceptance.intent.clone()).map_err(intent_refusal)?;
         let mut writer = self.lock_writer()?;
-        let caller = PreparedIntent::new(acceptance.intent.clone())?;
-        let mut prepared = None;
-        // The settlement replay comes before the hold, the deadline, or the payload: a settled proposal answers its settlement whatever has expired since. A caller key with a receipt falls through, so the commit path replays it under its fence and alignment repair.
-        {
+        let committed = {
             let tx = writer
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(map_sqlite)?;
-            let recorded = match recorded_receipt(&tx, &caller) {
+            let caller_receipt = match recorded_receipt(&tx, &caller) {
                 Err(KernelError::Conflict) => return Err(AcceptanceRefusal::Conflict.into()),
                 other => other?,
             };
-            if recorded.is_none() {
-                let intent = PreparedIntent::new(settlement.clone())?;
-                if let Some(receipt) = recorded_receipt(&tx, &intent)? {
-                    let recorded = decode(&receipt.result)?;
+            match (caller_receipt, recorded_receipt(&tx, &settlement)?) {
+                (None, None) => None,
+                (None, Some(settled)) => {
+                    let recorded = decode(&settled.result)?;
                     if recorded.target != acceptance.target {
                         return Err(AcceptanceRefusal::Changed.into());
                     }
@@ -183,19 +185,22 @@ impl KernelStore {
                         replayed: true,
                     });
                 }
-                prepared = Some(intent);
+                (Some(caller), Some(settled)) if caller.commit_seq == settled.commit_seq => {
+                    let recorded = decode(&settled.result)?;
+                    if recorded.target != acceptance.target {
+                        return Err(AcceptanceRefusal::Conflict.into());
+                    }
+                    Some(recorded)
+                }
+                (Some(_), _) => return Err(AcceptanceRefusal::Conflict.into()),
             }
-        }
+        };
         let mut refusal = None;
         let receipt = commit_intent_with_writer(
             &mut writer,
             self.lease_epoch(),
             caller,
             |envelope| {
-                let settlement = match prepared {
-                    Some(intent) => intent,
-                    None => PreparedIntent::new(settlement)?,
-                };
                 apply(envelope, acceptance, &settlement).map_err(|error| {
                     // Every refusal is classified inside `apply`; a store conflict there is a moved row, never the caller's key.
                     refusal = Some(match error {
@@ -210,26 +215,25 @@ impl KernelStore {
         );
         match receipt {
             Ok(receipt) => {
-                let recorded = decode(&receipt.result)?;
-                // A caller key replays only the acceptance it committed: the same proposal at the same target.
-                if receipt.replayed
-                    && (recorded.proposal_id != acceptance.proposal.candidate_id
-                        || recorded.payload_digest != acceptance.proposal.payload_digest
-                        || recorded.receipt_generation != acceptance.run.generation
-                        || recorded.project_digest != acceptance.run.project_digest
-                        || recorded.kernel_incarnation != acceptance.run.kernel_incarnation
-                        || recorded.memstore_incarnation != acceptance.run.memstore_incarnation
-                        || recorded.target != acceptance.target)
-                {
-                    return Err(AcceptanceRefusal::Conflict.into());
-                }
+                let settlement = match (committed, receipt.replayed) {
+                    (Some(settlement), true) => settlement,
+                    (None, false) => decode(&receipt.result)?,
+                    _ => return Err(AcceptanceRefusal::Conflict.into()),
+                };
                 Ok(AcceptanceOutcome {
-                    settlement: recorded,
+                    settlement,
                     replayed: receipt.replayed,
                 })
             }
             Err(error) => Err(refusal.map_or(AcceptanceError::Store(error), Into::into)),
         }
+    }
+}
+
+fn intent_refusal(error: KernelError) -> AcceptanceError {
+    match error {
+        KernelError::InvalidInput => AcceptanceRefusal::Invalid.into(),
+        error => error.into(),
     }
 }
 
@@ -241,6 +245,7 @@ fn settlement_intent(
     run.validate().map_err(|_| AcceptanceRefusal::Invalid)?;
     if proposal.candidate_id
         != provisional_result_identity(&run.subject, run.generation).candidate_id
+        || proposal.database_incarnation_id != run.kernel_incarnation
         || !super::cas::is_artifact_digest(&proposal.payload_digest)
     {
         return Err(AcceptanceRefusal::Invalid.into());
@@ -479,14 +484,20 @@ fn validate(
     let now = current_time_ms();
     let held =
         validate_review_evidence_in(envelope.tx, &review, &disclosed, now).map_err(hold_refusal)?;
-    if held
+    let disclosed = Disclosed {
+        ids: disclosed,
+        held,
+        now,
+    };
+    if disclosed
+        .held
         .iter()
         .any(|evidence| evidence.sensitivity == Sensitivity::Secret)
         || proposal
             .support
             .iter()
             .chain(&proposal.contradictions)
-            .any(|cited| disclosed.binary_search(&cited.evidence_id).is_err())
+            .any(|cited| disclosed.get(&cited.evidence_id).is_none())
     {
         return changed();
     }
@@ -495,13 +506,36 @@ fn validate(
         .or_else(|_| changed())?;
     let mut judged = Vec::new();
     for member in union.members() {
-        member_stands(envelope, acceptance, &proposal, member, &mut judged)?;
+        member_stands(
+            envelope,
+            acceptance,
+            &proposal,
+            &disclosed,
+            member,
+            &mut judged,
+        )?;
     }
     Ok(Validated {
         proposal: *proposal,
         project,
         judged,
     })
+}
+
+/// `ids` is sorted, and each `held` entry is the live review hold's facts for the id at the same index, read at `now`.
+struct Disclosed {
+    ids: Vec<String>,
+    held: Vec<HeldEvidence>,
+    now: i64,
+}
+
+impl Disclosed {
+    fn get(&self, evidence_id: &str) -> Option<&HeldEvidence> {
+        self.ids
+            .binary_search_by(|id| id.as_str().cmp(evidence_id))
+            .ok()
+            .map(|index| &self.held[index])
+    }
 }
 
 fn served(
@@ -606,11 +640,11 @@ fn subject_stands(
     subject_row_stands(envelope, acceptance, candidate_id, None)
 }
 
-/// One policy-union member still stands as the run read it, judged the way a reader's revalidation judges it: the question template is the proposal's; a descriptor is live at its revision and still names its decision owner, which is live and at the owner revision; a staged subject is this job's sealed row at its digest; and a capture is live, unpurged evidence at its digest. A descriptor and its owner are added to `judged`, so the batch judgement also requires them served.
 fn member_stands(
     envelope: &Envelope<'_>,
     acceptance: &ProposalAcceptance,
     proposal: &ReviewProposal,
+    disclosed: &Disclosed,
     member: &PolicyUnionMember,
     judged: &mut Vec<(EligibilityCandidate, Requirement)>,
 ) -> Result<(), AcceptanceError> {
@@ -623,6 +657,7 @@ fn member_stands(
             let ReviewQuestionTemplate::ExtractedFacts =
                 proposal.policy_dependencies.question_template;
             member.id == "extracted_facts"
+                && member.revision == acceptance.question_template_revision
         }
         ("native_source", None, None) => descriptor_stands(envelope, member, None, judged)?,
         ("canonical_source", Some(owner), Some(owner_revision)) => {
@@ -632,17 +667,11 @@ fn member_stands(
             subject_row_stands(envelope, acceptance, &member.id, Some(&member.revision))?;
             true
         }
-        ("temporary_capture", None, None) => envelope
-            .tx
-            .query_row_cached(
-                "SELECT EXISTS(SELECT 1 FROM evidence_meta e
-                 WHERE e.evidence_id=?1 AND e.artifact_digest=?2 AND e.invalidated_commit_seq IS NULL
-                   AND NOT EXISTS(SELECT 1 FROM artifact_purge_tombstones t
-                                  WHERE t.artifact_digest=e.artifact_digest))",
-                rusqlite::params![member.id, member.revision],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(map_sqlite)?,
+        ("temporary_capture", None, None) => disclosed.get(&member.id).is_some_and(|held| {
+            held.artifact_digest == member.revision
+                && held.retention_class == MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
+                && held.retain_until.is_some_and(|until| until > disclosed.now)
+        }),
         _ => false,
     };
     if stands { Ok(()) } else { changed() }

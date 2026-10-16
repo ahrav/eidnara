@@ -137,12 +137,12 @@ The sweep closes an in-progress receipt at the earlier of its run deadline and i
 
 ### Kernel acceptance
 
-`KernelStore::accept_review_proposal` applies the proposal a completed receipt selects. The caller passes what it copied from the trusted receipt (the run binding with project digest, both incarnations, the job's causal identity, and the generation; the selected row's id and payload digest; the completion time), the target it read, and its own idempotency intent. One Kernel envelope then:
+`KernelStore::accept_review_proposal` applies the proposal a completed receipt selects. The caller passes what it copied from the trusted receipt (the run binding with project digest, both incarnations, the job's causal identity, and the generation; the selected row's id, Kernel incarnation, and payload digest; the completion time), the target it read, the revision of the question template it runs, and its own idempotency intent. A reference whose Kernel incarnation is not the run's, or an intent with no valid key or digest, refuses as `invalid`. One Kernel envelope then:
 
 - reads the sealed row only once its stored binding names the run's project and job generation, then judges its queue deadline against the completion time;
 - requires the caller's target to equal the proposal's, and a memory target to be the live decision at exactly the proposal's object, source revision, and last-change commit token, still served to a local reader of the project;
 - requires the live review hold to cover every disclosed input, cited or not, each still live, unpurged, and not `Secret`;
-- requires every policy-union member to stand: each descriptor live at its revision and still naming its decision owner, each owner a live decision at its owner revision that a local reader of the project is served, each staged subject this job's sealed row at its digest, each capture live at its digest;
+- requires every policy-union member to stand: the question template at the caller's revision, each descriptor live at its revision and still naming its decision owner, each owner a live decision at its owner revision that a local reader of the project is served, each staged subject this job's sealed row at its digest, and each capture a disclosed MemoryReviewer capture at its digest whose acquisition reference is still ahead of the clock;
 - applies the action and records the settlement.
 
 | Action | Canonical effect |
@@ -151,7 +151,7 @@ The sweep closes an in-progress receipt at the earlier of its run deadline and i
 | `retain`, `no_change` | None: no canonical write, TTL refresh, maturity change, or corroboration |
 | `create`, `revise` | Refused as `unsupported`; nothing is written |
 
-The settlement is one receipt under the reserved producer `eidnara-kernel/memory-reviewer-settlement`, keyed by a versioned, length-delimited derivation over the project digest, proposal id, payload digest, generation, and both incarnations. The caller's key is not part of it and the request digest is derived from the key, so an acceptance of a settled proposal under any caller key replays the first settlement, before the review hold, the queue deadline, or the payload is read. A caller key that committed an acceptance replays only that acceptance; the same key for other input conflicts. A key that only received a replay is not recorded. A refused acceptance writes nothing; a missing row, a row bound to another project or job, a row of another Kernel incarnation, and a non-proposal row all refuse as one `unavailable` answer before anything else about the row is judged.
+The settlement is one receipt under the reserved producer `eidnara-kernel/memory-reviewer-settlement`, keyed by a versioned, length-delimited derivation over the project digest, proposal id, payload digest, generation, and both incarnations. The caller's key is not part of it and the request digest is derived from the key, so an acceptance of a settled proposal under any caller key replays the first settlement, before the review hold, the queue deadline, or the payload is read. A caller key that committed an acceptance replays only that acceptance: its receipt and the settlement share one commit, and the replay answers the settlement receipt. Any other receipt under the key, including one whose result reads as a settlement, conflicts. A key that only received a replay is not recorded. A refused acceptance writes nothing; a missing row, a row bound to another project or job, a row of another Kernel incarnation, and a non-proposal row all refuse as one `unavailable` answer before anything else about the row is judged.
 
 ### Observational routes
 

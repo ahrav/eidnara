@@ -9,10 +9,11 @@ use kernel::{
     ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactDestination, ArtifactIngestRequest,
     CanonicalTarget, CommitIntent, DecisionEventPayload, DecisionEventSpec, DecisionPayload,
     DecisionSpec, Dimension, DomainSpec, EligibilityCandidate, EventKind, EvidenceReference,
-    KernelStore, ManifestReference, MemoryReviewerHoldBinding, PolicyDependencies, ProjectScope,
-    ProposalAcceptance, ProposalAction, ProposalTarget, ProviderEgress,
-    REVIEW_DEPENDENCIES_VERSION, ReviewBinding, ReviewDependencies, ReviewOwner, ReviewPayload,
-    ReviewProposal, ReviewQuestionTemplate, ReviewStagingSpec, ScopeSpec, ScopeTermSpec,
+    KernelStore, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS, ManifestReference,
+    MemoryReviewerHoldBinding, PolicyDependencies, ProjectScope, ProposalAcceptance,
+    ProposalAction, ProposalTarget, ProviderEgress, REVIEW_DEPENDENCIES_VERSION, ReviewBinding,
+    ReviewDependencies, ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate,
+    ReviewStagedReference, ReviewStagingSpec, SETTLEMENT_VERSION, ScopeSpec, ScopeTermSpec,
     Sensitivity, Settlement, SettlementEffect, SourceClass, SourceDependency,
     SourceDescriptorPolicy, SourceDescriptorRequest, StagingTerminalState, Surface, TaintClass,
     Uncertainty, provisional_result_identity,
@@ -26,6 +27,7 @@ const SCOPE: &str = "project:a";
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_PROJECT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MEMSTORE: &str = "memstore-incarnation";
+const TEMPLATE_REVISION: &str = "1";
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -140,6 +142,30 @@ impl Fixture {
                 retain_until: None,
                 asserted_sensitivity: Sensitivity::Normal,
                 provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+        (handle.evidence_id, handle.digest)
+    }
+
+    fn capture(&self, key: &str) -> (String, String) {
+        let handle = self
+            .store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("capture-{key}")),
+                payload: format!("capture {key}").into_bytes(),
+                evidence_id: format!("capture-{key}"),
+                object_id: format!("capture-object-{key}"),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "local_file".to_string(),
+                source_id: format!("src/capture-{key}"),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(self.now + 2 * HOUR_MS),
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress: ProviderEgress::LocalOnly,
                 provenance: None,
             })
             .unwrap();
@@ -298,7 +324,7 @@ impl Fixture {
         union.insert(PolicyUnionMember {
             kind: "question_template".to_string(),
             id: "extracted_facts".to_string(),
-            revision: "1".to_string(),
+            revision: TEMPLATE_REVISION.to_string(),
             owner_id: None,
             owner_revision: None,
         });
@@ -424,6 +450,7 @@ impl Fixture {
             proposal: staged.reference.clone(),
             selected_at: self.now,
             target,
+            question_template_revision: TEMPLATE_REVISION.to_string(),
         }
     }
 
@@ -555,6 +582,7 @@ fn retain_settles_once_without_a_canonical_change_and_replays_across_keys_and_af
         proposal: staged.reference.clone(),
         selected_at: fixture.now,
         target: staged.target.clone(),
+        question_template_revision: TEMPLATE_REVISION.to_string(),
     });
     assert_eq!(
         reused,
@@ -1250,4 +1278,249 @@ fn retiring_an_approval_reports_the_dependents_its_cascade_demoted() {
         panic!("{:?}", outcome.settlement.effect)
     };
     assert_eq!((granted_authority_before, demoted, deferred), (true, 1, 0));
+}
+
+#[test]
+fn a_union_read_under_another_question_template_revision_refuses_and_writes_nothing() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Retire,
+        "decision-a",
+        &descriptor,
+        None,
+    );
+    let tip = fixture.store.tip().unwrap();
+    let edited = ProposalAcceptance {
+        question_template_revision: "2".to_string(),
+        ..fixture.acceptance(
+            "caller-edited",
+            &staged,
+            staged.run.clone(),
+            staged.target.clone(),
+        )
+    };
+    assert_eq!(
+        fixture.store.accept_review_proposal(&edited),
+        Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(
+        fixture
+            .state("decision-a")
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
+    assert!(fixture.accept("caller", &staged).is_ok());
+}
+
+#[test]
+fn a_capture_member_stands_only_as_a_disclosed_capture_with_a_live_reference() {
+    let fixture = Fixture::open();
+    let member = |(id, digest): &(String, String)| PolicyUnionMember {
+        kind: "temporary_capture".to_string(),
+        id: id.clone(),
+        revision: digest.clone(),
+        owner_id: None,
+        owner_revision: None,
+    };
+    let propose = |job: &str, disclosed: &[String], capture: &(String, String)| {
+        let object = format!("decision-{job}");
+        fixture.decision(&object);
+        fixture.propose(
+            job,
+            ProposalAction::Retain,
+            fixture.memory_target(&object),
+            None,
+            disclosed,
+            vec![member(capture)],
+        )
+    };
+    let standing = fixture.capture("standing");
+    let standing = propose("standing", std::slice::from_ref(&standing.0), &standing);
+    assert_eq!(
+        fixture
+            .accept("caller-standing", &standing)
+            .unwrap()
+            .settlement
+            .effect,
+        SettlementEffect::Unchanged
+    );
+
+    let canonical = fixture.ingest("canonical");
+    let canonical = propose("canonical", std::slice::from_ref(&canonical.0), &canonical);
+    let lapsed = fixture.capture("lapsed");
+    let lapsed_proposal = propose("lapsed", std::slice::from_ref(&lapsed.0), &lapsed);
+    fixture.execute(&format!(
+        "UPDATE evidence_meta SET retain_until={} WHERE evidence_id='{}'",
+        fixture.now - 1,
+        lapsed.0
+    ));
+    let support = fixture.ingest("support").0;
+    let undisclosed = fixture.capture("undisclosed");
+    let undisclosed = propose("undisclosed", std::slice::from_ref(&support), &undisclosed);
+    for (name, staged) in [
+        ("canonical evidence", &canonical),
+        ("lapsed reference", &lapsed_proposal),
+        ("undisclosed capture", &undisclosed),
+    ] {
+        let tip = fixture.store.tip().unwrap();
+        assert_eq!(
+            fixture.accept("caller", staged),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Changed)),
+            "{name}"
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip, "{name}");
+    }
+}
+
+#[test]
+fn a_caller_key_that_committed_other_work_conflicts_even_when_its_result_reads_as_a_settlement() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Retire,
+        "decision-a",
+        &descriptor,
+        None,
+    );
+    fixture
+        .store
+        .commit(intent("caller-other"), |_| Ok("{}".to_string()))
+        .unwrap();
+    let next = fixture.store.tip().unwrap() + 1;
+    let forged = Settlement {
+        version: SETTLEMENT_VERSION,
+        proposal_id: staged.reference.candidate_id.clone(),
+        payload_digest: staged.reference.payload_digest.clone(),
+        receipt_generation: staged.run.generation,
+        kernel_incarnation: staged.run.kernel_incarnation.clone(),
+        memstore_incarnation: staged.run.memstore_incarnation.clone(),
+        project_digest: staged.run.project_digest.clone(),
+        action: ProposalAction::Retire,
+        target: staged.target.clone(),
+        commit_seq: next,
+        effect: SettlementEffect::Retired {
+            object_id: "decision-a".to_string(),
+            object_kind: "decision".to_string(),
+            invalidated_commit_seq: next,
+            granted_authority_before: false,
+            demoted: 0,
+            deferred: 0,
+        },
+    };
+    fixture
+        .store
+        .commit(intent("caller-forged"), |_| {
+            Ok(serde_json::to_string(&forged).unwrap())
+        })
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    for key in ["caller-other", "caller-forged"] {
+        assert_eq!(
+            fixture.accept(key, &staged),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Conflict)),
+            "{key}"
+        );
+    }
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(
+        fixture
+            .state("decision-a")
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .review_settlement(&staged.run, &staged.reference)
+            .unwrap(),
+        None
+    );
+    let applied = fixture.accept("caller", &staged).unwrap();
+    assert!(!applied.replayed);
+    assert_eq!(
+        fixture.accept("caller", &staged).unwrap(),
+        kernel::AcceptanceOutcome {
+            replayed: true,
+            ..applied
+        }
+    );
+}
+
+#[test]
+fn a_reference_naming_another_incarnation_than_its_run_is_invalid_settled_or_not() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Retain,
+        "decision-a",
+        &descriptor,
+        None,
+    );
+    let foreign = ReviewStagedReference {
+        database_incarnation_id: "other-incarnation".to_string(),
+        ..staged.reference.clone()
+    };
+    let mismatched = |key: &str| ProposalAcceptance {
+        proposal: foreign.clone(),
+        ..fixture.acceptance(key, &staged, staged.run.clone(), staged.target.clone())
+    };
+    let invalid = AcceptanceError::Refused(AcceptanceRefusal::Invalid);
+    assert_eq!(
+        fixture
+            .store
+            .accept_review_proposal(&mismatched("caller-before")),
+        Err(invalid)
+    );
+    fixture.accept("caller", &staged).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .accept_review_proposal(&mismatched("caller-after")),
+        Err(invalid)
+    );
+    assert_eq!(
+        fixture.store.review_settlement(&staged.run, &foreign),
+        Err(invalid)
+    );
+}
+
+#[test]
+fn a_malformed_caller_intent_is_refused_as_invalid() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let staged = fixture.propose_over(
+        "job-1",
+        ProposalAction::Retain,
+        "decision-a",
+        &descriptor,
+        None,
+    );
+    for intent in [
+        CommitIntent {
+            request_digest: "not-a-digest".to_string(),
+            ..intent("caller")
+        },
+        CommitIntent {
+            operation_key: " ".to_string(),
+            ..intent("caller")
+        },
+    ] {
+        let acceptance = ProposalAcceptance {
+            intent,
+            ..fixture.acceptance("unused", &staged, staged.run.clone(), staged.target.clone())
+        };
+        assert_eq!(
+            fixture.store.accept_review_proposal(&acceptance),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Invalid)),
+            "{:?}",
+            acceptance.intent
+        );
+    }
 }
