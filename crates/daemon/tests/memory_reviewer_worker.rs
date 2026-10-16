@@ -264,6 +264,16 @@ impl Rig {
 
     /// A Memory Classifier job whose subject is a Normal, remote-allowed commit published under this project's scope, so its run reaches the provider.
     fn ready_memory_job(&self, now: i64, message: &str) -> String {
+        let (object_id, detail) = self.publish_memory(now, message);
+        let target = ReviewTarget::Memory {
+            object_id,
+            source_revision: detail.revision.parse().unwrap(),
+        };
+        self.reserve_ready(now, message, target)
+    }
+
+    /// Publishes `message` as a commit through the Git publisher, the repository-backed path production uses, Normal and remote-allowed under this project's scope; returns its descriptor.
+    fn publish_memory(&self, now: i64, message: &str) -> (String, kernel::SourceDescriptorDetail) {
         let scope = format!("project:{PROJECT_DIGEST}");
         if self.kernel.tip().unwrap() < 2 {
             self.kernel
@@ -350,10 +360,10 @@ impl Rig {
             .unwrap();
         let detail: kernel::SourceDescriptorDetail =
             serde_json::from_str(row.payload.detail.as_deref().unwrap()).unwrap();
-        let target = ReviewTarget::Memory {
-            object_id: published.object_id.clone(),
-            source_revision: detail.revision.parse().unwrap(),
-        };
+        (published.object_id, detail)
+    }
+
+    fn reserve_ready(&self, now: i64, message: &str, target: ReviewTarget) -> String {
         let producer = ProducerBinding {
             producer: "memory-classifier".to_string(),
             firing_id: format!("firing-{}", message.len()),
@@ -1404,4 +1414,146 @@ async fn the_bedrock_identity_follows_the_key_id_and_region() {
         bedrock_credential_identity(&[8; 32], REGION, AWS_KEY_ID),
         bedrock_credential_identity(&CONNECTION_KEY, REGION, AWS_KEY_ID)
     );
+}
+
+/// A response reporting `model` whose text is `step`.
+fn stepping_as(model: &str, step: &str) -> Vec<u8> {
+    let text = serde_json::to_string(step).unwrap();
+    let body = format!(
+        r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{model}","content":[{{"type":"text","text":{text}}}],"stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+    );
+    json_response("200 OK", &body, "")
+}
+
+/// U8's eligibility witness: a commit published through the Git publisher is repository-backed evidence the production policy makes Remote-eligible. The production selector function, given the test-only `git_commits` class because `MEMORY_CLASSES` walks only the decision-derived classes, picks it under production policy versions; the store primitives the scheduler's selection slot composes (its lease, frozen page, and atomic enqueue under the slot's own identities) admit it; and the production worker runs it through the coordinator to a scripted, non-abstaining `retain` that cites the subject. The completed receipt selects a readable proposal over the memory at its unchanged tokens, and the Kernel tip does not move. The production-class witness stays gated with `PRODUCTION_SELECTION_OPEN`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal() {
+    use daemon::memory_reviewer::selection::{SelectionScope, select_review_targets};
+    use memory_store::memory_reviewer_jobs::EnqueueOutcome;
+    let mut rig = Rig::open().await;
+    let now = now_ms();
+    let (object_id, detail) = rig.publish_memory(now, "bun builds the workspace");
+    let tip_before = rig.kernel.tip().unwrap();
+    let before = rig
+        .kernel
+        .observation_for_object_as_of(&object_id, tip_before)
+        .unwrap();
+
+    // The production selector over the repository-backed class, judged by the Remote fold.
+    let page = select_review_targets(
+        &rig.kernel,
+        &rig.store,
+        &SelectionScope {
+            project: &kernel::ProjectScope::new(PROJECT_DIGEST).unwrap(),
+            ledger_project: PROJECT,
+            classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
+            policy_versions: &daemon::memory_reviewer::handoff::review_policy_versions(),
+        },
+        None,
+        &kernel::applicability::EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert_eq!(page.references.len(), 1);
+    // The selection slot under the scheduler's own identities: a lease, a frozen page, and one atomic enqueue that completes the slot.
+    use daemon::selection_slot;
+    let command = format!("{}@{now}", selection_slot::TASK);
+    let generation = rig
+        .store
+        .next_memory_classifier_scheduler_generation(selection_slot::INSTANCE)
+        .unwrap();
+    let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = rig
+        .store
+        .acquire_memory_classifier_task(
+            PROJECT,
+            &command,
+            selection_slot::INSTANCE,
+            selection_slot::LEDGER_SLOT,
+            generation,
+            selection_slot::TASK_ID,
+            now,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the selection slot is claimed")
+    };
+    let frozen = rig
+        .store
+        .freeze_selection(PROJECT, selection_slot::TASK, &command, &page, now)
+        .unwrap();
+    let enqueued = rig
+        .store
+        .enqueue_frozen_selection(
+            PROJECT,
+            &claim.claim_id,
+            &format!("{command}:complete"),
+            selection_slot::INSTANCE,
+            selection_slot::LEDGER_SLOT,
+            &frozen,
+            &ProducerBinding {
+                producer: selection_slot::PRODUCER.to_string(),
+                firing_id: command.clone(),
+                ordinal: 0,
+            },
+            now,
+        )
+        .unwrap();
+    assert!(
+        matches!(enqueued, EnqueueOutcome::Enqueued { jobs: 1, .. }),
+        "{enqueued:?}"
+    );
+    let identity = page.references[0].causal_identity().unwrap();
+
+    rig.write_activation();
+    let worker = rig.worker();
+    let server = rig.peer.serve_script(vec![stepping_as(
+        "claude-test",
+        r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":null,"support":[{"alias":"ref-1"}],"contradictions":[],"limitations":["only the commit itself was read"],"uncertainty":"medium"}}"#,
+    )]);
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 1);
+    assert_eq!(server.await.unwrap().len(), 1, "one physical request");
+    let receipt = rig
+        .store
+        .lookup_memory_reviewer_receipt(PROJECT, &identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete),
+        "a non-abstaining terminal"
+    );
+    let selected = daemon::memory_reviewer::settlement::read_selected_proposal(
+        &rig.kernel,
+        &rig.store,
+        PROJECT,
+        &identity,
+        now_ms(),
+    )
+    .unwrap();
+    let proposal = &selected.proposal;
+    assert_eq!(proposal.action, kernel::ProposalAction::Retain);
+    let kernel::ProposalTarget::Memory(target) = &proposal.target else {
+        panic!("{:?}", proposal.target)
+    };
+    assert_eq!(target.object_id, object_id);
+    assert_eq!(
+        target.source_revision,
+        detail.revision.parse::<i64>().unwrap()
+    );
+    assert_eq!(
+        proposal
+            .support
+            .iter()
+            .map(|reference| reference.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![detail.evidence_id.as_str()],
+        "the proposal cites the disclosed commit"
+    );
+    // No canonical change: the descriptor reads the same at the new tip as before the run.
+    assert_eq!(rig.kernel.tip().unwrap(), tip_before, "no canonical commit");
+    let after = rig
+        .kernel
+        .observation_for_object_as_of(&object_id, tip_before)
+        .unwrap();
+    assert_eq!(before, after);
 }

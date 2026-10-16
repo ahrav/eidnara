@@ -608,6 +608,66 @@ CREATE TRIGGER memory_reviewer_selection_cursors_reject_secret_update
 BEFORE UPDATE OF cursor ON memory_reviewer_selection_cursors
 BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
 
+-- Each project's MemoryReviewer metadata: the receipt charge plus allowance of every
+-- review job and frozen selection page it holds. The triggers below keep the row equal
+-- to the sum over both tables through every insert, update, and delete, so a quota
+-- check reads one row per project.
+CREATE TABLE memory_reviewer_metadata_totals (
+            project        TEXT PRIMARY KEY,
+            metadata_bytes INTEGER NOT NULL DEFAULT 0
+        );
+
+CREATE TRIGGER memory_reviewer_jobs_metadata_insert AFTER INSERT ON memory_reviewer_jobs BEGIN
+            INSERT INTO memory_reviewer_metadata_totals(project, metadata_bytes)
+            VALUES (NEW.project, NEW.receipt_charge_bytes + NEW.allowance_bytes)
+            ON CONFLICT(project) DO UPDATE SET
+                metadata_bytes = metadata_bytes + excluded.metadata_bytes;
+        END;
+
+CREATE TRIGGER memory_reviewer_jobs_metadata_delete AFTER DELETE ON memory_reviewer_jobs BEGIN
+            UPDATE memory_reviewer_metadata_totals
+               SET metadata_bytes = metadata_bytes - (OLD.receipt_charge_bytes + OLD.allowance_bytes)
+             WHERE project = OLD.project;
+        END;
+
+CREATE TRIGGER memory_reviewer_jobs_metadata_update
+            AFTER UPDATE OF project, receipt_charge_bytes, allowance_bytes ON memory_reviewer_jobs BEGIN
+            UPDATE memory_reviewer_metadata_totals
+               SET metadata_bytes = metadata_bytes - (OLD.receipt_charge_bytes + OLD.allowance_bytes)
+             WHERE project = OLD.project;
+            INSERT INTO memory_reviewer_metadata_totals(project, metadata_bytes)
+            VALUES (NEW.project, NEW.receipt_charge_bytes + NEW.allowance_bytes)
+            ON CONFLICT(project) DO UPDATE SET
+                metadata_bytes = metadata_bytes + excluded.metadata_bytes;
+        END;
+
+CREATE TRIGGER memory_reviewer_frozen_selections_metadata_insert
+            AFTER INSERT ON memory_reviewer_frozen_selections BEGIN
+            INSERT INTO memory_reviewer_metadata_totals(project, metadata_bytes)
+            VALUES (NEW.project, NEW.receipt_charge_bytes + NEW.allowance_bytes)
+            ON CONFLICT(project) DO UPDATE SET
+                metadata_bytes = metadata_bytes + excluded.metadata_bytes;
+        END;
+
+CREATE TRIGGER memory_reviewer_frozen_selections_metadata_delete
+            AFTER DELETE ON memory_reviewer_frozen_selections BEGIN
+            UPDATE memory_reviewer_metadata_totals
+               SET metadata_bytes = metadata_bytes - (OLD.receipt_charge_bytes + OLD.allowance_bytes)
+             WHERE project = OLD.project;
+        END;
+
+CREATE TRIGGER memory_reviewer_frozen_selections_metadata_update
+            AFTER UPDATE OF project, receipt_charge_bytes, allowance_bytes
+            ON memory_reviewer_frozen_selections BEGIN
+            UPDATE memory_reviewer_metadata_totals
+               SET metadata_bytes = metadata_bytes - (OLD.receipt_charge_bytes + OLD.allowance_bytes)
+             WHERE project = OLD.project;
+            INSERT INTO memory_reviewer_metadata_totals(project, metadata_bytes)
+            VALUES (NEW.project, NEW.receipt_charge_bytes + NEW.allowance_bytes)
+            ON CONFLICT(project) DO UPDATE SET
+                metadata_bytes = metadata_bytes + excluded.metadata_bytes;
+        END;
+
 -- One MemoryReviewer receipt per admitted job: the run deadline and execution cutoff are
 -- written at the first claim and inherited unchanged by every takeover; the
 -- generation fences every later write; completion selects exactly one Kernel result.
@@ -1110,6 +1170,17 @@ CREATE UNIQUE INDEX idx_note_eval_claims_active_note
 CREATE UNIQUE INDEX idx_note_eval_claims_active_slot
             ON note_eval_claims(project, task_kind, evaluator_instance, evaluator_slot)
             WHERE terminal_kind IS NULL;
+
+-- Ledger collection runs on every acquisition and reads terminal claims by age: the
+-- responses it redacts, then the rows it deletes. These seek those rows by
+-- terminal_at_ms, so its work follows the rows it changes.
+CREATE INDEX idx_note_eval_claims_terminal_age
+            ON note_eval_claims(project, task_kind, terminal_at_ms)
+            WHERE terminal_kind IS NOT NULL;
+
+CREATE INDEX idx_note_eval_claims_unredacted
+            ON note_eval_claims(project, task_kind, terminal_at_ms)
+            WHERE terminal_kind IS NOT NULL AND terminal_response IS NOT NULL;
 
 CREATE TABLE note_eval_acquisitions (
             project TEXT NOT NULL,

@@ -767,6 +767,65 @@ fn linked_evidence_past_the_bound_keeps_the_newest_citations() {
     assert_eq!(Fixture::targets(&page), vec![target]);
 }
 
+/// Once the ledger shows most of a batch's targets already reviewed, the walk consults the ledger before eligibility for the next batch; a row the remote fold denies is still passed there, and the page holds exactly the eligible targets without a job, in walk order.
+#[test]
+fn a_walk_over_mostly_reviewed_targets_still_passes_remotely_denied_rows() {
+    let fixture = Fixture::open();
+    for n in 0..30 {
+        let key = format!("r{n:02}");
+        fixture.publish_derived_over(
+            &key,
+            "canonical_claims",
+            "object_id",
+            "decision_summary",
+            Some(&repository(&key)),
+        );
+    }
+    let denied: Vec<String> = (0..4)
+        .map(|n| {
+            fixture.publish_derived(
+                &format!("d{n}"),
+                "canonical_claims",
+                "object_id",
+                "decision_summary",
+            )
+        })
+        .collect();
+    let mut reviewed = 0;
+    loop {
+        let page = fixture.select(MEMORY_CLASSES, None);
+        if page.references.is_empty() {
+            break;
+        }
+        let targets = Fixture::targets(&page);
+        assert!(
+            targets.iter().all(|target| !denied.contains(target)),
+            "a remotely denied row is never selected: {targets:?}"
+        );
+        reviewed += targets.len();
+        for inputs in &page.references {
+            fixture.reserve(inputs, "reviewed");
+        }
+    }
+    assert_eq!(reviewed, 30, "every eligible target was reviewed once");
+    let mut arrivals: Vec<String> = ["s0", "s1"]
+        .into_iter()
+        .map(|key| {
+            fixture.publish_derived_over(
+                key,
+                "canonical_claims",
+                "object_id",
+                "decision_summary",
+                Some(&repository(key)),
+            )
+        })
+        .collect();
+    arrivals.sort();
+    let page = fixture.select(MEMORY_CLASSES, None);
+    assert_eq!(Fixture::targets(&page), arrivals);
+    assert_eq!(page.next_cursor, None, "36 rows end the pass in one page");
+}
+
 /// One batch fingerprints its permitted decision-derived rows together, so each selected target carries its own decision's citations even with denied rows and a row the ledger cannot bind sorted between them; a held row is passed while the others are still selected with their own inputs.
 #[test]
 fn a_batch_pairs_each_target_with_its_own_linked_evidence() {

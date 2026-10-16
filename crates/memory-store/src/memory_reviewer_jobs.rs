@@ -595,34 +595,28 @@ fn scalar(
     host_sql: &str,
 ) -> rusqlite::Result<i64> {
     match project {
-        Some(project) => conn.query_row(project_sql, [project], |row| row.get(0)),
-        None => conn.query_row(host_sql, [], |row| row.get(0)),
+        Some(project) => conn
+            .prepare_cached(project_sql)?
+            .query_row([project], |row| row.get(0)),
+        None => conn
+            .prepare_cached(host_sql)?
+            .query_row([], |row| row.get(0)),
     }
 }
 
-/// Receipt charges of every row plus allowances of non-terminal rows and frozen pages.
+/// Receipt charges of every row plus allowances of non-terminal rows and frozen pages, read from the per-project totals the baseline's triggers keep equal to that sum over `memory_reviewer_jobs` and `memory_reviewer_frozen_selections`.
 pub(crate) fn metadata_bytes(
     conn: &GuardedConn<'_>,
     project: Option<&str>,
 ) -> rusqlite::Result<u64> {
-    let jobs = scalar(
+    let bytes = scalar(
         conn,
         project,
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM memory_reviewer_jobs
+        "SELECT COALESCE(SUM(metadata_bytes), 0) FROM memory_reviewer_metadata_totals
          WHERE project = ?1",
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM memory_reviewer_jobs",
+        "SELECT COALESCE(SUM(metadata_bytes), 0) FROM memory_reviewer_metadata_totals",
     )?;
-    let pages = scalar(
-        conn,
-        project,
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0)
-         FROM memory_reviewer_frozen_selections WHERE project = ?1",
-        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0)
-         FROM memory_reviewer_frozen_selections",
-    )?;
-    Ok(u64::try_from(jobs)
-        .unwrap_or(u64::MAX)
-        .saturating_add(u64::try_from(pages).unwrap_or(u64::MAX)))
+    Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
 fn pending_jobs(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<usize> {
@@ -721,33 +715,62 @@ fn insert_reservation_in_tx(
     causal_identity: &str,
     now_ms: i64,
 ) -> rusqlite::Result<MemoryReviewerJob> {
+    insert_job_row_in_tx(
+        conn,
+        project,
+        producer,
+        inputs,
+        causal_identity,
+        None,
+        now_ms,
+    )?;
+    load_memory_reviewer_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
+}
+
+/// Callers supply normalized `inputs`, check headroom before insertion, and supply reference-only `input_json` when activating the job.
+fn insert_job_row_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    producer: &ProducerBinding,
+    inputs: &CausalInputs,
+    causal_identity: &str,
+    input_json: Option<&str>,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
     let ordinal = producer.validate().map_err(refuse)?;
     let deadline = now_ms
         .checked_add(MEMORY_REVIEWER_QUEUE_LIFETIME_MS)
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::InvalidRequest))?;
-    conn.execute(
+    let state = if input_json.is_some() {
+        "ready"
+    } else {
+        "reserved"
+    };
+    conn.prepare_cached(
         "INSERT INTO memory_reviewer_jobs (
              project, causal_identity, producer, firing_id, ordinal, target_json, question_template,
-             input_fingerprint, state, queue_deadline_ms, allowance_bytes, receipt_charge_bytes,
-             created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'reserved', ?9, ?10, ?11, ?12, ?12)",
-        params![
-            project,
-            causal_identity,
-            producer.producer,
-            producer.firing_id,
-            ordinal,
-            inputs.target.encode().map_err(refuse)?,
-            inputs.question_template,
-            inputs.fingerprint().map_err(refuse)?,
-            deadline,
-            i64::try_from(MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES).unwrap_or(i64::MAX),
-            i64::try_from(MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
-            now_ms,
-        ],
-    )?;
-    load_memory_reviewer_job(conn, project, causal_identity)?
-        .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
+             input_fingerprint, state, input_json, queue_deadline_ms, allowance_bytes,
+             receipt_charge_bytes, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
+    )?
+    .execute(params![
+        project,
+        causal_identity,
+        producer.producer,
+        producer.firing_id,
+        ordinal,
+        inputs.target.encode().map_err(refuse)?,
+        inputs.question_template,
+        inputs.fingerprint().map_err(refuse)?,
+        state,
+        input_json,
+        deadline,
+        i64::try_from(MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES).unwrap_or(i64::MAX),
+        i64::try_from(MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
+        now_ms,
+    ])?;
+    Ok(())
 }
 
 /// Moves a `Reserved` row to `Ready` with reference-only input inside the caller's fenced transaction. Activation consumes no second capacity slot and is refused for a row that is not reserved, belongs to another producer firing, has passed its queue deadline, or whose input names a subject or question template other than the reserved ones.
@@ -782,11 +805,11 @@ pub fn activate_memory_reviewer_job_in_tx(
     if input.subject != job.target || input.question_template != job.question_template {
         return Err(refuse(MemoryReviewerJobRefusal::InvalidRequest));
     }
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE memory_reviewer_jobs SET state = 'ready', input_json = ?3, updated_at_ms = ?4
          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
-        params![project, causal_identity, input_json, now_ms],
-    )?;
+    )?
+    .execute(params![project, causal_identity, input_json, now_ms])?;
     load_memory_reviewer_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
 }
@@ -817,11 +840,16 @@ pub fn rebind_reserved_memory_reviewer_job_in_tx(
     if job.queue_deadline_ms <= now_ms {
         return Err(refuse(MemoryReviewerJobRefusal::Expired));
     }
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE memory_reviewer_jobs SET firing_id = ?3, updated_at_ms = ?4
          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
-        params![project, causal_identity, producer.firing_id, now_ms],
-    )?;
+    )?
+    .execute(params![
+        project,
+        causal_identity,
+        producer.firing_id,
+        now_ms
+    ])?;
     load_memory_reviewer_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
 }
@@ -834,14 +862,15 @@ pub fn finish_memory_reviewer_job_in_tx(
     outcome: MemoryReviewerJobOutcome,
     now_ms: i64,
 ) -> rusqlite::Result<MemoryReviewerJob> {
-    let changed = conn.execute_cached(
-        "UPDATE memory_reviewer_jobs
+    let changed = conn
+        .prepare_cached(
+            "UPDATE memory_reviewer_jobs
             SET state = 'terminal', outcome = ?3, allowance_bytes = 0, input_json = NULL,
                 updated_at_ms = ?4
           WHERE project = ?1 AND causal_identity = ?2 AND state <> 'terminal'
             AND queue_deadline_ms > ?4",
-        params![project, causal_identity, outcome.as_str(), now_ms],
-    )?;
+        )?
+        .execute(params![project, causal_identity, outcome.as_str(), now_ms])?;
     let job = load_memory_reviewer_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))?;
     if changed == 0 {
@@ -859,14 +888,14 @@ pub(crate) fn close_reserved_jobs_of_identity_tx(
     causal_identity: &str,
     now_ms: i64,
 ) -> rusqlite::Result<usize> {
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE memory_reviewer_jobs
             SET state = 'terminal',
                 outcome = CASE WHEN queue_deadline_ms <= ?2 THEN 'expired' ELSE 'nonadmitted' END,
                 allowance_bytes = 0, input_json = NULL, updated_at_ms = ?2
           WHERE causal_identity = ?1 AND state = 'reserved'",
-        params![causal_identity, now_ms],
-    )
+    )?
+    .execute(params![causal_identity, now_ms])
 }
 
 /// Closes a `Reserved` row whose queue deadline has passed with the same `expired` outcome the sweep would record, so an activation that finds its reservation expired can close it eagerly without the outcome depending on whether the sweep ran first. A row still inside its deadline, already terminal, or past reservation is refused.
@@ -876,14 +905,15 @@ pub fn expire_reserved_memory_reviewer_job_in_tx(
     causal_identity: &str,
     now_ms: i64,
 ) -> rusqlite::Result<MemoryReviewerJob> {
-    let changed = conn.execute(
-        "UPDATE memory_reviewer_jobs
+    let changed = conn
+        .prepare_cached(
+            "UPDATE memory_reviewer_jobs
             SET state = 'terminal', outcome = 'expired', allowance_bytes = 0, input_json = NULL,
                 updated_at_ms = ?3
           WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'
             AND queue_deadline_ms <= ?3",
-        params![project, causal_identity, now_ms],
-    )?;
+        )?
+        .execute(params![project, causal_identity, now_ms])?;
     let job = load_memory_reviewer_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))?;
     if changed == 0 {
@@ -937,7 +967,7 @@ pub(crate) fn settle_memory_reviewer_reservation(
     )
 }
 
-/// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
+/// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`enqueue_frozen_selection_in_tx`], the expiry sweep, or [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
 pub fn freeze_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -960,9 +990,14 @@ pub fn freeze_selection_in_tx(
     }
     let mut normalized = Vec::with_capacity(page.references.len());
     for inputs in &page.references {
-        let inputs = inputs.clone().normalized().map_err(refuse)?;
-        inputs.reject_secrets()?;
-        normalized.push(inputs);
+        normalized.push(inputs.clone().normalized().map_err(refuse)?);
+    }
+    // References repeat the question template and policy versions; each distinct string is scanned once.
+    let mut scanned = std::collections::BTreeSet::new();
+    for (_, text) in normalized.iter().flat_map(causal_identity_fields) {
+        if scanned.insert(text) {
+            reject_secret(text)?;
+        }
     }
     if let Some(cursor) = &page.next_cursor {
         reject_secret(cursor)?;
@@ -1003,11 +1038,13 @@ pub fn freeze_selection_in_tx(
     let deadline = now_ms
         .checked_add(MEMORY_REVIEWER_QUEUE_LIFETIME_MS)
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::InvalidRequest))?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO memory_reviewer_frozen_selections (
              project, slot_id, selection_attempt, page_json, reference_count, next_cursor, state,
              selection_deadline_ms, allowance_bytes, receipt_charge_bytes, created_at_ms, updated_at_ms
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'frozen', ?7, ?8, ?9, ?10, ?10)",
+    )?
+    .execute(
         params![
             project,
             slot_id,
@@ -1021,8 +1058,15 @@ pub fn freeze_selection_in_tx(
             now_ms,
         ],
     )?;
-    load_selection(conn, project, slot_id, selection_attempt)?
-        .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
+    Ok(FrozenSelection {
+        project: project.to_string(),
+        slot_id: slot_id.to_string(),
+        selection_attempt: selection_attempt.to_string(),
+        page: Some(page),
+        state: FrozenSelectionState::Frozen,
+        selection_deadline_ms: deadline,
+        created_at_ms: now_ms,
+    })
 }
 
 /// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. An `Enqueued` result still carries the page, so the caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` return a compact receipt and leave the cursor where it was. Any completion at or after the selection deadline is refused as expired and left for the sweep, so the receipt does not depend on transaction ordering. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
@@ -1039,13 +1083,7 @@ pub fn complete_frozen_selection_in_tx(
     }
     let existing = load_selection(conn, project, slot_id, selection_attempt)?
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))?;
-    if existing.state != FrozenSelectionState::Frozen {
-        return Err(refuse(MemoryReviewerJobRefusal::Terminal));
-    }
-    if existing.selection_deadline_ms <= now_ms {
-        return Err(refuse(MemoryReviewerJobRefusal::Expired));
-    }
-    retire_frozen_page_in_tx(conn, project, slot_id, selection_attempt, state, now_ms)?;
+    complete_loaded_frozen_selection_in_tx(conn, &existing, state, now_ms)?;
     Ok(FrozenSelection {
         state,
         page: existing
@@ -1053,6 +1091,29 @@ pub fn complete_frozen_selection_in_tx(
             .filter(|_| state == FrozenSelectionState::Enqueued),
         ..existing
     })
+}
+
+/// The caller must load `existing` in the same transaction, so the completion checks judge that transaction's selection state.
+fn complete_loaded_frozen_selection_in_tx(
+    conn: &GuardedConn<'_>,
+    existing: &FrozenSelection,
+    state: FrozenSelectionState,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    if existing.state != FrozenSelectionState::Frozen {
+        return Err(refuse(MemoryReviewerJobRefusal::Terminal));
+    }
+    if existing.selection_deadline_ms <= now_ms {
+        return Err(refuse(MemoryReviewerJobRefusal::Expired));
+    }
+    retire_frozen_page_in_tx(
+        conn,
+        &existing.project,
+        &existing.slot_id,
+        &existing.selection_attempt,
+        state,
+        now_ms,
+    )
 }
 
 /// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released. The scan audit of the references is retired with them unless they became jobs (`Enqueued`), whose rows keep the same identities for the store incarnation and so keep their audit. Callers decide whether the deadline permits it.
@@ -1064,13 +1125,19 @@ fn retire_frozen_page_in_tx(
     state: FrozenSelectionState,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE memory_reviewer_frozen_selections
             SET state = ?4, page_json = NULL, next_cursor = NULL, allowance_bytes = 0,
                 updated_at_ms = ?5
           WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
-        params![project, slot_id, selection_attempt, state.as_str(), now_ms],
-    )?;
+    )?
+    .execute(params![
+        project,
+        slot_id,
+        selection_attempt,
+        state.as_str(),
+        now_ms
+    ])?;
     if state == FrozenSelectionState::Enqueued {
         return Ok(());
     }
@@ -1127,12 +1194,20 @@ pub fn advance_selection_cursor_in_tx(
     if cursor.is_some_and(|cursor| cursor.len() > 512) {
         return Err(refuse(MemoryReviewerJobRefusal::InvalidRequest));
     }
-    conn.execute(
-        "INSERT INTO memory_reviewer_selection_cursors (project, slot_id, cursor, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(project, slot_id) DO UPDATE SET cursor = excluded.cursor, updated_at_ms = excluded.updated_at_ms",
-        params![project, slot_id, cursor, now_ms],
-    )?;
+    // An existing continuation is updated in place, so its update trigger scans the new cursor once; the insert and its trigger run only for a slot's first continuation.
+    let updated = conn
+        .prepare_cached(
+            "UPDATE memory_reviewer_selection_cursors SET cursor = ?3, updated_at_ms = ?4
+              WHERE project = ?1 AND slot_id = ?2",
+        )?
+        .execute(params![project, slot_id, cursor, now_ms])?;
+    if updated == 0 {
+        conn.prepare_cached(
+            "INSERT INTO memory_reviewer_selection_cursors (project, slot_id, cursor, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?
+        .execute(params![project, slot_id, cursor, now_ms])?;
+    }
     Ok(())
 }
 
@@ -1173,6 +1248,9 @@ pub fn enqueue_frozen_selection_in_tx(
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))?;
     // Headroom is judged once for the whole page against the committed state, crediting the allowance the page releases when it leaves `frozen` later in this transaction; nothing is written before the judgement, so a `Deferred` outcome leaves the row untouched whatever the caller does with its transaction. A page either fits entirely or is deferred entirely.
     producer.validate().map_err(refuse)?;
+    // With the project's pending capacity already full, any count of new jobs overflows the project cap, which is judged before the host cap and the quota, so the first reference that needs a new job decides the deferral.
+    let project_full =
+        pending_jobs(conn, Some(project))? >= MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
     let mut fresh = Vec::with_capacity(page.references.len());
     let mut replayed = 0usize;
     for inputs in &page.references {
@@ -1184,6 +1262,10 @@ pub fn enqueue_frozen_selection_in_tx(
                 .any(|(_, fresh_id)| *fresh_id == causal_identity)
         {
             replayed += 1;
+        } else if project_full {
+            return Ok(EnqueueOutcome::Deferred(
+                MemoryReviewerJobRefusal::ProjectCapacity,
+            ));
         } else {
             fresh.push((inputs, causal_identity));
         }
@@ -1202,26 +1284,28 @@ pub fn enqueue_frozen_selection_in_tx(
         };
     }
     let jobs = fresh.len();
+    // Selection enqueueing activates each job with reference-only input in the row's insert.
     for (inputs, causal_identity) in &fresh {
-        insert_reservation_in_tx(conn, project, producer, inputs, causal_identity, now_ms)?;
-        activate_memory_reviewer_job_in_tx(
+        let input = MemoryReviewerJobInput {
+            subject: inputs.target.clone(),
+            starting_references: Vec::new(),
+            question_template: inputs.question_template.clone(),
+        };
+        input.reject_secrets()?;
+        let input_json = input.encode().map_err(refuse)?;
+        insert_job_row_in_tx(
             conn,
             project,
-            causal_identity,
             producer,
-            &MemoryReviewerJobInput {
-                subject: inputs.target.clone(),
-                starting_references: Vec::new(),
-                question_template: inputs.question_template.clone(),
-            },
+            inputs,
+            causal_identity,
+            Some(&input_json),
             now_ms,
         )?;
     }
-    complete_frozen_selection_in_tx(
+    complete_loaded_frozen_selection_in_tx(
         conn,
-        project,
-        &selection.slot_id,
-        &selection.selection_attempt,
+        &existing,
         FrozenSelectionState::Enqueued,
         now_ms,
     )?;
@@ -1245,9 +1329,11 @@ fn load_selection(
     slot_id: &str,
     selection_attempt: &str,
 ) -> rusqlite::Result<Option<FrozenSelection>> {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT page_json, state, selection_deadline_ms, created_at_ms FROM memory_reviewer_frozen_selections
          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3",
+    )?
+    .query_row(
         params![project, slot_id, selection_attempt],
         |row| {
             let page_json: Option<String> = row.get(0)?;
@@ -1276,6 +1362,14 @@ fn scan_causal_identities(
     write: &mut PreparedWrite,
     inputs: &CausalInputs,
 ) -> Result<(), MemoryStoreError> {
+    for (field_id, value) in causal_identity_fields(inputs) {
+        write.identity(field_id, value)?;
+    }
+    Ok(())
+}
+
+/// Each free string of `inputs` under the field id its scan records, in a fixed order.
+fn causal_identity_fields(inputs: &CausalInputs) -> impl Iterator<Item = (&'static str, &str)> {
     let CausalInputs {
         target,
         question_template,
@@ -1283,19 +1377,27 @@ fn scan_causal_identities(
         required_evidence,
         policy_versions,
     } = inputs;
-    scan_target(write, target)?;
-    write.identity("question_template", question_template)?;
-    for signal in signals {
-        write.identity("signal", signal)?;
-    }
-    for EvidenceAvailability { evidence_id, .. } in required_evidence {
-        write.identity("evidence_id", evidence_id)?;
-    }
-    for (name, version) in policy_versions {
-        write.identity("policy_name", name)?;
-        write.identity("policy_version", version)?;
-    }
-    Ok(())
+    let target = match target {
+        ReviewTarget::StagedSubject { candidate_id, .. } => ("candidate_id", candidate_id.as_str()),
+        ReviewTarget::Memory { object_id, .. } => ("object_id", object_id.as_str()),
+    };
+    std::iter::once(target)
+        .chain(std::iter::once((
+            "question_template",
+            question_template.as_str(),
+        )))
+        .chain(signals.iter().map(|signal| ("signal", signal.as_str())))
+        .chain(
+            required_evidence
+                .iter()
+                .map(|evidence| ("evidence_id", evidence.evidence_id.as_str())),
+        )
+        .chain(policy_versions.iter().flat_map(|(name, version)| {
+            [
+                ("policy_name", name.as_str()),
+                ("policy_version", version.as_str()),
+            ]
+        }))
 }
 
 fn scan_target(write: &mut PreparedWrite, target: &ReviewTarget) -> Result<(), MemoryStoreError> {
@@ -1327,11 +1429,10 @@ pub(crate) fn memory_reviewer_write(
 
 /// The store's own durable incarnation, read inside the caller's transaction.
 pub(crate) fn store_incarnation_in_tx(conn: &GuardedConn<'_>) -> rusqlite::Result<String> {
-    conn.query_row_cached(
+    conn.prepare_cached(
         "SELECT database_incarnation_id FROM memory_reviewer_store_identity WHERE id = 0",
-        [],
-        |row| row.get(0),
-    )
+    )?
+    .query_row([], |row| row.get(0))
 }
 
 impl MemoryStore {
@@ -1506,11 +1607,11 @@ impl MemoryStore {
                 let job =
                     finish_memory_reviewer_job_in_tx(conn, project, causal_identity, outcome, now_ms)?;
                 // A claim on a finished job can do nothing but renew; fence it here rather than leave it to the sweep.
-                let job_id: i64 = conn.query_row(
-                    "SELECT job_id FROM memory_reviewer_jobs WHERE project = ?1 AND causal_identity = ?2",
-                    params![project, causal_identity],
-                    |row| row.get(0),
-                )?;
+                let job_id: i64 = conn
+                    .prepare_cached(
+                        "SELECT job_id FROM memory_reviewer_jobs WHERE project = ?1 AND causal_identity = ?2",
+                    )?
+                    .query_row(params![project, causal_identity], |row| row.get(0))?;
                 crate::task_lease::fence_task_claims_tx(
                     conn,
                     &crate::memory_reviewer_ledger::MEMORY_REVIEWER_REVIEW_TASK,
@@ -1534,7 +1635,7 @@ impl MemoryStore {
         write
             .execute(&self.inner, |coordinated| {
                 // Nothing can publish once a receipt's run deadline or its job's queue deadline has passed: completion requires the queue to be live, so an in-progress receipt closes at the earlier of the two whatever its job's state, and the job follows in the same transaction rather than holding a pending slot.
-                coordinated.tx().execute(
+                coordinated.tx().prepare_cached(
                     "UPDATE memory_reviewer_receipts
                         SET state = 'complete', updated_at_ms = ?1,
                             terminal_kind = CASE
@@ -1551,52 +1652,56 @@ impl MemoryStore {
                                         WHERE j.project = memory_reviewer_receipts.project
                                           AND j.causal_identity = memory_reviewer_receipts.causal_identity
                                           AND j.queue_deadline_ms <= ?1))",
-                    [now_ms],
-                )?;
+                )?
+                .execute([now_ms])?;
                 // A job expires at its queue deadline, or as soon as its receipt is closed; an in-progress receipt inside both its run deadline and the job's queue deadline still shields the job.
-                let jobs = coordinated.tx().execute(
-                    "UPDATE memory_reviewer_jobs
-                        SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,
-                            outcome = COALESCE((
-                                SELECT CASE r.terminal_kind
-                                         WHEN 'unknown' THEN 'unknown'
-                                         WHEN 'cancelled' THEN 'failed'
-                                         ELSE 'expired' END
-                                  FROM memory_reviewer_receipts r
-                                 WHERE r.project = memory_reviewer_jobs.project
-                                   AND r.causal_identity = memory_reviewer_jobs.causal_identity), 'expired')
-                      WHERE state IN ('reserved', 'ready')
-                        AND (queue_deadline_ms <= ?1
-                             OR EXISTS(SELECT 1 FROM memory_reviewer_receipts r
-                                        WHERE r.project = memory_reviewer_jobs.project
-                                          AND r.causal_identity = memory_reviewer_jobs.causal_identity
-                                          AND r.state = 'complete'))
-                        AND NOT EXISTS(SELECT 1 FROM memory_reviewer_receipts r
-                                        WHERE r.project = memory_reviewer_jobs.project
-                                          AND r.causal_identity = memory_reviewer_jobs.causal_identity
-                                          AND r.state = 'in_progress')",
-                    [now_ms],
-                )?;
+                let jobs = coordinated
+                    .tx()
+                    .prepare_cached(
+                        "UPDATE memory_reviewer_jobs
+                            SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,
+                                outcome = COALESCE((
+                                    SELECT CASE r.terminal_kind
+                                             WHEN 'unknown' THEN 'unknown'
+                                             WHEN 'cancelled' THEN 'failed'
+                                             ELSE 'expired' END
+                                      FROM memory_reviewer_receipts r
+                                     WHERE r.project = memory_reviewer_jobs.project
+                                       AND r.causal_identity = memory_reviewer_jobs.causal_identity), 'expired')
+                          WHERE state IN ('reserved', 'ready')
+                            AND (queue_deadline_ms <= ?1
+                                 OR EXISTS(SELECT 1 FROM memory_reviewer_receipts r
+                                            WHERE r.project = memory_reviewer_jobs.project
+                                              AND r.causal_identity = memory_reviewer_jobs.causal_identity
+                                              AND r.state = 'complete'))
+                            AND NOT EXISTS(SELECT 1 FROM memory_reviewer_receipts r
+                                            WHERE r.project = memory_reviewer_jobs.project
+                                              AND r.causal_identity = memory_reviewer_jobs.causal_identity
+                                              AND r.state = 'in_progress')",
+                    )?
+                    .execute([now_ms])?;
                 let expiring_pages: Vec<(String, String, String)> = coordinated
                     .tx()
-                    .prepare(
+                    .prepare_cached(
                         "SELECT project, slot_id, selection_attempt FROM memory_reviewer_frozen_selections
                           WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
                     )?
                     .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                     .collect::<rusqlite::Result<_>>()?;
-                let pages = coordinated.tx().execute(
-                    "UPDATE memory_reviewer_frozen_selections
-                        SET state = 'expired', page_json = NULL, next_cursor = NULL,
-                            allowance_bytes = 0, updated_at_ms = ?1
-                      WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
-                    [now_ms],
-                )?;
+                let pages = coordinated
+                    .tx()
+                    .prepare_cached(
+                        "UPDATE memory_reviewer_frozen_selections
+                            SET state = 'expired', page_json = NULL, next_cursor = NULL,
+                                allowance_bytes = 0, updated_at_ms = ?1
+                          WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
+                    )?
+                    .execute([now_ms])?;
                 for (project, slot_id, selection_attempt) in &expiring_pages {
                     release_frozen_page_scans(coordinated.tx(), project, slot_id, selection_attempt)?;
                 }
                 // Renewal checks the claim, not the job, so a claim on a terminal job would otherwise live as long as its worker heartbeats.
-                coordinated.tx().execute(
+                coordinated.tx().prepare_cached(
                     "UPDATE note_eval_claims
                         SET terminal_kind = 'expired', terminal_response = ?2, terminal_at_ms = ?1
                       WHERE task_kind = ?3 AND terminal_kind IS NULL
@@ -1604,6 +1709,8 @@ impl MemoryStore {
                                     WHERE j.project = note_eval_claims.project
                                       AND j.job_id = note_eval_claims.note_id
                                       AND j.state = 'terminal')",
+                )?
+                .execute(
                     params![
                         now_ms,
                         crate::task_lease::kind_response("expired"),
@@ -1638,9 +1745,13 @@ impl MemoryStore {
                 if let Some(cursor) = &page.next_cursor {
                     write.identity("next_cursor", cursor)?;
                 }
-                page.references
-                    .iter()
-                    .try_for_each(|inputs| scan_causal_identities(write, inputs))?;
+                // References repeat the question template and policy versions, so each distinct value under a field id is scanned and receipted once for the page.
+                let mut scanned = std::collections::BTreeSet::new();
+                for field in page.references.iter().flat_map(causal_identity_fields) {
+                    if scanned.insert(field) {
+                        write.identity(field.0, field.1)?;
+                    }
+                }
                 write.reassign_scans_in(
                     first_reference_scan..write.scans.len(),
                     "project",
@@ -1669,7 +1780,7 @@ impl MemoryStore {
         )
     }
 
-    /// Standalone terminal transition for `Expired` and `FailedSlot`, which move no cursor. `Enqueued` is refused here: the slot's cursor advance must commit with the transition, which only [`complete_frozen_selection_in_tx`] inside the caller's transaction can do.
+    /// Standalone terminal transition for `Expired` and `FailedSlot`, which move no cursor. `Enqueued` is refused here: the slot's cursor advance must commit with the transition, which [`enqueue_frozen_selection_in_tx`] does inside the caller's transaction.
     pub fn complete_frozen_selection(
         &self,
         project: &str,
@@ -1801,12 +1912,11 @@ impl MemoryStore {
         self.inner
             .with_conn(|conn| {
                 let key: Option<(String, String)> = conn
-                    .query_row(
+                    .prepare_cached(
                         "SELECT slot_id, selection_attempt FROM memory_reviewer_frozen_selections
                           WHERE project = ?1 AND state = 'frozen' ORDER BY created_at_ms LIMIT 1",
-                        [project],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
+                    )?
+                    .query_row([project], |row| Ok((row.get(0)?, row.get(1)?)))
                     .optional()?;
                 match key {
                     Some((slot_id, attempt)) => load_selection(conn, project, &slot_id, &attempt),
@@ -1825,8 +1935,10 @@ impl MemoryStore {
         check_project(project)?;
         self.inner
             .with_conn(|conn| {
-                conn.query_row(
+                conn.prepare_cached(
                     "SELECT cursor FROM memory_reviewer_selection_cursors WHERE project = ?1 AND slot_id = ?2",
+                )?
+                .query_row(
                     params![project, slot_id],
                     |row| row.get::<_, Option<String>>(0),
                 )

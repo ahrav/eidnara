@@ -115,7 +115,10 @@ pub fn select_review_targets(
     budget: &EvalBudget,
 ) -> Result<FrozenSelectionPage, SelectionError> {
     let SelectionScope {
-        project, classes, ..
+        project,
+        ledger_project,
+        classes,
+        policy_versions,
     } = *scope;
     let kernel = SelectionError::Kernel;
     if classes.is_empty() {
@@ -125,12 +128,16 @@ pub fn select_review_targets(
     let tip = store.tip_within_budget(budget).map_err(kernel)?;
     let mut references = Vec::new();
     let mut examined = 0usize;
+    // The first batch holds as many rows as the page has references, and each later batch doubles up to the cap, so a page that fills from its first rows reads and judges few rows past them while a long walk still reads in large batches.
+    let mut batch = MAX_SELECTION_REFERENCES;
+    let mut ledger_first = false;
     // A page that filled at the end of a batch returns before another batch is read and judged.
     while references.len() < MAX_SELECTION_REFERENCES {
         let remaining = MAX_EXAMINED_PER_PAGE.saturating_sub(examined);
-        let Some(max_rows) = NonZeroUsize::new(remaining.min(MAX_SELECTION_REFERENCES * 4)) else {
+        let Some(max_rows) = NonZeroUsize::new(remaining.min(batch)) else {
             break;
         };
+        batch = (batch * 2).min(MAX_SELECTION_REFERENCES * 8);
         let page = store
             .live_source_descriptors(
                 classes[cursor.class_index],
@@ -142,19 +149,19 @@ pub fn select_review_targets(
             .map_err(kernel)?;
         examined += page.rows.len();
         // The review these targets feed discloses to a remote model, so a target is eligible only if the remote fold admits it; a locally readable but remotely denied memory would spend a job on a policy abstention.
-        let candidates: Vec<EligibilityCandidate> = page
-            .rows
-            .iter()
-            .map(|row| EligibilityCandidate {
-                object_id: row.object_id.clone(),
-                source_revision: row.detail.revision.parse().unwrap_or(-1),
-                artifact_digest: Some(row.detail.artifact_digest.clone()),
-            })
-            .collect();
-        let verdicts = if candidates.is_empty() {
-            Vec::new()
-        } else {
-            store
+        let judge = |rows: &[&LiveDescriptor]| -> Result<Vec<bool>, SelectionError> {
+            if rows.is_empty() {
+                return Ok(Vec::new());
+            }
+            let candidates: Vec<EligibilityCandidate> = rows
+                .iter()
+                .map(|row| EligibilityCandidate {
+                    object_id: row.object_id.clone(),
+                    source_revision: row.detail.revision.parse().unwrap_or(-1),
+                    artifact_digest: Some(row.detail.artifact_digest.clone()),
+                })
+                .collect();
+            Ok(store
                 .judge_surface_eligibility_within_budget(
                     project,
                     ArtifactDestination::Remote,
@@ -164,25 +171,79 @@ pub fn select_review_targets(
                 )
                 .map_err(kernel)?
                 .verdicts
+                .iter()
+                .map(|verdict| verdict.permits())
+                .collect())
         };
-        let selectable = selectable(
-            store,
-            ledger,
-            scope,
-            classes[cursor.class_index],
-            &page.rows,
-            &verdicts,
-            tip,
-            budget,
-        )?;
-        for (row, inputs) in page.rows.iter().zip(selectable) {
+        let rows: Vec<&LiveDescriptor> = page.rows.iter().collect();
+        // Eligibility-first judges the whole batch up front; ledger-first judges only the rows the ledger shows without a job.
+        let permits = if ledger_first {
+            None
+        } else {
+            Some(judge(&rows)?)
+        };
+        let may_select = |index: usize| permits.as_ref().is_none_or(|permits| permits[index]);
+        let class = classes[cursor.class_index];
+        let (mut checked, mut with_job) = (0usize, 0usize);
+        let mut next_row = 0;
+        // Each chunk holds exactly as many rows that may still be selected as the page has room for, so a chunk never reads past the row that fills the page, and its dedup is one ledger read.
+        while next_row < rows.len() {
             // The cursor passes a row only after it is selected or skipped; a full page stops before the row that would not fit, so that row is examined first next time.
             if references.len() >= MAX_SELECTION_REFERENCES {
                 return Ok(finish(references, Some(cursor)));
             }
-            references.extend(inputs);
-            cursor.after = Some(row.object_id.clone());
+            let room = MAX_SELECTION_REFERENCES - references.len();
+            let start = next_row;
+            let mut taken = 0;
+            while next_row < rows.len() && taken < room {
+                taken += usize::from(may_select(next_row));
+                next_row += 1;
+            }
+            let judged: Vec<&LiveDescriptor> = (start..next_row)
+                .filter(|index| may_select(*index))
+                .map(|index| rows[index])
+                .collect();
+            let linked = linked_evidence(store, class, &judged, tip, budget).map_err(kernel)?;
+            let mut bound = Vec::with_capacity(judged.len());
+            let mut identities = Vec::with_capacity(judged.len());
+            for (row, linked) in judged.into_iter().zip(linked) {
+                if let Some((inputs, causal_identity)) =
+                    causal_inputs(row, &linked, policy_versions)
+                {
+                    bound.push((row, inputs));
+                    identities.push(causal_identity);
+                }
+            }
+            if !identities.is_empty() {
+                let identities: Vec<&str> = identities.iter().map(String::as_str).collect();
+                let existing = ledger
+                    .memory_reviewer_jobs_exist(ledger_project, &identities)
+                    .map_err(|error| SelectionError::Ledger(error.to_string()))?;
+                checked += existing.len();
+                with_job += existing.iter().filter(|exists| **exists).count();
+                let fresh: Vec<_> = bound
+                    .into_iter()
+                    .zip(existing)
+                    .filter_map(|(bound, exists)| (!exists).then_some(bound))
+                    .collect();
+                if permits.is_some() {
+                    references.extend(fresh.into_iter().map(|(_, inputs)| inputs));
+                } else {
+                    let fresh_rows: Vec<&LiveDescriptor> =
+                        fresh.iter().map(|(row, _)| *row).collect();
+                    let fresh_permits = judge(&fresh_rows)?;
+                    references.extend(
+                        fresh
+                            .into_iter()
+                            .zip(fresh_permits)
+                            .filter_map(|((_, inputs), permitted)| permitted.then_some(inputs)),
+                    );
+                }
+            }
+            cursor.after = Some(rows[next_row - 1].object_id.clone());
         }
+        // A target needs both a permitting verdict and no job, so either order selects the same rows; the order decides which check the rows failing the other one skip. A batch whose ledger-checked rows mostly had a job is followed by a ledger-first batch.
+        ledger_first = with_job * 2 > checked;
         if page.next.is_none() {
             if cursor.class_index + 1 < classes.len() {
                 cursor.class_index += 1;
@@ -202,62 +263,28 @@ fn finish(references: Vec<CausalInputs>, cursor: Option<Cursor>) -> FrozenSelect
     }
 }
 
-/// For each of `rows`, its causal inputs when it is selectable: permitted by its verdict, bindable by the ledger, and holding no job at those inputs. One Kernel read at `tip` returns the linked evidence of every permitted decision-derived row, and one ledger read answers every job lookup, so a failure of either read fails the whole batch, rows past the point where the page fills included.
-#[allow(clippy::too_many_arguments)] // Splitting the call would split the batch's reads.
-fn selectable(
+/// The evidence each of `rows`' originating decisions cites at `tip`, itself or through its events, bounded by [`MAX_LINKED_EVIDENCE`], in `rows` order and read in one Kernel transaction; a native descriptor links none. This is the bounded enumeration that lets newly linked or newly retired evidence reconsider a target at an unchanged revision; unrelated writes, clocks, and selection attempts never enter it.
+fn linked_evidence(
     store: &KernelStore,
-    ledger: &MemoryStore,
-    scope: &SelectionScope<'_>,
     class: OccurrenceClass,
-    rows: &[LiveDescriptor],
-    verdicts: &[kernel::SurfaceVerdict],
+    rows: &[&LiveDescriptor],
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Vec<Option<CausalInputs>>, SelectionError> {
-    // Per row: `None` when its verdict denies it, otherwise its originating decision if it has one.
-    let permitted: Vec<Option<Option<&str>>> = rows
+) -> Result<Vec<Vec<LinkedEvidence>>, kernel::KernelError> {
+    let decisions: Vec<Option<&str>> = rows
         .iter()
-        .zip(verdicts)
-        .map(|(row, verdict)| {
-            verdict
-                .permits()
-                .then(|| super::broker::originating_decision(class, &row.detail.identity))
-        })
+        .map(|row| super::broker::originating_decision(class, &row.detail.identity))
         .collect();
-    let decisions: Vec<&str> = permitted.iter().flatten().flatten().copied().collect();
-    let mut linked = if decisions.is_empty() {
+    let read: Vec<&str> = decisions.iter().flatten().copied().collect();
+    let mut linked = if read.is_empty() {
         Vec::new()
     } else {
-        store
-            .linked_decisions_evidence_within_budget(&decisions, tip, MAX_LINKED_EVIDENCE, budget)
-            .map_err(SelectionError::Kernel)?
+        store.linked_decisions_evidence_within_budget(&read, tip, MAX_LINKED_EVIDENCE, budget)?
     }
     .into_iter();
-    let bound: Vec<Option<(CausalInputs, String)>> = rows
+    Ok(decisions
         .iter()
-        .zip(permitted)
-        .map(|(row, decision)| {
-            let links = decision?.and_then(|_| linked.next()).unwrap_or_default();
-            causal_inputs(row, &links, scope.policy_versions)
-        })
-        .collect();
-    let identities: Vec<&str> = bound
-        .iter()
-        .flatten()
-        .map(|(_, identity)| identity.as_str())
-        .collect();
-    let held = if identities.is_empty() {
-        Vec::new()
-    } else {
-        ledger
-            .memory_reviewer_jobs_exist(scope.ledger_project, &identities)
-            .map_err(|error| SelectionError::Ledger(error.to_string()))?
-    };
-    debug_assert_eq!(held.len(), identities.len());
-    let mut held = held.into_iter();
-    Ok(bound
-        .into_iter()
-        .map(|bound| bound.and_then(|(inputs, _)| (held.next() == Some(false)).then_some(inputs)))
+        .map(|decision| decision.and_then(|_| linked.next()).unwrap_or_default())
         .collect())
 }
 

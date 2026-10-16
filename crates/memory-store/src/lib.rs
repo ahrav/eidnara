@@ -5749,13 +5749,16 @@ impl MemoryStore {
             registration_generation,
             now_ms,
             |tx| {
-                let held: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM note_eval_claims
-                      WHERE project = ?1 AND task_kind = ?2 AND note_id = ?3
-                        AND terminal_kind IS NULL",
-                    params![project, MEMORY_CLASSIFIER_TASK.task_kind, task_id],
-                    |row| row.get(0),
-                )?;
+                let held: i64 = tx
+                    .prepare_cached(
+                        "SELECT COUNT(*) FROM note_eval_claims
+                          WHERE project = ?1 AND task_kind = ?2 AND note_id = ?3
+                            AND terminal_kind IS NULL",
+                    )?
+                    .query_row(
+                        params![project, MEMORY_CLASSIFIER_TASK.task_kind, task_id],
+                        |row| row.get(0),
+                    )?;
                 if held > 0 {
                     return Ok(task_lease::LeaseSelected::NoWork {
                         cycle_exhausted: false,
