@@ -1756,8 +1756,15 @@ Growth contract (`crates/eval-core/tests/growth.rs`,
   (`UnregisteredMarker`), an integer past the canonical safe range on
   serialize or parse (`NotCanonical`), a declared fault cut with no receipt
   (`Coverage(IncompleteCoverage)`), fault episodes with no declared cut
-  (`FaultedWithoutCuts`), declared cuts that are not one per fault episode
-  (`CutsDisagree`), and a v1 report refuse.
+  (`FaultedWithoutCuts`), a declared cut that is not a listed episode
+  (`CutNotAnEpisode`), and a v1 report refuse.
+- `declared_cuts_name_the_episodes_that_ran_not_merely_their_count`: a
+  receipted cut set of the right size whose cut names no listed episode
+  refuses (`Coverage(UndeclaredCut)` for the episode left undeclared), as do
+  an episode triggered at a step no sample records (`EpisodeNotSampled`) and
+  a duplicate episode id (`Episode(DuplicateEpisode)`).
+- `a_report_whose_ledger_never_ran_a_reviewer_pass_is_refused`: with every
+  sample's `reviewer_passes` zero, `validate` refuses `ReviewerNeverPassed`.
 
 Growth shell (`crates/daemon/tests/eval_growth.rs`, `--all-features`; the
 default shards run the never-restored campaign once with every scenario
@@ -1786,6 +1793,13 @@ completeness proof run in the `eval-campaign` CI job under
   with zero coordinator passes approved, the handed job is still pending at
   its quiescence, the witness records `reviewer_settled: false` with no pass,
   and `check_samples` refuses `ReviewerUnsettled`.
+- `a_cap_triggered_settle_and_its_drain_share_one_pass_bound`: with the
+  activation record removed, the gate stays closed; begun admissions fill the
+  pending queue to one short of the cap, and step 3's handed admission
+  reaches it. The cap-triggered settle and the drain together run exactly
+  `reviewer_coordinator_passes` passes, the witness records the job
+  unsettled, and `check_samples` refuses `ReviewerUnsettled` at the bound
+  rather than `ProgressUnbounded`.
 - `reviewer_headroom_is_accounted_from_the_stores_own_constants`
   (`flt-memory-reviewer-quota-refusal-expected`; marker
   `flt_headroom_accounted_from_store_constants`): the report's constants are
@@ -1796,8 +1810,9 @@ completeness proof run in the `eval-campaign` CI job under
 - `quota_pressure_past_the_pending_cap_settles_new_admissions_instead_of_panicking`:
   twice the per-project pending cap of admissions leaves the pending count one
   short of the cap, every admission pending or terminal, and the project bytes
-  equal to the constants' figure; the cap-triggered coordinator settles ran
-  passes that the next quiescence's witness counts.
+  equal to the constants' figure; each admission's cap-triggered coordinator
+  settle runs no more passes than the bound, and the settles together run at
+  least one pass.
 - `a_receipt_quota_refusal_is_counted_as_r24_and_admits_nothing`: with the
   project's receipt charges planted past the quota, the next admission is
   refused with `MetadataQuota`, counted once in `r24_refusals`, charges
@@ -1814,7 +1829,16 @@ completeness proof run in the `eval-campaign` CI job under
   safety check.
 - `a_restoring_campaign_cleans_a_stray_temporary_on_reopen_but_gives_no_leak_verdict`:
   a stray `artifacts/tmp` entry is seen by the sampler, swept by the reopen's
-  `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`.
+  `KernelStore::open`, and the restoring ledger's verdict is `NotALeakVerdict`;
+  the step's sample records its drain's catch-up episodes, and the sample
+  taken right after it with no drain between witnesses none (the checkpoint
+  at the tip, no catch-up episode, no pass, settled), as does the sample
+  after the restore.
+- `passes_run_before_a_restore_reach_the_ledger_whichever_sample_follows`:
+  passes accumulated after the last recorded sample and before a restore are
+  the `reviewer_passes` of whichever sample follows, the restore's own, the
+  next step's, or the final one, and a recorded sample drains the
+  accumulator.
 - `a_deliberate_envelope_breach_names_the_resource_and_publishes_nothing`
   (`xc-campaign-resource-envelope-declared-and-enforced`; marker
   `xc_envelope_breach_stops_the_run`): a run with a 64 KiB store bound stops
@@ -1827,9 +1851,13 @@ completeness proof run in the `eval-campaign` CI job under
   roots and publish directories and publish the result digests of their
   serial runs, with the same commit-log rows, projection rows, artifact
   objects, and mix counts; each campaign's reviewer peer holds one
-  OS-allocated port and the ports are disjoint; a fixture sharing a root or
-  a port is refused. This campaign records no cassette, so its cassette
-  namespace set is empty.
+  OS-allocated port, both peers listen before either campaign steps (a
+  barrier in `run_with`'s `opened` hook), and the concurrent pair's ports are
+  disjoint; the serial
+  pair is compared without ports, so a port the OS hands from one serial run
+  to the next is accepted; a fixture sharing a root, or a concurrent fixture
+  sharing a port, is refused. This campaign records no cassette, so its
+  cassette namespace set is empty.
 - `an_unapproved_profile_refuses_before_any_store_opens`: no approval, no
   campaign, nothing published.
 

@@ -452,8 +452,29 @@ would change.
 | [`reclaim_frees_capacity_for_next_write`][t-reclaim] | GC reclaim lowers usage so the next ingest fits. | unaudited |
 | [`payload_limit_is_inclusive_at_the_artifact_cap`][t-payload] | 64 MiB is accepted; 64 MiB + 1 is refused with no reservation or temp. | unaudited |
 | [`ingest_route_accepts_a_payload_at_the_artifact_cap`][t-route-cap] | The daemon route at and over `MAX_PAYLOAD_BYTES`. | unaudited |
-| [`orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects`][t-orphan] | Usage is read from objects written outside the store; `warn` at 80 percent. | unaudited |
-| [`facts_unless_abandons_the_artifact_walk_once_cancelled`][t-cancel] | The walk polls cancellation before every entry. | unaudited |
+| [`orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects`][t-orphan] | Usage counts objects written while no store is open; `warn` at 80 percent. | unaudited |
+| [`facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled`][t-cancel] | Facts read a held count without polling cancellation; with no count the walk polls before every entry. | unaudited |
+| [`ingestion_and_reclaim_keep_the_count_without_walking_the_object_tree`][t-no-walk] | Ingests, refusals, facts, and the ingest after a reclaim take no walk; a clean open takes one and maintenance one. | unaudited |
+| [`deduplicated_bytes_add_zero_at_exactly_the_cap`][t-usage-dedup] | A present digest is admitted at the cap and adds zero. | unaudited |
+| [`a_refused_ingest_leaves_no_reservation_and_no_object`][t-usage-refused] | A `Capacity` refusal leaves no reservation row and no object. | unaudited |
+| [`failed_reference_cleanup_subtracts_the_bytes_it_published`][t-usage-cleanup] | The `-cleanup` marker: the walk drops between `AfterPublish` and return, and usage equals the walk. | unaudited |
+| [`an_unrecovered_publish_counts_until_startup_recovery_removes_it`][t-usage-recovery] | An orphan publish counts against the cap; the `-recovery` marker fires at reopen and admission stays open. | unaudited |
+| [`reclaim_purge_and_a_retried_unlink_subtract_the_bytes_they_remove`][t-usage-paths] | The `-reclaim`, `-purge`, and `-retry` markers, with usage equal to the walk after each path and after a failed unlink. | unaudited |
+| [`bytes_added_outside_the_store_fail_the_next_admission_closed`][t-usage-added] | A stray file under `objects` makes maintenance latch; the next ingest is `IngestionFailClosed`; a reopen re-seeds. | unaudited |
+| [`bytes_removed_outside_the_store_fail_the_next_admission_closed`][t-usage-removed] | An object removed outside the store makes maintenance latch; the next ingest is `IngestionFailClosed`. | unaudited |
+| [`a_batch_counts_each_distinct_payload_once_and_a_refused_batch_subtracts_it`][t-usage-batch] | A batch with a duplicate adds each distinct payload once on a non-empty store; a refused batch nets zero. | unaudited |
+| [`a_removal_larger_than_the_count_fails_the_next_admission_closed`][t-usage-underflow] | An object grown outside the store underflows the count at purge; usage equals the walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown] | An object grown outside the store and purged leaves the count below the walk with admission open on the count; the next maintenance pass replaces the count with the walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`a_restore_reconciles_the_count_it_held_and_keeps_admission_open`][t-usage-restore] | Restore recovery reconciles once against the held count; usage equals the walk and admission stays open. | unaudited |
+| [`a_walk_counts_only_regular_files_at_both_levels`][t-usage-file-set] | The fallback walk and the census at open both count a top-level file and a shard object and skip symlinks and nested directories. | unaudited |
+| [`the_open_census_sums_every_shard_when_shards_outnumber_its_workers`][t-usage-census] | With 256 shards and up to 64 census workers, the census at open, a maintenance reconciliation, and the fallback walk each equal the independent sum; open takes one walk. | unaudited |
+| [`a_reconciliation_walks_without_the_writer_and_skips_a_count_that_moved_under_it`][t-usage-raced] | The writer lock is free after the maintenance walk returns; an ingest and a purge landed there leave usage equal to the walk and admission open, and the next pass still latches on a stray file. | unaudited |
+| [`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound] | With a stray file under `objects`, three maintenance passes each raced by an ingest leave admission open; the fourth holds the writer across its walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`an_admission_walk_short_of_descriptors_counts_the_tree_one_shard_at_a_time`][t-usage-descriptors] | With 128 shards and the soft descriptor limit eight above the descriptors in use, an admission with no count held walks the tree and admits; the walk becomes the count. | unaudited |
+| [`a_census_settled_during_an_older_walk_is_kept`][t-usage-settled-order] | A second maintenance pass that walks, settles, and latches between the first pass's walk and comparison keeps its total; usage equals the walk and the next ingest is `IngestionFailClosed`. | unaudited |
+| [`a_store_opens_while_its_census_shares_a_small_descriptor_table`][t-usage-open-descriptors] | With 128 shards and the soft descriptor limit twelve above the descriptors in use, the store opens and the census becomes the count. | unaudited |
+| [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk] | A maintenance walk that hits an unreadable directory keeps the count and admission; with no count held the same failure refuses with `IngestionFailClosed`. | unaudited |
+| [`an_open_whose_census_fails_admits_once_a_later_walk_succeeds`][t-usage-failed-census] | A census at open that hits an unreadable directory latches nothing; the first ingest after the directory is readable walks, admits, and matches the walk. | unaudited |
 | [`assert_semantic_oracle`][t-oracle] | `artifact_budget_facts().usage_bytes` equals an independent scan after every fault. | unaudited |
 | [`recover_twice`][t-recover-twice] | A second recovery changes nothing. | unaudited |
 | [`return_value_fault_table_latches_eio_and_never_publishes_a_reference`][t-faults] | Six ingest fault points. | unaudited |
@@ -461,14 +482,15 @@ would change.
 | [`crash_windows_recover_idempotently_and_match_no_crash_execution`][t-crash] | SIGKILL children at reservation, ingest, and purge barriers. | unaudited |
 | [`startup_retires_a_live_reservation_whose_bytes_are_already_gone`][t-gone] | Recovery deletes a reservation with no bytes. | unaudited |
 
-None found: a test that dedup at exactly the cap is admitted, or that a
-second ingest before recovery of an orphan publish is refused; a comparison
-of two independent usage sources, because only the walk exists; any daemon
-caller of `run_staging_maintenance` or `delete_artifact`, so the GC and purge
-decrement paths run only in kernel tests and benches; a test that the health
-sampler's lock-free walk and `check_budget`'s locked walk agree, or that the
-sampler's 300 s staleness bound is reached by a slow walk; a per-path usage
-delta in any fault table.
+None found: a daemon caller of `delete_artifact`, so the purge decrement
+runs only in kernel tests and benches (the daemon's memory-reviewer sweep
+calls `run_staging_maintenance`, so GC reclaim and the maintenance
+reconciliation run in production); a test that the health sampler's
+lock-free count read and `check_budget`'s locked read agree under
+concurrent ingest; a restore that finds drift; a durable unlink whose
+directory sync fails, which leaves the count unknown; a census at open whose
+workers hold the descriptors the database open needs, which the open test
+did not produce.
 
 ## Wildcard and cross-cutting
 
@@ -503,10 +525,32 @@ delta in any fault table.
 | [`optimized_matches_frozen_reference`][diff-small] | Small-window byte equality. | unaudited |
 | [`history_summarizer_chunk_golden_fixture_matches_builder`][t-golden] | Chunk output and every truncation case from `testdata/history_summarizer-chunk-golden.json`; each truncation input must exceed its budget before exact output comparison. | unaudited |
 | [`truncation_uses_marker_and_keeps_multibyte_boundaries`][t-marker] | Marker suffix, budget, scalar-boundary prefix. | unaudited |
+| [`the_field_jumping_search_matches_the_frozen_minute_stepper`][t-cron-prop] | Property test: random expressions, twelve zones, `after_ms` in 1800..2100, caps up to 14 days; the search equals the frozen stepper. | unaudited |
+| [`a_zone_without_an_hour_between_changes_is_searched_minute_by_minute`][t-cron-unbounded] | A 30-minute daylight window: the `Unbounded` claim equals the stepper and an overclaimed `HourApart` misses the match. | unaudited |
+| [`a_minute_by_minute_search_matches_the_stepper_on_both_sides_of_the_epoch`][t-cron-epoch] | An `Unbounded` zone with a seconds-bearing 30-minute daylight window, searched from 1900, late 1969, and 2026; each result equals the frozen stepper. | unaudited |
+| [`a_jump_across_a_shift_resumes_at_the_first_shifted_minute`][t-cron-shift] | A shift landing civil time past a jump's target: the bisected minute finds the match, and Lord Howe's half-hour shift equals the stepper. | unaudited |
+| [`a_spring_forward_gap_skips_the_day_and_a_fall_back_overlap_fires_the_earlier_instant`][t-cron-dst] | New York spring gap and both fall-back instants, Lord Howe and Kathmandu offsets, and Apia's skipped day, each equal to the frozen stepper. | unaudited |
+| [`calendar_impossible_expressions_return_none_at_the_search_cap`][t-cron-cap] | `0 0 30 2 *` and `0 0 31 4,6,9,11 *` return `None` at the full cap; February 29 is found; a cap one minute short returns `None`. | unaudited |
+| [`the_jump_matches_the_stepper_across_every_transition_of_a_zone_year`][t-cron-sweep] | Starts from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937, and 2026 in twelve zones, with day-of-week expressions that jump to midnight across transitions. | unaudited |
+| [`the_jump_matches_the_stepper_at_the_edges_of_the_representable_range`][t-cron-edge] | Chrono's minimum and maximum instants and the `i64` extremes. | unaudited |
+| [`every_lookup_of_the_search_falls_within_its_cap`][t-cron-lookups] | A recording `HourApart` zone: every offset lookup of a search is an epoch minute after `after_ms` and at or before the cap, including skips past the cap, a cap off the minute, and a fall-back that places the match before a probe. | unaudited |
 | [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie] | Vixie `*`-prefix semantics. | unaudited |
+| [`the_byte_parser_accepts_exactly_what_the_str_parser_accepts`][t-cron-parser] | Property test: random byte soups with ASCII and Unicode whitespace, overflowing numbers, and stray separators, plus random five-field expressions; `parse_cron` masks equal a frozen copy of the `&str` parser. | unaudited |
+| [`the_month_scan_finds_the_date_a_day_by_day_scan_finds`][t-cron-month] | Property test: random day-of-month, month, and day-of-week fields from year -410 to 3285 with spans up to 3,000 days; the month-at-a-time scan equals a day-by-day scan. | unaudited |
+| [`the_jitter_hashes_the_formatted_note_seed`][t-cron-jitter] | Property test: any `i64` note id and optional Unicode hash; the stack-built seed hash equals the hash of the formatted `"{note_id}:{hash}"`. `the_jitter_seed_spells_extreme_note_ids` pins `i64::MIN`, `-1`, `0`, and `i64::MAX`. | unaudited |
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes. | unaudited |
 | [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
+| [`a_tick_evaluates_the_configured_cron_schedule_of_a_module_project`][t-sched-marker] | The `cron-schedule-is-evaluated-for-a-configured-project` marker: a tick leaves a `next_due` entry with the schedule and a finite instant. | unaudited |
 | [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] | A `*/15 * * * *` project runs at its instant and not before; the same instant does not run twice. | unaudited |
+| [`the_merged_memo_observes_every_tier_and_override_change_by_the_next_load`][t-memo-change] | An unchanged load is served from the memo; a project-tier edit, a user-tier edit, a removed tier, and an override rewrite with its mtime restored each start from a populated memo and reach the next load. | unaudited |
+| [`the_merged_memo_reemits_warnings_and_keeps_project_raise_only_rules`][t-memo-raise] | Alternating a hostile and a quiet project root on one cache keeps each root's merge, refuses the hostile tier's raise-only and user-only keys, and repeats the per-key warnings on a memo hit. | unaudited |
+| [`a_rejected_user_tier_serves_its_admitted_fallback_from_the_memo`][t-memo-fallback] | A rejected user tier memoizes its admitted fallback and `Unresolved` admission; the hit returns the same merge and warnings. | unaudited |
+| [`unread_sources_and_oversized_merges_are_never_memoized`][t-memo-unread] | An unreadable guidance override, a 90,000-model user tier above the retained bound, and 200,000 repeated models whose deduplicated chain keeps that capacity leave the memo empty and serve the same merge. | unaudited |
+| [`a_tier_whose_entry_is_a_final_symlink_is_never_memoized`][t-memo-symlink] | A dangling project-tier link is not memoized, so creating its target makes the next load warn and stay `Unresolved`. | unaudited |
+| [`a_model_ttl_map_is_charged_its_node_share`][t-memo-map] | A 30,000-entry `cache_ttl` map within the tier limit, whose B-tree nodes carry it past the retained bound, leaves the memo empty. | unaudited |
+| [`a_tier_relinked_to_a_target_with_its_cached_mtime_is_never_memoized`][t-memo-relink] | A user tier renamed and replaced by a link to it keeps serving the tier cache's value and is never memoized, so editing the target makes the next load refuse the link. | unaudited |
+| [`a_settled_source_with_a_future_mtime_is_memoized`][t-memo-future] | A tier whose mtime is a day ahead is memoized once its ctime has settled. | unaudited |
+| [`a_source_exchanged_between_its_stamp_and_its_read_is_never_memoized`][t-memo-exchange] | A user tier whose directory is exchanged between the pre-read stamp and the read serves the file read and is never memoized, so swapping the directories back serves the original on the next load. | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | A same mtime hides an edit; a new mtime reloads. | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | The `ProjectRaiseOnly` threshold. | unaudited |
 | [`project_tier_cannot_raise_the_user_memory_gate`][t-gate] | The `ProjectRaiseOnly` gate. | unaudited |
@@ -524,8 +568,7 @@ identity; any bench reaching `Handler::handle` or a production-sized steady
 session; a check that `DECLARED_RETAINED_RESIDENT_BYTES` includes every
 cache; token-cache lock contention evidence; a bounded-scan versus
 whole-input differential for the secret scanner; a DST or
-unsatisfiable-expression case for the cron stepper; guidance override
-staleness, or two project roots sharing one `ConfigCache`; any test that aborts between
+unsatisfiable-expression case for the cron stepper; any test that aborts between
 commit and bookkeeping and inspects the next pass; any test in
 `crates/daemon/tests/` or in `kernel_routes` that panics inside a
 `kernel_routes::blocking` closure or any other `spawn_blocking` worker and
@@ -751,8 +794,29 @@ not a claim that no related check exists anywhere in the repository.
 [t-reclaim]: ../../../../crates/kernel/tests/kernel_gc.rs#L536
 [t-payload]: ../../../../crates/kernel/tests/kernel_cas.rs#L214
 [t-route-cap]: ../../../../crates/daemon/tests/kernel_routes.rs#L3601
-[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L594
-[t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L557
+[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
+[t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L584
+[t-no-walk]: ../../../../crates/kernel/tests/kernel_gc.rs#L557
+[t-usage-dedup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L163
+[t-usage-refused]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L177
+[t-usage-cleanup]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L193
+[t-usage-recovery]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L219
+[t-usage-paths]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L260
+[t-usage-added]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L309
+[t-usage-removed]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L328
+[t-usage-batch]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L341
+[t-usage-underflow]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L374
+[t-usage-restore]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L423
+[t-usage-grown]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L395
+[t-usage-file-set]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L451
+[t-usage-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L478
+[t-usage-raced]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L532
+[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
+[t-usage-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L67
+[t-usage-settled-order]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L609
+[t-usage-open-descriptors]: ../../../../crates/kernel/tests/kernel_artifact_usage_descriptors.rs#L103
+[t-usage-failed-walk]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L644
+[t-usage-failed-census]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L666
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
 [t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426
@@ -788,14 +852,36 @@ not a claim that no related check exists anywhere in the repository.
 [diff-small]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L134
 [t-golden]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1773
 [t-marker]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1744
-[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1585
-[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1571
-[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
-[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2118
-[t-raise]: ../../../../crates/daemon/src/config.rs#L1314
-[t-gate]: ../../../../crates/daemon/src/config.rs#L1650
-[t-hostile]: ../../../../crates/daemon/src/config.rs#L1718
+[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2582
+[t-cron-prop]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2516
+[t-cron-dst]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2146
+[t-cron-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2328
+[t-cron-sweep]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2533
+[t-cron-edge]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2467
+[t-cron-lookups]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2399
+[t-cron-unbounded]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2183
+[t-cron-epoch]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2209
+[t-cron-parser]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2735
+[t-cron-month]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2755
+[t-cron-jitter]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2774
+[t-cron-shift]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2257
+[t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
+[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2568
+[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1557
+[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2645
+[t-memo-change]: ../../../../crates/daemon/src/config.rs#L2702
+[t-memo-raise]: ../../../../crates/daemon/src/config.rs#L2774
+[t-memo-fallback]: ../../../../crates/daemon/src/config.rs#L2831
+[t-memo-unread]: ../../../../crates/daemon/src/config.rs#L2870
+[t-memo-symlink]: ../../../../crates/daemon/src/config.rs#L2953
+[t-memo-relink]: ../../../../crates/daemon/src/config.rs#L2994
+[t-memo-future]: ../../../../crates/daemon/src/config.rs#L3036
+[t-memo-exchange]: ../../../../crates/daemon/src/config.rs#L3054
+[t-memo-map]: ../../../../crates/daemon/src/config.rs#L2922
+[t-raise]: ../../../../crates/daemon/src/config.rs#L1796
+[t-gate]: ../../../../crates/daemon/src/config.rs#L2137
+[t-hostile]: ../../../../crates/daemon/src/config.rs#L2206
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643

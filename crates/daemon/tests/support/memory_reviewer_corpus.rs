@@ -89,7 +89,8 @@ pub struct Claim {
 pub enum Action {
     Retain,
     Retire,
-    Revise,
+    /// The replacement text the published proposal must carry.
+    Revise(&'static str),
     NoChange,
     /// No proposal: the receipt abstains with this reason.
     Abstain(&'static str),
@@ -141,6 +142,8 @@ const SUBJECT: Source =
 
 /// The subject's claim, which every published case's proposal is about.
 const BUILDS_WITH_BUN: &str = "the workspace builds with bun";
+
+const REVISED_FOR_HOOK: &str = "The workspace builds with bun; the pre-test hook runs bun install.";
 
 const READ_1: Turn = Turn(
     r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}"}]}}"#,
@@ -241,7 +244,7 @@ pub const CASES: &[Case] = &[
                 r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"The workspace builds with bun; the pre-test hook runs bun install.","support":[{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#,
             ),
         ],
-        action: Action::Revise,
+        action: Action::Revise(REVISED_FOR_HOOK),
         claims: &[Claim {
             text: "the pre-test hook runs bun install",
             supported_by: &[Span {
@@ -282,7 +285,7 @@ pub const CASES: &[Case] = &[
                 r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"The workspace builds with bun; the pre-test hook runs bun install.","support":[{"alias":"{alias:1}","range":{"start":0,"end":40}}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#,
             ),
         ],
-        action: Action::Revise,
+        action: Action::Revise(REVISED_FOR_HOOK),
         // The cited `[0,40)` stops inside "pre-test hook": a valid reference whose bytes do not carry the revision.
         claims: &[Claim {
             text: "the pre-test hook runs bun install",

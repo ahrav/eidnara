@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use context_core::memory_reviewer_policy_union::{PolicyUnion, PolicyUnionMember};
@@ -15,8 +16,8 @@ use context_core::redaction::{
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactErrorKind, ArtifactHandle, DecisionRow,
-    EligibilityCandidate, EligibilityVerdict, HeldEvidence, KernelError, KernelStore,
-    MAX_RUN_BUFFER_BYTES, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS, MemoryReviewerHold,
+    EgressSnapshot, EligibilityCandidate, EligibilityVerdict, HeldEvidence, KernelError,
+    KernelStore, MAX_RUN_BUFFER_BYTES, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS, MemoryReviewerHold,
     MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
     OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding, ReviewOwner, ReviewPayload,
     ReviewReadError, ReviewStagedReference, RunBufferMap, RunBufferRefusal, SOURCE_DESCRIPTOR_KIND,
@@ -332,6 +333,13 @@ impl RenderedBuffer {
             broker: self.broker,
         }
     }
+}
+
+/// The Kernel state a source revalidation is keyed by: the writer's lease epoch and the egress snapshot, or `None` when the snapshot is unreadable or a classification change overlapped it. Every caller passes the one store the run's broker reads.
+fn kernel_state(store: &KernelStore) -> Option<(u64, EgressSnapshot)> {
+    let snapshot = store.egress_snapshot().ok()?;
+    snapshot.classification_generation?;
+    Some((store.lease_epoch(), snapshot))
 }
 
 /// Detection-only render check over bytes about to be rendered: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text. Rendered ranges are bounded by [`MAX_MODEL_VISIBLE_BYTES`], well inside the scanner's single-pass input limit.
@@ -701,6 +709,8 @@ pub struct EvidenceBroker {
     refused_artifacts: BTreeSet<String>,
     /// Evidence already added to the execution hold by this run; a re-render skips the writer transaction.
     extended: BTreeSet<String>,
+    /// The Kernel state each source alias last passed revalidation at: the writer's lease epoch and the egress snapshot read before and after that revalidation's Kernel reads.
+    revalidated: Mutex<BTreeMap<Alias, (u64, EgressSnapshot)>>,
     /// Runs between the disk read and the post-load egress verdict, so a test can commit a classification change inside that window.
     #[cfg(feature = "test-support")]
     after_load_for_test: Option<AfterLoadHook>,
@@ -727,6 +737,7 @@ impl EvidenceBroker {
             checked_artifacts: BTreeSet::new(),
             refused_artifacts: BTreeSet::new(),
             extended: BTreeSet::new(),
+            revalidated: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "test-support")]
             after_load_for_test: None,
         })
@@ -813,13 +824,42 @@ impl EvidenceBroker {
         range: Option<Range<u64>>,
         now_ms: i64,
     ) -> Result<EvidenceRead, Refusal> {
+        // A source read makes every Kernel check its revalidation makes, so a read that saw one Kernel state throughout counts as a pass at that state.
+        let before = self
+            .source_alias(alias)
+            .and_then(|alias| Some((alias, kernel_state(store)?)));
         let result = self.read_inner(store, alias, range, now_ms);
-        if let Err(refusal) = &result
-            && refusal.code.truncates_evidence()
-        {
-            self.ledger.record_partial_disclosure();
+        match &result {
+            Ok(_) => {
+                if let Some((alias, before)) = before
+                    && kernel_state(store) == Some(before)
+                {
+                    self.remember(alias, before);
+                }
+            }
+            Err(refusal) if refusal.code.truncates_evidence() => {
+                self.ledger.record_partial_disclosure();
+            }
+            Err(_) => {}
         }
         result
+    }
+
+    /// The alias when it names a native or canonical source, the kinds whose Kernel revalidation a pass at an unchanged state stands for.
+    fn source_alias(&self, alias: &str) -> Option<Alias> {
+        let (alias, expectation) = self.aliases.resolve(alias).ok()?;
+        matches!(
+            expectation,
+            ReferenceExpectation::NativeSource { .. }
+                | ReferenceExpectation::CanonicalSource { .. }
+        )
+        .then(|| alias.clone())
+    }
+
+    fn remember(&self, alias: Alias, state: (u64, EgressSnapshot)) {
+        if let Ok(mut passed) = self.revalidated.lock() {
+            passed.insert(alias, state);
+        }
     }
 
     fn read_inner(
@@ -1189,15 +1229,17 @@ impl EvidenceBroker {
                 evidence_id,
                 ..
             } => {
-                self.judge_native_source(store, Some(alias), expectation)?;
-                self.egress_allowed(
-                    store,
-                    Some(alias),
-                    &ArtifactHandle {
-                        digest: artifact_digest.clone(),
-                        evidence_id: evidence_id.clone(),
-                    },
-                )?;
+                self.unless_unchanged(store, alias, || {
+                    self.judge_native_source(store, Some(alias), expectation)?;
+                    self.egress_allowed(
+                        store,
+                        Some(alias),
+                        &ArtifactHandle {
+                            digest: artifact_digest.clone(),
+                            evidence_id: evidence_id.clone(),
+                        },
+                    )
+                })?;
                 Ok(Some(evidence_id.clone()))
             }
             ReferenceExpectation::CanonicalSource {
@@ -1205,18 +1247,45 @@ impl EvidenceBroker {
                 evidence_id,
                 ..
             } => {
-                self.judge_canonical_source(store, Some(alias), expectation)?;
-                self.egress_allowed(
-                    store,
-                    Some(alias),
-                    &ArtifactHandle {
-                        digest: artifact_digest.clone(),
-                        evidence_id: evidence_id.clone(),
-                    },
-                )?;
+                self.unless_unchanged(store, alias, || {
+                    self.judge_canonical_source(store, Some(alias), expectation)?;
+                    self.egress_allowed(
+                        store,
+                        Some(alias),
+                        &ArtifactHandle {
+                            digest: artifact_digest.clone(),
+                            evidence_id: evidence_id.clone(),
+                        },
+                    )
+                })?;
                 Ok(Some(evidence_id.clone()))
             }
         }
+    }
+
+    /// Runs a source alias's Kernel revalidation unless the Kernel is still at the state the alias last passed it at. Every write that changes an egress fact moves the commit-log tip or the classification generation, so an equal egress snapshot under the same writer lease means the eligibility verdict, the descriptor at that tip, and the artifact's egress fold are the ones already passed. A pass is remembered only when the snapshot read before and after it agree, so every read it made saw that one state, and only under a stable classification generation; an unreadable snapshot runs the full revalidation and remembers nothing.
+    fn unless_unchanged(
+        &self,
+        store: &KernelStore,
+        alias: &Alias,
+        revalidate: impl FnOnce() -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let before = kernel_state(store);
+        if before.is_some()
+            && self
+                .revalidated
+                .lock()
+                .is_ok_and(|passed| passed.get(alias) == before.as_ref())
+        {
+            return Ok(());
+        }
+        revalidate()?;
+        if let Some(before) = before
+            && kernel_state(store) == Some(before)
+        {
+            self.remember(alias.clone(), before);
+        }
+        Ok(())
     }
 
     /// Judges a canonical descriptor together with its originating decision, requires the owner to be a decision row at that snapshot, and checks the live descriptor detail against the expectation. The decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it. Any other expectation kind is refused as unsupported.

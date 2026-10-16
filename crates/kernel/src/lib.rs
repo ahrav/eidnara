@@ -115,6 +115,7 @@ pub use memory_reviewer_hold::{
     MAX_RUN_BUFFER_BYTES, MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND,
     MemoryReviewerHold, MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
     MemoryReviewerHoldRefusal, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
+    SealedReviewProposal,
 };
 #[cfg(feature = "test-support")]
 pub use open::{ClassificationChange, OpenPhase};

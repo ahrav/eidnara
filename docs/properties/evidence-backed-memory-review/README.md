@@ -35,7 +35,7 @@ Records enter this catalog with the implementation ticket that gives them a
 code surface. Slugs assigned to a later ticket appear in the index with no
 record until that ticket lands. Landed so far: #725 (canonical resolution), #726 (private result expiry),
 #727 (broker-free recovery), #728 (observational routes), #729 (exact
-integers at the client seam), #730 (the review command), and #731 (cumulative
+integers at the client seam), #730 (the review command), #731 (cumulative
 response budgets), and #592 (the semantic evidence corpus).
 
 ## Landed by

@@ -152,7 +152,7 @@ impl KernelStore {
         &self,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<ArtifactBudgetFacts>, KernelError> {
-        let Some(usage_bytes) = super::cas::gc::object_usage(self, cancelled)? else {
+        let Some(usage_bytes) = self.reported_artifact_usage(cancelled)? else {
             return Ok(None);
         };
         let warn_at = self.artifact_cap.saturating_sub(self.artifact_cap / 5);

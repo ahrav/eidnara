@@ -84,6 +84,7 @@ fn kernel_incarnation(root: &std::path::Path) -> String {
 /// Publishes one commit with `message` as remote-eligible evidence, or as `Sensitive` evidence a remote model never receives; returns its descriptor and the unit it published, so a span of the same commit can be published under that unit's identity.
 fn publish_commit_unit(
     store: &KernelStore,
+    gate: &daemon::projection_gates::HookGate,
     root: &std::path::Path,
     message: &str,
     protected: bool,
@@ -92,8 +93,14 @@ fn publish_commit_unit(
     (String, SourceDescriptorDetail),
     daemon::harness_sources::SourceUnit,
 ) {
-    gix::init(root).unwrap();
-    let repo = gix::open_opts(root, gix::open::Options::isolated()).unwrap();
+    let repo: gix::Repository = gix::ThreadSafeRepository::init_opts(
+        root,
+        gix::create::Kind::WithWorktree,
+        gix::create::Options::default(),
+        gix::open::Options::isolated(),
+    )
+    .unwrap()
+    .into();
     let tree = repo
         .write_object(gix::objs::Tree::empty())
         .unwrap()
@@ -115,7 +122,7 @@ fn publish_commit_unit(
     let oid = repo.write_object(&commit).unwrap().detach().to_string();
     let object_bytes = u64::try_from(message.len()).unwrap().max(4096) + 1024;
     let selection = read_selection(
-        &support::projection_gate::open_gate(),
+        gate,
         &RepositoryBinding {
             repository_id: format!("repo-{}", root.file_name().unwrap().to_str().unwrap()),
             path: root.to_path_buf(),
@@ -266,12 +273,14 @@ impl Fixture {
         let mut dirs = Vec::new();
         let mut published = Vec::new();
         let mut units = Vec::new();
+        let gate = support::projection_gate::open_gate();
         for source in sources {
             match source.origin {
                 Origin::Own => {
                     let dir = tempfile::tempdir().unwrap();
                     let (descriptor, unit) = publish_commit_unit(
                         &store,
+                        &gate,
                         dir.path(),
                         source.message,
                         source.protected,
@@ -710,14 +719,20 @@ async fn run_case(case: &Case) {
             .unwrap();
             assert_eq!(selected.reference, reference);
             let proposal = &selected.proposal;
-            let expected_action = match action {
-                Action::Retain => kernel::ProposalAction::Retain,
-                Action::Retire => kernel::ProposalAction::Retire,
-                Action::Revise => kernel::ProposalAction::Revise,
-                Action::NoChange => kernel::ProposalAction::NoChange,
+            let (expected_action, expected_text) = match action {
+                Action::Retain => (kernel::ProposalAction::Retain, None),
+                Action::Retire => (kernel::ProposalAction::Retire, None),
+                Action::Revise(text) => (kernel::ProposalAction::Revise, Some(text)),
+                Action::NoChange => (kernel::ProposalAction::NoChange, None),
                 Action::Abstain(_) => unreachable!(),
             };
             assert_eq!(proposal.action, expected_action, "{}", case.name);
+            assert_eq!(
+                proposal.new_text.as_deref(),
+                expected_text,
+                "{}: the published replacement text",
+                case.name
+            );
             // A memory target names exactly the subject the run bound, unchanged since: its object, revision, and last change.
             let kernel::ProposalTarget::Memory(target) = &proposal.target else {
                 panic!("{}: {:?}", case.name, proposal.target)
@@ -918,7 +933,7 @@ fn the_corpus_covers_every_relation_once() {
     let has = |wanted: fn(&Action) -> bool| CASES.iter().any(|case| wanted(&case.action));
     assert!(has(|a| matches!(a, Action::Retain)));
     assert!(has(|a| matches!(a, Action::Retire)));
-    assert!(has(|a| matches!(a, Action::Revise)));
+    assert!(has(|a| matches!(a, Action::Revise(_))));
     assert!(has(|a| matches!(a, Action::NoChange)));
     assert!(has(|a| matches!(a, Action::Abstain(_))));
 }
@@ -2972,6 +2987,150 @@ async fn a_claim_about_to_lapse_is_renewed_before_the_attempt_so_the_request_com
         .expect("the request ends at the peer's answer, not the 30-second request bound")
         .unwrap();
     assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+}
+
+/// A claim acquired just before the run carries its first attempt without a renewal write; once provider time has aged the lease, the claim is renewed before the next attempt at the clock the read batch ran under.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_claim_carries_the_first_attempt_and_an_aged_one_is_renewed_before_the_next() {
+    use memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_TASK_LEASE_MS;
+    let case = &CASES[0];
+    let fixture = Fixture::open(case.sources);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut peer = Peer::start().await;
+    let script: Vec<Vec<u8>> = case
+        .turns
+        .iter()
+        .map(|turn| text_response(&fixture.expand(turn.0)))
+        .collect();
+    let server = {
+        let (ledger, identity, claim_id) = (
+            Arc::clone(&fixture.ledger),
+            fixture.identity.clone(),
+            fixture.claim.claim_id.clone(),
+        );
+        let (clock, seen) = (Arc::clone(&fixture.clock), Arc::clone(&seen));
+        peer.serve_script_with(script, move |_| {
+            // Each request is in flight here: record the lease it travels under, then let five seconds of provider time pass.
+            let now = clock.load(Ordering::SeqCst);
+            seen.lock().unwrap().push(
+                ledger
+                    .live_memory_reviewer_claim_expiry(PROJECT, &identity, &claim_id, now)
+                    .unwrap(),
+            );
+            clock.fetch_add(5_000, Ordering::SeqCst);
+            Box::pin(async {})
+        })
+    };
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert!(matches!(settled, Settled::Published(_)));
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            // The acquisition's own lease, unrenewed.
+            Some(fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS),
+            // Renewed for the second attempt, five seconds of provider time later.
+            Some(fixture.now + 5 + 5_000 + MEMORY_REVIEWER_TASK_LEASE_MS),
+        ]
+    );
+}
+
+/// The freshness window is inclusive: a lease with exactly the slack elapsed carries the attempt, and one a millisecond older is renewed first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_at_the_slack_boundary_is_used_and_one_past_it_is_renewed() {
+    use memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_TASK_LEASE_MS;
+    for elapsed in [250, 251] {
+        let fixture = Fixture::open(CASES[0].sources);
+        fixture.clock.store(fixture.now + elapsed, Ordering::SeqCst);
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut peer = Peer::start().await;
+        let server = {
+            let (ledger, identity, claim_id) = (
+                Arc::clone(&fixture.ledger),
+                fixture.identity.clone(),
+                fixture.claim.claim_id.clone(),
+            );
+            let (clock, seen) = (Arc::clone(&fixture.clock), Arc::clone(&seen));
+            peer.serve_script_with(
+                vec![text_response(
+                    r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+                )],
+                move |_| {
+                    let now = clock.load(Ordering::SeqCst);
+                    *seen.lock().unwrap() = ledger
+                        .live_memory_reviewer_claim_expiry(PROJECT, &identity, &claim_id, now)
+                        .unwrap();
+                    Box::pin(async {})
+                },
+            )
+        };
+        let settled = fixture
+            .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+        let expected = if elapsed == 250 {
+            fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS
+        } else {
+            fixture.now + elapsed + MEMORY_REVIEWER_TASK_LEASE_MS
+        };
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(expected),
+            "{elapsed} ms elapsed"
+        );
+    }
+}
+
+/// Cancellation ends the run with `InvestigationError::Cancelled` while the renewal started beside its read batch is still stalled before its lease-expiry read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_cancelled_during_a_read_batch_returns_without_waiting_on_its_side_renewal() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    const STALL: Duration = Duration::from_secs(30);
+    let case = &CASES[0];
+    let fixture = Fixture::open(case.sources);
+    let cancel = CancellationToken::new();
+    let (release, released) = mpsc::channel::<()>();
+    let (report, stalled) = mpsc::channel::<bool>();
+    let mut peer = Peer::start().await;
+    let server = {
+        let ledger = Arc::clone(&fixture.ledger);
+        let cancel = cancel.clone();
+        let mut armed = Some((released, report));
+        peer.serve_script_with(
+            vec![text_response(&fixture.expand(case.turns[0].0))],
+            move |_| {
+                // The first attempt's pre-attempt check has already read the lease, so the next expiry read is the renewal beside the read batch this response asks for.
+                if let Some((released, report)) = armed.take() {
+                    let cancel = cancel.clone();
+                    ledger.before_next_memory_reviewer_claim_expiry_read_for_test(Box::new(
+                        move || {
+                            cancel.cancel();
+                            let _ = report.send(released.recv_timeout(STALL).is_ok());
+                        },
+                    ));
+                }
+                Box::pin(async {})
+            },
+        )
+    };
+    let settled = fixture.run(&peer, Some(fixture.approval()), &cancel).await;
+    let _ = release.send(());
+    assert!(
+        matches!(settled, Err(InvestigationError::Cancelled)),
+        "{settled:?}"
+    );
+    assert!(
+        stalled.recv_timeout(STALL * 2).unwrap(),
+        "the run must return while its side renewal is still stalled"
+    );
+    server.await.unwrap();
 }
 
 /// A model profile the request encoder refuses is a configuration fault: the run reports it unavailable and leaves the receipt open, instead of durably abstaining the job as budget exhaustion.

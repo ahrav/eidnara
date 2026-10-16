@@ -14,15 +14,16 @@ preserve that, or state what it trades away.
 ## Evidence trail
 
 - [`ingest_artifact_inner`][ingest] writes and syncs the payload to a temp
-  under `tmp` ([`:379-405`][ingest-temp]) before any lock; a
+  under `tmp` ([`:382`][ingest-temp]) before any lock; a
   [`StagedObject`][staged] unlinks it on drop unless consumed.
 - It then takes the exclusive [writer lock][lock-writer] and calls
-  [`check_budget`][check-budget] at [`:407-416`][ingest-lock], before the
-  shard is created ([`:407-416`][ingest-lock]), before the reservation row
-  ([`:424-471`][ingest-reservation]), and before the publish rename
-  ([`:476-526`][ingest-publish]).
-- [`check_budget`][check-budget] calls [`regular_file_bytes`][walk] with an
-  uncancellable predicate, adds `byte_length` unless
+  [`check_budget`][check-budget] at [`:410`][ingest-lock], before the
+  shard is created, before the reservation row
+  ([`:427`][ingest-reservation]), and before the publish rename
+  ([`:479`][ingest-publish]).
+- [`check_budget`][check-budget] reads the [writer-lock count][usage-count],
+  which walks [`regular_file_bytes`][walk] with an uncancellable predicate
+  only while no count is held, adds `byte_length` unless
   [`object_is_present`][present] finds a regular file at the digest's path,
   and refuses with [`ArtifactError::capacity(usage, cap)`][cap-error] when
   `projected > artifact_cap`.
@@ -37,9 +38,10 @@ preserve that, or state what it trades away.
   becomes `StoreBusy`; [`is_retriable`][retriable] lists `Capacity`.
 - The health sampler reads usage through
   [`facts_unless`][sampler-facts] every [30 s][sampler], which reaches
-  [`object_usage`][object-usage] and the same walk without the writer lock.
-- Tests: [`cap_error_reports_usage_and_cap_without_poisoning_reads`][t-cap],
-  [`invalidated_retained_object_still_consumes_cap`][t-retained],
+  [`reported_artifact_usage`][object-usage]: the count when one is held,
+  and otherwise the same walk without the writer lock.
+- Tests:
+  [`cap_error_reports_usage_and_cap_and_counts_an_invalidated_retained_object`][t-cap],
   [`reclaim_frees_capacity_for_next_write`][t-reclaim],
   [`payload_limit_is_inclusive_at_the_artifact_cap`][t-payload], and the
   daemon's [`ingest_route_accepts_a_payload_at_the_artifact_cap`][t-route-cap].
@@ -93,29 +95,78 @@ or a refusal after an unrecovered orphan publish.
 - Missing evidence: A stated policy on the retry class.
 - Conclusion: needs human input.
 
-[ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L361-L663
+### Q: Does admission still fail closed once it reads a count instead of walking?
+
+- Sources examined: [`check_budget`][check-budget-head], the
+  [writer-lock count][usage-count], and the [usage tests][t-usage].
+- Findings: `check_budget` reads the count under the writer lock and keeps
+  the `object_is_present` dedup and the `Capacity` refusal. The usage tests
+  admit a present digest at exactly the cap with zero added, refuse a
+  two-byte ingest against `cap - 1` with no reservation row and no object,
+  and refuse an ingest that fits only if an unrecovered orphan publish is
+  ignored. A count a reconciliation walk contradicted latches the CAS state,
+  and the next ingest is refused with `IngestionFailClosed`.
+- Missing evidence: None.
+- Conclusion: resolved with answer - the refusal points and codes are
+  unchanged; the count replaces the walk as the admitted usage.
+
+### Q: Do the daemon's maintenance passes change who relieves a cap, and can a failed audit walk close admission?
+
+- Sources examined: the daemon's [memory-reviewer
+  sweep][daemon-maintenance], [`settle_census`][usage-settle],
+  [`reconcile_artifact_usage`][usage-reconcile-split], and the
+  [usage tests][t-usage].
+- Findings: The first entry's premise is wrong: the memory-reviewer sweep
+  calls `run_staging_maintenance`, so in production GC also lowers usage,
+  for invalidated bytes past their grace. `delete_artifact` still has no
+  daemon caller. The classification question stays open with that premise.
+  A census or reconciliation walk that fails settles nothing, so it neither
+  latches nor moves the held count; admission without a count walks under
+  the writer lock and refuses with `IngestionFailClosed` when that walk
+  fails, as
+  [`a_reconciliation_walk_that_fails_leaves_admission_on_the_held_count`][t-usage-failed-walk]
+  asserts.
+- Missing evidence: A stated policy on the retry class.
+- Conclusion: needs human input for the classification; resolved with
+  answer for the failed walk - admission fails closed only when it needs a
+  walk that fails.
+
+[ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L364-L666
 [staged]: ../../../../../crates/kernel/src/cas/ingest.rs#L38-L56
-[ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L379-L405
-[ingest-lock]: ../../../../../crates/kernel/src/cas/ingest.rs#L407-L416
-[ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L424-L471
-[ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
-[check-budget]: ../../../../../crates/kernel/src/cas/ingest.rs#L665-L682
-[stat-bytes]: ../../../../../crates/kernel/src/cas/ingest.rs#L1206-L1208
-[walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288
-[present]: ../../../../../crates/kernel/src/cas/ingest.rs#L1290-L1296
-[object-usage]: ../../../../../crates/kernel/src/cas/gc.rs#L637-L645
-[cap-default]: ../../../../../crates/kernel/src/cas/mod.rs#L24
-[retriable]: ../../../../../crates/kernel/src/cas/mod.rs#L299-L307
-[cap-error]: ../../../../../crates/kernel/src/cas/mod.rs#L318-L325
-[lock-writer]: ../../../../../crates/kernel/src/open.rs#L433-L442
-[maintenance]: ../../../../../crates/kernel/src/retention.rs#L186-L211
-[delete]: ../../../../../crates/kernel/src/cas/deletion.rs#L237
+[ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L382
+[ingest-lock]: ../../../../../crates/kernel/src/cas/ingest.rs#L410
+[ingest-reservation]: ../../../../../crates/kernel/src/cas/ingest.rs#L427
+[ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L479
+[check-budget]: ../../../../../crates/kernel/src/cas/ingest.rs#L947-L962
+[stat-bytes]: ../../../../../crates/kernel/src/cas/ingest.rs#L1495-L1497
+[walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1517-L1537
+[present]: ../../../../../crates/kernel/src/cas/ingest.rs#L1728-L1734
+[object-usage]: ../../../../../crates/kernel/src/cas/usage.rs#L208-L216
+[cap-default]: ../../../../../crates/kernel/src/cas/mod.rs#L27
+[retriable]: ../../../../../crates/kernel/src/cas/mod.rs#L305-L313
+[cap-error]: ../../../../../crates/kernel/src/cas/mod.rs#L324-L331
+[lock-writer]: ../../../../../crates/kernel/src/open.rs#L479-L488
+[maintenance]: ../../../../../crates/kernel/src/retention.rs#L197-L202
+[delete]: ../../../../../crates/kernel/src/cas/deletion.rs#L239
 [busy]: ../../../../../crates/daemon/src/kernel_routes/state.rs#L290-L295
 [route-ingest]: ../../../../../crates/daemon/src/kernel_routes/ingest.rs#L577
-[sampler]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L17-L22
+[sampler]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L17
 [sampler-facts]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L226
-[t-cap]: ../../../../../crates/kernel/tests/kernel_cas.rs#L418-L433
-[t-retained]: ../../../../../crates/kernel/tests/kernel_cas.rs#L436-L450
-[t-payload]: ../../../../../crates/kernel/tests/kernel_cas.rs#L214-L234
+[t-cap]: ../../../../../crates/kernel/tests/kernel_cas.rs#L355-L379
+[t-payload]: ../../../../../crates/kernel/tests/kernel_cas.rs#L214-L242
 [t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
-[t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3600-L3629
+[t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3650-L3678
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L52-L59
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L66-L88
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L96-L120
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L135-L204
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L208-L216
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L435
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L462-L467
+[maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
+[t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[check-budget-head]: ../../../../../crates/kernel/src/cas/ingest.rs#L947-L962
+[daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[usage-settle]: ../../../../../crates/kernel/src/cas/usage.rs#L192-L204
+[usage-reconcile-split]: ../../../../../crates/kernel/src/cas/usage.rs#L122-L168
+[t-usage-failed-walk]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs#L644

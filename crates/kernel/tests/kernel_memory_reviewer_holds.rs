@@ -9,8 +9,9 @@ use kernel::{
     MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND,
     MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
     MemoryReviewerHoldRefusal, ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding, ReviewOwner,
-    ReviewPayload, ReviewProposal, ReviewStagingSpec, RunBufferMap, RunBufferRefusal, Sensitivity,
-    SourceDependency, StagingTerminalState, provisional_result_identity,
+    ReviewPayload, ReviewProposal, ReviewStageError, ReviewStageRefusal, ReviewStagingSpec,
+    RunBufferMap, RunBufferRefusal, Sensitivity, SourceDependency, StagingTerminalState,
+    provisional_result_identity,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -285,6 +286,28 @@ impl Fixture {
             )
             .unwrap();
         recorded_at
+    }
+
+    /// The staging request for `job_id`'s proposal at its provisional identity.
+    fn proposal_spec(
+        &self,
+        job_id: &str,
+        generation: u64,
+        recorded_at: i64,
+        deadline: i64,
+        payload: ReviewPayload,
+    ) -> ReviewStagingSpec {
+        let identity = provisional_result_identity(job_id, generation);
+        ReviewStagingSpec {
+            extraction_run_id: identity.extraction_run_id,
+            candidate_id: identity.candidate_id,
+            producer: "memory_reviewer".to_string(),
+            binding: self.review_binding(job_id, generation),
+            payload,
+            recorded_at,
+            queue_deadline_at: deadline,
+            dependencies: Some(dependencies(generation)),
+        }
     }
 
     fn retain_until(&self, evidence_id: &str) -> Option<i64> {
@@ -1943,4 +1966,235 @@ fn stored_hold_kinds_and_capture_class_are_recognized_by_their_on_disk_text() {
         .store
         .release_review_hold(&review.hold_id, &review_binding)
         .expect("a stored review hold releases for its owner");
+}
+
+#[test]
+fn one_envelope_stages_seals_and_moves_retention_to_the_review_hold() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let held = fixture.ingest("held", b"held bytes", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&held), now + HOUR_MS)
+        .unwrap();
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let recorded_at = now - 1_000;
+    let spec = fixture.proposal_spec(
+        "job-1",
+        1,
+        recorded_at,
+        now + DAY_MS - 1_000,
+        fixture.proposal_payload_disclosing(std::slice::from_ref(&held)),
+    );
+    let sealed = fixture
+        .store
+        .stage_sealed_review_proposal(spec.clone(), &hold.hold_id, &execution, &review)
+        .unwrap();
+    // The proposal is sealed, its review hold covers the disclosed input from the row's creation, and the execution hold is released, all in the one commit.
+    assert_eq!(
+        fixture
+            .store
+            .sealed_review_reference(&identity.candidate_id)
+            .unwrap(),
+        Some(sealed.reference.clone())
+    );
+    let review_hold = sealed.review_hold.unwrap();
+    assert_eq!(review_hold.references, 1);
+    assert_eq!(review_hold.expires_at, recorded_at + REVIEW_EXPIRY_MAX_MS);
+    assert_eq!(
+        fixture.pin(&review_hold.hold_id).0,
+        MEMORY_REVIEWER_REVIEW_HOLD_KIND
+    );
+    assert!(fixture.pin(&hold.hold_id).3.is_some());
+    // A sealed run refuses a second envelope before writing anything.
+    let pins = fixture.pins();
+    assert!(matches!(
+        fixture
+            .store
+            .stage_sealed_review_proposal(spec, &hold.hold_id, &execution, &review),
+        Err(ReviewStageError::Refused(ReviewStageRefusal::Terminal))
+    ));
+    assert_eq!(fixture.pins(), pins);
+}
+
+#[test]
+fn a_refused_transfer_leaves_the_proposal_sealed_and_the_execution_hold_live() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let held = fixture.ingest("held", b"held bytes", None);
+    let unheld = fixture.ingest("unheld", b"never held", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&held), now + HOUR_MS)
+        .unwrap();
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins = fixture.pins();
+    let sealed = fixture
+        .store
+        .stage_sealed_review_proposal(
+            fixture.proposal_spec(
+                "job-1",
+                1,
+                now - 1_000,
+                now + DAY_MS - 1_000,
+                fixture.proposal_payload_disclosing(&[held.clone(), unheld.clone()]),
+            ),
+            &hold.hold_id,
+            &execution,
+            &review,
+        )
+        .unwrap();
+    // The transfer refused under its savepoint: the sealed row committed as separate staging would leave it, and no review hold was written.
+    assert_eq!(
+        refusal(sealed.review_hold.unwrap_err()),
+        MemoryReviewerHoldRefusal::NotCovered
+    );
+    assert_eq!(
+        fixture
+            .store
+            .sealed_review_reference(&identity.candidate_id)
+            .unwrap(),
+        Some(sealed.reference)
+    );
+    assert_eq!(fixture.pins(), pins);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    // The separate transfer completes once the hold covers the missing input.
+    fixture
+        .store
+        .extend_execution_hold(&hold.hold_id, &execution, std::slice::from_ref(&unheld))
+        .unwrap();
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(
+            &hold.hold_id,
+            &execution,
+            &review,
+            now - 1_000 + REVIEW_EXPIRY_MAX_MS,
+        )
+        .unwrap();
+    assert_eq!(review_hold.references, 2);
+}
+
+#[test]
+fn a_transfer_refused_after_its_writes_rolls_back_to_the_savepoint() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let held = fixture.ingest("held", b"held bytes", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&held), now + HOUR_MS)
+        .unwrap();
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    // The transfer's last step releases the execution hold; refusing that update fails the transfer after it inserted the review pin and its references.
+    mutate(
+        fixture.root(),
+        &format!(
+            "CREATE TRIGGER refuse_execution_release BEFORE UPDATE OF released_at ON capture_pins
+             WHEN NEW.released_at IS NOT NULL AND OLD.capture_pin_id = '{}'
+             BEGIN SELECT RAISE(ABORT, 'release refused'); END",
+            hold.hold_id
+        ),
+        [],
+    );
+    let pins = fixture.pins();
+    let refs = inspect(fixture.root(), |conn| {
+        conn.query_row("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    });
+    let sealed = fixture
+        .store
+        .stage_sealed_review_proposal(
+            fixture.proposal_spec(
+                "job-1",
+                1,
+                now - 1_000,
+                now + DAY_MS - 1_000,
+                fixture.proposal_payload_disclosing(std::slice::from_ref(&held)),
+            ),
+            &hold.hold_id,
+            &execution,
+            &review,
+        )
+        .unwrap();
+    assert!(sealed.review_hold.is_err());
+    // The review pin and its references are gone with the savepoint; the sealed row committed.
+    assert_eq!(fixture.pins(), pins);
+    assert_eq!(
+        inspect(fixture.root(), |conn| {
+            conn.query_row("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        }),
+        refs
+    );
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    assert_eq!(
+        fixture
+            .store
+            .sealed_review_reference(&identity.candidate_id)
+            .unwrap(),
+        Some(sealed.reference)
+    );
+}
+
+#[test]
+fn a_refused_seal_writes_nothing_of_the_envelope() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let held = fixture.ingest("held", b"held bytes", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&held), now + HOUR_MS)
+        .unwrap();
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let payload = fixture.proposal_payload_disclosing(std::slice::from_ref(&held));
+    let deadline = now + DAY_MS - 1_000;
+    // An earlier, unsealed staging of the same bytes heartbeats the run at `now`; sealing at an earlier instant is refused.
+    fixture
+        .store
+        .stage_review_input(fixture.proposal_spec("job-1", 1, now, deadline, payload.clone()))
+        .unwrap();
+    let pins = fixture.pins();
+    let rows = |table: &str| {
+        inspect(fixture.root(), |conn| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        })
+    };
+    let (candidates, runs) = (rows("candidates"), rows("extraction_runs"));
+    assert!(matches!(
+        fixture.store.stage_sealed_review_proposal(
+            fixture.proposal_spec("job-1", 1, now - 1_000, deadline, payload),
+            &hold.hold_id,
+            &execution,
+            &review,
+        ),
+        Err(ReviewStageError::Store(_))
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .sealed_review_reference(&identity.candidate_id)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        (rows("candidates"), rows("extraction_runs")),
+        (candidates, runs)
+    );
+    assert_eq!(fixture.pins(), pins);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
 }

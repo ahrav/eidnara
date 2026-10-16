@@ -1,6 +1,6 @@
 //! Settlement of one MemoryReviewer run across the Kernel and Memory Store, and the read that follows it.
 //!
-//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before or after its hold transfer, the row keeps its original queue deadline and expires there, and the loser releases the review hold it transferred. Completed staging is not selection.
+//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages and seals the proposal at the provisional identity the run reserved and moves retention from the execution hold to a review hold, all in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before or after its hold transfer, the row keeps its original queue deadline and expires there, and the loser releases the review hold it transferred. Completed staging is not selection.
 //!
 //! Reads follow the same copy-then-enter order in reverse: the completed receipt is copied and the Memory Store released before the Kernel is entered; the Kernel row must match every selected field and both incarnations; the review hold must be live; and every disclosed input is revalidated before content is returned. Completion never freezes eligibility.
 
@@ -170,10 +170,14 @@ impl Settlement<'_> {
         else {
             return content_free(ContentFree::Abstained(AbstainReason::ExpectationChanged));
         };
-        let (reference, created_at) = self.stage(run, queue_deadline_at, payload, record, now)?;
-        let review_hold = match recovered {
-            Some(hold) => hold,
-            None => self.transfer_retention(broker, &review, created_at)?,
+        let (reference, review_hold) = match recovered {
+            Some(hold) => (
+                self.stage(run, queue_deadline_at, payload, record, now)?.0,
+                hold,
+            ),
+            None => {
+                self.stage_with_retention(broker, &review, queue_deadline_at, payload, record, now)?
+            }
         };
         self.publish(run, &review, &review_hold, reference)
     }
@@ -506,6 +510,66 @@ impl Settlement<'_> {
         Ok(evidence)
     }
 
+    /// Stages and seals the proposal and moves retention from the execution hold to the review hold in one Kernel envelope. A refused transfer leaves the sealed row committed, as separate staging and transfer would. A run an earlier attempt of this settlement already sealed takes [`Self::stage`]'s adoption path and its own transfer.
+    fn stage_with_retention(
+        &self,
+        broker: &EvidenceBroker,
+        review: &MemoryReviewerHoldBinding,
+        queue_deadline_at: i64,
+        payload: ReviewPayload,
+        dependencies: ReviewDependencies,
+        now: i64,
+    ) -> Result<(ReviewStagedReference, MemoryReviewerHold), SettlementError> {
+        let run = &broker.binding().hold;
+        let spec = self.staging_spec(
+            run,
+            queue_deadline_at,
+            payload.clone(),
+            dependencies.clone(),
+            now,
+        );
+        match self
+            .store
+            .stage_sealed_review_proposal(spec, &broker.binding().hold_id, run, review)
+        {
+            Ok(sealed) => Ok((sealed.reference, sealed.review_hold.map_err(kernel)?)),
+            Err(ReviewStageError::Refused(ReviewStageRefusal::Terminal)) => {
+                let (reference, created_at) =
+                    self.stage(run, queue_deadline_at, payload, dependencies, now)?;
+                Ok((
+                    reference,
+                    self.transfer_retention(broker, review, created_at)?,
+                ))
+            }
+            Err(ReviewStageError::Refused(ReviewStageRefusal::Changed)) => {
+                Err(SettlementError::ConflictingContent)
+            }
+            Err(error) => Err(kernel(error)),
+        }
+    }
+
+    /// The staging request for this generation's proposal at its provisional identity.
+    fn staging_spec(
+        &self,
+        run: &MemoryReviewerHoldBinding,
+        queue_deadline_at: i64,
+        payload: ReviewPayload,
+        dependencies: ReviewDependencies,
+        now: i64,
+    ) -> ReviewStagingSpec {
+        let identity = provisional_result_identity(&run.subject, run.generation);
+        ReviewStagingSpec {
+            extraction_run_id: identity.extraction_run_id,
+            candidate_id: identity.candidate_id,
+            producer: SETTLEMENT_PRODUCER.to_string(),
+            binding: proposal_binding(self.binding, run),
+            payload,
+            recorded_at: now,
+            queue_deadline_at,
+            dependencies: Some(dependencies),
+        }
+    }
+
     /// Stages the proposal at the provisional identity and seals its run; returns the reference and the row's creation time. A row already sealed by an earlier attempt of this settlement is adopted when its bytes and its dependency record are this settlement's; different bytes or another record at the identity conflict.
     fn stage(
         &self,
@@ -517,16 +581,13 @@ impl Settlement<'_> {
     ) -> Result<(ReviewStagedReference, i64), SettlementError> {
         let identity = provisional_result_identity(&run.subject, run.generation);
         let binding = proposal_binding(self.binding, run);
-        let staged = self.store.stage_review_input(ReviewStagingSpec {
-            extraction_run_id: identity.extraction_run_id.clone(),
-            candidate_id: identity.candidate_id.clone(),
-            producer: SETTLEMENT_PRODUCER.to_string(),
-            binding: binding.clone(),
-            payload: payload.clone(),
-            recorded_at: now,
+        let staged = self.store.stage_review_input(self.staging_spec(
+            run,
             queue_deadline_at,
-            dependencies: Some(dependencies.clone()),
-        });
+            payload.clone(),
+            dependencies.clone(),
+            now,
+        ));
         let reference = match staged {
             Ok(reference) => reference,
             Err(ReviewStageError::Refused(ReviewStageRefusal::Changed)) => {

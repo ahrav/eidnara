@@ -7742,6 +7742,8 @@ pub struct MemoryStore {
     /// it reads the ledger.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) in_progress_receipts_fail_once: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) claim_expiry_read_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -8211,6 +8213,8 @@ impl MemoryStore {
             memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             in_progress_receipts_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            claim_expiry_read_hook: std::sync::Mutex::new(None),
         };
         store.transform_root_prune = store.prune_transform_session_roots(epoch_millis(
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH),
@@ -8772,6 +8776,17 @@ impl MemoryStore {
     pub fn fail_next_in_progress_memory_reviewer_receipts_for_test(&self) {
         self.in_progress_receipts_fail_once
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn before_next_memory_reviewer_claim_expiry_read_for_test(
+        &self,
+        hook: Box<dyn FnOnce() + Send>,
+    ) {
+        *self
+            .claim_expiry_read_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     }
 
     /// Reject a facade write that crosses the route's active authority identity.

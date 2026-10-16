@@ -215,6 +215,7 @@ pub fn select_review_targets(
                 }
             }
             if !identities.is_empty() {
+                let identities: Vec<&str> = identities.iter().map(String::as_str).collect();
                 let existing = ledger
                     .memory_reviewer_jobs_exist(ledger_project, &identities)
                     .map_err(|error| SelectionError::Ledger(error.to_string()))?;
@@ -278,12 +279,7 @@ fn linked_evidence(
     let mut linked = if read.is_empty() {
         Vec::new()
     } else {
-        store.linked_decision_evidence_batch_within_budget(
-            &read,
-            tip,
-            MAX_LINKED_EVIDENCE,
-            budget,
-        )?
+        store.linked_decisions_evidence_within_budget(&read, tip, MAX_LINKED_EVIDENCE, budget)?
     }
     .into_iter();
     Ok(decisions

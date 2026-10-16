@@ -575,6 +575,10 @@ fn the_reviewer_arm_settles_every_fed_job_within_its_bound_scenario(campaign: &C
         Some(1),
         "the first pass settles the backlog and the job fed with it"
     );
+    assert_eq!(
+        progress.fresh_work, progress.bound,
+        "one fresh job is activated per step; verdict only requires fresh_work > 0"
+    );
     assert!(arm.permanent_stalls.is_empty());
 }
 

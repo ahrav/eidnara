@@ -213,11 +213,12 @@ pub struct Campaign {
     pub handed: Vec<String>,
     /// The approved bound on coordinator passes per quiescence.
     pub reviewer_pass_bound: u64,
-    /// Coordinator passes run since the last drain, a cap-triggered settle
-    /// included.
+    /// Coordinator passes run since the last recorded sample, a cap-triggered
+    /// settle included; `sample` drains it once a witness records them.
     pub passes_since_drain: u64,
-    /// The progress witness of the drain the next sample follows.
-    pub progress: QuiescenceProgress,
+    /// Catch-up episodes the drains ran since the last recorded sample;
+    /// `sample` drains it once a witness records them.
+    pub catch_up_since_sample: u64,
 }
 
 impl Campaign {
@@ -226,12 +227,6 @@ impl Campaign {
         let generation = activate_module_authority(&stores.memory, root);
         commit_memory_domain(&stores.corpus.kernel);
         let rig = ReviewerRig::open(&stores, &root.join("reviewer-home"), root, generation, true);
-        let progress = QuiescenceProgress {
-            acknowledged_through: acknowledged_through(root),
-            catch_up_episodes: 0,
-            reviewer_passes: 0,
-            reviewer_settled: true,
-        };
         Self {
             plan,
             stores,
@@ -247,7 +242,7 @@ impl Campaign {
             handed: Vec::new(),
             reviewer_pass_bound: Lane::ReviewerCoordinatorPasses.bound(bounds),
             passes_since_drain: 0,
-            progress,
+            catch_up_since_sample: 0,
         }
     }
 
@@ -256,14 +251,11 @@ impl Campaign {
         self.rig.port()
     }
 
-    /// Runs coordinator passes until every handed job is terminal or the
-    /// approved bound is spent, adding them to `passes_since_drain`; returns
-    /// whether every handed job settled.
-    fn settle_handed(&mut self) -> bool {
-        let mut passes = 0;
-        while !self.handed.is_empty() && passes < self.reviewer_pass_bound {
+    /// The pass bound covers every coordinator pass before one quiescence, so
+    /// a cap-triggered settle and the drain's settle draw on the same budget.
+    fn settle_handed(&mut self) {
+        while !self.handed.is_empty() && self.passes_since_drain < self.reviewer_pass_bound {
             self.rig.pass(&self.stores);
-            passes += 1;
             self.passes_since_drain += 1;
             let memory = &self.stores.memory;
             self.handed.retain(|identity| {
@@ -276,7 +268,6 @@ impl Campaign {
                 )
             });
         }
-        self.handed.is_empty()
     }
 
     pub fn root(&self) -> &Path {
@@ -324,14 +315,8 @@ impl Campaign {
             // admissions are stamped with the wall clock, not the drive's logical time.
             self.quota_pressure(i, reviewer::now_ms())?;
         }
-        let catch_up_episodes = self.stores.drain(now);
-        let reviewer_settled = self.settle_handed();
-        self.progress = QuiescenceProgress {
-            acknowledged_through: acknowledged_through(self.root()),
-            catch_up_episodes,
-            reviewer_passes: std::mem::take(&mut self.passes_since_drain),
-            reviewer_settled,
-        };
+        self.catch_up_since_sample += self.stores.drain(now);
+        self.settle_handed();
         self.next_step += 1;
         self.sample(i as u32, charges)
     }
@@ -434,6 +419,17 @@ impl Campaign {
         }
     }
 
+    /// The progress witness of the quiescent point a sample records: the
+    /// projection's checkpoint and the work run since the last recorded sample.
+    fn progress(&self) -> QuiescenceProgress {
+        QuiescenceProgress {
+            acknowledged_through: acknowledged_through(self.root()),
+            catch_up_episodes: self.catch_up_since_sample,
+            reviewer_passes: self.passes_since_drain,
+            reviewer_settled: self.handed.is_empty(),
+        }
+    }
+
     fn sample_at(&self, step: u32, charges: &Charges) -> ResourceSample {
         sample_root(
             self.root(),
@@ -441,7 +437,7 @@ impl Campaign {
             self.stores.tip(),
             charges,
             self.headroom(),
-            self.progress.clone(),
+            self.progress(),
         )
     }
 }
@@ -517,6 +513,8 @@ impl Campaign {
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         charges.elapsed()?;
         self.ledger.record(sample)?;
+        self.passes_since_drain = 0;
+        self.catch_up_since_sample = 0;
         *self.checkpoints.entry(Cut::AtQuiescence).or_insert(0) += 1;
         Ok(())
     }
@@ -547,9 +545,11 @@ impl Campaign {
             handed,
             reviewer_pass_bound,
             passes_since_drain,
-            progress,
+            catch_up_since_sample,
         } = self;
         let tip = stores.tip();
+        // The reopen rebuilds the projection in one bootstrap; the work
+        // accumulated since the last recorded sample carries into the next.
         let stores = stores.close().reopen(now);
         assert_eq!(stores.tip(), tip, "a reopen moves no commit");
         (
@@ -568,7 +568,7 @@ impl Campaign {
                 handed,
                 reviewer_pass_bound,
                 passes_since_drain,
-                progress,
+                catch_up_since_sample,
             },
             Ok(()),
         )
@@ -578,6 +578,7 @@ impl Campaign {
     /// sample from the closed files: quiescent, with nothing transient left.
     pub fn finish(self, charges: &mut Charges) -> Result<Finished, RunError> {
         let headroom = self.headroom();
+        let mut progress = self.progress();
         let Campaign {
             stores,
             mut ledger,
@@ -585,7 +586,6 @@ impl Campaign {
             witness,
             mut checkpoints,
             rig,
-            handed,
             ..
         } = self;
         let step = ledger.samples.last().map_or(0, |s| s.step + 1);
@@ -593,14 +593,8 @@ impl Campaign {
         let tip = stores.tip();
         drop(rig);
         drop(stores.close());
-        // Nothing runs between the last drain and the close, so the final
-        // witness is the closed projection's checkpoint with no further work.
-        let progress = QuiescenceProgress {
-            acknowledged_through: acknowledged_through(&root),
-            catch_up_episodes: 0,
-            reviewer_passes: 0,
-            reviewer_settled: handed.is_empty(),
-        };
+        // The final witness reads the closed projection's checkpoint.
+        progress.acknowledged_through = acknowledged_through(&root);
         let sample = sample_root(&root, step, tip, charges, headroom, progress);
         charges.observe(eval_core::Resource::StoreBytes, sample.store_total())?;
         ledger.record(sample)?;
@@ -615,6 +609,12 @@ impl Campaign {
 }
 
 pub fn run(config: &Config) -> Result<Run, RunError> {
+    run_with(config, || {})
+}
+
+/// `opened` runs once the campaign's reviewer peer listens and before any
+/// step, so concurrent callers can hold every listener open at once.
+pub fn run_with(config: &Config, opened: impl FnOnce()) -> Result<Run, RunError> {
     let profile = profile(
         config.scale,
         config.messages,
@@ -645,6 +645,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     let root_path = root.path().display().to_string();
     let mut campaign = Campaign::open(root.path(), plan, config.mode, &bounds.progress);
     let port = campaign.port();
+    opened();
     while campaign.remaining() > 0 {
         campaign.step(&mut charges)?;
     }
@@ -704,7 +705,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         ledger,
         mix,
         expected_refusals: witness.refusals.clone(),
-        fault_episodes: witness.episodes.len() as u64,
+        episodes: witness.episodes.clone(),
         safety_checks_while_armed: witness.safety_checks,
         coverage: cuts,
         markers: coverage.fired().iter().map(|m| m.to_string()).collect(),
