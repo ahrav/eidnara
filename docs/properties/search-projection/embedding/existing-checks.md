@@ -149,7 +149,7 @@ Closely related checks are grouped by file; each named check is unaudited.
 | `a_multi_text_batch_yields_to_a_waiting_query_between_texts`, `crates/host-runtime/tests/local_embeddings_protocol.rs:241` | A two-text batch takes one grant per text, so a query that waits during the first text runs before the second. | unaudited |
 | `shutdown_cancels_waiters_but_drains_started_query`, `crates/host-runtime/tests/local_embeddings_protocol.rs:285` | Started native work delays shutdown; queued query is cancelled. | unaudited |
 | `route_loss_drops_queued_query_without_engine_work_and_releases_slot`, `crates/host-runtime/tests/local_embeddings_protocol.rs:361` | Queued query cancellation on route loss. | unaudited |
-| `boundary_waiters_with_maximal_texts_are_all_admitted`, `crates/host-runtime/tests/local_embeddings_protocol.rs:493` | Ignored boundary scenario; do not count it as exercised. | unaudited |
+| `boundary_waiters_with_maximal_texts_are_all_admitted`, `crates/host-runtime/tests/local_embeddings_protocol.rs:493` | All 31 boundary waiters park at once behind a running query over one client and one ring, and all 32 maximal queries are admitted and answered. | unaudited |
 | `queued_query_wait_is_bounded_by_its_deadline`, `crates/host-runtime/tests/local_embeddings_jobs.rs:389` | Existing query deadline during wait. | unaudited |
 | `shutdown_with_queued_running_and_retained_jobs_is_graceful`, `crates/host-runtime/tests/local_embeddings_jobs.rs:499` | Mixed local job states at shutdown. | unaudited |
 | `embed_blocking_shares_the_cpu_permit_and_reports_a_held_lane`, `crates/host-runtime/src/local_embeddings/mod.rs:1324` | Synchronous and routed calls share CPU admission. | unaudited |

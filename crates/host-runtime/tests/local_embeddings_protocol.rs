@@ -486,32 +486,47 @@ fn unservable_startup_limits_are_refused_before_publication() {
     );
 }
 
+/// Every waiter at the boundary runs over one client and one route, so the test opens a single
+/// ring: the host admits a bounded number of rings per process, and the waiters share one
+/// connection's correlations instead.
 #[tokio::test(start_paused = true)]
-#[ignore = "opens 32 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
-            admits at most 8 rings per process, so the ninth setup socket closes before its \
-            descriptor grant and the test never reaches its assertions"]
 async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
     const BOUNDARY: usize = WAITER_BOUNDARY;
     let engine = DeterministicEngine::new();
     let gate = engine.block_calls();
 
-    let host =
-        LocalEmbeddingsHost::start(ready_component(engine.clone(), waiter_limits(BOUNDARY))).await;
+    let component = ready_component(engine.clone(), waiter_limits(BOUNDARY));
+    let host = LocalEmbeddingsHost::start(component.clone()).await;
     let (clock_running, clock_task) = keep_paused_clock_manual();
     let lane = test_lane();
     let text = "x".repeat(lane.max_text_bytes);
+    let mut client = host.client().await;
+    let (channel, epoch) = open_local_embeddings_route(&mut client).await;
+    let mut params = constraints(&lane);
+    params["text"] = text.as_str().into();
+    params["deadline_ms"] = 30_000_u64.into();
 
-    let first = spawn_query(&host, &lane, &text, 30_000).await;
+    let mut corrs =
+        vec![send_call(&mut client, channel, epoch, "embed.query", params.clone()).await];
     yield_until(|| engine.calls.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
-    let mut waiters = Vec::new();
     for _ in 0..BOUNDARY {
-        waiters.push(spawn_query(&host, &lane, &text, 30_000).await);
+        corrs.push(send_call(&mut client, channel, epoch, "embed.query", params.clone()).await);
         tokio::task::yield_now().await;
     }
     // Each waiter retains its decoded maximal text while the closed engine gate makes all boundary+1 charges coexist in the scratch pool.
-    for _ in 0..1_000 {
+    // Thirty-one maximal bodies decode before they park, so the wait allows more yields than
+    // `yield_until`'s default.
+    for _ in 0..100_000 {
+        if component.waiting_queries_for_test() == BOUNDARY {
+            break;
+        }
         tokio::task::yield_now().await;
     }
+    assert_eq!(
+        component.waiting_queries_for_test(),
+        BOUNDARY,
+        "every boundary waiter is parked at once behind the running query"
+    );
     assert_eq!(
         engine.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -519,15 +534,19 @@ async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
     );
 
     DeterministicEngine::release_calls(&gate);
-    let terminal = first.await.expect("first query task");
-    assert_eq!(
-        terminal.ty,
-        support::raw_client::TY_RESPONSE,
-        "first query rejected: {}",
-        String::from_utf8_lossy(&terminal.body)
-    );
-    for waiter in waiters {
-        let terminal = waiter.await.expect("waiter query task");
+    let mut terminals = std::collections::HashMap::new();
+    while terminals.len() < corrs.len() {
+        let frame = client.frame_within(BUDGET).await.expect("query terminal");
+        if corrs.contains(&frame.corr) {
+            let corr = frame.corr;
+            assert!(
+                terminals.insert(corr, frame).is_none(),
+                "duplicate terminal for correlation {corr}"
+            );
+        }
+    }
+    for corr in &corrs {
+        let terminal = &terminals[corr];
         assert_eq!(
             terminal.ty,
             support::raw_client::TY_RESPONSE,
