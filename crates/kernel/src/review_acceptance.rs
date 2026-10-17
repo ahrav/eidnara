@@ -38,6 +38,10 @@ const SETTLEMENT_KEY_VERSION: &str = "memory-reviewer-settlement-v1";
 pub const SETTLEMENT_VERSION: u32 = 1;
 /// `source_kind` of a decision an accepted create inserts; its `source_id` is the proposal id.
 pub const ACCEPTED_SOURCE_KIND: &str = "memory_reviewer_proposal";
+/// Object ids an accepted create or revise writes; commit validation admits them only from the acceptance writer.
+const ACCEPTED_OBJECT_ID_PREFIX: &str = "memreview-decision-";
+/// The decision id of an accepted decision is its object id with this suffix.
+const ACCEPTED_DECISION_ID_SUFFIX: &str = "-decision";
 /// `decision_kind` of a decision an accepted create inserts.
 const ACCEPTED_DECISION_KIND: &str = "memory_reviewer_create";
 /// `event_payload.summary` of each support event.
@@ -638,13 +642,48 @@ struct AcceptedIds {
 impl AcceptedIds {
     fn new(settlement_key: &CommitIntent) -> Self {
         let object_id = format!(
-            "memreview-decision-{}",
+            "{ACCEPTED_OBJECT_ID_PREFIX}{}",
             identity_digest(settlement_key.operation_key.as_bytes())
         );
         Self {
-            decision_id: format!("{object_id}-decision"),
+            decision_id: format!("{object_id}{ACCEPTED_DECISION_ID_SUFFIX}"),
             object_id,
         }
+    }
+}
+
+impl Envelope<'_> {
+    /// Registry and decision inserts use several writers; commit validation admits `memreview-decision-` ids only when this envelope's acceptance wrote them, so no other writer can hold a proposal's derived ids.
+    pub(super) fn check_accepted_decision_ownership(&self) -> Result<(), KernelError> {
+        self.check_reserved_ownership(ACCEPTED_OBJECT_ID_PREFIX, &self.accepted_decisions)?;
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT decision_id,object_id FROM decisions
+                 WHERE created_commit_seq=?1 AND decision_id>=?2 AND decision_id<?3",
+            )
+            .map_err(map_sqlite)?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![
+                    self.commit_seq,
+                    ACCEPTED_OBJECT_ID_PREFIX,
+                    super::envelope::prefix_upper_bound(ACCEPTED_OBJECT_ID_PREFIX)
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(map_sqlite)?;
+        for row in rows {
+            let (decision_id, object_id) = row.map_err(map_sqlite)?;
+            let owned = self
+                .accepted_decisions
+                .values()
+                .any(|accepted| *accepted == object_id);
+            if !owned || decision_id != format!("{object_id}{ACCEPTED_DECISION_ID_SUFFIX}") {
+                return Err(KernelError::InvalidInput);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -948,6 +987,10 @@ fn create(
             sensitivity: Sensitivity::Sensitive,
         })
         .map_err(action_refusal)?;
+    envelope.accepted_decisions.insert(
+        acceptance.proposal.candidate_id.clone(),
+        ids.object_id.clone(),
+    );
     let admission = admit(envelope, ids, &validated.support, validated.now)?;
     Ok(SettlementEffect::Created {
         object_id: ids.object_id.clone(),
@@ -1010,6 +1053,9 @@ fn revise(
             },
         )
         .map_err(action_refusal)?;
+    envelope
+        .accepted_decisions
+        .insert(predecessor.object.source_id, ids.object_id.clone());
     let admission = admit(envelope, ids, &validated.support, validated.now)?;
     Ok(SettlementEffect::Revised {
         object_id: ids.object_id.clone(),

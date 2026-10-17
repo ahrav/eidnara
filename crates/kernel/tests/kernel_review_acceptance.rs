@@ -842,6 +842,69 @@ fn a_create_commits_only_when_each_disclosed_capture_member_stands_at_its_digest
 }
 
 #[test]
+fn the_accepted_decision_namespace_is_reserved_for_acceptance() {
+    let fixture = Fixture::open();
+    // An ordinary writer squatting on either derived id fails its commit, so no proposal is blocked for good.
+    for (key, object_id, decision_id) in [
+        ("object", "memreview-decision-squat", "squat-decision"),
+        (
+            "decision",
+            "squat-object",
+            "memreview-decision-squat-decision",
+        ),
+    ] {
+        let tip = fixture.store.tip().unwrap();
+        let result = fixture
+            .store
+            .commit(intent(&format!("squat-{key}")), |envelope| {
+                envelope.insert_decision(DecisionSpec {
+                    decision_id: decision_id.to_string(),
+                    object_id: object_id.to_string(),
+                    domain_id: DOMAIN.to_string(),
+                    proposition_id: None,
+                    scope_id: Some(SCOPE.to_string()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "architecture".to_string(),
+                    payload: DecisionPayload {
+                        summary: "squat".to_string(),
+                        rationale: String::new(),
+                    },
+                    source_kind: "repo".to_string(),
+                    source_id: "src/squat".to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            });
+        assert_eq!(
+            result.unwrap_err(),
+            kernel::KernelError::InvalidInput,
+            "{key}"
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip, "{key}");
+    }
+    // The acceptance writer still owns the namespace.
+    let subject = fixture.subject("job-1");
+    let support = fixture.capture("support");
+    let staged = fixture.propose(
+        "job-1",
+        ProposalAction::Create,
+        ProposalTarget::StagedCandidate {
+            candidate_id: subject,
+        },
+        Some("bun builds the workspace"),
+        std::slice::from_ref(&support.0),
+        vec![capture_member(&support)],
+    );
+    let outcome = fixture.accept("caller-1", &staged).unwrap();
+    let SettlementEffect::Created { object_id, .. } = &outcome.settlement.effect else {
+        panic!("{:?}", outcome.settlement.effect)
+    };
+    assert!(object_id.starts_with("memreview-decision-"), "{object_id}");
+}
+
+#[test]
 fn create_cites_each_support_row_in_its_own_ordered_event() {
     let fixture = Fixture::open();
     let subject = fixture.subject("job-1");
