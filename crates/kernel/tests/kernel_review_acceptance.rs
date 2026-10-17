@@ -201,15 +201,16 @@ impl Fixture {
     }
 
     fn decision_of_kind(&self, object: &str, kind: &str) -> (String, String) {
-        self.decision_admitted(object, kind, admission(object))
+        self.decision_admitted(object, kind, admission(object), 1)
     }
 
-    /// [`Self::decision`] of `kind`, admitted by `request`.
+    /// [`Self::decision`] of `kind` at `source_revision`, admitted by `request`.
     fn decision_admitted(
         &self,
         object: &str,
         kind: &str,
         request: AdmissionRequest,
+        source_revision: i64,
     ) -> (String, String) {
         let (evidence, digest) = self.ingest(object);
         let mut descriptor = None;
@@ -230,7 +231,7 @@ impl Fixture {
                     },
                     source_kind: "repo".to_string(),
                     source_id: format!("src/{object}"),
-                    source_revision: 1,
+                    source_revision,
                     sensitivity: Sensitivity::Normal,
                 })?;
                 envelope.record_admission(request)?;
@@ -963,7 +964,7 @@ fn revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_
     verified.taint_class = Some(TaintClass::AssistantInference);
     verified.event.kind = EventKind::Verify;
     verified.event.approval_object_id = Some("decision-adr".to_string());
-    let descriptor = fixture.decision_admitted("decision-a", "architecture", verified);
+    let descriptor = fixture.decision_admitted("decision-a", "architecture", verified, 1);
     assert_eq!(fixture.maturity("decision-a"), "verified");
     assert!(fixture.served("decision-a", Surface::AutoInject));
     let staged = fixture.propose_over(
@@ -1110,6 +1111,51 @@ fn an_approval_is_not_revised_into_model_written_text() {
         Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
     );
     assert_eq!(fixture.store.tip().unwrap(), tip);
+}
+
+#[test]
+fn a_revise_of_a_target_at_the_last_source_revision_refuses_and_writes_nothing() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision_admitted(
+        "decision-last",
+        "architecture",
+        admission("decision-last"),
+        i64::MAX,
+    );
+    let staged = fixture.propose(
+        "job-1",
+        ProposalAction::Revise,
+        fixture.memory_target("decision-last"),
+        Some("rewritten"),
+        std::slice::from_ref(&descriptor.1),
+        vec![PolicyUnionMember {
+            kind: "canonical_source".to_string(),
+            id: descriptor.0.clone(),
+            revision: "1".to_string(),
+            owner_id: Some("decision-last".to_string()),
+            owner_revision: Some(i64::MAX.to_string()),
+        }],
+    );
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture.accept("caller", &staged),
+        Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(
+        fixture
+            .state("decision-last")
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
+    assert!(
+        fixture
+            .store
+            .review_settlement(&staged.run, &staged.reference)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

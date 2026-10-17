@@ -957,7 +957,10 @@ fn revise(
         return changed();
     }
     fresh(envelope, &ids.object_id)?;
-    let source_revision = predecessor.object.source_revision + 1;
+    // A target at the last source revision refuses the revise as changed: the successor's revision must exceed the predecessor's.
+    let Some(source_revision) = predecessor.object.source_revision.checked_add(1) else {
+        return changed();
+    };
     envelope
         .supersede_decision(
             &predecessor_id,
