@@ -4,7 +4,9 @@ use std::path::Path;
 
 use daemon::memory_reviewer::broker::{EvidenceBroker, QuestionTemplate, RunBinding};
 use daemon::memory_reviewer::handoff::{review_binding, review_policy_versions};
-use daemon::memory_reviewer::settlement::{RunResult, Settled, Settlement, TaskClaim};
+use daemon::memory_reviewer::settlement::{
+    RunResult, Settled, Settlement, SettlementError, TaskClaim,
+};
 use kernel::{
     KernelStore, ManifestReference, MemoryReviewerHoldBinding, PolicyDependencies, ProposalAction,
     ProposalTarget, ReviewProposal, ReviewQuestionTemplate, Uncertainty,
@@ -101,6 +103,53 @@ pub fn try_begin_job(
     firing: u64,
     now: i64,
 ) -> Result<BegunJob, MemoryReviewerJobRefusal> {
+    let job = try_ready_job(kernel, store, digest, kernel_incarnation, firing, now)?;
+    let LeaseAcquireOutcome::Claim { claim, .. } = store
+        .acquire_memory_reviewer_task(
+            PROJECT,
+            &format!("acq-{firing}"),
+            "worker-a",
+            i64::try_from(firing).unwrap(),
+            i64::try_from(generation).unwrap(),
+            &job.causal_identity,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the job is claimed")
+    };
+    let MemoryReviewerBeginOutcome::Begun(receipt) = store
+        .begin_memory_reviewer_receipt(
+            PROJECT,
+            &job.causal_identity,
+            kernel_incarnation,
+            &claim.claim_id,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the receipt begins")
+    };
+    let job = store
+        .lookup_memory_reviewer_job(PROJECT, &job.causal_identity)
+        .unwrap()
+        .unwrap();
+    Ok(BegunJob {
+        job,
+        claim_id: claim.claim_id,
+        receipt,
+    })
+}
+
+/// One History Summarizer job at firing `firing` as the handoff leaves it, before any worker claims it: reserved, its subject staged in the Kernel under `digest`'s binding, and activated Ready with reference-only input. A reservation refusal writes nothing.
+pub fn try_ready_job(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    digest: &str,
+    kernel_incarnation: &str,
+    firing: u64,
+    now: i64,
+) -> Result<MemoryReviewerJob, MemoryReviewerJobRefusal> {
     let producer = ProducerBinding {
         producer: "history_summarizer".to_string(),
         firing_id: format!("{}#{firing}", "5".repeat(32)),
@@ -172,41 +221,10 @@ pub fn try_begin_job(
             now,
         )
         .unwrap();
-    let LeaseAcquireOutcome::Claim { claim, .. } = store
-        .acquire_memory_reviewer_task(
-            PROJECT,
-            &format!("acq-{firing}"),
-            "worker-a",
-            i64::try_from(firing).unwrap(),
-            i64::try_from(generation).unwrap(),
-            &job.causal_identity,
-            now,
-        )
-        .unwrap()
-    else {
-        panic!("the job is claimed")
-    };
-    let MemoryReviewerBeginOutcome::Begun(receipt) = store
-        .begin_memory_reviewer_receipt(
-            PROJECT,
-            &job.causal_identity,
-            kernel_incarnation,
-            &claim.claim_id,
-            now,
-        )
-        .unwrap()
-    else {
-        panic!("the receipt begins")
-    };
-    let job = store
+    Ok(store
         .lookup_memory_reviewer_job(PROJECT, &job.causal_identity)
         .unwrap()
-        .unwrap();
-    Ok(BegunJob {
-        job,
-        claim_id: claim.claim_id,
-        receipt,
-    })
+        .unwrap())
 }
 
 /// The run abstained on a Sensitive subject, recorded in the ledger alone.
@@ -260,6 +278,22 @@ pub fn publish(
     begun: &BegunJob,
     now: i64,
 ) -> ReviewProposal {
+    let settled =
+        settle_proposal(kernel, store, digest, kernel_incarnation, begun, now, None).unwrap();
+    assert!(matches!(settled, Settled::Published(_)), "{settled:?}");
+    proposal()
+}
+
+/// [`publish`] up to the settlement's own answer, with `before_completion` run after the Kernel work and before the Memory Store completion.
+pub fn settle_proposal(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    digest: &str,
+    kernel_incarnation: &str,
+    begun: &BegunJob,
+    now: i64,
+    before_completion: Option<&dyn Fn()>,
+) -> Result<Settled, SettlementError> {
     let hold_binding = MemoryReviewerHoldBinding {
         project_digest: digest.to_string(),
         kernel_incarnation: kernel_incarnation.to_string(),
@@ -325,19 +359,16 @@ pub fn publish(
         begun.job.producer.ordinal,
         &begun.job.causal_identity,
     );
-    let settled = Settlement {
+    Settlement {
         store: kernel,
         ledger: store,
         project: PROJECT,
         binding: &binding,
         claim: &claim,
         now_ms: &move || now,
-        before_completion_for_test: None,
+        before_completion_for_test: before_completion,
     }
     .settle(&broker, RunResult::Proposal(Box::new(proposal())))
-    .unwrap();
-    assert!(matches!(settled, Settled::Published(_)), "{settled:?}");
-    proposal()
 }
 
 /// The memory domain every production Kernel commits before a job can exist; holds pin the commit snapshot.

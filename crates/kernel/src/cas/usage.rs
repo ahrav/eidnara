@@ -13,9 +13,36 @@ use std::fs::File;
 
 use rustix::fs::{self as rfs, AtFlags};
 
-use super::ingest::regular_file_bytes;
-use crate::durable_fs::{StorageError, durable_unlink};
+use super::ingest::{regular_file_bytes, regular_file_bytes_concurrently};
+use crate::durable_fs::{
+    PublishOutcome, StorageError, durable_unlink, publish_noreplace_between_locked,
+};
 use crate::{KernelError, KernelStore};
+
+/// The counted bytes below `objects`, `None` until a walk succeeds and after
+/// an unlink whose outcome is unknown, beside the number of publications and
+/// unlinks applied to the tree since the store opened. `settlements` counts
+/// the walks that became the count, so a reconciliation whose walk predates
+/// a later settlement leaves that settlement in place. `raced_reconciliations`
+/// counts consecutive comparisons deferred because `tree_changes` moved
+/// between a reconciliation's snapshot and its comparison.
+#[derive(Debug, Default)]
+pub(crate) struct ArtifactUsage {
+    bytes: Option<u64>,
+    tree_changes: u64,
+    settlements: u64,
+    raced_reconciliations: u8,
+}
+
+/// After this many consecutive deferrals, the next reconciliation acquires the
+/// writer lock before taking its snapshot and walking the tree.
+const MAX_RACED_RECONCILIATIONS: u8 = 3;
+
+impl ArtifactUsage {
+    fn record_tree_change(&mut self) {
+        self.tree_changes = self.tree_changes.wrapping_add(1);
+    }
+}
 
 impl KernelStore {
     /// The counted usage, walking the tree only when no count is held: before
@@ -23,28 +50,49 @@ impl KernelStore {
     /// The caller holds the writer lock, so no publication or unlink races the
     /// walk it may take.
     pub(super) fn counted_artifact_usage(&self) -> Result<u64, StorageError> {
-        if let Some(bytes) = *self.counted_usage() {
+        if let Some(bytes) = self.counted_usage().bytes {
             return Ok(bytes);
         }
         let walked = self.walk_artifact_usage()?;
-        *self.counted_usage() = Some(walked);
+        self.counted_usage().bytes = Some(walked);
         Ok(walked)
     }
 
-    /// Adds the bytes a publication placed below `objects`. The caller holds
-    /// the writer lock.
-    pub(super) fn count_published_artifact(&self, byte_length: u64) {
-        if let Some(bytes) = self.counted_usage().as_mut() {
+    /// Publishes the staged file `temp_name` in `source` as the object `name`
+    /// in `shard` and adds `byte_length` to the count when the object lands.
+    /// The caller holds the writer lock. Every outcome but `AlreadyExists` can
+    /// have changed the tree, if only between a fallback link and its
+    /// rollback, so each one records a tree change.
+    pub(super) fn publish_counted_object(
+        &self,
+        source: &File,
+        temp_name: &str,
+        shard: &File,
+        name: &str,
+        byte_length: u64,
+    ) -> Result<PublishOutcome, StorageError> {
+        let published = publish_noreplace_between_locked(source, temp_name, shard, name);
+        if matches!(published, Ok(PublishOutcome::AlreadyExists)) {
+            return published;
+        }
+        let mut usage = self.counted_usage();
+        usage.record_tree_change();
+        if let (
+            Ok(PublishOutcome::Published | PublishOutcome::PublishedTempRetained),
+            Some(bytes),
+        ) = (&published, usage.bytes.as_mut())
+        {
             *bytes = bytes.saturating_add(byte_length);
         }
+        published
     }
 
     /// Durably unlinks the object `name` in `shard`, subtracts the bytes the
-    /// walk counted for it, and returns them. The caller holds the writer
-    /// lock. An unlink that fails, or a size the stat cannot report, leaves the
-    /// count unknown, so the next reader walks; a removal larger than the count
-    /// is drift, which leaves the count unknown and latches the fail-closed
-    /// state.
+    /// walk counted for it, records a tree change, and returns the bytes. The
+    /// caller holds the writer lock. An unlink that fails, or a size the stat
+    /// cannot report, leaves the count unknown, so the next reader walks; a
+    /// removal larger than the count is drift, which leaves the count unknown
+    /// and latches the fail-closed state.
     pub(super) fn unlink_counted_object(
         &self,
         shard: &File,
@@ -59,39 +107,100 @@ impl KernelStore {
         };
         let unlinked = durable_unlink(shard, name);
         let mut usage = self.counted_usage();
-        let Some(bytes) = *usage else {
-            return unlinked.map(|()| removed.unwrap_or(0));
-        };
-        *usage = None;
-        if let (Ok(()), Some(removed)) = (&unlinked, removed) {
+        usage.record_tree_change();
+        if let Some(bytes) = usage.bytes.take()
+            && let (Ok(()), Some(removed)) = (&unlinked, removed)
+        {
             match bytes.checked_sub(removed) {
-                Some(remaining) => *usage = Some(remaining),
+                Some(remaining) => usage.bytes = Some(remaining),
                 None => self.latch_cas_failure(),
             }
         }
         unlinked.map(|()| removed.unwrap_or(0))
     }
 
-    /// Re-walks the tree under the writer lock and compares the walk with the
-    /// count. With no count held the walk becomes the count. A disagreement is
-    /// drift: the fail-closed state latches and the walk replaces the count,
-    /// so admission stays refused while the health sampler reports the bytes
-    /// on disk. A walk that fails for a reason other than exhaustion latches
-    /// too; an exhausted walk leaves the count as it was for the next reader.
+    /// Re-walks the tree and compares the walk with the count, holding the
+    /// writer lock only for the comparison, so writers proceed during the
+    /// walk. Each publication and unlink holds the writer lock from its
+    /// filesystem change through its tree-change record. Once this thread
+    /// holds the writer lock no change is half-applied, so an unchanged
+    /// tree-change number proves the walk saw the tree the count describes; a
+    /// changed one leaves the comparison to the next reconciliation. After
+    /// [`MAX_RACED_RECONCILIATIONS`] deferrals in a row the next
+    /// reconciliation takes the writer lock before its snapshot and holds it
+    /// across the walk, so that comparison runs. With no
+    /// count held the walk becomes the count. A disagreement is drift: the
+    /// fail-closed state latches and the walk replaces the count, so admission
+    /// stays refused while the health sampler reports the bytes on disk.
     pub(crate) fn reconcile_artifact_usage(&self) {
+        let conclusive = self.counted_usage().raced_reconciliations >= MAX_RACED_RECONCILIATIONS;
+        let mut writer = None;
+        if conclusive {
+            let Ok(held) = self.lock_writer() else {
+                return;
+            };
+            writer = Some(held);
+        }
+        let (changes, settlements) = {
+            let usage = self.counted_usage();
+            (usage.tree_changes, usage.settlements)
+        };
+        let walked = self.walk_artifact_usage();
+        #[cfg(feature = "test-support")]
+        self.run_reconciliation_hook();
+        if writer.is_none() {
+            let Ok(held) = self.lock_writer() else {
+                return;
+            };
+            writer = Some(held);
+        }
+        let mut usage = self.counted_usage();
+        if usage.settlements == settlements {
+            if usage.tree_changes == changes {
+                usage.raced_reconciliations = 0;
+                self.settle_census(&mut usage, walked);
+            } else {
+                usage.raced_reconciliations = usage.raced_reconciliations.saturating_add(1);
+            }
+        }
+        drop(usage);
+        drop(writer);
+    }
+
+    /// [`reconcile_artifact_usage`](Self::reconcile_artifact_usage) with the
+    /// walk `census` took while the store was opening. Until `open` returns,
+    /// the opening thread is the store's only user, so that walk counts the
+    /// tree the writer lock would have seen. A census whose thread could not be
+    /// started walks here instead.
+    pub(crate) fn seed_artifact_usage(&self, mut census: ArtifactCensus) {
         let Ok(_writer) = self.lock_writer() else {
             return;
         };
-        let walked = match self.walk_artifact_usage() {
-            Ok(walked) => walked,
-            Err(StorageError::Exhausted(_)) => return,
-            Err(StorageError::Other(_)) => return self.latch_cas_failure(),
+        let walked = match census.0.take() {
+            Some(walk) => {
+                #[cfg(feature = "test-support")]
+                self.artifact_census_walks
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                walk.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            }
+            None => self.walk_artifact_usage(),
         };
-        let mut usage = self.counted_usage();
-        if usage.is_some_and(|bytes| bytes != walked) {
+        self.settle_census(&mut self.counted_usage(), walked);
+    }
+
+    /// A walk that fails says nothing about the count, so it settles nothing:
+    /// a held count stays, and an admission that finds none walks under the
+    /// writer lock and fails closed if that walk fails too.
+    fn settle_census(&self, usage: &mut ArtifactUsage, walked: Result<u64, StorageError>) {
+        let Ok(walked) = walked else {
+            return;
+        };
+        if usage.bytes.is_some_and(|bytes| bytes != walked) {
             self.latch_cas_failure();
         }
-        *usage = Some(walked);
+        usage.bytes = Some(walked);
+        usage.settlements = usage.settlements.wrapping_add(1);
     }
 
     /// The usage the health sampler reports: the count when one is held, and
@@ -100,10 +209,14 @@ impl KernelStore {
         &self,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<u64>, KernelError> {
-        if let Some(bytes) = *self.counted_usage() {
+        if let Some(bytes) = self.counted_usage().bytes {
             return Ok(Some(bytes));
         }
         regular_file_bytes(&self.objects_directory, cancelled).map_err(|_| KernelError::Io)
+    }
+
+    pub(crate) fn held_artifact_usage(&self) -> Option<u64> {
+        self.counted_usage().bytes
     }
 
     /// Walks of the object tree this store took to count its usage since it
@@ -119,20 +232,68 @@ impl KernelStore {
     #[cfg(feature = "test-support")]
     pub fn forget_artifact_usage_for_test(&self) {
         let _writer = self.lock_writer();
-        *self.counted_usage() = None;
+        self.counted_usage().bytes = None;
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn on_next_artifact_reconciliation_for_test(
+        &self,
+        hook: impl FnOnce(&KernelStore) + Send + 'static,
+    ) {
+        *self
+            .reconciliation_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    }
+
+    #[cfg(feature = "test-support")]
+    fn run_reconciliation_hook(&self) {
+        let hook = self
+            .reconciliation_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
     }
 
     fn walk_artifact_usage(&self) -> Result<u64, StorageError> {
         #[cfg(feature = "test-support")]
         self.artifact_census_walks
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(regular_file_bytes(&self.objects_directory, &|| false)?
-            .expect("an uncancellable walk completes"))
+        regular_file_bytes_concurrently(&self.objects_directory)
     }
 
-    fn counted_usage(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+    fn counted_usage(&self) -> std::sync::MutexGuard<'_, ArtifactUsage> {
         self.artifact_usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) type ReconciliationHook = Box<dyn FnOnce(&KernelStore) + Send>;
+
+/// The census `open` starts on a thread of its own once the layout and any
+/// interrupted restore are settled, so the walk overlaps the database open.
+/// Dropping it joins the walk.
+pub(crate) struct ArtifactCensus(Option<std::thread::JoinHandle<Result<u64, StorageError>>>);
+
+impl ArtifactCensus {
+    pub(crate) fn start(objects: &File) -> Self {
+        Self(objects.try_clone().ok().and_then(|objects| {
+            std::thread::Builder::new()
+                .spawn(move || regular_file_bytes_concurrently(&objects))
+                .ok()
+        }))
+    }
+}
+
+impl Drop for ArtifactCensus {
+    fn drop(&mut self) {
+        if let Some(walk) = self.0.take() {
+            let _ = walk.join();
+        }
     }
 }

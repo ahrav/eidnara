@@ -60,6 +60,8 @@ pub mod m0_compose;
 pub(crate) mod m1_compose;
 pub mod memory_capture;
 pub(crate) mod memory_classifier_scheduler;
+#[cfg(feature = "test-support")]
+pub use memory_classifier_scheduler::selection_slot;
 pub(crate) mod memory_render;
 pub mod memory_reviewer;
 pub mod memory_tool;
@@ -81,6 +83,7 @@ pub mod search_writer;
 pub mod selection;
 pub mod served_json;
 pub mod session_resolver;
+mod staged_body;
 mod tail_hygiene;
 pub mod terse_text_compression;
 mod token_cache;
@@ -4877,10 +4880,10 @@ impl HandlerCore {
         )
     }
 
-    fn effective_config(&self, project_root: &Path) -> DaemonConfig {
+    fn effective_config(&self, project_root: &Path) -> Arc<DaemonConfig> {
         #[cfg(test)]
         if let Some(config) = &self.fixed_config {
-            return config.clone();
+            return Arc::new(config.clone());
         }
         self.config
             .lock()
@@ -5984,7 +5987,7 @@ impl HandlerCore {
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
                 project_memory: self.project_memory_read(binding, &cfg, now),
-                model_chain: cfg.model_chain,
+                model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
                 ),
@@ -8958,6 +8961,7 @@ impl HandlerCore {
             .fold_authority_intent(channel)
             .filter(|authority| authority.bind_seq == Some(bind_seq))
             .unwrap_or_else(|| BindingAuthority::detached(&binding));
+        let charges: Arc<[host_runtime::wire::ByteCharge]> = entry.meter.take_charges().into();
         let intake = PassIntake {
             store,
             parsed,
@@ -8976,13 +8980,14 @@ impl HandlerCore {
                 core_started_at,
             },
             held: PassHold {
-                _charges: entry.meter.take_charges(),
+                _charges: Arc::clone(&charges),
                 _page_apply: page_apply,
                 _lane: lane,
             },
         };
         // From here the pass's store work runs on the blocking pool. The resident charges the
         // decode took travel with the pass, so the bytes stay charged while a thread uses them.
+        // The response output shares them too and retains them after the pass completes.
         let core = Arc::clone(entry.core);
         let signal = entry.runner.cancel_signal();
         let outcome = entry
@@ -8993,11 +8998,13 @@ impl HandlerCore {
             }))
             .await;
         let carry = match outcome {
-            Ok(UnitOutcome::Terminal(outcome)) => return outcome,
+            Ok(UnitOutcome::Terminal(outcome)) => return outcome.holding(charges),
             Ok(UnitOutcome::Continue(carry)) => *carry,
             Err(failed) => return unit_failed_error(failed),
         };
-        self.finish_emergency_pass(entry, carry).await
+        self.finish_emergency_pass(entry, carry)
+            .await
+            .holding(charges)
     }
 
     /// Waits for a unit permit on the async side, where the wait is abortable; the permit
@@ -13081,7 +13088,7 @@ impl CompositeComponent for Handler {
                 harness: identity.harness,
                 session: identity.session,
                 model_key: None,
-                config,
+                config: Arc::unwrap_or_clone(config),
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
                 credential_fingerprints: identity.credential_fingerprints,
                 context_capabilities,
@@ -13118,6 +13125,12 @@ impl CompositeComponent for Handler {
             },
         };
         let (_, outcome) = self.dispatch_body(&entry, body).await;
+        let charges = meter.take_charges();
+        let outcome = if charges.is_empty() {
+            outcome
+        } else {
+            outcome.holding(charges.into())
+        };
         settle_prepared(&ctx, outcome).await
     }
 
@@ -18908,6 +18921,46 @@ mod tests {
                 Some(Reserved::Owned(expected))
             );
         }
+    }
+
+    /// Charges a response holds travel with its direct serializer and return once it runs; a retained clone and an error outcome hold none.
+    #[tokio::test]
+    async fn a_held_response_keeps_its_request_charges_until_its_direct_serializer_runs() {
+        let pool = TestPool::with_capacity(64);
+        let charges = || -> Arc<[host_runtime::wire::ByteCharge]> { Arc::from([pool.hold(64)]) };
+        let free = || pool.try_reserve(64).is_some();
+
+        let PreparedOutcome::Response(output) =
+            PreparedOutcome::Response(direct_transform()).holding(charges())
+        else {
+            panic!("a response stays a response");
+        };
+        let retained = output.clone();
+        let settlement = settle_direct_with(
+            output,
+            || false,
+            |len, serializer| std::future::ready(Ok::<_, ()>((len, serializer))),
+        )
+        .await;
+        let PreparedSettlement::Response((len, serializer)) = settlement else {
+            panic!("a direct settlement returns the reservation");
+        };
+        assert!(!free(), "the queued serializer holds the request charges");
+        let mut written = Vec::with_capacity(len);
+        serializer(&mut written).expect("the serializer writes the measured body");
+        assert!(
+            free(),
+            "the charges return once the serializer has run, while a retained clone lives"
+        );
+        assert_eq!(written, owned_bytes(retained).await);
+
+        let error = PreparedOutcome::Error {
+            code: "invalid".to_owned(),
+            message: "bad".to_owned(),
+        }
+        .holding(charges());
+        assert!(free(), "an error outcome returns the charges at once");
+        drop(error);
     }
 
     /// A direct settlement reserves exactly the measured length, and a cancellation before or after the reservation settles `request_cancelled`.

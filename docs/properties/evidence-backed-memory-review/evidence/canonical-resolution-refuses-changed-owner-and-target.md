@@ -33,7 +33,21 @@ rows equal before and after),
 decision revision, evidence object as owner refused by `proposal_target` and by
 the broker with zero bytes),
 `canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both`,
-`a_canonical_owner_must_be_a_live_decision`.
+`a_canonical_owner_must_be_a_live_decision`,
+`a_missing_or_empty_decision_identity_is_unsupported` (a stored identity with a
+missing or empty leading field refuses `Unsupported` at resolution),
+`a_class_tightened_after_resolution_refuses_every_destination` (a subject
+readable before the change refuses `PolicyBlocked` with zero bytes on both
+destinations once the same bytes are ingested under `Secret`),
+`a_deleted_artifact_refuses_the_execution_hold` (deleted evidence refuses the
+hold `UnavailableEvidence`; the coordinator takes the hold before it builds a
+broker, so the run reads nothing).
+
+`crates/daemon/tests/memory_reviewer_worker.rs` -
+`fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision`:
+through the production selector, slot enqueue, and worker, the proposal over a
+canonical or promoted descriptor targets the decision at its exact tokens, not
+the descriptor.
 
 ## Failure scenario
 
@@ -64,6 +78,11 @@ assert the broker refuses before disclosure with zero model-visible bytes.
 Insert a second scope whose project term names another project, a decision in
 that scope, and an in-scope descriptor naming it; assert resolution binds the
 decision and the broker refuses the read `Scope` with zero model-visible bytes.
+Rewrite a stored descriptor identity to drop or empty its leading field; assert
+`Unsupported`. Read a resolved subject, ingest the same bytes under `Secret`,
+and read again on both destinations; assert `PolicyBlocked` with zero bytes.
+Delete a resolved subject's evidence; assert the execution hold refuses
+`UnavailableEvidence`.
 
 ## Investigation log
 
@@ -78,4 +97,5 @@ decision and the broker refuses the read `Scope` with zero model-visible bytes.
   empty-value branch is a defense against corruption, not a reachable input.
 - Missing evidence: none.
 - Conclusion: resolved with answer; the refusal is defensive and the
-  publication check is the reachable guard.
+  publication check is the reachable guard. The defensive branch is witnessed
+  by rewriting the stored identity in place.

@@ -85,6 +85,10 @@ pub enum LimitsRefusal {
         "lexical_accepted {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
     )]
     LexicalAccepted { value: usize },
+    #[error(
+        "exact_page_rows {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
+    )]
+    ExactPageRows { value: usize },
     #[error("response_bytes {value} cannot hold the {floor}-byte empty fused envelope")]
     ResponseBytes { value: usize, floor: usize },
     #[error("response_bytes {value} exceeds the {max}-byte wire body the host can send")]
@@ -204,6 +208,11 @@ impl QueryRouteLimits {
         if self.lexical_accepted.get() > MAX_ELIGIBILITY_CANDIDATES {
             return Err(LimitsRefusal::LexicalAccepted {
                 value: self.lexical_accepted.get(),
+            });
+        }
+        if self.exact_page_rows.get() > MAX_ELIGIBILITY_CANDIDATES {
+            return Err(LimitsRefusal::ExactPageRows {
+                value: self.exact_page_rows.get(),
             });
         }
         let floor = Self::response_floor();
@@ -1211,7 +1220,7 @@ impl ResolvedLane {
     }
 }
 
-/// Every `id:` selector's attempt reads at most the lane's page budget, and retains at most the rows those pages hold, up to the kernel batch final use re-judges, and at most the response's bytes.
+/// Every `id:` selector's attempt reads at most the lane's page budget, and retains at most the rows those pages hold, up to one kernel batch, and at most the response's bytes.
 fn resolve_bounds(limits: &QueryRouteLimits) -> ResolveBounds {
     let rows = limits.exact_page_rows.saturating_mul(limits.exact_pages);
     ResolveBounds {
@@ -1818,7 +1827,7 @@ pub fn admit_lanes<'a>(
 
     // An uncertified exact lane runs only projection statements while the connection is held and takes its kernel readers after it is released; a certified one judges each page it resolves and validates a proof for final use under the connection. The lexical lane reads each candidate's occurrence row just before the kernel judges it, and the dense oracle judges each page it scores, so both read the kernel under the connection.
     let read = projection.read_under(budget, |conn| {
-        let Some(identity) = retrieval::read_identity(conn)? else {
+        let Some((identity, _)) = retrieval::batch::read_identity_and_checkpoint(conn)? else {
             return Ok(Err(QueryFailure::Unavailable("no_identity")));
         };
         let mut phases = || -> Result<Scanned, QueryFailure> {

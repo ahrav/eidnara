@@ -18,7 +18,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use memory_store::memory_reviewer_jobs::{
     EnqueueOutcome, FrozenSelection, FrozenSelectionPage, FrozenSelectionState,
-    MemoryReviewerJobError, MemoryReviewerJobRefusal, ProducerBinding,
+    MAX_FROZEN_SELECTIONS_PER_PROJECT, MemoryReviewerJobError, MemoryReviewerJobRefusal,
+    ProducerBinding,
 };
 use memory_store::{LeaseAcquireOutcome, LeaseClaim, LeaseCompleteOutcome, MemoryStore};
 use serde_json::{Value, json};
@@ -76,6 +77,17 @@ impl ScheduledTask {
         }
     }
 }
+/// The selection slot's identities on the lease ledger and the producer its jobs are reserved under, for tests that compose the slot's store primitives outside the scheduler.
+#[cfg(feature = "test-support")]
+pub mod selection_slot {
+    /// The task name frozen pages and cursors are keyed by; a slot's command id is `{TASK}@{due}`.
+    pub const TASK: &str = super::MEMORY_REVIEWER_REVIEW_SELECTION_TASK;
+    pub const TASK_ID: i64 = super::MEMORY_REVIEWER_REVIEW_SELECTION_TASK_ID;
+    pub const LEDGER_SLOT: i64 = super::SCHEDULER_SLOT + 2;
+    pub const INSTANCE: &str = super::SCHEDULER_INSTANCE;
+    pub const PRODUCER: &str = super::MEMORY_REVIEWER_SELECTION_PRODUCER;
+}
+
 /// The ledger session every scheduled run is recorded under.
 pub(crate) const SCHEDULER_LEDGER_SESSION: &str = "eidnara-memory_classifier-scheduler";
 /// The scheduler's worker identity on the lease ledger; one slot per daemon.
@@ -549,9 +561,10 @@ impl MemoryClassifierScheduler {
             .expire_memory_reviewer_work(now_ms)
             .map_err(|error| format!("expiring memory_reviewer work failed: {error}"))?;
         // This slot's own page first: a page it froze and could not enqueue resumes; one that expired or was already enqueued records that outcome and selects nothing new under this attempt.
-        if let Some(own) = store
+        let own = store
             .lookup_frozen_selection(&project.project, project.task.name(), command_id)
-            .map_err(|error| format!("frozen selection lookup failed: {error}"))?
+            .map_err(|error| format!("frozen selection lookup failed: {error}"))?;
+        if let Some(own) = &own
             && own.state != FrozenSelectionState::Frozen
         {
             let enqueued = own.state == FrozenSelectionState::Enqueued;
@@ -569,10 +582,15 @@ impl MemoryClassifierScheduler {
                 json!({"ok": enqueued, "code": code}),
             );
         }
-        let frozen = match store
-            .frozen_selection_for_project(&project.project)
-            .map_err(|error| format!("frozen selection lookup failed: {error}"))?
-        {
+        // `MAX_FROZEN_SELECTIONS_PER_PROJECT` is one, so this slot's frozen page is the project's frozen page.
+        const _: () = assert!(MAX_FROZEN_SELECTIONS_PER_PROJECT == 1);
+        let held = match own {
+            Some(own) => Some(own),
+            None => store
+                .frozen_selection_for_project(&project.project)
+                .map_err(|error| format!("frozen selection lookup failed: {error}"))?,
+        };
+        let frozen = match held {
             Some(frozen) => frozen,
             None => {
                 let cursor = store
@@ -2337,6 +2355,284 @@ mod tests {
         assert_eq!(ready_jobs(&store, "git:a"), 2);
     }
 
+    /// Q29's service under continuous arrivals: a page deferred by full capacity keeps its place while new targets keep arriving, so every retry offers the same frozen page and no new selection runs; once capacity returns that page is enqueued first, and the next slot selects the arrivals from its cursor.
+    #[tokio::test]
+    async fn arrivals_never_jump_a_deferred_page() {
+        use memory_store::memory_reviewer_jobs::MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        for index in 0..MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
+            store
+                .reserve_memory_reviewer_job(
+                    "git:a",
+                    &producer,
+                    &selection_page(1_000 + index, 1, None).references[0],
+                    T0,
+                )
+                .unwrap();
+        }
+        // The deferred page, then a stream of arrivals the script would hand any new selection.
+        *host.selections.lock().unwrap() = (0..6)
+            .map(|n| Ok(selection_page(10 * n, 2, Some(&format!("cursor-{n}")))))
+            .collect();
+        clock.advance(15 * MINUTE);
+        // The deferral outlasts the next cron instant: every retry, the one at T0+30m included, is the same slot offering the same page.
+        for _ in 0..20 {
+            let events = scheduler.tick(&host).await;
+            assert!(
+                matches!(&events[0], TickEvent::CapacityDeferred { due_at_ms, .. } if *due_at_ms == T0 + 15 * MINUTE_MS),
+                "{events:?}"
+            );
+            clock.advance(MINUTE);
+        }
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().len(),
+            1,
+            "arrivals waited behind the deferred page: no second selection"
+        );
+        for inputs in &selection_page(10, 2, None).references {
+            assert_eq!(
+                store
+                    .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
+                    .unwrap(),
+                None,
+                "no arrival was admitted ahead of the deferred page"
+            );
+        }
+        for index in 0..2 {
+            store
+                .finish_memory_reviewer_job(
+                    "git:a",
+                    &selection_page(1_000 + index, 1, None).references[0]
+                        .causal_identity()
+                        .unwrap(),
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Nonadmitted,
+                    T0 + 1,
+                )
+                .unwrap();
+        }
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued"),
+            "{events:?}"
+        );
+        for inputs in &selection_page(0, 2, None).references {
+            assert!(
+                store
+                    .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
+                    .unwrap()
+                    .is_some(),
+                "the deferred page was served first"
+            );
+        }
+        // Capacity frees again; the next slot selects the arrivals from the deferred page's cursor.
+        for index in 2..4 {
+            store
+                .finish_memory_reviewer_job(
+                    "git:a",
+                    &selection_page(1_000 + index, 1, None).references[0]
+                        .causal_identity()
+                        .unwrap(),
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Nonadmitted,
+                    T0 + 1,
+                )
+                .unwrap();
+        }
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued"),
+            "{events:?}"
+        );
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().as_slice(),
+            [None, Some("cursor-0".to_string())]
+        );
+        for inputs in &selection_page(10, 2, None).references {
+            assert!(
+                store
+                    .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
+                    .unwrap()
+                    .is_some(),
+                "the arrivals were served next"
+            );
+        }
+    }
+
+    /// Repeated selection expiry is recorded each time and never replays: each round's slot selects the same targets anew from the recorded cursor under its own attempt identity and freezes a page that full capacity defers; once that page passes its 24-hour selection deadline, the slot's lease has ended expired on the ledger and the sweep has expired the page, so the next slot resumes nothing and selects again. When capacity returns, the renewed page is a new admission for the targets no page admitted and a replay of the one job already admitted, whose recorded outcome stands. No round moves the cursor, admits a page's targets, or disturbs an earlier recorded outcome.
+    #[tokio::test]
+    async fn repeated_selection_expiry_records_each_slot_and_moves_nothing() {
+        use memory_store::memory_reviewer_jobs::MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // One page is enqueued and its continuation recorded.
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 1, Some("kept")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(matches!(&events[0], TickEvent::Ran { .. }), "{events:?}");
+        let first = selection_page(0, 1, None).references[0]
+            .causal_identity()
+            .unwrap();
+        store
+            .finish_memory_reviewer_job(
+                "git:a",
+                &first,
+                memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Failed,
+                clock.now_ms(),
+            )
+            .unwrap();
+        let mut attempts = Vec::new();
+        for round in 0..3 {
+            // Filler jobs hold the project's pending capacity for the whole round.
+            let producer = ProducerBinding {
+                producer: "filler".to_string(),
+                firing_id: format!("f{round}"),
+                ordinal: 0,
+            };
+            for index in 0..MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
+                store
+                    .reserve_memory_reviewer_job(
+                        "git:a",
+                        &producer,
+                        &selection_page(10_000 * (round + 1) + index, 1, None).references[0],
+                        clock.now_ms(),
+                    )
+                    .unwrap();
+            }
+            // The walk finds the same targets every round, the admitted `memory-0` among them.
+            *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("stale")))];
+            clock.advance(15 * MINUTE);
+            let events = scheduler.tick(&host).await;
+            assert!(
+                matches!(&events[0], TickEvent::CapacityDeferred { .. }),
+                "round {round}: {events:?}"
+            );
+            attempts.push(
+                store
+                    .frozen_selection_for_project("git:a")
+                    .unwrap()
+                    .unwrap()
+                    .selection_attempt,
+            );
+            // The page outlives its 24-hour selection deadline; the sweep expires it and the fillers alike.
+            clock.advance(Duration::from_millis(25 * 60 * MINUTE_MS as u64));
+            store.expire_memory_reviewer_work(clock.now_ms()).unwrap();
+            // The slot's own lease lapsed with the page: the ledger records the slot as ended expired, and the sweep has expired the page, so nothing is left frozen to resume.
+            let events = scheduler.tick(&host).await;
+            assert!(
+                matches!(&events[0], TickEvent::Skipped { reason, .. } if reason == "the slot already ended expired"),
+                "round {round}: {events:?}"
+            );
+            assert_eq!(
+                store.frozen_selection_for_project("git:a").unwrap(),
+                None,
+                "round {round}: the expired page is not resumed"
+            );
+            assert_eq!(
+                store
+                    .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
+                    .unwrap()
+                    .as_deref(),
+                Some("kept"),
+                "round {round}: expiry moves no cursor"
+            );
+            for inputs in &selection_page(1, 2, None).references {
+                assert_eq!(
+                    store
+                        .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
+                        .unwrap(),
+                    None,
+                    "round {round}: an expired page admits no job"
+                );
+            }
+        }
+        let mut distinct = attempts.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            attempts.len(),
+            "every round's page had its own selection attempt"
+        );
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().as_slice(),
+            [
+                None,
+                Some("kept".to_string()),
+                Some("kept".to_string()),
+                Some("kept".to_string())
+            ],
+            "each round selected once, from the recorded cursor"
+        );
+        assert_eq!(
+            store
+                .memory_reviewer_headroom("git:a")
+                .unwrap()
+                .pending_jobs,
+            0,
+            "the last sweep released every filler"
+        );
+        // With capacity free, the next slot selects the same page once more: the admitted `memory-0` replays its recorded row and only the two never-admitted targets become jobs.
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("stale")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued" && response["jobs"] == 2 && response["replayed"] == 1),
+            "{events:?}"
+        );
+        assert_eq!(
+            store
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("stale"),
+            "the renewed page that enqueued moves the cursor"
+        );
+        assert!(
+            matches!(
+                store
+                    .lookup_memory_reviewer_job("git:a", &first)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                memory_store::memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Failed
+                )
+            ),
+            "the replayed job keeps its recorded outcome"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_exported_selection_slot_is_the_one_the_scheduler_leases() {
+        assert_eq!(
+            selection_slot::LEDGER_SLOT,
+            ScheduledTask::MemoryReviewerReviewSelection.ledger_slot()
+        );
+        assert_eq!(
+            selection_slot::TASK_ID,
+            ScheduledTask::MemoryReviewerReviewSelection.lease_id()
+        );
+        assert_eq!(
+            selection_slot::TASK,
+            ScheduledTask::MemoryReviewerReviewSelection.name()
+        );
+    }
+
     #[test]
     fn only_pending_job_capacity_defers_a_frozen_page() {
         for refusal in MemoryReviewerJobRefusal::ALL {
@@ -2408,6 +2704,7 @@ mod tests {
         use memory_store::memory_reviewer_jobs::{
             FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
             MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
+            MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MemoryReviewerJobOutcome, MemoryReviewerJobState,
         };
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -2415,6 +2712,32 @@ mod tests {
         let clock = ManualClock::at(T0 + 1_000);
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
+        // An earlier job's recorded outcome, which no refusal may disturb; its permanent receipt charge stays in the quota.
+        let earlier = selection_page(2_000, 1, None).references[0]
+            .causal_identity()
+            .unwrap();
+        store
+            .reserve_memory_reviewer_job(
+                "git:a",
+                &ProducerBinding {
+                    producer: "earlier".to_string(),
+                    firing_id: "e".to_string(),
+                    ordinal: 0,
+                },
+                &selection_page(2_000, 1, None).references[0],
+                T0,
+            )
+            .unwrap();
+        store
+            .finish_memory_reviewer_job("git:a", &earlier, MemoryReviewerJobOutcome::Failed, T0)
+            .unwrap();
+        let earlier_state = || {
+            store
+                .lookup_memory_reviewer_job("git:a", &earlier)
+                .unwrap()
+                .unwrap()
+                .state
+        };
         // A receipt charge near the project quota stands in for a long history of admitted work: the frozen page fits exactly, and once its allowance is released exactly one more reservation fits beside its receipt, so a page of two is refused.
         let producer = ProducerBinding {
             producer: "filler".to_string(),
@@ -2429,7 +2752,8 @@ mod tests {
             MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
                 - MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
                 - FROZEN_SELECTION_ALLOWANCE_BYTES
-                - FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+                - FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+                - MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
         )
         .unwrap();
         store
@@ -2485,6 +2809,11 @@ mod tests {
         assert_eq!(
             store.frozen_selection_for_project("git:a").unwrap(),
             Some(frozen)
+        );
+        assert_eq!(
+            earlier_state(),
+            MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Failed),
+            "both refusals left the earlier outcome as recorded"
         );
     }
 

@@ -273,7 +273,13 @@ Clustered:
   `a_clock_that_disagrees_with_the_newest_recorded_write_keeps_every_root`,
   `an_agreeing_clock_prunes_roots_idle_past_the_window_and_keeps_its_boundary`,
   and `an_unreadable_clock_keeps_every_transform_session_root` (unaudited)
-  check. The
+  check. Each root keeps a trigger-maintained copy of its session's cache
+  activity, `session_activity_at`, and the prune deletes one range of
+  `transform_session_roots_by_retention`;
+  `root_retention_tracks_cache_activity_through_every_write` (unaudited) checks
+  the copy and the deleted set against the window predicate under random
+  writes, and `the_transform_root_prune_reads_only_its_two_indexes` (unaudited)
+  pins the query plans. The
   refusal at `lib.rs:1375-1385` is asymmetric: it errors on `recorded <
   OLDEST_ADOPTABLE_MIGRATION_VERSION` and falls through to `_ => Ok(())` for
   everything else, and `OLDEST_ADOPTABLE_MIGRATION_VERSION` is

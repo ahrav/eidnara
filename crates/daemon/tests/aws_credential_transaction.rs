@@ -631,9 +631,10 @@ async fn resource_limits_fail_without_partial_adoption() {
         let mut slot = TransactionSlot::default();
         let outcome = owner.run(&mut slot, &fake, None, limits).await;
         assert_eq!(outcome.failure, failure, "{name}");
-        // SIGXCPU can land before or after the request reaches the helper; either way
-        // only a delivered request leaves renewal unknown.
-        if name.starts_with("cpu") {
+        // SIGXCPU or an address-space refusal at exec can land before or after the
+        // request write reaches the helper's pipe; `prompt_delivered` is true only
+        // when the write completed.
+        if matches!(name, "cpu" | "address space") {
             assert!(matches!(outcome.renewal, NotStarted | Unknown), "{name}");
         } else {
             assert_eq!(outcome.renewal, renewal, "{name}");

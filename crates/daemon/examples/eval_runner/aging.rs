@@ -380,7 +380,8 @@ pub struct Stores {
     pub corpus: Corpus,
     pub projection: SearchProjection,
     pub consumer: CatchUpConsumer,
-    pub memory: MemoryStore,
+    /// Shared so the reviewer liveness arm's worker reads the same handle.
+    pub memory: Arc<MemoryStore>,
     rendering: Rendering,
     pub bounds: DriveBounds,
     chains: BTreeMap<String, Vec<String>>,
@@ -398,7 +399,7 @@ impl Stores {
     pub fn open_within(root: &Path, plan: &Plan, bounds: DriveBounds) -> Self {
         let corpus = Corpus::open(root);
         corpus.seed();
-        let memory = MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap();
+        let memory = Arc::new(MemoryStore::open(&daemon::store_descriptor_in(root)).unwrap());
         let (projection, consumer) = Self::bootstrap(&corpus, root, &bounds, EPOCH_MS);
         Self {
             root: root.to_path_buf(),
@@ -578,8 +579,9 @@ impl Stores {
         }
     }
 
-    pub fn drain(&mut self, now: i64) {
-        self.catch_up(now);
+    /// Returns the catch-up episodes the drain ran.
+    pub fn drain(&mut self, now: i64) -> u64 {
+        let episodes = self.catch_up(now);
         embed_pending(
             &self.corpus,
             &self.projection,
@@ -592,15 +594,19 @@ impl Stores {
             0,
             "the drain embeds every open job"
         );
+        episodes
     }
 
     /// Publishes the outbox and runs catch-up episodes until the projection
-    /// acknowledges the tip; the embedding lane is left as it is.
-    pub fn catch_up(&mut self, now: i64) {
+    /// acknowledges the tip; the embedding lane is left as it is. Returns the
+    /// episodes it ran.
+    pub fn catch_up(&mut self, now: i64) -> u64 {
         self.publish_outbox();
         let tip = self.tip();
+        let mut episodes = 0;
         for _ in 0..MAX_EPISODES_PER_DRAIN {
             let report = self.episode(now, None, &mut |_| {});
+            episodes += 1;
             assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
             if report.acknowledged_through >= tip {
                 break;
@@ -611,6 +617,7 @@ impl Stores {
             0,
             "the drain reaches the tip"
         );
+        episodes
     }
 
     /// One catch-up episode, under one injected fault when `fault` is set.
@@ -675,9 +682,16 @@ impl Stores {
         );
         let (_, search_lease) = projection.close();
         handles_closed.insert(StoreFamily::SearchProjection, true);
-        drop(memory);
-        handles_closed.insert(StoreFamily::Memory, true);
-        wal.insert(StoreFamily::Memory, truncate(&memory_file(&root)));
+        let memory_closed = Arc::try_unwrap(memory).map(drop).is_ok();
+        handles_closed.insert(StoreFamily::Memory, memory_closed);
+        wal.insert(
+            StoreFamily::Memory,
+            if memory_closed {
+                truncate(&memory_file(&root))
+            } else {
+                NOT_TRUNCATED
+            },
+        );
         let kernel_closed = match Arc::try_unwrap(corpus.kernel) {
             Ok(kernel) => {
                 drop(kernel);
@@ -943,7 +957,7 @@ fn reopen_stores(
         .kernel
         .reconcile_source_holds(&corpus.binding().consumer_id, now)
         .unwrap();
-    let memory = MemoryStore::open(&daemon::store_descriptor_in(&root)).unwrap();
+    let memory = Arc::new(MemoryStore::open(&daemon::store_descriptor_in(&root)).unwrap());
     let copied = SearchProjection::open(&root).unwrap();
     copied.verify_connection().unwrap();
     let (path, lease) = copied.close();

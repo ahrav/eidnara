@@ -569,7 +569,10 @@ still holds (`outstanding`, its own return obligations to the peer, not leases
 the peer holds), live backings, and backings proved released with their
 bytes; `exhaustion.observed`
 and `exhaustion.by_resource` count admission refusals in total and by the
-resource that ran out; `accounting` reports active and quarantined
+resource that ran out; `direct_serialize_failure.observed` counts response
+frames serialized straight into the ring whose serializer failed, panicked, or
+wrote other than the declared length, each of which closes its connection;
+`accounting` reports active and quarantined
 commitment; and `aggregate` reports the transport, host-resident, and terminal
 encoding ceilings with their checked total. The aggregate is a commitment
 figure, not a resident-set claim. No field carries a socket path, descriptor,

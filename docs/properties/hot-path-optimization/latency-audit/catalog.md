@@ -237,25 +237,25 @@ the [check inventory](existing-checks.md).
 | P1-P4 | default-production | The plugin runs the verdict, mid-turn, paging, and logging steps on every production pass; `deps.client` is the SDK client ([hook.ts][hookclient]). |
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
 | T1-T2 | default-production | [`process_limits`][process-limits] runs at host startup; every inbound frame calls [`to_vec`][to-vec] and every outbound frame calls `copy_in`. |
-| T3-T4 | test-only | [`reserve_direct`][reserve-direct] is reached only through [`output_from_writer`][from-writer], whose sole non-crate caller is a [fixture arm][fixture-arm] no test sends. |
-| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], and every store open runs the seed and reconciliation walks; GC and purge decrements have no daemon caller. |
-| G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
+| T3-T4 | default-production | The daemon's `settle_prepared_via` sends every transform and exact-length response through `settle_direct_with` and `RequestCtx::output_from_direct_write` to [`reserve_direct`][reserve-direct]; the fault arms need the `direct_fill` [fixture arm][fixture-arm], which reaches the same reservation through [`output_from_writer`][from-writer]. |
+| G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget], every store open seeds the count from one census walk and reconciles only when that census failed or recovery changed the count, and the daemon's [memory-reviewer sweep][daemon-maintenance] runs a GC pass and its reconciliation; purge has no daemon caller. |
+| G3 | default-production | Cleanup, startup recovery, GC reclaim, and the retried GC unlink run in the daemon; the purge decrement runs only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The memory_classifier schedule [defaults to `None`][sched-default]; conditional notes need a cron on the note. |
-| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14634-14647`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
+| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:15119`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the deterministic abort seam is `#[cfg(test)]` [`after_transform_commit`][unit-after-hook]. |
 | W12 | default-production | Transform units use [the guarded host runner][unit-runner-live]. [`kernel_routes::blocking`][blocking] still runs without that guard; the panic itself is the injected fault. |
 
 Transform execution topology is resolved by the host-owned unit runner. W8 and
 W11 retain separate safety and overlap obligations, now with post-commit abort
 evidence. W12 has transform-specific redaction evidence but an unresolved
-kernel-route boundary. T3 and T4 are
-test-only at HEAD because the
-direct path has no production sender; the specification would move them to
-default-production for whichever routes it moves to the direct path,
-transform responses first. T3's check applies unchanged to a
-`MeasuredSource::Json` response, which the owned path serializes twice at
-HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
+kernel-route boundary. T3 and T4 are default-production: the daemon sends
+every transform and exact-length response through the direct path. T3's
+check applies unchanged to a `MeasuredSource::Json` response, which the owned
+path measures structurally (`measure_json`,
+`crates/daemon/src/dispatch.rs:605-610`) and serializes once into the
+reserved body (`MeasuredOutput::write_to`, `:464-480`); the serializer-based
+count runs only for a value past the wire cap.
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
 [unit-host-live]: ../../../../crates/host-runtime/src/handler.rs#L606
@@ -266,7 +266,7 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 [unit-settle-live]: ../../../../crates/daemon/src/lib.rs#L8993-L9011
 [unit-abort-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L254
 [unit-emergency-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L771-L837
-[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
+[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L444-L472
 [unit-failure-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L839-L929
 
 ## Index
@@ -1708,7 +1708,11 @@ Status: active
 Exercised: yes - `to_vec` allocates without zero-fill and copies through
 `copy_out_uninit`; under the [Miri job][ci-miri],
 `copy_out_uninit_initializes_every_byte_at_every_alignment_and_length`
-reads back an uninitialized destination at every shift and length,
+reads back an uninitialized destination at 32 shifts, which reach every head
+length and every count of leading single words, and at every length through a
+full head and lead, two full steps, and three single words; outside Miri the
+same test copies into a sentinel-filled buffer, which exposes a skipped byte in
+the aarch64 step kernels;
 `to_vec_copies_every_body_length_without_a_zero_fill` covers every body
 length through a lease, and
 `a_span_length_mismatch_refuses_before_writing_any_byte` shows a mismatched
@@ -1717,8 +1721,10 @@ byte, one head byte, or one word in `copy_out_uninit` fails the first under
 Miri as an uninitialized read. `to_vec` forms one span of exactly `body_len`
 bytes, so a mismatched span is unreachable through it and is witnessed at the
 span API.
-The round-trip, concurrent-writer, and per-byte agreement tests still run,
-and the [Valgrind job][ci-valgrind] round-trips frames through `to_vec`.
+The round-trip, concurrent-writer, and per-byte agreement tests still run;
+the concurrent-writer test also checks that every copied word holds eight
+equal bytes, which the aarch64 step kernels must keep natively, and the
+[Valgrind job][ci-valgrind] round-trips frames through `to_vec`.
 Guarantee: A concurrent peer store of the same shape yields stale bytes,
 never a mixed-size data race, and a receiver never reads uninitialized
 process memory as payload.
@@ -1729,14 +1735,24 @@ through [`copy_in`][copy-in], [`copy_out`][copy-out], `read_byte`, or
 formed over arena bytes; and [`to_vec`][to-vec], which skips the zero-fill,
 returns a `Vec` whose every byte in `0..body_len` was written by
 [`copy_out_uninit`][copy-out-uninit] before the `Vec` is observable, or
-returns `Err` without exposing the buffer. `always` because the soundness argument in the
+returns `Err` without exposing the buffer. On aarch64 outside Miri, each
+32-byte step of [`copy_out_uninit`][copy-step-out] and [`copy_in`][copy-step-in]
+moves its four aligned words through one `ldp q` and one `stp q`; Arm ARM
+B2.2.1 treats a 128-bit SIMD&FP access at a 64-bit-aligned address as a pair
+of single-copy-atomic 64-bit accesses, and with FEAT_LS64WB a 32-byte-aligned
+pair as one 256-bit single-copy-atomic access, which still moves each
+overlapped word whole, so each arena word keeps the address and width the
+shape assigns. Miri and every other target run the portable
+`AtomicU64` step definitions. `always` because the soundness argument in the
 [`LeaseSpan` contract][span-safety] and the crate's [AGENTS.md][agents]
 treat this as a verification boundary.
 Fault/timing angle: `to_vec` reserves capacity and sets the length only
 after `copy_to_uninit` returns `Ok`, so the initialization proof rests on the
 span's length check, which refuses before writing, and on
 `copy_out_uninit` writing every byte of the range `AccessShape` partitions.
-Any early `Err` drops the buffer unexposed. A `memcpy` replacement forms a
+`copy_out_uninit` copies up to three leading single words so every step
+starts on a 32-byte boundary; the words and widths stay those the shape
+assigns. Any early `Err` drops the buffer unexposed. A `memcpy` replacement forms a
 reference over peer-writable memory, which the shm-transport catalog's
 [no-reference record][shm-noref] forbids.
 Required faults and enabling state: A peer writing the same span while the
@@ -1746,16 +1762,24 @@ the eight word offsets.
 Confidence: high - [Evidence](evidence/arena-payload-copies-keep-the-address-derived-atomic-shape.md).
 The shape derivation, both copies, the uninitialized `to_vec` buffer, and the
 raw-pointer
-[exclusive-write documentation][span-ptr] are source-verified;
-[`receive_one`][receive-to-vec] calls `to_vec` on every inbound frame and
-[`write_reservation`][write-res] calls `copy_in` on every outbound frame.
+[exclusive-write documentation][span-ptr] are source-verified; the aarch64
+step kernels are source-verified against Arm ARM B2.2.1 and checked natively
+and under memcheck on an aarch64 host, since Miri cannot execute inline
+assembly; [`InboundFrame::into_private`][receive-to-vec] calls `to_vec` on
+every inbound frame with a body (corrected from `receive_one`, which now
+delivers the lease) and [`write_reservation`][write-res] calls `copy_in` on
+every outbound frame.
 Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
 include the six lease copy tests under the [Miri job][ci-miri], three of
 them required witnesses there, and the [Valgrind job][ci-valgrind]; all
 unaudited.
 Impact: A torn multi-byte read or an uninitialized payload byte reaches the
 handler.
-Open questions: None.
+Open questions:
+- No CI job runs on aarch64, so the `ldp q`/`stp q` step kernels run only in
+  native and memcheck runs on aarch64 hosts; the CI Miri and Valgrind jobs
+  check the portable steps on x86-64. Whether to add an aarch64 runner is a CI
+  decision. (needs human input)
 
 ### direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges
 
@@ -1776,7 +1800,17 @@ JSON and emitted bodies stay owned;
 `a_failed_direct_serializer_publishes_nothing_and_returns_its_charge`
 (`host-runtime/tests/direct_frames.rs`) drives the four fault arms of the
 `direct_fill` fixture through a real host and ring at the one-frame egress
-floor; the deadline arm keeps its in-crate test.
+floor and reads one `direct_serialize_failure.observed` count per arm from
+`host.status`; the deadline arm keeps its in-crate test, which classifies a
+late commit as `DirectFailure::Commit` rather than a body failure;
+`a_settled_direct_response_holds_its_decode_charges_until_it_publishes`
+(`daemon/src/transform_unit/host_tests.rs`) holds a real transform response
+between the daemon's `handle` and publication and finds the decode's scratch
+charges still held, then released once the response publishes;
+`a_held_response_keeps_its_request_charges_until_its_direct_serializer_runs`
+(`daemon/src/lib.rs`) shows the charges travel with the direct serializer,
+return once it runs, stay off a retained clone, and drop at once for an error
+outcome.
 Guarantee: The direct path never publishes a frame whose body differs from
 its header's declared length, a mid-write failure leaves no hole, partial
 frame, or leaked slot, and deferring serialization releases neither the
@@ -1806,11 +1840,24 @@ reported through `Publisher::try_publish` as
 [`ReadClose::Corrupt("shared-memory publish failed")`][publish-fail], which
 closes the whole connection, while the owned path turns the same failure into
 a request-scoped `encode_failed` terminal in
-[`settle_prepared_with`][settle-with]. On the direct path the closure holds
-the source tree after `handle` returns, so a scratch charge released at
-return undercounts until the endpoint thread serializes; a cancelled or
-retired generation drops the queued frame with its closure and must release
-both.
+[`settle_prepared_with`][settle-with]. The connection close is the decided
+classification: the daemon measures every direct body before reserving it,
+and `write_measured` writes the same immutable source at that length, so a
+publication-time mismatch is a writer-integrity fault rather than a
+request-scoped encoding error; a measurement failure still settles the
+request as `encode_failed` before any reservation. A body failure (serializer
+`Err`, panic, or a written length other than `body_len`) also increments
+`direct_serialize_failure.observed` in `host.status`; a refused commit leaves
+it unchanged. Two charges cover a direct frame until commit. The egress
+charge of the measured length plus header covers the ring bytes. The decode's
+scratch charges cover the source: the pass shares its charges with the
+response through `PreparedOutcome::holding`, and `handle` hands any charges
+left in its meter to the response the same way. The serializer owns the
+`PreparedOutput` and its held charges, so both drop when the serializer runs
+or when the queued frame drops; a cancelled or retired generation drops the
+queued frame with its closure and releases both. A clone of the output, such
+as the completed-page replay copy, starts with an empty charge list, and its
+retaining cache charges it against the completed-response budget.
 Required faults and enabling state: A serializer that writes `body_len - 1`,
 `body_len + 1`, returns `Err` after some bytes, or panics; a body wrapping
 the arena end; a deadline expiring during serialization; a direct response
@@ -1818,32 +1865,21 @@ queued behind slow egress with the handler future gone (T4); generation
 retirement with a direct frame queued; an egress budget near capacity.
 Confidence: medium - [Evidence](evidence/direct-frame-publishes-declared-length-or-nothing-and-holds-its-charges.md).
 The reservation, writer, commit, abort, charge, and failure classification
-are source-verified; the path has no production sender at HEAD, so the
-charge class for captured source bytes is undecided.
+are source-verified, and the daemon's transform and exact-length responses
+are the production sender.
 Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
-cover the deadline arm, quarantine at ring level, and the owned-arm
-`into_parts` cases; none for the direct arm's charge; all unaudited.
+cover the deadline arm, quarantine at ring level, the owned-arm `into_parts`
+cases, the direct arm's charge through the in-crate hold-or-return test and
+the two daemon charge tests, the four fault arms through the real-host test,
+and the production settlement branch; none for a queued direct frame dropped
+by generation retirement; all unaudited.
 Impact: A response that won settlement closes the connection for every
 in-flight request, or source bytes outlive the charge that admitted them.
-Open questions:
-
-- Decided: a serializer failure on the direct path closes the connection.
-  The daemon measures every direct body before reserving it, and
-  `write_measured` writes the same immutable source at that length, so a
-  publication-time mismatch is a writer-integrity fault rather than a
-  request-scoped encoding error. A measurement failure still settles the
-  request as `encode_failed` before any reservation.
-- Decided: the egress charge of the measured length plus header covers the
-  direct frame until commit. The serializer owns the `PreparedOutput`, whose
-  transform segments and exact bytes are immutable shared sources that the
-  owned path's settlement also kept alive until it finished writing; the
-  owned path's body copy of the same length is the allocation the direct
-  path removes. The source drops when the serializer runs or when the queued
-  frame drops.
-- [The host-runtime terminal record][hr-terminal] holds trivially on the
-  failure arm because nothing is emitted; the settled `Response` is then
-  never delivered, which [its publication-failure record][hr-pubfail]
-  already covers for owned frames.
+[The host-runtime terminal record][hr-terminal] holds trivially on the
+failure arm because nothing is emitted; the settled `Response` is then never
+delivered, which [its publication-failure record][hr-pubfail] already covers
+for owned frames.
+Open questions: None.
 
 ### direct-frame-outlives-its-handler-before-publication
 
@@ -1877,9 +1913,12 @@ it; a handler that returns immediately after
 [`output_from_writer`][from-writer]; observation of handler completion (the
 joined future) and of the `Publisher::try_publish` commit as separate events.
 Confidence: medium - [Evidence](evidence/direct-frame-outlives-its-handler-before-publication.md).
-The queueing and commit points are source-verified; the direct path is
-reached only through the [fixture arm][fixture-arm] at HEAD.
-Existing check: none found.
+The queueing and commit points are source-verified, and the daemon's
+transform and exact-length responses are the production sender; the marker
+test observes the window through the `direct_fill` fixture arm.
+Existing check: [Ring checks](existing-checks.md#ring-arena-and-direct-frame)
+list `a_direct_frame_serializes_after_its_handler_has_ended` as the T4
+marker; unaudited.
 Impact: T3's charge clause passes without the window ever opening.
 Open questions: None.
 
@@ -1895,11 +1934,15 @@ a refusal that leaves no reservation row and no object, and a refusal that
 counts an unrecovered orphan publish; the cap error, invalidated-retained
 bytes, reclaim, and the inclusive payload limit keep their earlier tests.
 Guarantee: No ingest publishes bytes that would raise the on-disk regular-file
-sum under `objects` above `artifact_cap`, and a refused ingest leaves no
-reservation row and no published object.
+sum under `objects` above `artifact_cap` while every byte under `objects`
+changed through the store since the last conclusive reconciliation, and a
+refused ingest leaves no reservation row and no published object. Bytes
+changed outside the store are drift: the count follows them at the next
+conclusive reconciliation, which latches admission closed
+([`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown]).
 Check: `always` - For every ingest, [`check_budget`][check-budget] runs under
 the exclusive [writer lock][lock-writer] before the reservation row, the
-shard creation, and the publish rename ([`:411-420`][ingest-lock]); it reads
+shard creation, and the publish rename ([`:410-419`][ingest-lock]); it reads
 the [writer-lock count][usage-count] and refuses with [`Capacity`][cap-error]
 carrying `usage` and `cap` when `usage + byte_length > artifact_cap`, adds
 zero for a digest already present ([`object_is_present`][present]), and
@@ -1911,12 +1954,15 @@ contradicted latches the [fail-closed state][latch], and
 it stages anything. `always` because the cap is a hard promise with no
 admission on the failure arm.
 Fault/timing angle: The temp file is written and synced under `tmp`
-([`:379-405`][ingest-temp]) before the lock and the check, so `tmp` bytes are
+([`:378-404`][ingest-temp]) before the lock and the check, so `tmp` bytes are
 never counted and a refused ingest still cost one full write. Every count
 update runs inside the writer lock that publishes or unlinks, so the count
 cannot lag a publish. Bytes changed outside the store are invisible to the
 count until a [reconciliation walk][usage-reconcile] at open, restore
-recovery, or maintenance compares them and latches.
+recovery, or maintenance compares them and latches. A walk that fails
+settles nothing, so it leaves a held count and admission as they were; an
+admission that holds no count walks under the writer lock and refuses with
+`IngestionFailClosed` when that walk fails.
 Required faults and enabling state: A store at `cap - 1` receiving a two-byte
 payload; the same digest re-ingested at the cap; an invalidated reference
 whose bytes remain; a crash between publish and reference commit followed by
@@ -1932,10 +1978,12 @@ reservation behind.
 Open questions:
 
 - The daemon maps `Capacity` to [`StoreBusy`][busy], a retryable class, while
-  the only production paths that lower usage are failed-ingest cleanup and
-  startup recovery ([`run_staging_maintenance`][maintenance] and
-  [`delete_artifact`][delete] have no daemon caller). Is "busy" the intended
-  classification of a cap that only a restart or an operator relieves?
+  the production paths that lower usage are failed-ingest cleanup, startup
+  recovery, and the GC pass of the daemon's [memory-reviewer
+  sweep][daemon-maintenance] through [`run_staging_maintenance`][maintenance]
+  ([`delete_artifact`][delete] has no daemon caller), and GC frees only
+  invalidated bytes past their grace. Is "busy" the intended classification
+  of a cap that only such a reclaim, a restart, or an operator relieves?
   (needs human input)
 
 ### reported-artifact-usage-equals-on-disk-object-bytes-after-recovery
@@ -1945,9 +1993,11 @@ Reachability: default-production
 Status: active
 Exercised: yes - The [usage tests][t-usage] compare the reported usage with
 an independent `st_size` walk after publish, dedup, cleanup, startup
-recovery, reclaim, purge, a failed unlink, and its retry, and inject drift
-both ways; the fault-injection oracle still asserts the equality after every
-fault point and after a second recovery.
+recovery, reclaim, purge, a failed unlink, and its retry, inject drift
+both ways, land an ingest and a purge between a reconciliation walk and its
+comparison, and fail a reconciliation walk and an open census; the
+fault-injection oracle still asserts the equality after every fault point
+and after a second recovery.
 Guarantee: Reported artifact usage never drifts from the bytes actually on
 disk once recovery has run, whatever crash window preceded it.
 Check: `always` - At every quiescent point (after `KernelStore::open`
@@ -1956,22 +2006,32 @@ cleanup, GC pass, or purge returns with the writer lock released), the usage
 the store reports through [`artifact_budget_facts`][facts] and the usage
 `check_budget` admits against are the same [count][usage-count], and it
 equals an independent sum of `st_size` over regular files under `objects`
-and its subdirectories. The count lives in process memory under the writer
+and its subdirectories, provided every byte under `objects` changed through
+the store since the last conclusive reconciliation. A byte changed outside
+the store is drift: an unlink then subtracts the size on disk rather than
+the size counted
+([`an_object_grown_outside_the_store_and_purged_latches_at_the_next_pass`][t-usage-grown]),
+and the equality resumes at the next conclusive reconciliation, which
+latches. The count lives in process memory under the writer
 lock: the kernel store has no spare mutable column and a new table or column
 is a format break, so the durable counter the specification named is
 replaced by a count the [open walk][open-seed] seeds before startup
 recovery. [`reconcile_artifact_usage`][usage-reconcile] re-walks the tree at
-the end of every recovery and every [maintenance pass][maintenance]; with a
-count held, a walk that disagrees latches the [fail-closed state][latch], so
-drift is detected at the next reconciliation and the admission after it is
+the end of a [recovery][recover] that seeded no count or changed the count
+the census seeded, and of every [maintenance pass][maintenance], without
+holding the writer lock across the walk, then takes the writer lock and
+compares only when no publication or unlink recorded a [tree
+change][usage-tree-change] since the walk began; with a count held, a walk
+that disagrees latches the [fail-closed state][latch], so drift is detected
+at the next conclusive reconciliation and the admission after it is
 refused. `always`
 because the [usage tests][t-usage] and the [fault-injection
 oracle][t-oracle] assert exactly this equality.
 Fault/timing angle: Every path that changes on-disk object bytes is a
 filesystem operation beside, not inside, a SQLite transaction: publish by
 rename after the [reservation row][ingest-reservation] commits and before the
-reference commits ([`:476-526`][ingest-publish],
-[`:580-595`][ingest-commit]); unlink inside a fenced write in
+reference commits ([`:475-523`][ingest-publish],
+[`:577-592`][ingest-commit]); unlink inside a fenced write in
 [`cleanup_failed_reference`][cleanup], [`reclaim_candidate`][reclaim-cand]
 (through [`unlink_artifact`][unlink-artifact]), and
 [`complete_pending_purge_locked`][purge-unlink], each through
@@ -1989,10 +2049,42 @@ unknown, so the next reader walks; a removal larger than the count leaves it
 unknown and latches. A reconciliation that finds drift latches and replaces
 the count with the walk, so admission stays refused while the sampler reports
 the bytes on disk; only a new store admits again. In production the
-reconciliation runs at open and at restore, because the daemon calls neither
-maintenance nor deletion. Open pays two walks, one before and one after
-startup recovery, and each maintenance pass holds the writer lock for one
-walk.
+reconciliation runs at open, at restore, and after the GC pass of every
+[memory-reviewer sweep][daemon-maintenance], which repeats every 30 s when
+idle and every 5 s after a pass that advanced, with up to four maintenance
+calls a slice ([`SAMPLE_INTERVAL`][sample-interval]); the daemon has no purge
+caller. A clean open walks once: the
+[census][usage-census] starts on a thread of its own once the layout and any
+interrupted restore are settled ([`:320`][open-census]), runs beside the
+database open, and [seeds the count][usage-seed] before startup recovery;
+until `open` returns, the opening thread is the store's only user, so that
+walk counts the tree the writer lock would have seen. Open walks again after
+recovery when the census failed or recovery changed the count. Every
+uncancellable walk
+divides the shard directories among up to [64 threads][walk-workers]
+([`regular_file_bytes_concurrently`][walk-concurrent]); the count it settles
+is the same sum, and a failure other than exhaustion outranks an exhaustion
+from another worker, so an admission walk that would have latched still
+latches. A census or reconciliation walk that fails, for any reason, settles
+nothing: a held count stays, and an admission that finds none walks again
+under the writer lock. The reconciliation walk runs without the writer lock.
+Each publication and unlink holds the writer lock from its filesystem change
+through its [tree-change record][usage-tree-change], so once the
+reconciliation holds the writer lock no change is half-applied: an unchanged
+tree-change number proves its walk saw the tree the count describes, and a
+changed one leaves the comparison to the next pass. A maintenance pass holds
+the writer lock only for that comparison, except after three deferred
+comparisons in a row, when the next pass takes the writer lock before its
+snapshot and holds it across the walk, so a writer that overlaps every pass
+delays drift detection by at most three passes
+([`drift_latches_once_raced_reconciliations_reach_their_bound`][t-usage-raced-bound]).
+A census walk whose workers run the descriptor table out (`EMFILE` or
+`ENFILE`) repeats on the calling thread with one shard descriptor, and the
+workers number at most one per sixteen descriptors of the soft limit
+([`regular_file_bytes_concurrently`][walk-concurrent]). A walk that settles
+advances a settlement number, and a reconciliation whose snapshot predates
+it leaves the newer census in place
+([`a_census_settled_during_an_older_walk_is_kept`][t-usage-settled-order]).
 The [restore path][restore] runs recovery and its reconciliation against the
 count it held; tests writing [directly to disk][t-orphan] do so before the
 store opens. The health sampler reads the count without the writer lock
@@ -2001,11 +2093,13 @@ no count is held, so equality with the walk is claimed only at quiescence.
 Required faults and enabling state: The six ingest fault points and three GC
 fault points in [`cas_fault_injection.rs`][t-faults]; SIGKILL at the
 [post-reservation and post-publish crash barriers][t-crash]; an object added
-or removed under `objects` by something other than the store.
+or removed under `objects` by something other than the store; a publication
+or unlink between a reconciliation walk and its comparison; a directory
+below `objects` that a reconciliation walk or the open census cannot read.
 Confidence: high - [Evidence](evidence/reported-artifact-usage-equals-on-disk-object-bytes-after-recovery.md).
 Every byte-changing path, both recovery branches, and every count update are
-source-verified; GC and purge reclamation are reached only by tests and
-benches.
+source-verified; GC reclamation runs in the daemon's memory-reviewer sweep,
+and purge is reached only by tests and benches.
 Existing check: [CAS checks](existing-checks.md#cas-usage-accounting) include
 the usage tests, the semantic oracle, `recover_twice`, the orphan
 reconciliation, the fallback walk's cancellation, and the retired live
@@ -2017,7 +2111,7 @@ Open questions: None.
 ### artifact-byte-decrement-paths-are-exercised
 
 Type: reachability
-Reachability: test-only
+Reachability: default-production
 Status: active
 Exercised: yes - [`kernel_artifact_usage.rs`][t-usage] reaches all five
 markers with a non-zero independent byte delta.
@@ -2037,17 +2131,18 @@ object past its grace; [`complete_pending_purge_locked`][purge-unlink]
 unlinking a purged digest; and a GC unlink that fails and is retried.
 `sometimes` because these are operational states, and executing the unlink
 lines with a zero-byte candidate would not exercise the accounting.
-Fault/timing angle: At HEAD only cleanup and startup recovery run in
-production; GC and purge decrements are reached only when a caller is added,
-so the production reconciliation at open and restore never sees them.
+Fault/timing angle: At HEAD cleanup, startup recovery, and the GC reclaim
+and retry run in production, GC through the daemon's [memory-reviewer
+sweep][daemon-maintenance]; the purge decrement is reached only when a
+caller is added, so the production reconciliation never sees it.
 Required faults and enabling state: `ArtifactIngestFault::AfterEvents` after a
 new publish; a writer that stops after `AfterPublish` (the usage test panics
 in the hook; the SIGKILL child at `INGEST_CRASH_POINT` constructs the same
 state); an invalidated reference aged past its grace; a purge request;
 `ArtifactGcFault::Unlink`.
 Confidence: high - [Evidence](evidence/artifact-byte-decrement-paths-are-exercised.md).
-The five unlink sites and the absence of daemon callers for GC and purge are
-source-verified.
+The five unlink sites, the daemon's GC caller, and the absence of a daemon
+purge caller are source-verified.
 Existing check: [Usage tests][t-usage] fire each marker; the
 [CAS fault tables](existing-checks.md#cas-usage-accounting) exercise the
 fault points and crash windows; all unaudited.
@@ -2369,8 +2464,14 @@ spring-forward and fall-back instants; at the full cap for
 calendar-impossible expressions; at a cap one minute short of an occurrence;
 from 30 hours before to 2 hours after every offset change of 1900, 1916, 1937,
 and 2026 in each zone; at a shift that lands civil time just past a jump's
-target; in a zone with a 30-minute daylight window; and at the edges of
-chrono's representable range.
+target; in a zone with a 30-minute daylight window, searched minute by minute
+on both sides of 1970; and at the edges of chrono's representable range. A
+recording zone shows every offset lookup falls within the cap, including
+when the skip runs past it and when a fall-back places the match before a
+probe.
+[Component tests][t-cron-parts] compare the byte parser with a frozen copy of
+the `&str` parser, the month-at-a-time date scan with a day-by-day scan, and
+the stack-built jitter seed with the formatted one.
 Guarantee: A field-jumping search never fires a schedule at a different
 instant, never fires one the stepper would never fire, and never runs past
 the cap.
@@ -2380,18 +2481,28 @@ returns the same `Option<i64>` as the test-only
 [`frozen_minute_stepper`][t-cron-frozen], a verbatim copy of the minute stepper
 it replaced, including `None` for unsatisfiable-but-valid expressions within
 the cap and `None` at unrepresentable instants;
-[`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter. The search
-visits only epoch minutes the stepper visits: from each minute it
-[skips][cron-skip] to the next civil midnight when the date fails, to the next
-civil hour when the hour fails, and to the next listed minute otherwise. How
-far a skip may run depends on what the zone's [`CronZone`][cron-zone] impl
-claims: `Never` (UTC and fixed offsets) skips straight to the target;
-`HourApart` stops the skip at the first minute whose offset differs, found by
+[`next_cron_occurrence`][occurrence] keeps the `ms != 0` filter, and
+`parse_cron` accepts exactly the expressions the `&str` parser accepted, with
+the same masks. Every zone lookup of the search falls on an epoch minute
+after `after_ms` and at or before the cap; a probe may pass a match that an
+offset change places before it, and the bisection returns to that minute.
+Without a zone lookup, a [date bound][cron-bound] moves the cursor to the first
+epoch minute that could reach the first listed civil minute still reachable
+under any offset chrono represents (just under a day either way); it returns
+`None` when no listed date falls before the cap, or at once when
+[no date can ever match][cron-never], and it is taken again once that civil
+minute becomes unreachable. From each minute the search then
+[skips][cron-skip] to the next listed minute today, to the first listed time
+of a matching date within two days, or to the next civil midnight. How far a
+skip may run depends on what the zone's [`CronZone`][cron-zone] impl claims:
+`Never` (UTC and fixed offsets) skips straight to the target; `HourApart`
+stops the skip at the first minute whose offset differs, found by
 [probes][cron-advance] every [`OFFSET_PROBE_MS`][cron-probe] (one hour) and
-bisection; `Unbounded` visits every minute. [`Local`][cron-local] claims
-`HourApart` when `TZ` is unset or names a zone file and `Unbounded` when `TZ`
-holds a POSIX rule, which may place offset changes minutes apart. `always`
-because the scheduler consumes the value directly as its due time.
+bisection, and at the bound's horizon and the cap; `Unbounded` visits every
+minute. [`Local`][cron-local] claims `HourApart` when `TZ` is unset or names a
+zone file and `Unbounded` when `TZ` holds a POSIX rule, which may place offset
+changes minutes apart. `always` because the scheduler consumes the value
+directly as its due time.
 Fault/timing angle: The stepper evaluates local civil fields for each epoch
 minute, so a spring-forward gap skips that day and a fall-back overlap
 matches the earlier instant first; the jump is exact while the offset holds,
@@ -2401,28 +2512,37 @@ parse of the chrono-tz 0.10.4 tables, put the closest two transitions about
 6.9 days apart (America/Cambridge_Bay, 2000). A custom zone file under
 `/etc/localtime` with shorter offset runs is outside that evidence.
 `parse_cron` accepts day-of-month 1..31 independent of month, so
-`0 0 30 2 *` is valid and unsatisfiable and searches the full
+`0 0 30 2 *` is valid and unsatisfiable within the full
 [`MAX_SEARCH_MS`][cap] (4 x 366 days) on the scheduler task
-([`next_due`][sched-due]); with `HourApart` the jump reaches the cap with
-about 35,000 offset probes instead of 2.1 million minute evaluations.
-[`matches_day`][vixie] implements Vixie OR semantics.
+([`next_due`][sched-due]); the search returns `None` for it before any zone
+lookup. A satisfiable expression whose next date is far pays hourly probes
+only across the window of about a day plus the zone's offset before its
+first reachable civil minute, because an offset of almost a day could bring
+any earlier minute there. [`matches_day`][vixie] implements Vixie OR
+semantics.
 Required faults and enabling state: A zone with DST; expressions such as
 `30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
 `0 0 29 2 *`; a zone whose offset changes sit less than an hour apart;
 `after_ms` at the `i64` extremes and at chrono's range edges.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
 The parser, the search, the cap, the conditional-note ceiling
-([`:369-373`][note-cap]), and the config acceptance
+([`:642-671`][note-cap]), and the config acceptance
 ([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the differential tests, the Vixie test, the extreme-instant test, and
-the golden; all unaudited.
+list the differential and component tests, the Vixie test, the
+extreme-instant test, and the golden; all unaudited.
 Impact: A scheduled task fires at the wrong instant or never.
 Open questions:
 
 - Should validation reject calendar-impossible dates instead? That is a
   config-acceptance change outside a latency change. (needs human input)
+- Should zone files claim offset runs longer than an hour, or POSIX rules be
+  classified by the runs they define? Under the current claims the search
+  costs about one `Local` lookup per hour of its last day; a six-day probe
+  cut New York's weekly search from about 2.4 us to 0.48 us in a local probe,
+  but a custom zone file or rule with shorter runs would break the stepper
+  equality. (needs human input)
 
 ### effective-config-reads-observe-a-tier-change-by-the-next-pass
 
@@ -2430,27 +2550,42 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - [The memo tests][t-memo] edit each tier and rewrite the
-guidance override with its mtime restored between loads, alternate a hostile
-and a quiet project root on one cache, serve a rejected user tier's admitted
-fallback from the memo, assert per-key warnings repeat on a memo hit, and
-assert that an unread source or an oversized merge is never memoized; the
-mtime test and the three raise-only tests still pass.
+guidance override with its mtime restored, each against a populated memo,
+alternate a hostile and a quiet project root on one cache, serve a rejected
+user tier's admitted fallback from the memo, assert per-key warnings repeat
+on a memo hit, and
+assert that an unread source, an oversized merge, a deduplicated chain whose
+retained capacity exceeds the bound, a model-TTL map whose B-tree nodes
+carry it past the bound, a tier whose entry is a dangling final symlink, a
+tier relinked to a target carrying its cached mtime, and a tier whose
+directory is exchanged between its stamp and its read are never memoized,
+and that a settled tier with a future mtime is; the mtime test and the three
+raise-only tests still pass.
 Guarantee: A config edit takes effect within one pass, as today, and a
 project tier can never gain privilege through a stale or cross-project cache
 entry.
-Check: `always` - After the user tier, the project tier, or the configured
-guidance override file changes on disk, the next [`effective_config`][eff-cfg]
-call for that `project_root` returns the merge of the new contents. The
+Check: `always` - After the user tier or the project tier changes on disk
+with a new mtime, or the configured guidance override file is rewritten on
+disk, the next [`effective_config`][eff-cfg] call for that `project_root`
+returns the merge of the new contents. The
 [merged memo][memo] records a [`SourceIdentity`][identity] for the user tier,
 the project tier, whose path names its root, and the override: the path and,
 without following a final symlink, its device, inode, length, modification
 time, and change time. It [serves][memo-serves] a load only when all of them
-match a fresh `stat`. A merge is [memoized][memo-store] only when every source
-was read and every source last changed more than
+match a fresh `stat`. A merge is [memoized][memo-store] only when every
+source was read, each source's stamp taken before its read equals the stamp
+of the file the read opened (the descriptor's `fstat`, or on a
+[`read_tier_cached`][tier-cached] hit the followed `stat` that matched its
+mtime), and every source's change time is more than
 [`RECENT_CHANGE_MARGIN`][memo-margin] (1 s) before the load began, so a
 rewrite inside one coarse timestamp tick after the memoized read cannot keep
-the stamp. A tier edit that restores its mtime still meets
-[`read_tier_cached`][tier-cached]'s existing mtime contract.
+the stamp; the change time alone gates this because every write and
+attribute change moves it, while a future modification time set by a tool or
+a skewed clock settles with it. A tier rewritten with its mtime restored
+misses the memo on its changed ctime and then takes
+[`read_tier_cached`][tier-cached]'s mtime fast path, which returns the cached
+`Value`, as the [mtime test][t-mtime] asserts; that is the tier staleness
+contract at HEAD, unchanged by the memo.
 [`merge_tiers_with_warnings`][merge] including [`ProjectRaiseOnly`][raise-only]
 runs on every miss unchanged, a hit returns the stored merge and warnings, and
 bind-frozen `SessionBinding.config` stays frozen. `always` because
@@ -2464,22 +2599,32 @@ project tier every call because one `ConfigCache` holds one project tier
 ([`read_tier_cached`][tier-cached]), so the payoff holds for one active root;
 the override edited without touching a tier. Every identity is taken before
 its read, so a rewrite racing the read leaves an identity the next load does
-not match. A tier or override whose read failed is never memoized, so a
-transient failure is retried on the next load. The memo is bounded by
+not match, and a source whose pre-read stamp differs from the file the read
+opened is not memoized: a file that appears or disappears between the two, a
+directory exchanged under the path between the two (which moves no file's
+inode or change time, so swapping it back would otherwise match the stamp
+and replay the other file's contents), a dangling link, a link with a
+target (which fails the `NOFOLLOW` read), and a link placed over a cached
+tier pointing at a target that carries the cached mtime (which the tier
+cache serves from its value while the stamp names the link).
+A tier or override whose read failed is never memoized, so a transient
+failure is retried on the next load. The memo is bounded by
 [`MERGED_CONFIG_RETAINED_BYTES_BOUND`][memo-bound], declared in the daemon's
-retained-resident total; a merge whose allocation estimate exceeds it is
-served unmemoized.
+retained-resident total; the estimate counts every vector and string at its
+capacity and charges each model-TTL map entry its share of a partially
+filled B-tree node, and a merge whose estimate exceeds the bound is served
+unmemoized.
 Required faults and enabling state: A user or project tier rewritten with a
 later mtime; `prompt_surface.guidance_override_path` configured and its file
 rewritten with its mtime restored; two project roots bound at once.
 Confidence: high - [Evidence](evidence/effective-config-reads-observe-a-tier-change-by-the-next-pass.md).
-[`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn],
-the memo, the per-pass callers ([`:5101`][call-reattach],
-[`:5362`][call-fire-caller], [`:5679`][call-wrapup]), and the bind freeze
-([`:12427`][call-bind], [binding doc][binding-doc]) are source-verified.
+[`effective_for_project`][eff-proj], [`effective_from_sources`][eff-warn],
+the memo, the per-pass callers ([`:5141`][call-reattach],
+[`:5550`][call-fire-caller], [`:5956`][call-wrapup]), and the bind freeze
+([`:13074`][call-bind], [binding doc][binding-doc]) are source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the memo tests, the mtime test, and the three privilege tests; all
-unaudited. Unit tests built with `fixed_config` (`lib.rs:4119`, returned at
+unaudited. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
 [`effective_config`][eff-cfg]) bypass the cache and cannot exercise this
 record.
 Impact: An edit is ignored for the life of the daemon, or a project tier
@@ -2768,8 +2913,8 @@ lines execute every [`IDLE_POLL`][sched-idle] on a default campaign while the
 list is empty, so `reachable` would be trivially satisfied.
 Fault/timing angle: The schedule [defaults to `None`][sched-default], and
 [`scheduled_projects`][sched-projects] drops any project whose schedule is
-`None` (`schedule: schedule?` at [`:14634-14647`][sched-filter]) or whose memories
-authority is not `MODULE` ([`:14617-14622`][sched-authority]), so a default
+`None` (`let schedule = schedule?;` at [`:15119`][sched-filter]) or whose memories
+authority is not `MODULE` ([`:15095-15100`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
@@ -2877,8 +3022,8 @@ oracle. The following notes define the evidence to request, not tickets.
 | [P5][p5] | Sequence deny-then-fail through an SDK fake. |
 | [T1][t1] | Assert the dead-byte inequality over a long publish and release run; decide the deferred bound first. |
 | [T2][t2] | Done: the zero-fill-free `to_vec` and its Miri witnesses landed; a mismatched span is witnessed at `copy_to_uninit`. |
-| [T3][t3] | Done: the fault arms are covered and the failure classification and charge class are decided in the record. |
-| [T4][t4] | Done: `a_direct_frame_serializes_after_its_handler_has_ended` reaches the window. |
+| [T3][t3] | Underfill, overflow, error, and panic are covered in-crate and through a real host; the failure classification and charge class are decided. Add a queued direct frame dropped by generation retirement. |
+| [T4][t4] | The marker test observes a serializer that runs after its handler ended. Lengthen the window with held egress when the marker misses it. |
 | [G1][g1] | Done: dedup at exactly the cap and a second ingest before orphan recovery are covered by the usage tests. |
 | [G2][g2] | Done: the walk is the oracle and the reconciliation; the usage tests compare the count against it at every quiescent point. |
 | [G3][g3] | Done: the usage tests record a non-zero byte delta per decrement path. |
@@ -3157,50 +3302,52 @@ evaluation of this area and its disposition are recorded in
 [batch]: ../../../../crates/shm-transport/src/backend/ring.rs#L2159
 [abort]: ../../../../crates/shm-transport/src/backend/ring.rs#L2271
 [prepare-commit]: ../../../../crates/shm-transport/src/backend/ring.rs#L2308
-[write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L2388
-[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L2520
+[write-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L1374
+[res-write]: ../../../../crates/shm-transport/src/backend/ring.rs#L1823
 [commit-underfill]: ../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
-[span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L33
-[span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L49-L52
-[shape]: ../../../../crates/shm-transport/src/lease.rs#L134-L156
-[copy-out]: ../../../../crates/shm-transport/src/lease.rs#L203
-[copy-out-uninit]: ../../../../crates/shm-transport/src/lease.rs#L221
-[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L251
-[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L367
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L847
+[span-safety]: ../../../../crates/shm-transport/src/lease.rs#L25-L35
+[span-ptr]: ../../../../crates/shm-transport/src/lease.rs#L51-L54
+[shape]: ../../../../crates/shm-transport/src/lease.rs#L159-L199
+[copy-out]: ../../../../crates/shm-transport/src/lease.rs#L211
+[copy-out-uninit]: ../../../../crates/shm-transport/src/lease.rs#L229
+[copy-step-out]: ../../../../crates/shm-transport/src/lease.rs#L269-L308
+[copy-in]: ../../../../crates/shm-transport/src/lease.rs#L318
+[copy-step-in]: ../../../../crates/shm-transport/src/lease.rs#L347-L384
+[to-vec]: ../../../../crates/shm-transport/src/lease.rs#L481
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L978
 [max-resident]: ../../../../crates/host-runtime/src/ring_transport.rs#L57-L58
 [affordable]: ../../../../crates/host-runtime/src/ring_transport.rs#L60
 [process-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L98
-[idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
-[publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L696-L704
-[receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L664
-[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1333-L1389
-[publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L788
-[commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L815
-[res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L830
+[idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L909-L978
+[publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L799-L806
+[receive-to-vec]: ../../../../crates/host-runtime/src/frame_channel.rs#L115-L125
+[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1377-L1440
+[publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L1452
+[commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L1485
+[res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L1497
 [config-validate]: ../../../../crates/host-runtime/src/config.rs#L127-L131
-[outbuf]: ../../../../crates/host-runtime/src/handler.rs#L320-L335
+[outbuf]: ../../../../crates/host-runtime/src/handler.rs#L327-L332
 [into-parts]: ../../../../crates/host-runtime/src/handler.rs#L394
 [from-writer]: ../../../../crates/host-runtime/src/handler.rs#L554
-[reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L517
-[direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
+[reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L574
+[direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L157-L183
 [native-reserve]: ../../../../crates/shm-transport/src/backend/ring.rs#L1345
-[settle-with]: ../../../../crates/daemon/src/lib.rs#L12657
-[fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L492-L503
+[settle-with]: ../../../../crates/daemon/src/lib.rs#L13351
+[fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L509-L544
 [ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
-[ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L365
-[ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L379-L405
-[ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L411-L420
-[ingest-reservation]: ../../../../crates/kernel/src/cas/ingest.rs#L424-L471
-[ingest-publish]: ../../../../crates/kernel/src/cas/ingest.rs#L476-L526
-[ingest-commit]: ../../../../crates/kernel/src/cas/ingest.rs#L580-L595
-[check-budget]: ../../../../crates/kernel/src/cas/ingest.rs#L950
-[release-res]: ../../../../crates/kernel/src/cas/ingest.rs#L1039-L1055
-[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1062
-[stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1498-L1500
-[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1525
-[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1582
+[ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L364
+[ingest-temp]: ../../../../crates/kernel/src/cas/ingest.rs#L378-L404
+[ingest-lock]: ../../../../crates/kernel/src/cas/ingest.rs#L410-L419
+[ingest-reservation]: ../../../../crates/kernel/src/cas/ingest.rs#L423-L470
+[ingest-publish]: ../../../../crates/kernel/src/cas/ingest.rs#L475-L523
+[ingest-commit]: ../../../../crates/kernel/src/cas/ingest.rs#L577-L592
+[check-budget]: ../../../../crates/kernel/src/cas/ingest.rs#L947
+[release-res]: ../../../../crates/kernel/src/cas/ingest.rs#L1036-L1052
+[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L1059
+[stat-bytes]: ../../../../crates/kernel/src/cas/ingest.rs#L1495-L1497
+[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1522
+[present]: ../../../../crates/kernel/src/cas/ingest.rs#L1728
 [startup]: ../../../../crates/kernel/src/cas/gc.rs#L102
 [startup-unreachable]: ../../../../crates/kernel/src/cas/gc.rs#L109-L136
 [reclaim-cand]: ../../../../crates/kernel/src/cas/gc.rs#L239
@@ -3211,25 +3358,36 @@ evaluation of this area and its disposition are recorded in
 [delete]: ../../../../crates/kernel/src/cas/deletion.rs#L239
 [cap-default]: ../../../../crates/kernel/src/cas/mod.rs#L24
 [cap-error]: ../../../../crates/kernel/src/cas/mod.rs#L318-L325
-[latch]: ../../../../crates/kernel/src/cas/mod.rs#L628
-[recover]: ../../../../crates/kernel/src/open.rs#L449-L454
-[lock-writer]: ../../../../crates/kernel/src/open.rs#L465-L474
+[latch]: ../../../../crates/kernel/src/cas/mod.rs#L631
+[recover]: ../../../../crates/kernel/src/open.rs#L462-L467
+[lock-writer]: ../../../../crates/kernel/src/open.rs#L479-L488
 [facts]: ../../../../crates/kernel/src/facts.rs#L145
 [maintenance]: ../../../../crates/kernel/src/retention.rs#L197
 [restore]: ../../../../crates/kernel/src/backup.rs#L422-L424
 [busy]: ../../../../crates/daemon/src/kernel_routes/state.rs#L290-L295
-[route-ingest]: ../../../../crates/kernel/src/cas/ingest.rs#L256
+[route-ingest]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L577
 [t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
 [t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L634
-[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L25-L32
-[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L48-L73
-[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L81-L95
-[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L99-L107
-[open-seed]: ../../../../crates/kernel/src/open.rs#L431
+[usage-count]: ../../../../crates/kernel/src/cas/usage.rs#L52-L59
+[usage-publish]: ../../../../crates/kernel/src/cas/usage.rs#L66-L88
+[usage-unlink]: ../../../../crates/kernel/src/cas/usage.rs#L96-L120
+[usage-reconcile]: ../../../../crates/kernel/src/cas/usage.rs#L135-L204
+[usage-reported]: ../../../../crates/kernel/src/cas/usage.rs#L208-L216
+[open-seed]: ../../../../crates/kernel/src/open.rs#L435
+[open-census]: ../../../../crates/kernel/src/open.rs#L320
+[usage-seed]: ../../../../crates/kernel/src/cas/usage.rs#L170-L190
+[usage-census]: ../../../../crates/kernel/src/cas/usage.rs#L278-L299
+[walk-concurrent]: ../../../../crates/kernel/src/cas/ingest.rs#L1539-L1608
+[walk-workers]: ../../../../crates/kernel/src/cas/ingest.rs#L1701
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[usage-tree-change]: ../../../../crates/kernel/src/cas/usage.rs#L41-L45
+[t-usage-raced-bound]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L570
+[t-usage-grown]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L395
+[t-usage-settled-order]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs#L609
+[daemon-maintenance]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[sample-interval]: ../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L16-L22
 
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7
@@ -3300,37 +3458,35 @@ evaluation of this area and its disposition are recorded in
 [diff-header]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
 [cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
-[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L125
-[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L152
-[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L230-L260
-[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L342
-[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L350
-[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L369-L373
+[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L120-L175
+[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L188
+[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L366
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L622
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L630
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
-[sched-default]: ../../../../crates/daemon/src/config.rs#L127
-[sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
+[sched-default]: ../../../../crates/daemon/src/config.rs#L152
+[sched-accept]: ../../../../crates/daemon/src/config.rs#L1226-L1244
 [eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4880-L4889
-[binding-doc]: ../../../../crates/daemon/src/lib.rs#L239-L240
-[call-reattach]: ../../../../crates/daemon/src/lib.rs#L5101
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5305
-[call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5362
-[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5679
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L12427
-[eff-proj]: ../../../../crates/daemon/src/config.rs#L437-L445
-[eff-warn-doc]: ../../../../crates/daemon/src/config.rs#L266-L267
-[eff-warn]: ../../../../crates/daemon/src/config.rs#L474-L587
-[eff-clone]: ../../../../crates/daemon/src/config.rs#L288
-[tier-cached]: ../../../../crates/daemon/src/config.rs#L668-L699
-[guidance]: ../../../../crates/daemon/src/config.rs#L732-L789
-[merge]: ../../../../crates/daemon/src/config.rs#L1016
-[raise-only]: ../../../../crates/daemon/src/config.rs#L816
-[memo]: ../../../../crates/daemon/src/config.rs#L339-L432
-[memo-serves]: ../../../../crates/daemon/src/config.rs#L353-L363
-[memo-store]: ../../../../crates/daemon/src/config.rs#L561-L585
-[memo-bound]: ../../../../crates/daemon/src/config.rs#L277
-[memo-margin]: ../../../../crates/daemon/src/config.rs#L282
-[identity]: ../../../../crates/daemon/src/config.rs#L284-L337
-[t-memo]: ../../../../crates/daemon/src/config.rs#L2606
+[binding-doc]: ../../../../crates/daemon/src/lib.rs#L236-L247
+[call-reattach]: ../../../../crates/daemon/src/lib.rs#L5141
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5443
+[call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5550
+[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5956
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L13074
+[eff-proj]: ../../../../crates/daemon/src/config.rs#L471-L481
+[eff-warn]: ../../../../crates/daemon/src/config.rs#L515-L638
+[tier-cached]: ../../../../crates/daemon/src/config.rs#L725-L761
+[merge]: ../../../../crates/daemon/src/config.rs#L1085
+[raise-only]: ../../../../crates/daemon/src/config.rs#L885-L887
+[memo]: ../../../../crates/daemon/src/config.rs#L371-L468
+[memo-serves]: ../../../../crates/daemon/src/config.rs#L388-L395
+[memo-store]: ../../../../crates/daemon/src/config.rs#L606-L636
+[memo-bound]: ../../../../crates/daemon/src/config.rs#L282
+[memo-margin]: ../../../../crates/daemon/src/config.rs#L287
+[identity]: ../../../../crates/daemon/src/config.rs#L312-L369
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2701-L3106
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2644-L2682
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
@@ -3352,22 +3508,25 @@ evaluation of this area and its disposition are recorded in
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
 [sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327
 [sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351
-[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L72
-[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L536
-[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L626
+[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L86
+[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L939-L952
+[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L929-L937
 [sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743
 [t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027
 [t-sched-marker]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
-[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1850-L2058
-[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1782
-[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L264
-[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L291-L326
-[cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L166
-[cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L168-L195
-[cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L198-L219
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14662
-[sched-authority]: ../../../../crates/daemon/src/lib.rs#L14681-L14686
-[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14698-L14711
+[t-cron-diff]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078-L2565
+[t-cron-frozen]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078
+[t-cron-parts]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L2623-L2791
+[cron-skip]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L525-L560
+[cron-bound]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L465-L506
+[cron-never]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L381-L393
+[cron-advance]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L567-L606
+[cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
+[cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
+[cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L15071-L15140
+[sched-authority]: ../../../../crates/daemon/src/lib.rs#L15095-L15100
+[sched-filter]: ../../../../crates/daemon/src/lib.rs#L15119
 
 Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
 `SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,

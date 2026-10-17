@@ -1147,3 +1147,82 @@ fn a_restore_under_the_same_handle_is_a_new_incarnation() {
         CommitReadError::IncarnationMismatch
     );
 }
+
+#[test]
+fn an_identified_capture_reads_the_tip_identity_and_incarnation_of_one_snapshot() {
+    let mut fixture = seeded();
+    let budget = EvalBudget::unbounded();
+    let identified = fixture
+        .store
+        .capture_identified_commit_read_target_within_budget(&budget)
+        .unwrap();
+    assert_eq!(identified.target.through_commit, fixture.tip());
+    assert_eq!(
+        identified.target,
+        fixture
+            .store
+            .capture_commit_read_target_within_budget(&budget)
+            .unwrap()
+    );
+    assert_eq!(
+        identified.database_incarnation_id,
+        fixture
+            .store
+            .database_incarnation_id_within_budget(&budget)
+            .unwrap()
+    );
+    let generation = identified
+        .classification_generation
+        .expect("no classification window overlaps a quiet capture");
+    assert_eq!(
+        identified.egress_snapshot(),
+        fixture.store.egress_snapshot().unwrap()
+    );
+
+    fixture.insert_domains("later", &[40]);
+    let later = fixture
+        .store
+        .capture_identified_commit_read_target_within_budget(&budget)
+        .unwrap();
+    assert_eq!(later.target.through_commit, fixture.tip());
+    assert!(later.target.through_commit > identified.target.through_commit);
+    assert_eq!(later.target.incarnation, identified.target.incarnation);
+    assert_eq!(
+        later.database_incarnation_id,
+        identified.database_incarnation_id
+    );
+    assert_eq!(later.classification_generation, Some(generation));
+
+    {
+        let _window = fixture.store.hold_classification_change_for_test();
+        let open = fixture
+            .store
+            .capture_identified_commit_read_target_within_budget(&budget)
+            .unwrap();
+        assert_eq!(
+            open.classification_generation, None,
+            "an open classification window leaves no reusable generation"
+        );
+        assert_eq!(open.target, later.target);
+    }
+    let closed = fixture
+        .store
+        .capture_identified_commit_read_target_within_budget(&budget)
+        .unwrap();
+    assert_ne!(
+        closed.classification_generation,
+        Some(generation),
+        "a closed window advances the generation, so an earlier snapshot no longer matches"
+    );
+    assert!(closed.classification_generation.is_some());
+
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        fixture
+            .store
+            .capture_identified_commit_read_target_within_budget(&cancelled)
+            .unwrap_err(),
+        KernelError::Deadline
+    );
+}

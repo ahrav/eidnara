@@ -17,26 +17,26 @@ consumer.
 
 - `next_occurrence` has two production consumers. The scheduler's
   [`next_due`][sched-due] calls [`next_cron_occurrence`][occurrence] with
-  `chrono::Local` and maps `None` to `i64::MAX` (`:414-416`). The conditional-note
+  `chrono::Local` and maps `None` to `i64::MAX` (`:735-737`). The conditional-note
   path calls `next_due_at_ms` through
   [`next_conditional_note_check_due_at`][note-due] with a clamp and jitter
-  (`:228-239`). This record witnesses the scheduler consumer; the note
+  (`:642-671`). This record witnesses the scheduler consumer; the note
   consumer has the fixture-zone golden and is covered by W6's Exercised.
 - [`MemoryClassifierScheduler::tick`][sched-tick] asks the host for
   `scheduled_projects()` and hands them to [`due_projects`][sched-due-projects],
-  which calls `next_due` for a project on first sight (`:277-282`) and again
-  when its schedule string changes (`:283-288`); a project is due when the
-  stored instant is at or before `now_ms` (`:289-291`).
+  which calls `next_due` for a project on first sight (`:366-371`) and again
+  when its schedule string changes (`:372-377`); a project is due when the
+  stored instant is at or before `now_ms` (`:378-380`).
 - The production host's [`scheduled_projects`][sched-projects] reads
   `memory_classifier_review_user_memories_schedule` from each bound route's frozen
-  config (`:13991`), skips roots whose memories authority is not `MODULE`
-  ([`:14086-14091`][sched-authority]), and drops a project with no schedule
-  through `schedule: schedule?` ([`:14111`][sched-filter]).
+  config (`:15087`), skips roots whose memories authority is not `MODULE`
+  ([`:15095-15100`][sched-authority]), and drops a project with no schedule
+  through `let schedule = schedule?;` ([`:15119`][sched-filter]).
 - The schedule [defaults to `None`][sched-default], so a default campaign
   yields an empty list, `next_due` is never called, and the loop waits
   [`IDLE_POLL`][sched-idle] (60 s) between ticks.
 - Config acceptance runs [`is_valid_conditional_note_cron`][valid] on the schedule
-  ([`config.rs:887`][sched-accept]), so only a parseable expression reaches
+  ([`config.rs:1232`][sched-accept]), so only a parseable expression reaches
   the scheduler.
 - The scheduler tests build the state directly. The [`project`][sched-fixture]
   helper activates `MODULE` memories authority on a real store
@@ -45,8 +45,8 @@ consumer.
   `ScriptedHost`; [`ManualClock`][sched-clock] moves time by hand.
   [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] uses
   `*/15 * * * *`, advances 14 then 15 minutes, and asserts the run at the
-  15-minute instant (`:680-704`). Its siblings cover backlog order, schedule
-  change, lease failures, and clock steps (`:707-1257`).
+  15-minute instant (`:1027-1051`). Its siblings cover backlog order, schedule
+  change, lease failures, and clock steps (`:1073-1369`).
 
 ## Failure scenario
 
@@ -80,7 +80,7 @@ route in `MODULE` authority. No existing test records the marker.
 ### Q: Is the enabling state constructible from existing fixtures?
 
 - Sources examined: the scheduler test module
-  ([`:458-1292`][sched-tests-span] as a whole), the `project`, `scripted`,
+  ([`:805-2599`][sched-tests-span] as a whole), the `project`, `scripted`,
   and `activate` helpers, `ManualClock`, and the production
   `scheduled_projects`.
 - Findings: Yes. Every scheduler test already constructs a scheduled project
@@ -103,24 +103,24 @@ route in `MODULE` authority. No existing test records the marker.
 - Missing evidence: None.
 - Conclusion: resolved with answer - the marker fires.
 
-[sched-idle]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L36
-[sched-tick]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L244-L261
-[sched-due-projects]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L265-L296
-[sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L412-L416
-[sched-clock]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L418-L427
-[sched-tests-span]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L458-L1292
-[sched-activate]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L562-L584
-[sched-fixture]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L586-L593
-[sched-scripted]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L595-L600
-[t-sched-cron]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L680-L704
-[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L14067-L14116
-[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L14086-L14091
-[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L14111
-[sched-default]: ../../../../../crates/daemon/src/config.rs#L127
-[sched-accept]: ../../../../../crates/daemon/src/config.rs#L887
-[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L205-L210
-[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L212-L218
-[note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L228-L239
+[sched-idle]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L86
+[sched-tick]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327-L347
+[sched-due-projects]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351-L385
+[sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735-L737
+[sched-clock]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L743-L748
+[sched-tests-span]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L805-L2599
+[sched-activate]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L905-L927
+[sched-fixture]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L929-L937
+[sched-scripted]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L939-L952
+[t-sched-cron]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027-L1051
+[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L15071-L15140
+[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L15095-L15100
+[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L15119
+[sched-default]: ../../../../../crates/daemon/src/config.rs#L152
+[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1232
+[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L622-L632
+[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L630-L632
+[note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671
 [cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
-[marker-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054
+[marker-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1054-L1071
 [due-projects-head]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L351-L385

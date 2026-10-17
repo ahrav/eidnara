@@ -16,16 +16,16 @@ bytes at stake, not to check the accounting.
 
 - The five unlink sites, each removing regular-file bytes under `objects`:
   - [`cleanup_failed_reference`][cleanup] unlinks at
-    [`:831-841`][cleanup-unlink] when `published_new` is true and no reference
+    [`:1111`][cleanup-unlink] when `published_new` is true and no reference
     or reservation protects the digest. It runs after a
     [`PublishOutcome::Published`][ingest-publish] when the directory sync,
     `verify_object`, the injected `after_directory_sync` fault, the CAS latch,
-    or the reference commit fails ([`:528-572`][ingest-postpublish],
-    [`:645-652`][ingest-commit-fail]).
+    or the reference commit fails ([`:531`][ingest-postpublish],
+    [`:648`][ingest-commit-fail]).
   - [`run_artifact_recovery`][recovery] promotes orphan `Live` rows through
     [`prepare_startup_cas_recovery`][startup] and runs `reclaim_candidate`
     over them, which reaches [`unlink_artifact`][unlink-artifact].
-  - [`reclaim_candidate`][reclaim-cand] unlinks at [`:212-289`][reclaim-cand]
+  - [`reclaim_candidate`][reclaim-cand] unlinks at [`:239-319`][reclaim-cand]
     after `prepare_reclaim` accepts a candidate past its grace; it is reached
     from [`run_artifact_gc`][run-gc], which
     [`run_staging_maintenance`][maintenance] calls after its own transaction.
@@ -81,7 +81,7 @@ records the path name and the delta. The
 faults and windows; none records a per-path delta.
 
 The usage reading is the independent `st_size` sum over `objects`
-(`regular_file_bytes`, `crates/kernel/src/cas/ingest.rs:1228-1288`), never a
+(`regular_file_bytes`, `crates/kernel/src/cas/ingest.rs:1517-1537`), never a
 counter under test, and each path has its own constant marker:
 `artifact-byte-decrement-paths-are-exercised-cleanup`, `-recovery`,
 `-reclaim`, `-purge`, and `-retry`.
@@ -122,35 +122,52 @@ enumerating the paths.
 - Missing evidence: None.
 - Conclusion: resolved with answer - all five markers fire.
 
-[ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L476-L526
-[ingest-postpublish]: ../../../../../crates/kernel/src/cas/ingest.rs#L528-L572
-[ingest-commit-fail]: ../../../../../crates/kernel/src/cas/ingest.rs#L645-L652
-[cleanup]: ../../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[cleanup-unlink]: ../../../../../crates/kernel/src/cas/ingest.rs#L831-L841
-[walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288
+### Q: Which decrement paths run in production?
+
+- Sources examined: the daemon's [memory-reviewer
+  sweep][daemon-maintenance] and the callers of `delete_artifact` in
+  `crates/daemon/src`.
+- Findings: The sweep calls `run_staging_maintenance`, so GC reclaim and the
+  retried GC unlink run in production beside cleanup and startup recovery.
+  No daemon source calls `delete_artifact`, so the purge decrement runs only
+  in kernel tests and benches. Each of the four production paths records a
+  tree change through [`unlink_counted_object`][usage-unlink-change], which
+  the maintenance reconciliation reads before it compares.
+- Missing evidence: None.
+- Conclusion: resolved with answer - four of five paths run in production;
+  the record's reachability is default-production.
+
+[ingest-publish]: ../../../../../crates/kernel/src/cas/ingest.rs#L479
+[ingest-postpublish]: ../../../../../crates/kernel/src/cas/ingest.rs#L531
+[ingest-commit-fail]: ../../../../../crates/kernel/src/cas/ingest.rs#L648
+[cleanup]: ../../../../../crates/kernel/src/cas/ingest.rs#L1059-L1123
+[cleanup-unlink]: ../../../../../crates/kernel/src/cas/ingest.rs#L1111
+[walk]: ../../../../../crates/kernel/src/cas/ingest.rs#L1517-L1537
 [reservation-ms]: ../../../../../crates/kernel/src/cas/ingest.rs#L36
-[startup]: ../../../../../crates/kernel/src/cas/gc.rs#L78-L180
-[run-gc]: ../../../../../crates/kernel/src/cas/gc.rs#L187-L210
-[reclaim-cand]: ../../../../../crates/kernel/src/cas/gc.rs#L212-L289
-[recovery]: ../../../../../crates/kernel/src/cas/gc.rs#L300-L341
-[unlink-artifact]: ../../../../../crates/kernel/src/cas/gc.rs#L403-L419
-[purge-unlink]: ../../../../../crates/kernel/src/cas/deletion.rs#L532-L556
-[purge-object]: ../../../../../crates/kernel/src/cas/deletion.rs#L589-L599
-[delete]: ../../../../../crates/kernel/src/cas/deletion.rs#L237
-[maintenance]: ../../../../../crates/kernel/src/retention.rs#L186-L211
+[startup]: ../../../../../crates/kernel/src/cas/gc.rs#L102-L204
+[run-gc]: ../../../../../crates/kernel/src/cas/gc.rs#L211-L237
+[reclaim-cand]: ../../../../../crates/kernel/src/cas/gc.rs#L239-L319
+[recovery]: ../../../../../crates/kernel/src/cas/gc.rs#L330-L371
+[unlink-artifact]: ../../../../../crates/kernel/src/cas/gc.rs#L442-L460
+[purge-unlink]: ../../../../../crates/kernel/src/cas/deletion.rs#L535-L558
+[purge-object]: ../../../../../crates/kernel/src/cas/deletion.rs#L592-L604
+[delete]: ../../../../../crates/kernel/src/cas/deletion.rs#L239
+[maintenance]: ../../../../../crates/kernel/src/retention.rs#L197-L202
 [route-ingest]: ../../../../../crates/daemon/src/kernel_routes/ingest.rs#L577
 [t-oracle]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-faults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
 [t-crash-point]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L34
-[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
+[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L903-L969
 [t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
-[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L25-L32
-[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L36-L40
-[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L48-L73
-[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L81-L95
-[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L99-L107
-[open-seed]: ../../../../../crates/kernel/src/open.rs#L431
-[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L449-L454
+[usage-count]: ../../../../../crates/kernel/src/cas/usage.rs#L52-L59
+[usage-publish]: ../../../../../crates/kernel/src/cas/usage.rs#L66-L88
+[usage-unlink]: ../../../../../crates/kernel/src/cas/usage.rs#L96-L120
+[usage-reconcile]: ../../../../../crates/kernel/src/cas/usage.rs#L135-L204
+[usage-reported]: ../../../../../crates/kernel/src/cas/usage.rs#L208-L216
+[open-seed]: ../../../../../crates/kernel/src/open.rs#L435
+[recover-reconcile]: ../../../../../crates/kernel/src/open.rs#L462-L467
 [maintenance-reconcile]: ../../../../../crates/kernel/src/retention.rs#L222-L223
 [t-usage]: ../../../../../crates/kernel/tests/kernel_artifact_usage.rs
+[daemon-maintenance]: ../../../../../crates/daemon/src/memory_reviewer/lifecycle.rs#L311-L325
+[usage-unlink-change]: ../../../../../crates/kernel/src/cas/usage.rs#L90-L120

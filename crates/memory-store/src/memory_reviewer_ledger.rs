@@ -476,7 +476,7 @@ fn load_receipt(
     project: &str,
     causal_identity: &str,
 ) -> rusqlite::Result<Option<MemoryReviewerReceipt>> {
-    conn.query_row(
+    conn.query_row_cached(
         &format!(
             "SELECT {RECEIPT_COLUMNS} FROM memory_reviewer_receipts WHERE project = ?1 AND causal_identity = ?2"
         ),
@@ -494,7 +494,7 @@ fn live_claim_expiry(
     claim_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT expires_at FROM note_eval_claims
           WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3
             AND terminal_kind IS NULL AND expires_at > ?4
@@ -527,7 +527,7 @@ fn current_authority(
     conn: &GuardedConn<'_>,
     project: &str,
 ) -> rusqlite::Result<Option<(String, i64)>> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT context_store_uuid, generation FROM authority
           WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
           ORDER BY context_store_uuid
@@ -551,7 +551,7 @@ fn ledger_clock_floor(
     project: &str,
     causal_identity: &str,
 ) -> rusqlite::Result<i64> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT MAX(
              COALESCE((SELECT MAX(created_at_ms, updated_at_ms) FROM memory_reviewer_jobs
                         WHERE project = ?1 AND causal_identity = ?2), 0),
@@ -576,7 +576,7 @@ fn job_open_deadline(
     causal_identity: &str,
     now_ms: i64,
 ) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT queue_deadline_ms FROM memory_reviewer_jobs
           WHERE project = ?1 AND causal_identity = ?2 AND state = 'ready' AND queue_deadline_ms > ?3",
         params![project, causal_identity, now_ms],
@@ -781,7 +781,7 @@ pub fn commit_memory_reviewer_attempt_in_tx(
     }
     // The attempt count and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier commit or terminal.
     let attempt_index: Option<i64> = conn
-        .query_row(
+        .query_row_cached(
             "INSERT INTO memory_reviewer_attempts (
                  project, causal_identity, generation, attempt_index, body_digest, request_bytes,
                  provider, model, credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms
@@ -840,7 +840,7 @@ fn response_allowance(
     project: &str,
     causal_identity: &str,
 ) -> rusqlite::Result<ResponseAllowance> {
-    let (raw, text): (i64, i64) = conn.query_row(
+    let (raw, text): (i64, i64) = conn.query_row_cached(
         "SELECT COALESCE(SUM(CASE WHEN terminal_kind IS NULL OR terminal_kind = 'unknown' OR raw_response_bytes IS NULL
                                   THEN ?3 ELSE MIN(raw_response_bytes, ?3) END), 0),
                 COALESCE(SUM(CASE WHEN terminal_kind IS NULL OR terminal_kind = 'unknown' OR decoded_text_bytes IS NULL
@@ -880,7 +880,7 @@ pub fn finish_memory_reviewer_attempt_in_tx(
     }
     // A terminal dated before the marker it closes is a clock that stepped back, refused by name like a lagging commit. A result that arrives at or after the attempt's own deadline is over budget: it cannot close the marker as complete, only as failed, cancelled, or unknown.
     let window: Option<(i64, i64)> = conn
-        .query_row(
+        .query_row_cached(
             "SELECT committed_at_ms, attempt_deadline_ms FROM memory_reviewer_attempts
               WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?4",
             params![
@@ -938,7 +938,7 @@ fn record_attempt_terminal_in_tx(
             })
             .transpose()
     };
-    let changed = conn.execute(
+    let changed = conn.execute_cached(
         "UPDATE memory_reviewer_attempts
             SET terminal_kind = ?6, terminal_at_ms = ?7, raw_response_bytes = ?8, decoded_text_bytes = ?9
           WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?5
@@ -1442,7 +1442,7 @@ impl MemoryStore {
         // A claim already terminal has nothing left to decide: the lease ledger replays its stored response or reports the conflict, and the clock and evidence checks for a new completion do not apply.
         let (claim_terminal, floor): (bool, i64) = self.inner.with_conn(|conn| {
             let terminal: Option<bool> = conn
-                .query_row(
+                .query_row_cached(
                     "SELECT terminal_kind IS NOT NULL FROM note_eval_claims
                       WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3",
                     params![project, MEMORY_REVIEWER_REVIEW_TASK.task_kind, claim_id],
@@ -1507,7 +1507,7 @@ impl MemoryStore {
                     (terminal, selection, completion.abstained_reason())
                 };
                 // The clock and evidence checks made before the lease are repeated here, serialized with the write: a dispatch that landed in between leaves a newer event, and a completion dated before it, or a publication no longer backed, is stale rather than written.
-                let backed: bool = tx.query_row(
+                let backed: bool = tx.query_row_cached(
                     "SELECT EXISTS(SELECT 1 FROM memory_reviewer_attempts
                                     WHERE project = ?1 AND causal_identity = ?2
                                       AND generation = ?3 AND terminal_kind = 'complete')",
@@ -1536,7 +1536,7 @@ impl MemoryStore {
                             .map_err(redaction_error)
                     })
                     .transpose()?;
-                let changed = tx.execute(
+                let changed = tx.execute_cached(
                     "UPDATE memory_reviewer_receipts
                         SET state = 'complete', terminal_kind = ?5, selected_generation = ?6,
                             selected_candidate_id = ?7, selected_payload_digest = ?8, updated_at_ms = ?9,
@@ -1604,6 +1604,29 @@ impl MemoryStore {
                 )?;
                 rows.collect()
             })
+            .map_err(Into::into)
+    }
+
+    /// The claim's expiry while it is live on this job at `now_ms`, read without a write; `None` once it expired, ended, or names another job.
+    pub fn live_memory_reviewer_claim_expiry(
+        &self,
+        project: &str,
+        causal_identity: &str,
+        claim_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<i64>, MemoryStoreError> {
+        check_project(project)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self
+            .claim_expiry_read_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            hook();
+        }
+        self.inner
+            .with_conn(|conn| live_claim_expiry(conn, project, causal_identity, claim_id, now_ms))
             .map_err(Into::into)
     }
 

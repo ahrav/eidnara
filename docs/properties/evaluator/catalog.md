@@ -194,12 +194,11 @@ Guarantee: Every hard case carries a coverage witness, a safety check evaluated
   coverage entry is `IncompleteCoverage`, never `Pass`.
 Check: `always` - for every fault report, `cuts` receipts every declared cut
   and `safety_checks_while_armed > 0`, both refused by `FaultReport::validate`
-  when missing; `liveness.verdict(bounds)` is met when the member is present.
-  `FaultReport::validate` accepts `liveness: None` (`if let Some(liveness)`;
-  `crates/eval-core/tests/fault.rs` validates a `liveness_less` report), so a
-  missing progress member is not refused by validation: the drive asserts it
-  per campaign, not the report. The three are report-wide today, so the check
-  is per report, not per hard case.
+  when missing; every liveness arm's `verdict(bounds)` is met, and the arms
+  together drive every `Lane` exactly once (`LaneNotDriven` for a lane no arm
+  drives, an empty `liveness` included; `LaneInTwoArms` for a lane two arms
+  claim), so a missing progress member is refused by the report. The three
+  are report-wide, so the check is per report, not per hard case.
 Fault/timing angle: The safety check runs while a fault is armed; a check that
   only runs after healing proves nothing about the armed window.
 Required faults and enabling state: A fault campaign with declared cuts, at
@@ -216,10 +215,6 @@ Impact: A hard case that was never actually reached, never checked while armed,
 Open questions:
 - Is the safety check owed per hard case or shared per checkpoint? Today it is
   shared per report. (needs human input)
-- Should `FaultReport::validate` require `liveness` once every campaign
-  declares its lanes? Today it accepts `None`, so the progress member of the
-  triple is asserted by the drive, not refused by the report. (needs human
-  input)
 
 ### rid-replay-equality-semantic-trace-digest
 

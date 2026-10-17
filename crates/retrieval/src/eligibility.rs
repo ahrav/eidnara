@@ -1,12 +1,14 @@
 //! Maps live projection occurrences to [`EligibilityCandidate`]s and carries the kernel's verdicts back as [`Disposition`]s. A verdict is snapshot-bound; the kernel revalidates canonical state at use.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityBatch,
-    EligibilityCandidate, EligibilityVerdict, KernelError, KernelStore, ProjectScope,
+    EligibilityCandidate, EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+    ProjectScope,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -228,6 +230,111 @@ fn kernel_candidates(candidates: &[OccurrenceCandidate]) -> Vec<EligibilityCandi
         .iter()
         .map(|candidate| candidate.candidate.clone())
         .collect()
+}
+
+/// The kernel judges a row by these terms alone.
+pub trait CandidateTerms {
+    fn object_id(&self) -> &str;
+    fn source_revision(&self) -> i64;
+    fn artifact_digest(&self) -> Option<&str>;
+}
+
+impl CandidateTerms for OccurrenceCandidate {
+    fn object_id(&self) -> &str {
+        &self.candidate.object_id
+    }
+
+    fn source_revision(&self) -> i64 {
+        self.candidate.source_revision
+    }
+
+    fn artifact_digest(&self) -> Option<&str> {
+        self.candidate.artifact_digest.as_deref()
+    }
+}
+
+/// `dispositions` preserves input order; `snapshot` and `incarnation` identify the state read by the batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dispositions {
+    pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
+    pub dispositions: Vec<Disposition>,
+}
+
+/// `judge_dispositions_within_budget` follows [`judge_occurrences_within_budget`]'s contract and returns dispositions in input order. Rows with equal object, revision, and artifact digest are judged once and share the verdict.
+///
+/// # Errors
+///
+/// As [`judge_occurrences_within_budget`]; the candidate bound counts every row, duplicates included, and the verdict count must equal the distinct candidate count.
+pub fn judge_dispositions_within_budget<T: CandidateTerms>(
+    kernel: &KernelStore,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    rows: &[T],
+    budget: &EvalBudget,
+) -> Result<Dispositions, KernelError> {
+    let distinct = Distinct::of(rows)?;
+    let batch = kernel.judge_eligibility_within_budget(
+        project,
+        destination,
+        &distinct.candidates,
+        budget,
+    )?;
+    aligned(distinct.candidates.len(), batch.verdicts.len())?;
+    Ok(Dispositions {
+        snapshot: batch.snapshot,
+        incarnation: batch.incarnation,
+        dispositions: distinct
+            .positions
+            .iter()
+            .map(|&position| batch.verdicts[position].into())
+            .collect(),
+    })
+}
+
+/// The batch's distinct kernel candidates in first-seen order, and the index of each input's candidate among them. One kernel batch judges every distinct candidate under one project, destination, and snapshot, so inputs with equal candidates share that verdict.
+struct Distinct {
+    candidates: Vec<EligibilityCandidate>,
+    positions: Vec<usize>,
+}
+
+/// The object, revision, and artifact digest a kernel verdict is keyed by.
+type Terms<'a> = (&'a str, i64, Option<&'a str>);
+
+impl Distinct {
+    /// `Distinct::of` applies [`MAX_ELIGIBILITY_CANDIDATES`] to the input count, so every duplicate occurrence consumes the kernel's per-call allowance.
+    fn of<T: CandidateTerms>(rows: &[T]) -> Result<Self, KernelError> {
+        if rows.len() > MAX_ELIGIBILITY_CANDIDATES {
+            return Err(KernelError::InvalidInput);
+        }
+        let mut seen: HashMap<Terms<'_>, usize> = HashMap::with_capacity(rows.len());
+        let mut distinct = Self {
+            candidates: Vec::new(),
+            positions: Vec::with_capacity(rows.len()),
+        };
+        let mut previous: Option<(Terms<'_>, usize)> = None;
+        for row in rows {
+            let key: Terms<'_> = (
+                row.object_id(),
+                row.source_revision(),
+                row.artifact_digest(),
+            );
+            let position = match previous {
+                Some((last, position)) if last == key => position,
+                _ => *seen.entry(key).or_insert_with(|| {
+                    distinct.candidates.push(EligibilityCandidate {
+                        object_id: key.0.to_owned(),
+                        source_revision: key.1,
+                        artifact_digest: key.2.map(str::to_owned),
+                    });
+                    distinct.candidates.len() - 1
+                }),
+            };
+            previous = Some((key, position));
+            distinct.positions.push(position);
+        }
+        Ok(distinct)
+    }
 }
 
 /// Pairs each candidate with its verdict by position. A batch whose verdict count differs from the candidate count is refused, so a short batch cannot drop candidates from a report that still reads as a judgment of every one.

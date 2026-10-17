@@ -145,6 +145,24 @@ impl Peer {
         )
     }
 
+    /// Counts connections accepted by serving tasks and drains pending connections from the peer-held listener. TCP handshake completion queues a connection before any application accept or data, so a client that connects and sends nothing is counted. The drain is nonblocking and restores the listener for a later serving call.
+    pub fn connection_count(&mut self) -> usize {
+        if let Some(listener) = self.listener.take() {
+            let listener = listener.into_std().unwrap();
+            let mut queued = 0;
+            loop {
+                match listener.accept() {
+                    Ok(_) => queued += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("draining the peer's accept queue: {error}"),
+                }
+            }
+            self.connections.fetch_add(queued, Ordering::SeqCst);
+            self.listener = Some(TcpListener::from_std(listener).unwrap());
+        }
+        self.connections.load(Ordering::SeqCst)
+    }
+
     /// Accepts one TLS connection, runs `before_read` after the handshake, reads one full request if the client sends one, answers with `respond`, and reports what it observed. The peer never asserts; a client that goes away early yields a partial report.
     pub fn serve(
         &mut self,

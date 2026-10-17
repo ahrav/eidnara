@@ -43,7 +43,7 @@ fn t0() -> i64 {
 struct Rig {
     _dirs: Vec<tempfile::TempDir>,
     kernel: Arc<KernelStore>,
-    store: MemoryStore,
+    store: Arc<MemoryStore>,
     kernel_incarnation: String,
     gate: Arc<MemoryReviewerStatus>,
 }
@@ -57,11 +57,13 @@ impl Rig {
             .database_incarnation_id_within_budget(&budget)
             .unwrap();
         let store_dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&MemoryStore::test_descriptor(
-            store_dir.path(),
-            "eidnara-history-summarizer-handoff-test",
-        ))
-        .unwrap();
+        let store = Arc::new(
+            MemoryStore::open(&MemoryStore::test_descriptor(
+                store_dir.path(),
+                "eidnara-history-summarizer-handoff-test",
+            ))
+            .unwrap(),
+        );
         let gate = Arc::new(MemoryReviewerStatus::default());
         gate.set_activation(ActivationState::Open);
         let rig = Rig {
@@ -174,17 +176,21 @@ impl Rig {
     fn reopen(&mut self) {
         let path = self._dirs[1].path().to_path_buf();
         let placeholder_dir = tempfile::tempdir().unwrap();
-        let placeholder = MemoryStore::open(&MemoryStore::test_descriptor(
-            placeholder_dir.path(),
-            "eidnara-history-summarizer-handoff-placeholder",
-        ))
-        .unwrap();
+        let placeholder = Arc::new(
+            MemoryStore::open(&MemoryStore::test_descriptor(
+                placeholder_dir.path(),
+                "eidnara-history-summarizer-handoff-placeholder",
+            ))
+            .unwrap(),
+        );
         drop(std::mem::replace(&mut self.store, placeholder));
-        self.store = MemoryStore::open(&MemoryStore::test_descriptor(
-            &path,
-            "eidnara-history-summarizer-handoff-test",
-        ))
-        .unwrap();
+        self.store = Arc::new(
+            MemoryStore::open(&MemoryStore::test_descriptor(
+                &path,
+                "eidnara-history-summarizer-handoff-test",
+            ))
+            .unwrap(),
+        );
         self._dirs.push(placeholder_dir);
     }
 
@@ -3181,4 +3187,285 @@ fn a_recovery_clocked_before_the_deadline_still_publishes_a_job_the_sweep_expire
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
     assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
+}
+
+/// Internal launches need a backend only for public runs; the reviewer's sender speaks to its provider itself.
+struct NoPublicModel;
+
+impl host_runtime::model_execution::backend::LlmExecutionBackend for NoPublicModel {
+    fn execute(
+        &self,
+        _request: host_runtime::model_execution::backend::BackendRequest,
+        _events: host_runtime::model_execution::backend::EventSink,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> host_runtime::model_execution::backend::BackendFuture {
+        Box::pin(async { unreachable!("no public run is started") })
+    }
+}
+
+/// #709 U1's producer-to-outcome chain for a conversation candidate: the real publication path validates a producer output, reserves, stages the subject, and activates the job; the production worker then finds nothing to run while the disclosure gate has no owner record, leaving the job pending rather than abstained; once the owner's record opens the gate, the run settles `owner_sensitive` with no attempt marker and no Kernel commit. The identities the chain carries join: the job's producer binding names firing 3 at the chunk's ordinal, the staged candidate is owned by exactly that job, and no other job row exists in any state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send_and_no_canonical_change()
+ {
+    use crate::memory_reviewer::activation::{
+        ACTIVATION_DIR, IDENTITY_RECORD, IDENTITY_SCHEMA, LiveIdentity,
+    };
+    use crate::memory_reviewer::coordinator::InvestigationPermits;
+    use crate::memory_reviewer::model_request::{Endpoint, Providers};
+    use crate::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
+    use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::open();
+    // The memory domain every production Kernel commits before a job can exist; the run's holds pin the commit snapshot.
+    rig.kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "history-summarizer-handoff-test".to_string(),
+                operation_key: "domain".to_string(),
+                request_digest: "0".repeat(64),
+                actor: "test".to_string(),
+                cause: "fixture".to_string(),
+            },
+            |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: DOMAIN.to_string(),
+                    object_id: "domain-memory".to_string(),
+                    name: DOMAIN.to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: DOMAIN.to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                Ok("domain".to_string())
+            },
+        )
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project_root = home.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let generation = {
+        let preparing = rig
+            .store
+            .authority_begin_prepare("ctx", PROJECT, "memories")
+            .unwrap();
+        rig.store
+            .authority_finish_prepare(
+                "ctx",
+                PROJECT,
+                "memories",
+                preparing.generation,
+                "h",
+                "h",
+                true,
+            )
+            .unwrap()
+            .generation
+    };
+    rig.store
+        .bind_authority_route("ctx", PROJECT, project_root.to_str().unwrap())
+        .unwrap();
+
+    // The real publication path: one accepted chunk, through validation, reservation, staging, and activation.
+    let mut awaiting = publishing_state(3);
+    awaiting.state = HistorySummarizerPhase::AwaitingProducer;
+    awaiting.chunk_range = Some(HistorySummarizerChunkRange {
+        from_ordinal: 2,
+        to_ordinal: 4,
+    });
+    rig.persist(awaiting);
+    publish_accepted_chunk(&rig, &rig.target(), 2).unwrap();
+    // Publication activated the job with the firing's progress, so the firing holds no reservation any longer.
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(PROJECT, 8, t0())
+        .unwrap();
+    assert_eq!(ready.len(), 1);
+    let job = ready[0].clone();
+    let identity = job.causal_identity.clone();
+    assert_eq!(job.producer.producer, "history_summarizer");
+    assert_eq!(
+        job.producer.firing_id,
+        format!("{}#3", rig_key()),
+        "the job's firing is firing 3 under this session's handoff key"
+    );
+    assert_eq!(job.producer.ordinal, 2, "the chunk's first ordinal");
+    let ReviewTarget::StagedSubject {
+        kernel_incarnation,
+        candidate_id,
+        payload_digest,
+    } = &job.target
+    else {
+        panic!("{:?}", job.target)
+    };
+    let binding = rig
+        .kernel
+        .staged_review_binding(
+            &kernel::ReviewStagedReference {
+                database_incarnation_id: kernel_incarnation.clone(),
+                candidate_id: candidate_id.clone(),
+                payload_digest: payload_digest.clone(),
+            },
+            t0(),
+        )
+        .expect("the staged candidate is sealed under the job");
+    assert_eq!(binding.project_digest, PROJECT_DIGEST);
+    assert_eq!(
+        binding.owner,
+        kernel::ReviewOwner::Job {
+            job_id: identity.clone()
+        },
+        "the staged candidate is owned by exactly this job"
+    );
+    let tip = rig.kernel.tip().unwrap();
+
+    // The provider endpoint is a listener nobody answers, so a send would show as a queued connection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = Endpoint::for_test(
+        "localhost",
+        listener.local_addr().unwrap().port(),
+        rustls::RootCertStore::empty(),
+    )
+    .unwrap();
+    let providers = Providers::at(endpoint.clone(), endpoint, "us-east-1");
+    let host = Arc::new(MemoryReviewerHost {
+        supervisor: Arc::new(host_runtime::model_execution::supervisor::Supervisor::new(
+            Arc::new(NoPublicModel),
+        )),
+        credentials: [(
+            "ANTHROPIC_API_KEY".to_string(),
+            zeroize::Zeroizing::new("sk-handoff".to_string()),
+        )]
+        .into_iter()
+        .collect(),
+        credential_identities: std::sync::OnceLock::from(
+            [(
+                "ANTHROPIC_API_KEY".to_string(),
+                "handoff-identity".to_string(),
+            )]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        ),
+        worker_instance: "worker-a".to_string(),
+    });
+    let kernel = Arc::clone(&rig.kernel);
+    let route = ProjectRoute {
+        project: PROJECT.to_string(),
+        authority_generation: generation,
+        roots: vec![RootScope {
+            project_root: project_root.clone(),
+            project_digest: PROJECT_DIGEST.to_string(),
+            scope_id: format!("project:{PROJECT_DIGEST}"),
+        }],
+    };
+    let status = Arc::new(MemoryReviewerStatus::default());
+    let worker = Arc::new(Worker {
+        host,
+        home: home.path().to_path_buf(),
+        store: Arc::clone(&rig.store),
+        kernel: Arc::new(move || Some(Arc::clone(&kernel))),
+        projects: Arc::new(move || vec![route.clone()]),
+        status: Arc::clone(&status),
+        permits: Arc::new(InvestigationPermits::default()),
+        providers: providers.clone(),
+        rejection: Default::default(),
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    // Publication ran under the handoff's own open gate; the worker reads the owner's record itself. With the record missing at the pass, the gate is closed, the job stays pending, and nothing abstains falsely. A gate already missing at publication is a nonadmission instead (`every_accepted_chunk_published_while_the_gate_is_not_open_records_the_nonadmission`).
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(
+        status.activation_state(),
+        ActivationState::Closed("missing")
+    );
+    assert!(matches!(
+        rig.store
+            .lookup_memory_reviewer_job(PROJECT, &identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        MemoryReviewerJobState::Ready(_)
+    ));
+    assert!(
+        rig.store
+            .lookup_memory_reviewer_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_none()
+    );
+
+    // The owner's record for exactly these stores opens the gate.
+    let record = serde_json::json!({
+        "schema": IDENTITY_SCHEMA,
+        "model": "claude-test",
+        "prompt_template_version": LiveIdentity::prompt_template_version(),
+        "step_schema_version": crate::memory_reviewer::steps::STEP_VERSION,
+        "scanner_ruleset_version": LiveIdentity::scanner_ruleset_version(),
+        "egress_policy_version": context_core::memory_reviewer_policy_union::MEMORY_REVIEWER_POLICY_UNION_VERSION,
+        "kernel_baseline_digest": kernel::kernel_baseline_digest().unwrap(),
+        "memstore_baseline_digest": memory_store::baseline_digest(),
+        "kernel_incarnation": rig.kernel_incarnation,
+        "memstore_incarnation": rig.store.memory_reviewer_store_incarnation().unwrap(),
+        "provider": providers.anthropic().identity(),
+        "credential": "ANTHROPIC_API_KEY",
+        "credential_fingerprint": "handoff-identity",
+        "provider_retention": {
+            "attested_by": "deployment owner",
+            "attested_on": "2026-09-18",
+            "retention_terms": "no provider is reached",
+            "finite_work_exposure_acknowledged": true
+        }
+    });
+    let dir = home.path().join(ACTIVATION_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join(IDENTITY_RECORD);
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(worker.pass(&cancel).await, 1);
+    assert_eq!(status.activation_state(), ActivationState::Open);
+    let receipt = rig
+        .store
+        .lookup_memory_reviewer_receipt(PROJECT, &identity)
+        .unwrap()
+        .expect("the run began a receipt");
+    assert_eq!(
+        receipt.terminal,
+        Some(MemoryReviewerReceiptTerminal::Abstained)
+    );
+    assert_eq!(
+        receipt.abstained_reason,
+        Some(AbstainReason::OwnerSensitive)
+    );
+    assert!(
+        rig.store
+            .list_memory_reviewer_attempts(PROJECT, &identity)
+            .unwrap()
+            .is_empty(),
+        "no attempt marker, so nothing was sent"
+    );
+    assert_eq!(rig.kernel.tip().unwrap(), tip, "no canonical commit");
+    let facts = rig.store.memory_reviewer_status_facts().unwrap();
+    assert_eq!(facts.attempts_attempted, 0);
+    assert_eq!(
+        (
+            facts.jobs_reserved,
+            facts.jobs_ready,
+            facts.jobs_expired,
+            facts.jobs_nonadmitted,
+            facts.jobs_failed,
+            facts.jobs_unknown,
+            facts.jobs_completed,
+            facts.jobs_abstained,
+        ),
+        (0, 0, 0, 0, 0, 0, 0, 1),
+        "exactly one job row, and it abstained"
+    );
+    assert_eq!(
+        listener.accept().map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "no connection reached the provider endpoint"
+    );
 }

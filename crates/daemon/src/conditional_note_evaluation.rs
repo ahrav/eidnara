@@ -48,100 +48,136 @@ struct ParsedCron {
     dow_restricted: bool,
 }
 
-fn is_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+fn read_number(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    let start = *at;
+    let mut value = 0u64;
+    while let Some(&byte) = bytes.get(*at) {
+        let digit = byte.wrapping_sub(b'0');
+        if digit > 9 {
+            break;
+        }
+        value = value.checked_mul(10)?.checked_add(u64::from(digit))?;
+        *at += 1;
+    }
+    (*at > start).then_some(value)
 }
 
-/// `dow_field` enables the 7→0 Sunday alias (after range validation, so `7`
-/// is accepted but `8` is rejected).
-fn parse_field(token: &str, min: u64, max: u64, dow_field: bool) -> Option<u64> {
+/// The ASCII bytes `char::is_whitespace` accepts.
+fn is_cron_space(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | 0x0B | 0x0C | b'\r' | b' ')
+}
+
+/// Reads one field from `bytes[*at..]` up to the end or an ASCII space and
+/// moves `*at` past it.
+fn parse_field(bytes: &[u8], at: &mut usize, min: u64, max: u64) -> Option<u64> {
     let mut mask = 0u64;
-    for part in token.split(',') {
-        let piece = part.trim();
-        if piece.is_empty() {
-            return None;
-        }
-
-        let mut split = piece.split('/');
-        let range_part = split.next().unwrap_or_default();
-        let step_part = split.next();
-        if split.next().is_some() {
-            return None;
-        }
-        let step = match step_part {
-            Some(s) => {
-                if !is_digits(s) {
-                    return None;
-                }
-                let step: u64 = s.parse().ok()?;
-                if step < 1 {
-                    return None;
-                }
-                step
-            }
-            None => 1,
-        };
-
-        let (lo, hi) = if range_part == "*" {
-            (min, max)
-        } else if range_part.contains('-') {
-            let mut bounds = range_part.split('-');
-            let lo_str = bounds.next().unwrap_or_default();
-            let hi_str = bounds.next().unwrap_or_default();
-            if bounds.next().is_some() || !is_digits(lo_str) || !is_digits(hi_str) {
-                return None;
-            }
-            (lo_str.parse().ok()?, hi_str.parse().ok()?)
+    loop {
+        let (lo, mut hi, single) = if bytes.get(*at) == Some(&b'*') {
+            *at += 1;
+            (min, max, false)
         } else {
-            if !is_digits(range_part) {
-                return None;
+            let lo = read_number(bytes, at)?;
+            if bytes.get(*at) == Some(&b'-') {
+                *at += 1;
+                (lo, read_number(bytes, at)?, false)
+            } else {
+                (lo, lo, true)
             }
-            let lo: u64 = range_part.parse().ok()?;
-            // `a/step` (no upper bound) means a..max by step.
-            let hi = if step_part.is_some() { max } else { lo };
-            (lo, hi)
         };
-
-        if lo < min || lo > max || hi < min || hi > max || lo > hi {
+        let step = if bytes.get(*at) == Some(&b'/') {
+            *at += 1;
+            // `a/step` (no upper bound) means a..max by step.
+            if single {
+                hi = max;
+            }
+            read_number(bytes, at)?
+        } else {
+            1
+        };
+        if step == 0 || lo < min || hi > max || lo > hi {
             return None;
         }
-
-        let mut v = lo;
-        while v <= hi {
-            let normalized = if dow_field && v == 7 { 0 } else { v };
-            mask |= 1u64 << normalized;
-            // A step near `u64::MAX` ends the range on overflow.
-            let Some(next) = v.checked_add(step) else {
-                break;
-            };
-            v = next;
+        mask |= if step == 1 {
+            (2u64 << hi) - (1u64 << lo)
+        } else {
+            let mut values = 0u64;
+            let mut value = lo;
+            while value <= hi {
+                values |= 1u64 << value;
+                // An overflowing step saturates above `hi`, ending the loop.
+                value = value.saturating_add(step);
+            }
+            values
+        };
+        match bytes.get(*at) {
+            Some(b',') => *at += 1,
+            Some(&byte) if !is_cron_space(byte) => return None,
+            _ => return Some(mask),
         }
     }
-    if mask == 0 { None } else { Some(mask) }
 }
 
 /// `parse_cron` accepts exactly five numeric fields: `minute hour dom month dow`.
 /// `parse_cron` rejects empty or whitespace-only input.
 fn parse_cron(expression: &str) -> Option<ParsedCron> {
-    let trimmed = expression.trim();
-    if trimmed.is_empty() {
-        return None;
+    if expression.is_ascii() {
+        parse_fields(expression.as_bytes())
+    } else {
+        // Non-ASCII whitespace separates fields too; rejoining the tokens
+        // with ASCII spaces keeps the same fields.
+        parse_fields(
+            expression
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .as_bytes(),
+        )
     }
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    if tokens.len() != 5 {
-        return None;
+}
+
+/// Fields split on the ASCII bytes `char::is_whitespace` accepts, the only
+/// separators in ASCII text.
+fn parse_fields(bytes: &[u8]) -> Option<ParsedCron> {
+    const BOUNDS: [(u64, u64); 5] = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)];
+    let mut at = 0;
+    let mut masks = [0u64; 5];
+    let mut starred = [false; 5];
+    for (field, &(min, max)) in BOUNDS.iter().enumerate() {
+        skip_spaces(bytes, &mut at);
+        starred[field] = bytes.get(at) == Some(&b'*');
+        // A lone `*`, the common field, is the whole range.
+        let lone_star = starred[field] && bytes.get(at + 1).is_none_or(|&byte| is_cron_space(byte));
+        masks[field] = if lone_star {
+            at += 1;
+            (2u64 << max) - (1u64 << min)
+        } else {
+            parse_field(bytes, &mut at, min, max)?
+        };
     }
-    Some(ParsedCron {
-        minute: parse_field(tokens[0], 0, 59, false)?,
-        hour: parse_field(tokens[1], 0, 23, false)?,
-        dom: parse_field(tokens[2], 1, 31, false)?,
-        month: parse_field(tokens[3], 1, 12, false)?,
-        dow: parse_field(tokens[4], 0, 7, true)?,
+    skip_spaces(bytes, &mut at);
+    let [minute, hour, dom, month, mut dow] = masks;
+    // Day-of-week `7` is Sunday's alias, accepted by the range check above and
+    // folded into `0` here.
+    if dow & (1 << 7) != 0 {
+        dow = dow & !(1 << 7) | 1;
+    }
+    (at == bytes.len()).then_some(ParsedCron {
+        minute,
+        hour,
+        dom,
+        month,
+        dow,
         // Vixie cron sets DOM_STAR/DOW_STAR from a leading `*`, so `*/2` and `*,5`
         // are unrestricted like a bare `*`.
-        dom_restricted: !tokens[2].starts_with('*'),
-        dow_restricted: !tokens[4].starts_with('*'),
+        dom_restricted: !starred[2],
+        dow_restricted: !starred[4],
     })
+}
+
+fn skip_spaces(bytes: &[u8], at: &mut usize) {
+    while bytes.get(*at).copied().is_some_and(is_cron_space) {
+        *at += 1;
+    }
 }
 
 fn mask_has(mask: u64, value: u32) -> bool {
@@ -196,36 +232,24 @@ impl CronZone for chrono::FixedOffset {
 }
 
 impl CronZone for chrono::Local {
-    /// chrono reads the zone from `/etc/localtime` when `TZ` is unset and from
-    /// the zone file `TZ` names when one exists; otherwise it parses `TZ` as a
-    /// POSIX rule, which may place offset changes minutes apart.
     fn offset_changes(&self) -> OffsetChanges {
-        let Some(value) = std::env::var_os("TZ") else {
-            return OffsetChanges::HourApart;
-        };
-        let name = std::path::Path::new(&value);
-        let name = name.strip_prefix(":").unwrap_or(name);
-        let zone_file = if name.is_absolute() {
-            name.to_path_buf()
-        } else {
-            std::path::Path::new("/usr/share/zoneinfo").join(name)
-        };
-        if !name.as_os_str().is_empty() && zone_file.is_file() {
-            OffsetChanges::HourApart
-        } else {
-            OffsetChanges::Unbounded
-        }
+        local_offset_changes(std::env::var_os("TZ").as_deref())
+    }
+}
+
+fn local_offset_changes(tz: Option<&std::ffi::OsStr>) -> OffsetChanges {
+    match tz {
+        Some(value) if value.as_encoded_bytes().contains(&b',') => OffsetChanges::Unbounded,
+        _ => OffsetChanges::HourApart,
     }
 }
 
 /// `next_occurrence` returns the first instant strictly after `after_ms` whose local civil time in `tz` matches `cron`.
-/// It visits the same epoch minutes the minute stepper would, but jumps over every
-/// minute whose civil fields cannot match: to the next civil midnight when the date
-/// fails, to the next civil hour when the hour fails, and to the next listed minute
-/// otherwise. Civil time moves with epoch time while the offset holds, so in a zone
-/// whose offsets last an hour a jump stops early at the first minute whose offset
-/// differs, and the search resumes there; in a zone without that bound the search
-/// steps one minute at a time.
+/// The search skips an epoch minute only when its civil time cannot match.
+/// [`earliest_possible_match_ms`] bounds civil time by the zone's offsets,
+/// [`minutes_until_candidate`] assumes the current offset, and
+/// [`advance_while_offset_holds`] stops at the first changed offset in a zone
+/// whose offsets last an hour. Other zones advance one minute at a time.
 /// `next_occurrence` returns `None` when no match occurs by `after_ms + min(MAX_SEARCH_MS, max_search_ms)`.
 fn next_occurrence<Tz: CronZone>(
     cron: &ParsedCron,
@@ -233,59 +257,311 @@ fn next_occurrence<Tz: CronZone>(
     max_search_ms: i64,
     tz: &Tz,
 ) -> Option<i64> {
-    let changes = tz.offset_changes();
     let mut cursor_ms = after_ms
         .div_euclid(MINUTE_MS)
         .checked_mul(MINUTE_MS)?
         .checked_add(MINUTE_MS)?;
     let cap_ms = after_ms.saturating_add(max_search_ms.clamp(0, MAX_SEARCH_MS));
+    if !some_date_could_match(cron) {
+        return None;
+    }
+    // The search asks the zone for its claim at its first civil time, so a
+    // search the date bound settles never asks, and narrows the date bound to
+    // the exact offset once a zone claims it never changes.
+    let mut changes = None;
+    let mut offsets_ms = -MAX_OFFSET_MS..=MAX_OFFSET_MS;
+    // The date bound leaves the cursor in place for every cursor before
+    // `bound_until_ms`. When every date could match, it never moves the cursor
+    // and never runs out before the cap.
+    let every_date = cron.month == ALL_MONTHS && !cron.dom_restricted && !cron.dow_restricted;
+    let mut bound_until_ms = if every_date { i64::MAX } else { i64::MIN };
+    let mut cursor_civil = None;
     while cursor_ms <= cap_ms {
+        if cursor_ms >= bound_until_ms {
+            let (possible_ms, until_ms) =
+                earliest_possible_match_ms(cron, cursor_ms, cap_ms, &offsets_ms)?;
+            if possible_ms > cursor_ms {
+                cursor_ms = possible_ms;
+                cursor_civil = None;
+                continue;
+            }
+            bound_until_ms = until_ms;
+        }
         // `timestamp_millis_opt` returns no civil time outside chrono's representable
         // date range; an unrepresentable `cursor_ms` makes the search return `None`.
-        let civil = tz.timestamp_millis_opt(cursor_ms).single()?;
-        let skip_minutes = minutes_until_candidate(cron, &civil);
+        let civil = match cursor_civil.take() {
+            Some(civil) => civil,
+            None => tz.timestamp_millis_opt(cursor_ms).single()?,
+        };
+        let changes = *changes.get_or_insert_with(|| tz.offset_changes());
+        let offset = civil.offset().fix();
+        if changes == OffsetChanges::Unbounded {
+            // Stepping minute by minute, most minutes fail on the time of
+            // day, which the epoch minute and offset give without a date.
+            let local_minute =
+                (cursor_ms + i64::from(offset.local_minus_utc()) * 1000).div_euclid(MINUTE_MS);
+            let hour = local_minute.div_euclid(60).rem_euclid(24) as u32;
+            let minute = local_minute.rem_euclid(60) as u32;
+            if !mask_has(cron.minute, minute) || !mask_has(cron.hour, hour) {
+                cursor_ms = cursor_ms.checked_add(MINUTE_MS)?;
+                continue;
+            }
+        }
+        // A `DateTime` reads its fields from the local time chrono wraps past
+        // the ends of its range, so only a representable local time is read
+        // directly.
+        let skip_minutes = match civil.naive_utc().checked_add_offset(offset) {
+            Some(local) => minutes_until_candidate(cron, &local, changes),
+            None => minutes_until_candidate(cron, &civil, changes),
+        };
         if skip_minutes == 0 {
             return Some(cursor_ms);
         }
         cursor_ms = match changes {
-            OffsetChanges::Never => cursor_ms.checked_add(skip_minutes * MINUTE_MS)?,
-            OffsetChanges::HourApart => {
-                let target_ms = cursor_ms.checked_add(skip_minutes * MINUTE_MS)?;
-                advance_while_offset_holds(tz, cursor_ms, civil.offset().fix(), target_ms)
+            OffsetChanges::Never => {
+                let offset_ms = i64::from(offset.local_minus_utc()) * 1000;
+                if offsets_ms != (offset_ms..=offset_ms) {
+                    offsets_ms = offset_ms..=offset_ms;
+                    if !every_date {
+                        bound_until_ms = i64::MIN;
+                    }
+                }
+                cursor_ms.checked_add(skip_minutes * MINUTE_MS)?
             }
-            OffsetChanges::Unbounded => cursor_ms.checked_add(MINUTE_MS)?,
+            OffsetChanges::HourApart => {
+                // A skip stops where the date bound must be taken again. A
+                // skip past the cap stops at the last minute at or before it:
+                // once the offset holds through that minute, every minute
+                // within the cap misses, and the search ends there.
+                let bound_stop_ms = if bound_until_ms > cursor_ms {
+                    ceil_to_minute(bound_until_ms)
+                } else {
+                    i64::MAX
+                };
+                let last_ms = cap_ms.div_euclid(MINUTE_MS) * MINUTE_MS;
+                let target_ms = cursor_ms
+                    .checked_add(skip_minutes * MINUTE_MS)?
+                    .min(bound_stop_ms);
+                if target_ms <= last_ms {
+                    let (reached_ms, reached_civil) =
+                        advance_while_offset_holds(tz, cursor_ms, offset, target_ms);
+                    cursor_civil = reached_civil;
+                    reached_ms
+                } else if cursor_ms == last_ms {
+                    return None;
+                } else {
+                    match advance_while_offset_holds(tz, cursor_ms, offset, last_ms) {
+                        (_, Some(_)) => return None,
+                        (changed_ms, None) => {
+                            cursor_civil = None;
+                            changed_ms
+                        }
+                    }
+                }
+            }
+            OffsetChanges::Unbounded => cursor_ms.checked_add(skip_minutes * MINUTE_MS)?,
         };
     }
     None
 }
 
-/// Whole minutes from `civil` to the next civil minute that could match `cron`
-/// while the offset holds, or zero when `civil` matches.
-fn minutes_until_candidate<Tz: TimeZone>(cron: &ParsedCron, civil: &chrono::DateTime<Tz>) -> i64 {
-    let minute = civil.minute();
-    let minute_of_day = i64::from(civil.hour() * 60 + minute);
-    if !mask_has(cron.month, civil.month())
-        || !matches_day(cron, civil.day(), civil.weekday().num_days_from_sunday())
-    {
-        return 24 * 60 - minute_of_day;
+fn ceil_to_minute(ms: i64) -> i64 {
+    ms.saturating_add(MINUTE_MS - 1).div_euclid(MINUTE_MS) * MINUTE_MS
+}
+
+/// Bits 1 through 12 of [`ParsedCron::month`].
+const ALL_MONTHS: u64 = 0x1FFE;
+const MONTHS_OF_31_DAYS: u64 = 0b1_0101_1010_1010;
+const MONTHS_OF_30_DAYS: u64 = 0b0_1010_0101_0000;
+
+/// Whether any date in any year passes the date fields. A day-of-week list
+/// matches some day of every month, so only a day-of-month list, with the day
+/// of the week unrestricted, can rule out every date: each listed month is
+/// shorter than every listed day, as in `0 0 30 2 *`.
+fn some_date_could_match(cron: &ParsedCron) -> bool {
+    if !cron.dom_restricted || cron.dow_restricted {
+        return true;
     }
-    if !mask_has(cron.hour, civil.hour()) {
-        return 60 - i64::from(minute);
-    }
-    if mask_has(cron.minute, minute) {
-        return 0;
-    }
-    // Bits above 59 are never set, so an empty remainder means the next hour.
-    let later = (cron.minute >> minute) >> 1;
-    if later == 0 {
-        60 - i64::from(minute)
+    let longest_month = if cron.month & MONTHS_OF_31_DAYS != 0 {
+        31
+    } else if cron.month & MONTHS_OF_30_DAYS != 0 {
+        30
     } else {
-        i64::from(later.trailing_zeros()) + 1
+        29
+    };
+    cron.dom & ((2u64 << longest_month) - 2) != 0
+}
+
+/// Whether a civil date could match `cron`: its month is listed and its day
+/// passes the Vixie day-of-month and day-of-week rule.
+fn date_could_match(cron: &ParsedCron, date: &impl Datelike) -> bool {
+    mask_has(cron.month, date.month())
+        && matches_day(cron, date.day(), date.weekday().num_days_from_sunday())
+}
+
+fn first_matching_date(
+    cron: &ParsedCron,
+    date: chrono::NaiveDate,
+    last: chrono::NaiveDate,
+) -> Option<chrono::NaiveDate> {
+    let (mut year, mut month, mut from_day) = (date.year(), date.month(), date.day());
+    loop {
+        if mask_has(cron.month, month) {
+            let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+            let days = matching_days(cron, &first) >> from_day << from_day;
+            if days != 0 {
+                let found = first.with_day(days.trailing_zeros())?;
+                return (found <= last).then_some(found);
+            }
+        }
+        let later = cron.month >> (month + 1);
+        (year, month) = if later == 0 {
+            (year.checked_add(1)?, cron.month.trailing_zeros())
+        } else {
+            (year, month + 1 + later.trailing_zeros())
+        };
+        from_day = 1;
+        if (year, month) > (last.year(), last.month()) {
+            return None;
+        }
     }
 }
 
+fn matching_days(cron: &ParsedCron, first: &chrono::NaiveDate) -> u64 {
+    let month_days = (2u64 << first.num_days_in_month()) - 2;
+    let weekday_days = || {
+        // Day `d` falls on weekday `(w + d - 1) % 7`, where `w` is the
+        // weekday of the 1st; rotating the weekday bits by `w` and repeating
+        // them every seven days gives that pattern from day 1.
+        let weekdays = cron.dow & 0x7F;
+        let w = first.weekday().num_days_from_sunday();
+        let rotated = ((weekdays >> w) | (weekdays << (7 - w))) & 0x7F;
+        (rotated * 0x1020_4081) << 1
+    };
+    let days = match (cron.dom_restricted, cron.dow_restricted) {
+        (true, true) => cron.dom | weekday_days(),
+        (true, false) => cron.dom,
+        (false, true) => weekday_days(),
+        (false, false) => month_days,
+    };
+    days & month_days
+}
+
+/// The largest offset chrono represents: a [`chrono::FixedOffset`] is whole
+/// seconds strictly within a day of UTC.
+const MAX_OFFSET_MS: i64 = 24 * 60 * MINUTE_MS - 1000;
+
+/// The first epoch minute at or after `cursor_ms` whose civil time could match
+/// `cron` when every offset, civil time minus epoch time, lies in `offsets_ms`,
+/// paired with the instant from which the bound must be taken again.
+/// Each minute from `cursor_ms` on has a civil time of at least
+/// `earliest = cursor_ms + offsets_ms.start()`, so the first civil minute
+/// that could match and still contains a time from `earliest` on bounds every
+/// match; no earlier minute reaches it with an offset up to
+/// `offsets_ms.end()`. That civil minute stays the bound for every cursor
+/// whose `earliest` is still inside or before it. `None` means no epoch minute
+/// up to `cap_ms` can match; at the ends of chrono's representable range the
+/// result is `cursor_ms`, to be bounded again at the next cursor.
+fn earliest_possible_match_ms(
+    cron: &ParsedCron,
+    cursor_ms: i64,
+    cap_ms: i64,
+    offsets_ms: &std::ops::RangeInclusive<i64>,
+) -> Option<(i64, i64)> {
+    let civil = |ms: Option<i64>| Some(chrono::DateTime::from_timestamp_millis(ms?)?.naive_utc());
+    let unbounded = Some((cursor_ms, i64::MIN));
+    let (Some(earliest), Some(latest)) = (
+        civil(cursor_ms.checked_add(*offsets_ms.start())),
+        civil(cap_ms.checked_add(*offsets_ms.end())),
+    ) else {
+        return unbounded;
+    };
+    let listed_today = date_could_match(cron, &earliest)
+        .then(|| next_listed_time(cron, earliest.hour(), earliest.minute()))
+        .flatten();
+    let (date, (hour, minute)) = match listed_today {
+        Some(time) => (earliest.date(), time),
+        None => {
+            // A date past `latest` is later than the civil time of every
+            // epoch minute up to `cap_ms`.
+            let tomorrow = earliest.date().succ_opt()?;
+            let date = first_matching_date(cron, tomorrow, latest.date())?;
+            (
+                date,
+                (cron.hour.trailing_zeros(), cron.minute.trailing_zeros()),
+            )
+        }
+    };
+    let Some(first) = date.and_hms_opt(hour, minute, 0) else {
+        return unbounded;
+    };
+    let first_ms = first.and_utc().timestamp_millis();
+    // A minute matches only when its civil time reaches `first`, so its epoch
+    // time is at least `first_ms - offsets_ms.end()`, rounded up here to a
+    // whole minute. `first` holds civil times before `first_ms + MINUTE_MS`.
+    let possible_ms =
+        (first_ms - offsets_ms.end() + MINUTE_MS - 1).div_euclid(MINUTE_MS) * MINUTE_MS;
+    let until_ms = first_ms + MINUTE_MS - offsets_ms.start();
+    Some((cursor_ms.max(possible_ms), until_ms))
+}
+
+/// The first listed time of day at or after `hour:minute`.
+fn next_listed_time(cron: &ParsedCron, hour: u32, minute: u32) -> Option<(u32, u32)> {
+    if mask_has(cron.hour, hour) {
+        let minutes = cron.minute >> minute << minute;
+        if minutes != 0 {
+            return Some((hour, minutes.trailing_zeros()));
+        }
+    }
+    let hours = cron.hour >> (hour + 1) << (hour + 1);
+    (hours != 0).then(|| (hours.trailing_zeros(), cron.minute.trailing_zeros()))
+}
+
+/// Whole minutes from `local` to the next civil minute that could match
+/// `cron` while the offset holds, or zero when `local` matches. A zone whose
+/// offsets may change at any minute moves one minute. Otherwise the next
+/// minute is later today, the first listed time of the next of the following
+/// [`LOOKAHEAD_DAYS`] dates that could match, or the next civil midnight.
+fn minutes_until_candidate(
+    cron: &ParsedCron,
+    local: &(impl Datelike + Timelike),
+    changes: OffsetChanges,
+) -> i64 {
+    let (hour, minute) = (local.hour(), local.minute());
+    let hour_listed = mask_has(cron.hour, hour);
+    let date_listed = date_could_match(cron, local);
+    if mask_has(cron.minute, minute) && hour_listed && date_listed {
+        return 0;
+    }
+    if changes == OffsetChanges::Unbounded {
+        return 1;
+    }
+    if date_listed && let Some((h, m)) = next_listed_time(cron, hour, minute) {
+        return i64::from(h * 60 + m) - i64::from(hour * 60 + minute);
+    }
+    let to_midnight = i64::from(24 * 60 - (hour * 60 + minute));
+    let first_listed = i64::from(cron.hour.trailing_zeros() * 60 + cron.minute.trailing_zeros());
+    let today = local.num_days_from_ce();
+    (1..=LOOKAHEAD_DAYS)
+        .map_while(|days| {
+            let date = chrono::NaiveDate::from_num_days_from_ce_opt(today.checked_add(days)?)?;
+            Some((days, date))
+        })
+        .find(|(_, date)| date_could_match(cron, date))
+        .map_or(to_midnight, |(days, _)| {
+            to_midnight + i64::from(days - 1) * 24 * 60 + first_listed
+        })
+}
+
+/// Days past today a single skip may cross. A search that the date bound
+/// leaves in place is within about two days of the first civil time that
+/// could match, so two days let one skip, and its hourly offset probes, run
+/// from there to that time.
+const LOOKAHEAD_DAYS: i32 = 2;
+
 /// The first epoch minute in `(from_ms, target_ms]` whose offset differs from
-/// `offset` or that has no civil time, or `target_ms` when none does. Probes
+/// `offset` or that has no civil time, or `target_ms` when none does, with the
+/// civil time at `target_ms` in the second case. Probes
 /// run every [`OFFSET_PROBE_MS`] and at `target_ms`; because each offset lasts
 /// at least that long, two probes that report `offset` hold it between them.
 fn advance_while_offset_holds<Tz: TimeZone>(
@@ -293,21 +569,25 @@ fn advance_while_offset_holds<Tz: TimeZone>(
     from_ms: i64,
     offset: chrono::FixedOffset,
     target_ms: i64,
-) -> i64 {
-    let holds = |ms: i64| {
+) -> (i64, Option<chrono::DateTime<Tz>>) {
+    let civil_holding = |ms: i64| {
         tz.timestamp_millis_opt(ms)
             .single()
-            .is_some_and(|civil| civil.offset().fix() == offset)
+            .filter(|civil| civil.offset().fix() == offset)
     };
     let mut held_ms = from_ms;
-    while held_ms < target_ms {
+    loop {
         let probe_ms = held_ms.saturating_add(OFFSET_PROBE_MS).min(target_ms);
-        if !holds(probe_ms) {
-            return first_change_after(held_ms, probe_ms, holds);
+        match civil_holding(probe_ms) {
+            Some(civil) if probe_ms == target_ms => return (target_ms, Some(civil)),
+            Some(_) => held_ms = probe_ms,
+            None => {
+                let changed_ms =
+                    first_change_after(held_ms, probe_ms, |ms| civil_holding(ms).is_some());
+                return (changed_ms, None);
+            }
         }
-        held_ms = probe_ms;
     }
-    target_ms
 }
 
 /// Bisects `(held_ms, changed_ms]`, both epoch minutes, to the first minute
@@ -395,12 +675,28 @@ fn deterministic_jitter_ms(interval_ms: i64, note_id: i64, hash: Option<&str>) -
     if max <= 0 {
         return 0;
     }
-    let seed = format!("{note_id}:{}", hash.unwrap_or(""));
-    let mut h: u32 = 2166136261;
-    for unit in seed.encode_utf16() {
-        h ^= u32::from(unit);
-        h = h.wrapping_mul(16777619);
+    // The jitter hash applies FNV-1a to the UTF-16 units of
+    // `"{note_id}:{hash}"`; the decimal id and the colon are ASCII, so their
+    // units equal their bytes.
+    let mut digits = [0u8; 20];
+    let mut start = digits.len();
+    let mut rest = note_id.unsigned_abs();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
     }
+    let sign = if note_id < 0 { &b"-"[..] } else { &[] };
+    let ascii = sign.iter().chain(&digits[start..]).chain(b":");
+    let units = ascii
+        .map(|&byte| u16::from(byte))
+        .chain(hash.unwrap_or("").encode_utf16());
+    let h = units.fold(2166136261u32, |h, unit| {
+        (h ^ u32::from(unit)).wrapping_mul(16777619)
+    });
     i64::from(h) % (max * 2 + 1) - max
 }
 
@@ -1910,6 +2206,54 @@ mod tests {
     }
 
     #[test]
+    fn a_minute_by_minute_search_matches_the_stepper_on_both_sides_of_the_epoch() {
+        // A seconds-bearing daylight shift, with instants before 1970 where
+        // epoch minutes are negative.
+        let zone = DailyDaylight {
+            start_minute: 130,
+            end_minute: 160,
+            shift_seconds: 3600 + 37,
+            changes: OffsetChanges::Unbounded,
+        };
+        for after_ms in [
+            utc_ms(1969, 12, 30, 22, 0),
+            utc_ms(1900, 3, 1, 0, 7),
+            utc_ms(2026, 3, 1, 23, 59),
+        ] {
+            for expression in ["15 3 * * *", "*/7 2,3 * * *", "0 0 * * 1", "59 23 31 * *"] {
+                assert_matches_stepper(expression, after_ms, 3 * DAY_MS, &zone);
+            }
+        }
+    }
+
+    #[test]
+    fn a_local_tz_rule_with_transition_dates_is_searched_minute_by_minute() {
+        use std::ffi::OsStr;
+        for rule in ["STD0DST,J60/1:10,J60/2:40", "EST5EDT,M3.2.0,M11.1.0"] {
+            assert_eq!(
+                local_offset_changes(Some(OsStr::new(rule))),
+                OffsetChanges::Unbounded,
+                "{rule}"
+            );
+        }
+        for zone in [
+            "",
+            "UTC",
+            "UTC0",
+            "America/New_York",
+            ":Europe/London",
+            "/etc/localtime",
+        ] {
+            assert_eq!(
+                local_offset_changes(Some(OsStr::new(zone))),
+                OffsetChanges::HourApart,
+                "{zone}"
+            );
+        }
+        assert_eq!(local_offset_changes(None), OffsetChanges::HourApart);
+    }
+
+    #[test]
     fn a_jump_across_a_shift_resumes_at_the_first_shifted_minute() {
         // Daylight starts at 23:50 UTC, moving civil time from 23:50 to 00:20
         // of the next day, and lasts four hours. From 23:01 the hour fails
@@ -1928,6 +2272,55 @@ mod tests {
             let after_ms = utc_ms(2026, 10, 3, start_hour, 7);
             assert_matches_stepper("*/7 2 4 10 *", after_ms, 2 * DAY_MS, &lord_howe);
             assert_matches_stepper("31,37 2 * * *", after_ms, 2 * DAY_MS, &lord_howe);
+        }
+    }
+
+    #[test]
+    fn a_date_jump_holds_at_the_largest_offsets_chrono_represents() {
+        // Offsets one second short of a day put civil time almost a day from
+        // epoch time. Closing a window with `shift_seconds = largest` moves
+        // civil time back 86,399 seconds, so a later minute can fall on an
+        // earlier date; closing one with `-largest` moves it forward as far.
+        let largest = 24 * 60 * 60 - 1;
+        let windows = [
+            (0, 24 * 60, OffsetChanges::Unbounded),
+            (600, 900, OffsetChanges::HourApart),
+        ];
+        let mut zones = Vec::new();
+        for (start_minute, end_minute, changes) in windows {
+            for shift_seconds in [largest, -largest] {
+                zones.push(DailyDaylight {
+                    start_minute,
+                    end_minute,
+                    shift_seconds,
+                    changes,
+                });
+            }
+        }
+        let fixed = [
+            chrono::FixedOffset::east_opt(largest).unwrap(),
+            chrono::FixedOffset::west_opt(largest).unwrap(),
+            chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60 + 7).unwrap(),
+        ];
+        let expressions = [
+            "0 0 1 * *",
+            "59 23 31 * *",
+            "30 12 1,15 * *",
+            "0 0 * * 0",
+            "15 10 * 2 *",
+        ];
+        for day in [1, 28, 31] {
+            for hour in [0, 13] {
+                let after_ms = utc_ms(2026, 1, day, hour, 7);
+                for expression in expressions {
+                    for zone in &zones {
+                        assert_matches_stepper(expression, after_ms, 35 * DAY_MS, zone);
+                    }
+                    for zone in &fixed {
+                        assert_matches_stepper(expression, after_ms, 35 * DAY_MS, zone);
+                    }
+                }
+            }
         }
     }
 
@@ -1954,6 +2347,120 @@ mod tests {
             assert_matches_stepper("5 0 * * *", start, next - start, &chrono::Utc),
             Some(next)
         );
+    }
+
+    /// A zone that records the instant of every offset lookup the search makes.
+    #[derive(Clone)]
+    struct Recording {
+        inner: DailyDaylight,
+        seen: std::cell::RefCell<Vec<i64>>,
+    }
+
+    impl TimeZone for Recording {
+        type Offset = chrono::FixedOffset;
+
+        fn from_offset(_offset: &chrono::FixedOffset) -> Self {
+            unreachable!("the search never rebuilds a zone from an offset")
+        }
+
+        fn offset_from_local_date(
+            &self,
+            local: &chrono::NaiveDate,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            self.inner.offset_from_local_date(local)
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            self.inner.offset_from_local_datetime(local)
+        }
+
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> chrono::FixedOffset {
+            self.inner.offset_from_utc_date(utc)
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            self.seen
+                .borrow_mut()
+                .push(utc.and_utc().timestamp_millis());
+            self.inner.offset_from_utc_datetime(utc)
+        }
+    }
+
+    impl CronZone for Recording {
+        fn offset_changes(&self) -> OffsetChanges {
+            self.inner.changes
+        }
+    }
+
+    #[test]
+    fn every_lookup_of_the_search_falls_within_its_cap() {
+        // Daylight runs 02:00 to 05:00 UTC, so each offset lasts an hour and
+        // the zone may claim `HourApart`.
+        let zone = Recording {
+            inner: DailyDaylight {
+                start_minute: 120,
+                end_minute: 300,
+                shift_seconds: 3600,
+                changes: OffsetChanges::HourApart,
+            },
+            seen: std::cell::RefCell::new(Vec::new()),
+        };
+        let start = utc_ms(2026, 3, 1, 3, 0);
+        // At 04:31 UTC civil time is 05:31 in daylight, so the skip to the
+        // next civil 05:30 aims at the following day, past a cap near 06:00;
+        // the fall-back at 05:00 UTC brings civil 05:30 inside the cap.
+        let fall_back = utc_ms(2026, 3, 1, 4, 31);
+        let fall_back_match = Some(Some(utc_ms(2026, 3, 1, 5, 30)));
+        for (expression, after_ms, max_search_ms, expected) in [
+            ("30 2 * * *", start, 60 * MINUTE_MS, None),
+            ("30 2 * * *", start, 150 * MINUTE_MS, None),
+            ("30 2 * * *", start, DAY_MS, None),
+            ("0 9 1 * *", start, 10 * DAY_MS, None),
+            ("0 9 1 * *", start, 40 * DAY_MS, None),
+            ("*/15 * * * *", start, 3 * MINUTE_MS, None),
+            ("*/15 * * * *", start, 20 * MINUTE_MS, None),
+            ("30 5 * * *", fall_back, 90 * MINUTE_MS, fall_back_match),
+            (
+                "30 5 * * *",
+                fall_back + 20_000,
+                90 * MINUTE_MS + 30_000,
+                fall_back_match,
+            ),
+            (
+                "45 5 * * *",
+                fall_back,
+                50 * MINUTE_MS + 30_000,
+                Some(Some(utc_ms(2026, 3, 1, 4, 45))),
+            ),
+        ] {
+            zone.seen.borrow_mut().clear();
+            let found = assert_matches_stepper(expression, after_ms, max_search_ms, &zone);
+            if let Some(expected) = expected {
+                assert_eq!(
+                    found, expected,
+                    "{expression} after {after_ms} within {max_search_ms}"
+                );
+            }
+            // Every lookup falls on an epoch minute after `after_ms` and at
+            // or before the cap. An hourly probe may pass a match that an
+            // offset change places before it; the bisection then returns to
+            // that minute, so `found` bounds the result, not the probes.
+            let first_ms = after_ms.div_euclid(MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+            let last_ms = after_ms + max_search_ms;
+            let seen = zone.seen.borrow();
+            let outside: Vec<i64> = seen
+                .iter()
+                .copied()
+                .filter(|&ms| ms < first_ms || ms > last_ms || ms.rem_euclid(MINUTE_MS) != 0)
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "{expression} within {max_search_ms}: lookups {outside:?} outside {first_ms}..={last_ms}"
+            );
+        }
     }
 
     #[test]
@@ -2093,6 +2600,210 @@ mod tests {
             next_due_at_ms("0 0 1,8 * 1", monday_2026_09_07, MAX_SEARCH_MS, &utc),
             Some(tuesday_2026_09_08)
         );
+    }
+
+    #[test]
+    fn a_cron_needs_exactly_five_whitespace_separated_fields() {
+        for valid in ["* * * * *", "  0 9 * * 1-5 ", "0\t9\n*  *\u{a0}1"] {
+            assert!(is_valid_conditional_note_cron(valid), "{valid:?}");
+        }
+        for invalid in [
+            "",
+            "   ",
+            "* * * *",
+            "* * * * * *",
+            "* * * * ,",
+            "* * * *  ",
+        ] {
+            assert!(!is_valid_conditional_note_cron(invalid), "{invalid:?}");
+        }
+    }
+
+    /// `frozen_str_parser` serves as the byte scanner's test oracle.
+    fn frozen_str_parser(expression: &str) -> Option<[u64; 5]> {
+        fn is_digits(s: &str) -> bool {
+            !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+        }
+        fn field(token: &str, min: u64, max: u64, dow_field: bool) -> Option<u64> {
+            let mut mask = 0u64;
+            for part in token.split(',') {
+                let piece = part.trim();
+                if piece.is_empty() {
+                    return None;
+                }
+                let mut split = piece.split('/');
+                let range_part = split.next().unwrap_or_default();
+                let step_part = split.next();
+                if split.next().is_some() {
+                    return None;
+                }
+                let step = match step_part {
+                    Some(s) => {
+                        if !is_digits(s) {
+                            return None;
+                        }
+                        let step: u64 = s.parse().ok()?;
+                        if step < 1 {
+                            return None;
+                        }
+                        step
+                    }
+                    None => 1,
+                };
+                let (lo, hi) = if range_part == "*" {
+                    (min, max)
+                } else if range_part.contains('-') {
+                    let mut bounds = range_part.split('-');
+                    let lo_str = bounds.next().unwrap_or_default();
+                    let hi_str = bounds.next().unwrap_or_default();
+                    if bounds.next().is_some() || !is_digits(lo_str) || !is_digits(hi_str) {
+                        return None;
+                    }
+                    (lo_str.parse().ok()?, hi_str.parse().ok()?)
+                } else {
+                    if !is_digits(range_part) {
+                        return None;
+                    }
+                    let lo: u64 = range_part.parse().ok()?;
+                    let hi = if step_part.is_some() { max } else { lo };
+                    (lo, hi)
+                };
+                if lo < min || lo > max || hi < min || hi > max || lo > hi {
+                    return None;
+                }
+                let mut v = lo;
+                while v <= hi {
+                    let normalized = if dow_field && v == 7 { 0 } else { v };
+                    mask |= 1u64 << normalized;
+                    let Some(next) = v.checked_add(step) else {
+                        break;
+                    };
+                    v = next;
+                }
+            }
+            if mask == 0 { None } else { Some(mask) }
+        }
+        let tokens: Vec<&str> = expression.split_whitespace().collect();
+        if tokens.len() != 5 {
+            return None;
+        }
+        Some([
+            field(tokens[0], 0, 59, false)?,
+            field(tokens[1], 0, 23, false)?,
+            field(tokens[2], 1, 31, false)?,
+            field(tokens[3], 1, 12, false)?,
+            field(tokens[4], 0, 7, true)?,
+        ])
+    }
+
+    fn cron_text() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let piece = prop_oneof![
+            Just("*"),
+            Just("/"),
+            Just("-"),
+            Just(","),
+            Just(" "),
+            Just("\t"),
+            Just("\u{b}"),
+            Just("\u{a0}"),
+            Just("\u{2003}"),
+            Just("\u{1c}"),
+            Just("0"),
+            Just("1"),
+            Just("7"),
+            Just("8"),
+            Just("12"),
+            Just("23"),
+            Just("24"),
+            Just("31"),
+            Just("59"),
+            Just("60"),
+            Just("007"),
+            Just("+1"),
+            Just("a"),
+            Just("18446744073709551615"),
+            Just("18446744073709551616"),
+        ];
+        proptest::collection::vec(piece, 0..24).prop_map(|pieces| pieces.concat())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(1024))]
+
+        #[test]
+        fn the_byte_parser_accepts_exactly_what_the_str_parser_accepts(
+            text in cron_text(),
+            fields in (
+                cron_field(0, 59),
+                cron_field(0, 23),
+                cron_field(1, 31),
+                cron_field(1, 12),
+                cron_field(0, 7),
+            ),
+        ) {
+            let (minute, hour, dom, month, dow) = fields;
+            let structured = format!("{minute} {hour} {dom} {month} {dow}");
+            for expression in [text, structured] {
+                let parsed = parse_cron(&expression)
+                    .map(|cron| [cron.minute, cron.hour, cron.dom, cron.month, cron.dow]);
+                proptest::prop_assert_eq!(parsed, frozen_str_parser(&expression), "{:?}", expression);
+            }
+        }
+
+        #[test]
+        fn the_month_scan_finds_the_date_a_day_by_day_scan_finds(
+            dom in cron_field(1, 31),
+            month in cron_field(1, 12),
+            dow in cron_field(0, 7),
+            start_days in -150_000_i32..1_200_000,
+            span_days in 0_i64..3_000,
+        ) {
+            let expression = format!("0 0 {dom} {month} {dow}");
+            let cron = parse_cron(&expression).unwrap();
+            let start = chrono::NaiveDate::from_num_days_from_ce_opt(start_days).unwrap();
+            let last = start + chrono::Days::new(span_days as u64);
+            let mut expected = Some(start);
+            while let Some(date) = expected.filter(|date| !date_could_match(&cron, date)) {
+                expected = date.succ_opt().filter(|next| *next <= last);
+            }
+            proptest::prop_assert_eq!(first_matching_date(&cron, start, last), expected, "{}", expression);
+        }
+
+        #[test]
+        fn the_jitter_hashes_the_formatted_note_seed(
+            interval_ms in 0_i64..2 * CONDITIONAL_NOTE_CHECK_CEILING_MS,
+            note_id in proptest::prelude::any::<i64>(),
+            hash in proptest::option::of("\\PC{0,12}"),
+        ) {
+            let max = 60_000i64.min((interval_ms as f64 * 0.1).floor() as i64);
+            let expected = if max <= 0 {
+                0
+            } else {
+                let seed = format!("{note_id}:{}", hash.as_deref().unwrap_or(""));
+                let h = seed.encode_utf16().fold(2166136261u32, |h, unit| {
+                    (h ^ u32::from(unit)).wrapping_mul(16777619)
+                });
+                i64::from(h) % (max * 2 + 1) - max
+            };
+            proptest::prop_assert_eq!(deterministic_jitter_ms(interval_ms, note_id, hash.as_deref()), expected);
+        }
+    }
+
+    #[test]
+    fn the_jitter_seed_spells_extreme_note_ids() {
+        for note_id in [i64::MIN, i64::MIN + 1, -1, 0, 9, 10, i64::MAX] {
+            let seed = format!("{note_id}:abc");
+            let h = seed.encode_utf16().fold(2166136261u32, |h, unit| {
+                (h ^ u32::from(unit)).wrapping_mul(16777619)
+            });
+            let max = 60_000;
+            assert_eq!(
+                deterministic_jitter_ms(CONDITIONAL_NOTE_CHECK_CEILING_MS, note_id, Some("abc")),
+                i64::from(h) % (max * 2 + 1) - max,
+                "{note_id}"
+            );
+        }
     }
 
     fn compiled_state(now: i64) -> ConditionalNoteLifecycleState {

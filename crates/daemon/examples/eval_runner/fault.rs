@@ -495,6 +495,18 @@ pub fn lock_holder_episode(
     Ok(())
 }
 
+/// `{episode}` when the external holder still has `path` locked: a
+/// second `BEGIN IMMEDIATE` with no busy wait fails.
+fn armed_if_held(path: &Path, episode: &str) -> BTreeSet<String> {
+    let probe = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    probe.busy_timeout(Duration::ZERO).unwrap();
+    let mut armed = BTreeSet::new();
+    if probe.execute_batch("BEGIN IMMEDIATE").is_err() {
+        armed.insert(episode.to_string());
+    }
+    armed
+}
+
 pub fn hold_write_lock(path: &Path) -> Connection {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     conn.busy_timeout(Duration::ZERO).unwrap();
@@ -1208,7 +1220,8 @@ fn open_embedding_job(
 
 /// Reads every lost reply back by its identity from the closed files.
 /// Read-back refuses checkpoints past the recorded fault boundary because monotonic checkpoints cannot prove the faulted effect.
-/// An embedding job's row names its own state, so it is read directly.
+/// An embedding job's row and a reviewer receipt name their own state, so
+/// they are read directly.
 pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
     let search = read_only(&search_file(root));
     let (projection, kernel) = checkpoints(root);
@@ -1219,6 +1232,22 @@ pub fn read_back(root: &Path, witness: &mut Witness) -> Result<(), RunError> {
         let checkpoint = match kind {
             "search_commit" => projection,
             "search_ack" => kernel,
+            "reviewer_completion" => {
+                // Applied only as the completion it lost the reply of: complete
+                // and selecting a published result. Another terminal, an open
+                // receipt, or no receipt at all is not that completion.
+                let selected: bool = read_only(&memory_file(root))
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM memory_reviewer_receipts
+                          WHERE project=?1 AND causal_identity=?2 AND state='complete'
+                            AND terminal_kind='complete' AND selected_candidate_id IS NOT NULL)",
+                        [reviewer::PROJECT, key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                states.push((identity, applied(selected)));
+                continue;
+            }
             "embedding" => {
                 let state: String = search
                     .query_row(
@@ -1333,6 +1362,13 @@ pub fn campaign(
         SearchEpisodeFault::LoseAcknowledgementReply,
     )?);
     let stores = recover(stores, witness, charges, steps[5].now_ms)?;
+    expected.extend(reviewer_completion_episode(
+        plan,
+        charges,
+        witness,
+        step(5),
+        steps[5].now_ms,
+    )?);
 
     let stores = corruption_episode(stores, witness, charges, step(5), steps[5].now_ms)?;
     let (stores, evidence) =
@@ -1498,7 +1534,10 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
             cut,
         )?;
     }
-    let liveness = liveness(&plan, &mut charges, &mut witness, fault_profile.liveness())?;
+    let liveness = vec![
+        liveness(&plan, &mut charges, &mut witness, fault_profile.liveness())?,
+        reviewer_liveness(&plan, &mut charges, &mut witness, fault_profile.liveness())?,
+    ];
     check_expectations(&expected, &witness.effects)?;
     witness.cuts.verdict().map_err(FaultReportError::Coverage)?;
     witness
@@ -1526,7 +1565,7 @@ pub fn run(config: &Config, spawn: Spawn) -> Result<Run, RunError> {
         effects: witness.effects.clone(),
         expected_refusals: witness.refusals.clone(),
         safety_checks_while_armed: witness.safety_checks,
-        liveness: Some(liveness),
+        liveness,
         markers: witness
             .coverage
             .fired()
@@ -1608,7 +1647,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
 use daemon::embedding_dispatch::{DispatchBounds, DispatchEvent, EmbeddingDispatcher};
@@ -2209,19 +2248,6 @@ pub fn liveness(
     ));
     let holder = hold_write_lock(&memory_file(stores.root()));
     let outside_core: BTreeSet<String> = [memory_lock.clone()].into_iter().collect();
-    let armed = |stores: &Stores| -> BTreeSet<String> {
-        let mut armed = BTreeSet::new();
-        let probe = Connection::open_with_flags(
-            memory_file(stores.root()),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .unwrap();
-        probe.busy_timeout(Duration::ZERO).unwrap();
-        if probe.execute_batch("BEGIN IMMEDIATE").is_err() {
-            armed.insert(memory_lock.clone());
-        }
-        armed
-    };
 
     let engine = TestEngine::new();
     let local = component(&engine, LocalEmbeddingsLimits::default());
@@ -2237,20 +2263,7 @@ pub fn liveness(
     let mut fresh = fresh.iter();
     let mut lanes: BTreeMap<Lane, LaneProgress> = core_lanes
         .into_iter()
-        .map(|lane| {
-            (
-                lane,
-                LaneProgress {
-                    bound: lane.bound(bounds),
-                    steps: 0,
-                    met_at: None,
-                    stalled_at: None,
-                    holds_at_bound: false,
-                    fresh_commits: 0,
-                    blocked: None,
-                },
-            )
-        })
+        .map(|lane| (lane, LaneProgress::new(lane.bound(bounds))))
         .collect();
     for step in 1..=window {
         let fed = feed(
@@ -2265,8 +2278,6 @@ pub fn liveness(
             if step > progress.bound {
                 continue;
             }
-            progress.steps += 1;
-            progress.fresh_commits += fed;
             let (holds, blocked) = match lane {
                 Lane::CatchUpEpisodes => {
                     let report = stores.episode(now, None, &mut |_| {});
@@ -2322,25 +2333,16 @@ pub fn liveness(
                         blocked,
                     )
                 }
-                Lane::ReviewerCoordinatorPasses => unreachable!("outside this campaign's core"),
+                Lane::ReviewerCoordinatorPasses => {
+                    unreachable!("the reviewer arm drives this lane")
+                }
             };
-            if let Some(b) = blocked {
-                progress.blocked = Some(b);
-            }
-            if holds && progress.met_at.is_none() {
-                progress.met_at = Some(step);
-            }
-            if !holds && progress.met_at.is_some() && progress.stalled_at.is_none() {
-                progress.stalled_at = Some(step);
-            }
-            if step == progress.bound {
-                progress.holds_at_bound = holds;
-            }
+            progress.observe(step, fed, holds, blocked);
         }
         witness.safety_check_while_armed(&stores, "liveness_window_step");
     }
 
-    let armed_at_bound = armed(&stores);
+    let armed_at_bound = armed_if_held(&memory_file(stores.root()), &memory_lock);
     drop(holder);
     witness.receipt(&memory_lock);
     let report = LivenessReport {
@@ -2377,4 +2379,394 @@ pub fn liveness(
     drop(stores.close());
     charges.vacate(root)?;
     Ok(report)
+}
+
+// The reviewer coordinator liveness arm.
+
+use daemon::memory_reviewer::coordinator::InvestigationPermits;
+use daemon::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
+use daemon::memory_reviewer::model_request::{Endpoint, Providers};
+use daemon::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
+use host_runtime::model_execution::supervisor::Supervisor;
+use memory_store::memory_reviewer_jobs::MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
+use tokio_util::sync::CancellationToken;
+
+use super::support::memory_reviewer_gate::{
+    Deployment, NoPublicModel, activation_record, write_activation_record,
+};
+use super::support::memory_reviewer_publish as reviewer;
+use super::support::tls_peer::Peer;
+
+/// The bound root every reviewer job is staged under.
+pub const REVIEWER_DIGEST: &str =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const REVIEWER_CREDENTIAL: &str = "ANTHROPIC_API_KEY";
+/// The keyed identity the host's selection file records for the credential.
+const REVIEWER_CREDENTIAL_IDENTITY: &str = "eval-reviewer-credential-identity";
+/// Ready jobs the window opens with, before any fresh job is fed.
+const REVIEWER_BACKLOG: u64 = 2;
+
+/// The production MemoryReviewer worker's surroundings for one root: the
+/// owner's activation record for exactly that root's stores, a local TLS peer
+/// on an OS-allocated port as the provider endpoint, the credential identity
+/// derived, and one MODULE project whose one bound root stages every job the
+/// rig feeds. The worker is built per pass, so the rig holds no store handle
+/// and the stores close and reopen under it.
+pub struct ReviewerRig {
+    /// Declared before `runtime`, so its listener drops while the reactor
+    /// that registered it still runs.
+    peer: Peer,
+    runtime: tokio::runtime::Runtime,
+    status: Arc<MemoryReviewerStatus>,
+    home: PathBuf,
+    project_root: PathBuf,
+    generation: u64,
+    incarnation: String,
+}
+
+impl ReviewerRig {
+    /// `project_root` is the route `generation` raised to MODULE authority;
+    /// `activate` writes the owner's record, so a rig without it measures a
+    /// worker whose gate stays closed.
+    pub fn open(
+        stores: &Stores,
+        home: &Path,
+        project_root: &Path,
+        generation: u64,
+        activate: bool,
+    ) -> Self {
+        let runtime = runtime();
+        let peer = runtime.block_on(Peer::start());
+        let incarnation = reviewer::kernel_incarnation(&stores.corpus.kernel);
+        if activate {
+            write_activation_record(
+                home,
+                &activation_record(&Deployment {
+                    model: "claude-eval",
+                    kernel_incarnation: &incarnation,
+                    memstore_incarnation: &stores
+                        .memory
+                        .memory_reviewer_store_incarnation()
+                        .unwrap(),
+                    provider: &peer.sender().provider_identity(),
+                    credential: REVIEWER_CREDENTIAL,
+                    credential_fingerprint: REVIEWER_CREDENTIAL_IDENTITY,
+                }),
+            );
+        }
+        Self {
+            runtime,
+            peer,
+            status: Arc::default(),
+            home: home.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+            generation,
+            incarnation,
+        }
+    }
+
+    /// Activates one fresh History Summarizer job, as the handoff leaves it,
+    /// under the rig's bound root; a reservation refusal writes nothing.
+    pub fn feed(
+        &self,
+        stores: &Stores,
+        firing: u64,
+        now: i64,
+    ) -> Result<memory_store::memory_reviewer_jobs::MemoryReviewerJob, MemoryReviewerJobRefusal>
+    {
+        reviewer::try_ready_job(
+            &stores.corpus.kernel,
+            &stores.memory,
+            REVIEWER_DIGEST,
+            &self.incarnation,
+            firing,
+            now,
+        )
+    }
+
+    /// The OS-allocated port the rig's provider peer listens on.
+    pub fn port(&self) -> u16 {
+        self.peer.port
+    }
+
+    /// The activation state the rig's worker last reported.
+    pub fn activation_state(&self) -> ActivationState {
+        self.status.activation_state()
+    }
+
+    /// The attempt markers the memory store holds: every send commits one
+    /// first, so zero is the durable proof that nothing was sent.
+    pub fn attempts(stores: &Stores) -> u64 {
+        stores
+            .memory
+            .memory_reviewer_status_facts()
+            .unwrap()
+            .attempts_attempted
+    }
+
+    /// One production `Worker::pass` over `stores`, driven directly.
+    pub fn pass(&self, stores: &Stores) -> usize {
+        let worker = self.worker(stores);
+        self.runtime
+            .block_on(worker.pass(&CancellationToken::new()))
+    }
+
+    fn worker(&self, stores: &Stores) -> Arc<Worker> {
+        let host = Arc::new(MemoryReviewerHost {
+            supervisor: Arc::new(Supervisor::new(Arc::new(NoPublicModel))),
+            credentials: [(
+                REVIEWER_CREDENTIAL.to_string(),
+                zeroize::Zeroizing::new("sk-eval-reviewer".to_string()),
+            )]
+            .into_iter()
+            .collect(),
+            credential_identities: std::sync::OnceLock::from(
+                [(
+                    REVIEWER_CREDENTIAL.to_string(),
+                    REVIEWER_CREDENTIAL_IDENTITY.to_string(),
+                )]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+            ),
+            worker_instance: "eval-reviewer".to_string(),
+        });
+        let endpoint =
+            Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap();
+        let kernel = Arc::clone(&stores.corpus.kernel);
+        let route = ProjectRoute {
+            project: reviewer::PROJECT.to_string(),
+            authority_generation: self.generation,
+            roots: vec![RootScope {
+                project_root: self.project_root.clone(),
+                project_digest: REVIEWER_DIGEST.to_string(),
+                scope_id: format!("project:{REVIEWER_DIGEST}"),
+            }],
+        };
+        Arc::new(Worker {
+            host,
+            home: self.home.clone(),
+            store: Arc::clone(&stores.memory),
+            kernel: Arc::new(move || Some(Arc::clone(&kernel))),
+            projects: Arc::new(move || vec![route.clone()]),
+            status: Arc::clone(&self.status),
+            permits: Arc::new(InvestigationPermits::default()),
+            providers: Providers::at(endpoint.clone(), endpoint, "us-east-1"),
+            rejection: Default::default(),
+        })
+    }
+}
+
+/// [`reviewer_liveness`]'s window, unjudged; `activate` writes the owner's
+/// activation record before the window opens, so a window without it
+/// measures a worker whose gate stays closed.
+pub fn reviewer_window(
+    plan: &Plan,
+    charges: &mut Charges,
+    witness: &mut Witness,
+    bounds: &LivenessBounds,
+    activate: bool,
+) -> Result<LivenessReport, RunError> {
+    let bound = Lane::ReviewerCoordinatorPasses.bound(bounds);
+    let root = charges.occupy()?;
+    let stores = Stores::open(root.path(), plan);
+    reviewer::commit_memory_domain(&stores.corpus.kernel);
+    let project_root = root.path().join("reviewer-project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let generation = reviewer::activate_module_authority(&stores.memory, &project_root);
+    let rig = ReviewerRig::open(
+        &stores,
+        &root.path().join("reviewer-home"),
+        &project_root,
+        generation,
+        activate,
+    );
+    let feed = |firing| {
+        rig.feed(&stores, firing, reviewer::now_ms())
+            .unwrap_or_else(|refusal| panic!("reviewer job {firing}: {refusal}"));
+    };
+    for firing in 0..REVIEWER_BACKLOG {
+        feed(firing);
+    }
+
+    let projection_lock = witness.declare(episode(
+        "liveness-projection-lock-holder",
+        plan.checkpoint_step,
+        StoreFamily::SearchProjection,
+        "write",
+        FaultAction::ExternalLockHolder,
+        "an external connection holds BEGIN IMMEDIATE on the search projection for the whole reviewer window; the projection is outside the reviewer arm's core, which never opens it, and the lock is never released inside it",
+    ));
+    let holder = hold_write_lock(&search_file(stores.root()));
+    let mut progress = LaneProgress::new(bound);
+    for step in 1..=bound {
+        feed(REVIEWER_BACKLOG + step - 1);
+        rig.pass(&stores);
+        let ready = stores
+            .memory
+            .ready_memory_reviewer_jobs(
+                reviewer::PROJECT,
+                MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT,
+                reviewer::now_ms(),
+            )
+            .unwrap()
+            .len();
+        let facts = stores.memory.memory_reviewer_status_facts().unwrap();
+        let activation = rig.activation_state();
+        let holds = activation == ActivationState::Open
+            && ready == 0
+            && facts.jobs_abstained == REVIEWER_BACKLOG + step;
+        let blocked = (activation != ActivationState::Open).then(|| format!("{activation:?}"));
+        progress.observe(step, 1, holds, blocked);
+        witness.safety_check_while_armed(&stores, "liveness_window_step");
+    }
+    let attempts = ReviewerRig::attempts(&stores);
+    if attempts != 0 {
+        return Err(unexpected(
+            "reviewer-liveness",
+            "no attempt marker for policy-blocked subjects",
+            attempts,
+        ));
+    }
+
+    let armed_at_bound = armed_if_held(&search_file(stores.root()), &projection_lock);
+    drop(holder);
+    witness.receipt(&projection_lock);
+    drop(rig);
+    charges.store_bytes(stores.root())?;
+    drop(stores.close());
+    charges.vacate(root)?;
+    Ok(LivenessReport {
+        core: HealthyCore {
+            families: [StoreFamily::Kernel, StoreFamily::Memory]
+                .into_iter()
+                .collect(),
+            lanes: [Lane::ReviewerCoordinatorPasses].into_iter().collect(),
+        },
+        outside_core: [projection_lock].into_iter().collect(),
+        armed_at_bound,
+        lanes: [(Lane::ReviewerCoordinatorPasses, progress)]
+            .into_iter()
+            .collect(),
+        permanent_stalls: Vec::new(),
+    })
+}
+
+/// The reviewer coordinator arm on its own root: the healthy core is the
+/// kernel, the memory store, and the production `Worker::pass`, driven
+/// directly rather than through the worker task's loop; an external
+/// `BEGIN IMMEDIATE` on the search projection, which the core never opens,
+/// stays armed for the whole window as the outside-core fault. Each step
+/// activates one fresh History Summarizer job and runs one pass, and the
+/// predicate holds when the gate is open, no job is Ready, and every fed job
+/// has settled. The staged subjects are default-Sensitive, so each run
+/// settles as a policy-blocked abstention before any request: the arm
+/// measures coordinator passes, not model work, and refuses the run if any
+/// attempt marker was committed.
+pub fn reviewer_liveness(
+    plan: &Plan,
+    charges: &mut Charges,
+    witness: &mut Witness,
+    bounds: &LivenessBounds,
+) -> Result<LivenessReport, RunError> {
+    let report = reviewer_window(plan, charges, witness, bounds, true)?;
+    report.verdict(bounds).map_err(FaultReportError::Liveness)?;
+    witness
+        .coverage
+        .record("sls_reviewer_passes_bounded_with_projection_locked")
+        .unwrap();
+    Ok(report)
+}
+
+/// A reviewer settlement whose completion commits and whose reply is then
+/// lost through `storage::after_commit_for_test`, on its own root: the
+/// settlement answers with a store error for a completion that applied, the
+/// effect stays unknown over `{applied, not_applied}`, and the read-back from
+/// the closed memory store before reopen at `AfterRecovery` names its state.
+pub fn reviewer_completion_episode(
+    plan: &Plan,
+    charges: &mut Charges,
+    witness: &mut Witness,
+    step: u32,
+    now: i64,
+) -> Result<BTreeMap<String, EffectState>, RunError> {
+    let id = "reviewer-completion-reply-lost";
+    // The recovery below reads back every unknown effect from this root, so
+    // no other episode's may still be pending.
+    if let Some(pending) = witness.effects.unknown().into_iter().next() {
+        return Err(unexpected(
+            id,
+            "no unknown effect from another root",
+            pending,
+        ));
+    }
+    let root = charges.occupy()?;
+    let stores = Stores::open(root.path(), plan);
+    reviewer::commit_memory_domain(&stores.corpus.kernel);
+    let generation = reviewer::activate_module_authority(&stores.memory, root.path());
+    let incarnation = reviewer::kernel_incarnation(&stores.corpus.kernel);
+    // The receipt's run deadline is wall-clock by design, so the job is
+    // stamped with the wall clock while the drive keeps its logical time.
+    let wall = reviewer::now_ms();
+    let begun = reviewer::begin_job(
+        &stores.corpus.kernel,
+        &stores.memory,
+        REVIEWER_DIGEST,
+        &incarnation,
+        generation,
+        1,
+        wall,
+    );
+    witness.declare(episode(
+        id,
+        step,
+        StoreFamily::Memory,
+        "complete_memory_reviewer_receipt",
+        FaultAction::ReviewerCompletionLoseReply,
+        "storage::after_commit_for_test: the receipt completion commits, then a TEMP shadow of memory_reviewer_receipts on the writer connection refuses the settlement's read-back, so the caller sees SettlementError::Store for a completion that applied; the runner drops the shadow once the reply is lost",
+    ));
+    // The settlement runs this once, before the completion; the hook fires on
+    // the completion's own commit.
+    let shadow = || {
+        storage::after_commit_for_test(|conn| {
+            conn.execute("CREATE TEMP TABLE memory_reviewer_receipts (x)", [])
+                .expect("plant a shadow after the completion commits");
+        });
+    };
+    let settled = reviewer::settle_proposal(
+        &stores.corpus.kernel,
+        &stores.memory,
+        REVIEWER_DIGEST,
+        &incarnation,
+        &begun,
+        wall,
+        Some(&shadow),
+    );
+    if !matches!(
+        settled,
+        Err(daemon::memory_reviewer::settlement::SettlementError::Store(
+            _
+        ))
+    ) {
+        return Err(unexpected(
+            id,
+            "a store error for the completion that applied",
+            settled,
+        ));
+    }
+    let identity = format!("reviewer_completion:{}@{id}", begun.job.causal_identity);
+    witness.effects.attempt(&identity);
+    witness.effects.lose_reply(&identity, id).unwrap();
+    // The shadow refuses every callback on the writer connection, the
+    // safety check's segment read included, so it is dropped first.
+    stores
+        .memory
+        .execute_tag_sql_for_test("DROP TABLE temp.memory_reviewer_receipts")
+        .unwrap();
+    witness.safety_check(&stores);
+    witness.receipt(id);
+    let stores = recover(stores, witness, charges, now)?;
+    charges.store_bytes(stores.root())?;
+    drop(stores.close());
+    charges.vacate(root)?;
+    Ok([(identity, EffectState::Applied)].into_iter().collect())
 }

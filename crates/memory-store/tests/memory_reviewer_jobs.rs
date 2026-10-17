@@ -1537,6 +1537,68 @@ fn an_enqueued_page_keeps_the_scan_audit_of_its_references() {
     );
 }
 
+#[test]
+fn an_enqueued_reference_is_the_row_reservation_and_activation_write() {
+    let columns = |store: &MemoryStore| {
+        store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT allowance_bytes, receipt_charge_bytes FROM memory_reviewer_jobs",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    let identity = inputs("cand-1").causal_identity().unwrap();
+    let selected_dir = tempfile::tempdir().unwrap();
+    let selected = MemoryStore::open(&descriptor(selected_dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: None,
+    };
+    let frozen = selected
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let outcome = selected
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, EnqueueOutcome::Enqueued { jobs: 1, .. }),
+        "{outcome:?}"
+    );
+    let produced_dir = tempfile::tempdir().unwrap();
+    let produced = MemoryStore::open(&descriptor(produced_dir.path())).unwrap();
+    reserved(
+        produced
+            .reserve_memory_reviewer_job("proj", &producer("f1"), &inputs("cand-1"), NOW + 1)
+            .unwrap(),
+    );
+    let activated = produced
+        .activate_memory_reviewer_job(
+            "proj",
+            &identity,
+            &producer("f1"),
+            &MemoryReviewerJobInput {
+                subject: subject("cand-1"),
+                starting_references: Vec::new(),
+                question_template: "extracted_facts".to_string(),
+            },
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        selected
+            .lookup_memory_reviewer_job("proj", &identity)
+            .unwrap()
+            .as_ref(),
+        Some(&activated)
+    );
+    assert_eq!(columns(&selected), columns(&produced));
+}
+
 /// A page that reaches its deadline between the slot's sweep and its enqueue is recorded as the slot's failure inside the enqueue transaction, not refused back to the caller for another retry.
 #[test]
 fn an_enqueue_at_or_after_the_page_deadline_records_the_failed_slot() {
@@ -1831,5 +1893,385 @@ fn a_terminal_page_releases_the_scan_audit_of_its_references() {
         scans(&store),
         ["project", "selection_attempt", "slot_id"],
         "only the identities the compact row still retains keep their audit"
+    );
+}
+
+/// Bookkeeping that cannot commit preserves the frozen page and every recorded outcome: a failure injected while the second reference becomes a job, while the page moves to `enqueued`, or while the continuation advances rolls the whole enqueue back, leaving the page frozen as it was, no job for any reference, the cursor where it stood, and an earlier terminal outcome unchanged; the same page then enqueues once the failure clears.
+#[test]
+fn a_failed_enqueue_commit_keeps_the_page_the_cursor_and_recorded_outcomes() {
+    let second = inputs("cand-2").causal_identity().unwrap();
+    for (name, trigger) in [
+        (
+            "between the job inserts",
+            format!(
+                "CREATE TRIGGER fail_enqueue BEFORE INSERT ON memory_reviewer_jobs WHEN NEW.causal_identity = '{second}'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END"
+            ),
+        ),
+        (
+            "at the page transition",
+            "CREATE TRIGGER fail_enqueue BEFORE UPDATE ON memory_reviewer_frozen_selections
+             BEGIN SELECT RAISE(ABORT, 'injected'); END"
+                .to_string(),
+        ),
+        (
+            "at the continuation",
+            "CREATE TRIGGER fail_enqueue BEFORE INSERT ON memory_reviewer_selection_cursors
+             BEGIN SELECT RAISE(ABORT, 'injected'); END"
+                .to_string(),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let earlier = reserved(
+            store
+                .reserve_memory_reviewer_job("proj", &producer("old"), &inputs("old"), NOW)
+                .unwrap(),
+        );
+        store
+            .finish_memory_reviewer_job(
+                "proj",
+                &earlier.causal_identity,
+                MemoryReviewerJobOutcome::Failed,
+                NOW,
+            )
+            .unwrap();
+        let page = FrozenSelectionPage {
+            references: vec![inputs("cand-1"), inputs("cand-2")],
+            next_cursor: Some("cursor-2".to_string()),
+        };
+        let frozen = store
+            .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+            .unwrap();
+        store.execute_tag_sql_for_test(&trigger).unwrap();
+        let failed = store.with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        });
+        assert!(
+            failed
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("injected")),
+            "{name}: {failed:?}"
+        );
+        assert_eq!(
+            store
+                .lookup_frozen_selection("proj", "slot-1", "attempt-1")
+                .unwrap()
+                .as_ref(),
+            Some(&frozen),
+            "{name}: the page is frozen as it was"
+        );
+        for reference in &page.references {
+            assert_eq!(
+                store
+                    .lookup_memory_reviewer_job("proj", &reference.causal_identity().unwrap())
+                    .unwrap(),
+                None,
+                "{name}: no reference became a job"
+            );
+        }
+        assert_eq!(
+            store.selection_cursor("proj", "slot-1").unwrap(),
+            None,
+            "{name}: the continuation did not move"
+        );
+        assert_eq!(
+            store
+                .lookup_memory_reviewer_job("proj", &earlier.causal_identity)
+                .unwrap()
+                .unwrap()
+                .state,
+            MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Failed),
+            "{name}: the recorded outcome stands"
+        );
+        store
+            .execute_tag_sql_for_test("DROP TRIGGER fail_enqueue")
+            .unwrap();
+        let retried = store
+            .with_fenced_conn_for_test(|conn| {
+                enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 2)
+            })
+            .unwrap();
+        assert!(
+            matches!(retried, EnqueueOutcome::Enqueued { jobs: 2, .. }),
+            "{name}: {retried:?}"
+        );
+        assert_eq!(
+            store.selection_cursor("proj", "slot-1").unwrap().as_deref(),
+            Some("cursor-2"),
+            "{name}"
+        );
+    }
+}
+
+/// Each project's metadata total equals the receipt charges plus allowances of its job and frozen-page rows after every write the store makes and after direct row edits and deletes, so a quota judged from the totals is the quota judged from the rows.
+#[test]
+fn metadata_totals_equal_the_sum_over_jobs_and_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let check = |store: &MemoryStore, step: &str| {
+        let rows: Vec<(String, i64, i64)> = store
+            .with_conn_for_test(|conn| {
+                conn.prepare(
+                    "SELECT p.project,
+                            COALESCE((SELECT SUM(receipt_charge_bytes + allowance_bytes)
+                                        FROM memory_reviewer_jobs j WHERE j.project = p.project), 0)
+                          + COALESCE((SELECT SUM(receipt_charge_bytes + allowance_bytes)
+                                        FROM memory_reviewer_frozen_selections f WHERE f.project = p.project), 0),
+                            COALESCE((SELECT metadata_bytes FROM memory_reviewer_metadata_totals t
+                                       WHERE t.project = p.project), 0)
+                       FROM (SELECT project FROM memory_reviewer_jobs
+                             UNION SELECT project FROM memory_reviewer_frozen_selections
+                             UNION SELECT project FROM memory_reviewer_metadata_totals) p
+                      ORDER BY p.project",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect()
+            })
+            .unwrap();
+        for (project, summed, total) in &rows {
+            assert_eq!(summed, total, "{step}: {project}");
+            let headroom = store.memory_reviewer_headroom(project).unwrap();
+            assert_eq!(
+                headroom.project_metadata_bytes,
+                u64::try_from(*summed).unwrap(),
+                "{step}: {project}"
+            );
+        }
+        let host: i64 = rows.iter().map(|(_, summed, _)| summed).sum();
+        if let Some((project, _, _)) = rows.first() {
+            assert_eq!(
+                store
+                    .memory_reviewer_headroom(project)
+                    .unwrap()
+                    .host_metadata_bytes,
+                u64::try_from(host).unwrap(),
+                "{step}"
+            );
+        }
+        rows.len()
+    };
+    assert_eq!(check(&store, "empty"), 0);
+    let first = reserved(
+        store
+            .reserve_memory_reviewer_job("proj-a", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    let second = reserved(
+        store
+            .reserve_memory_reviewer_job("proj-b", &producer("f1"), &inputs("cand-2"), NOW)
+            .unwrap(),
+    );
+    assert_eq!(check(&store, "reserved"), 2);
+    store
+        .activate_memory_reviewer_job(
+            "proj-a",
+            &first.causal_identity,
+            &producer("f1"),
+            &input("cand-1"),
+            NOW + 1,
+        )
+        .unwrap();
+    store
+        .finish_memory_reviewer_job(
+            "proj-b",
+            &second.causal_identity,
+            MemoryReviewerJobOutcome::Failed,
+            NOW + 1,
+        )
+        .unwrap();
+    check(&store, "activated and finished");
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-3"), inputs("cand-4")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
+    store
+        .freeze_selection("proj-a", "slot-1", "attempt-1", &page, NOW + 2)
+        .unwrap();
+    store
+        .freeze_selection("proj-b", "slot-1", "attempt-1", &page, NOW + 2)
+        .unwrap();
+    check(&store, "frozen");
+    let selection = store
+        .lookup_frozen_selection("proj-a", "slot-1", "attempt-1")
+        .unwrap()
+        .unwrap();
+    let enqueued = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj-a", &selection, &producer("f2"), NOW + 3)
+        })
+        .unwrap();
+    assert!(
+        matches!(enqueued, EnqueueOutcome::Enqueued { jobs: 2, .. }),
+        "{enqueued:?}"
+    );
+    check(&store, "enqueued");
+    store
+        .expire_memory_reviewer_work(NOW + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + 10)
+        .unwrap();
+    check(&store, "expired");
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = receipt_charge_bytes + 7
+                  WHERE project = 'proj-a'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE memory_reviewer_frozen_selections SET project = 'proj-c' WHERE project = 'proj-b'",
+                [],
+            )?;
+            conn.execute(
+                "DELETE FROM memory_reviewer_jobs WHERE causal_identity = ?1",
+                [&first.causal_identity],
+            )?;
+            conn.execute(
+                "DELETE FROM memory_reviewer_frozen_selections WHERE project = 'proj-a'",
+                [],
+            )
+        })
+        .unwrap();
+    assert_eq!(check(&store, "edited and deleted"), 3);
+}
+
+/// A frozen page's references repeat the question template, evidence, and policy versions; the freeze scans and receipts each distinct value under its field once, so the audit grows by the page's distinct values, not by its references.
+#[test]
+fn a_freeze_receipts_each_distinct_reference_value_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let copies = |store: &MemoryStore| -> BTreeMap<String, i64> {
+        store
+            .with_conn_for_test(|conn| {
+                conn.prepare(
+                    "SELECT field_id, COUNT(*) FROM scan_owner_copies
+                      WHERE field_id IN ('candidate_id', 'question_template', 'evidence_id',
+                                         'policy_name', 'policy_version', 'signal')
+                      GROUP BY field_id",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+            })
+            .unwrap()
+    };
+    let before = copies(&store);
+    store
+        .freeze_selection(
+            "proj",
+            "slot-1",
+            "attempt-1",
+            &FrozenSelectionPage {
+                references: vec![inputs("cand-1"), inputs("cand-2"), inputs("cand-3")],
+                next_cursor: None,
+            },
+            NOW,
+        )
+        .unwrap();
+    let after = copies(&store);
+    let grew = |field: &str| {
+        after.get(field).copied().unwrap_or(0) - before.get(field).copied().unwrap_or(0)
+    };
+    assert_eq!(grew("candidate_id"), 3, "each reference's own target");
+    for field in [
+        "question_template",
+        "evidence_id",
+        "policy_name",
+        "policy_version",
+    ] {
+        assert_eq!(grew(field), 1, "{field} is shared by every reference");
+    }
+    assert_eq!(grew("signal"), 2, "the two signals every reference carries");
+}
+
+/// Persisted jobs are keyed by their causal identity: the SHA-256 of the target's JSON, a unit separator, and the fingerprint's hex digest, over the sorted and deduplicated inputs. These values are pinned, and input order or duplicates do not move them.
+#[test]
+fn causal_identities_are_pinned_and_independent_of_input_order() {
+    let staged = inputs("cand-1");
+    assert_eq!(
+        staged.causal_identity().unwrap(),
+        "587a1bcb26fbe6b1a9aa52b6566c0ff1d1b51653ddf0bf76e3dfdbac686d5513"
+    );
+    let mut shuffled = staged.clone();
+    shuffled.signals.reverse();
+    shuffled.signals.push("drift".to_string());
+    shuffled
+        .required_evidence
+        .push(shuffled.required_evidence[0].clone());
+    assert_eq!(shuffled.causal_identity(), staged.causal_identity());
+    let memory = CausalInputs {
+        target: ReviewTarget::Memory {
+            object_id: "m\u{e9}mo \"1\"".to_string(),
+            source_revision: 7,
+        },
+        required_evidence: vec![
+            EvidenceAvailability {
+                evidence_id: "ev-b".to_string(),
+                available: false,
+            },
+            EvidenceAvailability {
+                evidence_id: "ev-a".to_string(),
+                available: true,
+            },
+        ],
+        ..inputs("unused")
+    };
+    assert_eq!(
+        memory.causal_identity().unwrap(),
+        "cd8b7c7d454b69d6b555bef7fde8c0ca189977c15aad096b1f8121a53b23c5fc"
+    );
+    let mut conflicting = memory.clone();
+    conflicting.required_evidence.push(EvidenceAvailability {
+        evidence_id: "ev-a".to_string(),
+        available: false,
+    });
+    assert_eq!(
+        conflicting.causal_identity(),
+        Err(MemoryReviewerJobRefusal::InvalidRequest),
+        "one evidence id with two availabilities has no identity"
+    );
+    // The same conflict already in ascending order is refused too.
+    conflicting.required_evidence = vec![
+        EvidenceAvailability {
+            evidence_id: "ev-a".to_string(),
+            available: false,
+        },
+        EvidenceAvailability {
+            evidence_id: "ev-a".to_string(),
+            available: true,
+        },
+    ];
+    assert_eq!(
+        conflicting.causal_identity(),
+        Err(MemoryReviewerJobRefusal::InvalidRequest)
+    );
+}
+
+/// The selector's deduplication read answers every identity of a batch in request order, within its project only.
+#[test]
+fn job_existence_answers_each_identity_in_request_order_within_its_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let held = reserved(
+        store
+            .reserve_memory_reviewer_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    )
+    .causal_identity;
+    let absent = inputs("cand-2").causal_identity().unwrap();
+    assert_eq!(
+        store
+            .memory_reviewer_jobs_exist("proj", &[&held, &absent, &held])
+            .unwrap(),
+        vec![true, false, true]
+    );
+    assert_eq!(
+        store.memory_reviewer_jobs_exist("other", &[&held]).unwrap(),
+        vec![false],
+        "another project's job is not this project's"
+    );
+    assert!(
+        store
+            .memory_reviewer_jobs_exist("proj", &[])
+            .unwrap()
+            .is_empty()
     );
 }

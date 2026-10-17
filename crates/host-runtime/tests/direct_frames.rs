@@ -23,13 +23,14 @@ fn direct_fill(fault: &str) -> Vec<u8> {
     }))
 }
 
-/// T3: a serializer that underfills, overfills, fails, or panics publishes no frame for its correlation, and the failure closes the connection. Every arm returns the egress charge: on a host whose egress budget holds one such frame, a fresh connection's full-size direct frame still publishes, with exactly the declared bytes.
+/// T3: a serializer that underfills, overfills, fails, or panics publishes no frame for its correlation, and the failure closes the connection. Every arm returns the egress charge: on a host whose egress budget holds one such frame, a fresh connection's full-size direct frame still publishes, with exactly the declared bytes. `host.status` counts each failed arm, and the exact frames add nothing.
 #[tokio::test]
 async fn a_failed_direct_serializer_publishes_nothing_and_returns_its_charge() {
     let host = TestHost::start_with(|config| {
         config.limits.max_resident_bytes = host_runtime::config::MIN_RESIDENT_BYTES + HEADROOM;
     })
     .await;
+    assert_eq!(direct_serialize_failures(&host).await, 0);
     for fault in ["underfill", "overflow", "error", "panic"] {
         let mut client = host.client().await;
         let (channel, epoch) = client
@@ -84,7 +85,17 @@ async fn a_failed_direct_serializer_publishes_nothing_and_returns_its_charge() {
         assert_eq!(frame.len as usize, BODY, "{fault}");
         assert_eq!(frame.body, vec![0x5a; BODY], "{fault}");
     }
+    assert_eq!(direct_serialize_failures(&host).await, 4);
     host.shutdown_gracefully().await;
+}
+
+async fn direct_serialize_failures(host: &TestHost) -> serde_json::Value {
+    let client = host_runtime::Client::connect(host.publication_path())
+        .await
+        .expect("a status client attaches");
+    let snapshot = client.host_status().await.expect("host.status decodes");
+    client.close().await.expect("the status client closes");
+    snapshot.shared_memory["direct_serialize_failure"]["observed"].clone()
 }
 
 /// T4: a unary direct frame is queued from settlement after its handler future has ended, so its serializer runs, and holds the response's source, in the window between the handler's end and publication.

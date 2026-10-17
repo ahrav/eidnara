@@ -85,7 +85,7 @@ pub use claim_facts::{
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
-    CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
+    CommitReadTarget, CommitSpan, CompleteCommit, IdentifiedCommitReadTarget, PageEnd,
 };
 pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
 pub use current_input::{
@@ -115,6 +115,7 @@ pub use memory_reviewer_hold::{
     MAX_RUN_BUFFER_BYTES, MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND,
     MemoryReviewerHold, MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
     MemoryReviewerHoldRefusal, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
+    SealedReviewProposal,
 };
 #[cfg(feature = "test-support")]
 pub use open::{ClassificationChange, OpenPhase};
@@ -146,8 +147,9 @@ pub use slice::{
     AlignmentSnapshot, DECISION_CHANGE_KINDS, DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND,
     DECISION_INSERT_KIND, DECISION_RETIRE_KIND, DecisionEventOutcome, DecisionEventPayload,
     DecisionEventSpec, DecisionPage, DecisionPayload, DecisionRow, DecisionSpec,
-    DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload, ObservationRow,
-    ObservationSpec, ObservationWriteOutcome, PagedDecision, RetirementOutcome, SliceSnapshot,
+    DecisionWriteOutcome, LINKED_EVENT_WINDOW, LinkedEvidence, ObservationDependencySpec,
+    ObservationPayload, ObservationRow, ObservationSpec, ObservationWriteOutcome, PagedDecision,
+    RetirementOutcome, SliceSnapshot,
 };
 pub use source_descriptor::{
     LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,

@@ -2767,6 +2767,51 @@ fn a_slice_ends_by_the_records_deadline_while_the_projection_is_held() {
     assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
 }
 
+#[test]
+fn a_cancelled_certificate_issuance_stops_waiting_for_a_held_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let reader = owner.pin(&slice_budget()).unwrap();
+    reader
+        .completeness_certificate(&corpus.kernel, &slice_budget())
+        .expect(
+            "the current family certifies its inventory, so issuance reaches its projection read",
+        );
+
+    let issuance = budget(Duration::from_secs(30));
+    let held = std::sync::Barrier::new(2);
+    let (waited, certified) = std::thread::scope(|scope| {
+        hold_projection(scope, &reader, &held, Duration::from_secs(4));
+        held.wait();
+        let cancel = issuance.clone();
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            cancel.cancel();
+        });
+        let started = Instant::now();
+        let certified = reader.completeness_certificate(&corpus.kernel, &issuance);
+        (started.elapsed(), certified)
+    });
+    assert!(
+        waited < Duration::from_secs(2),
+        "issuance waited {waited:?} for a held connection after its budget was cancelled: {certified:?}"
+    );
+    assert!(
+        matches!(
+            certified,
+            Err(BuildError::Projection(
+                daemon::search_projection::SearchProjectionError::Store(
+                    storage::StoreError::Deadline
+                )
+            ))
+        ),
+        "{certified:?}"
+    );
+}
+
 /// A pin with a short budget returns within that budget while a slice holds the owner across a long projection read.
 #[test]
 fn a_pin_waits_for_the_owner_only_within_its_budget() {

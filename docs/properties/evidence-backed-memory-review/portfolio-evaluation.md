@@ -19,7 +19,7 @@ reviews found and how each finding was dispositioned.
 | `related_memories` decoded the class twice for one row | refinement | fixed: `expectation` calls `originating_decision` with the class it already parsed |
 | The new integration test file duplicated the broker fixture | refinement | fixed: the tests moved into `memory_reviewer_broker.rs` and reuse its fixture |
 | The `commit_token` oracle used the same formula as the implementation over a decision with one commit | gap | fixed: a second commit appends a decision event so the last change differs from creation |
-| No coordinator-level witness exercised `resolve_subject` through `open` for a canonical subject | gap | fixed: `a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model` |
+| No coordinator-level witness exercised `resolve_subject` through `open` for a canonical subject | gap | fixed: a coordinator test, later replaced by the worker witness `production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator` over both classes; that witness's artifacts are also `LocalOnly`, so `a_resolved_canonical_or_promoted_subject_still_refuses_the_remote_destination` remains the witness that missing provenance alone forces the refusal |
 | The scheduler gate test derived its expectation from the gate constant, so flipping the gate changed nothing | gap | fixed: a constant assertion on the gate plus a fixed expected task list |
 | Canonical before/after equality was asserted only on the Git path | gap | fixed: tracked registry rows compared before and after in both broker tests |
 | The wrong-kind owner refusal at the broker is `Scope`, not a kind-specific code, because the evidence object is unscoped | bias | kept: the Kernel judges scope before kind; `proposal_target` supplies the kind refusal, and the evidence file records the ordering |
@@ -121,13 +121,33 @@ reviews found and how each finding was dispositioned.
 | The ledger tests that committed successive markers without terminals now close each attempt first | refinement | fixed: matches what a live run does; the unterminated case is exercised on purpose in the new tests |
 | No timing or memory measurement of the padded-response path | bias | kept: the byte counts the tests assert are the resource evidence; no latency or quality threshold is claimed, per the ticket |
 
+## Production-class witnesses
+
+Lenses for this change: over-engineering, complexity, testing, invariant
+adequacy, Rust code review, and documentation verification.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The empty production page was attributed to the Remote fold only through an artifact check, while the selector judges the surface verdict, which also covers admission and scope | gap | fixed: the refusal witness judges the same candidates through `judge_surface_eligibility_within_budget`, permitted for `Local` and `ProviderSensitive` for `Remote` |
+| The forced causal inputs restated the selector's derivation with a literal question id and an unstated no-linked-evidence precondition | gap | fixed: the question id comes from `QuestionTemplate::ExtractedFacts`, and the test asserts the decision links no evidence |
+| "Nothing to read" accepted any refusal | gap | fixed: the read is asserted `not_selected` |
+| The refusal accepted either denial reason | refinement | fixed: the artifact reason is pinned to `SensitiveRemote` |
+| The fixture positive path covered only `canonical_claims` | gap | fixed: a `promoted_memory` form of the same decision runs beside it and targets the same decision |
+| The broker matrix test bundled three faults, its tightened-class case had no readable control and no Remote read, and its deletion case ended on an assertion about a value resolved before the delete | gap | fixed: split into three tests; the tightened case reads before the change and refuses both destinations after it; the deletion case re-resolves after the delete and asserts the hold refusal |
+| `live_descriptors` ignored a continuation page | refinement | fixed: it asserts one page holds the inventory |
+| Two fixed `CommitIntent` literals sat beside the new `worker_intent` helper | refinement | fixed: both use it |
+| The Git witness's doc comment and the operations document named the production-class witness as wholly gated | refinement | fixed: both name the positive witness as gated and point at the refusal and fixture witnesses |
+| The forced inputs are built in the test rather than by the selector's private `causal_inputs` | bias | kept: the selector refuses these rows, so no selector output exists to reuse; the test pins each input the derivation uses and the precondition that keeps linked evidence empty |
+| The refusal witness forces jobs the production selector refuses | bias | kept: the selector's eligibility-first contract is #593's; the forced jobs show the coordinator's refusal for any job that reaches it, such as one admitted before a class tightened |
+| The refusal witness's zero-connection assertion read a counter that only a serving task increments, and the witness starts none, so a client connection would leave it at zero | gap | fixed: the witness reads `Peer::connection_count`, which also drains the unserved listener's accept queue; `an_unserved_peer_counts_a_connection_it_never_answered` is its positive control |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner
   supplies a Remote-eligible decision representation. Queued under the owner of
   the policy-validating broker.
 - Class tightening and wrong-scope decisions at the coordinator seam remain
-  unconstructed; see `existing-checks.md`.
+  unconstructed; the broker seam covers both; see `existing-checks.md`.
 - A TypeScript-driven positive `review show` against the hermetic host needs
   a fixture control that publishes a proposal with nonempty spans; queued
   under the direct-host fixture owner.

@@ -119,8 +119,8 @@ pub use governance::{ArmError, ArmRecord, GovernanceArms, HistoryPolicy, pair_se
 pub use growth::{
     CampaignResources, GROWTH_REPORT_SCHEMA, GrowthBounds, GrowthContract, GrowthLedger,
     GrowthMode, GrowthRefused, GrowthReport, GrowthReportError, HeadroomSample, IsolationRefused,
-    MixIncomplete, Operation, ResourceSample, ReviewerQuota, StoreBytes, SwarmMix,
-    digests_match_serial, isolated, parse_growth_report,
+    MixIncomplete, Operation, QuiescenceProgress, ResourceSample, ReviewerQuota, StoreBytes,
+    SwarmMix, digests_match_serial, isolated, parse_growth_report,
 };
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,

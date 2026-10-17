@@ -2540,6 +2540,10 @@ mirroring the fault enums and hooks that exist: `search_episode`
 transaction after the change events), `message_cleanup_lose_write_reply` and
 `identity_sweep_lose_reclaim_reply` (the two projection maintenance slices
 whose COMMIT reply is lost after the store applied it),
+`reviewer_completion_lose_reply` (`storage::after_commit_for_test` plants a
+TEMP shadow of `memory_reviewer_receipts` on the writer connection after the
+receipt completion commits, so the settlement's read-back fails with a store
+error for a completion that applied),
 `external_lock_holder` (an external `BEGIN IMMEDIATE`), `process_kill { cut }`,
 `corrupt_quiescent_file`, and `expected_refusal { refusal }`, which injects no
 fault: the runner drives production into a refusal it makes on purpose. The
@@ -2552,7 +2556,8 @@ internals, not faults a campaign injects, and stay outside it on purpose
 the seam lives in: catch-up, publication, dispatch, and a projection batch
 write the search projection, as do the cleanup and sweep slices; the CAS, its
 GC, a restore, a backup, a commit, and the materializer's outbox are the
-kernel; R11 is the projection's refusal and R24 the memory store's; and a
+kernel; a reviewer completion is the memory store's; R11 is the projection's
+refusal and R24 the memory store's; and a
 lock holder, a kill, or a corrupted file names its own store; a scope on
 another family is
 `ScopeMismatch`. `FaultAction::loses_reply` names the actions that leave an
@@ -2560,8 +2565,9 @@ operation's outcome unknown to its caller: the search-episode reply losses,
 `embedding_publication`'s `lose_local_commit_reply`, the materializer's
 `lose_acknowledgement_reply`, dispatch's
 `lose_charge_reply` and `lose_obsoletion_reply`,
-GC's `after_reclaiming` and `after_unlink`, and the cleanup and sweep
-slices' lost COMMIT replies; a rolled-back commit, a refused
+GC's `after_reclaiming` and `after_unlink`, the cleanup and sweep
+slices' lost COMMIT replies, and the reviewer completion's lost read-back; a
+rolled-back commit, a refused
 statement, a skipped acknowledgement, the materializer's
 `fail_acknowledgement` (which never calls the kernel), an expected refusal, or
 a process kill, whose cut fixes what committed, is known, not lost, and
@@ -2575,8 +2581,9 @@ incarnation. A restore interrupted `before_displace` or `after_displace` is
 rolled back by the handle before the fault returns and is `consumed`; only
 `recovery_failure` leaves the store for a `reopen`. A projection batch fault
 rolls its transaction back and is `consumed`, as are a backup that fails
-before its rename, a commit that fails after its events, and the two
-maintenance slices' lost replies. The CAS faults split by whether they latch ingestion closed: the
+before its rename, a commit that fails after its events, the two
+maintenance slices' lost replies, and the reviewer completion's lost reply,
+whose shadow the runner drops once the reply is lost. The CAS faults split by whether they latch ingestion closed: the
 ingest faults `write`, `file_sync`, `rename`, `after_directory_sync`, and
 `takeover_before_cleanup_unlink` and the EIO deletion faults `intent_append`
 and `unlink` heal by `reopen`; `reservation_commit` and `after_events` abort a
@@ -2697,8 +2704,10 @@ when the bound was reached, and one `LaneProgress` per driven lane in that
 lane's own unit (`catch_up_episodes`, `embedding_passes`,
 `materialization_episodes`, `reviewer_coordinator_passes`): the bound, the
 steps driven, the step the predicate first held, the first step after that at
-which it did not, whether it held at the bound, the fresh commits the window
-fed the lane, and the block that stopped it. `verdict(bounds)` takes the approved
+which it did not, whether it held at the bound, the fresh work the window
+fed the lane (`fresh_work`: kernel commits for the catch-up, embedding, and
+materialization lanes, activated jobs for the reviewer lane), and the block
+that stopped it. `verdict(bounds)` takes the approved
 profile's `LivenessBounds` and refuses `EmptyHealthyCore` when the core names
 no family or no lane (a core with nothing to drive proves no liveness),
 `NoOutsideCoreFault` when no
@@ -2709,16 +2718,16 @@ lane with no progress record, `BoundMismatch` when a lane's declared bound is
 not the profile's (a bound fitted to the observed progress is not a bound),
 and `LivenessUnmet { lane, progress_at_bound, blocked }` when the predicate
 never held, held only transiently, stalled after it first held, the lane was
-fed no fresh commits (an idle lane meets its predicate trivially), the lane
+fed no fresh work (an idle lane meets its predicate trivially), the lane
 stopped short of the bound or was driven past it (`steps` must equal the
 bound), or the lane records the `blocked` stop that a met
 predicate contradicts.
 
-`FaultReport` (`eval-suite-c-fault-report/v1`) is what one fault campaign
+`FaultReport` (`eval-suite-c-fault-report/v2`) is what one fault campaign
 publishes: identity, profile digest, claim boundary, the episodes, barrier
 receipts, cut receipts, cut coverage, the effect ledger, expected refusals,
 the count of safety checks made while faults were armed (`SafetyNeverChecked`
-at zero), the optional liveness report, markers, and envelope. `validate`
+at zero), one liveness report per arm, markers, and envelope. `validate`
 takes a `FaultProfile`, the approved profile's digest, liveness bounds, and
 resource limits; its fields are private and `RunProfile::fault_profile` is
 its only constructor, refusing an unapproved profile, so holding one is
@@ -2741,11 +2750,15 @@ report's episodes, `CoreFamilyFaulted` for one scoped to a family the healthy
 core names, `ConsumedFaultArmed` for one whose heal is `consumed`: a
 one-shot fault is consumed or never fired, and neither is armed at the bound,
 and `RefusalArmed` for an `expected_refusal`, which injects no fault to arm.
+Each arm's `verdict` must hold, and the arms together drive every `Lane`
+exactly once: `LaneInTwoArms` for a lane two arms claim and `LaneNotDriven`
+for a lane no arm drives, so a report with no liveness arm, or one missing an
+arm, has no progress evidence for that lane and is refused rather than passed.
 `serialize` and `parse_fault_report` also refuse `NotCanonical` for an integer
 outside the canonical safe range, which `result_digest` could not encode;
 `parse_fault_report`
 reads a report back losslessly; `result_digest` drops barrier pids and
-envelope peaks under `eval-suite-c-fault-report-result/v1`.
+envelope peaks under `eval-suite-c-fault-report-result/v2`.
 
 ## Growth ledger, reviewer headroom, swarm mix, and isolation
 
@@ -2765,16 +2778,35 @@ permanent exhaustion is intended.
 A `ResourceSample` is everything a campaign holds at one quiescent point: per
 store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
 entries, and bytes; cassette bytes; temp roots and processes;
-commit-log and projection rows; open holds; and a `HeadroomSample` (pending
+commit-log and projection rows; open holds; a `HeadroomSample` (pending
 and terminal jobs, frozen and terminal pages, project bytes and remaining,
 admissions, R24
-refusals). A `GrowthLedger` records samples under a `GrowthMode`
+refusals); and a `QuiescenceProgress`, the healthy-progress witness of the
+drain that reached the point (the projection's `acknowledged_through`, the
+catch-up episodes the drain ran, the reviewer coordinator passes run since the
+previous quiescence until every job handed to the coordinator was terminal,
+and whether every handed job settled). A `GrowthLedger` records samples under a `GrowthMode`
 (`never_restored` or `restoring`) with monotonic steps and commit sequence;
 `restore_attempted` under `never_restored` is `RestoreUnderNeverRestored` and
 counted. `verdict(quota, bounds)` is a leak verdict only for a never-restored
 ledger (`NotALeakVerdict` otherwise) with a baseline and a final sample
 (`NoBaseline` for one sample, which has no interval to judge growth over):
-every sample must carry every store
+every sample must carry a progress witness whose `acknowledged_through`
+equals its commit sequence (`NotQuiescent { step, acknowledged_through,
+commit_seq }`, a drain that stopped short) and whose catch-up episodes and
+reviewer passes are within the `catch_up_episodes` and
+`reviewer_coordinator_passes` of the approved liveness bounds that
+`GrowthBounds::progress` carries (`ProgressUnbounded { step, lane, used,
+bound }`), with every handed job settled (`ReviewerUnsettled { step,
+passes, bound }`); `check_samples` applies this in both modes, so a restoring
+ledger keeps its progress evidence too. Only the catch-up and reviewer lanes
+are witnessed in a growth campaign: its drain publishes embeddings directly
+and runs no claim materializer, so those lanes' bounds judge the fault
+campaign's liveness mode alone. The checker is independent of the producer,
+which stops at the bound itself (`catch_up` refuses past its own episode cap,
+and the shell runs no pass past the approved bound), so an overrun reaches the
+ledger only from a forged report.
+Every sample must carry every store
 family (`StoreMissing { step, family }`, so an omitted store cannot hide its
 bytes), its project bytes must equal `expected_project_bytes`
 (`HeadroomMismatch`; `HeadroomOverflow` when the counts do not fit in `u64`,
@@ -2828,13 +2860,24 @@ mounts), and `digests_match_serial` refuses
 differs from its serial one and `TooFewCampaigns` below two, since isolation
 is a claim about at least two.
 
-`GrowthReport` (`eval-suite-c-growth-report/v1`) is what one campaign
+`GrowthReport` (`eval-suite-c-growth-report/v2`) is what one campaign
 publishes: identity, profile digest, claim boundary, the quota read, the
-bounds, the ledger, the mix, expected refusals, fault-episode and
-safety-check counts (`SafetyNeverChecked` when either the fault-episode count
+bounds, the ledger, the mix, expected refusals, the fault episodes it ran and
+its safety-check count (`SafetyNeverChecked` when either an episode is listed
 or the mix records a fault episode and no safety check ran while armed;
-`FaultEpisodesDisagree` when the count and the mix's `fault_episode` tally
-differ),
+`ReviewerNeverPassed` when no sample's progress witness records a reviewer
+coordinator pass, since a complete mix exercised quota pressure, which hands
+work to the coordinator;
+`FaultEpisodesDisagree` when the listed episodes and the mix's `fault_episode`
+tally differ; `Episode` for a duplicate or malformed episode, as the fault
+report refuses them), the episodes' cut coverage (`Coverage(IncompleteCoverage)`
+for a declared cut with no receipt, `FaultedWithoutCuts` when fault episodes
+ran and no cut was declared; the declared set is derived from the episodes:
+`Coverage(UndeclaredCut)` for an episode whose id is not declared,
+`CutNotAnEpisode { cut }` for a declared cut that is not a listed episode,
+and `EpisodeNotSampled { episode, step }` for an episode triggered at a step
+no sample records, so a receipted set of the right size cannot stand in for
+the episodes that ran),
 markers, and envelope. `validate(contract)` requires `eval_run_id` and
 `profile_digest` to be 64 lowercase hex digits (`MalformedDigest { field }`),
 as the Suite B report does; the manifest derives the run id and names the
@@ -2866,7 +2909,7 @@ each sample's byte measurements (`stores`, `artifact_bytes`,
 `cassette_bytes`) and the envelope peaks, which name one machine's bytes, and
 keeps steps, commit sequence, row and object counts, and headroom, so a
 concurrent campaign that saw another campaign's commits does not match its
-serial digest; the digest protocol is `eval-suite-c-growth-report-result/v1`.
+serial digest; the digest protocol is `eval-suite-c-growth-report-result/v2`.
 
 ## Aging shell
 
@@ -3162,7 +3205,7 @@ opens with; the other half is fed one planned step per window step as fresh
 kernel-only work (`Stores::apply_kernel_only`, which leaves the memory store
 untouched because it is outside the core), so every lane's predicate is
 re-established against new commits rather than held by idling. A lane's
-`fresh_commits` is the kernel tip's advance across each feed, because a
+`fresh_work` is the kernel tip's advance across each feed, because a
 publish commits once per unit and a retirement of a dead lineage commits
 nothing. Every fourth step inside the materialization lane's bound also
 commits one scoped decision and retires the one before it, so the materializer
@@ -3185,12 +3228,49 @@ each decision the window commits. The plan's own bounds would fall short from
 references. A CAS ingest fault cannot
 be the permanent outside-core fault here: its latch refuses the kernel
 ingestion the fresh publishes need, which would put the fault inside the core.
-The reviewer coordinator lane is outside this campaign's core (its scripted
-model peer is not in the drive), so the report declares three lanes and
-`verdict` judges those; the R11 stall is listed under `permanent_stalls`. The
-evaluator drives every lane directly and the claim boundary says so: the
-lifecycle owner's wall-clock reads are outside the core. The liveness root is
-charged while its stores are open, before the close checkpoints their WALs.
+This arm declares three lanes and `verdict` judges those; the R11 stall is
+listed under `permanent_stalls`. The evaluator drives every lane directly, so
+the lifecycle owner's wall-clock reads are outside the core; this document
+states that boundary, and the pinned claim boundary's exclusions do not name
+it. The liveness root is charged while its stores are open, before the
+close checkpoints their WALs.
+
+The reviewer coordinator lane is a second arm on its own root
+(`fault::reviewer_liveness`), because its core is the memory store the first
+arm holds locked. Its core is the kernel, the memory store, and the production
+`memory_reviewer::worker::Worker`: one MODULE-authority project with one bound
+root, the deployment owner's activation record for exactly these stores, a
+local TLS peer as the provider endpoint, and the credential identity derived.
+Outside it, an external `BEGIN IMMEDIATE` on the search projection stays armed
+for the whole window and at the bound; the worker never opens the
+projection, so the lock shares no resource with the core and is not a
+contention test. The window opens with two Ready
+History Summarizer jobs; each of the profile's `reviewer_coordinator_passes`
+steps activates one fresh job (`fresh_work` counts them) and runs one
+`Worker::pass` directly, outside the worker task's loop, and the lane holds when the activation gate is open, no job
+is Ready, and the abstained count equals every job fed. The staged subjects
+are default-Sensitive, so each run settles as a policy-blocked abstention
+before any request; every send commits an attempt marker first, so the arm
+refuses the run when the memory store records any attempt.
+`fault::reviewer_window` is the unjudged window; with no activation record
+written its passes settle nothing and the verdict is `LivenessUnmet` with the
+closed gate as the block. Job deadlines are wall-clock, as the queue's are by design.
+
+The reviewer completion's lost reply (`reviewer_completion_lose_reply`) runs
+on its own root after the second recovery: the root raises its project to
+MODULE authority, claims a History Summarizer job and begins its receipt, and
+settles a proposal with nothing disclosed through
+`memory_reviewer::settlement::Settlement` with `before_completion_for_test`
+arming `storage::after_commit_for_test` once. The completion commits, the
+shadow refuses the read-back, and the settlement answers
+`SettlementError::Store`; the effect
+`reviewer_completion:<causal identity>@<episode>` stays unknown until the
+recovery reads `memory_reviewer_receipts.state` from the closed memory store,
+which reads `complete` with terminal kind `complete` and a selected result,
+so it is `applied`; an open receipt, another terminal, or no receipt reads
+`not_applied`. The runner drops the shadow before
+its safety check, which reads the memory store's segments through the same
+connection.
 
 The `fault` subcommand takes the same flags as `aging` and answers with one
 JSON line; `fault-child` is its kill child. A history whose checkpoint leaves
@@ -3214,13 +3294,31 @@ the reviewer queue is real. `Campaign::step` applies the planned mutation
 (`publish`, `correct`, or `retire`, as `Stores::apply` reports it), reads the
 projection every third step (`query`), runs a lost-acknowledgement catch-up
 episode through the fault shell every fifth step that committed (`fault_episode`,
-with its safety check; a skipped retire leaves nothing to acknowledge), admits one reviewer job through the real reservation, staging,
-claim, and receipt path every fourth step and settles every other one by
-abstention (`quota_pressure`, so the ledger holds both pending allowances and
-permanent receipt charges), drains to quiescence, and samples. The store
+with its safety check; a skipped retire leaves nothing to acknowledge), admits one reviewer job every fourth step (`quota_pressure`): every other
+admission (`i % 8 == 3`) is activated Ready under the campaign's bound root
+and handed to the production `memory_reviewer::worker::Worker` through
+`fault::ReviewerRig` (the owner's activation record for exactly these stores,
+a local TLS peer on an OS-allocated port, the credential identity derived),
+and the rest go through the real reservation, staging, claim, and receipt
+path and stay pending, so the ledger holds both pending allowances and
+permanent receipt charges. The step then drains to quiescence, counting the
+catch-up episodes, runs `Worker::pass` directly until every handed job has
+settled or the approved `reviewer_coordinator_passes` is spent, records that
+as the next sample's `QuiescenceProgress`, and samples. The handed subjects
+are default-Sensitive, so each settles as a policy-blocked abstention before
+any request, and the peer's port carries no traffic: it is the campaign's
+isolated resource, not provider evidence. The manifest declares reviewer model
+calls excluded, so the run refuses itself (`RunError::ReviewerAttempted`) when
+the memory store holds any attempt marker before the final sample. A begun job
+is staged under its own digest, which the rig's one bound root never names,
+so the worker passes over it whatever its lease, and a coordinator pass
+cannot change what the begun jobs hold. The store
 refuses a reservation past `MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT`
 pending jobs, so an admission that brings the pending count to that cap is
-settled by abstention as well; the pending queue then holds one slot free and
+settled by abstention as well (a handed one by the coordinator at once; its
+passes count toward the next quiescence's witness and draw on that
+quiescence's `reviewer_coordinator_passes`, so the drain's own settle runs
+only what the cap-triggered one left); the pending queue then holds one slot free and
 every later admission becomes a permanent receipt charge, which is how a long
 history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
@@ -3245,7 +3343,15 @@ files are measured: an open commits a new fence epoch and runs startup
 maintenance, so a sample taken after it would not be the history's own.
 `Campaign::restore` is refused
 and counted under `never_restored`; under `restoring` it closes and reopens
-in place, and the ledger then gives no leak verdict.
+in place, and the ledger then gives no leak verdict. Every sample builds its
+progress witness at the moment it is taken: the projection's checkpoint as
+the files hold it, the catch-up episodes and coordinator passes accumulated
+since the last recorded sample, and whether every handed job has settled;
+recording the sample drains both accumulators. So a second sample with no
+drain between witnesses no further work, a sample after a restore witnesses
+the reopen's bootstrap plus whatever ran since the last recorded sample, and
+a cap-triggered settle's passes reach the ledger through whichever sample
+follows, the restore's own, the next step's, or the final one.
 
 The report carries the quota constants as `memory_reviewer_jobs` declares them
 and the bounds scaled from the message count (with a per-commit store-byte
@@ -3263,8 +3369,16 @@ reported, not planted: a reservation the store refuses with
 the R24 expected refusal the report reconciles that count against, and
 admits nothing, and the campaign continues; any other refusal stops the run
 with `RunError::Admission`. An S0 history never reaches the quota, and the
-report says zero. Two campaigns run from one checkout on two roots publish the same
-result digest as their serial runs; a fixture that shares a root is refused.
+report says zero. Two campaigns run from one checkout on two roots, each with
+its own reviewer peer on an OS-allocated port, publish the same result digest
+as their serial runs; `run_with(config, opened)` calls `opened` once the peer
+listens and before the first step, and the concurrent pair waits there on a
+barrier, so both ports are held at once and the pair's ports are disjoint; a
+fixture that shares a root or a port is refused. The
+serial pair is compared without its ports: each serial run releases its peer
+port before the next binds, so the OS may hand the second the same port. The
+campaign records no cassette, so its `cassette_namespaces` is empty and the
+isolation check covers roots, publish directories, and ports.
 The `growth` subcommand takes the `aging` flags plus `--mode
 <never_restored|restoring>`; the CI `eval-campaign` job runs `eval_growth`
 under `EIDNARA_EVAL_S0_BUDGET_MS` with the ignored scenarios, and the default
@@ -4381,7 +4495,9 @@ second half of this change, owns the growth-campaign markers
 owns the fault-campaign markers (`flt_lost_reply_unknown_until_readback`,
 `flt_every_declared_cut_receipted`, `flt_kill_barrier_read_before_kill`,
 `flt_r11_recorded_as_expected_refusal`, `flt_r24_recorded_as_expected_refusal`,
-`flt_liveness_bounds_met_with_faults_armed`, `flt_corruption_detected_at_quiescence`,
+`flt_liveness_bounds_met_with_faults_armed`,
+`sls_reviewer_passes_bounded_with_projection_locked`,
+`flt_corruption_detected_at_quiescence`,
 `flt_external_lock_holder_released`, `flt_artifact_fault_named_errno`,
 `sls_embedding_publication_held_then_released`). Each suite checks that every
 marker it owns names one of its scenarios and runs its completeness proof on
