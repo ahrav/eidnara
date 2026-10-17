@@ -399,8 +399,8 @@ struct Validated {
     now: i64,
     /// The objects the policy-union members must have served to a local reader, each flagged when it is a descriptor; they are judged in one batch with the target.
     served: Vec<(EligibilityCandidate, bool)>,
-    /// The candidate ids of the staged-subject members, each already proven this job's sealed subject row at its digest.
-    subjects: Vec<String>,
+    /// Whether a staged-subject member already proved the proposal's staged target at its digest.
+    subject_proven: bool,
 }
 
 /// Validates and applies one acceptance inside its envelope and records the settlement receipt; returns the recorded settlement.
@@ -536,8 +536,11 @@ fn validate(
     let union = PolicyUnion::decode(&dependencies.union_canonical, &dependencies.union_digest)
         .or_else(|_| changed())?;
     let mut served = Vec::new();
+    let mut subject_proven = false;
     for member in union.members() {
         member_stands(envelope, acceptance, &proposal, member, &mut served)?;
+        subject_proven |= member.kind == "staged_subject"
+            && matches!(&proposal.target, ProposalTarget::StagedCandidate { candidate_id } if *candidate_id == member.id);
     }
     let mut support: Vec<String> = proposal
         .support
@@ -553,11 +556,7 @@ fn validate(
         support,
         now,
         served,
-        subjects: union
-            .members()
-            .filter(|member| member.kind == "staged_subject")
-            .map(|member| member.id.clone())
-            .collect(),
+        subject_proven,
     })
 }
 
@@ -707,11 +706,7 @@ fn subject_stands(
     validated: &Validated,
     candidate_id: &str,
 ) -> Result<(), AcceptanceError> {
-    if validated
-        .subjects
-        .iter()
-        .any(|subject| subject == candidate_id)
-    {
+    if validated.subject_proven {
         return Ok(());
     }
     subject_row_stands(envelope, acceptance, candidate_id, None)

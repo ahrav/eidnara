@@ -408,7 +408,7 @@ mod tests {
             })
         };
         // A disclosure record beside it changes nothing.
-        write(home.path(), &record(1, "kernel-1", "reviewed"), 0o600);
+        write(home.path(), &self::record(), 0o600);
         assert_eq!(gate(), Err(Closed::Missing));
         write_acceptance(record(1, "kernel-1", "reviewed"), 0o640);
         assert!(matches!(gate(), Err(Closed::Refused(_))));
@@ -416,6 +416,20 @@ mod tests {
         assert_eq!(gate(), Err(Closed::Malformed));
         write_acceptance(record(1, "kernel-1", ""), 0o600);
         assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(
+            record(1, "kernel-1", &"e".repeat(MAX_ATTESTATION_FIELD_BYTES + 1)),
+            0o600,
+        );
+        assert_eq!(gate(), Err(Closed::Malformed));
+        let mut unknown_field = record(1, "kernel-1", "reviewed");
+        unknown_field["approved"] = serde_json::json!(true);
+        write_acceptance(unknown_field, 0o600);
+        assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(
+            record(1, "kernel-1", &"e".repeat(MAX_ATTESTATION_FIELD_BYTES)),
+            0o600,
+        );
+        assert_eq!(gate(), Ok(()));
         write_acceptance(record(1, "kernel-2", "reviewed"), 0o600);
         assert_eq!(gate(), Err(Closed::IdentityMismatch("kernel incarnation")));
         write_acceptance(record(1, "kernel-1", "reviewed"), 0o600);

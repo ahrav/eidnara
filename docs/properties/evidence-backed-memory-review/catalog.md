@@ -459,6 +459,8 @@ The two application records share one envelope: `future-acceptance-co-commits-ex
 is the envelope's all-or-nothing contract, and `future-correction-keeps-kernel-maturity-and-retrieval`
 is what a create or revise inside it may write. Both consume the selected row and
 policy union that `uncited-owner-lineage-remains-read-authority` revalidates for a reader.
+`future-acceptance-needs-version-and-evidence-gates` stands in front of that envelope:
+`review.accept` enters it only under the owner's acceptance record for the live pair.
 
 `observer-route-does-not-change-background-rosters` sits upstream of every
 worker record: the participating view decides which projects the worker sees

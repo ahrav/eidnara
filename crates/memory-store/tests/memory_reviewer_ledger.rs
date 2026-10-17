@@ -874,6 +874,27 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
         Some(MemoryReviewerReceiptTerminal::Complete)
     );
     assert_eq!(receipt.selected, Some((1, selection.clone())));
+    fixture
+        .store
+        .bind_authority_route("ctx", PROJECT, "/repo")
+        .unwrap();
+    let module = fixture
+        .store
+        .module_authority_for_route("/repo", "memories")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .module_authority_with_memory_reviewer_receipt("/repo", "memories", &fixture.identity)
+            .unwrap(),
+        Some((
+            module,
+            fixture.store.memory_reviewer_store_incarnation().unwrap(),
+            Some(receipt.clone())
+        )),
+        "the route read carries the completed receipt"
+    );
     assert_eq!(
         fixture
             .store
