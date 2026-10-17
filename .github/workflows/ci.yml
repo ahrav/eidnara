@@ -856,6 +856,7 @@ jobs:
             lease::tests::to_vec_copies_every_body_length_without_a_zero_fill
             lease::tests::a_span_length_mismatch_refuses_before_writing_any_byte
             backend::ring::miri::descriptor_snapshot_is_copied_out_field_by_field_and_validated
+            backend::ring::miri::descriptor_copy_races_a_concurrent_slot_rewrite
             backend::ring::miri::completion_cell_publication_is_monotonic
             backend::ring::miri::lifecycle_snapshot_sees_a_write_made_through_the_raw_page
           )
@@ -1005,8 +1006,15 @@ jobs:
       - name: Build and test the addon
         # The addon loads a release build of the cdylib; the package tests
         # then drive the setup handshake, ring geometry, buffer bounds, and
-        # detachment through N-API.
+        # detachment through N-API. The plugin's real-host witness dials the
+        # echo host example as a separate process and fails if it cannot.
+        env:
+          EIDNARA_REAL_HOST_BIN: "${{ github.workspace }}\
+            /target/debug/examples/local_embeddings_host"
+          EIDNARA_REQUIRE_REAL_HOST: "1"
         run: |
+          cargo +1.98 build -p host-runtime --example local_embeddings_host \
+            --locked
           bun run --cwd packages/shm-native build:native
           bun run --cwd packages/shm-native build:js
           bun run --cwd packages/shm-native typecheck

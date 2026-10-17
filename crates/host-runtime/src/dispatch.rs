@@ -856,6 +856,8 @@ fn release_before_copy(
     true
 }
 
+pub(crate) const INLINE_PRIVATE_COPY_MAX_BYTES: usize = 64 * 1024;
+
 pub async fn dispatch_request<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     generation: &Arc<GenerationCore>,
@@ -1043,8 +1045,8 @@ pub async fn dispatch_request<H: HostHandler>(
         // still reading. The lease is released inside `into_private`, before any storage or
         // response work, and a copied length that disagrees with the header is a structural
         // fault that ends the generation.
-        let copied = if frame.is_empty() {
-            // Nothing to read, so no worker hop; the closed-route outcome matches `run_blocking`.
+        let copied = if frame.len() <= INLINE_PRIVATE_COPY_MAX_BYTES {
+            // A copy up to `INLINE_PRIVATE_COPY_MAX_BYTES` completes within this poll.
             if ledgers.route.is_closed() {
                 if !release_before_copy(frame, &gen_task) {
                     remove_pending(&gen_task, key);
@@ -1055,7 +1057,13 @@ pub async fn dispatch_request<H: HostHandler>(
                 Ok(frame.into_private())
             }
         } else {
-            ledgers.run_blocking(move || frame.into_private()).await
+            let body_len = header.len;
+            ledgers
+                .run_blocking(move || {
+                    crate::inbound_copy_gate::pass(body_len);
+                    frame.into_private()
+                })
+                .await
         };
         let private = match copied {
             Ok(Ok(private)) => private,

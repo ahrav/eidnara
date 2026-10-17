@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/profile.rs:622`
 - `crates/host-runtime/src/ring_transport.rs:562`
 
-Witness status: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:507` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:3926` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
+Witness status: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:550` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:4167` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
 
 ## Failure scenario
 
@@ -44,3 +44,10 @@ Check semantics: `always` - after a setup failure before the grant is sent, `sna
   witness constructs and what it leaves unconstructed.
 - Missing evidence: the last implementation task injects a descriptor-duplication failure in the combined matrix.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: `fail_next_descriptor_transfer` fails the endpoint after `worker_descriptor` duplicated its six descriptors and before they are handed to the caller; the duplicates close unsent and the accounting returns to its prior value, after which a one-connection limit admits again.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

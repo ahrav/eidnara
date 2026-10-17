@@ -543,10 +543,11 @@ describe("mandatory shared-memory channel", () => {
             corr: 1n,
         };
         const oversize = { byteLength: 65, fill: () => {} };
-        expect(() => channel.produce(header, oversize)).toThrow(RangeError);
+        const tooLarge = { kind: "not_sent", code: "frame_body_too_large" };
+        expect(() => channel.produce(header, oversize)).toThrow(expect.objectContaining(tooLarge));
         const poisoned = { byteLength: Number.NaN, fill: () => {} };
         expect(() => channel.produce(header, poisoned)).toThrow(RangeError);
-        expect(() => channel.reserve(header, 65)).toThrow(RangeError);
+        expect(() => channel.reserve(header, 65)).toThrow(expect.objectContaining(tooLarge));
         // Nothing was charged and the native ring was never touched.
         expect(budget.used).toBe(0);
         expect(produceCalls).toBe(0);

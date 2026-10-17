@@ -32,7 +32,7 @@ Situation markers that must fire independently of the safety check:
 
 - `gate.stale_artifact_present`
 
-Check semantics: `always` - the addon's `qualifiedTestProfile()` equals the wrapper constant in every run.
+Check semantics: `always` - in every run under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`, the addon's `qualifiedTestProfile()` equals the wrapper constant and its `sourceDigest` equals the digest `packages/shm-native/tests/source-digest.ts` recomputes from the checkout; `always` because both assertions run on every claimed-target pass.
 
 ## Investigation log
 
@@ -54,3 +54,10 @@ invalidated. At the #989 head, the grant is 124 bytes and carries no layout
 version, the lifecycle page carries no layout version, and the setup grant and
 activation carry no descriptor schema or wire version. Line anchors into files
 #989 changed are as of their earlier recorded head.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: The addon carries a source digest computed by `build.rs`, and the claimed-target capability witness recomputes it from the checkout; a stale build fails with a named message.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

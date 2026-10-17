@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/descriptor.rs:222`
 - `crates/shm-transport/src/backend/ring.rs:1501`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2153` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2615` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2155` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2658` forges every field through the peer handle. No test races a rewrite against the copy itself.
 
 ## Failure scenario
 
@@ -45,3 +45,12 @@ Check semantics: `always` - after `try_receive_inner` returns, the lease's block
   witness constructs and what it leaves unconstructed.
 - Missing evidence: unsafe-review for the copy-out contract; invariant-test-review for the forged-field test's discriminating power.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised`, the code they drive, and the
+  handoff review reports.
+- Findings: `copy_descriptor` is now the single read of a slot in `try_receive`, and a Miri witness races a slot rewrite against it. Review verdicts: unsafe-review SAFETY: APPROVED; invariant-test-review: the forged-field test proves structural rejection only, and the race test proves the copy is race-free and that accepted copies fit their block. The no-reread rule rests on the single call site and on `PoolDescriptor` holding owned words.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.
+

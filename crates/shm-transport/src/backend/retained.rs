@@ -3,13 +3,14 @@
 //! alive, so a block a worker is still reading stays mapped after its `Ring` exits.
 
 use std::cell::UnsafeCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::mem::size_of;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 /// The kernel page size, cached; falls back to `BLOCK_ALIGN` if `sysconf` reports none.
 pub(crate) fn system_page_size() -> usize {
@@ -147,13 +148,61 @@ pub(crate) struct Mapping {
     len: usize,
 }
 
+/// Live mappings occupy disjoint address ranges, so checking the mapping with the greatest
+/// start below a nonempty range's end suffices to detect any overlap.
+struct LiveRanges(BTreeMap<usize, usize>);
+
+impl LiveRanges {
+    const fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    fn insert(&mut self, start: usize, len: usize) {
+        self.0.insert(start, start.saturating_add(len));
+    }
+
+    fn remove(&mut self, start: usize) {
+        self.0.remove(&start);
+    }
+
+    fn overlaps(&self, start: usize, len: usize) -> bool {
+        if len == 0 {
+            return false;
+        }
+        let end = start.saturating_add(len);
+        self.0
+            .range(..end)
+            .next_back()
+            .is_some_and(|(_, &mapped_end)| mapped_end > start)
+    }
+}
+
+static LIVE_SHARED_MAPPINGS: Mutex<LiveRanges> = Mutex::new(LiveRanges::new());
+
+fn live_shared_mappings() -> MutexGuard<'static, LiveRanges> {
+    LIVE_SHARED_MAPPINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Reads of overlapping ranges must use the atomic accessors because peer processes can
+/// write live shared mappings at any time.
+pub fn overlaps_live_shared_mapping(start: *const u8, len: usize) -> bool {
+    live_shared_mappings().overlaps(start.addr(), len)
+}
+
 impl Mapping {
+    fn shared(fd: OwnedFd, len: usize) -> Result<Self, MappingError> {
+        let base =
+            sys::mmap_shared(fd.as_fd(), len).map_err(|_| MappingError::ObjectSetupFailed)?;
+        live_shared_mappings().insert(base.addr().get(), len);
+        Ok(Self { fd, base, len })
+    }
+
     pub(crate) fn create(len: usize) -> Result<Self, MappingError> {
         let fd = create_linux_memfd(len)?;
         validate_object(&fd, len)?;
-        let base =
-            sys::mmap_shared(fd.as_fd(), len).map_err(|_| MappingError::ObjectSetupFailed)?;
-        Ok(Self { fd, base, len })
+        Self::shared(fd, len)
     }
 
     /// Anonymous private mapping with a placeholder descriptor, for accessor and lease tests
@@ -171,9 +220,7 @@ impl Mapping {
         // mapping and leave a page whose first touch is `SIGBUS`.
         validate_seals(&fd)?;
         validate_object(&fd, len)?;
-        let base =
-            sys::mmap_shared(fd.as_fd(), len).map_err(|_| MappingError::ObjectSetupFailed)?;
-        Ok(Self { fd, base, len })
+        Self::shared(fd, len)
     }
 
     pub(crate) const fn fd(&self) -> &OwnedFd {
@@ -264,9 +311,13 @@ impl fmt::Debug for Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
+        // The registry lock is held across `munmap`, so a mapping created on another thread
+        // at the released address registers only after this entry is gone.
+        let mut live = live_shared_mappings();
         // SAFETY: base and len came from one successful mmap and are unmapped once here, in
         // Drop, after every borrow of the mapping has ended.
         let _ = unsafe { sys::munmap(self.base, self.len) };
+        live.remove(self.base.addr().get());
     }
 }
 
@@ -777,4 +828,36 @@ pub(crate) fn validate_lifecycle(
         && snapshot.reserved_descriptors == geometry.reserved_descriptors()
         && snapshot.class_bytes == class_bytes
         && snapshot.class_counts == class_counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LiveRanges;
+
+    /// A range overlaps a live mapping when any of its bytes lies inside one; an empty range
+    /// and a range that only touches either edge do not, and a removed mapping no longer
+    /// counts.
+    #[test]
+    fn live_ranges_report_byte_overlap_and_forget_removed_mappings() {
+        let mut ranges = LiveRanges::new();
+        assert!(!ranges.overlaps(150, 1));
+        ranges.insert(100, 100);
+        ranges.insert(400, 50);
+        for (start, len) in [(100, 1), (150, 10), (199, 1), (99, 2), (50, 500), (449, 8)] {
+            assert!(ranges.overlaps(start, len), "{start}+{len}");
+        }
+        for (start, len) in [
+            (99, 1),
+            (200, 1),
+            (200, 200),
+            (450, 1),
+            (150, 0),
+            (usize::MAX, 9),
+        ] {
+            assert!(!ranges.overlaps(start, len), "{start}+{len}");
+        }
+        ranges.remove(100);
+        assert!(!ranges.overlaps(150, 1));
+        assert!(ranges.overlaps(420, 1));
+    }
 }

@@ -364,6 +364,7 @@ const LOCAL_NOT_SENT_CODES = new Set([
     "deadline_expired",
     "aborted",
     "control_body_too_large",
+    "frame_body_too_large",
     "invalid_max_stream_items",
 ]);
 

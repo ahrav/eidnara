@@ -182,6 +182,10 @@ pub struct RingTransport {
     /// failed, panicked, or wrote other than its declared length.
     direct_serialize_failures: Arc<AtomicU64>,
     publish_hook: Mutex<Option<PublishHook>>,
+    /// Test hook: the next endpoint fails after duplicating its descriptors and before handing
+    /// them to the caller, the last point at which nothing has been exposed to a peer.
+    #[cfg(any(test, feature = "test-support"))]
+    fail_next_descriptor_transfer: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) struct PreparedRing {
@@ -306,6 +310,8 @@ impl RingTransport {
             endpoint_panics: Arc::new(AtomicU64::new(0)),
             direct_serialize_failures: Arc::new(AtomicU64::new(0)),
             publish_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_descriptor_transfer: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -467,6 +473,15 @@ impl RingTransport {
         *self.publish_hook.lock().expect("publish hook lock") = Some(hook);
     }
 
+    /// Test hook: the next `prepare` duplicates its descriptors and then fails before
+    /// returning them, as a failed grant transfer would.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_next_descriptor_transfer(&self) {
+        self.fail_next_descriptor_transfer
+            .store(true, Ordering::Release);
+    }
+
     pub(crate) fn prepare(
         &self,
         ingress: ByteBudget,
@@ -509,6 +524,8 @@ impl RingTransport {
         };
         let endpoint_panics = Arc::clone(&self.endpoint_panics);
         let backing_registry = Arc::clone(&self.backings);
+        #[cfg(any(test, feature = "test-support"))]
+        let fail_transfer = Arc::clone(&self.fail_next_descriptor_transfer);
         let panic_root = root.clone();
         let panic_retired = queue.retired.clone();
         // Held outside `run_endpoint` so a panic there can still deliver an
@@ -538,7 +555,17 @@ impl RingTransport {
                 rings.retain_charge(Arc::clone(&backing_admission));
                 backing_registry.register(&rings);
                 let transfer = worker_descriptor(&rings);
+                // The duplicated descriptors close with the discarded value, unsent.
+                #[cfg(any(test, feature = "test-support"))]
+                let transfer = transfer.and_then(|transfer| {
+                    if fail_transfer.swap(false, Ordering::AcqRel) {
+                        Err(())
+                    } else {
+                        Ok(transfer)
+                    }
+                });
                 let Ok((descriptor, descriptors)) = transfer else {
+                    // No descriptor reached a peer, so every charge refunds with the drops.
                     let _ = initialized_tx.send(Err(RingUnavailable));
                     return;
                 };
@@ -4099,6 +4126,37 @@ mod tests {
             budget.capacity(),
             "the charge returns exactly once, with the private bytes"
         );
+    }
+
+    /// A failure after the endpoint duplicated its descriptors and before they reach a peer
+    /// refunds every charge: the accounting returns to its prior value and the next connection
+    /// admits under limits sized for one.
+    #[test]
+    fn a_failed_descriptor_transfer_refunds_only_unexposed_resources() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let before = transport.diagnostics()["accounting"].clone();
+        transport.fail_next_descriptor_transfer();
+        assert!(
+            transport
+                .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1))
+                .is_err(),
+            "admission.setup_failed_before_exposure"
+        );
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        while transport.diagnostics()["accounting"] != before {
+            assert!(
+                StdInstant::now() < deadline,
+                "the failed setup never refunded: {}",
+                transport.diagnostics()["accounting"]
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(transport.diagnostics()["exhaustion"]["observed"], 0);
+        let prepared = transport
+            .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1))
+            .expect("the refunded charge admits the next connection");
+        assert_ne!(transport.diagnostics()["accounting"], before);
+        drop(prepared);
     }
 
     /// Refusals name the resource that ran out. Limits for one connection admit the first

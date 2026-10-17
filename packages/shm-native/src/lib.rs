@@ -11,6 +11,7 @@ use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
@@ -91,6 +92,10 @@ struct Channel {
     // `next_lease` as of the previous readiness evaluation. A handler that took no frame since
     // then is not consuming, so visible data does not earn another redispatch.
     dispatched_lease: u32,
+    // Set when `poll` found the ring empty and armed its data wait; a lease clears it. While
+    // set, the wait stays armed with its doorbell token drained, so readiness has nothing to
+    // complete or re-arm.
+    data_armed: bool,
     closed: bool,
     // Latched when a receive-side failure was the peer hanging up on a drained ring; later
     // polls stay empty and `peer_closed` reports the hang-up.
@@ -109,6 +114,14 @@ struct Channel {
 /// active on any thread is a concurrently duplicated descriptor on all of
 /// them.
 static ACTIVE_GRANTS: Mutex<BTreeSet<Vec<u8>>> = Mutex::new(BTreeSet::new());
+
+/// Environment cleanup hook runs, process-wide.
+static CLEANUP_RUNS: AtomicU64 = AtomicU64::new(0);
+/// Alias-free channels the cleanup hook closed and dropped.
+static CLEANUP_CLOSED_CHANNELS: AtomicU64 = AtomicU64::new(0);
+/// Alias-holding channels the cleanup hook quarantined and leaked with their mapping. The
+/// mapping and its charge persist until process exit, also after a worker thread ends.
+static CLEANUP_QUARANTINED_CHANNELS: AtomicU64 = AtomicU64::new(0);
 
 struct GrantReservation {
     grants: [Vec<u8>; 2],
@@ -129,6 +142,14 @@ impl GrantReservation {
         Ok(Self {
             grants: [first, second],
         })
+    }
+}
+
+impl Channel {
+    /// Whether a JavaScript view of this channel's storage may still be attached: such a
+    /// channel keeps its entry and its mapping until every alias is detached.
+    fn holds_aliases(&self) -> bool {
+        !(self.producers.is_empty() && self.active.is_empty() && self.stranded.is_empty())
     }
 }
 
@@ -472,31 +493,32 @@ fn allocate_token<T>(next: &mut u32, in_use: &HashMap<u32, T>) -> Option<u32> {
     None
 }
 
-fn cleanup_env(raw_env: usize) {
-    let raw_env = raw_env as napi::sys::napi_env;
-    let env = Env::from_raw(raw_env);
+/// Runs while the environment is torn down, when JavaScript cannot run and no handle scope
+/// is open, so it makes no N-API call that needs either. An alias-free channel says goodbye
+/// and drops its mapping. A channel that still holds an alias cannot detach it here: it is
+/// quarantined, keeps its charge, and is leaked with its mapping until process exit, which
+/// outlives a worker thread's environment.
+fn cleanup_env(_raw_env: usize) {
+    CLEANUP_RUNS.fetch_add(1, Ordering::Relaxed);
     REGISTRY.with(|registry| {
         if let Ok(mut registry) = registry.try_borrow_mut() {
             if let Some(mut reactor) = registry.reactor.take() {
                 reactor.shutdown();
             }
             registry.pending.clear();
-            registry.channels.retain(|_, channel| {
-                if close_channel(&env, channel).is_err() {
-                    // Env teardown offers no later retry, so a failed close
-                    // leaves both directions' alias state unknown.
+            for (_, mut channel) in registry.channels.drain() {
+                channel.closed = true;
+                if let Some(mut setup) = channel.setup.take() {
+                    setup::goodbye(&mut setup);
+                }
+                if channel.holds_aliases() {
                     channel.to_host.enter_quarantine();
                     channel.from_host.enter_quarantine();
+                    CLEANUP_QUARANTINED_CHANNELS.fetch_add(1, Ordering::Relaxed);
+                    std::mem::forget(channel);
+                } else {
+                    CLEANUP_CLOSED_CHANNELS.fetch_add(1, Ordering::Relaxed);
                 }
-                // Same retention rule as close: only alias-free channels may
-                // drop their mapping.
-                !(channel.producers.is_empty()
-                    && channel.active.is_empty()
-                    && channel.stranded.is_empty())
-            });
-            for (_, quarantined) in registry.channels.drain() {
-                // Process exit owns uncertain alias reclamation.
-                std::mem::forget(quarantined);
             }
         }
     });
@@ -552,6 +574,12 @@ pub fn build_target() -> String {
 #[napi]
 pub fn qualified_test_profile() -> &'static str {
     PROFILE
+}
+
+/// FNV-1a digest of the sources this addon was built from, computed by `build.rs`.
+#[napi]
+pub fn source_digest() -> &'static str {
+    env!("EIDNARA_SHM_NATIVE_SOURCE_DIGEST")
 }
 
 #[napi]
@@ -654,6 +682,25 @@ pub fn set_detach_failpoint(call: u32) {
 #[napi]
 pub fn set_delete_failpoint(call: u32) {
     napi_buffers::set_delete_failpoint(call);
+}
+
+/// Makes the `call`th external reference creation from now fail; `0` disarms.
+#[napi]
+pub fn set_reference_failpoint(call: u32) {
+    napi_buffers::set_reference_failpoint(call);
+}
+
+/// Process-wide teardown counts: `[cleanup hook runs, alias-free channels the hook closed,
+/// alias-holding channels the hook quarantined and leaked, borrowed views finalized]`.
+#[napi]
+pub fn teardown_diagnostics() -> Vec<u32> {
+    let clamp = |value: u64| value.min(u64::from(u32::MAX)) as u32;
+    vec![
+        clamp(CLEANUP_RUNS.load(Ordering::Relaxed)),
+        clamp(CLEANUP_CLOSED_CHANNELS.load(Ordering::Relaxed)),
+        clamp(CLEANUP_QUARANTINED_CHANNELS.load(Ordering::Relaxed)),
+        clamp(napi_buffers::finalized_views()),
+    ]
 }
 
 #[napi]
@@ -801,6 +848,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
                     next_producer: 0,
                     next_lease: 0,
                     dispatched_lease: 0,
+                    data_armed: false,
                     closed: false,
                     hung_up: false,
                     setup: None,
@@ -925,6 +973,7 @@ impl Task for FinishSetupTask {
                     next_producer: 0,
                     next_lease: 0,
                     dispatched_lease: 0,
+                    data_armed: false,
                     closed: false,
                     hung_up: false,
                     setup: Some(stream),
@@ -1005,6 +1054,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     next_producer: 0,
                     next_lease: 0,
                     dispatched_lease: 0,
+                    data_armed: false,
                     closed: false,
                     hung_up: false,
                     setup: None,
@@ -1024,6 +1074,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     next_producer: 0,
                     next_lease: 0,
                     dispatched_lease: 0,
+                    data_armed: false,
                     closed: false,
                     hung_up: false,
                     setup: None,
@@ -1143,6 +1194,55 @@ pub fn produce(
             .commit(written)
             .map_err(|_| error("producer underfill or invalid commit"))?;
         Ok(())
+    })
+}
+
+/// Publishes `body`, a `Uint8Array` over an unshared `ArrayBuffer`, as one frame. Returns
+/// `false` before reserving a frame when `UnsharedBytes::of` returns `None`.
+#[napi]
+pub fn produce_bytes(
+    env: &Env,
+    channel_id: u32,
+    header: Buffer,
+    body: Unknown<'_>,
+    before_publish: Function<(), ()>,
+) -> Result<bool> {
+    let header: [u8; WIRE_HEADER_BYTES] = header
+        .as_ref()
+        .try_into()
+        .map_err(|_| error("wire header has invalid length"))?;
+    let Some(body) = napi_buffers::UnsharedBytes::of(env, body)? else {
+        return Ok(false);
+    };
+    let body_len = body.len();
+    REGISTRY.with(|registry| {
+        let mut registry = registry
+            .try_borrow_mut()
+            .map_err(|_| error("native channel is busy"))?;
+        let channel = registry
+            .channels
+            .get_mut(&channel_id)
+            .ok_or_else(|| error("native channel is closed"))?;
+        if channel.closed {
+            return Err(error("native channel is closed"));
+        }
+        let inventory = inventory_for(&channel.to_host, &header, body_len);
+        let mut reservation = channel
+            .to_host
+            .try_reserve_in(inventory, body_len, header)
+            .map_err(reservation_error)?;
+        // SAFETY: no JavaScript runs between `UnsharedBytes::of` and the end of this copy.
+        reservation
+            .write(unsafe { body.as_slice() })
+            .map_err(|_| error("producer overflow"))?;
+        let written_len = u64::try_from(body_len).map_err(|_| error("producer overflow"))?;
+        check_wire_header(&header, written_len)
+            .map_err(|_| error("wire header does not describe the committed body"))?;
+        before_publish.call(())?;
+        reservation
+            .commit(body_len)
+            .map_err(|_| error("producer underfill or invalid commit"))?;
+        Ok(true)
     })
 }
 
@@ -1419,6 +1519,7 @@ mod tests {
             next_producer: 0,
             next_lease: 1,
             dispatched_lease: 0,
+            data_armed: false,
             closed: false,
             hung_up: false,
             setup: None,
@@ -1470,6 +1571,7 @@ mod tests {
             next_producer: 1,
             next_lease: 0,
             dispatched_lease: 0,
+            data_armed: false,
             closed: false,
             hung_up: false,
             setup: None,
@@ -1520,10 +1622,8 @@ pub fn readiness_handled() -> bool {
         let Some(reactor) = reactor.as_mut() else {
             return false;
         };
-        let mut redispatch = false;
-        // A capacity wake whose owner did not re-arm during dispatch is consumed here, so a
-        // level-triggered doorbell cannot wake the reactor again for a park nobody holds. An
-        // owner that re-armed drained the doorbell itself and cleared its entry.
+        // Dispatch completion settles the capacity wakes sealed into `dispatched_capacity` at
+        // dispatch start.
         for channel_id in reactor.take_capacity_ready() {
             let Some(channel) = channels.get_mut(&channel_id) else {
                 continue;
@@ -1542,22 +1642,28 @@ pub fn readiness_handled() -> bool {
             };
             let progressed = channel.next_lease != channel.dispatched_lease;
             channel.dispatched_lease = channel.next_lease;
+            if channel.data_armed {
+                match channel.from_host.has_data() {
+                    Ok(true) if progressed => reactor.mark_ready(channel_id),
+                    Ok(_) => {}
+                    Err(_) => reactor.unregister(channel_id),
+                }
+                continue;
+            }
             let completed = channel.from_host.complete_data_wait().is_ok();
             match (completed, channel.from_host.arm_data_wait()) {
                 (true, Ok(true)) => {}
                 // A lease advanced while data remains ready, so re-queue the channel.
-                (true, Ok(false)) if progressed => {
-                    reactor.mark_ready(channel_id);
-                    redispatch = true;
-                }
+                (true, Ok(false)) if progressed => reactor.mark_ready(channel_id),
                 // `Ring::signal_wake` wakes only parked consumers; `poll` arms the channel
                 // once the ring is empty.
                 (true, Ok(false)) => {}
                 (false, _) | (true, Err(_)) => reactor.unregister(channel_id),
             }
         }
-        reactor.handled();
-        redispatch
+        // Readiness the watcher recorded during this dispatch, and channels re-queued above,
+        // claim the next dispatch here.
+        reactor.handled()
     })
 }
 
@@ -1665,6 +1771,7 @@ pub fn poll(
         let Some(lease) = lease else {
             return Ok::<Option<(u32, Buffer, Vec<Unknown<'_>>)>, Error>(None);
         };
+        channel.data_armed = false;
         let token = allocate_token(&mut channel.next_lease, &channel.active)
             .ok_or_else(|| error("receive lease identity exhausted"))?;
         let header = Buffer::from(lease.wire_header().to_vec());
@@ -1720,6 +1827,7 @@ pub fn poll(
                 }
                 Err(_) => return Err(error("shared-memory receive failed")),
             };
+            channel.data_armed = should_block == Some(true);
             if should_block == Some(false)
                 && let Some(reactor) = reactor
             {
@@ -1820,9 +1928,10 @@ pub fn close(env: &Env, channel_id: u32) -> Result<()> {
 }
 
 fn finish_close(registry: &mut Registry, channel_id: u32, result: Result<()>) -> Result<()> {
-    let retained = registry.channels.get(&channel_id).is_some_and(|channel| {
-        !(channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty())
-    });
+    let retained = registry
+        .channels
+        .get(&channel_id)
+        .is_some_and(Channel::holds_aliases);
     if retained {
         return result;
     }

@@ -222,6 +222,17 @@ The last holder's drop unmaps the backing and settles its admission charge.
 An endpoint exit therefore cannot unmap a block a reader still holds.
 A return after endpoint exit publishes only into the retired pool's cells.
 
+The addon's environment cleanup hook runs while the JavaScript environment is
+torn down, when no JavaScript runs and no handle scope is open, so it makes no
+N-API call that needs either. A channel with no alias says goodbye and drops its
+mapping. A channel that still holds a producer alias, a leased view, or a
+stranded view cannot detach it there: both pools are quarantined, the channel
+keeps its charge and its reference count, and the mapping is leaked until
+process exit, which outlives a worker thread's environment. External
+finalizers record only whether their view was detached; a runtime may run one
+inside the detach call itself, so the addon marks a view released before every
+detach and clears the mark if the detach fails.
+
 ## 8. Wake channels
 
 Each direction has two connected `AF_UNIX` stream socketpairs: data-ready and
@@ -283,7 +294,11 @@ bytes in this crate is:
   orderings above.
 - `copy_in` and `copy_out`: relaxed atomic stores and loads of the width
   `AccessShape` derives from the absolute address and length, so two parties
-  touching the same range agree on every byte's width.
+  touching the same range agree on every byte's width. A large `copy_in`
+  prefetches its destination lines for writing; a prefetch accesses no memory.
+  A large `copy_out` stores into its private destination with non-temporal
+  stores and fences them before it returns; its shared-side loads keep the
+  same shape.
 - `LeaseSpan::read_byte`, `copy_to`, and `checksum`, which use the same shape.
 
 No `&[u8]` or `&mut [u8]` over the arena is ever formed. A copy stabilizes the
@@ -300,10 +315,24 @@ Before parsing, they validate the copied header against the copied body length.
 The producer's raw-pointer escape is `ProducerReservation::segment`, whose span
 is exactly the caller's bound; the consumer's is `PayloadLease::body`, whose
 span is exactly the declared body. The native addon aliases those spans as
-external `ArrayBuffer`s and detaches them before commit and before return.
+external `ArrayBuffer`s and detaches them before commit and before return. A
+body of at most 256 KiB that JavaScript holds in an unshared `ArrayBuffer`,
+outside every addon segment, publishes without a producer alias: the addon
+copies it into the reservation through `ProducerReservation::write`. Before it
+reads such a body, the addon checks it against every shared mapping live in the
+process (`overlaps_live_shared_mapping`); a body that overlaps one publishes
+through the JavaScript copy into the producer view instead.
 Concurrent non-atomic JavaScript writes to a span the peer is reading are a
-protocol violation the shape does not cover; the addon's detach-before-publish
-rule is what excludes them.
+protocol violation the shape does not cover. Two rules exclude them: the addon
+detaches every alias before publish and before return, and the runtime refuses
+to transfer a leased buffer to another isolate before that detach (Node refuses
+external buffers itself). Bun 1.3.14 reports no transfer prevention, so there a
+transferred alias escapes detachment and can write only into storage the
+receiver then copies privately and validates, never into a Rust reference. A
+shifted overlapping access, where two accessors partition the same bytes with
+different widths, can only come from a protocol-violating peer in another
+process, outside the Rust abstract machine; its effect is torn bytes in a
+private copy.
 
 ## 11. Ordering promises
 

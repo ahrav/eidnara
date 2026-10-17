@@ -325,7 +325,11 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
         const pending: PendingPublication = {
             header,
-            body: { byteLength: body.byteLength, fill: (cursor) => cursor.write(snapshot) },
+            body: {
+                byteLength: body.byteLength,
+                bytes: snapshot,
+                fill: (cursor) => cursor.write(snapshot),
+            },
             hooks,
             deadline,
             reservedBytes,
@@ -683,15 +687,20 @@ export class ShmFrameChannel implements SetupFrameChannel {
      * The configured frame limit and integer validity are enforced before
      * any budget charge or native call: a non-safe length (`NaN`, negative,
      * fractional) would poison `ByteBudget.used`, and the shared-memory
-     * path must reject the same over-limit bodies TCP rejects.
+     * path must reject the same over-limit bodies TCP rejects. An over-limit
+     * body is a `not_sent` refusal, the outcome the Rust client reports, with
+     * the wire's `frame_body_too_large` code.
      */
     private assertBodyBounds(byteLength: number): void {
-        if (
-            !Number.isSafeInteger(byteLength) ||
-            byteLength < 0 ||
-            byteLength > this.options.maxBodyLen
-        ) {
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
             throw new RangeError("producer capacity is outside frame bounds");
+        }
+        if (byteLength > this.options.maxBodyLen) {
+            throw new HostCallError(
+                "not_sent",
+                `frame body length ${byteLength} exceeds max ${this.options.maxBodyLen}`,
+                "frame_body_too_large",
+            );
         }
     }
 
@@ -704,21 +713,29 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
         if (deadline?.isExpired()) throw deadlineExpiredError();
         let published = false;
-        // `fill` runs caller code, so the deadline is re-checked after it; a throw there aborts the reservation before publication.
+        // `fill` runs caller code, so the deadline is re-checked after it, and an addon copy of
+        // `body.bytes` re-checks it before the commit; a throw at either point aborts the
+        // reservation before publication.
         // `expiredBeforePublish` preserves deadline classification when the addon rewraps the callback error.
         let expiredBeforePublish = false;
+        const checkDeadline = (): void => {
+            if (deadline?.isExpired()) {
+                expiredBeforePublish = true;
+                throw deadlineExpiredError();
+            }
+        };
+        let filled = false;
         try {
             this.attached().produce(
                 encodeHeader({ ...header, len: body.byteLength }),
                 body.byteLength,
                 (cursor: ProducerCursor) => {
+                    filled = true;
                     body.fill(cursor);
-                    if (deadline?.isExpired()) {
-                        expiredBeforePublish = true;
-                        throw deadlineExpiredError();
-                    }
+                    checkDeadline();
                 },
                 () => {
+                    if (!filled) checkDeadline();
                     published = true;
                     try {
                         hooks?.onPublish?.();
@@ -726,6 +743,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
                         // Send hooks cannot change publication.
                     }
                 },
+                body.bytes,
             );
         } catch (error) {
             if (expiredBeforePublish) {
@@ -766,16 +784,19 @@ export class ShmFrameChannel implements SetupFrameChannel {
         // outbound queue is served first so a host return is not left waiting behind a drain.
         // Once the peer has hung up, queued frames stay queued: publishing them would turn a
         // provable `not_sent` into `outcome_unknown`, and the drain below still delivers an
-        // inbound Goodbye before the channel retires.
-        let peerClosed: boolean;
-        try {
-            peerClosed = this.attached().peerClosed();
-        } catch (error) {
-            this.failClose("protocol_violation", error);
-            return;
+        // inbound Goodbye before the channel retires. An empty queue has nothing to publish, so
+        // the hang-up probe runs only when frames wait.
+        if (this.pendingPublications.length > 0) {
+            let peerClosed: boolean;
+            try {
+                peerClosed = this.attached().peerClosed();
+            } catch (error) {
+                this.failClose("protocol_violation", error);
+                return;
+            }
+            if (!peerClosed) this.pumpPending();
+            if (this.closed) return;
         }
-        if (!peerClosed) this.pumpPending();
-        if (this.closed) return;
         try {
             for (let frames = 0; frames < DRAIN_BATCH_FRAMES; frames += 1) {
                 // `onFrame` can close the channel; return before polling its closed native handle.

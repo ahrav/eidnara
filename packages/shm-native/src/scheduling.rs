@@ -9,7 +9,7 @@ use napi::bindgen_prelude::Function;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Result, Status};
 use rustix::buffer::spare_capacity;
-use rustix::event::{EventfdFlags, PollFd, PollFlags, epoll, eventfd};
+use rustix::event::{EventfdFlags, epoll, eventfd};
 use rustix::io::Errno;
 use shm_transport::backend::ring::Ring;
 
@@ -71,16 +71,36 @@ fn decode_event(data: u64) -> (u32, EventKind) {
     (((data >> 2) - 1) as u32, kind)
 }
 
-/// Channels the watcher saw wake since the main thread last drained the set, plus the
-/// setup sockets that reported hangup. `peer_closed` is latched rather than drained: the
-/// hangup fires once (the registration is one-shot) and `peer_closed()` must keep
-/// reporting it until the channel unregisters. `capacity` holds channels whose outbound
-/// capacity doorbell rang while a producer was parked on it.
+/// Channels the watcher saw wake, plus the setup sockets that reported hangup. `data` and
+/// `capacity` hold wakes recorded since the last dispatch began; starting a dispatch seals
+/// them into `dispatched_data` and `dispatched_capacity`, which that dispatch's end settles.
+/// A wake recorded while a dispatch runs therefore reaches the next dispatch instead of being
+/// settled by one that started before it. `capacity` holds channels whose outbound capacity
+/// doorbell rang while a producer was parked on it. `peer_closed` is latched rather than
+/// drained: the hangup fires once (the registration is one-shot) and `peer_closed()` must
+/// keep reporting it until the channel unregisters; `hangup_undispatched` records a hangup
+/// that no dispatch has started since.
 #[derive(Default)]
 struct ReadyState {
     data: BTreeSet<u32>,
     capacity: BTreeSet<u32>,
+    dispatched_data: BTreeSet<u32>,
+    dispatched_capacity: BTreeSet<u32>,
     peer_closed: BTreeSet<u32>,
+    hangup_undispatched: bool,
+}
+
+impl ReadyState {
+    fn has_undispatched(&self) -> bool {
+        !self.data.is_empty() || !self.capacity.is_empty() || self.hangup_undispatched
+    }
+
+    /// Hands every recorded wake to the dispatch that is starting.
+    fn seal(&mut self) {
+        self.dispatched_data.append(&mut self.data);
+        self.dispatched_capacity.append(&mut self.capacity);
+        self.hangup_undispatched = false;
+    }
 }
 
 /// The setup socket carries no traffic after activation, so any readiness on it is the
@@ -107,24 +127,6 @@ fn register_setup_socket(
     )
     .map_err(|_| Error::new(Status::GenericFailure, "readiness registration failed"))?;
     Ok(setup.into())
-}
-
-fn wait_until_handled(
-    control: &OwnedFd,
-    pending: &AtomicBool,
-    closing: &AtomicBool,
-) -> std::result::Result<bool, Errno> {
-    let mut fds = [PollFd::new(control, PollFlags::IN)];
-    while pending.load(Ordering::Acquire) && !closing.load(Ordering::Acquire) {
-        if retry_interrupted(closing, || rustix::event::poll(&mut fds, None))?.is_none() {
-            return Ok(false);
-        }
-        if fds[0].revents().contains(PollFlags::IN) {
-            let mut value = [0u8; 8];
-            let _ = rustix::io::read(control, &mut value);
-        }
-    }
-    Ok(!closing.load(Ordering::Acquire))
 }
 
 /// Native worker limit.
@@ -230,42 +232,41 @@ impl Reactor {
                             let (channel_id, kind) = decode_event(data);
                             if let Ok(mut state) = ready_state.lock() {
                                 match kind {
-                                    EventKind::Setup => state.peer_closed.insert(channel_id),
-                                    EventKind::Data => state.data.insert(channel_id),
-                                    EventKind::Capacity => state.capacity.insert(channel_id),
-                                };
+                                    EventKind::Setup => {
+                                        state.peer_closed.insert(channel_id);
+                                        state.hangup_undispatched = true;
+                                    }
+                                    EventKind::Data => {
+                                        state.data.insert(channel_id);
+                                    }
+                                    EventKind::Capacity => {
+                                        state.capacity.insert(channel_id);
+                                    }
+                                }
                             }
                             ready = true;
                         }
                         if closing.load(Ordering::Acquire) {
                             break;
                         }
+                        // Readiness recorded while a dispatch is pending is claimed by that
+                        // dispatch's `handled`; the doorbells are edge-triggered, so the watcher
+                        // returns to `epoll_wait` at once instead of waiting for it.
                         if ready
                             && pending
                                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                                 .is_ok()
                         {
+                            if let Ok(mut state) = ready_state.lock() {
+                                state.seal();
+                            }
                             let status = callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
                             if status != Status::Ok {
                                 // A rejected call ends the reactor: nothing drains the doorbells
-                                // or the setup hangup, so `epoll_wait` would return immediately
-                                // on every iteration.
+                                // or reports the setup hangup.
                                 failed.store(true, Ordering::Release);
                                 pending.store(false, Ordering::Release);
                                 break;
-                            }
-                            match wait_until_handled(&control, &pending, &closing) {
-                                Ok(true) if kick.load(Ordering::Acquire) => {
-                                    let _ = rustix::io::write(&control, &1u64.to_ne_bytes());
-                                }
-                                Ok(true) => {}
-                                Ok(false) => break,
-                                Err(_) => {
-                                    failed.store(true, Ordering::Release);
-                                    let _ =
-                                        callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
-                                    break;
-                                }
                             }
                         }
                     }
@@ -310,7 +311,7 @@ impl Reactor {
             &self.epoll,
             &descriptor,
             epoll::EventData::new_u64(data_event(channel_id)),
-            epoll::EventFlags::IN,
+            epoll::EventFlags::IN | epoll::EventFlags::ET,
         )
         .map_err(|_| Error::new(Status::GenericFailure, "readiness registration failed"))?;
         let mut descriptors = vec![descriptor];
@@ -362,7 +363,7 @@ impl Reactor {
             &self.epoll,
             &descriptor,
             epoll::EventData::new_u64(capacity_event(channel_id)),
-            epoll::EventFlags::IN,
+            epoll::EventFlags::IN | epoll::EventFlags::ET,
         )
         .map_err(|_| Error::new(Status::GenericFailure, "readiness registration failed"))?;
         registration.capacity = Some(descriptor);
@@ -382,6 +383,8 @@ impl Reactor {
         if let Ok(mut state) = self.ready.lock() {
             state.data.remove(&channel_id);
             state.capacity.remove(&channel_id);
+            state.dispatched_data.remove(&channel_id);
+            state.dispatched_capacity.remove(&channel_id);
             state.peer_closed.remove(&channel_id);
         }
     }
@@ -390,9 +393,12 @@ impl Reactor {
         self.registrations.contains_key(&channel_id)
     }
 
+    /// Channels whose data wake the running dispatch was started for.
     pub(crate) fn take_ready(&self) -> Vec<u32> {
         match self.ready.lock() {
-            Ok(mut state) => std::mem::take(&mut state.data).into_iter().collect(),
+            Ok(mut state) => std::mem::take(&mut state.dispatched_data)
+                .into_iter()
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -402,13 +408,16 @@ impl Reactor {
     pub(crate) fn clear_capacity_ready(&self, channel_id: u32) {
         if let Ok(mut state) = self.ready.lock() {
             state.capacity.remove(&channel_id);
+            state.dispatched_capacity.remove(&channel_id);
         }
     }
 
-    /// Channels whose capacity doorbell rang since the last call.
+    /// Channels whose capacity wake the running dispatch was started for.
     pub(crate) fn take_capacity_ready(&self) -> Vec<u32> {
         match self.ready.lock() {
-            Ok(mut state) => std::mem::take(&mut state.capacity).into_iter().collect(),
+            Ok(mut state) => std::mem::take(&mut state.dispatched_capacity)
+                .into_iter()
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -430,9 +439,26 @@ impl Reactor {
         }
     }
 
-    pub(crate) fn handled(&self) {
-        self.pending.store(false, Ordering::Release);
-        let _ = rustix::io::write(&self.control, &1u64.to_ne_bytes());
+    /// Ends a dispatch. The watcher records readiness that arrives while a dispatch is pending
+    /// and leaves the callback to that dispatch, so when any is recorded this claims and seals
+    /// the next dispatch for the caller and returns `true`. `pending` is cleared before the
+    /// recorded state is read, and the watcher records before it tries to set `pending`, so
+    /// each recorded wake starts exactly one dispatch.
+    pub(crate) fn handled(&self) -> bool {
+        self.pending.store(false, Ordering::SeqCst);
+        let Ok(mut state) = self.ready.lock() else {
+            return false;
+        };
+        if !state.has_undispatched()
+            || self
+                .pending
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        state.seal();
+        true
     }
 
     /// Marks `channel_id` ready without a doorbell event, for data found visible while arming.
@@ -470,50 +496,15 @@ impl Drop for Reactor {
 mod tests {
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, mpsc};
-    use std::time::Duration;
 
     use rustix::buffer::spare_capacity;
-    use rustix::event::{EventfdFlags, epoll, eventfd};
+    use rustix::event::epoll;
     use rustix::io::Errno;
 
     use super::{
         EventKind, capacity_event, data_event, decode_event, register_setup_socket,
-        retry_interrupted, setup_event, wait_until_handled,
+        retry_interrupted, setup_event,
     };
-
-    #[test]
-    fn pending_callback_waits_for_acknowledgement() {
-        let control = Arc::new(
-            eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK).expect("control eventfd"),
-        );
-        let pending = Arc::new(AtomicBool::new(true));
-        let closing = Arc::new(AtomicBool::new(false));
-        let (done_tx, done_rx) = mpsc::channel();
-        let waiter = {
-            let control = Arc::clone(&control);
-            let pending = Arc::clone(&pending);
-            let closing = Arc::clone(&closing);
-            std::thread::spawn(move || {
-                done_tx
-                    .send(wait_until_handled(&control, &pending, &closing))
-                    .unwrap();
-            })
-        };
-
-        rustix::io::write(&control, &1u64.to_ne_bytes()).unwrap();
-        assert!(done_rx.recv_timeout(Duration::from_millis(25)).is_err());
-
-        pending.store(false, Ordering::Release);
-        rustix::io::write(&control, &1u64.to_ne_bytes()).unwrap();
-        assert!(
-            done_rx
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap()
-                .unwrap()
-        );
-        waiter.join().unwrap();
-    }
 
     #[test]
     fn setup_socket_eof_is_reported_once() {

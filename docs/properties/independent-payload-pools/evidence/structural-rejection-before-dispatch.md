@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1487`
 - `crates/host-runtime/src/ring_transport.rs:1027`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2615` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2658` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
 
 ## Failure scenario
 
@@ -44,3 +44,10 @@ Check semantics: `always` - `try_receive` returns `Err` and quarantines for ever
   witness constructs and what it leaves unconstructed.
 - Missing evidence: none.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: `structural_corruption_is_rejected_before_dispatch` already drives structurally illegal headers through a real ring to a running host with zero dispatches; the forged-descriptor transport test covers a header/body mismatch written into the block, which an honest producer refuses to publish.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

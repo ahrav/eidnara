@@ -24,6 +24,10 @@ mod dispatch;
 mod file_mode;
 #[doc(hidden)]
 pub mod frame_channel;
+#[cfg_attr(feature = "test-support", path = "inbound_copy_gate.rs")]
+#[cfg_attr(not(feature = "test-support"), path = "inbound_copy_gate_off.rs")]
+#[doc(hidden)]
+pub mod inbound_copy_gate;
 mod instance;
 mod panic_boundary;
 mod routing;

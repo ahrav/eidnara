@@ -50,8 +50,8 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::backend::retained::{
-    Mapping, MappingError, Retained, WakeEpoch, initialize_mapping, seal_object, system_page_size,
-    validate_lifecycle, validate_object_len,
+    DescriptorSlot, Mapping, MappingError, Retained, WakeEpoch, initialize_mapping, seal_object,
+    system_page_size, validate_lifecycle, validate_object_len,
 };
 use crate::backend::sys;
 use crate::descriptor::{
@@ -876,6 +876,15 @@ impl Ring {
         }
     }
 
+    /// `has_data` checks for a published frame using `consumed_local` and the verified
+    /// published cursor. A published-cursor verification error quarantines the ring.
+    pub fn has_data(&self) -> Result<bool, RingError> {
+        if self.is_quarantined() {
+            return Err(RingError::Quarantined);
+        }
+        self.data_available()
+    }
+
     fn data_available(&self) -> Result<bool, RingError> {
         let consumed = self.consumed_local.get();
         let published = self
@@ -1436,14 +1445,8 @@ impl Ring {
             usize::try_from((sequence - 1) % depth).map_err(|_| RingError::ArithmeticOverflow)?;
         let slot = self.retained.slot(index).map_err(RingError::from)?;
         // The Acquire load of `published` in `verified_published` pairs with the producer's
-        // Release publication, so these Relaxed loads see the fields written before it. Each is
-        // a fixed-width atomic copied out once; nothing re-reads the slot afterwards.
-        let snapshot = PoolDescriptor::from_untrusted(
-            slot.sequence.load(Ordering::Relaxed),
-            slot.block.load(Ordering::Relaxed),
-            slot.generation.load(Ordering::Relaxed),
-            slot.body_len.load(Ordering::Relaxed),
-        );
+        // Release publication, so these Relaxed loads see the fields written before it.
+        let snapshot = copy_descriptor(slot);
         let validated = snapshot
             .validate(sequence, &geometry)
             .map_err(RingError::Descriptor)?;
@@ -2050,6 +2053,17 @@ impl fmt::Debug for RingError {
     }
 }
 
+/// Copies the four descriptor words out of `slot`, each a fixed-width atomic read once. The
+/// receiver validates and uses only this copy; nothing re-reads the slot afterwards.
+fn copy_descriptor(slot: &DescriptorSlot) -> PoolDescriptor {
+    PoolDescriptor::from_untrusted(
+        slot.sequence.load(Ordering::Relaxed),
+        slot.block.load(Ordering::Relaxed),
+        slot.generation.load(Ordering::Relaxed),
+        slot.body_len.load(Ordering::Relaxed),
+    )
+}
+
 /// Accessor tests over an anonymous mapping. Miri cannot map a memfd or open a doorbell that
 /// sends, so this module exercises the layer of `ring.rs` that touches raw shared memory
 /// without constructing a `Ring`: slot copy-out, completion-cell monotonicity, and lifecycle
@@ -2162,6 +2176,52 @@ mod miri {
         // A peer that rewrites the slot after the copy changes nothing the receiver holds.
         slot.body_len.store(1 << 40, Ordering::Relaxed);
         assert_eq!(validated.body_len(), 40);
+    }
+
+    /// A peer rewriting the slot while the receiver copies it out: Miri finds no data race in
+    /// the copy, and every copy validates to a combination of values the peer wrote that fits
+    /// its block, or is refused.
+    #[test]
+    fn descriptor_copy_races_a_concurrent_slot_rewrite() {
+        let retained = retained_fixture();
+        let slot = retained.slot(1).unwrap();
+        slot.block.store(2, Ordering::Relaxed);
+        slot.generation.store(7, Ordering::Relaxed);
+        slot.body_len.store(40, Ordering::Relaxed);
+        slot.sequence.store(2, Ordering::Release);
+        let iterations = if cfg!(miri) { 32 } else { 2_000 };
+        std::thread::scope(|scope| {
+            // The atomics are `Sync`; the slot as a whole carries the page's padding cell.
+            let (block, body_len) = (&slot.block, &slot.body_len);
+            let writer = scope.spawn(move || {
+                for round in 0..iterations {
+                    block.store([2, 3, 1 << 40][round % 3], Ordering::Relaxed);
+                    body_len.store([40, 4096, u64::MAX][round % 3], Ordering::Relaxed);
+                }
+            });
+            for _ in 0..iterations {
+                match super::copy_descriptor(slot).validate(2, retained.geometry()) {
+                    Ok(descriptor) => {
+                        assert!(matches!(descriptor.block(), 2 | 3));
+                        assert!(matches!(descriptor.body_len(), 40 | 4096));
+                        let capacity = retained
+                            .geometry()
+                            .placement(descriptor.block())
+                            .unwrap()
+                            .body_capacity();
+                        assert!(descriptor.body_len() <= capacity);
+                        assert_eq!(descriptor.generation(), 7);
+                    }
+                    Err(error) => assert!(matches!(
+                        error,
+                        DescriptorError::InvalidBlock
+                            | DescriptorError::BodyExceedsBlock
+                            | DescriptorError::FrameTooLarge
+                    )),
+                }
+            }
+            writer.join().unwrap();
+        });
     }
 
     #[test]
@@ -3277,6 +3337,46 @@ mod tests {
             "everything reads as published"
         );
         assert!(inventory.classes.iter().all(|class| class.free == 0));
+    }
+
+    #[test]
+    fn a_live_ring_mapping_is_reported_as_shared_memory() {
+        use crate::backend::retained::overlaps_live_shared_mapping;
+        let (producer, consumer) = pair(tiny_geometry());
+        for ring in [&producer, &consumer] {
+            let body = ring.retained().body_ptr(0, 1).unwrap();
+            assert!(overlaps_live_shared_mapping(body, 1));
+            assert!(overlaps_live_shared_mapping(body.wrapping_sub(1), 2));
+        }
+        let private = [0u8; 64];
+        assert!(!overlaps_live_shared_mapping(
+            private.as_ptr(),
+            private.len()
+        ));
+    }
+
+    /// `has_data` follows the shared cursors through publication and receipt without touching
+    /// a doorbell, and a quarantined ring reports `Quarantined`.
+    #[test]
+    fn has_data_tracks_publication_and_receipt_from_the_cursors() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        let doorbell_before = consumer.syscall_counters().doorbell;
+        assert_eq!(consumer.has_data(), Ok(false));
+        publish(&producer, b"one");
+        publish(&producer, b"two");
+        assert_eq!(consumer.has_data(), Ok(true));
+        drop(receive(&consumer));
+        assert_eq!(consumer.has_data(), Ok(true), "one frame still waits");
+        drop(receive(&consumer));
+        assert_eq!(consumer.has_data(), Ok(false));
+        assert_eq!(
+            consumer.syscall_counters().doorbell,
+            doorbell_before,
+            "the check reads only shared memory"
+        );
+        consumer.enter_quarantine();
+        assert_eq!(consumer.has_data(), Err(RingError::Quarantined));
     }
 
     #[test]
