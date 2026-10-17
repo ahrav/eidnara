@@ -46,6 +46,26 @@ fn intent(key: &str) -> CommitIntent {
     }
 }
 
+fn template_member() -> PolicyUnionMember {
+    PolicyUnionMember {
+        kind: "question_template".to_string(),
+        id: "extracted_facts".to_string(),
+        revision: TEMPLATE_REVISION.to_string(),
+        owner_id: None,
+        owner_revision: None,
+    }
+}
+
+fn capture_member((id, digest): &(String, String)) -> PolicyUnionMember {
+    PolicyUnionMember {
+        kind: "temporary_capture".to_string(),
+        id: id.clone(),
+        revision: digest.clone(),
+        owner_id: None,
+        owner_revision: None,
+    }
+}
+
 fn admission(object_id: &str) -> AdmissionRequest {
     AdmissionRequest {
         candidate_id: None,
@@ -328,7 +348,6 @@ impl Fixture {
         }
     }
 
-    /// Stages, seals, and transfers `job`'s proposal of `action` over `target`, disclosing and citing `evidence` with `members` in its policy union.
     fn propose(
         &self,
         job: &str,
@@ -337,6 +356,30 @@ impl Fixture {
         new_text: Option<&str>,
         evidence: &[String],
         members: Vec<PolicyUnionMember>,
+    ) -> Staged {
+        let mut union = PolicyUnion::new();
+        union.insert(template_member());
+        let mut ancestry: Vec<String> = members
+            .iter()
+            .filter_map(|member| member.owner_id.clone())
+            .collect();
+        ancestry.sort();
+        ancestry.dedup();
+        for member in members {
+            union.insert(member);
+        }
+        self.propose_union(job, action, target, new_text, evidence, (union, ancestry))
+    }
+
+    /// `union` is the policy union and the ancestry the proposal records beside it.
+    fn propose_union(
+        &self,
+        job: &str,
+        action: ProposalAction,
+        target: ProposalTarget,
+        new_text: Option<&str>,
+        evidence: &[String],
+        (union, ancestry): (PolicyUnion, Vec<String>),
     ) -> Staged {
         let run = MemoryReviewerHoldBinding {
             project_digest: PROJECT.to_string(),
@@ -354,17 +397,6 @@ impl Fixture {
             subject: identity.candidate_id.clone(),
             ..run.clone()
         };
-        let mut union = PolicyUnion::new();
-        union.insert(PolicyUnionMember {
-            kind: "question_template".to_string(),
-            id: "extracted_facts".to_string(),
-            revision: TEMPLATE_REVISION.to_string(),
-            owner_id: None,
-            owner_revision: None,
-        });
-        for member in members {
-            union.insert(member);
-        }
         let union = union.encode().unwrap();
         let references: Vec<EvidenceReference> = evidence
             .iter()
@@ -400,7 +432,7 @@ impl Fixture {
                             question_template: ReviewQuestionTemplate::ExtractedFacts,
                             disclosed_inputs: references,
                             uncited_disclosed_inputs: vec![],
-                            ancestry: vec![],
+                            ancestry,
                         },
                     })),
                     recorded_at: self.now - 1_000,
@@ -1563,7 +1595,7 @@ fn an_owner_at_another_revision_or_a_target_at_another_change_token_refuses_and_
 #[test]
 fn create_needs_a_scope_of_the_runs_project_and_no_change_on_a_subject_writes_nothing() {
     let fixture = Fixture::open();
-    let support = fixture.ingest("support").0;
+    let support = fixture.capture("support");
     let propose = |job: &str, action, text| {
         let subject = fixture.subject(job);
         fixture.propose(
@@ -1573,8 +1605,8 @@ fn create_needs_a_scope_of_the_runs_project_and_no_change_on_a_subject_writes_no
                 candidate_id: subject,
             },
             text,
-            std::slice::from_ref(&support),
-            vec![],
+            std::slice::from_ref(&support.0),
+            vec![capture_member(&support)],
         )
     };
     let staged = propose("job-1", ProposalAction::Create, Some("created"));
@@ -1736,7 +1768,7 @@ fn cleanup_and_purge_after_acceptance_keep_the_settlement_and_the_originals() {
 fn concurrent_acceptances_of_one_proposal_settle_it_once() {
     let fixture = Fixture::open();
     let subject = fixture.subject("job-1");
-    let support = fixture.ingest("support").0;
+    let support = fixture.capture("support");
     let staged = fixture.propose(
         "job-1",
         ProposalAction::Create,
@@ -1744,8 +1776,8 @@ fn concurrent_acceptances_of_one_proposal_settle_it_once() {
             candidate_id: subject,
         },
         Some("created once"),
-        std::slice::from_ref(&support),
-        vec![],
+        std::slice::from_ref(&support.0),
+        vec![capture_member(&support)],
     );
     let outcomes: Vec<_> = std::thread::scope(|scope| {
         let handles: Vec<_> = ["caller-a", "caller-b"]
@@ -1923,13 +1955,7 @@ fn a_union_read_under_another_question_template_revision_refuses_and_writes_noth
 #[test]
 fn a_capture_member_stands_only_as_a_disclosed_capture_with_a_live_reference() {
     let fixture = Fixture::open();
-    let member = |(id, digest): &(String, String)| PolicyUnionMember {
-        kind: "temporary_capture".to_string(),
-        id: id.clone(),
-        revision: digest.clone(),
-        owner_id: None,
-        owner_revision: None,
-    };
+    let member = capture_member;
     let propose = |job: &str, disclosed: &[String], capture: &(String, String)| {
         let object = format!("decision-{job}");
         fixture.decision(&object);
@@ -2127,4 +2153,131 @@ fn a_malformed_caller_intent_is_refused_as_invalid() {
             acceptance.intent
         );
     }
+}
+
+/// The Kernel judges the union's completeness itself: the question template is a member, the members name exactly the disclosed inputs, and their owners are exactly the proposal's ancestry.
+#[test]
+fn an_incomplete_union_refuses_and_writes_nothing() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let member = PolicyUnionMember {
+        kind: "canonical_source".to_string(),
+        id: descriptor.0.clone(),
+        revision: "1".to_string(),
+        owner_id: Some("decision-a".to_string()),
+        owner_revision: Some("1".to_string()),
+    };
+    let union = |members: &[&PolicyUnionMember]| {
+        let mut union = PolicyUnion::new();
+        for member in members {
+            union.insert((*member).clone());
+        }
+        union
+    };
+    let propose = |job: &str, union: PolicyUnion, ancestry: Vec<String>| {
+        fixture.propose_union(
+            job,
+            ProposalAction::Retain,
+            fixture.memory_target("decision-a"),
+            None,
+            std::slice::from_ref(&descriptor.1),
+            (union, ancestry),
+        )
+    };
+    let owner = vec!["decision-a".to_string()];
+    let complete = propose(
+        "job-complete",
+        union(&[&template_member(), &member]),
+        owner.clone(),
+    );
+    let no_template = propose("job-no-template", union(&[&member]), owner.clone());
+    let unnamed_input = propose("job-unnamed", union(&[&template_member()]), vec![]);
+    let no_ancestry = propose(
+        "job-no-ancestry",
+        union(&[&template_member(), &member]),
+        vec![],
+    );
+    for (name, staged) in [
+        ("no question template", &no_template),
+        ("a disclosed input no member names", &unnamed_input),
+        ("an owner missing from the ancestry", &no_ancestry),
+    ] {
+        let tip = fixture.store.tip().unwrap();
+        assert_eq!(
+            fixture.accept("caller", staged),
+            Err(AcceptanceError::Refused(AcceptanceRefusal::Changed)),
+            "{name}"
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip, "{name}");
+    }
+    assert_eq!(
+        fixture
+            .accept("caller-complete", &complete)
+            .unwrap()
+            .settlement
+            .effect,
+        SettlementEffect::Unchanged
+    );
+}
+
+/// A descriptor member stands only on a descriptor row: an ordinary observation carrying a copied descriptor detail refuses.
+#[test]
+fn a_descriptor_member_naming_an_ordinary_observation_refuses_and_writes_nothing() {
+    let fixture = Fixture::open();
+    let descriptor = fixture.decision("decision-a");
+    let tip = fixture.store.tip().unwrap();
+    let detail = fixture
+        .store
+        .observation_for_object_as_of(&descriptor.0, tip)
+        .unwrap()
+        .unwrap()
+        .payload
+        .detail;
+    fixture
+        .store
+        .commit(intent("note"), |envelope| {
+            envelope.insert_observation(kernel::ObservationSpec {
+                observation_id: "note-1".to_string(),
+                object_id: "note-object".to_string(),
+                domain_id: DOMAIN.to_string(),
+                proposition_id: None,
+                scope_id: Some(SCOPE.to_string()),
+                anchor_id: None,
+                evidence_id: Some(descriptor.1.clone()),
+                observation_kind: "note".to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "a note".to_string(),
+                    classification: "note".to_string(),
+                    detail,
+                },
+                observed_at: 1,
+                dependencies: vec![],
+                source_kind: "fixture".to_string(),
+                source_id: "note-1".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let staged = fixture.propose(
+        "job-note",
+        ProposalAction::Retain,
+        fixture.memory_target("decision-a"),
+        None,
+        std::slice::from_ref(&descriptor.1),
+        vec![PolicyUnionMember {
+            kind: "canonical_source".to_string(),
+            id: "note-object".to_string(),
+            revision: "1".to_string(),
+            owner_id: Some("decision-a".to_string()),
+            owner_revision: Some("1".to_string()),
+        }],
+    );
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture.accept("caller", &staged),
+        Err(AcceptanceError::Refused(AcceptanceRefusal::Changed))
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
 }

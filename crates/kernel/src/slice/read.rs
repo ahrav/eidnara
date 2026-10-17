@@ -610,7 +610,7 @@ pub(super) fn load_observations(
 }
 
 /// The one live observation of `object_id` at `requested`; `object_id` is unique on the table, so the primary key drives the lookup.
-fn load_observation_for_object(
+pub(crate) fn load_observation_for_object(
     tx: &Transaction<'_>,
     requested: i64,
     object_id: &str,
