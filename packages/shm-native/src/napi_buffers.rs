@@ -427,14 +427,16 @@ impl UnsharedBytes {
 
     /// # Safety
     /// No JavaScript may run between [`UnsharedBytes::of`] and the last use of the slice, so
-    /// nothing detaches, resizes, or writes the backing while Rust reads it.
+    /// nothing detaches, resizes, or writes the backing from JavaScript while Rust reads it,
+    /// and the body is quiescent: its contents are final, with no native operation such as an
+    /// unfinished `fs.read` writing it.
     pub(crate) unsafe fn as_slice(&self) -> &[u8] {
         if self.len == 0 {
             return &[];
         }
         // SAFETY: `napi_get_typedarray_info` reported `len` readable bytes at `data` in an
-        // unshared backing outside every live shared mapping, and the caller keeps JavaScript
-        // from running while the slice lives.
+        // unshared backing outside every live shared mapping, the caller keeps JavaScript from
+        // running while the slice lives, and the body is quiescent.
         unsafe { std::slice::from_raw_parts(self.data, self.len) }
     }
 }

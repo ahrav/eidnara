@@ -32,7 +32,7 @@ Situation markers that must fire independently of the safety check:
 
 - `gate.stale_artifact_present`
 
-Check semantics: `always` - the addon's `qualifiedTestProfile()` equals the wrapper constant in every run.
+Check semantics: `always` - in every run under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`, the addon's `qualifiedTestProfile()` equals the wrapper constant and its `sourceDigest` equals the digest `packages/shm-native/tests/source-digest.ts` recomputes from the checkout; `always` because both assertions run on every claimed-target pass.
 
 ## Investigation log
 

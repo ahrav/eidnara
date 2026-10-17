@@ -925,7 +925,9 @@ export class NativeChannel {
      *
      * `bytes`, when it holds exactly `capacity` bytes over a private `ArrayBuffer` and
      * `capacity` is at most `ADDON_COPY_MAX_BYTES`, is the frame body: the addon copies it into
-     * the reservation and `fill` does not run. A body the addon finds inside a live shared
+     * the reservation and `fill` does not run. The addon reads `bytes` as a Rust slice, so its
+     * contents must be final for the whole call: no in-flight native operation, such as an
+     * unfinished `fs.read` into it, may write it. A body the addon finds inside a live shared
      * mapping publishes through `fill`.
      */
     produce(
