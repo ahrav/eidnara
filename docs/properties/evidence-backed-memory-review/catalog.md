@@ -23,7 +23,7 @@ slug the specification assigns.
 
 ## Index
 
-Every slug the seven residual tickets own, plus the semantic-evidence slug #592 makes executable. Slugs the specification assigns to other owners are not indexed here.
+Every slug the seven residual tickets own, plus the semantic-evidence slug #592 and the application slugs #597 make executable. Slugs the specification assigns to other owners are not indexed here.
 
 | Slug | Ticket | Record |
 | --- | --- | --- |
@@ -48,6 +48,8 @@ Every slug the seven residual tickets own, plus the semantic-evidence slug #592 
 | `attempt-ledger-preserves-cross-generation-ceilings` | #731 | yes |
 | `guarded-request-handoff-precedes-network-polling` | #731 | yes |
 | `material-claims-require-exact-cited-byte-support` | #592 | yes |
+| `future-acceptance-co-commits-exact-target-and-replay` | #597 | yes |
+| `future-correction-keeps-kernel-maturity-and-retrieval` | #597 | no |
 
 ## Records
 
@@ -371,6 +373,22 @@ Impact: Without the separation, a structurally valid citation would read as supp
 Open questions:
 - A production-resolved `retain` over a canonical or promoted memory needs the owner's Remote-eligible decision representation; every corpus subject is a repository-backed commit (needs human input)
 
+### future-acceptance-co-commits-exact-target-and-replay
+
+Type: safety
+Reachability: test-only - `KernelStore::accept_review_proposal` has no daemon caller in this change; only `crates/kernel/tests/kernel_review_acceptance.rs` constructs an acceptance
+Status: active
+Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` accepts retain, no-change, and retire proposals and refuses create and revise as unsupported, including the retirement of an approval with a dependent; races two acceptances of one proposal; replays under a second caller key, after the review hold is released, after the row is deleted and the support purged, after a reopen, and at a selection past the queue deadline; reuses a caller key with other input and for another proposal; and refuses a moved target for each memory action, a quarantined owner, a caller target that differs from the proposal's, another project's run, a released hold, a selection at the queue deadline or before sealing, deleted evidence, evidence reclassified `Secret`, a retired union owner, and a deleted subject; refuses a union read under another question template revision, a capture member that is undisclosed, not a MemoryReviewer capture, or past its acquisition reference, a caller key whose receipt records other work, including a result that decodes as a settlement, a reference naming another Kernel incarnation than its run, and a malformed caller intent
+Guarantee: An acceptance either applies the selected proposal's action at its exact target and records one proposal-level settlement in the same Kernel envelope, or writes nothing; a settled proposal answers that settlement under any caller key before any expirable state is read, and a reused caller key with other input conflicts.
+Check: `always` - after every acceptance, either the tip and `review_settlement` are unchanged and the call refused, or the action's canonical effect and the settlement receipt share one `commit_seq`; a call for a settled proposal returns `replayed` with the recorded settlement and moves no tip; asserted on every acceptance because a partial or duplicate application is a canonical corruption
+Fault/timing angle: the proposal's target, a disclosed input, or a union owner changes between the read the caller made and the envelope; the review hold ends after settlement and before a retry
+Required faults and enabling state: a decision event appended to the target after the proposal; a quarantine admission on the target; `delete_artifact` of a disclosed input under the live hold, and a purge of the support after settlement; a `Secret` re-ingest of a disclosed input's bytes; `retire_decision` of a union owner; `release_review_hold` before a fresh and before a replayed acceptance; deletion of the staged rows; a store reopen between acceptances; a selection time at the queue deadline; two threads accepting at once; a caller intent reused with another request digest or for another proposal; a caller question template revision other than the union's; a capture's `retain_until` set behind the clock under the live hold; a caller-producer receipt committed under the acceptance's key before the acceptance
+Confidence: high - [evidence](evidence/future-acceptance-co-commits-exact-target-and-replay.md). Verified each refusal leaves the tip and the settlement lookup unchanged, that replay is answered before the hold check and the queue deadline, that one of two concurrent acceptances applies, and that the settlement's `commit_seq` is the applying commit and the retirement cascade's counts are reported
+Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - every test
+Impact: An application that committed without its settlement, or a settlement without its application, would let a retry apply a proposal twice or report one that never applied
+Open questions:
+- Whether the review hold should be released inside the settlement envelope (needs human input)
+
 ## Relationship map
 
 `canonical-resolution-refuses-changed-owner-and-target` is the safety half of
@@ -404,6 +422,9 @@ and the ordering that keeps the sum honest without holding a store across the
 network (`guarded-request-handoff-precedes-network-polling`).
 `unknown-dispatch-does-not-authorize-resend` is the same conservatism for
 attempts: missing evidence is consumption, never headroom.
+
+`future-acceptance-co-commits-exact-target-and-replay` consumes the selected row and
+policy union that `uncited-owner-lineage-remains-read-authority` revalidates for a reader.
 
 `observer-route-does-not-change-background-rosters` sits upstream of every
 worker record: the participating view decides which projects the worker sees

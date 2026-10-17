@@ -156,7 +156,7 @@ fn corrupt<T>(_: T) -> MemoryReviewerHoldError {
 }
 
 impl MemoryReviewerHoldBinding {
-    fn validate(&self) -> Result<(), MemoryReviewerHoldRefusal> {
+    pub(crate) fn validate(&self) -> Result<(), MemoryReviewerHoldRefusal> {
         check_digest(&self.project_digest)
             .map_err(|_| MemoryReviewerHoldRefusal::InvalidRequest)?;
         for field in [
@@ -727,6 +727,30 @@ fn transfer_target(
     Ok(execution_hold_id)
 }
 
+/// Inside `tx`, at `now`: the review hold `review` owns is unreleased, unexpired, and not purge-degraded, and every id in `evidence_ids` is covered by it and names live, unpurged evidence. The facts are returned in `evidence_ids` order.
+pub(crate) fn validate_review_evidence_in(
+    tx: &Transaction<'_>,
+    review: &MemoryReviewerHoldBinding,
+    evidence_ids: &[String],
+    now: i64,
+) -> Result<Vec<HeldEvidence>, MemoryReviewerHoldError> {
+    review.validate()?;
+    let (hold_id, _, degraded) = live_hold_of(tx, MemoryReviewerHoldKind::Review, review, now)?
+        .ok_or(MemoryReviewerHoldRefusal::Missing)?;
+    if degraded {
+        return Err(MemoryReviewerHoldRefusal::PurgeDegraded.into());
+    }
+    evidence_ids
+        .iter()
+        .map(|evidence_id| {
+            if !is_covered(tx, &hold_id, evidence_id)? {
+                return Err(MemoryReviewerHoldRefusal::NotCovered.into());
+            }
+            load_live_evidence(tx, evidence_id)
+        })
+        .collect()
+}
+
 /// Whether `hold_id` carries an unreleased reference to `evidence_id`.
 fn is_covered(
     tx: &Transaction<'_>,
@@ -750,7 +774,8 @@ fn live_hold_of(
     now: i64,
 ) -> Result<Option<(String, i64, bool)>, MemoryReviewerHoldError> {
     tx.query_row_cached(
-        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL FROM capture_pins
+        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL
+         FROM capture_pins INDEXED BY idx_capture_pins_owner_active
          WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL AND expires_at>?3
          ORDER BY created_at DESC LIMIT 1",
         params![kind.pin_kind(), binding.owner_id(), now],

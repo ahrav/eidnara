@@ -141,6 +141,35 @@ adequacy, Rust code review, and documentation verification.
 | The refusal witness forces jobs the production selector refuses | bias | kept: the selector's eligibility-first contract is #593's; the forced jobs show the coordinator's refusal for any job that reaches it, such as one admitted before a class tightened |
 | The refusal witness's zero-connection assertion read a counter that only a serving task increments, and the witness starts none, so a client connection would leave it at zero | gap | fixed: the witness reads `Peer::connection_count`, which also drains the unserved listener's accept queue; `an_unserved_peer_counts_a_connection_it_never_answered` is its positive control |
 
+## Kernel acceptance
+
+Lenses for this change: over-engineering, complexity, testing, Rust code review, idempotency and unknown outcomes, and Rust design review.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The Kernel union check judged liveness and revision only; a hidden or quarantined owner, a descriptor that no longer names its owner, a staged subject of another binding or past its deadline, and an unknown dependency-record version passed | gap | fixed: `descriptor_stands` reads the descriptor detail and requires the owner in its leading identity field, the owner and target pass the batch eligibility judgement for a local reader, `subject_row_stands` reads the subject through the bound-row path, and the record version must match; `a_quarantined_owner_refuses_without_being_invalidated` |
+| The retirement cascade counts had no witness | gap | fixed: `retiring_an_approval_reports_the_dependents_its_cascade_demoted` |
+| No cleanup, purge, deadline, concurrency, or per-action target tests | gap | fixed: the tests added to `kernel_review_acceptance.rs` |
+| The Kernel change passed the 1,000-line hard maximum | bias | split: create and revise, with their admission and support citations, land in the next stacked change; this one refuses them as `unsupported` |
+| A caller-key replay returned whatever its key stored, even for another proposal | gap | fixed: a caller receipt replays only when the reserved settlement shares its commit, and the replay answers the settlement receipt; tested |
+| A caller-key replay decoded the caller receipt's own text, so another operation's result surfaced as a store failure and a result that decoded as a settlement replayed with no settlement recorded | gap | fixed: the replay reads the reserved settlement at the caller receipt's commit and conflicts otherwise; `a_caller_key_that_committed_other_work_conflicts_even_when_its_result_reads_as_a_settlement` |
+| The question template member was judged by id only, while the daemon's revalidation also requires its revision | gap | fixed: `ProposalAcceptance::question_template_revision`, required on the member; `a_union_read_under_another_question_template_revision_refuses_and_writes_nothing` |
+| A capture member was judged as live evidence at its digest, while the daemon's revalidation requires a disclosed MemoryReviewer capture under the hold whose acquisition reference is still ahead of the clock | gap | fixed: `member_stands` judges a capture from the held disclosed inputs, which also drops its per-member query; `a_capture_member_stands_only_as_a_disclosed_capture_with_a_live_reference` |
+| A reference naming another Kernel incarnation than its run replayed the settlement | gap | fixed: `settlement_intent` refuses it as `invalid`; `a_reference_naming_another_incarnation_than_its_run_is_invalid_settled_or_not` |
+| A malformed caller intent surfaced as a store failure | gap | fixed: `invalid`; `a_malformed_caller_intent_is_refused_as_invalid` |
+| The union loop judged only the members present, so a union missing the question template or a member for a disclosed input, or a proposal whose ancestry omitted an owner, settled without revalidating that lineage (PR review) | gap | fixed: `validate` requires the template member, the member-named evidence to equal the disclosed inputs, and the member owners to equal the ancestry, as the daemon's `revalidate` does; `an_incomplete_union_refuses_and_writes_nothing` |
+| `descriptor_stands` read any observation's payload and accepted a detail that decoded as a descriptor, so an ordinary observation carrying a copied detail stood as a `native_source` or `canonical_source` member (PR review) | gap | fixed: it reads the live row through `load_observation_for_object` and requires the descriptor kind, the current detail version, `is_consistent_with` the member id, and a detail citing the row's evidence, the broker's four checks; `a_descriptor_member_naming_an_ordinary_observation_refuses_and_writes_nothing` |
+| A retain or no-change proposal whose memory target is a native descriptor refuses `changed`, because the target requirement demands a decision (PR review) | bias | kept: the documented contract is a memory target that is the live decision at the proposal's tokens; the production selector walks only decision-derived classes, which resolve to their originating decision, so no production job proposes over a native descriptor, and retire has no meaning for one |
+| A store `Conflict` inside the envelope was reported as caller-key reuse | gap | fixed: it is a changed input; the caller-key conflict comes only from the pre-check |
+| A row bound to another project could answer `changed` or `review_expired` and so reveal its state | gap | fixed: `bound_review_row_in` compares the stored binding before sealing, deadline, or digest and answers `Missing` otherwise |
+| A Kernel admission refusal of the action (barred lineage, retired parent) surfaced as a store failure | gap | fixed: `action_refusal` maps it to `changed` |
+| The caller-receipt pre-check replayed without the fence check and alignment repair | refinement | fixed: a caller receipt falls through to `commit_intent_with_writer`, which replays it |
+| A selection time before sealing passed the deadline check | gap | fixed: `invalid` |
+| `apply` mixed validation and five action arms; ids were formatted in five places; error mappings used wildcards; a `Cell` side channel | refinement | fixed: `validate`, explicit mappings, a captured `Option` |
+| The stored settlement had no version | gap | fixed: `Settlement.version`; an unknown version is a store failure |
+| Settlement replay under a new caller key records no receipt for that key | bias | kept and documented: only a key that committed an acceptance is bound |
+| The review hold stays in place after settlement | bias | kept: the record's open question asks the owner; support stays cited through decision events |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

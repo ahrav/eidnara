@@ -158,3 +158,27 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 - No test constructs the window after the Kernel result and before the hold
   transfer; the execution hold expires on its own cutoff and the row keeps its
   queue deadline by the same mechanism the post-transfer tests witness.
+
+## Kernel acceptance
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `retain_settles_once_without_a_canonical_change_and_replays_across_keys_and_after_the_hold` | `crates/kernel/tests/kernel_review_acceptance.rs` | settlement head fields; no change to the target's row, last change, or surface eligibility; replay under a second key without a commit; replay after the review hold is released; `review_settlement` lookup; a reused caller key with another digest conflicts | unaudited |
+| `retire_runs_the_existing_retirement_and_reports_its_cascade` | same | the retirement's commit and zero cascade for a decision that grants nothing | unaudited |
+| `retiring_an_approval_reports_the_dependents_its_cascade_demoted` | same | an accepted-ADR approval with one verified dependent reports `granted_authority_before` and one demotion | unaudited |
+| `every_memory_action_refuses_a_target_that_moved_after_the_proposal` | same | retain and retire each refuse a touched target with no tip move | unaudited |
+| `a_quarantined_owner_refuses_without_being_invalidated` | same | a live but quarantined target refuses `changed` | unaudited |
+| `a_selection_past_the_queue_deadline_is_expired_but_a_settlement_still_replays` | same | a selection at the deadline is `review_expired`, one before sealing is `invalid`, and a settled proposal replays at the late selection | unaudited |
+| `cleanup_and_purge_after_acceptance_keep_the_settlement` | same | release, row deletion, and purge leave the settlement replayable | unaudited |
+| `no_change_on_a_subject_settles_and_create_and_revise_are_unsupported` | same | no-change on a subject settles unchanged; a deleted subject refuses; create and revise refuse `unsupported` without a commit | unaudited |
+| `concurrent_acceptances_of_one_proposal_settle_it_once` | same | two threads: one applies, one replays the same settlement | unaudited |
+| `a_caller_key_reused_for_another_proposal_conflicts` | same | the same caller key and digest for another proposal conflicts and settles nothing; a caller claiming the settlement producer is `invalid` | unaudited |
+| `a_moved_target_another_project_a_released_hold_and_changed_evidence_refuse_and_write_nothing` | same | `changed` for a touched target, a redirected target, deleted and tightened evidence, and a retired owner; `unavailable` for another project's run; `invalid` for a run of another job; `review_expired` for a released hold; no tip move and no settlement for each | unaudited |
+| `a_settlement_survives_a_reopen_and_replays_under_a_new_key` | same | the settlement replays from a reopened store | unaudited |
+| `a_union_read_under_another_question_template_revision_refuses_and_writes_nothing` | same | a caller template revision other than the union's refuses `changed` with no tip move and no retirement; the matching revision applies | unaudited |
+| `a_capture_member_stands_only_as_a_disclosed_capture_with_a_live_reference` | same | a disclosed capture with a live reference settles; a capture member over canonical-class evidence, over a capture whose `retain_until` lapsed under the hold, and over an undisclosed capture each refuse `changed` with no tip move | unaudited |
+| `a_caller_key_that_committed_other_work_conflicts_even_when_its_result_reads_as_a_settlement` | same | a caller key whose receipt records other work, including a result that decodes as a `Retired` settlement, conflicts with no tip move, no retirement, and no settlement; a fresh key then applies and its own replay answers the settlement | unaudited |
+| `a_reference_naming_another_incarnation_than_its_run_is_invalid_settled_or_not` | same | a reference whose Kernel incarnation is not the run's is `invalid` before and after settlement and in `review_settlement` | unaudited |
+| `a_malformed_caller_intent_is_refused_as_invalid` | same | a non-hex request digest and a blank operation key refuse `invalid`, not as a store failure | unaudited |
+| `an_incomplete_union_refuses_and_writes_nothing` | same | a union without the question template member, a union whose members name no member for a disclosed input, and a proposal whose ancestry omits a member's owner each refuse `changed` with no tip move; the complete union settles | unaudited |
+| `a_descriptor_member_naming_an_ordinary_observation_refuses_and_writes_nothing` | same | a `canonical_source` member naming an admitted `note` observation that carries a copied descriptor detail refuses `changed` with no tip move | unaudited |

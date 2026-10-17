@@ -27,6 +27,7 @@ pub(crate) mod open;
 mod outbox;
 mod redaction;
 mod retention;
+mod review_acceptance;
 mod review_staging;
 pub mod schema;
 mod scope;
@@ -123,6 +124,10 @@ pub use open::{KernelError, KernelStore, kernel_baseline_digest};
 pub use outbox::{ConsumerAbandonment, ConsumerTipSnapshot, OutboxEntry, OutboxPruneResult};
 pub use retention::{
     STAGING_DELETE_BATCH_RUNS, STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState,
+};
+pub use review_acceptance::{
+    AcceptanceError, AcceptanceOutcome, AcceptanceRefusal, ProposalAcceptance, SETTLEMENT_PRODUCER,
+    SETTLEMENT_VERSION, Settlement, SettlementEffect,
 };
 pub use review_staging::{
     ByteRange, CanonicalTarget, EvidenceReference, ExtractedFact, MAX_FACT_SPANS,
