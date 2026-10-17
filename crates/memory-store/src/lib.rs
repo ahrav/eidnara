@@ -8623,31 +8623,6 @@ impl MemoryStore {
         })
     }
 
-    /// Resolve a requested facade identity to the MODULE authority that owns it. The
-    /// context UUID is returned with the identity so a write can establish the route
-    /// binding even when the transform's authority-status result was cached.
-    pub fn module_authority_for_project(
-        &self,
-        project: &str,
-        domain: &str,
-    ) -> Result<Option<(String, String)>, MemoryStoreError> {
-        validate_authority_domain(domain)?;
-        self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT context_store_uuid, project
-                       FROM authority
-                      WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
-                      ORDER BY context_store_uuid
-                      LIMIT 1",
-                    params![project, domain],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-            })
-            .map_err(Into::into)
-    }
-
     /// Resolve a facade-supplied identity while it is module-owned or draining. DRAINING remains
     /// visible so callers can return a retryable transition error instead of falling back to a
     /// filesystem route.
@@ -8716,7 +8691,7 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// The MODULE authority row serving `route_project_root` for `domain`, from one `with_conn` read: the project [`Self::authority_project_for_route`] names, then that project's MODULE row with the lowest context store UUID, as [`Self::module_authority_for_project`] selects it. `None` when the route has no MODULE or DRAINING binding or its project has no MODULE row.
+    /// The MODULE authority row serving `route_project_root` for `domain`, from one `with_conn` read: the project [`Self::authority_project_for_route`] names, then that project's MODULE row with the lowest context store UUID. `None` when the route has no MODULE or DRAINING binding or its project has no MODULE row.
     pub fn module_authority_for_route(
         &self,
         route_project_root: &str,
