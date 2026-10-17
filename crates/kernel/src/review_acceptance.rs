@@ -19,11 +19,12 @@ use super::{
     ArtifactDestination, CachedSql, CanonicalTarget, EligibilityCandidate, EligibilityVerdict,
     HeldEvidence, KernelError, KernelStore, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
     MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldRefusal, ObjectState,
-    ObservationPayload, ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION,
-    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError,
-    ReviewReadRefusal, ReviewStagedReference, Sensitivity, SourceDescriptorDetail, current_time_ms,
-    map_sqlite, provisional_result_identity,
+    ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner,
+    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal,
+    ReviewStagedReference, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, Sensitivity,
+    SourceDescriptorDetail, current_time_ms, map_sqlite, provisional_result_identity,
 };
+use crate::slice::load_observation_for_object;
 use crate::source_identity::{OccurrenceClass, identity_digest};
 
 /// The reserved producer every settlement receipt is recorded under.
@@ -505,15 +506,28 @@ fn validate(
     let union = PolicyUnion::decode(&dependencies.union_canonical, &dependencies.union_digest)
         .or_else(|_| changed())?;
     let mut judged = Vec::new();
+    let mut named = Vec::new();
+    let mut owners = Vec::new();
+    let mut template = false;
     for member in union.members() {
-        member_stands(
+        template |= member.kind == "question_template";
+        named.extend(member_stands(
             envelope,
             acceptance,
             &proposal,
             &disclosed,
             member,
             &mut judged,
-        )?;
+        )?);
+        owners.extend(member.owner_id.clone());
+    }
+    named.sort_unstable();
+    named.dedup();
+    owners.sort_unstable();
+    owners.dedup();
+    // Acceptance requires a complete policy union so settlement covers the question template, every disclosed input, and every owner in the proposal's ancestry.
+    if !template || named != disclosed.ids || owners != proposal.policy_dependencies.ancestry {
+        return changed();
     }
     Ok(Validated {
         proposal: *proposal,
@@ -647,8 +661,8 @@ fn member_stands(
     disclosed: &Disclosed,
     member: &PolicyUnionMember,
     judged: &mut Vec<(EligibilityCandidate, Requirement)>,
-) -> Result<(), AcceptanceError> {
-    let stands = match (
+) -> Result<Option<String>, AcceptanceError> {
+    let named = match (
         member.kind.as_str(),
         member.owner_id.as_deref(),
         member.owner_revision.as_deref(),
@@ -656,55 +670,66 @@ fn member_stands(
         ("question_template", None, None) => {
             let ReviewQuestionTemplate::ExtractedFacts =
                 proposal.policy_dependencies.question_template;
-            member.id == "extracted_facts"
-                && member.revision == acceptance.question_template_revision
+            if member.id != "extracted_facts"
+                || member.revision != acceptance.question_template_revision
+            {
+                return changed();
+            }
+            None
         }
-        ("native_source", None, None) => descriptor_stands(envelope, member, None, judged)?,
-        ("canonical_source", Some(owner), Some(owner_revision)) => {
-            descriptor_stands(envelope, member, Some((owner, owner_revision)), judged)?
-        }
+        ("native_source", None, None) => Some(descriptor_stands(envelope, member, None, judged)?),
+        ("canonical_source", Some(owner), Some(owner_revision)) => Some(descriptor_stands(
+            envelope,
+            member,
+            Some((owner, owner_revision)),
+            judged,
+        )?),
         ("staged_subject", None, None) => {
             subject_row_stands(envelope, acceptance, &member.id, Some(&member.revision))?;
-            true
+            None
         }
-        ("temporary_capture", None, None) => disclosed.get(&member.id).is_some_and(|held| {
-            held.artifact_digest == member.revision
-                && held.retention_class == MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
-                && held.retain_until.is_some_and(|until| until > disclosed.now)
-        }),
-        _ => false,
+        ("temporary_capture", None, None) => {
+            let stands = disclosed.get(&member.id).is_some_and(|held| {
+                held.artifact_digest == member.revision
+                    && held.retention_class == MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
+                    && held.retain_until.is_some_and(|until| until > disclosed.now)
+            });
+            if !stands {
+                return changed();
+            }
+            Some(member.id.clone())
+        }
+        _ => return changed(),
     };
-    if stands { Ok(()) } else { changed() }
+    Ok(named)
 }
 
-/// A native or canonical descriptor member is a descriptor whose class agrees with the member kind; a canonical one's detail names `owner` in its class's leading identity field. Both are added to `judged`, and the batch eligibility judgement for a local reader proves the descriptor live at its revision and the owner a served decision at `owner_revision`.
 fn descriptor_stands(
     envelope: &Envelope<'_>,
     member: &PolicyUnionMember,
     owner: Option<(&str, &str)>,
     judged: &mut Vec<(EligibilityCandidate, Requirement)>,
-) -> Result<bool, AcceptanceError> {
+) -> Result<String, AcceptanceError> {
     let Ok(revision) = member.revision.parse::<i64>() else {
-        return Ok(false);
+        return changed();
     };
-    let payload: Option<Vec<u8>> = envelope
-        .tx
-        .query_row_cached(
-            "SELECT observation_payload FROM observations WHERE object_id=?1",
-            [member.id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(map_sqlite)?;
-    let Some(detail) = payload
-        .and_then(|payload| serde_json::from_slice::<ObservationPayload>(&payload).ok())
-        .and_then(|payload| payload.detail)
-        .and_then(|detail| serde_json::from_str::<SourceDescriptorDetail>(&detail).ok())
+    let row = load_observation_for_object(envelope.tx, envelope.commit_seq - 1, &member.id)?;
+    let Some(detail) =
+        row.filter(|row| row.observation_kind == SOURCE_DESCRIPTOR_KIND)
+            .and_then(|row| {
+                let detail = row.payload.detail.as_deref().and_then(|detail| {
+                    serde_json::from_str::<SourceDescriptorDetail>(detail).ok()
+                })?;
+                (detail.descriptor_version == SOURCE_DESCRIPTOR_DETAIL_VERSION
+                    && detail.is_consistent_with(&member.id)
+                    && row.evidence_id.as_deref() == Some(detail.evidence_id.as_str()))
+                .then_some(detail)
+            })
     else {
-        return Ok(false);
+        return changed();
     };
     let Some(class) = OccurrenceClass::from_code(&detail.class) else {
-        return Ok(false);
+        return changed();
     };
     let descriptor = (
         EligibilityCandidate {
@@ -717,7 +742,7 @@ fn descriptor_stands(
     match owner {
         None => {
             if decision_derived(class) {
-                return Ok(false);
+                return changed();
             }
         }
         Some((owner, owner_revision)) => {
@@ -727,10 +752,10 @@ fn descriptor_stands(
                 .iter()
                 .any(|(field, value)| Some(field.as_str()) == leading && value == owner);
             let Ok(owner_revision) = owner_revision.parse::<i64>() else {
-                return Ok(false);
+                return changed();
             };
             if !decision_derived(class) || !names_owner {
-                return Ok(false);
+                return changed();
             }
             judged.push((
                 EligibilityCandidate {
@@ -743,7 +768,7 @@ fn descriptor_stands(
         }
     }
     judged.push(descriptor);
-    Ok(true)
+    Ok(detail.evidence_id)
 }
 
 /// The descriptor classes whose leading identity field names an originating decision.
