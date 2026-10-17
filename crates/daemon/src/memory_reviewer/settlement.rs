@@ -1093,17 +1093,15 @@ pub enum AcceptRefusal {
     Kernel(kernel::AcceptanceRefusal),
 }
 
-/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. `operation_key` enters the caller intent as its digest, scoped to the project and job; reusing it for a different target causes a conflict.
+/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. The caller intent's identity is the run's project digest, the job's causal identity, and the digest of `operation_key`; reusing the key for a different target causes a conflict.
 pub fn accept_selected_proposal(
     store: &KernelStore,
     receipt: Option<MemoryReviewerReceipt>,
     expected: (&str, &str),
-    project: &str,
     causal_identity: &str,
     operation_key: &str,
     target: &kernel::ProposalTarget,
 ) -> Result<kernel::AcceptanceOutcome, AcceptRefusal> {
-    use sha2::Digest;
     let (live_kernel, live_memstore) = expected;
     let CopiedSelection {
         reference,
@@ -1116,26 +1114,9 @@ pub fn accept_selected_proposal(
     if run.kernel_incarnation != live_kernel {
         return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
     }
-    let request = serde_json::json!({
-        "causal_identity": causal_identity,
-        "target": target,
-    })
-    .to_string();
     let scope_id = format!("project:{}", run.project_digest);
-    // The Kernel refuses an identity that carries a secret, so the caller's key enters the identity as its digest and any visible ASCII key is admitted.
-    let caller_key = format!("{:x}", sha2::Sha256::digest(operation_key.as_bytes()));
     let acceptance = kernel::ProposalAcceptance {
-        intent: kernel::CommitIntent {
-            producer: ACCEPTANCE_PRODUCER.to_string(),
-            operation_key: format!(
-                "{}:{project}#{}:{causal_identity}#{caller_key}",
-                project.len(),
-                causal_identity.len(),
-            ),
-            request_digest: format!("{:x}", sha2::Sha256::digest(request.as_bytes())),
-            actor: "memory-reviewer".to_string(),
-            cause: "explicit acceptance".to_string(),
-        },
+        intent: caller_intent(&run, causal_identity, operation_key, target),
         run,
         proposal: reference,
         selected_at,
@@ -1151,4 +1132,70 @@ pub fn accept_selected_proposal(
                 AcceptRefusal::Receipt(ReadRefusal::Store(error.to_string()))
             }
         })
+}
+
+/// The caller's commit intent: its identity is hex text only, the run's project digest, the job's causal identity, and the SHA-256 of the caller's key, since the Kernel refuses an identity in which its secret scanner finds a match; the request digest covers the causal identity and target.
+fn caller_intent(
+    run: &MemoryReviewerHoldBinding,
+    causal_identity: &str,
+    operation_key: &str,
+    target: &kernel::ProposalTarget,
+) -> kernel::CommitIntent {
+    use sha2::Digest;
+    let request = serde_json::json!({
+        "causal_identity": causal_identity,
+        "target": target,
+    })
+    .to_string();
+    kernel::CommitIntent {
+        producer: ACCEPTANCE_PRODUCER.to_string(),
+        operation_key: format!(
+            "{}#{causal_identity}#{:x}",
+            run.project_digest,
+            sha2::Sha256::digest(operation_key.as_bytes())
+        ),
+        request_digest: format!("{:x}", sha2::Sha256::digest(request.as_bytes())),
+        actor: "memory-reviewer".to_string(),
+        cause: "explicit acceptance".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The caller intent's identity carries the run's project digest, the causal identity, and the key's digest as hex, whatever bytes the key holds, so a key or project the Kernel's secret scanner would match cannot make it `invalid`; two keys yield two identities and one key yields one.
+    #[test]
+    fn the_caller_intent_identity_is_hex_whatever_the_key_and_project_hold() {
+        let run = MemoryReviewerHoldBinding {
+            project_digest: "a".repeat(64),
+            kernel_incarnation: "b".repeat(32),
+            memstore_incarnation: "c".repeat(32),
+            subject: "d".repeat(64),
+            generation: 1,
+        };
+        let target = kernel::ProposalTarget::StagedCandidate {
+            candidate_id: "cand-1".to_string(),
+        };
+        let identity = |key: &str| caller_intent(&run, &run.subject, key, &target).operation_key;
+        let hex = |text: &str| text.bytes().all(|byte| byte.is_ascii_hexdigit());
+        for key in ["caller-1", "AKIAQ7RSTUVWXYZ23456", &"k".repeat(128)] {
+            let identity = identity(key);
+            let parts: Vec<&str> = identity.split('#').collect();
+            assert_eq!(parts.len(), 3, "{identity}");
+            assert_eq!(parts[0], run.project_digest);
+            assert_eq!(parts[1], run.subject);
+            assert!(parts[2].len() == 64 && hex(parts[2]), "{identity}");
+            assert!(!identity.contains(key), "{identity}");
+        }
+        assert_eq!(identity("caller-1"), identity("caller-1"));
+        assert_ne!(identity("caller-1"), identity("caller-2"));
+        let other_target = kernel::ProposalTarget::StagedCandidate {
+            candidate_id: "cand-2".to_string(),
+        };
+        assert_ne!(
+            caller_intent(&run, &run.subject, "caller-1", &target).request_digest,
+            caller_intent(&run, &run.subject, "caller-1", &other_target).request_digest
+        );
+    }
 }

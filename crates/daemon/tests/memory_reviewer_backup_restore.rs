@@ -259,7 +259,6 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
                 &kernel,
                 Some(receipt.clone()),
                 (&kernel_incarnation(&kernel), &store_id),
-                PROJECT,
                 &identity,
                 "caller-1",
                 &kernel::ProposalTarget::StagedCandidate {

@@ -337,7 +337,6 @@ impl HandlerCore {
                 &scope.kernel,
                 receipt,
                 (record.kernel_incarnation(), &memstore_incarnation),
-                &scope.project,
                 &parsed.causal_identity,
                 &parsed.operation_key,
                 &parsed.target,
