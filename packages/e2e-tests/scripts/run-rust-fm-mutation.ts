@@ -3,7 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
-import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
+import {
+    exitIfMeasureOnly,
+    reportMutationInventorySync,
+    syncMutationInventory,
+} from "./mutation-inventory";
 
 type MutationCase = {
     name: string;
@@ -31,18 +35,27 @@ const mutations: Record<string, MutationCase[]> = {
         {
             name: "FM_OC_2_RUNG_DELETION",
             source: pluginTransform,
-            oldText:
-                'sessionLog(sessionId, "rust transform failed; serving the input unchanged:", error);',
-            replacement: "",
+            oldText: `        sessionLog.warn(
+            sessionId,
+            servedLastApplied
+                ? "rust transform failed; serving the last applied output with the messages appended since:"
+                : "rust transform failed; serving the input unchanged:",
+            error,
+        );`,
+            // The voids keep the mutated build free of unused-binding errors.
+            replacement: "        void servedLastApplied;\n        void error;",
             expectedFailingTest: "continues through the outage with a loud module failure",
         },
     ],
     "3": [
         {
-            name: "FM_OC_3_RUNG_SWAP",
+            name: "FM_OC_3_STICKY_FALLBACK",
             source: pluginTransform,
-            oldText: "if (needFullSync || nativeContentOmitted) {",
-            replacement: "if (nativeContentOmitted) {",
+            // A session that has failed once stops attempting the transform, so every pass
+            // after the restart keeps serving the last applied output.
+            oldText: "            const directory = await source.preflight();",
+            replacement: `            if (state.failureCount > 0) throw new Error("sticky outage fallback");
+            const directory = await source.preflight();`,
             expectedFailingTest:
                 "serves passes from transform again after the host restarts, without restarting the session",
         },
@@ -51,8 +64,10 @@ const mutations: Record<string, MutationCase[]> = {
         {
             name: "FM_OC_5_RUNG_SWAP",
             source: pluginTransform,
-            oldText: 'servedFrom = "raw";',
-            replacement: 'servedFrom = "transform";',
+            oldText: `                const servedLastApplied = serveLastApplied();
+                if (servedLastApplied) servedFrom = "last_applied";`,
+            replacement: `                const servedLastApplied = serveLastApplied();
+                servedFrom = "transform";`,
             expectedFailingTest: "continues through a transport timeout and recovers after SIGCONT",
         },
     ],
@@ -153,6 +168,8 @@ for (const mutation of mutations[drill]) {
         adequacy_finding: null,
     });
 }
+
+exitIfMeasureOnly(`FM-OC-${drill}`);
 
 const recordPath = resolve(e2eRoot, `mutations/fm-oc-${drill}.json`);
 writeFileSync(

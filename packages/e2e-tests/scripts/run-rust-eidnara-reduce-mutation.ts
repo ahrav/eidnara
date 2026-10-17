@@ -3,7 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
-import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
+import {
+    exitIfMeasureOnly,
+    reportMutationInventorySync,
+    syncMutationInventory,
+} from "./mutation-inventory";
 
 type CommandResult = { exit_status: number; output: string };
 
@@ -72,6 +76,8 @@ if (
 if (revertedRerun.exit_status !== 0) {
     throw new Error("EIDNARA_REDUCE_UNKNOWN_TARGET: reverted eidnara_reduce drill did not pass");
 }
+
+exitIfMeasureOnly("RUST-CTX-REDUCE-ROUNDTRIP");
 
 const record = {
     drill: "RUST-CTX-REDUCE-ROUNDTRIP",

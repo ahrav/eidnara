@@ -106,3 +106,14 @@ export function reportMutationInventorySync(sync: MutationInventorySync): void {
             "EXPECTED_MUTATION_ARTIFACTS and EXPECTED_MUTATION_RECORDS in src/incident-pool/evidence.ts must match",
     );
 }
+
+/**
+ * A CI measurement checks red-under-mutation and green-after-revert without writing or
+ * syncing any record; only a deliberate local run updates `mutations/`. Called after a
+ * drill's verdicts and before its record write.
+ */
+export function exitIfMeasureOnly(label: string): void {
+    if (process.env.EIDNARA_MUTATION_MEASURE_ONLY !== "1") return;
+    console.log(`measured ${label}: red under mutation, green after revert; no record written`);
+    process.exit(0);
+}

@@ -3,7 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
-import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
+import {
+    exitIfMeasureOnly,
+    reportMutationInventorySync,
+    syncMutationInventory,
+} from "./mutation-inventory";
 
 type CommandResult = { exit_status: number; output: string };
 
@@ -69,6 +73,8 @@ if (failedTests.some((name) => !name.includes(TYPED_FAILURE_TEST))) {
 if (revertedRerun.exit_status !== 0) {
     throw new Error("RUST_HISTORY_SUMMARIZER_TYPED_FAILURE: reverted test did not pass");
 }
+
+exitIfMeasureOnly("RUST-HISTORY_SUMMARIZER-DIRECT-BACKEND");
 
 writeFileSync(
     resolve(e2eRoot, "mutations/rust-history_summarizer-producer.json"),

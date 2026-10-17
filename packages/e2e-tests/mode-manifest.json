@@ -140,8 +140,7 @@
             "rationale": "an agent eidnara_reduce drop enters the daemon queued-drop ledger and is consumed on the next producer-backed bust",
             "contract_refs": [
                 "U5-PORT"
-            ],
-            "quarantined": "the dropped tag survives the next bust under the lazy-drop policy; the scenario needs pressure for the drop to materialize"
+            ]
         },
         {
             "path": "tests/rust-duplicate-tool-use-id.test.ts",
@@ -165,8 +164,7 @@
             "rationale": "failure-mode drill 3: passes are served from the transform again after the host restarts, without restarting the session",
             "contract_refs": [
                 "U5-PORT"
-            ],
-            "quarantined": "six recovery prompts log seven pass lines after the restart (one reconnect retry), so the pass-count ceiling fails while the self-heal invariant holds; the ceiling must count prompts, not passes"
+            ]
         },
         {
             "path": "tests/rust-fm-oc-5.test.ts",

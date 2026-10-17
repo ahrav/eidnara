@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { RustTestHarness } from "../src/rust-harness";
+import { type RustPassLine, RustTestHarness } from "../src/rust-harness";
+import { RustPassCursor } from "../src/rust-pass-cursor";
 import {
     assertLoudModuleFailure,
     assertMessagesHaveNoPlaceholders,
@@ -24,8 +25,7 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
         await h?.dispose();
     });
 
-    // Quarantined (E2E triage): six recovery prompts log seven pass lines after the restart (one reconnect retry), so the pass-count ceiling fails while the self-heal invariant itself (no raw after transform) holds; the ceiling needs to count prompts, not passes. Tracked in the transport PR description.
-    it.skip("serves passes from transform again after the host restarts, without restarting the session", async () => {
+    it("serves passes from transform again after the host restarts, without restarting the session", async () => {
         const sessionId = await h.createSession();
         await driveToSteadyState(h, sessionId, 2);
         const healthyVersions = h
@@ -48,7 +48,9 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
         assertLoudModuleFailure(h, sessionId);
 
         await h.host.restartHost();
-        const recoveryStart = h.readRustPasses().length;
+        // The settled baseline keeps a buffered outage pass out of the recovery window.
+        const passCursor = await RustPassCursor.settle(h);
+        const recovery: RustPassLine[] = [];
         for (let i = 1; i <= RECOVERY_PASSES; i += 1) {
             h.mock.setDefault({
                 text: `FM-OC-3 recovery assistant ${i}`,
@@ -59,12 +61,15 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
                 },
             });
             await h.sendPrompt(sessionId, `FM-OC-3 recovery turn ${i}: ${h.ballast(400)}`);
+            // A prompt's pass lines are produced before it returns, so the settled read ties each
+            // of them to this turn: every turn logs one pass, a reconnect retry repeats it once,
+            // and a turn served unchanged without a pass cannot hide behind another turn's retry.
+            const turn = await passCursor.settledStep();
+            expect(turn.length, `recovery turn ${i} logged a pass`).toBeGreaterThanOrEqual(1);
+            expect(turn.length, `recovery turn ${i} retried at most once`).toBeLessThanOrEqual(2);
+            recovery.push(...turn);
         }
 
-        // Every recovery prompt has returned, so its pass line is due; waiting for all of them keeps a late raw fallback observable.
-        const passes = await h.waitForRustPasses(recoveryStart + RECOVERY_PASSES);
-        const recovery = passes.slice(recoveryStart);
-        expect(recovery.length).toBeLessThanOrEqual(RECOVERY_PASSES);
         const firstRecovered = recovery.findIndex((pass) => pass.servedFrom === "transform");
         expect(firstRecovered).toBeGreaterThanOrEqual(0);
         // Self-healing holds only if no pass falls back to raw after the transform first serves one.

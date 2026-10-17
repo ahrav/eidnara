@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { RustTestHarness } from "../src/rust-harness";
+import { RustPassCursor } from "../src/rust-pass-cursor";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 interface ModuleStatus {
@@ -22,6 +23,9 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
             eidnaraConfig: {
                 execute_threshold_percentage: 25,
                 protected_tags: 1,
+                // A summarizer chain turns compaction on, which registers `eidnara_reduce` and
+                // makes the busts below producer-backed.
+                history_summarizer: { model: "fixture/deterministic" },
             },
         });
     });
@@ -30,8 +34,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
         await h?.dispose();
     });
 
-    // Quarantined (E2E triage): the dropped tag survives the next bust under the current lazy-drop policy; the scenario needs pressure for the drop to materialize. Tracked in the transport PR description.
-    it.skip("consumes an agent eidnara_reduce drop on the next producer-backed bust", async () => {
+    it("consumes an agent eidnara_reduce drop on the next producer-backed bust", async () => {
         const sessionId = await h.createSession();
 
         for (let i = 1; i <= 3; i += 1) {
@@ -97,7 +100,8 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
             "queued eidnara_reduce drop must be pending before the bust",
         ).toBeGreaterThan(0);
 
-        // The next turn exceeds the execute threshold, so the bust drains the pending drop.
+        const passCursor = await RustPassCursor.settle(h);
+        let drainedOnBust = false;
         for (let i = 5; i <= 10; i += 1) {
             h.mock.setDefault({
                 text: `pressure ${i}`,
@@ -108,24 +112,39 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
                 },
             });
             await h.sendPrompt(sessionId, `eidnara_reduce pressure turn ${i}: ${h.ballast(2_500)}`);
-            await Bun.sleep(200);
-            if (i === 5) {
-                // The first producer-backed bust must consume the drop; a later pressure turn draining it would hide a stalled ledger.
-                const deadline = Date.now() + 10_000;
-                let pending = -1;
-                while (Date.now() < deadline) {
-                    const status = (await h.host.primaryStatus(
-                        sessionId,
-                        h.env.workdir,
-                        "session.status",
-                    )) as ModuleStatus;
-                    pending = status.pending_drop_count ?? -1;
-                    if (pending === 0) break;
-                    await Bun.sleep(100);
-                }
-                expect(pending).toBe(0);
+            const passes = await passCursor.next();
+            const busted = passes.slice(passCursor.start).some((pass) => pass.decision === "HARD");
+            if (drainedOnBust) continue;
+            if (!busted) {
+                const status = (await h.host.primaryStatus(
+                    sessionId,
+                    h.env.workdir,
+                    "session.status",
+                )) as ModuleStatus;
+                expect(
+                    status.pending_drop_count ?? 0,
+                    "the drop stays pending through deferred passes",
+                ).toBeGreaterThan(0);
+                continue;
             }
+            // The first producer-backed bust must consume the drop; a later pressure turn draining
+            // it would hide a stalled ledger.
+            const deadline = Date.now() + 10_000;
+            let pending = -1;
+            while (Date.now() < deadline) {
+                const status = (await h.host.primaryStatus(
+                    sessionId,
+                    h.env.workdir,
+                    "session.status",
+                )) as ModuleStatus;
+                pending = status.pending_drop_count ?? -1;
+                if (pending === 0) break;
+                await Bun.sleep(100);
+            }
+            expect(pending).toBe(0);
+            drainedOnBust = true;
         }
+        expect(drainedOnBust, "a pressure turn reached a producer-backed bust").toBe(true);
         await Bun.sleep(800);
 
         // The producer may fold the dropped history entry before the final provider request.
@@ -141,7 +160,8 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: eidnara_reduce round-trip", ()
         expect(finalStatus.history_segment_count ?? 0).toBeGreaterThan(0);
         expect(await h.host.backendRequestCount()).toBeGreaterThan(0);
         const finalWire = h.lastMainWireSerialized();
-        expect(finalWire).toContain("<session-history>");
-        expect(finalWire).toContain("Rust reduce e2e chunk");
+        // The deterministic fixture summarizer publishes a segment headed by the ordinals it
+        // covers. The wire is JSON-serialized, so `\\n` matches its escaped newline.
+        expect(finalWire).toMatch(/<session-history>\\n## \d+-\d+ · /);
     }, 300_000);
 });
