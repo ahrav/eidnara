@@ -1093,7 +1093,7 @@ pub enum AcceptRefusal {
     Kernel(kernel::AcceptanceRefusal),
 }
 
-/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. `operation_key` is scoped to the project and job; reusing it for a different target causes a conflict.
+/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. `operation_key` enters the caller intent as its digest, scoped to the project and job; reusing it for a different target causes a conflict.
 pub fn accept_selected_proposal(
     store: &KernelStore,
     receipt: Option<MemoryReviewerReceipt>,
@@ -1122,14 +1122,15 @@ pub fn accept_selected_proposal(
     })
     .to_string();
     let scope_id = format!("project:{}", run.project_digest);
+    // The Kernel refuses an identity that carries a secret, so the caller's key enters the identity as its digest and any visible ASCII key is admitted.
+    let caller_key = format!("{:x}", sha2::Sha256::digest(operation_key.as_bytes()));
     let acceptance = kernel::ProposalAcceptance {
         intent: kernel::CommitIntent {
             producer: ACCEPTANCE_PRODUCER.to_string(),
             operation_key: format!(
-                "{}:{project}#{}:{causal_identity}#{}:{operation_key}",
+                "{}:{project}#{}:{causal_identity}#{caller_key}",
                 project.len(),
                 causal_identity.len(),
-                operation_key.len()
             ),
             request_digest: format!("{:x}", sha2::Sha256::digest(request.as_bytes())),
             actor: "memory-reviewer".to_string(),

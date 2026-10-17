@@ -562,6 +562,15 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
     let replay = daemon.call(accept("caller-2", &target)).await;
     assert_eq!(replay["replayed"], json!(true));
     assert_eq!(&replay["settlement"], settlement);
+    let credential_shaped = daemon.call(accept("AKIAQ7RSTUVWXYZ23456", &target)).await;
+    assert_eq!(
+        (
+            &credential_shaped["replayed"],
+            &credential_shaped["settlement"]
+        ),
+        (&json!(true), settlement),
+        "a key shaped like a credential is an idempotency key like any other: {credential_shaped}"
+    );
     let own = daemon.call(accept("caller-1", &target)).await;
     assert_eq!(
         (&own["replayed"], &own["settlement"]),
