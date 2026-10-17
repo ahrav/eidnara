@@ -3143,7 +3143,9 @@ impl KernelStore {
             .iter()
             .map(|(object_id, digest)| (object_id.as_str(), digest.as_deref()))
             .collect();
-        self.egress_read(|tx, tip| egress_candidates_tx(tx, tip, &named, destination))
+        self.egress_read(|tx, tip| {
+            egress_candidates_tx(tx, tip, &named, destination, ArtifactFacts::Always)
+        })
     }
 
     /// The state an egress verdict computed now would be keyed by, read
@@ -3199,11 +3201,18 @@ impl KernelStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactFacts {
+    Always,
+    WhenServed,
+}
+
 pub(crate) fn egress_candidates_tx(
     tx: &Transaction<'_>,
     tip: i64,
     candidates: &[(&str, Option<&str>)],
     destination: ArtifactDestination,
+    artifact_facts: ArtifactFacts,
 ) -> Result<Vec<EgressCandidate>, KernelError> {
     let ids: Vec<&str> = candidates.iter().map(|(id, _)| *id).collect();
     let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
@@ -3236,6 +3245,14 @@ pub(crate) fn egress_candidates_tx(
             let artifact = match digest {
                 Some(digest) if !crate::cas::is_artifact_digest(digest) => {
                     return Err(KernelError::InvalidInput);
+                }
+                Some(_)
+                    if artifact_facts == ArtifactFacts::WhenServed
+                        && served.is_none_or(|served| {
+                            served.visibility == SurfaceVisibility::Hidden
+                        }) =>
+                {
+                    None
                 }
                 Some(digest) => Some(match artifacts.get(digest) {
                     Some(facts) => *facts,

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::canonical_json::{ContractError, encode_canonical_string, protocol_digest_of_canonical};
+use crate::canonical_json::{ContractError, canonical_digest, encode_canonical_string};
 
 pub const MEMORY_REVIEWER_POLICY_UNION_VERSION: u32 = 1;
 pub const MEMORY_REVIEWER_POLICY_UNION_PROTOCOL: &str = "eidnara-memory_reviewer-policy-union-v1";
@@ -22,10 +22,10 @@ pub struct PolicyUnionMember {
 }
 
 impl PolicyUnionMember {
-    /// The member's canonical JSON object: its keys in code-point order, an absent owner field as `null`.
+    /// The canonical representation orders keys by code point and encodes absent `owner_id` and `owner_revision` values as `null`.
     fn canonical(&self) -> String {
         let mut out = String::with_capacity(
-            64 + self.kind.len()
+            80 + self.kind.len()
                 + self.id.len()
                 + self.revision.len()
                 + self.owner_id.as_ref().map_or(0, String::len)
@@ -90,7 +90,7 @@ impl PolicyUnion {
         self.members.contains(member)
     }
 
-    /// Canonical encoding: members sorted by their own canonical bytes inside `{"v":1,"members":[...]}`, which is `{"members":[...],"v":1}` in canonical key order.
+    /// Canonical encoding: members sorted by their own canonical bytes inside `{"v":1,"members":[...]}`.
     pub fn encode(&self) -> Result<EncodedPolicyUnion, ContractError> {
         let mut members: Vec<String> = self
             .members
@@ -112,7 +112,7 @@ impl PolicyUnion {
         canonical.push_str(&MEMORY_REVIEWER_POLICY_UNION_VERSION.to_string());
         canonical.push('}');
         Ok(EncodedPolicyUnion {
-            digest: protocol_digest_of_canonical(MEMORY_REVIEWER_POLICY_UNION_PROTOCOL, &canonical),
+            digest: canonical_digest(MEMORY_REVIEWER_POLICY_UNION_PROTOCOL, &canonical),
             canonical,
             members: self.members.len(),
         })
@@ -165,6 +165,7 @@ impl PolicyUnion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical_json::canonical_json_encode;
 
     fn member(
         kind: &str,
@@ -245,32 +246,33 @@ mod tests {
         assert!(PolicyUnion::decode("{\"members\":[],\"v\":2}", &encoded.digest).is_err());
     }
 
-    /// The union bytes and digest equal the generic canonical encoder's output for the documented `{"v":1,"members":[...]}` value, including strings that need escapes and non-ASCII text.
     #[test]
-    fn encoding_equals_the_generic_canonical_encoder() {
-        use crate::canonical_json::{canonical_json_encode, protocol_digest};
-        use serde_json::json;
+    fn encoding_matches_the_generic_canonical_encoder_for_escaped_and_unicode_text() {
         let texts = [
             "",
             "plain",
-            "quote\"and\\slash",
-            "control\u{0}\u{1f}\n\t",
-            "\u{7f}\u{e9}\u{1f600}",
-            "zz",
-            "A",
+            "quote\"d",
+            "back\\slash",
+            "line\nfeed\ttab\u{0}nul\u{1f}",
+            "\u{7f}del",
+            "caf\u{e9} \u{1f600}",
+            "\u{2028}separator",
         ];
         let mut union = PolicyUnion::new();
-        for (index, kind) in texts.iter().enumerate() {
-            for id in texts {
-                let revision = texts[(index + id.len()) % texts.len()];
-                union.insert(member(kind, id, revision, None));
-                union.insert(member(kind, id, revision, Some((id, kind))));
-            }
+        for (index, text) in texts.iter().enumerate() {
+            let owner = (index % 2 == 0).then(|| texts[(index + 3) % texts.len()].to_string());
+            union.insert(PolicyUnionMember {
+                kind: format!("kind{text}"),
+                id: (*text).to_string(),
+                revision: texts[(index + 1) % texts.len()].to_string(),
+                owner_id: owner.clone(),
+                owner_revision: owner.map(|owner| format!("{owner}r")),
+            });
         }
         let mut members: Vec<(String, Value)> = union
             .members()
             .map(|member| {
-                let value = json!({
+                let value = serde_json::json!({
                     "kind": member.kind,
                     "id": member.id,
                     "revision": member.revision,
@@ -281,7 +283,7 @@ mod tests {
             })
             .collect();
         members.sort_by(|left, right| left.0.cmp(&right.0));
-        let value = json!({
+        let value = serde_json::json!({
             "v": MEMORY_REVIEWER_POLICY_UNION_VERSION,
             "members": members.into_iter().map(|(_, value)| value).collect::<Vec<_>>(),
         });
@@ -289,7 +291,8 @@ mod tests {
         assert_eq!(encoded.canonical, canonical_json_encode(&value).unwrap());
         assert_eq!(
             encoded.digest,
-            protocol_digest(MEMORY_REVIEWER_POLICY_UNION_PROTOCOL, &value).unwrap()
+            crate::canonical_json::protocol_digest(MEMORY_REVIEWER_POLICY_UNION_PROTOCOL, &value)
+                .unwrap()
         );
         assert_eq!(
             PolicyUnion::decode(&encoded.canonical, &encoded.digest).unwrap(),

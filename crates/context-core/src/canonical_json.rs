@@ -52,19 +52,25 @@ fn number_as_safe_integer(number: &Number) -> Option<i64> {
     Some(value as i64)
 }
 
-/// Appends `value` as a canonical JSON string, the form [`canonical_json_encode`] gives every string.
-pub fn encode_canonical_string(out: &mut String, value: &str) {
+pub(crate) fn encode_canonical_string(out: &mut String, value: &str) {
     out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
+    // Every byte the encoding escapes is ASCII, so the text between two escaped bytes is whole UTF-8 and copies through unchanged.
+    let mut copied = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        if byte >= 0x20 && byte != b'"' && byte != b'\\' {
+            continue;
         }
+        out.push_str(&value[copied..index]);
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            _ => {
+                let _ = write!(out, "\\u{byte:04x}");
+            }
+        }
+        copied = index + 1;
     }
+    out.push_str(&value[copied..]);
     out.push('"');
 }
 
@@ -127,14 +133,11 @@ fn lower_hex(bytes: &[u8]) -> String {
 
 /// Hashes `<protocol>\n<canonical JSON>` without materializing the joined string.
 pub fn protocol_digest(protocol: &str, value: &Value) -> Result<String, ContractError> {
-    Ok(protocol_digest_of_canonical(
-        protocol,
-        &canonical_json_encode(value)?,
-    ))
+    Ok(canonical_digest(protocol, &canonical_json_encode(value)?))
 }
 
-/// [`protocol_digest`] over text the caller already holds in canonical form.
-pub fn protocol_digest_of_canonical(protocol: &str, canonical: &str) -> String {
+/// The caller must encode `canonical` in this module's canonical form.
+pub(crate) fn canonical_digest(protocol: &str, canonical: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(protocol.as_bytes());
     hasher.update(b"\n");

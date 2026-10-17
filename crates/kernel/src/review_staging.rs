@@ -939,7 +939,8 @@ impl KernelStore {
         } else {
             live_at
         };
-        judge_stored_row(row, reference, live_at)
+        let witness = decode_witness(&row.witness);
+        judge_stored_row(row, reference, live_at, witness)
     }
 }
 
@@ -957,13 +958,13 @@ pub(crate) fn bound_review_row_in(
     check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
     check_digest(&reference.payload_digest).map_err(|_| ReviewReadError::Invalid)?;
     let row = stored_review_row(tx, reference)?;
-    let Some(witness) = decode_witness(&row.witness)
-        .filter(|(binding, _)| binding.project_digest == project_digest && binding.owner == *owner)
-    else {
+    let witness = decode_witness(&row.witness)
+        .filter(|(binding, _)| binding.project_digest == project_digest && binding.owner == *owner);
+    if witness.is_none() {
         return Err(ReviewReadRefusal::Missing.into());
-    };
+    }
     let (row, sealed_at, binding, dependencies) =
-        judge_decoded_row(row, reference, selected_at, Some(witness))?;
+        judge_stored_row(row, reference, selected_at, witness)?;
     if selected_at < sealed_at {
         return Err(ReviewReadError::Invalid);
     }
@@ -1006,25 +1007,8 @@ fn stored_review_row(
     .ok_or_else(|| ReviewReadRefusal::Missing.into())
 }
 
-/// A row is readable when it is sealed, its deadline is strictly after `live_at`, and its bytes are the ones `reference` names.
+/// A row is readable when it is sealed, its deadline is strictly after `live_at`, its bytes are the ones `reference` names, and `witness`, the row's decoded witness, is present.
 fn judge_stored_row(
-    row: StoredReviewRow,
-    reference: &ReviewStagedReference,
-    live_at: i64,
-) -> Result<
-    (
-        StoredReviewRow,
-        i64,
-        ReviewBinding,
-        Option<ReviewDependencies>,
-    ),
-    ReviewReadError,
-> {
-    judge_decoded_row(row, reference, live_at, None)
-}
-
-/// [`judge_stored_row`] with the row's witness already decoded by the caller, or `None` to decode it here.
-fn judge_decoded_row(
     row: StoredReviewRow,
     reference: &ReviewStagedReference,
     live_at: i64,
@@ -1054,9 +1038,7 @@ fn judge_decoded_row(
     if identity_digest(&row.payload) != reference.payload_digest {
         return Err(ReviewReadRefusal::Changed.into());
     }
-    let (binding, dependencies) = witness
-        .or_else(|| decode_witness(&row.witness))
-        .ok_or(ReviewReadRefusal::ScopeMismatch)?;
+    let (binding, dependencies) = witness.ok_or(ReviewReadRefusal::ScopeMismatch)?;
     Ok((row, sealed_at, binding, dependencies))
 }
 

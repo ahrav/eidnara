@@ -291,7 +291,7 @@ pub struct Envelope<'tx> {
     pub(super) causality_objects: HashMap<String, String>,
     /// Capture evidence id to the `localfileobj:` row this envelope wrote for it.
     pub(super) local_file_objects: HashMap<String, String>,
-    /// The last receipt result this envelope recorded and its redaction, so a commit whose own result is that text reuses the redaction.
+    /// The latest receipt result this envelope redacted, keyed by its original text.
     receipt_redaction: Option<(String, RedactedField)>,
     poisoned: Option<KernelError>,
 }
@@ -576,16 +576,17 @@ impl Envelope<'_> {
     /// [`Self::record_receipt`] for a receipt the store writes on its own behalf under a reserved producer, which no caller intent may name.
     pub(crate) fn record_reserved_receipt(
         &mut self,
-        intent: &RedactedIntent,
+        intent: &PreparedIntent,
         result: &str,
     ) -> Result<(), KernelError> {
         if !intent
+            .0
             .producer
             .starts_with(CommitIntent::RESERVED_PRODUCER_PREFIX)
         {
             return Err(KernelError::InvalidInput);
         }
-        self.guarded(|envelope| envelope.insert_receipt(intent, result))
+        self.guarded(|envelope| envelope.insert_receipt(&intent.0, result))
     }
 
     fn record_receipt_inner(
@@ -1256,14 +1257,23 @@ fn read_snapshot_on<T>(
 /// The receipt recorded under `intent` as `tx` sees it, for a caller or reserved producer alike; `Conflict` when the key is recorded under another digest.
 pub(crate) fn recorded_receipt(
     tx: &Transaction<'_>,
-    intent: CommitIntent,
+    intent: &PreparedIntent,
 ) -> Result<Option<CommitReceipt>, KernelError> {
-    stored_receipt(tx, &RedactedIntent::new(intent)?)
+    stored_receipt(tx, &intent.0)
+}
+
+/// `PreparedIntent` reuses a single redaction across receipt lookups and commits.
+pub(crate) struct PreparedIntent(RedactedIntent);
+
+impl PreparedIntent {
+    pub(crate) fn new(intent: CommitIntent) -> Result<Self, KernelError> {
+        RedactedIntent::new(intent).map(Self)
+    }
 }
 
 /// The receipt a repeat of `intent` replays; a stored key under a different
 /// digest is `Conflict`, since the caller reused an identity for other bytes.
-pub(crate) fn stored_receipt(
+fn stored_receipt(
     tx: &Transaction<'_>,
     intent: &RedactedIntent,
 ) -> Result<Option<CommitReceipt>, KernelError> {
@@ -1548,28 +1558,27 @@ pub(super) fn commit_with_writer(
     operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
     after_events: impl FnOnce() -> Result<(), KernelError>,
 ) -> Result<CommitReceipt, KernelError> {
-    commit_redacted_with_writer(
+    commit_intent_with_writer(
         writer,
         lease_epoch,
-        RedactedIntent::new(intent)?,
+        PreparedIntent::new(intent)?,
         operation,
         after_events,
     )
 }
 
-/// [`commit_with_writer`] for an intent the caller already redacted.
-pub(super) fn commit_redacted_with_writer(
+pub(crate) fn commit_intent_with_writer(
     writer: &mut Connection,
     lease_epoch: u64,
-    intent: RedactedIntent,
+    intent: PreparedIntent,
     operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
     after_events: impl FnOnce() -> Result<(), KernelError>,
 ) -> Result<CommitReceipt, KernelError> {
-    let transaction_id = operation_identity(&intent);
+    let transaction_id = operation_identity(&intent.0);
     commit_prepared_with_writer(
         writer,
         lease_epoch,
-        intent,
+        intent.0,
         transaction_id,
         operation,
         after_events,
@@ -1611,7 +1620,7 @@ fn truncate_alignment_projection(tx: &Transaction<'_>) -> Result<usize, KernelEr
     Ok(removed)
 }
 
-pub(crate) struct RedactedIntent {
+struct RedactedIntent {
     producer: String,
     operation_key: String,
     request_digest: String,
@@ -1620,7 +1629,7 @@ pub(crate) struct RedactedIntent {
 }
 
 impl RedactedIntent {
-    pub(crate) fn new(intent: CommitIntent) -> Result<Self, KernelError> {
+    fn new(intent: CommitIntent) -> Result<Self, KernelError> {
         if !context_core::canonical_json::is_lower_hex(&intent.request_digest, 64)
             || intent.producer.trim().is_empty()
             || intent.operation_key.trim().is_empty()
@@ -2271,6 +2280,69 @@ fn operation_identity(intent: &RedactedIntent) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{CommitIntent, PreparedIntent, commit_intent_with_writer, recorded_receipt};
+    use rusqlite::TransactionBehavior;
+
+    const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+
+    fn intent(producer: &str, key: &str) -> CommitIntent {
+        CommitIntent {
+            producer: producer.to_string(),
+            operation_key: key.to_string(),
+            request_digest: "a".repeat(64),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_commit_result_repeating_a_reserved_receipt_is_redacted_like_any_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::KernelStore::open(directory.path()).unwrap();
+        let text = format!("result {SECRET}");
+        let mut writer = store.lock_writer().unwrap();
+        for (key, result) in [("same", text.clone()), ("other", format!("other {SECRET}"))] {
+            let reserved =
+                PreparedIntent::new(intent("eidnara-kernel/test", &format!("reserved-{key}")))
+                    .unwrap();
+            let receipt = commit_intent_with_writer(
+                &mut writer,
+                store.lease_epoch(),
+                PreparedIntent::new(intent("caller", key)).unwrap(),
+                |envelope| {
+                    envelope.record_reserved_receipt(&reserved, &text)?;
+                    Ok(result.clone())
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            assert!(!receipt.result.contains(SECRET), "{key}");
+            assert_eq!(
+                receipt.result,
+                crate::redaction::redact(&result).unwrap().text,
+                "{key}"
+            );
+            let tx = writer
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .unwrap();
+            assert_eq!(
+                recorded_receipt(&tx, &reserved).unwrap().unwrap().result,
+                crate::redaction::redact(&text).unwrap().text,
+                "{key}"
+            );
+            let detections: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM durable_text_redactions r
+                     JOIN operation_receipts o ON o.receipt_id=r.owner_id
+                     WHERE r.owner_kind='operation_receipt' AND o.commit_seq=?1",
+                    [receipt.commit_seq],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(detections, 2, "{key}");
+        }
+    }
+
     #[test]
     fn prefix_upper_bound_brackets_exactly_the_prefixed_ids() {
         let bound = super::prefix_upper_bound("srcdesc:ab:");

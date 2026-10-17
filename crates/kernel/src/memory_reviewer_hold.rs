@@ -774,7 +774,8 @@ fn live_hold_of(
     now: i64,
 ) -> Result<Option<(String, i64, bool)>, MemoryReviewerHoldError> {
     tx.query_row_cached(
-        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL FROM capture_pins
+        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL
+         FROM capture_pins INDEXED BY idx_capture_pins_owner_active
          WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL AND expires_at>?3
          ORDER BY created_at DESC LIMIT 1",
         params![kind.pin_kind(), binding.owner_id(), now],
