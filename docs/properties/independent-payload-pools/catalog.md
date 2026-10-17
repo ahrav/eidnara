@@ -79,7 +79,7 @@ A marker fires on a correct implementation; none asserts a violation.
 
 | Slug | Type | Reachability | Check | Exercised |
 | --- | --- | --- | --- | --- |
-| `descriptor-private-snapshot` | safety | default-production | `always` | partial |
+| `descriptor-private-snapshot` | safety | default-production | `always` | yes |
 | `descriptor-capacity-independent-of-payload` | safety | default-production | `always` | yes |
 | `payload-identity-authorizes-reuse` | safety | default-production | `always` | yes |
 | `released-block-reuse-preserves-held-bytes` | safety | default-production | `always` | yes |
@@ -93,30 +93,30 @@ A marker fires on a correct implementation; none asserts a violation.
 | `sole-identifiers-before-activation` | safety | default-production | `always` | yes |
 | `validated-setup-geometry` | safety | default-production | `always` | yes |
 | `authentication-transcript-boundary` | safety | default-production | `always` | yes |
-| `structural-rejection-before-dispatch` | safety | default-production | `always` | partial |
-| `shared-copy-source-access` | safety | default-production | `always` | partial |
+| `structural-rejection-before-dispatch` | safety | default-production | `always` | yes |
+| `shared-copy-source-access` | safety | default-production | `always` | yes |
 | `owned-lease-thread-boundary` | safety | default-production | `always` | yes |
 | `private-decode-input-stability` | safety | default-production | `always` | yes |
-| `request-conversion-completion-ownership` | safety | default-production | `always` | partial |
+| `request-conversion-completion-ownership` | safety | default-production | `always` | yes |
 | `native-alias-closure-before-transfer` | safety | default-production | `always` | yes |
-| `partial-close-token-conservation` | safety | default-production | `always` | partial |
-| `environment-finalizer-confinement` | safety | default-production | `always` | partial |
+| `partial-close-token-conservation` | safety | default-production | `always` | yes |
+| `environment-finalizer-confinement` | safety | default-production | `always` | yes |
 | `response-retention-isolation` | safety | default-production | `always` | yes |
 | `complete-capacity-admission` | safety | default-production | `always` | yes |
 | `terminal-credit-follows-storage` | safety | default-production | `always` | yes |
 | `reserved-progress-under-data-exhaustion` | liveness | default-production | `always` | yes |
 | `reserved-publication-order` | safety | default-production | `always` | yes |
-| `partial-setup-reclaims-only-unexposed-resources` | safety | default-production | `always` | partial |
+| `partial-setup-reclaims-only-unexposed-resources` | safety | default-production | `always` | yes |
 | `bounded-refusal-and-recovery` | liveness | default-production | `always` | yes |
 | `direct-serialization-commit-boundary` | safety | default-production | `always` | yes |
 | `terminal-encoding-reserve-bound` | safety | default-production | `always` | yes |
-| `send-outcome-no-generic-replay` | safety | default-production | `always` | partial |
+| `send-outcome-no-generic-replay` | safety | default-production | `always` | yes |
 | `reclamation-diagnostics-meaning` | safety | default-production | `always` | yes |
 | `single-replacement-surface` | safety | test-only | `always` | yes |
 | `integration-gate-dependency-selection` | safety | test-only | `always` | yes |
 | `unsafe-witness-selection` | safety | test-only | `always` | yes |
-| `acceptance-artifact-provenance` | safety | test-only | `always` | partial |
-| `real-process-current-layout-witness` | reachability | test-only | `reachable` | partial |
+| `acceptance-artifact-provenance` | safety | test-only | `always` | yes |
+| `real-process-current-layout-witness` | reachability | test-only | `reachable` | yes |
 | `malformed-fixture-valid-baseline` | safety | test-only | `always` | yes |
 | `fuzz-adapter-current-contract` | safety | test-only | `always` | yes |
 | `capacity-model-conservation` | safety | test-only | `always` (retired) | not yet (invalidated) |
@@ -128,17 +128,15 @@ A marker fires on a correct implementation; none asserts a violation.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2153` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2615` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Exercised: yes - `copy_descriptor` (`crates/shm-transport/src/backend/ring.rs`) is the receiver's only read of a slot: four fixed-width atomic loads after the Acquire on `published`, and `try_receive` validates and uses only that copy; `descriptor_copy_races_a_concurrent_slot_rewrite` (Miri CI witness) rewrites the block and body length from another thread while the receiver copies and validates, and Miri finds no data race while every accepted copy fits its block and every other copy is refused; `descriptor_snapshot_is_copied_out_field_by_field_and_validated` shows a later rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs` forged-field test refuses every forged field. The handoff reviews at the closing-evidence head: unsafe-review returned SAFETY: APPROVED (each field copied once, validation and lease construction use only the copy, the CAS is AcqRel); invariant-test-review found the forged-field test proves structural rejection but not the no-reread rule, which is enforced by the single `copy_descriptor` call and by `PoolDescriptor` holding plain owned words, not by a test.
 Guarantee: The receiver validates only a private copy of the four descriptor words taken once under the Acquire on `published`; no check rereads shared memory and no lease references the slot.
 Check: `always` - after `try_receive_inner` returns, the lease's block, generation, and body length equal the values `PoolDescriptor::from_untrusted` captured, whatever the slot holds now; the semantics are `always` because the property must hold on every receive, not only when a rewrite occurs.
 Fault/timing angle: The window between the four relaxed loads and the compare-exchange on `consumed`, during which a peer may rewrite the slot.
 Required faults and enabling state: A peer rewrite of a slot field after publication; the consumer must have observed `published` past that slot. Markers: marker:`pool.slot_rewritten_after_publication`, marker:`pool.consumer_saw_published_sequence`.
 Confidence: high - [evidence](evidence/descriptor-private-snapshot.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1453`; `crates/shm-transport/src/descriptor.rs:222`; `crates/shm-transport/src/backend/ring.rs:1501`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2153` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2615` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Existing check: `copy_descriptor` (`crates/shm-transport/src/backend/ring.rs`) is the receiver's only read of a slot: four fixed-width atomic loads after the Acquire on `published`, and `try_receive` validates and uses only that copy; `descriptor_copy_races_a_concurrent_slot_rewrite` (Miri CI witness) rewrites the block and body length from another thread while the receiver copies and validates, and Miri finds no data race while every accepted copy fits its block and every other copy is refused; `descriptor_snapshot_is_copied_out_field_by_field_and_validated` shows a later rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs` forged-field test refuses every forged field. The handoff reviews at the closing-evidence head: unsafe-review returned SAFETY: APPROVED (each field copied once, validation and lease construction use only the copy, the CAS is AcqRel); invariant-test-review found the forged-field test proves structural rejection but not the no-reread rule, which is enforced by the single `copy_descriptor` call and by `PoolDescriptor` holding plain owned words, not by a test.
 Impact: A receiver that rereads the slot could validate one value and lease another, exposing bytes outside the block or a body longer than the block holds.
-Open questions:
-
-- Handoff: unsafe-review for the copy-out contract; invariant-test-review for the forged-field test's discriminating power.
+Open questions: None. A test that rewrites the slot between the copy and lease construction inside `try_receive_inner` would need a hook in the receive path; the rule stands by inspection and by type.
 
 ### descriptor-capacity-independent-of-payload
 
@@ -162,13 +160,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2710` and `crates/shm-transport/src/backend/ring.rs:2615`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2753` and `crates/shm-transport/src/backend/ring.rs:2658`; `crates/shm-transport/tests/contract.rs:116` covers the pure validator.
 Guarantee: A block is reused only when its completion cell holds exactly the generation the producer issued; a stale cell frees nothing, a cell ahead of any issued generation quarantines, and no pointer or peer offset is ever consulted (KTD2).
 Check: `always` - in `reclaim_completions`, every block pushed to a free list satisfies `cell == ledger.generations[block]`, and every observed `cell > generation` ends in quarantine before any free-list mutation.
 Fault/timing angle: A stale return landing after the block was reused with a newer generation; a forged cell value above the issued generation.
 Required faults and enabling state: A block reused at least once (generation >= 2) with a late return of the earlier generation; a cell written past the issued generation. Markers: marker:`pool.block_reused_with_newer_generation`, marker:`pool.completion_cell_ahead_of_issue`.
 Confidence: high - [evidence](evidence/payload-identity-authorizes-reuse.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1171`; `crates/shm-transport/src/backend/retained.rs:602`; `crates/shm-transport/src/descriptor.rs:222`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2710` and `crates/shm-transport/src/backend/ring.rs:2615`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2753` and `crates/shm-transport/src/backend/ring.rs:2658`; `crates/shm-transport/tests/contract.rs:116` covers the pure validator.
 Impact: A stale or forged return could free a block a newer occupant still reads, the early-reuse stop condition.
 Open questions:
 
@@ -179,13 +177,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2293` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:347` repeats it across a process boundary with returns from a worker thread.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2338` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:344` repeats it across a process boundary with returns from a worker thread.
 Guarantee: Releasing payload B permits reuse of B's block while an older payload A remains byte-identical and live (R2); B's reuse never touches A's block.
 Check: `always` - after each B cycle, `A.to_vec()` equals the bytes captured at A's receive and no B reservation returned A's block id.
 Fault/timing angle: None structural; the enabling state is reuse of a block while another block's lease is live across more than one descriptor lap.
 Required faults and enabling state: At least `2 * descriptor_depth + 1` publications after A while A is held; B's block id repeats. Markers: marker:`pool.reuse_beyond_descriptor_lap`, marker:`pool.older_lease_live_during_reuse`.
 Confidence: high - [evidence](evidence/released-block-reuse-preserves-held-bytes.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:285`; `crates/shm-transport/src/backend/ring.rs:1053`; `crates/shm-transport/src/lease.rs:308`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2293` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:347` repeats it across a process boundary with returns from a worker thread.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2338` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:344` repeats it across a process boundary with returns from a worker thread.
 Impact: Reuse that overlapped a live block would corrupt bytes a reader is decoding.
 Open questions:
 
@@ -196,13 +194,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2362`, `crates/shm-transport/src/backend/ring.rs:2391`, and `crates/shm-transport/src/backend/ring.rs:2426`.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2407`, `crates/shm-transport/src/backend/ring.rs:2436`, and `crates/shm-transport/src/backend/ring.rs:2469`.
 Guarantee: Each class's free, reserved, and published counts sum to its block count; an ordinary bound takes the smallest fitting class and never spills; abort and underfill return the block; a short commit retains it (KTD1).
 Check: `always` - `PoolInventory::conserves` holds after every reserve, abort, commit, and reclaim, and `class_for` returns the smallest fitting class or `None`.
 Fault/timing angle: Abort and underfill paths; a bound exactly at, one below, and one above each class boundary.
 Required faults and enabling state: A class exhausted while a larger class has free blocks; an aborted reservation; an underfilled commit; a body of exactly `MAX_FRAME_BYTES` and of `MAX_FRAME_BYTES + 1`. Markers: marker:`pool.class_exhausted_with_larger_class_free`, marker:`pool.reservation_aborted`, marker:`pool.commit_underfilled`, marker:`pool.maximum_body_reserved`.
 Confidence: high - [evidence](evidence/class-allocation-conservation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:273`; `crates/shm-transport/src/backend/ring.rs:1288`; `crates/shm-transport/src/backend/ring.rs:555`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2362`, `crates/shm-transport/src/backend/ring.rs:2391`, and `crates/shm-transport/src/backend/ring.rs:2426`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2407`, `crates/shm-transport/src/backend/ring.rs:2436`, and `crates/shm-transport/src/backend/ring.rs:2469`.
 Impact: A lost or double-counted block either strands capacity forever or hands one block to two frames.
 Open questions:
 
@@ -298,13 +296,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2426`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
+Exercised: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2469`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
 Guarantee: The 20-byte header, JSON bodies, direct serializers, send outcomes, and the exact 67,108,864-byte maximum are unchanged; both directions accept one maximum frame on an admitted connection and refuse maximum-plus-one (R7).
 Check: `always` - every published body of length `n <= MAX_FRAME_BYTES` is received with identical bytes and header, and `MAX_FRAME_BYTES + 1` is `BoundExceedsClass` before any block is taken.
 Fault/timing angle: None; boundary values are the enabling state.
 Required faults and enabling state: A body of exactly `MAX_FRAME_BYTES` in each direction on an otherwise empty connection. Markers: marker:`pool.maximum_frame_each_direction`, marker:`pool.zero_body_frame`.
 Confidence: high - [evidence](evidence/application-frame-interoperability.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:310`; `crates/shm-transport/src/profile.rs:676`; `crates/shm-transport/src/descriptor.rs:26`.
-Existing check: `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2426`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
+Existing check: `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2469`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
 Impact: A smaller effective maximum would break the interoperability promise of the wire contract.
 Open questions:
 
@@ -366,13 +364,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2615` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2658` forges every descriptor field, including a body length that disagrees with the header in the block (`WireHeaderMismatch`); `structural_corruption_is_rejected_before_dispatch` (`crates/host-runtime/tests/protocol_vectors.rs:453`) sends structurally illegal headers through a real ring to a running host and asserts no frame, a retired generation, and zero handler dispatches; the producer refuses a header/body mismatch before publication, so the host-level path for that shape is the transport consumer's rejection.
 Guarantee: A structurally illegal descriptor, header, or body length closes the generation before any application dispatch and exposes no byte.
 Check: `always` - `try_receive` returns `Err` and quarantines for every validation failure, and `receive_one` maps a header failure to `ReadClose::Corrupt` before delivering an `InboundEvent`.
 Fault/timing angle: Header/body mismatch written into the block; oversized declared length.
 Required faults and enabling state: A block header whose declared length differs from the descriptor's body length. Markers: marker:`pool.header_body_mismatch_in_block`, marker:`pool.oversized_body_declared`.
 Confidence: high - [evidence](evidence/structural-rejection-before-dispatch.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1487`; `crates/host-runtime/src/ring_transport.rs:1027`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2615` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2658` forges every descriptor field, including a body length that disagrees with the header in the block (`WireHeaderMismatch`); `structural_corruption_is_rejected_before_dispatch` (`crates/host-runtime/tests/protocol_vectors.rs:453`) sends structurally illegal headers through a real ring to a running host and asserts no frame, a retired generation, and zero handler dispatches; the producer refuses a header/body mismatch before publication, so the host-level path for that shape is the transport consumer's rejection.
 Impact: Dispatching a structurally illegal frame would let a peer steer application decoding with unchecked lengths.
 Open questions:
 
@@ -385,17 +383,15 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/lease.rs:631` and `crates/shm-transport/src/lease.rs:737` under Miri prove same-shape access; cross-process hostile writers are not provable here (recorded limitation).
+Exercised: yes - `crates/shm-transport/src/lease.rs:934` and `crates/shm-transport/src/lease.rs:1179` under Miri prove same-shape access; docs/payload-pool-protocol.md section 10 states both JavaScript-writer exclusions (detach before publish and return, and the runtime's transfer prevention, with Bun 1.3.14's `none` bounded to torn bytes in a private copy) and scopes a shifted overlap to a protocol-violating peer in another process. The handoff review (unsafe-review with safe-over-unsafe, at the closing-evidence head) returned SAFETY: APPROVED-BOUNDARY: every arena access is an `AccessShape` atomic, no slice over the arena is formed, and the raw escapes are exactly `ProducerReservation::segment` and `PayloadLease::body`. Cross-process hostile writers remain outside what a test can prove.
 Guarantee: Every access to shared bytes is a fixed-width atomic or an `AccessShape` copy; no `&[u8]` over the arena exists; a copy stabilizes destination bytes only, and consumers decode from private copies (R6, KTD4).
 Check: `always` - `rg` over `crates/shm-transport/src` finds no `slice::from_raw_parts` over arena memory, and every raw pointer escape is one of `ProducerReservation::segment` and `PayloadLease::body`.
 Fault/timing angle: A same-shape concurrent writer; a shifted overlapping writer is outside the contract and documented.
 Required faults and enabling state: A writer thread storing through `copy_in` while a span is read. Markers: marker:`lease.concurrent_same_shape_writer`, marker:`lease.copy_at_every_alignment`.
 Confidence: medium - [evidence](evidence/shared-copy-source-access.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/lease.rs:142`; `crates/shm-transport/src/lease.rs:188`; docs/payload-pool-protocol.md section 10.
-Existing check: `crates/shm-transport/src/lease.rs:631` and `crates/shm-transport/src/lease.rs:737` under Miri prove same-shape access; cross-process hostile writers are not provable here (recorded limitation).
+Existing check: `crates/shm-transport/src/lease.rs:934` and `crates/shm-transport/src/lease.rs:1179` under Miri prove same-shape access; docs/payload-pool-protocol.md section 10 states both JavaScript-writer exclusions (detach before publish and return, and the runtime's transfer prevention, with Bun 1.3.14's `none` bounded to torn bytes in a private copy) and scopes a shifted overlap to a protocol-violating peer in another process. The handoff review (unsafe-review with safe-over-unsafe, at the closing-evidence head) returned SAFETY: APPROVED-BOUNDARY: every arena access is an `AccessShape` atomic, no slice over the arena is formed, and the raw escapes are exactly `ProducerReservation::segment` and `PayloadLease::body`. Cross-process hostile writers remain outside what a test can prove.
 Impact: A Rust slice over peer-writable memory is undefined behavior the moment the peer writes.
-Open questions:
-
-- Handoff: safe-over-unsafe then unsafe-review for the shifted-overlap and JavaScript-writer exclusions.
+Open questions: None.
 
 ### owned-lease-thread-boundary
 
@@ -436,13 +432,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:3804` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
+Exercised: yes - `cancel_route_close_and_shutdown_wait_for_the_held_production_inbound_copy` (`crates/host-runtime/tests/dispatch.rs:1843`) holds the production copy in `dispatch_request` on its blocking thread through the test-support `inbound_copy_gate`, then delivers `Cancel`, a route `Goodbye`, or shutdown: no terminal and no shutdown completion appear while the copy is held, `host.status` reports the block outstanding, and after release the request settles as `cancelled`, the block returns, and shutdown completes (markers `host.cancel_during_barrier_held_copy`, `host.shutdown_during_held_inbound_copy`); `crates/host-runtime/src/ring_transport.rs` still holds a real `into_private` copy on the blocking barrier with the ingress charge.
 Guarantee: Cancellation, route close, and shutdown cannot return a block or its charge before the barrier-held copy/decode physically completes.
 Check: `always` - a lease moved into blocking work returns only after that work joins; `Cancel` observed mid-copy leaves `outstanding_returns` unchanged until the join. A pure-header body copies inline in `dispatch_request` (`crates/host-runtime/src/dispatch.rs:1047`) with no worker and nothing to read, so no window exists there; a closed route still settles it as cancelled.
 Fault/timing angle: Cancel, route close, and shutdown during copy.
 Required faults and enabling state: A barrier holding copy work while `Cancel` arrives. Markers: marker:`host.cancel_during_barrier_held_copy`.
 Confidence: high - [evidence](evidence/request-conversion-completion-ownership.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/handler.rs:617`; `crates/host-runtime/src/dispatch.rs:1047`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:3804` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
+Existing check: `cancel_route_close_and_shutdown_wait_for_the_held_production_inbound_copy` (`crates/host-runtime/tests/dispatch.rs:1843`) holds the production copy in `dispatch_request` on its blocking thread through the test-support `inbound_copy_gate`, then delivers `Cancel`, a route `Goodbye`, or shutdown: no terminal and no shutdown completion appear while the copy is held, `host.status` reports the block outstanding, and after release the request settles as `cancelled`, the block returns, and shutdown completes (markers `host.cancel_during_barrier_held_copy`, `host.shutdown_during_held_inbound_copy`); `crates/host-runtime/src/ring_transport.rs` still holds a real `into_private` copy on the blocking barrier with the ingress charge.
 Impact: An early return would reuse a block a worker is still copying.
 Open questions:
 
@@ -453,51 +449,45 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - producer aliases detach before commit (`packages/shm-native/src/lib.rs:381`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:354`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts runs against the raw addon on every runtime and shows a refused detach leaving the alias attached, the token registered, the block held, and the ring quarantined, with a cooperating retry detaching and returning exactly once.
+Exercised: yes - producer aliases detach before commit and consumer aliases detach before return; `runNativeLifecycle` in packages/shm-native/tests/runtime.ts runs on Node and on Bun 1.3.14, both of which now report the detachment capability, and asserts subarray, DataView, and Buffer aliases read zero after release; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts covers a refused detach.
 Guarantee: Every JavaScript alias of a block detaches before the block is published or returned; a failed detach quarantines the direction and retains the alias record (R9, KTD6).
 Check: `always` - `commit_reservation` and `release` reach the ring only after `detach_all` succeeded; a detach failure calls `enter_quarantine` and keeps the entry.
 Fault/timing angle: `napi_detach_arraybuffer` failure; alias survivors through `subarray`/`DataView`.
 Required faults and enabling state: An external-view failpoint firing on detach; a `subarray` created before release. Markers: marker:`native.detach_failed`, marker:`native.alias_survivor_before_return`.
 Confidence: medium - [evidence](evidence/native-alias-closure-before-transfer.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/src/lib.rs:354`; `packages/shm-native/src/napi_buffers.rs:149`; `packages/shm-native/src/napi_buffers.rs:248`; `packages/shm-native/tests/runtime.ts:135`.
-Existing check: producer aliases detach before commit (`packages/shm-native/src/lib.rs:381`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:354`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts runs against the raw addon on every runtime and shows a refused detach leaving the alias attached, the token registered, the block held, and the ring quarantined, with a cooperating retry detaching and returning exactly once.
+Existing check: producer aliases detach before commit and consumer aliases detach before return; `runNativeLifecycle` in packages/shm-native/tests/runtime.ts runs on Node and on Bun 1.3.14, both of which now report the detachment capability, and asserts subarray, DataView, and Buffer aliases read zero after release; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts covers a refused detach.
 Impact: A live alias after return would let JavaScript write a block the peer has reused.
-Open questions:
-
-- Handoff: the Bun 1.3.14 `markAsUntransferable` gap is a recorded unsupported capability; the wrapper-level lifecycle rerun waits on a runtime that reports detachment.
+Open questions: None. Transfer prevention is reported, not gated: Bun 1.3.14 has no `markAsUntransferable` and reports `none`, and the detach-before-publish rule bounds an escaped alias to torn bytes on a private copy.
 
 ### partial-close-token-conservation
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `packages/shm-native/src/lib.rs:408` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts injects a detach failure into a two-lease close sweep and shows exactly one alias surviving, the channel entry retained with its mapping, and a later close completing the sweep and removing it; a deletion failure after a successful detach consumes the token (the wrapper is told), keeps the leaked reference counted, and quarantines the ring; repeated release and close are covered by the neighboring tests. The reentrant path (a `deliver` callback calling `close`) and environment termination are not constructed by any test.
+Exercised: yes - `packages/shm-native/src/lib.rs:434` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts covers the partial sweep and the deletion failure; `runReentrantClose` in packages/shm-native/tests/runtime.ts (`:301`) closes the channel from inside its `drainOne` delivery callback and shows the delivered alias detached, the reference count unchanged, and a later release refused as already released (marker `native.reentrant_close_from_delivery`); `runEnvironmentExit` (`:360`) terminates a worker environment with and without a held alias on Node and Bun.
 Guarantee: Partial close sweeps, reentrant callbacks, repeated release/close, and environment termination conserve tokens and one-shot return authority; uncertain aliases quarantine the owning backing once.
 Check: `always` - every token is released or retained exactly once across a partial sweep, and a channel with any alias outstanding is never removed from the registry.
 Fault/timing angle: A detach failure mid-sweep; a callback that closes the channel reentrantly.
 Required faults and enabling state: Injected detach failure on the second of three aliases; a `deliver` callback calling `close`. Markers: marker:`native.partial_sweep_failure`, marker:`native.reentrant_close`.
 Confidence: medium - [evidence](evidence/partial-close-token-conservation.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/src/lib.rs:408`; `packages/shm-native/src/lib.rs:1735`; `packages/shm-native/src/napi_buffers.rs:252`.
-Existing check: `packages/shm-native/src/lib.rs:408` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts injects a detach failure into a two-lease close sweep and shows exactly one alias surviving, the channel entry retained with its mapping, and a later close completing the sweep and removing it; a deletion failure after a successful detach consumes the token (the wrapper is told), keeps the leaked reference counted, and quarantines the ring; repeated release and close are covered by the neighboring tests.
+Existing check: `packages/shm-native/src/lib.rs:434` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts covers the partial sweep and the deletion failure; `runReentrantClose` in packages/shm-native/tests/runtime.ts (`:301`) closes the channel from inside its `drainOne` delivery callback and shows the delivered alias detached, the reference count unchanged, and a later release refused as already released (marker `native.reentrant_close_from_delivery`); `runEnvironmentExit` (`:360`) terminates a worker environment with and without a held alias on Node and Bun.
 Impact: A lost token strands a block; a double return frees a newer occupant.
-Open questions:
-
-- Handoff: a mechanism witness in which a `deliver` callback closes its channel, and an environment-termination witness on a runtime that reports the detachment capability.
+Open questions: None.
 
 ### environment-finalizer-confinement
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `packages/shm-native/src/lib.rs:470` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:584`).
+Exercised: yes - `cleanup_env` (`packages/shm-native/src/lib.rs`) makes no N-API call that needs a handle scope or JavaScript: an alias-free channel says goodbye and drops its mapping, and an alias-holding one quarantines both pools and is leaked with its charge until process exit; process-wide counters (`nativeTeardownDiagnostics`) record hook runs, channels the hook closed, channels it quarantined, and finalized views. `runEnvironmentExit` in packages/shm-native/tests/runtime.ts runs a worker on Node and on Bun 1.3.14 in three modes and asserts exit code 0, one hook run, and the counter deltas: channels closed by the worker leave nothing for the hook (0 closed, 0 quarantined), released-but-open channels are closed by the hook (2, 0), and a held view leaves one channel closed and one quarantined with its reference still counted (marker `native.environment_exit_with_aliases`); before the fix Node aborted in `napi_get_reference_value` with no handle scope. `runLateFinalizer` releases a whole class of leases and waits for the native finalizer count to rise by the class size, during the detach on Bun and at collection on Node, with no leak diagnostic, no reference change, and the class refilling exactly once. `runReferenceCreationFailure` fails reference creation after the view exists and shows the view detached without a leak diagnostic and its block returned; `detach_marking_released` (`packages/shm-native/src/napi_buffers.rs`) sets `released` before every detach because Bun runs the finalizer inside it.
 Guarantee: Finalizers and cleanup hooks own only their declared context: no ring call, allocator mismatch, unwind across C, or arbitrary N-API; uncertain cleanup quarantines rather than unmapping (KTD6).
 Check: `always` - `cleanup_env` never calls `Ring` methods other than `enter_quarantine`, and a final drop never reaches the N-API boundary; no observer instruments that boundary in `shm-transport`, so the check is on the addon's detach-before-return path.
 Fault/timing angle: Environment teardown with aliases outstanding.
 Required faults and enabling state: An environment exit while a channel holds a stranded alias. Markers: marker:`native.environment_exit_with_aliases`.
 Confidence: medium - [evidence](evidence/environment-finalizer-confinement.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/src/lib.rs:494`; `crates/shm-transport/src/lease.rs:378`.
-Existing check: `packages/shm-native/src/lib.rs:470` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:584`).
+Existing check: `cleanup_env` (`packages/shm-native/src/lib.rs`) makes no N-API call that needs a handle scope or JavaScript: an alias-free channel says goodbye and drops its mapping, and an alias-holding one quarantines both pools and is leaked with its charge until process exit; process-wide counters (`nativeTeardownDiagnostics`) record hook runs, channels the hook closed, channels it quarantined, and finalized views. `runEnvironmentExit` in packages/shm-native/tests/runtime.ts runs a worker on Node and on Bun 1.3.14 in three modes and asserts exit code 0, one hook run, and the counter deltas: channels closed by the worker leave nothing for the hook (0 closed, 0 quarantined), released-but-open channels are closed by the hook (2, 0), and a held view leaves one channel closed and one quarantined with its reference still counted (marker `native.environment_exit_with_aliases`); before the fix Node aborted in `napi_get_reference_value` with no handle scope. `runLateFinalizer` releases a whole class of leases and waits for the native finalizer count to rise by the class size, during the detach on Bun and at collection on Node, with no leak diagnostic, no reference change, and the class refilling exactly once. `runReferenceCreationFailure` fails reference creation after the view exists and shows the view detached without a leak diagnostic and its block returned; `detach_marking_released` (`packages/shm-native/src/napi_buffers.rs`) sets `released` before every detach because Bun runs the finalizer inside it.
 Impact: A finalizer calling N-API off-thread or unmapping under an alias is a crash or a use-after-unmap.
-Open questions:
-
-- Handoff: late-finalizer witnesses remain open within #550.
+Open questions: None.
 
 ### response-retention-isolation
 
@@ -591,13 +581,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:507` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:3926` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
+Exercised: yes - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `a_failed_descriptor_transfer_refunds_only_unexposed_resources` (`crates/host-runtime/src/ring_transport.rs`) fails an endpoint after it duplicated its descriptors and before they reach a peer through the test-only `fail_next_descriptor_transfer`, and shows the accounting returning to its prior value and the next connection admitting under one-connection limits (marker `admission.setup_failed_before_exposure`); the exposed side, where a peer kept a mapping past the grace, stays charged in `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`crates/host-runtime/src/ring_transport.rs:3469`); `crates/host-runtime/src/ring_transport.rs:550` refunds on a ring-creation failure.
 Guarantee: Setup failure refunds only resources proved unexposed; a quarantine-accounting failure leaves the backing charge counted forever (KTD5, KTD7).
 Check: `always` - after a setup failure before the grant is sent, `snapshot().active` returns to its prior value; after a quarantine failure, `BackingAdmission::is_active()` is false and no refund occurs on drop.
 Fault/timing angle: Failure after ring creation before the grant is sent; quarantine accounting failure.
 Required faults and enabling state: A `DuplexRing::create` failure; a poisoned accounting lock at quarantine time. Markers: marker:`admission.setup_failed_before_exposure`, marker:`admission.quarantine_accounting_failed`.
 Confidence: medium - [evidence](evidence/partial-setup-reclaims-only-unexposed-resources.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/profile.rs:622`; `crates/host-runtime/src/ring_transport.rs:562`.
-Existing check: `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:507` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:3926` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
+Existing check: `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `a_failed_descriptor_transfer_refunds_only_unexposed_resources` (`crates/host-runtime/src/ring_transport.rs`) fails an endpoint after it duplicated its descriptors and before they reach a peer through the test-only `fail_next_descriptor_transfer`, and shows the accounting returning to its prior value and the next connection admitting under one-connection limits (marker `admission.setup_failed_before_exposure`); the exposed side, where a peer kept a mapping past the grace, stays charged in `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`crates/host-runtime/src/ring_transport.rs:3469`); `crates/host-runtime/src/ring_transport.rs:550` refunds on a ring-creation failure.
 Impact: Refunding storage a peer may have mapped lets a later connection map over it.
 Open questions:
 
@@ -608,13 +598,13 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2362` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3926` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3744` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7738` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7087` covers the client budget's exact-fit, one-over, and overflow cases.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2407` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:4167` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3946` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7709` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7065` covers the client budget's exact-fit, one-over, and overflow cases.
 Guarantee: Every refusal is bounded and named by resource (class, descriptor headroom, admission field), and recovery follows the resource's own release within one reservation attempt.
 Check: `always` - after the exhausting resource is released, the next `try_reserve_in` or `admit` succeeds; refusals charge nothing.
 Fault/timing angle: Exhaustion of each resource in isolation.
 Required faults and enabling state: One class empty; descriptor headroom full; one admission field at its limit. Markers: marker:`pool.single_resource_exhausted`, marker:`admission.field_at_limit`.
 Confidence: high - [evidence](evidence/bounded-refusal-and-recovery.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1044`; `crates/shm-transport/src/profile.rs:416`; `crates/host-runtime/src/ring_transport.rs:313`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2362` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3926` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3744` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7738` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7087` covers the client budget's exact-fit, one-over, and overflow cases.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2407` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:4167` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3946` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7709` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7065` covers the client budget's exact-fit, one-over, and overflow cases.
 Impact: An unbounded or unrecoverable refusal is a hang the peer cannot diagnose.
 Open questions:
 
@@ -625,13 +615,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:3583` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1409` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2391` covers abort and short commit.
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:3679` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1479` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2436` covers abort and short commit.
 Guarantee: A direct serializer runs only into a reserved block whose span is the logical body bound, is never consumed without a reservation, and a short result keeps its block (KTD1).
 Check: `always` - `ProducerReservation::capacity()` equals the caller's bound, `segment(0)` has that length, and an unreserved `DirectFrame` is never invoked.
 Fault/timing angle: Reservation failure before serialization.
 Required faults and enabling state: `reserve_until` returning `Deadline` with a `DirectFrame` queued. Markers: marker:`host.direct_frame_unreserved_on_deadline`.
 Confidence: high - [evidence](evidence/direct-serialization-commit-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1742`; `crates/host-runtime/src/ring_transport.rs:1449`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:3583` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1409` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2391` covers abort and short commit.
+Existing check: `crates/host-runtime/src/ring_transport.rs:3679` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1479` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2436` covers abort and short commit.
 Impact: Serializing into class slack or without a reservation would write bytes no descriptor accounts for.
 Open questions:
 
@@ -659,17 +649,15 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:1669` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3744` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7738` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart; the TypeScript channel drops a waiting frame whose deadline passes without publishing it and its ticket reports cancellation as unpublished (`packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:410`). Native and TypeScript stop/restart witnesses over a live daemon remain with the combined matrix.
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:1749` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; the host and Rust client deadline and restart witnesses stand; the TypeScript channel drops a waiting frame at its deadline unpublished; `a host that stops after a request was published reports outcome_unknown, and a fresh client recovers on a restarted host` in packages/opencode-plugin/src/shared/host-client/real-host.test.ts freezes a real host with `SIGSTOP`, publishes a request, kills the host, and receives `outcome_unknown`, then completes a request through a new client on a restarted host; an over-limit body is refused as `not_sent` before any charge.
 Guarantee: Failure before publication is `not_sent`; failure after publication is `outcome_unknown`; no layer replays an uncertain request (R7).
 Check: `always` - every `SendFailure` maps to exactly one of the two outcomes and no code path resubmits a frame after `commit` returned `Err`.
 Fault/timing angle: Quarantine between the pre-commit check and `commit`.
 Required faults and enabling state: A quarantine landing after `write` and before `commit`. Markers: marker:`host.quarantine_between_write_and_commit`.
 Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:1597`; `crates/shm-transport/src/backend/ring.rs:1019`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:1669` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3744` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7738` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart; the TypeScript channel drops a waiting frame whose deadline passes without publishing it and its ticket reports cancellation as unpublished (`packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:410`). Native and TypeScript stop/restart witnesses over a live daemon remain with the combined matrix.
+Existing check: `crates/host-runtime/src/ring_transport.rs:1749` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; the host and Rust client deadline and restart witnesses stand; the TypeScript channel drops a waiting frame at its deadline unpublished; `a host that stops after a request was published reports outcome_unknown, and a fresh client recovers on a restarted host` in packages/opencode-plugin/src/shared/host-client/real-host.test.ts freezes a real host with `SIGSTOP`, publishes a request, kills the host, and receives `outcome_unknown`, then completes a request through a new client on a restarted host; an over-limit body is refused as `not_sent` before any charge.
 Impact: A replayed uncertain request executes twice.
-Open questions:
-
-- Handoff: the combined daemon matrix for native stop/restart.
+Open questions: None.
 
 ### reclamation-diagnostics-meaning
 
@@ -746,34 +734,30 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: partial - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
+Exercised: yes - `packages/shm-native/build.rs` stamps the addon with an FNV-1a digest of the sources it is built from (`SOURCE_INPUTS` in `packages/shm-native/build.rs`: the addon, `shm-transport`, and `tokenizer` sources, manifests, and build scripts, the tokenizer's embedded assets under `crates/tokenizer/assets`, and the workspace `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, and `.cargo/config.toml`), `nativeArtifactIdentity` reports it as `sourceDigest`, and the capability witness (`packages/shm-native/tests/capability.ts`) recomputes the digest from the checkout (`packages/shm-native/tests/source-digest.ts`) and fails under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1` when they differ; a one-line source edit after the build fails it with `the loaded addon was built from other sources`.
 Guarantee: Acceptance runs load a wrapper and addon built from the tested source at the current layout.
-Check: `always` - the addon's `qualifiedTestProfile()` equals the wrapper constant in every run.
+Check: `always` - in every run under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`, the addon's `qualifiedTestProfile()` equals the wrapper constant and its `sourceDigest` equals the digest `packages/shm-native/tests/source-digest.ts` recomputes from the checkout; `always` because both assertions run on every claimed-target pass.
 Fault/timing angle: A stale prebuilt `shm_native.node`.
 Required faults and enabling state: A run against a stale artifact. Markers: marker:`gate.stale_artifact_present`.
 Confidence: medium - [evidence](evidence/acceptance-artifact-provenance.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/tests/mechanism.ts:50`; `.github/workflows/ci.yml:785`; `packages/shm-native/index.ts:38`.
-Existing check: the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
+Existing check: `packages/shm-native/build.rs` stamps the addon with an FNV-1a digest of the sources it is built from (`SOURCE_INPUTS` in `packages/shm-native/build.rs`: the addon, `shm-transport`, and `tokenizer` sources, manifests, and build scripts, the tokenizer's embedded assets under `crates/tokenizer/assets`, and the workspace `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, and `.cargo/config.toml`), `nativeArtifactIdentity` reports it as `sourceDigest`, and the capability witness (`packages/shm-native/tests/capability.ts`) recomputes the digest from the checkout (`packages/shm-native/tests/source-digest.ts`) and fails under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1` when they differ; a one-line source edit after the build fails it with `the loaded addon was built from other sources`.
 Impact: A stale artifact tests the old layout while reporting the new one.
-Open questions:
-
-- Handoff: a content digest of the addon tied to the source revision, recorded by the addon and checked by the wrapper, before a standalone run can claim exact artifact provenance.
+Open questions: None.
 
 ### real-process-current-layout-witness
 
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: partial - `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:795`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Exercised: yes - `crates/shm-transport/tests/ring.rs:344` records a real cross-process exchange at layout 4; `crates/host-runtime/tests/client.rs:365` records the managed Rust client in-process; the TypeScript client over the native addon runs against a separate host process (`crates/host-runtime/examples/local_embeddings_host.rs`) in packages/opencode-plugin/src/shared/host-client/real-host.test.ts, which reads the sole profile from `host.status`, echoes a 64 MiB body in both directions byte-identical, refuses 64 MiB + 1 as `not_sent` `frame_body_too_large`, keeps a held maximum response readable after its connection closes and returns it once, observes the first generation retire and its backing release under a second client, and completes a request on a restarted host; the native CI job runs it with `EIDNARA_REQUIRE_REAL_HOST=1`; the Rust-mode E2E lane's `rust-smoke` and `rust-steady-state-byte-identity` pass through OpenCode, the plugin, and the direct-host fixture on Bun 1.3.14.
 Guarantee: Every required real-process witness records current-layout activation and a completed daemon request on a supported runtime; a skip discharges nothing.
 Check: `reachable` - the code point that reports a completed real exchange (`EIDNARA_SHM_CHILD_DONE`) executes in the two-process job; `reachable` because a specific code location must execute.
 Fault/timing angle: None.
 Required faults and enabling state: A supported runtime. Markers: marker:`gate.supported_runtime_present`.
 Confidence: medium - [evidence](evidence/real-process-current-layout-witness.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/tests/ring.rs:429`; `crates/host-runtime/tests/client.rs:426`; `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`.
-Existing check: `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:795`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Existing check: `crates/shm-transport/tests/ring.rs:344` records a real cross-process exchange at layout 4; `crates/host-runtime/tests/client.rs:365` records the managed Rust client in-process; the TypeScript client over the native addon runs against a separate host process (`crates/host-runtime/examples/local_embeddings_host.rs`) in packages/opencode-plugin/src/shared/host-client/real-host.test.ts, which reads the sole profile from `host.status`, echoes a 64 MiB body in both directions byte-identical, refuses 64 MiB + 1 as `not_sent` `frame_body_too_large`, keeps a held maximum response readable after its connection closes and returns it once, observes the first generation retire and its backing release under a second client, and completes a request on a restarted host; the native CI job runs it with `EIDNARA_REQUIRE_REAL_HOST=1`; the Rust-mode E2E lane's `rust-smoke` and `rust-steady-state-byte-identity` pass through OpenCode, the plugin, and the direct-host fixture on Bun 1.3.14.
 Impact: A skipped suite counted as passing hides an unexercised layout.
-Open questions:
-
-- Handoff: the Rust client's cross-process run is still owed under #552 and passes to this task's combined matrix if #552 closes first; a native/TypeScript daemon-level witness on a runtime that reports the detachment capability remains a recorded gap; the capability witness records artifact and runtime identity for every skip.
+Open questions: None.
 
 ### malformed-fixture-valid-baseline
 

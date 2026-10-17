@@ -24,6 +24,8 @@ export interface NativeArtifactIdentity {
     buildTarget: string;
     napiVersion: number;
     qualifiedTestProfile: string;
+    /** FNV-1a digest of the sources the addon was built from; see `build.rs`. */
+    sourceDigest: string;
 }
 
 /**
@@ -39,6 +41,9 @@ export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
         buildTarget: native.buildTarget(),
         napiVersion: native.napiVersion(),
         qualifiedTestProfile: native.qualifiedTestProfile(),
+        // An addon built before the digest existed reports none, so the stale-build check
+        // fails with its rebuild hint instead of a missing-export error.
+        sourceDigest: native.sourceDigest?.() ?? "none",
     };
 }
 
@@ -149,6 +154,7 @@ interface NativeAddon {
     buildProfile(): string;
     buildTarget(): string;
     qualifiedTestProfile(): string;
+    sourceDigest?(): string;
     estimateTokens?: (text: string) => number;
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
@@ -159,6 +165,8 @@ interface NativeAddon {
     setExternalViewFailpoint(call: number): void;
     setDetachFailpoint(call: number): void;
     setDeleteFailpoint(call: number): void;
+    setReferenceFailpoint(call: number): void;
+    teardownDiagnostics(): number[];
     workerLimit(): number;
     activeChannelCount(): number;
     attach(descriptor: NativeDescriptor): number;
@@ -180,6 +188,12 @@ interface NativeAddon {
         fill: (segments: Uint8Array[]) => number,
         beforePublish: () => void,
     ): void;
+    produceBytes(
+        channel: number,
+        header: Uint8Array,
+        body: Uint8Array,
+        beforePublish: () => void,
+    ): boolean;
     reserve(
         channel: number,
         capacity: number,
@@ -379,13 +393,28 @@ function isBun(): boolean {
     return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 }
 
+/** Backings of every segment the addon has handed out; they alias shared memory. */
+const leasedBuffers = new WeakSet<ArrayBuffer>();
+
 function protect(segments: readonly Uint8Array[]): void {
     for (const segment of segments) {
         if (!(segment.buffer instanceof ArrayBuffer)) {
             throw new Error("external segment lacks ArrayBuffer backing");
         }
+        leasedBuffers.add(segment.buffer);
         if (markLeasedBuffers) markAsUntransferable(segment.buffer);
     }
+}
+
+/**
+ * Largest body the addon copies itself. Its word-sized atomic stores keep pace with a
+ * JavaScript copy while the body fits in a core's private cache; a larger body copies faster
+ * through the runtime's streaming copy into the producer view.
+ */
+export const ADDON_COPY_MAX_BYTES = 256 * 1024;
+
+function privatelyBacked(bytes: Uint8Array): boolean {
+    return bytes.buffer instanceof ArrayBuffer && !leasedBuffers.has(bytes.buffer);
 }
 
 const PROBE_BYTES = 31;
@@ -893,15 +922,37 @@ export class NativeChannel {
      * way the host does: a pure-header `Cancel`, `Ping`, `Pong`, or `Goodbye` takes the
      * control reserve, a terminal that fits takes the terminal reserve, and everything else is
      * ordinary. An exhausted inventory throws `RING_FULL_MESSAGE` with nothing charged.
+     *
+     * `bytes`, when it holds exactly `capacity` bytes over a private `ArrayBuffer` and
+     * `capacity` is at most `ADDON_COPY_MAX_BYTES`, is the frame body: the addon copies it into
+     * the reservation and `fill` does not run. The addon reads `bytes` as a Rust slice, so its
+     * contents must be final for the whole call: no in-flight native operation, such as an
+     * unfinished `fs.read` into it, may write it. A body the addon finds inside a live shared
+     * mapping publishes through `fill`.
      */
     produce(
         header: Uint8Array,
         capacity: number,
         fill: (cursor: ProducerCursor) => void,
         beforePublish?: () => void,
+        bytes?: Uint8Array,
     ): void {
         this.assertOpen();
         assertUint32Argument("capacity", capacity);
+        if (
+            bytes !== undefined &&
+            capacity <= ADDON_COPY_MAX_BYTES &&
+            bytes.byteLength === capacity &&
+            privatelyBacked(bytes) &&
+            this.native.produceBytes(
+                this.id,
+                privateBytes(header),
+                bytes,
+                beforePublish ?? (() => {}),
+            )
+        ) {
+            return;
+        }
         this.native.produce(
             this.id,
             privateBytes(header),
@@ -1081,6 +1132,29 @@ export function setDetachFailpoint(call: number): void {
 /** Test hook: the `call`th reference deletion from now fails; `0` disarms. */
 export function setDeleteFailpoint(call: number): void {
     addon()?.setDeleteFailpoint(call);
+}
+
+/** Test hook: the `call`th external reference creation from now fails; `0` disarms. */
+export function setReferenceFailpoint(call: number): void {
+    addon()?.setReferenceFailpoint(call);
+}
+
+/** Process-wide counts of environment teardown and view finalization, for witnesses. */
+export interface NativeTeardownDiagnostics {
+    /** Environment cleanup hook runs. */
+    cleanupRuns: number;
+    /** Alias-free channels a cleanup hook closed and dropped. */
+    closedChannels: number;
+    /** Alias-holding channels a cleanup hook quarantined and leaked until process exit. */
+    quarantinedChannels: number;
+    /** Borrowed external views whose finalizer has run. */
+    finalizedViews: number;
+}
+
+export function nativeTeardownDiagnostics(): NativeTeardownDiagnostics {
+    const [cleanupRuns = 0, closedChannels = 0, quarantinedChannels = 0, finalizedViews = 0] =
+        addon()?.teardownDiagnostics() ?? [];
+    return { cleanupRuns, closedChannels, quarantinedChannels, finalizedViews };
 }
 
 export function activeNativeChannels(): number {

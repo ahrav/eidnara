@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:408`
+- `packages/shm-native/src/lib.rs:434`
 - `packages/shm-native/src/lib.rs:1735`
 - `packages/shm-native/src/napi_buffers.rs:252`
 
-Witness status: partial - `packages/shm-native/src/lib.rs:408` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts injects a detach failure into a two-lease close sweep and shows exactly one alias surviving, the channel entry retained with its mapping, and a later close completing the sweep and removing it; a deletion failure after a successful detach consumes the token (the wrapper is told), keeps the leaked reference counted, and quarantines the ring; repeated release and close are covered by the neighboring tests. The reentrant path (a `deliver` callback calling `close`) and environment termination are not constructed by any test.
+Witness status: partial - `packages/shm-native/src/lib.rs:434` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts injects a detach failure into a two-lease close sweep and shows exactly one alias surviving, the channel entry retained with its mapping, and a later close completing the sweep and removing it; a deletion failure after a successful detach consumes the token (the wrapper is told), keeps the leaked reference counted, and quarantines the ring; repeated release and close are covered by the neighboring tests. The reentrant path (a `deliver` callback calling `close`) and environment termination are not constructed by any test.
 
 ## Failure scenario
 
@@ -45,3 +45,10 @@ Check semantics: `always` - every token is released or retained exactly once acr
   witness constructs and what it leaves unconstructed.
 - Missing evidence: a `deliver` callback that closes its channel (marker `native.reentrant_close`) and environment termination; only the injected detach and deletion failures are constructed.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: `runReentrantClose` closes the channel from its own delivery callback; the close detaches the delivered alias and consumes its return authority once, so the later `release` is refused and the reference count is unchanged. `runEnvironmentExit` terminates a worker environment with and without a held alias.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

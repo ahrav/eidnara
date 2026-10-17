@@ -7,11 +7,14 @@ use napi::{Env, Error, JsValue, Result, Status, Unknown, sys};
 
 static LEAK_DIAGNOSTICS: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_EXTERNAL_REFS: AtomicU64 = AtomicU64::new(0);
+/// Borrowed external views whose finalizer has run, process-wide.
+static FINALIZED_VIEWS: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static FAIL_EXTERNAL_VIEW_AFTER: Cell<u32> = const { Cell::new(0) };
     static FAIL_DETACH_AFTER: Cell<u32> = const { Cell::new(0) };
     static FAIL_DELETE_AFTER: Cell<u32> = const { Cell::new(0) };
+    static FAIL_REFERENCE_AFTER: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Counts a failpoint down: `0` is disarmed, `1` fires now and disarms, `n` fires on the
@@ -44,6 +47,7 @@ struct OwnedProbe(Box<[u8]>);
 unsafe extern "C" fn finalize_borrowed(_env: sys::napi_env, _data: *mut c_void, hint: *mut c_void) {
     // SAFETY: create_external_view allocates exactly one FinalizerState hint.
     let state = unsafe { Box::from_raw(hint.cast::<FinalizerState>()) };
+    FINALIZED_VIEWS.fetch_add(1, Ordering::Relaxed);
     if !state.released.load(Ordering::Acquire) {
         LEAK_DIAGNOSTICS.fetch_add(1, Ordering::Relaxed);
     }
@@ -54,12 +58,32 @@ unsafe extern "C" fn finalize_owned(_env: sys::napi_env, _data: *mut c_void, hin
     drop(unsafe { Box::from_raw(hint.cast::<OwnedProbe>()) });
 }
 
-/// On typed-array or reference creation failure, `abandon_arraybuffer` attempts to detach the external ArrayBuffer. It sets `released` only after successful detachment, so `finalize_borrowed` increments `LEAK_DIAGNOSTICS` if detachment fails.
-fn abandon_arraybuffer(env: &Env, arraybuffer: sys::napi_value, released: &Arc<AtomicBool>) {
+/// Detaches `arraybuffer` and records it as released. A runtime may run the external
+/// finalizer inside `napi_detach_arraybuffer` itself (Bun does), so `released` is set before
+/// the call and cleared again if the call fails; a finalizer that runs at any point after a
+/// successful detach reads it set.
+fn detach_marking_released(
+    env: &Env,
+    arraybuffer: sys::napi_value,
+    released: &AtomicBool,
+) -> Result<()> {
+    released.store(true, Ordering::Release);
     // SAFETY: arraybuffer is a live external ArrayBuffer in env.
-    if unsafe { sys::napi_detach_arraybuffer(env.raw(), arraybuffer) } == sys::Status::napi_ok {
-        released.store(true, Ordering::Release);
+    let detached = check(
+        unsafe { sys::napi_detach_arraybuffer(env.raw(), arraybuffer) },
+        "ArrayBuffer detachment failed",
+    );
+    if detached.is_err() {
+        released.store(false, Ordering::Release);
     }
+    detached
+}
+
+/// On typed-array or reference creation failure, `abandon_arraybuffer` attempts to detach the
+/// external ArrayBuffer; `finalize_borrowed` increments `LEAK_DIAGNOSTICS` only if that
+/// detachment failed.
+fn abandon_arraybuffer(env: &Env, arraybuffer: sys::napi_value, released: &Arc<AtomicBool>) {
+    let _ = detach_marking_released(env, arraybuffer, released);
 }
 
 fn check(status: sys::napi_status, message: &'static str) -> Result<()> {
@@ -125,6 +149,13 @@ pub(crate) fn create_external_view<'env>(
         abandon_arraybuffer(env, arraybuffer, &released);
         return Err(error);
     }
+    if failpoint_fires(&FAIL_REFERENCE_AFTER) {
+        abandon_arraybuffer(env, arraybuffer, &released);
+        return Err(Error::new(
+            Status::GenericFailure,
+            "external reference creation failpoint",
+        ));
+    }
     let mut reference = std::ptr::null_mut();
     // SAFETY: arraybuffer is a live N-API value in this environment.
     if let Err(error) = check(
@@ -167,25 +198,27 @@ pub(crate) fn detach(env: &Env, external: &ExternalRef) -> Result<()> {
             "ArrayBuffer alias state is unknown",
         ));
     }
-    // SAFETY: referenced value is the external ArrayBuffer.
-    check(
-        unsafe { sys::napi_detach_arraybuffer(env.raw(), value) },
-        "ArrayBuffer detachment failed",
-    )?;
+    detach_marking_released(env, value, &external.released)?;
     let mut detached = false;
     // `arraybuffer` remains valid until `napi_delete_reference` deletes `reference`.
-    check(
+    let verified = check(
         unsafe { sys::napi_is_detached_arraybuffer(env.raw(), value, &mut detached) },
         "ArrayBuffer detachment verification failed",
-    )?;
-    if !detached {
-        return Err(Error::new(
-            Status::GenericFailure,
-            "ArrayBuffer detachment verification failed",
-        ));
+    )
+    .and_then(|()| {
+        if detached {
+            Ok(())
+        } else {
+            Err(Error::new(
+                Status::GenericFailure,
+                "ArrayBuffer detachment verification failed",
+            ))
+        }
+    });
+    if verified.is_err() {
+        external.released.store(false, Ordering::Release);
     }
-    external.released.store(true, Ordering::Release);
-    Ok(())
+    verified
 }
 
 pub(crate) fn delete_ref(env: &Env, external: ExternalRef) -> Result<()> {
@@ -247,6 +280,14 @@ pub(crate) fn set_external_view_failpoint(call: u32) {
 
 pub(crate) fn set_detach_failpoint(call: u32) {
     FAIL_DETACH_AFTER.with(|remaining| remaining.set(call));
+}
+
+pub(crate) fn set_reference_failpoint(call: u32) {
+    FAIL_REFERENCE_AFTER.with(|remaining| remaining.set(call));
+}
+
+pub(crate) fn finalized_views() -> u64 {
+    FINALIZED_VIEWS.load(Ordering::Relaxed)
 }
 
 pub(crate) fn set_delete_failpoint(call: u32) {
@@ -327,4 +368,75 @@ pub(crate) fn detach_value(env: &Env, value: Unknown<'_>) -> Result<bool> {
 
 pub(crate) fn leak_diagnostics() -> u64 {
     LEAK_DIAGNOSTICS.load(Ordering::Relaxed)
+}
+
+pub(crate) struct UnsharedBytes {
+    data: *const u8,
+    len: usize,
+}
+
+impl UnsharedBytes {
+    /// `None` when any byte of the body lies in a live shared mapping, which a peer may write
+    /// while Rust reads it.
+    pub(crate) fn of(env: &Env, value: Unknown<'_>) -> Result<Option<Self>> {
+        let mut kind = 0;
+        let mut len = 0;
+        let mut data = std::ptr::null_mut();
+        let mut buffer = std::ptr::null_mut();
+        let mut offset = 0;
+        // SAFETY: `value` is a live value in `env` for the duration of this call.
+        check(
+            unsafe {
+                sys::napi_get_typedarray_info(
+                    env.raw(),
+                    value.raw(),
+                    &mut kind,
+                    &mut len,
+                    &mut data,
+                    &mut buffer,
+                    &mut offset,
+                )
+            },
+            "body must be a Uint8Array",
+        )?;
+        if kind != sys::TypedarrayType::uint8_array {
+            return Err(Error::new(Status::InvalidArg, "body must be a Uint8Array"));
+        }
+        let mut unshared = false;
+        // SAFETY: `buffer` is the live backing of `value`.
+        check(
+            unsafe { sys::napi_is_arraybuffer(env.raw(), buffer, &mut unshared) },
+            "body backing probe failed",
+        )?;
+        if !unshared {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "body must not share its backing",
+            ));
+        }
+        let data: *const u8 = data.cast_const().cast();
+        if shm_transport::backend::retained::overlaps_live_shared_mapping(data, len) {
+            return Ok(None);
+        }
+        Ok(Some(Self { data, len }))
+    }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// # Safety
+    /// No JavaScript may run between [`UnsharedBytes::of`] and the last use of the slice, so
+    /// nothing detaches, resizes, or writes the backing from JavaScript while Rust reads it,
+    /// and the body is quiescent: its contents are final, with no native operation such as an
+    /// unfinished `fs.read` writing it.
+    pub(crate) unsafe fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `napi_get_typedarray_info` reported `len` readable bytes at `data` in an
+        // unshared backing outside every live shared mapping, the caller keeps JavaScript from
+        // running while the slice lives, and the body is quiescent.
+        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+    }
 }

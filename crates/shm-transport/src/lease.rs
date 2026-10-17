@@ -200,8 +200,7 @@ impl AccessShape {
 
 /// Copies `destination.len()` bytes out of shared memory at `source` through relaxed atomic
 /// loads of the width `AccessShape` assigns to each byte, so a same-shape store during the copy
-/// yields stale bytes rather than a data race. The destination is ordinary Rust memory and
-/// takes plain stores.
+/// yields stale bytes through race-free atomic loads. The destination is ordinary Rust memory.
 ///
 /// # Safety
 /// `source..source.add(destination.len())` must be valid for reads and writes for the duration
@@ -230,25 +229,47 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
     let shape = AccessShape::of(source, destination.len());
     let (head, rest) = destination.split_at_mut(shape.head);
     let (words, tail) = rest.split_at_mut(shape.words * WORD);
-    let words = words.as_chunks_mut::<WORD>().0;
-    // Single words up to a `STEP_BYTES`-aligned source address align every step load; each word
-    // keeps the address and width `shape` assigns.
-    let lead = (source.wrapping_add(shape.head).addr().wrapping_neg() % STEP_BYTES) / WORD;
-    let (lead_words, words) = words.split_at_mut(lead.min(words.len()));
-    let (steps, single_words) = words.as_chunks_mut::<WORDS_PER_STEP>();
     // SAFETY: `shape` partitions exactly `[0, destination.len())`, which the caller keeps
     // valid for reads and writes with no Rust reference over it. The word region starts at
-    // `source.add(shape.head)`, an 8-aligned address, and `lead_words`, `steps`, then
-    // `single_words` cover its `shape.words` words in order, so `word` stays 8-aligned, every
-    // `from_ptr` and step lies entirely within the range, and `word` ends at most one past it.
+    // `source.add(shape.head)`, an 8-aligned address, and `words` is exactly its
+    // `shape.words` words, so the word copies meet their contracts; every byte access lies
+    // within the range.
     unsafe {
         for (offset, byte) in head.iter_mut().enumerate() {
             byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
         }
-        let mut word = source.add(shape.head);
+        if words.len() >= STREAMING_COPY_OUT_MIN_BYTES {
+            stream_words(source.add(shape.head), words);
+        } else {
+            copy_words_out(source.add(shape.head), words);
+        }
+        for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
+            byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
+        }
+    }
+}
+
+/// Copies the aligned shared words at `source` into private `destination`. Each arena word is
+/// read whole, at the address and width `AccessShape` assigns, as one relaxed `AtomicU64` load
+/// or as part of one `copy_step_out` step.
+///
+/// # Safety
+/// `source` is 8-aligned, `destination.len()` is a multiple of `WORD`, and the
+/// `destination.len()` bytes at `source` meet the source contract of [`copy_out`].
+unsafe fn copy_words_out(source: *mut u8, destination: &mut [MaybeUninit<u8>]) {
+    let words = destination.as_chunks_mut::<WORD>().0;
+    // Single words up to a `STEP_BYTES`-aligned source address align every step load.
+    let lead = (source.addr().wrapping_neg() % STEP_BYTES) / WORD;
+    let (lead_words, words) = words.split_at_mut(lead.min(words.len()));
+    let (steps, single_words) = words.as_chunks_mut::<WORDS_PER_STEP>();
+    // SAFETY: `source` is 8-aligned, and `lead_words`, `steps`, then `single_words` cover the
+    // caller's words in order, so `word` stays 8-aligned, every `from_ptr` and step lies
+    // entirely within the range, and `word` ends at most one past it.
+    unsafe {
+        let mut word = source;
         for chunk in lead_words {
             let value = AtomicU64::from_ptr(word.cast()).load(Ordering::Relaxed);
-            *chunk = value.to_ne_bytes().map(MaybeUninit::new);
+            chunk.write_copy_of_slice(&value.to_ne_bytes());
             word = word.add(WORD);
         }
         for step in steps {
@@ -257,13 +278,76 @@ pub(crate) unsafe fn copy_out_uninit(source: *mut u8, destination: &mut [MaybeUn
         }
         for chunk in single_words {
             let value = AtomicU64::from_ptr(word.cast()).load(Ordering::Relaxed);
-            *chunk = value.to_ne_bytes().map(MaybeUninit::new);
+            chunk.write_copy_of_slice(&value.to_ne_bytes());
             word = word.add(WORD);
         }
-        for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
-            byte.write(AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed));
-        }
     }
+}
+
+/// Word regions at least this long take non-temporal destination stores. A private copy this
+/// large outgrows the caches, so each destination line is written once without first being
+/// read for ownership.
+const STREAMING_COPY_OUT_MIN_BYTES: usize = 8 << 20;
+
+/// Copies the aligned shared words at `source` into private `destination` with one relaxed
+/// `AtomicU64` load per word, as the plain loop does, and stores whole aligned destination
+/// words with non-temporal stores. A destination misaligned against the source takes each
+/// aligned word from two adjacent source words; its first and last partial words take plain
+/// stores. The closing `sfence` orders the streamed stores before every later store, so a
+/// release that publishes the destination also publishes its bytes.
+///
+/// # Safety
+/// `source` is 8-aligned, `destination.len()` is a positive multiple of `WORD`, and the
+/// `destination.len()` bytes at `source` meet the source contract of [`copy_out`].
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+unsafe fn stream_words(source: *mut u8, destination: &mut [MaybeUninit<u8>]) {
+    use std::arch::x86_64::{_mm_sfence, _mm_stream_si64};
+
+    let words = destination.len() / WORD;
+    let out = destination.as_mut_ptr().cast::<u8>();
+    // SAFETY: `index < words`, so the word lies within the caller's source range and starts at
+    // an 8-aligned address.
+    let load = |index: usize| unsafe {
+        AtomicU64::from_ptr(source.add(index * WORD).cast()).load(Ordering::Relaxed)
+    };
+    let lead = out.addr().wrapping_neg() % WORD;
+    // SAFETY: every store lands in `destination`, which the caller owns exclusively: the
+    // aligned stores cover `[lead, lead + (words - 1) * WORD)` or all of it when `lead` is
+    // zero, and the two partial copies cover the `lead` bytes before and the `WORD - lead`
+    // bytes after. `sfence` completes the streamed stores before this function returns.
+    unsafe {
+        if lead == 0 {
+            for index in 0..words {
+                _mm_stream_si64(out.add(index * WORD).cast(), load(index).cast_signed());
+            }
+        } else {
+            let mut current = load(0);
+            std::ptr::copy_nonoverlapping(current.to_ne_bytes().as_ptr(), out, lead);
+            for index in 1..words {
+                let next = load(index);
+                let merged = (current >> (8 * lead)) | (next << (8 * (WORD - lead)));
+                _mm_stream_si64(
+                    out.add(lead + (index - 1) * WORD).cast(),
+                    merged.cast_signed(),
+                );
+                current = next;
+            }
+            std::ptr::copy_nonoverlapping(
+                current.to_ne_bytes().as_ptr().add(lead),
+                out.add(lead + (words - 1) * WORD),
+                WORD - lead,
+            );
+        }
+        _mm_sfence();
+    }
+}
+
+/// # Safety
+/// The contract of the streaming variant.
+#[cfg(not(all(target_arch = "x86_64", not(miri))))]
+unsafe fn stream_words(source: *mut u8, destination: &mut [MaybeUninit<u8>]) {
+    // SAFETY: the streaming contract is the contract of `copy_words_out`.
+    unsafe { copy_words_out(source, destination) }
 }
 
 /// Copies the `WORDS_PER_STEP` aligned words at `source` into `step`. Each arena word is read
@@ -302,7 +386,7 @@ unsafe fn copy_step_out(source: *mut u8, step: &mut [[MaybeUninit<u8>; WORD]; WO
             AtomicU64::from_ptr(source.add(index * WORD).cast()).load(Ordering::Relaxed)
         });
         for (chunk, value) in step.iter_mut().zip(loaded) {
-            *chunk = value.to_ne_bytes().map(MaybeUninit::new);
+            chunk.write_copy_of_slice(&value.to_ne_bytes());
         }
     }
 }
@@ -319,17 +403,41 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
     let shape = AccessShape::of(destination, source.len());
     let (head, rest) = source.split_at(shape.head);
     let (words, tail) = rest.split_at(shape.words * WORD);
-    let (steps, single_words) = words.as_chunks::<WORD>().0.as_chunks::<WORDS_PER_STEP>();
     // SAFETY: `shape` partitions exactly `[0, source.len())`, which the caller keeps valid for
     // reads and writes with no Rust reference over it. The word region starts at
-    // `destination.add(shape.head)`, an 8-aligned address, and `steps` then `single_words`
-    // cover its `shape.words` words in order, so `word` stays 8-aligned, every `from_ptr` lies
-    // entirely within the range, and `word` ends at most one past it.
+    // `destination.add(shape.head)`, an 8-aligned address, and `words` is exactly its
+    // `shape.words` words, so the word stores meet their contracts; every byte access lies
+    // within the range.
     unsafe {
         for (offset, byte) in head.iter().enumerate() {
             AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
         }
-        let mut word = destination.add(shape.head);
+        let word_destination = destination.add(shape.head);
+        if words.len() >= PREFETCHED_COPY_IN_MIN_BYTES {
+            store_words_prefetching(words, word_destination);
+        } else {
+            copy_words_in(words, word_destination);
+        }
+        for (offset, byte) in shape.tail_range().zip(tail.iter()) {
+            AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Stores the private words of `source` to the aligned shared words at `destination`. Each
+/// arena word is written whole, at the address and width `AccessShape` assigns, as one relaxed
+/// `AtomicU64` store or as part of one `copy_step_in` step.
+///
+/// # Safety
+/// `destination` is 8-aligned, `source.len()` is a multiple of `WORD`, and the `source.len()`
+/// bytes at `destination` meet the destination contract of [`copy_in`].
+unsafe fn copy_words_in(source: &[u8], destination: *mut u8) {
+    let (steps, single_words) = source.as_chunks::<WORD>().0.as_chunks::<WORDS_PER_STEP>();
+    // SAFETY: `destination` is 8-aligned, and `steps` then `single_words` cover the caller's
+    // words in order, so `word` stays 8-aligned, every `from_ptr` and step lies entirely within
+    // the range, and `word` ends at most one past it.
+    unsafe {
+        let mut word = destination;
         for step in steps {
             copy_step_in(step, word);
             word = word.add(WORDS_PER_STEP * WORD);
@@ -338,10 +446,45 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
             AtomicU64::from_ptr(word.cast()).store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
             word = word.add(WORD);
         }
-        for (offset, byte) in shape.tail_range().zip(tail.iter()) {
-            AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
-        }
     }
+}
+
+/// Word regions at least this long prefetch their destination lines for writing ahead of the
+/// stores, so the read for ownership of each line overlaps the stores to earlier lines. Under
+/// Miri a short region takes the same line loop, so its witnesses stay fast.
+const PREFETCHED_COPY_IN_MIN_BYTES: usize = if cfg!(miri) { 256 } else { 1 << 20 };
+
+/// Destination bytes between the line being stored and the line being prefetched.
+const COPY_IN_PREFETCH_DISTANCE: usize = 4096;
+
+/// The relaxed `AtomicU64` stores of [`copy_in`]'s word loop, with a write prefetch
+/// `COPY_IN_PREFETCH_DISTANCE` bytes ahead of each 64-byte destination line. A prefetch
+/// accesses no memory in the abstract machine, so a prefetched address past the range is
+/// harmless.
+///
+/// # Safety
+/// The contract of [`copy_words_in`].
+unsafe fn store_words_prefetching(source: &[u8], destination: *mut u8) {
+    const LINE: usize = 64;
+    const _: () = assert!(LINE.is_multiple_of(STEP_BYTES));
+    let (lines, rest) = source.as_chunks::<LINE>();
+    for (line, bytes) in lines.iter().enumerate() {
+        let start = line * LINE;
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        // SAFETY: `_mm_prefetch` is a hint that dereferences nothing.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_ET0 }>(
+                destination
+                    .wrapping_add(start + COPY_IN_PREFETCH_DISTANCE)
+                    .cast(),
+            );
+        }
+        // SAFETY: the line lies within the caller's destination range and starts 8-aligned.
+        unsafe { copy_words_in(bytes, destination.add(start)) };
+    }
+    // SAFETY: the remaining words lie within the caller's destination range and start
+    // 8-aligned.
+    unsafe { copy_words_in(rest, destination.add(lines.len() * LINE)) };
 }
 
 /// Stores the `WORDS_PER_STEP` words of `step` to the aligned arena words at `destination`.
@@ -858,6 +1001,64 @@ mod tests {
                     assert_eq!(sentinel, source[..len], "shift {shared_shift} len {len}");
                 }
             }
+        }
+    }
+
+    use super::STREAMING_COPY_OUT_MIN_BYTES;
+
+    /// A copy long enough to stream initializes every destination byte with the source's
+    /// bytes at every pairing of source and destination alignment, including the partial words
+    /// a misaligned destination leaves at each end.
+    #[test]
+    #[cfg_attr(miri, ignore = "copies tens of megabytes")]
+    fn a_streamed_copy_out_matches_the_source_at_every_alignment_pairing() {
+        use std::sync::atomic::AtomicU64;
+        let len = STREAMING_COPY_OUT_MIN_BYTES + 3 * WORD + 5;
+        let pattern: Vec<u8> = (0..len + WORD)
+            .map(|index| (index.wrapping_mul(131) ^ (index >> 11)) as u8)
+            .collect();
+        let shared: Vec<AtomicU64> = (0..len / WORD + 3).map(|_| AtomicU64::new(0)).collect();
+        let base = shared.as_ptr().cast_mut().cast::<u8>();
+        let mut back: Vec<u8> = Vec::with_capacity(len + WORD);
+        for source_shift in 0..WORD {
+            // SAFETY: `shared` covers `source_shift + len` bytes and no `&[u8]` is formed over it.
+            unsafe { copy_in(&pattern[..len], base.add(source_shift)) };
+            for destination_shift in 0..WORD {
+                let spare =
+                    &mut back.spare_capacity_mut()[destination_shift..destination_shift + len];
+                // SAFETY: `shared` is live and only atomics touch it; `spare` is private.
+                unsafe { copy_out_uninit(base.add(source_shift), spare) };
+                // SAFETY: `copy_out_uninit` initialized every byte of `spare`.
+                let copied =
+                    unsafe { std::slice::from_raw_parts(spare.as_ptr().cast::<u8>(), spare.len()) };
+                assert!(
+                    copied == &pattern[..len],
+                    "source shift {source_shift} destination shift {destination_shift}"
+                );
+            }
+        }
+    }
+
+    /// A copy-in long enough to prefetch its destination round-trips at two source
+    /// alignments; under Miri this checks the line loop of the prefetching path.
+    #[test]
+    fn a_prefetched_copy_in_round_trips_past_the_threshold() {
+        use super::PREFETCHED_COPY_IN_MIN_BYTES;
+        use std::sync::atomic::AtomicU64;
+        let len = PREFETCHED_COPY_IN_MIN_BYTES + 2 * WORD + 3;
+        let pattern: Vec<u8> = (0..len)
+            .map(|index| (index.wrapping_mul(29) >> 3) as u8)
+            .collect();
+        let shared: Vec<AtomicU64> = (0..len / WORD + 2).map(|_| AtomicU64::new(0)).collect();
+        let base = shared.as_ptr().cast_mut().cast::<u8>();
+        for shift in [0, 3] {
+            let mut back = vec![0u8; len];
+            // SAFETY: `shared` covers `shift + len` bytes and only atomics touch it.
+            unsafe {
+                copy_in(&pattern, base.add(shift));
+                copy_out(base.add(shift), &mut back);
+            }
+            assert!(back == pattern, "shift {shift}");
         }
     }
 

@@ -160,6 +160,8 @@ export interface FrameProducerCursor {
 
 export interface DirectFrameBody {
     readonly byteLength: number;
+    /** The exact bytes `fill` writes, when the body already holds them. */
+    readonly bytes?: Uint8Array;
     fill(cursor: FrameProducerCursor): void;
 }
 
@@ -179,6 +181,7 @@ export function frameBodyMaterializer(
 export function bytesFrameBody(bytes: Uint8Array): DirectFrameBody {
     const body: DirectFrameBody = {
         byteLength: bytes.byteLength,
+        bytes,
         fill: (cursor) => cursor.write(bytes),
     };
     BODY_MATERIALIZERS.set(body, () => ({ bytes: Buffer.from(bytes), copied: true }));

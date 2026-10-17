@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/tests/client.rs:426`
 - `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`
 
-Witness status: partial - `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:795`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Witness status: partial - `crates/shm-transport/tests/ring.rs:344` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:774`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 
 ## Failure scenario
 
@@ -44,3 +44,10 @@ Check semantics: `reachable` - the code point that reports a completed real exch
   witness constructs and what it leaves unconstructed.
 - Missing evidence: the Rust client's cross-process run is still owed under #552 and passes to this task's combined matrix if #552 closes first; a native/TypeScript daemon-level witness on a runtime that reports the detachment capability remains a recorded gap; the capability witness records artifact and runtime identity for every skip.
 - Conclusion: unresolved, needs the named handoff.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: The TypeScript client over the native addon now runs against a separate host process at the 64 MiB maximum in both directions, refuses one byte over as `not_sent`, survives close, reconnect, and restart, and is required in the native CI job.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

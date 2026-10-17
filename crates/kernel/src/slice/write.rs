@@ -7,8 +7,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
 
 use super::{
-    DecisionEventOutcome, DecisionEventSpec, DecisionSpec, DecisionWriteOutcome,
-    ObservationDependencySpec, ObservationSpec, ObservationWriteOutcome, RetirementOutcome,
+    DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec, DecisionSpec,
+    DecisionWriteOutcome, ObservationDependencySpec, ObservationSpec, ObservationWriteOutcome,
+    RetirementOutcome,
 };
 use crate::CachedSql;
 use crate::envelope::{Envelope, ObjectRow, PendingChange};
@@ -117,6 +118,7 @@ struct RedactedDependency {
     payload: Option<RedactedField>,
 }
 
+#[derive(Clone)]
 struct RedactedEvent {
     kind: RedactedField,
     summary: RedactedField,
@@ -225,19 +227,74 @@ impl Envelope<'_> {
             spec.evidence_id.as_ref(),
         )?;
         let object = load_live_decision_object(self.tx, &decision_id.text)?;
-        let ordinal = self
-            .tx
-            .query_row_cached(
-                "SELECT COALESCE(MAX(event_ordinal),0)+1
-                 FROM decision_events WHERE decision_id=?1",
-                [&decision_id.text],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(crate::map_sqlite)?;
-        let payload = serde_json::to_vec(&StoredEventPayload {
-            summary: &spec.summary.text,
+        let ordinal = next_event_ordinal(self.tx, &decision_id.text)?;
+        let payload = stored_event_payload(&spec.summary)?;
+        self.write_decision_event(&decision_id, object, ordinal, &spec, &payload)?;
+        Ok(DecisionEventOutcome {
+            decision_id: decision_id.text,
+            event_ordinal: ordinal,
         })
-        .map_err(|_| KernelError::InvalidInput)?;
+    }
+
+    /// Appends one event of `event_kind` and `summary` citing each of `evidence_ids`, in order, to one live decision. The rows, ordinals, and change records equal one [`Self::append_decision_event`] per id; the decision, its first ordinal, the shared text, and the liveness of every cited evidence row are resolved once. Every id is checked as an identity before any is checked live.
+    pub(crate) fn append_decision_citations(
+        &mut self,
+        decision_id: &str,
+        event_kind: &str,
+        summary: &str,
+        evidence_ids: &[String],
+        recorded_at: i64,
+    ) -> Result<(), KernelError> {
+        self.guarded(|envelope| {
+            if evidence_ids.is_empty() {
+                return Ok(());
+            }
+            let decision_id = identity_field(decision_id)?;
+            let shared = RedactedEvent::new(DecisionEventSpec {
+                event_kind: event_kind.to_string(),
+                payload: DecisionEventPayload {
+                    summary: summary.to_string(),
+                },
+                evidence_id: None,
+                recorded_at,
+            })?;
+            let payload = stored_event_payload(&shared.summary)?;
+            let cited = evidence_ids
+                .iter()
+                .map(|evidence_id| identity_field(evidence_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            require_live_evidence(envelope.tx, &cited)?;
+            let events: Vec<RedactedEvent> = cited
+                .into_iter()
+                .map(|evidence_id| RedactedEvent {
+                    evidence_id: Some(evidence_id),
+                    ..shared.clone()
+                })
+                .collect();
+            let object = load_live_decision_object(envelope.tx, &decision_id.text)?;
+            let first = next_event_ordinal(envelope.tx, &decision_id.text)?;
+            for (ordinal, event) in (first..).zip(&events) {
+                envelope.write_decision_event(
+                    &decision_id,
+                    object.clone(),
+                    ordinal,
+                    event,
+                    &payload,
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Writes one event row at `ordinal` with its redaction records and change. The caller has proved the decision and any cited evidence live and allocated `ordinal` in this envelope.
+    fn write_decision_event(
+        &mut self,
+        decision_id: &RedactedField,
+        object: ObjectRow,
+        ordinal: i64,
+        event: &RedactedEvent,
+        payload: &[u8],
+    ) -> Result<(), KernelError> {
         self.tx
             .execute_cached(
                 "INSERT INTO decision_events(
@@ -248,27 +305,34 @@ impl Envelope<'_> {
                     decision_id.text,
                     ordinal,
                     self.commit_seq,
-                    spec.kind.text,
+                    event.kind.text,
                     payload,
-                    spec.evidence_id.as_ref().map(|value| value.text.as_str()),
-                    spec.recorded_at,
+                    event.evidence_id.as_ref().map(|value| value.text.as_str()),
+                    event.recorded_at,
                 ],
             )
             .map_err(map_write_error)?;
-        let owner_id = format!("{}:{ordinal}", decision_id.text);
-        let mut event_fields = vec![
-            ("decision_id".to_string(), decision_id.clone()),
-            ("event_kind".to_string(), spec.kind.clone()),
-            ("event_payload.summary".to_string(), spec.summary.clone()),
-        ];
-        push_optional(&mut event_fields, "evidence_id", &spec.evidence_id);
-        record_fields(
-            self.tx,
-            "decision_events",
-            &owner_id,
-            &event_fields,
-            self.commit_seq,
-        )?;
+        // A field without detections records no row, so only fields with detections are carried.
+        let mut event_fields = Vec::new();
+        for (name, field) in [
+            ("decision_id", Some(decision_id)),
+            ("event_kind", Some(&event.kind)),
+            ("event_payload.summary", Some(&event.summary)),
+            ("evidence_id", event.evidence_id.as_ref()),
+        ] {
+            if let Some(field) = field.filter(|field| !field.detections.is_empty()) {
+                event_fields.push((name.to_string(), field.clone()));
+            }
+        }
+        if !event_fields.is_empty() {
+            record_fields(
+                self.tx,
+                "decision_events",
+                &format!("{}:{ordinal}", decision_id.text),
+                &event_fields,
+                self.commit_seq,
+            )?;
+        }
         self.changes.push(PendingChange {
             object,
             kind: DECISION_EVENT_APPEND_KIND,
@@ -277,13 +341,10 @@ impl Envelope<'_> {
             audit: Some(serde_json::json!({
                 "decision_id": decision_id.text,
                 "event_ordinal": ordinal,
-                "event_kind": spec.kind.text,
+                "event_kind": event.kind.text,
             })),
         });
-        Ok(DecisionEventOutcome {
-            decision_id: decision_id.text,
-            event_ordinal: ordinal,
-        })
+        Ok(())
     }
 
     /// Replaces a live decision while preserving domain and source identity.
@@ -1085,6 +1146,51 @@ fn require_live(
         .optional()
         .map_err(crate::map_sqlite)?
         .ok_or(KernelError::NotFound)
+}
+
+fn require_live_evidence(
+    tx: &Transaction<'_>,
+    evidence_ids: &[RedactedField],
+) -> Result<(), KernelError> {
+    let ids = serde_json::to_string(
+        &evidence_ids
+            .iter()
+            .map(|field| field.text.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| KernelError::InvalidInput)?;
+    let live = tx
+        .query_row_cached(
+            "SELECT COUNT(*) FROM json_each(?1) j
+             JOIN evidence_meta e ON e.evidence_id=j.value
+             WHERE e.invalidated_commit_seq IS NULL",
+            [ids],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(crate::map_sqlite)?;
+    if usize::try_from(live).ok() == Some(evidence_ids.len()) {
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
+    }
+}
+
+/// The ordinal the next event of `decision_id` takes: one past the current maximum, or 1.
+fn next_event_ordinal(tx: &Transaction<'_>, decision_id: &str) -> Result<i64, KernelError> {
+    tx.query_row_cached(
+        "SELECT COALESCE(MAX(event_ordinal),0)+1
+         FROM decision_events WHERE decision_id=?1",
+        [decision_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(crate::map_sqlite)
+}
+
+fn stored_event_payload(summary: &RedactedField) -> Result<Vec<u8>, KernelError> {
+    serde_json::to_vec(&StoredEventPayload {
+        summary: &summary.text,
+    })
+    .map_err(|_| KernelError::InvalidInput)
 }
 
 fn load_live_decision_object(

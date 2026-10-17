@@ -18,7 +18,7 @@ use memory_store::memory_reviewer_ledger::{
 };
 use memory_store::{LeaseCompleteOutcome, MemoryStore};
 
-use super::broker::{EvidenceBroker, HeldUnder, RefusalCode, check_render};
+use super::broker::{EvidenceBroker, HeldUnder, QuestionTemplate, RefusalCode, check_render};
 use super::dependencies::{self, Revalidation, Verdict};
 
 /// Producer recorded on settled proposals.
@@ -1139,6 +1139,7 @@ pub fn accept_selected_proposal(
         proposal: reference,
         selected_at,
         target: target.clone(),
+        question_template_revision: QuestionTemplate::ExtractedFacts.revision(),
         scope_id: Some(scope_id),
     };
     store

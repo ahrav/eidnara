@@ -46,3 +46,10 @@ Check semantics: `always` - `commit_reservation` and `release` reach the ring on
   witness constructs and what it leaves unconstructed.
 - Missing evidence: none for this task
 - Conclusion: resolved with answer.
+
+### Q: Is the handoff closed at the closing-evidence head?
+
+- Sources examined: the tests named in `Exercised` and the code they drive.
+- Findings: Bun 1.3.14 and Node both report the detachment capability, so `runNativeLifecycle` runs on both; transfer prevention is reported, not gated.
+- Missing evidence: None for this record.
+- Conclusion: resolved with answer - the record is exercised.

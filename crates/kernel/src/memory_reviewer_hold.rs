@@ -773,10 +773,10 @@ fn live_hold_of(
     binding: &MemoryReviewerHoldBinding,
     now: i64,
 ) -> Result<Option<(String, i64, bool)>, MemoryReviewerHoldError> {
-    // The unary `+` keeps `expires_at` out of index selection, so the planner seeks the owner's unreleased pins through `idx_capture_pins_owner_active` instead of scanning every unexpired unreleased pin of the host through `idx_capture_pins_ttl`.
     tx.query_row_cached(
-        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL FROM capture_pins
-         WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL AND +expires_at>?3
+        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL
+         FROM capture_pins INDEXED BY idx_capture_pins_owner_active
+         WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL AND expires_at>?3
          ORDER BY created_at DESC LIMIT 1",
         params![kind.pin_kind(), binding.owner_id(), now],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

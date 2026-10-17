@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import {
         activeNativeChannels,
         NativeChannel,
@@ -7,6 +8,7 @@ import {
         QUALIFIED_TEST_PROFILE,
         supportsNativePlatform,
 } from "../index.ts";
+import { checkoutSourceDigest } from "./source-digest.ts";
 
 assert.equal(supportsNativePlatform("linux", "x64"), true);
 assert.equal(supportsNativePlatform("darwin", "x64"), false);
@@ -27,6 +29,13 @@ if (claimedTarget) {
         assert.equal(artifact.buildProfile, "release");
         assert.equal(artifact.buildTarget, "linux-x86_64");
         assert.equal(artifact.qualifiedTestProfile, QUALIFIED_TEST_PROFILE);
+        // The addon must be built from this checkout's sources, not merely at its layout.
+        const root = fileURLToPath(new URL("../../..", import.meta.url));
+        assert.equal(
+                artifact.sourceDigest,
+                checkoutSourceDigest(root),
+                "the loaded addon was built from other sources; rebuild it with build:native",
+        );
 }
 // A claimed target must at least load its addon on every runtime. Transfer prevention is
 // reported, not gated, so availability on Node and Bun depends only on the gated mechanisms.

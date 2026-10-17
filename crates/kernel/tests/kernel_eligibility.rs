@@ -43,6 +43,7 @@ fn expected(
             if remote { ProviderSensitive } else { Ok },
         ),
         (candidate("unadmitted", 1), Hidden),
+        (with_artifact(candidate("unadmitted", 1), artifact), Hidden),
         (candidate("contradicted", 1), Hidden),
         (
             with_artifact(candidate("with-artifact", 1), artifact),
