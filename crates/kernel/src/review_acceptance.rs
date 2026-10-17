@@ -228,6 +228,9 @@ impl KernelStore {
             let tx = writer
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(map_sqlite)?;
+            if super::open::database_incarnation_id_via(&tx)? != acceptance.run.kernel_incarnation {
+                return Err(AcceptanceRefusal::Unavailable.into());
+            }
             let caller_receipt = match recorded_receipt(&tx, &caller) {
                 Err(KernelError::Conflict) => return Err(AcceptanceRefusal::Conflict.into()),
                 other => other?,
@@ -414,6 +417,8 @@ struct Validated {
     /// The store clock the hold was judged at; the support events are stamped with it.
     now: i64,
     judged: Vec<(EligibilityCandidate, Requirement)>,
+    /// Whether a staged-subject member already proved the proposal's staged target at its digest.
+    subject_proven: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -463,7 +468,7 @@ fn apply(
         (
             ProposalAction::NoChange | ProposalAction::Create,
             ProposalTarget::StagedCandidate { candidate_id },
-        ) => subject_stands(envelope, acceptance, candidate_id)?,
+        ) => subject_stands(envelope, acceptance, &validated, candidate_id)?,
         // Staging admits only legal action and target pairs, so a stored row with another pair is corruption.
         _ => return Err(KernelError::Io.into()),
     }
@@ -530,10 +535,6 @@ fn validate(
     acceptance: &ProposalAcceptance,
 ) -> Result<Validated, AcceptanceError> {
     let run = &acceptance.run;
-    let incarnation = super::open::database_incarnation_id_via(envelope.tx)?;
-    if incarnation != run.kernel_incarnation {
-        return Err(AcceptanceRefusal::Unavailable.into());
-    }
     let row = bound_review_row_in(
         envelope.tx,
         &acceptance.proposal,
@@ -596,8 +597,11 @@ fn validate(
     let mut named = Vec::new();
     let mut owners = Vec::new();
     let mut template = false;
+    let mut subject_proven = false;
     for member in union.members() {
         template |= member.kind == "question_template";
+        subject_proven |= member.kind == "staged_subject"
+            && matches!(&proposal.target, ProposalTarget::StagedCandidate { candidate_id } if *candidate_id == member.id);
         named.extend(member_stands(
             envelope,
             acceptance,
@@ -630,6 +634,7 @@ fn validate(
         support,
         now: disclosed.now,
         judged,
+        subject_proven,
     })
 }
 
@@ -800,11 +805,16 @@ fn subject_row_stands(
     }
 }
 
+/// The staged subject a create or no-change names stands: a staged-subject member already proved it at its digest, or it is this job's sealed subject row at whatever digest it is stored.
 fn subject_stands(
     envelope: &Envelope<'_>,
     acceptance: &ProposalAcceptance,
+    validated: &Validated,
     candidate_id: &str,
 ) -> Result<(), AcceptanceError> {
+    if validated.subject_proven {
+        return Ok(());
+    }
     subject_row_stands(envelope, acceptance, candidate_id, None)
 }
 

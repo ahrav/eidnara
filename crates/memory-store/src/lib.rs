@@ -7024,12 +7024,23 @@ struct ValidatedSeedBoundary {
     max_sequence: i64,
 }
 
-const AUTHORITY_SELECT_SQL: &str = "SELECT context_store_uuid, project, domain, state, generation,
+/// An `authority` row select in the column order `authority_row_from_sql` reads, filtered by `$filter`.
+macro_rules! authority_select {
+    ($filter:literal) => {
+        concat!(
+            "SELECT context_store_uuid, project, domain, state, generation,
     captured_upper_bound, drain_generation, drain_cursor, step_seed, step_memories,
     step_notes, step_history_segments, step_reconcile, step_verify, step_flip,
     coordinator_lease, lease_expires_at, coordinator_token,
     checksum_expected, checksum_actual, checksum_ok
-    FROM authority WHERE context_store_uuid = ?1 AND project = ?2 AND domain = ?3";
+    FROM authority WHERE ",
+            $filter
+        )
+    };
+}
+
+const AUTHORITY_SELECT_SQL: &str =
+    authority_select!("context_store_uuid = ?1 AND project = ?2 AND domain = ?3");
 
 /// The two `cache_state` row reads, shared so every reader stays on the
 /// same projection.
@@ -7324,6 +7335,27 @@ fn authority_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<Authority
         checksum_actual: row.get(19)?,
         checksum_ok: row.get::<_, Option<i64>>(20)?.map(|value| value != 0),
     })
+}
+
+/// The project bound to `route_project_root` whose `domain` authority is MODULE or DRAINING.
+fn route_authority_project_in(
+    conn: &GuardedConn<'_>,
+    route_project_root: &str,
+    domain: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row_cached(
+        "SELECT authority.project
+           FROM authority_route_bindings binding
+           JOIN authority authority
+             ON authority.context_store_uuid = binding.context_store_uuid
+            AND authority.project = binding.project
+          WHERE binding.route_project_root = ?1
+            AND authority.domain = ?2
+            AND authority.state IN ('MODULE', 'DRAINING')",
+        params![route_project_root, domain],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 fn authority_require_live_coordinator(
@@ -7726,8 +7758,8 @@ pub struct MemoryStore {
     /// store.
     #[cfg(any(test, feature = "test-support"))]
     pass_trace_receive_fail_once: std::sync::atomic::AtomicBool,
-    /// Makes the next `authority_project_for_route` fail as a backend error,
-    /// so a caller's store-failure branch can be exercised on a healthy store.
+    /// Makes the next `authority_project_for_route` or `module_authority_for_route` fail as a
+    /// backend error, so a caller's store-failure branch can be exercised on a healthy store.
     #[cfg(any(test, feature = "test-support"))]
     authority_route_read_fail_once: std::sync::atomic::AtomicBool,
     /// Makes the next `acquire_memory_classifier_task` fail as a backend error before it
@@ -8591,31 +8623,6 @@ impl MemoryStore {
         })
     }
 
-    /// Resolve a requested facade identity to the MODULE authority that owns it. The
-    /// context UUID is returned with the identity so a write can establish the route
-    /// binding even when the transform's authority-status result was cached.
-    pub fn module_authority_for_project(
-        &self,
-        project: &str,
-        domain: &str,
-    ) -> Result<Option<(String, String)>, MemoryStoreError> {
-        validate_authority_domain(domain)?;
-        self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT context_store_uuid, project
-                       FROM authority
-                      WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
-                      ORDER BY context_store_uuid
-                      LIMIT 1",
-                    params![project, domain],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-            })
-            .map_err(Into::into)
-    }
-
     /// Resolve a facade-supplied identity while it is module-owned or draining. DRAINING remains
     /// visible so callers can return a retryable transition error instead of falling back to a
     /// filesystem route.
@@ -8678,6 +8685,58 @@ impl MemoryStore {
         domain: &str,
     ) -> Result<Option<String>, MemoryStoreError> {
         validate_authority_domain(domain)?;
+        self.injected_authority_route_read_failure()?;
+        self.inner
+            .with_conn(|conn| route_authority_project_in(conn, route_project_root, domain))
+            .map_err(Into::into)
+    }
+
+    /// The MODULE authority row serving `route_project_root` for `domain`, from one `with_conn` read: the project [`Self::authority_project_for_route`] names, then that project's MODULE row with the lowest context store UUID. `None` when the route has no MODULE or DRAINING binding or its project has no MODULE row.
+    pub fn module_authority_for_route(
+        &self,
+        route_project_root: &str,
+        domain: &str,
+    ) -> Result<Option<AuthorityRow>, MemoryStoreError> {
+        self.module_authority_for_route_then(route_project_root, domain, |_, _| Ok(()))
+            .map(|found| found.map(|(row, ())| row))
+    }
+
+    /// [`Self::module_authority_for_route`], then `then` over the found row inside the same `with_conn` read.
+    pub(crate) fn module_authority_for_route_then<T>(
+        &self,
+        route_project_root: &str,
+        domain: &str,
+        then: impl FnOnce(&GuardedConn<'_>, &AuthorityRow) -> rusqlite::Result<T>,
+    ) -> Result<Option<(AuthorityRow, T)>, MemoryStoreError> {
+        validate_authority_domain(domain)?;
+        self.injected_authority_route_read_failure()?;
+        self.inner
+            .with_conn(|conn| {
+                let Some(project) = route_authority_project_in(conn, route_project_root, domain)?
+                else {
+                    return Ok(None);
+                };
+                let Some(row) = conn
+                    .query_row_cached(
+                        authority_select!(
+                            "project = ?1 AND domain = ?2 AND state = 'MODULE'
+                      ORDER BY context_store_uuid
+                      LIMIT 1"
+                        ),
+                        params![project, domain],
+                        authority_row_from_sql,
+                    )
+                    .optional()?
+                else {
+                    return Ok(None);
+                };
+                let then = then(conn, &row)?;
+                Ok(Some((row, then)))
+            })
+            .map_err(Into::into)
+    }
+
+    fn injected_authority_route_read_failure(&self) -> Result<(), MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         if self
             .authority_route_read_fail_once
@@ -8687,23 +8746,7 @@ impl MemoryStore {
                 "injected authority route read failure".to_string(),
             )));
         }
-        self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT authority.project
-                       FROM authority_route_bindings binding
-                       JOIN authority authority
-                         ON authority.context_store_uuid = binding.context_store_uuid
-                        AND authority.project = binding.project
-                      WHERE binding.route_project_root = ?1
-                        AND authority.domain = ?2
-                        AND authority.state IN ('MODULE', 'DRAINING')",
-                    params![route_project_root, domain],
-                    |row| row.get(0),
-                )
-                .optional()
-            })
-            .map_err(Into::into)
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -8749,8 +8792,8 @@ impl MemoryStore {
             .insert(kind.to_string());
     }
 
-    /// The next `authority_project_for_route` returns a backend error instead
-    /// of reading the ledger; every call after it reads normally.
+    /// The next `authority_project_for_route` or `module_authority_for_route` returns a backend
+    /// error instead of reading the ledger; every call after it reads normally.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_next_authority_route_read_for_test(&self) {
         self.authority_route_read_fail_once
@@ -34441,6 +34484,82 @@ mod shadow_tests {
                 .iter()
                 .all(|note| note.content.contains("password=<REDACTED:password>")
                     && !note.content.contains("seed-secret"))
+        );
+    }
+
+    /// `module_authority_for_route` names the route's MODULE row only while the route is bound to a MODULE authority, and the MemoryReviewer read beside it carries the store incarnation and the job's receipt from the same read; an injected route read failure fails both readers once.
+    #[test]
+    fn module_authority_for_route_reads_the_route_row_and_its_receipt_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let causal = "c".repeat(64);
+        let read = |store: &MemoryStore| {
+            (
+                store
+                    .module_authority_for_route("/repo", "memories")
+                    .unwrap(),
+                store
+                    .module_authority_with_memory_reviewer_receipt("/repo", "memories", &causal)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            read(&store),
+            (None, None),
+            "an unbound route has no authority"
+        );
+        store
+            .bind_authority_route("store-uuid", "project", "/repo")
+            .unwrap();
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "memories")
+            .unwrap();
+        assert_eq!(
+            read(&store),
+            (None, None),
+            "a PREPARING authority is not MODULE"
+        );
+        let module = store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "memories",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        let (row, with_receipt) = read(&store);
+        assert_eq!(row.as_ref(), Some(&module));
+        assert_eq!(
+            with_receipt,
+            Some((
+                module.clone(),
+                store.memory_reviewer_store_incarnation().unwrap(),
+                None
+            ))
+        );
+        store.fail_next_authority_route_read_for_test();
+        assert!(
+            store
+                .module_authority_for_route("/repo", "memories")
+                .is_err()
+        );
+        store.fail_next_authority_route_read_for_test();
+        assert!(
+            store
+                .module_authority_with_memory_reviewer_receipt("/repo", "memories", &causal)
+                .is_err()
+        );
+        assert_eq!(read(&store).0, Some(module));
+        store
+            .authority_begin_drain("store-uuid", "project", "memories", "lease", 100, 0)
+            .unwrap();
+        assert_eq!(
+            read(&store),
+            (None, None),
+            "a DRAINING route serves no MODULE row"
         );
     }
 

@@ -1,11 +1,14 @@
 //! The deployment owner's activation record for MemoryReviewer disclosure: `runtime-identity.json` under `<home>/memory_reviewer-activation/`, an owner-only JSON record read anew on every gate refresh. It binds the running binary's identity tuple (model, question template revision, step schema version, scanner ruleset, egress policy version, both stores' baseline digests and incarnations, provider identity, credential name) to the owner's provider-retention attestation and finite-work-exposure acknowledgement. A missing or refused record closes the gate; a record naming another identity denies with the field that differs; only a matching, attested record yields the startup approval the sender requires before any byte is disclosed. Restore or a new incarnation changes the pair the record names, so it needs a new record.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use context_core::memory_reviewer_policy_union::MEMORY_REVIEWER_POLICY_UNION_VERSION;
 use serde::Deserialize;
 
-use crate::projection_lifecycle::{RecordRead, read_owner_only_record};
+use crate::projection_lifecycle::{
+    HeldRecord, RecordRead, read_owner_only_record, read_owner_only_record_held,
+};
 
 use super::broker::QuestionTemplate;
 use super::disclosure::DisclosureApproval;
@@ -260,6 +263,73 @@ pub fn evaluate(record: &RuntimeIdentityRecord, live: &LiveIdentity) -> Result<A
     })
 }
 
+/// The deployment owner's acceptance record, `acceptance.json` beside the disclosure record. It is a separate gate: a disclosure record, open or not, never admits acceptance.
+pub const ACCEPTANCE_RECORD: &str = "acceptance.json";
+const ACCEPTANCE_SCHEMA: u32 = 1;
+
+/// The owner's acceptance record as written: the store pair it admits acceptance for, and the owner's reference to the reviewed actual-evidence record that justified it. Removing the record, or replacing either store, stops acceptance.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AcceptanceRecord {
+    schema: u32,
+    kernel_incarnation: String,
+    memstore_incarnation: String,
+    evidence: String,
+}
+
+impl AcceptanceRecord {
+    /// The Kernel incarnation the record admits acceptance for.
+    pub(crate) fn kernel_incarnation(&self) -> &str {
+        &self.kernel_incarnation
+    }
+
+    /// Admits acceptance for the live `(kernel incarnation, memory store incarnation)` pair exactly when the record names both.
+    pub(crate) fn admits(
+        &self,
+        kernel_incarnation: &str,
+        memstore_incarnation: &str,
+    ) -> Result<(), Closed> {
+        if self.kernel_incarnation != kernel_incarnation {
+            return Err(Closed::IdentityMismatch("kernel incarnation"));
+        }
+        self.admits_memory_store(memstore_incarnation)
+    }
+
+    /// Admits acceptance for the live Memory Store incarnation exactly when the record names it.
+    pub(crate) fn admits_memory_store(&self, memstore_incarnation: &str) -> Result<(), Closed> {
+        if self.memstore_incarnation != memstore_incarnation {
+            return Err(Closed::IdentityMismatch("memory store incarnation"));
+        }
+        Ok(())
+    }
+}
+
+/// `read_acceptance_record` requires an owner-only acceptance record with schema 1 and a nonempty evidence reference of at most [`MAX_ATTESTATION_FIELD_BYTES`] bytes. It reads no store; a sound record still admits acceptance only for the pair [`AcceptanceRecord::admits`] accepts. `held` keeps the record open between calls while its path still names it unchanged; its bytes are read and judged anew on every call.
+pub(crate) fn read_acceptance_record(
+    home: &Path,
+    held: &Mutex<Option<HeldRecord>>,
+) -> Result<AcceptanceRecord, Closed> {
+    let read = read_owner_only_record_held(
+        &home.join(ACTIVATION_DIR),
+        ACCEPTANCE_RECORD,
+        &mut held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    let bytes = match read {
+        Ok(RecordRead::Bytes(bytes)) => bytes,
+        Ok(RecordRead::Absent) => return Err(Closed::Missing),
+        Ok(RecordRead::Refused(reason)) => return Err(Closed::Refused(reason)),
+        Err(error) => return Err(Closed::Unreadable(error.0)),
+    };
+    let record: AcceptanceRecord = serde_json::from_slice(&bytes).map_err(|_| Closed::Malformed)?;
+    if record.schema != ACCEPTANCE_SCHEMA
+        || record.evidence.is_empty()
+        || record.evidence.len() > MAX_ATTESTATION_FIELD_BYTES
+    {
+        return Err(Closed::Malformed);
+    }
+    Ok(record)
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -308,6 +378,69 @@ mod tests {
         let path = dir.join(IDENTITY_RECORD);
         std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// `read_acceptance_record` requires an owner-only acceptance record with schema 1 and a nonempty evidence reference, read through one held slot across every change below; `admits` opens the gate only for the live pair the record names, and removing the record closes it.
+    #[test]
+    fn the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair() {
+        let home = tempfile::tempdir().unwrap();
+        let held = Mutex::new(None);
+        let gate_for = |memstore: &str| {
+            read_acceptance_record(home.path(), &held)
+                .and_then(|record| record.admits("kernel-1", memstore))
+        };
+        let gate = || gate_for("memstore-1");
+        assert_eq!(gate(), Err(Closed::Missing));
+        let write_acceptance = |value: serde_json::Value, mode: u32| {
+            let dir = home.path().join(ACTIVATION_DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = dir.join(ACCEPTANCE_RECORD);
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let record = |schema: u32, kernel: &str, evidence: &str| {
+            serde_json::json!({
+                "schema": schema,
+                "kernel_incarnation": kernel,
+                "memstore_incarnation": "memstore-1",
+                "evidence": evidence,
+            })
+        };
+        // A disclosure record beside it changes nothing.
+        write(home.path(), &self::record(), 0o600);
+        assert_eq!(gate(), Err(Closed::Missing));
+        write_acceptance(record(1, "kernel-1", "reviewed"), 0o640);
+        assert!(matches!(gate(), Err(Closed::Refused(_))));
+        write_acceptance(record(2, "kernel-1", "reviewed"), 0o600);
+        assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(record(1, "kernel-1", ""), 0o600);
+        assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(
+            record(1, "kernel-1", &"e".repeat(MAX_ATTESTATION_FIELD_BYTES + 1)),
+            0o600,
+        );
+        assert_eq!(gate(), Err(Closed::Malformed));
+        let mut unknown_field = record(1, "kernel-1", "reviewed");
+        unknown_field["approved"] = serde_json::json!(true);
+        write_acceptance(unknown_field, 0o600);
+        assert_eq!(gate(), Err(Closed::Malformed));
+        write_acceptance(
+            record(1, "kernel-1", &"e".repeat(MAX_ATTESTATION_FIELD_BYTES)),
+            0o600,
+        );
+        assert_eq!(gate(), Ok(()));
+        write_acceptance(record(1, "kernel-2", "reviewed"), 0o600);
+        assert_eq!(gate(), Err(Closed::IdentityMismatch("kernel incarnation")));
+        write_acceptance(record(1, "kernel-1", "reviewed"), 0o600);
+        assert_eq!(
+            gate_for("memstore-2"),
+            Err(Closed::IdentityMismatch("memory store incarnation"))
+        );
+        assert_eq!(gate(), Ok(()));
+        // Removing the held record closes the gate on the next read.
+        std::fs::remove_file(home.path().join(ACTIVATION_DIR).join(ACCEPTANCE_RECORD)).unwrap();
+        assert_eq!(gate(), Err(Closed::Missing));
     }
 
     /// A matching, attested record yields the approval bound to the live pair and the named credential's fingerprint; each identity term that differs closes the gate naming that term; a missing acknowledgement, an unknown credential, a group-readable record, and an absent record close it too.

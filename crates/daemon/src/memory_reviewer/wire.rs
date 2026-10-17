@@ -1,4 +1,4 @@
-//! The context application protocol's review operations: a bounded list of a project's completed review outcomes and the read of one selected proposal. Both are local reads over the bound route's project. An unbound root or an unready Kernel answers as every kernel route does; an uninstalled Memory Store or a root whose memories authority is not MODULE answers `disabled`, the terminal the lane's other methods use while they are not installed. A receipt lists from its row alone; a read goes through the same receipt-selected path every reader uses, so a proposal is visible only while its receipt is complete, its selection matches, and its review hold is live.
+//! The context application protocol's review operations: a bounded list of a project's completed review outcomes, the read of one selected proposal, and the explicit acceptance of one. List and read are local reads over the bound route's project; acceptance applies the selected proposal through the Kernel only while the owner's acceptance record admits it. An unbound root or an unready Kernel answers as every kernel route does; an uninstalled Memory Store or a root whose memories authority is not MODULE answers `disabled`, the terminal the lane's other methods use while they are not installed. A receipt lists from its row alone; a read goes through the same receipt-selected path every reader uses, so a proposal is visible only while its receipt is complete, its selection matches, and its review hold is live.
 
 use std::sync::Arc;
 
@@ -11,13 +11,21 @@ use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::blocking;
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 use host_runtime::RouteHandle;
-use memory_store::memory_reviewer_ledger::MAX_RECEIPT_PAGE;
+use memory_store::memory_reviewer_ledger::{MAX_RECEIPT_PAGE, MemoryReviewerReceipt};
 use memory_store::{MemoryStore, MemoryStoreError};
 
-use super::settlement::{ReadRefusal, ReviewOutcome, list_review_outcomes, read_selected_proposal};
+use super::settlement::{
+    AcceptRefusal, ReadRefusal, ReviewOutcome, accept_selected_proposal, list_review_outcomes,
+    read_selected_proposal,
+};
 
 pub(crate) const LIST: &str = "review.list";
 pub(crate) const READ: &str = "review.read";
+pub(crate) const ACCEPT: &str = "review.accept";
+/// Longest caller operation key `review.accept` admits.
+const MAX_OPERATION_KEY_BYTES: usize = 128;
+/// How long the acceptance gate may wait for a Kernel reader to learn the live incarnation.
+const GATE_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The list page a caller asks for; `limit` is capped at [`MAX_RECEIPT_PAGE`].
 #[derive(Debug, Deserialize)]
@@ -33,6 +41,14 @@ struct ListRequest {
 #[serde(deny_unknown_fields)]
 struct ReadRequest {
     causal_identity: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptRequest {
+    causal_identity: String,
+    operation_key: String,
+    target: kernel::ProposalTarget,
 }
 
 /// The stores and the ledger project one review operation reads under.
@@ -65,6 +81,20 @@ fn require_causal_identity(
     }
 }
 
+/// An operation key is 1 to [`MAX_OPERATION_KEY_BYTES`] visible ASCII bytes (0x21 to 0x7E); any other spelling is `invalid_params`.
+fn require_operation_key(key: &str) -> Result<(), PreparedOutcome> {
+    if !key.is_empty()
+        && key.len() <= MAX_OPERATION_KEY_BYTES
+        && key.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        Ok(())
+    } else {
+        Err(crate::invalid_params_error(format!(
+            "{ACCEPT} requires an operation_key of 1 to {MAX_OPERATION_KEY_BYTES} visible ASCII bytes"
+        )))
+    }
+}
+
 /// The wire spelling of why a selected proposal was not returned: a closed set, never the refusal's text.
 fn read_terminal(refusal: &ReadRefusal) -> &'static str {
     match refusal {
@@ -75,6 +105,18 @@ fn read_terminal(refusal: &ReadRefusal) -> &'static str {
         ReadRefusal::ReviewExpired => "review_expired",
         ReadRefusal::Dependency(_) => "dependency_refused",
         ReadRefusal::Store(_) => "store_unavailable",
+    }
+}
+
+/// The wire spelling of why an acceptance was neither applied nor replayed: a closed set, never the refusal's text.
+fn accept_terminal(refusal: &AcceptRefusal) -> &'static str {
+    match refusal {
+        AcceptRefusal::Receipt(refusal) => read_terminal(refusal),
+        AcceptRefusal::Kernel(kernel::AcceptanceRefusal::Unavailable) => "unavailable",
+        AcceptRefusal::Kernel(kernel::AcceptanceRefusal::Expired) => "review_expired",
+        AcceptRefusal::Kernel(kernel::AcceptanceRefusal::Changed) => "changed",
+        AcceptRefusal::Kernel(kernel::AcceptanceRefusal::Conflict) => "conflict",
+        AcceptRefusal::Kernel(kernel::AcceptanceRefusal::Invalid) => "invalid",
     }
 }
 
@@ -117,6 +159,34 @@ impl Bound {
             ledger: self.ledger,
             project,
         })
+    }
+
+    /// [`Self::review_scope`] with the Memory Store incarnation and `causal_identity`'s receipt copied from the authority's own read, so the store is released before the Kernel is entered.
+    fn review_scope_with_receipt(
+        self,
+        causal_identity: &str,
+    ) -> Result<(ReviewScope, String, Option<MemoryReviewerReceipt>), &'static str> {
+        let read = self.ledger.module_authority_with_memory_reviewer_receipt(
+            &self.root,
+            "memories",
+            causal_identity,
+        );
+        let (row, copied) = match read {
+            Ok(Some((row, incarnation, receipt))) => (Some(row), Some((incarnation, receipt))),
+            Ok(None) => (None, None),
+            Err(_) => return Err("store_unavailable"),
+        };
+        let project = authority_project(Ok(crate::memories_authority(row)))?;
+        let (incarnation, receipt) = copied.ok_or("disabled")?;
+        Ok((
+            ReviewScope {
+                kernel: self.kernel,
+                ledger: self.ledger,
+                project,
+            },
+            incarnation,
+            receipt,
+        ))
     }
 }
 
@@ -224,6 +294,80 @@ impl HandlerCore {
     }
 }
 
+impl HandlerCore {
+    pub(crate) async fn handle_review_accept(
+        &self,
+        channel: RouteHandle,
+        request: Value,
+    ) -> PreparedOutcome {
+        let (bound, parsed) = match self.bind_review::<AcceptRequest>(channel, request, ACCEPT) {
+            Ok(bound) => bound,
+            Err(outcome) => return outcome,
+        };
+        if let Err(outcome) =
+            require_causal_identity(ACCEPT, "causal_identity", &parsed.causal_identity)
+        {
+            return outcome;
+        }
+        if let Err(outcome) = require_operation_key(&parsed.operation_key) {
+            return outcome;
+        }
+        let home = self.memory_reviewer_home();
+        let held = Arc::clone(&self.memory_reviewer_acceptance_record);
+        let accepted = blocking(move || {
+            // The owner's acceptance record is its own gate: the disclosure record, open or not, admits no acceptance. It reads no store, so it is read first and a sound record's Memory Store inputs come from the authority's own read; the route's state is still answered before the gate.
+            let record = home
+                .as_deref()
+                .map(|home| super::activation::read_acceptance_record(home, &held));
+            let (scope, copied) = match &record {
+                Some(Ok(_)) => {
+                    let (scope, incarnation, receipt) =
+                        bound.review_scope_with_receipt(&parsed.causal_identity)?;
+                    (scope, Some((incarnation, receipt)))
+                }
+                _ => (bound.review_scope()?, None),
+            };
+            let record = record.ok_or("disabled")?.map_err(|_| "disabled")?;
+            let (memstore_incarnation, receipt) = copied.ok_or("disabled")?;
+            record
+                .admits_memory_store(&memstore_incarnation)
+                .map_err(|_| "disabled")?;
+            // The Kernel checks its live incarnation against the one the record names before it reads anything else, so an acceptance it answers ran under an open gate. A refusal reads the live Kernel incarnation, so a closed gate answers `disabled` before any other terminal.
+            accept_selected_proposal(
+                &scope.kernel,
+                receipt,
+                (record.kernel_incarnation(), &memstore_incarnation),
+                &parsed.causal_identity,
+                &parsed.operation_key,
+                &parsed.target,
+            )
+            .or_else(|refusal| {
+                let kernel_incarnation = scope
+                    .kernel
+                    .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::new(
+                        Some(std::time::Instant::now() + GATE_READ_BUDGET),
+                        Arc::default(),
+                    ))
+                    .map_err(|_| "store_unavailable")?;
+                record
+                    .admits(&kernel_incarnation, &memstore_incarnation)
+                    .map_err(|_| "disabled")?;
+                Err(accept_terminal(&refusal))
+            })
+        })
+        .await;
+        match accepted {
+            Ok(Ok(outcome)) => response(json!({
+                "kind": "settled",
+                "replayed": outcome.replayed,
+                "settlement": outcome.settlement,
+            })),
+            Ok(Err(code)) => terminal(code),
+            Err(_) => terminal("store_unavailable"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +393,52 @@ mod tests {
                 reason.as_str()
             );
         }
+    }
+
+    /// The `review.accept` terminals are exactly the literals its paragraph lists, plus the shared `disabled`.
+    #[test]
+    fn every_review_accept_terminal_is_a_documented_literal() {
+        let wire = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/host-wire-protocol.md"
+        ))
+        .unwrap();
+        let paragraph = wire
+            .lines()
+            .find(|line| line.starts_with("`review.accept` carries"))
+            .expect("the review.accept paragraph");
+        let listed = paragraph
+            .split_once("with `t` one of")
+            .expect("the terminal sentence")
+            .1;
+        let documented: std::collections::BTreeSet<&str> = listed
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|literal| !literal.contains(' ') && *literal != "review.read")
+            .collect();
+        let produced: std::collections::BTreeSet<&str> = [
+            AcceptRefusal::Receipt(ReadRefusal::NotSelected),
+            AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch),
+            AcceptRefusal::Receipt(ReadRefusal::SelectionMismatch),
+            AcceptRefusal::Receipt(ReadRefusal::Store(String::new())),
+        ]
+        .iter()
+        .chain(
+            [
+                kernel::AcceptanceRefusal::Unavailable,
+                kernel::AcceptanceRefusal::Expired,
+                kernel::AcceptanceRefusal::Changed,
+                kernel::AcceptanceRefusal::Conflict,
+                kernel::AcceptanceRefusal::Invalid,
+            ]
+            .map(AcceptRefusal::Kernel)
+            .iter(),
+        )
+        .map(accept_terminal)
+        .collect();
+        assert_eq!(documented, produced);
+        assert!(paragraph.contains(r#"{"kind":"terminal","terminal":"disabled"}"#));
     }
 
     #[test]

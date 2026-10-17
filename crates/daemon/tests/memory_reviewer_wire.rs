@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use support::kernel_daemon::{KernelDaemon, envelope};
 use support::memory_reviewer_publish::{
     PROJECT, abstain, activate_module_authority, begin_job, commit_memory_domain,
-    kernel_incarnation, now_ms, publish,
+    kernel_incarnation, now_ms, proposal, publish, publish_proposal,
 };
 
 #[tokio::test]
@@ -390,5 +390,264 @@ async fn a_published_proposal_reads_from_every_root_after_a_newer_root_binds() {
             root.display()
         );
         assert_eq!(read["causal_identity"], body["causal_identity"]);
+    }
+}
+
+/// Writes `name` under the owner-only activation directory of `home`, as the deployment owner does.
+fn write_owner_record(home: &std::path::Path, name: &str, value: &Value) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = home.join(daemon::memory_reviewer::activation::ACTIVATION_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// `review.accept` end to end: `disabled` until the owner's acceptance record names the live store pair, whatever the disclosure record says; then the selected create proposal settles through the Kernel into one decision, a second operation key replays the same settlement, the first key reused for another target conflicts, removing the record stops acceptance again, and bodies are strict.
+#[tokio::test]
+async fn review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record() {
+    let daemon = KernelDaemon::start().await;
+    let project = daemon.project().to_path_buf();
+    let store = daemon.memory_store().unwrap();
+    let kernel = daemon.store();
+    let digest = daemon.project_digest();
+    let generation = activate_module_authority(&store, &project);
+    commit_memory_domain(&kernel);
+    let scope = format!("project:{digest}");
+    kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "memory_reviewer-test".to_string(),
+                operation_key: "scope".to_string(),
+                request_digest: "1".repeat(64),
+                actor: "test".to_string(),
+                cause: "fixture".to_string(),
+            },
+            |envelope| {
+                // The project scope as the kernel routes materialize it, in their own domain.
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "project-scopes".to_string(),
+                    object_id: "domain-project-scopes".to_string(),
+                    name: "project scopes".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_id: "project-scopes".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                envelope.insert_scope(kernel::ScopeSpec {
+                    scope_id: scope.clone(),
+                    object_id: scope.clone(),
+                    source_id: scope.clone(),
+                    domain_id: "project-scopes".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                    terms: vec![kernel::ScopeTermSpec {
+                        dimension: kernel::Dimension::Project.as_str().to_string(),
+                        operator: "exact".to_string(),
+                        exact_value: Some(digest.clone()),
+                        ..kernel::ScopeTermSpec::default()
+                    }],
+                })?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    let kernel_incarnation = kernel_incarnation(&kernel);
+    let now = now_ms();
+    let begun = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
+    let memory_store::memory_reviewer_jobs::ReviewTarget::StagedSubject { candidate_id, .. } =
+        &begun.job.target
+    else {
+        panic!("{:?}", begun.job.target)
+    };
+    let created = publish_proposal(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        &begun,
+        now,
+        ReviewProposal {
+            target: kernel::ProposalTarget::StagedCandidate {
+                candidate_id: candidate_id.clone(),
+            },
+            ..proposal()
+        },
+    );
+    let target = serde_json::to_value(&created.target).unwrap();
+    let accept = |key: &str, target: &Value| {
+        envelope(
+            "review.accept",
+            &project,
+            json!({
+                "causal_identity": begun.job.causal_identity,
+                "operation_key": key,
+                "target": target,
+            }),
+        )
+    };
+    let disabled = json!({ "kind": "terminal", "terminal": "disabled" });
+
+    // A disclosure record admits no acceptance; only the acceptance record does.
+    write_owner_record(
+        daemon.data_home(),
+        daemon::memory_reviewer::activation::IDENTITY_RECORD,
+        &json!({ "schema": 1 }),
+    );
+    let tip = kernel.tip().unwrap();
+    assert_eq!(daemon.call(accept("caller-1", &target)).await, disabled);
+    let memstore_incarnation = store.memory_reviewer_store_incarnation().unwrap();
+    let record = |kernel_incarnation: &str| {
+        json!({
+            "schema": 1,
+            "kernel_incarnation": kernel_incarnation,
+            "memstore_incarnation": memstore_incarnation,
+            "evidence": "owner review of the actual-evidence record",
+        })
+    };
+    write_owner_record(
+        daemon.data_home(),
+        daemon::memory_reviewer::activation::ACCEPTANCE_RECORD,
+        &record("another-incarnation"),
+    );
+    assert_eq!(
+        daemon.call(accept("caller-1", &target)).await,
+        disabled,
+        "a record for another store pair is closed"
+    );
+    assert_eq!(kernel.tip().unwrap(), tip, "a closed gate writes nothing");
+    write_owner_record(
+        daemon.data_home(),
+        daemon::memory_reviewer::activation::ACCEPTANCE_RECORD,
+        &record(&kernel_incarnation),
+    );
+
+    let settled = daemon.call(accept("caller-1", &target)).await;
+    assert_eq!(
+        (&settled["kind"], &settled["replayed"]),
+        (&json!("settled"), &json!(false)),
+        "{settled}"
+    );
+    let settlement = &settled["settlement"];
+    assert_eq!(settlement["action"], json!("create"));
+    assert_eq!(settlement["target"], target);
+    assert_eq!(settlement["effect"]["kind"], json!("created"));
+    assert_eq!(
+        settlement["effect"]["admission"]["effective_maturity"],
+        json!("candidate")
+    );
+    let object_id = settlement["effect"]["object_id"].as_str().unwrap();
+    let (_, states) = kernel.object_states(&[object_id.to_string()]).unwrap();
+    let created_row = states[0].clone().unwrap();
+    assert_eq!(
+        (
+            created_row.object.object_kind.as_str(),
+            created_row.scope_id.as_deref()
+        ),
+        ("decision", Some(scope.as_str())),
+        "the decision is scoped to the bound project"
+    );
+
+    // Another key replays the same settlement, and so does the committing key; the first key for another target conflicts.
+    let replay = daemon.call(accept("caller-2", &target)).await;
+    assert_eq!(replay["replayed"], json!(true));
+    assert_eq!(&replay["settlement"], settlement);
+    let credential_shaped = daemon.call(accept("AKIAQ7RSTUVWXYZ23456", &target)).await;
+    assert_eq!(
+        (
+            &credential_shaped["replayed"],
+            &credential_shaped["settlement"]
+        ),
+        (&json!(true), settlement),
+        "a key shaped like a credential is an idempotency key like any other: {credential_shaped}"
+    );
+    let own = daemon.call(accept("caller-1", &target)).await;
+    assert_eq!(
+        (&own["replayed"], &own["settlement"]),
+        (&json!(true), settlement)
+    );
+    let other = json!({ "kind": "staged_candidate", "candidate_id": "another" });
+    assert_eq!(
+        daemon.call(accept("caller-1", &other)).await,
+        json!({ "kind": "terminal", "terminal": "conflict" })
+    );
+    assert_eq!(
+        daemon.call(accept("caller-3", &other)).await,
+        json!({ "kind": "terminal", "terminal": "changed" }),
+        "a target that is not the proposal's cannot redirect the settlement"
+    );
+
+    // An unknown job has no selection; a settled proposal replays after its review hold ends.
+    let unknown = envelope(
+        "review.accept",
+        &project,
+        json!({ "causal_identity": "b".repeat(64), "operation_key": "k".repeat(128), "target": target }),
+    );
+    assert_eq!(
+        daemon.call(unknown).await,
+        json!({ "kind": "terminal", "terminal": "not_selected" })
+    );
+    let review = kernel::MemoryReviewerHoldBinding {
+        project_digest: digest.clone(),
+        kernel_incarnation: kernel_incarnation.clone(),
+        memstore_incarnation: memstore_incarnation.clone(),
+        subject: settlement["proposal_id"].as_str().unwrap().to_string(),
+        generation: 1,
+    };
+    let hold = kernel.lookup_review_hold(&review, now).unwrap().unwrap();
+    kernel.release_review_hold(&hold.hold_id, &review).unwrap();
+    let after_hold = daemon.call(accept("caller-5", &target)).await;
+    assert_eq!(
+        (&after_hold["replayed"], &after_hold["settlement"]),
+        (&json!(true), settlement)
+    );
+
+    // Removing the record is the stop path: acceptance is disabled again, and the recorded decision stands.
+    std::fs::remove_file(
+        daemon
+            .data_home()
+            .join(daemon::memory_reviewer::activation::ACTIVATION_DIR)
+            .join(daemon::memory_reviewer::activation::ACCEPTANCE_RECORD),
+    )
+    .unwrap();
+    assert_eq!(daemon.call(accept("caller-4", &target)).await, disabled);
+    assert!(
+        kernel.object_states(&[object_id.to_string()]).unwrap().1[0]
+            .as_ref()
+            .unwrap()
+            .object
+            .invalidated_commit_seq
+            .is_none()
+    );
+
+    // Bodies are strict.
+    for body in [
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": target, "extra": 1 }),
+        json!({ "causal_identity": "z", "operation_key": "k", "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "", "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "with space", "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k" }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k".repeat(129), "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "ké", "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": { "kind": "staged_candidate", "candidate_id": "c", "extra": 1 } }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": target, "v": 1 }),
+    ] {
+        match daemon
+            .outcome(envelope("review.accept", &project, body.clone()))
+            .await
+        {
+            PreparedOutcome::Error { code, .. } => assert_eq!(code, "invalid_params", "{body}"),
+            other => panic!("{body}: {other:?}"),
+        }
     }
 }

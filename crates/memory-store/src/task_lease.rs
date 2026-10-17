@@ -222,9 +222,9 @@ pub(crate) fn redaction_error(error: MemoryStoreError) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
-/// Resolve the MODULE authority row a kind's protocol is fenced on. A MODULE
-/// row wins over stale twins under other context store UUIDs, matching
-/// `module_authority_for_project`. Returns `(generation, epoch)`.
+/// The generation and protocol epoch of the project's MODULE row for the kind's
+/// domain with the lowest context store UUID. `MemoryStore::module_authority_for_route`
+/// orders MODULE rows the same way, so a lease fence and a route lookup name one row.
 pub(crate) fn module_authority_tx(
     tx: &GuardedConn<'_>,
     kind: &TaskLeaseKind,

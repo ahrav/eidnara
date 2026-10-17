@@ -14,11 +14,11 @@ use kernel::{
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, MAX_RECEIPT_PAGE, MemoryReviewerAttempt, MemoryReviewerAttemptTerminal,
-    MemoryReviewerReceiptTerminal, ReceiptCompletion, ResultSelection,
+    MemoryReviewerReceipt, MemoryReviewerReceiptTerminal, ReceiptCompletion, ResultSelection,
 };
 use memory_store::{LeaseCompleteOutcome, MemoryStore};
 
-use super::broker::{EvidenceBroker, HeldUnder, RefusalCode, check_render};
+use super::broker::{EvidenceBroker, HeldUnder, QuestionTemplate, RefusalCode, check_render};
 use super::dependencies::{self, Revalidation, Verdict};
 
 /// Producer recorded on settled proposals.
@@ -859,6 +859,78 @@ pub fn list_review_outcomes(
     Ok(ReviewOutcomePage { outcomes, next })
 }
 
+/// What a reader or acceptor copies from the job's completed receipt before it enters the Kernel: the selected row's reference, the run binding the row and its holds are owned under, and the completion time the row's queue deadline is judged against.
+struct CopiedSelection {
+    reference: ReviewStagedReference,
+    run: MemoryReviewerHoldBinding,
+    selected_at: i64,
+}
+
+/// `copy_selected_receipt` copies the selection under the live Memory Store incarnation and completes all Memory Store reads before returning.
+fn copy_selected_receipt(
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+) -> Result<CopiedSelection, ReadRefusal> {
+    let receipt = lookup_receipt(ledger, project, causal_identity)?;
+    let live_memstore = ledger
+        .memory_reviewer_store_incarnation()
+        .map_err(|error| ReadRefusal::Store(error.to_string()))?;
+    copy_selection(receipt, &live_memstore, causal_identity)
+}
+
+fn lookup_receipt(
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+) -> Result<MemoryReviewerReceipt, ReadRefusal> {
+    ledger
+        .lookup_memory_reviewer_receipt(project, causal_identity)
+        .map_err(|error| ReadRefusal::Store(error.to_string()))?
+        .ok_or(ReadRefusal::NotSelected)
+}
+
+/// `receipt` must be complete with a selection at its own generation and provisional identity, under Memory Store incarnation `live_memstore`.
+fn copy_selection(
+    receipt: MemoryReviewerReceipt,
+    live_memstore: &str,
+    causal_identity: &str,
+) -> Result<CopiedSelection, ReadRefusal> {
+    let (selected_generation, selection, selected_at) =
+        match (receipt.terminal, receipt.selected, receipt.completed_at_ms) {
+            (
+                Some(MemoryReviewerReceiptTerminal::Complete),
+                Some((generation, selection)),
+                Some(at),
+            ) => (generation, selection, at),
+            _ => return Err(ReadRefusal::NotSelected),
+        };
+    if receipt.database_incarnation_id != live_memstore {
+        return Err(ReadRefusal::IncarnationMismatch);
+    }
+    if selected_generation != receipt.generation
+        || selection.candidate_id
+            != provisional_result_identity(causal_identity, receipt.generation).candidate_id
+    {
+        return Err(ReadRefusal::SelectionMismatch);
+    }
+    Ok(CopiedSelection {
+        reference: ReviewStagedReference {
+            database_incarnation_id: receipt.kernel_incarnation_id.clone(),
+            candidate_id: selection.candidate_id,
+            payload_digest: selection.payload_digest,
+        },
+        run: MemoryReviewerHoldBinding {
+            project_digest: selection.project_digest,
+            kernel_incarnation: receipt.kernel_incarnation_id,
+            memstore_incarnation: receipt.database_incarnation_id,
+            subject: causal_identity.to_string(),
+            generation: receipt.generation,
+        },
+        selected_at,
+    })
+}
+
 /// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. The row's queue deadline is judged against the receipt's completion time, which the Memory Store fenced against that same deadline, so a result selected while its queue was live stays readable afterward exactly as long as its review hold is live and every disclosed input still passes local policy.
 pub fn read_selected_proposal(
     store: &KernelStore,
@@ -898,47 +970,17 @@ fn read_selected_proposal_inner(
     now: i64,
     after_hold_lookup: Option<&dyn Fn()>,
 ) -> Result<SelectedProposal, ReadRefusal> {
-    let receipt = ledger
-        .lookup_memory_reviewer_receipt(project, causal_identity)
-        .map_err(|error| ReadRefusal::Store(error.to_string()))?
-        .ok_or(ReadRefusal::NotSelected)?;
+    let copied = copy_selected_receipt(ledger, project, causal_identity)?;
     let attempts = ledger
         .list_memory_reviewer_attempts(project, causal_identity)
         .map_err(|error| ReadRefusal::Store(error.to_string()))?;
-    let live_memstore = ledger
-        .memory_reviewer_store_incarnation()
-        .map_err(|error| ReadRefusal::Store(error.to_string()))?;
     // The Memory Store is released; everything below is the Kernel's.
-    let (selected_generation, selection, selected_at) =
-        match (receipt.terminal, receipt.selected, receipt.completed_at_ms) {
-            (
-                Some(MemoryReviewerReceiptTerminal::Complete),
-                Some((generation, selection)),
-                Some(at),
-            ) => (generation, selection, at),
-            _ => return Err(ReadRefusal::NotSelected),
-        };
-    if receipt.database_incarnation_id != live_memstore {
-        return Err(ReadRefusal::IncarnationMismatch);
-    }
-    if selected_generation != receipt.generation
-        || selection.candidate_id
-            != provisional_result_identity(causal_identity, receipt.generation).candidate_id
-    {
-        return Err(ReadRefusal::SelectionMismatch);
-    }
-    let reference = ReviewStagedReference {
-        database_incarnation_id: receipt.kernel_incarnation_id.clone(),
-        candidate_id: selection.candidate_id.clone(),
-        payload_digest: selection.payload_digest.clone(),
-    };
-    let run = MemoryReviewerHoldBinding {
-        project_digest: selection.project_digest.clone(),
-        kernel_incarnation: receipt.kernel_incarnation_id.clone(),
-        memstore_incarnation: receipt.database_incarnation_id.clone(),
-        subject: causal_identity.to_string(),
-        generation: receipt.generation,
-    };
+    let CopiedSelection {
+        reference,
+        run,
+        selected_at,
+    } = copied;
+    let selection_candidate = reference.candidate_id.clone();
     let refused = |error| match error {
         ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
             ReadRefusal::IncarnationMismatch
@@ -969,7 +1011,7 @@ fn read_selected_proposal_inner(
         return Err(ReadRefusal::Kernel(ReviewReadRefusal::DecodeRefused));
     };
     let review = MemoryReviewerHoldBinding {
-        subject: selection.candidate_id.clone(),
+        subject: selection_candidate,
         ..run.clone()
     };
     let hold = store
@@ -1039,4 +1081,121 @@ fn read_selected_proposal_inner(
         proposal: *proposal,
         review_expires_at: hold.expires_at,
     })
+}
+
+/// Producer of the caller intent an acceptance commits under; the caller's own key is scoped under its project and job.
+const ACCEPTANCE_PRODUCER: &str = "eidnara-daemon/review-accept";
+
+/// Why an acceptance was neither applied nor replayed: the receipt refused as it refuses a read, or the Kernel refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptRefusal {
+    Receipt(ReadRefusal),
+    Kernel(kernel::AcceptanceRefusal),
+}
+
+/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. The caller intent's identity is the run's project digest, the job's causal identity, and the digest of `operation_key`; reusing the key for a different target causes a conflict.
+pub fn accept_selected_proposal(
+    store: &KernelStore,
+    receipt: Option<MemoryReviewerReceipt>,
+    expected: (&str, &str),
+    causal_identity: &str,
+    operation_key: &str,
+    target: &kernel::ProposalTarget,
+) -> Result<kernel::AcceptanceOutcome, AcceptRefusal> {
+    let (live_kernel, live_memstore) = expected;
+    let CopiedSelection {
+        reference,
+        run,
+        selected_at,
+    } = receipt
+        .ok_or(ReadRefusal::NotSelected)
+        .and_then(|receipt| copy_selection(receipt, live_memstore, causal_identity))
+        .map_err(AcceptRefusal::Receipt)?;
+    if run.kernel_incarnation != live_kernel {
+        return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
+    }
+    let scope_id = format!("project:{}", run.project_digest);
+    let acceptance = kernel::ProposalAcceptance {
+        intent: caller_intent(&run, causal_identity, operation_key, target),
+        run,
+        proposal: reference,
+        selected_at,
+        target: target.clone(),
+        question_template_revision: QuestionTemplate::ExtractedFacts.revision(),
+        scope_id: Some(scope_id),
+    };
+    store
+        .accept_review_proposal(&acceptance)
+        .map_err(|error| match error {
+            kernel::AcceptanceError::Refused(refusal) => AcceptRefusal::Kernel(refusal),
+            kernel::AcceptanceError::Store(error) => {
+                AcceptRefusal::Receipt(ReadRefusal::Store(error.to_string()))
+            }
+        })
+}
+
+/// The caller's commit intent: its identity is hex text only, the run's project digest, the job's causal identity, and the SHA-256 of the caller's key, since the Kernel refuses an identity in which its secret scanner finds a match; the request digest covers the causal identity and target.
+fn caller_intent(
+    run: &MemoryReviewerHoldBinding,
+    causal_identity: &str,
+    operation_key: &str,
+    target: &kernel::ProposalTarget,
+) -> kernel::CommitIntent {
+    use sha2::Digest;
+    let request = serde_json::json!({
+        "causal_identity": causal_identity,
+        "target": target,
+    })
+    .to_string();
+    kernel::CommitIntent {
+        producer: ACCEPTANCE_PRODUCER.to_string(),
+        operation_key: format!(
+            "{}#{causal_identity}#{:x}",
+            run.project_digest,
+            sha2::Sha256::digest(operation_key.as_bytes())
+        ),
+        request_digest: format!("{:x}", sha2::Sha256::digest(request.as_bytes())),
+        actor: "memory-reviewer".to_string(),
+        cause: "explicit acceptance".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The caller intent's identity carries the run's project digest, the causal identity, and the key's digest as hex, whatever bytes the key holds, so a key or project the Kernel's secret scanner would match cannot make it `invalid`; two keys yield two identities and one key yields one.
+    #[test]
+    fn the_caller_intent_identity_is_hex_whatever_the_key_and_project_hold() {
+        let run = MemoryReviewerHoldBinding {
+            project_digest: "a".repeat(64),
+            kernel_incarnation: "b".repeat(32),
+            memstore_incarnation: "c".repeat(32),
+            subject: "d".repeat(64),
+            generation: 1,
+        };
+        let target = kernel::ProposalTarget::StagedCandidate {
+            candidate_id: "cand-1".to_string(),
+        };
+        let identity = |key: &str| caller_intent(&run, &run.subject, key, &target).operation_key;
+        let hex = |text: &str| text.bytes().all(|byte| byte.is_ascii_hexdigit());
+        for key in ["caller-1", "AKIAQ7RSTUVWXYZ23456", &"k".repeat(128)] {
+            let identity = identity(key);
+            let parts: Vec<&str> = identity.split('#').collect();
+            assert_eq!(parts.len(), 3, "{identity}");
+            assert_eq!(parts[0], run.project_digest);
+            assert_eq!(parts[1], run.subject);
+            assert!(parts[2].len() == 64 && hex(parts[2]), "{identity}");
+            assert!(!identity.contains(key), "{identity}");
+        }
+        assert_eq!(identity("caller-1"), identity("caller-1"));
+        assert_ne!(identity("caller-1"), identity("caller-2"));
+        let other_target = kernel::ProposalTarget::StagedCandidate {
+            candidate_id: "cand-2".to_string(),
+        };
+        assert_ne!(
+            caller_intent(&run, &run.subject, "caller-1", &target).request_digest,
+            caller_intent(&run, &run.subject, "caller-1", &other_target).request_digest
+        );
+    }
 }

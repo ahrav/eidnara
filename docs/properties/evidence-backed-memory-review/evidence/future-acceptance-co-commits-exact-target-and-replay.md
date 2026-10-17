@@ -17,8 +17,9 @@ reserved-producer key from the project digest, proposal id, payload digest,
 generation, and both incarnations, each length-prefixed, and the request digest
 from the key; it refuses a reference whose Kernel incarnation is not the run's.
 `accept_review_proposal` maps a malformed caller intent to `invalid` through
-`intent_refusal`, then reads the caller's receipt and the settlement receipt
-under the writer lock before `commit_intent_with_writer` runs `apply`. A caller
+`intent_refusal`, then under the writer lock checks the live Kernel incarnation
+against the run's, reads the caller's receipt and the settlement receipt, and
+lets `commit_intent_with_writer` run `apply`. A caller
 receipt replays only when it shares its `commit_seq` with the settlement
 receipt, and the replay answers the settlement receipt; any other caller
 receipt conflicts. A refusal inside `apply` aborts the commit. `apply` reads the

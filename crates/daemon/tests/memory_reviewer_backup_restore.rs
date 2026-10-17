@@ -8,7 +8,9 @@ use std::sync::Arc;
 use daemon::memory_reviewer::activation::{
     Closed, IDENTITY_SCHEMA, LiveIdentity, RuntimeIdentityRecord, evaluate,
 };
-use daemon::memory_reviewer::settlement::{ReadRefusal, read_selected_proposal};
+use daemon::memory_reviewer::settlement::{
+    AcceptRefusal, ReadRefusal, accept_selected_proposal, read_selected_proposal,
+};
 use daemon::memory_reviewer::steps::STEP_VERSION;
 use kernel::{KernelError, KernelStore};
 use memory_store::MemoryStore;
@@ -236,7 +238,7 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
         assert!(evaluate(&owner_record, &live(&kernel, &store)).is_ok());
     }
 
-    // Backup Memory Store beside a replaced Kernel: the receipt binds the old Kernel, so the read, a resumed receipt, and the gate all refuse; the row is exactly as backed up.
+    // The restored receipt binds the original Kernel incarnation, so reads and acceptance with the replacement Kernel fail with IncarnationMismatch.
     let replaced_kernel = root.path().join("replaced-kernel");
     private_dir(&replaced_kernel);
     {
@@ -247,6 +249,26 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
             read_selected_proposal(&kernel, &store, PROJECT, &identity, now + 3),
             Err(ReadRefusal::IncarnationMismatch)
         );
+        let receipt = store
+            .lookup_memory_reviewer_receipt(PROJECT, &identity)
+            .unwrap()
+            .unwrap();
+        let tip = kernel.tip().unwrap();
+        assert_eq!(
+            accept_selected_proposal(
+                &kernel,
+                Some(receipt.clone()),
+                (&kernel_incarnation(&kernel), &store_id),
+                &identity,
+                "caller-1",
+                &kernel::ProposalTarget::StagedCandidate {
+                    candidate_id: "cand-1".to_string(),
+                },
+            ),
+            Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch)),
+            "a receipt of the old Kernel is refused under a record for the live pair"
+        );
+        assert_eq!(kernel.tip().unwrap(), tip);
         let resumed = store.begin_memory_reviewer_receipt(
             PROJECT,
             &identity,
@@ -267,10 +289,6 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
             evaluate(&owner_record, &live(&kernel, &store)),
             Err(Closed::IdentityMismatch("kernel incarnation"))
         );
-        let receipt = store
-            .lookup_memory_reviewer_receipt(PROJECT, &identity)
-            .unwrap()
-            .unwrap();
         assert_eq!(receipt.kernel_incarnation_id, kernel_id);
     }
 

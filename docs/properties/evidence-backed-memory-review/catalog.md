@@ -50,6 +50,7 @@ Every slug the seven residual tickets own, plus the semantic-evidence slug #592 
 | `material-claims-require-exact-cited-byte-support` | #592 | yes |
 | `future-acceptance-co-commits-exact-target-and-replay` | #597 | yes |
 | `future-correction-keeps-kernel-maturity-and-retrieval` | #597 | yes |
+| `future-acceptance-needs-version-and-evidence-gates` | #597 | yes |
 
 ## Records
 
@@ -67,7 +68,7 @@ Confidence: high - [evidence](evidence/production-classes-reach-policy-eligible-
 Existing check: `crates/daemon/tests/memory_reviewer_broker.rs::canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it` covers resolution; `a_resolved_canonical_or_promoted_subject_still_refuses_the_remote_destination` covers the Remote refusal; `crates/daemon/tests/memory_reviewer_worker.rs::production_classes_are_refused_the_remote_model_at_selection_and_in_the_coordinator` covers the production refusal at selection and in the coordinator; `fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting_their_decision` covers the fixture positive path; `crates/daemon/tests/memory_reviewer_selection.rs::the_production_classes_are_walked_in_order_and_a_cursor_resumes_in_the_second_class` covers the class order; `crates/daemon/src/lib.rs::memory_reviewer_review_selection_is_not_scheduled_while_production_selection_is_closed` covers the scheduler gate
 Impact: A positive result claimed without this witness would report scripted Git-only coverage as production eligibility
 Open questions:
-- Which decision bytes may reach the Remote destination, and which Kernel-owned proof binds them to the decision's id, revision, and scope (needs human input)
+- Which decision bytes may reach the Remote destination, and which Kernel-owned proof binds them to the decision's id, revision, and scope: the owner's current choice is none, so the witness is not constructed while that choice stands
 
 ### canonical-resolution-refuses-changed-owner-and-target
 
@@ -376,7 +377,7 @@ Open questions:
 ### future-acceptance-co-commits-exact-target-and-replay
 
 Type: safety
-Reachability: test-only - `KernelStore::accept_review_proposal` has no daemon caller in this change; only `crates/kernel/tests/kernel_review_acceptance.rs` constructs an acceptance
+Reachability: explicit-config-only - `review.accept` reaches `KernelStore::accept_review_proposal` only while the owner's `acceptance.json` names the live Memory Store incarnation and the Kernel incarnation the receipt is bound to; the Kernel refuses `unavailable` before any read unless that incarnation is live, so a record for a replaced Kernel applies nothing. No record ships
 Status: active
 Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` accepts retain, no-change, create, revise, and retire proposals, including the retirement of an approval with a dependent; races two acceptances of one proposal; replays under a second caller key, after the review hold is released, after the row is deleted and the support purged, after a reopen, and at a selection past the queue deadline; reuses a caller key with other input and for another proposal; and refuses a moved target for each memory action, a quarantined owner, a caller target that differs from the proposal's, another project's run, a released hold, a selection at the queue deadline or before sealing, deleted evidence, evidence reclassified `Secret`, a retired union owner, a deleted subject, and a create scope that is missing or names another project; refuses a union read under another question template revision, a capture member that is undisclosed, not a MemoryReviewer capture, or past its acquisition reference, a caller key whose receipt records other work, including a result that decodes as a settlement, a reference naming another Kernel incarnation than its run, and a malformed caller intent
 Guarantee: An acceptance either applies the selected proposal's action at its exact target and records one proposal-level settlement in the same Kernel envelope, or writes nothing; a settled proposal answers that settlement under any caller key before any expirable state is read, and a reused caller key with other input conflicts.
@@ -392,7 +393,7 @@ Open questions:
 ### future-correction-keeps-kernel-maturity-and-retrieval
 
 Type: safety
-Reachability: test-only - as `future-acceptance-co-commits-exact-target-and-replay`
+Reachability: explicit-config-only - as `future-acceptance-co-commits-exact-target-and-replay`
 Status: active
 Exercised: yes - `crates/kernel/tests/kernel_review_acceptance.rs` revises a verified, auto-served decision, refuses a revise of an approval and a second revise of a superseded target, creates a decision from a staged subject, and tightens a created and a revised decision's support to `Secret` after acceptance
 Guarantee: A decision an accepted create or revise writes is admitted on its own as `ModelInference` with `MemoryClassifierInference` taint, inherits no maturity, is served to explicit search and not to automatic surfaces while it is a candidate, serves no lower than the strictest class its cited support reads today, and a revise supersedes its predecessor through a fresh successor that keeps domain and source identity at the next source revision.
@@ -403,6 +404,22 @@ Confidence: high - [evidence](evidence/future-correction-keeps-kernel-maturity-a
 Existing check: `crates/kernel/tests/kernel_review_acceptance.rs` - `create_inserts_one_decision_admitted_as_model_inference_with_durable_support`, `revise_writes_a_fresh_successor_that_inherits_no_maturity_and_supersedes_the_target`, `an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today`
 Impact: A revised memory that inherited its predecessor's maturity, or folded into a survivor, would grant model inference the authority of the decision it replaced; a decision served below its support's current class would disclose model text written from evidence later found secret
 Open questions: None.
+
+### future-acceptance-needs-version-and-evidence-gates
+
+Type: safety
+Reachability: explicit-config-only - `review.accept` is routed in every daemon; it applies anything only under the owner's `acceptance.json`
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_wire.rs::review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` accepts under no record beside a disclosure record (one the acceptance path never reads), under a record for another pair, under the live pair, after the review hold ends, and after the record is removed, asserting no tip move while closed; `memory_reviewer::activation` unit tests cover absent, group-readable, other-schema, evidence-less, other-Kernel, and other-Memory-Store records
+Guarantee: An explicit acceptance applies or replays a settlement only while an owner-only acceptance record of its schema, naming a reviewed evidence reference, binds the live Kernel and Memory Store incarnations; a disclosure record, open or not, admits no acceptance, and removing the acceptance record stops acceptance at once.
+Check: `always` - every `review.accept` answered while the acceptance record (`read_acceptance_record`, `AcceptanceRecord::admits`) refuses is `{"kind":"terminal","terminal":"disabled"}` and moves no Kernel tip; asserted on every request because application authority must never follow from disclosure approval, completion, or caller selection
+Fault/timing angle: the record is removed or the stores are replaced between two acceptances; a request already past the gate when the record is removed completes
+Required faults and enabling state: a disclosure record with no acceptance record; an acceptance record naming another Kernel incarnation; record removal after a settlement
+Confidence: high - [evidence](evidence/future-acceptance-needs-version-and-evidence-gates.md). Verified the gate is read on every request before the receipt is copied, and `every_review_accept_terminal_is_a_documented_literal` pins the terminal set to wire document 7.8
+Existing check: `crates/daemon/tests/memory_reviewer_wire.rs::review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record`; `crates/daemon/src/memory_reviewer/activation.rs::tests::the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair`; `crates/daemon/src/memory_reviewer/wire.rs::tests::every_review_accept_terminal_is_a_documented_literal`
+Impact: Acceptance opened by a disclosure approval would let model proposals write canonical memory without the owner's evidence review
+Open questions:
+- Which actual-evidence record the owner reviews before writing `acceptance.json`, once #596's U4 evidence exists (needs human input)
 
 ## Relationship map
 
@@ -442,6 +459,8 @@ The two application records share one envelope: `future-acceptance-co-commits-ex
 is the envelope's all-or-nothing contract, and `future-correction-keeps-kernel-maturity-and-retrieval`
 is what a create or revise inside it may write. Both consume the selected row and
 policy union that `uncited-owner-lineage-remains-read-authority` revalidates for a reader.
+`future-acceptance-needs-version-and-evidence-gates` stands in front of that envelope:
+`review.accept` enters it only under the owner's acceptance record for the live pair.
 
 `observer-route-does-not-change-background-rosters` sits upstream of every
 worker record: the participating view decides which projects the worker sees

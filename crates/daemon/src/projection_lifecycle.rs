@@ -1486,6 +1486,15 @@ pub(crate) fn read_owner_only_record(dir: &Path, record: &str) -> Result<RecordR
     read_owner_only_file(dir, &dir.join(record), None)
 }
 
+/// [`read_owner_only_record`] that keeps the record open in `held` while its path still names the same unchanged inode, so a repeat read checks the path and reads the open file instead of reopening it.
+pub(crate) fn read_owner_only_record_held(
+    dir: &Path,
+    record: &str,
+    held: &mut Option<HeldRecord>,
+) -> Result<RecordRead, Unreadable> {
+    read_owner_only_file(dir, &dir.join(record), Some(held))
+}
+
 /// [`read_owner_only_record`] for the record path `record` under `dir`.
 fn read_owner_only_file(
     dir: &Path,
