@@ -291,6 +291,8 @@ pub struct Envelope<'tx> {
     pub(super) causality_objects: HashMap<String, String>,
     /// Capture evidence id to the `localfileobj:` row this envelope wrote for it.
     pub(super) local_file_objects: HashMap<String, String>,
+    /// Source id to the `memreview-decision-` row an accepted proposal wrote for it in this envelope.
+    pub(super) accepted_decisions: HashMap<String, String>,
     /// The latest receipt result this envelope redacted, keyed by its original text.
     receipt_redaction: Option<(String, RedactedField)>,
     poisoned: Option<KernelError>,
@@ -854,6 +856,7 @@ impl KernelStore {
                     descriptor_objects: HashMap::new(),
                     causality_objects: HashMap::new(),
                     local_file_objects: HashMap::new(),
+                    accepted_decisions: HashMap::new(),
                     receipt_redaction: None,
                     poisoned: None,
                 },
@@ -1359,6 +1362,7 @@ fn commit_prepared_with_writer(
         descriptor_objects: HashMap::new(),
         causality_objects: HashMap::new(),
         local_file_objects: HashMap::new(),
+        accepted_decisions: HashMap::new(),
         receipt_redaction: None,
         poisoned: None,
     };
@@ -1369,6 +1373,7 @@ fn commit_prepared_with_writer(
     envelope.check_descriptor_ownership()?;
     envelope.check_causality_ownership()?;
     envelope.check_local_file_ownership()?;
+    envelope.check_accepted_decision_ownership()?;
     let unconditional_changes = envelope
         .changes
         .iter()

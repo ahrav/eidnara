@@ -126,8 +126,8 @@ pub use retention::{
     STAGING_DELETE_BATCH_RUNS, STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState,
 };
 pub use review_acceptance::{
-    AcceptanceError, AcceptanceOutcome, AcceptanceRefusal, ProposalAcceptance, SETTLEMENT_PRODUCER,
-    SETTLEMENT_VERSION, Settlement, SettlementEffect,
+    ACCEPTED_SOURCE_KIND, AcceptanceError, AcceptanceOutcome, AcceptanceRefusal, AdmittedState,
+    ProposalAcceptance, SETTLEMENT_PRODUCER, SETTLEMENT_VERSION, Settlement, SettlementEffect,
 };
 pub use review_staging::{
     ByteRange, CanonicalTarget, EvidenceReference, ExtractedFact, MAX_FACT_SPANS,

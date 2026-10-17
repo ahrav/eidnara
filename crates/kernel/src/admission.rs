@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "a244dde51610bc6088b9a1ff016c1d2bc5065d607da51944f8b7d1d472a12dbf";
+    "097ed31de1a3f3a49b83de0cedf83e7a1b9850f1cfce8d33aa4fa777d7ca0d17";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -2840,14 +2840,18 @@ const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
 /// same reason as [`EVIDENCE_SENSITIVITY_COLUMN`]: a replay can tighten it after
 /// the citing row was written, and the citing row is immutable.
 const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 33;
+/// The strictest class among the evidence a decision's support events cite. A
+/// replay can tighten that evidence after the decision and its events were
+/// written, so serving reads the class live.
+const SUPPORT_EVIDENCE_SENSITIVITY_COLUMN: usize = 34;
 /// The classes of the observation that triggered the object's own admission and
 /// of the evidence backing that observation, then the same pair for the lineage
 /// admission. The admission folded them once when it was decided; serving folds
 /// what they read today.
-const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [34, 35, 36, 37];
-const OWN_ADMISSION_DECISION_ID_COLUMN: usize = 38;
+const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [35, 36, 37, 38];
+const OWN_ADMISSION_DECISION_ID_COLUMN: usize = 39;
 /// Groups the history rows of one object without reading its identifier text.
-const OBJECT_ROWID_COLUMN: usize = 39;
+const OBJECT_ROWID_COLUMN: usize = 40;
 const LAST_SERVED_COLUMN: usize = OBJECT_ROWID_COLUMN;
 
 /// A text column's bytes borrowed from the row, `None` for SQL NULL.
@@ -3422,6 +3426,24 @@ fn trigger_evidence_sensitivity_sql(trigger_column: &str) -> String {
     )
 }
 
+/// The `event_kind` of a decision event that cites one row of the decision's supporting evidence.
+pub(crate) const SUPPORT_EVENT_KIND: &str = "memory_reviewer_support";
+
+/// Support events are bounded by `:governing_as_of`; evidence ranks use live `evidence_meta.sensitivity_class` values.
+fn strictest_support_evidence_sql(decision_column: &str) -> String {
+    let rank = sensitivity_rank_sql("se.sensitivity_class");
+    format!(
+        "CASE WHEN {decision_column} IS NULL THEN NULL
+              ELSE (SELECT se.evidence_id FROM decision_events de
+                    JOIN evidence_meta se ON se.evidence_id=de.evidence_id
+                    WHERE de.decision_id={decision_column}
+                      AND de.event_kind='{SUPPORT_EVENT_KIND}'
+                      AND de.commit_seq<=:governing_as_of
+                    ORDER BY {rank} DESC
+                    LIMIT 1) END"
+    )
+}
+
 /// The served-class query text for one selection shape; the bound value is not part of the text. It embeds only
 /// constants, so each shape is identical on every call.
 fn served_classes_sql(selection: ServedSelection<'_>) -> String {
@@ -3439,6 +3461,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
     let d_trigger_evidence = trigger_evidence_sensitivity_sql("d.trigger_object_id");
     let s_trigger = trigger_sensitivity_sql("s.trigger_object_id");
     let s_trigger_evidence = trigger_evidence_sensitivity_sql("s.trigger_object_id");
+    let support_evidence = strictest_support_evidence_sql("dec.decision_id");
     // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`.
     // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too.
     let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
@@ -3500,6 +3523,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
                          ELSE (SELECT cited.sensitivity_class FROM evidence_meta cited
                                 WHERE cited.evidence_id={cited_expr})
                          END AS cited_evidence_sensitivity_class,
+                    sup.sensitivity_class AS support_evidence_sensitivity_class,
                     {d_trigger} AS d_trigger_sensitivity_class,
                     {d_trigger_evidence} AS d_trigger_evidence_sensitivity_class,
                     {s_trigger} AS s_trigger_sensitivity_class,
@@ -3509,6 +3533,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
              FROM object_registry o
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
              {object_joins}
+             LEFT JOIN evidence_meta sup ON sup.evidence_id={support_evidence}
              LEFT JOIN admission_decisions s
                ON s.admission_decision_id=CASE WHEN {any_lineage_decision} THEN {lineage} END
              LEFT JOIN admission_decisions lh
@@ -3731,6 +3756,9 @@ impl LatestRow {
         // cites reads today, however it was classified when written.
         if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
             shared = shared.restrictive(Sensitivity::from_stored(cited_class));
+        }
+        if let Some(support_class) = text_column(row, SUPPORT_EVIDENCE_SENSITIVITY_COLUMN)? {
+            shared = shared.restrictive(Sensitivity::from_stored(support_class));
         }
         // Nor lower than the observation that admitted it and the evidence
         // behind that observation read today.
@@ -3988,6 +4016,10 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
         (
             CITED_EVIDENCE_SENSITIVITY_COLUMN,
             "cited_evidence_sensitivity_class",
+        ),
+        (
+            SUPPORT_EVIDENCE_SENSITIVITY_COLUMN,
+            "support_evidence_sensitivity_class",
         ),
         (
             TRIGGER_SENSITIVITY_COLUMNS[0],
@@ -5678,6 +5710,7 @@ mod tests {
             "enum ServedSelection<",
             "fn trigger_sensitivity_sql(",
             "fn trigger_evidence_sensitivity_sql(",
+            "fn strictest_support_evidence_sql(",
             "fn served_classes_selected(",
             "fn class_differs<",
             "fn stored_class<",
@@ -6239,12 +6272,38 @@ mod tests {
         }
     }
 
-    fn served_read_steps(own: usize, lineage: usize) -> usize {
+    fn served_read_steps(own: usize, lineage: usize, support: usize) -> usize {
         let directory = tempfile::tempdir().unwrap();
         let (store, commit_seq) = store_with_one_decision(directory.path());
         drop(store);
         let connection =
             rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 WHERE {support}>0 UNION ALL SELECT i+1 FROM n WHERE i<{support})
+                 INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 )
+                 SELECT 'support-object-'||i,'evidence','memory','fixture','src/support-'||i,1,
+                        {commit_seq},'normal'
+                 FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 1 WHERE {support}>0 UNION ALL SELECT i+1 FROM n WHERE i<{support})
+                 INSERT INTO evidence_meta(
+                     evidence_id,object_id,artifact_reference,artifact_digest,byte_length,media_type,
+                     retention_class,provider_egress_class,redaction_metadata,created_commit_seq,sensitivity_class
+                 )
+                 SELECT 'support-'||i,'support-object-'||i,'support-'||i,'d',1,'text/plain','canonical',
+                        'remote_allowed',X'',{commit_seq},'normal'
+                 FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 1 WHERE {support}>0 UNION ALL SELECT i+1 FROM n WHERE i<{support})
+                 INSERT INTO decision_events(
+                     decision_id,event_ordinal,commit_seq,event_kind,event_payload,evidence_id,recorded_at
+                 )
+                 SELECT 'decision-one',i,{commit_seq},'{SUPPORT_EVENT_KIND}',X'','support-'||i,1
+                 FROM n;"
+            ))
+            .unwrap();
         for (prefix, subject, count) in [("own", "'one'", own), ("lineage", "NULL", lineage)] {
             connection
                 .execute_batch(&format!(
@@ -6290,12 +6349,26 @@ mod tests {
 
     #[test]
     fn lineage_history_cost_does_not_scale_with_own_history() {
-        let lineage_cost = |own: usize| served_read_steps(own, 200) - served_read_steps(own, 0);
+        let lineage_cost =
+            |own: usize| served_read_steps(own, 200, 0) - served_read_steps(own, 0, 0);
         let short = lineage_cost(0);
         let long = lineage_cost(40);
         assert!(
             long <= 2 * short,
             "200 lineage rows cost {short} VM steps beside one own row and {long} beside 41"
+        );
+    }
+
+    #[test]
+    fn support_citation_cost_does_not_scale_with_own_history() {
+        let support_cost =
+            |own: usize| served_read_steps(own, 0, 200) - served_read_steps(own, 0, 0);
+        let short = support_cost(0);
+        let long = support_cost(40);
+        assert!(short > 0, "the support citations were never read");
+        assert!(
+            long <= 2 * short,
+            "200 support citations cost {short} VM steps beside one own row and {long} beside 41"
         );
     }
 
