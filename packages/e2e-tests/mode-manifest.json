@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure; tier `pi-rust` runs Pi against the rust-mode direct-host fixture, in process under `createAgentSession` and as the Pi RPC process, and skips itself when either tier's prerequisites are unavailable, under the same `EIDNARA_E2E_REQUIRE_PI=1` rule. An entry whose every test is skipped carries `quarantined` with the reason; `validate-mode-manifest` refuses a fully skipped file without it and a marked file with live tests, and lists the quarantines it validated.",
+    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-rust` runs Pi against the rust-mode direct-host fixture, in process under `createAgentSession` and as the Pi RPC process under Node, and skips itself when the fixture, Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure. An entry whose every test is skipped carries `quarantined` with the reason; `validate-mode-manifest` refuses a fully skipped file without it and a marked file with live tests, and lists the quarantines it validated.",
     "entries": [
         {
             "path": "tests/bedrock-only-opencode.test.ts",
@@ -111,6 +111,14 @@
             ]
         },
         {
+            "path": "tests/pi-rust-delivery.test.ts",
+            "tier": "pi-rust",
+            "rationale": "Pi knowledge delivery under native authority against the direct-host fixture: a compaction-off Pi session with a stored project memory gets it in m0 exactly once per request across turns and one Pi compaction, a memory written mid-session reaches the next pass, Pi's compaction request carries no m0 text, the provider sees one request per completed turn, and the fixture reports no summarizer firing",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
             "path": "tests/pi-rust-eviction.test.ts",
             "tier": "pi-rust",
             "rationale": "Pi eviction and cold import against the direct-host fixture: an idle eviction keeps the rendered boundary's end entry and m0 bytes; with the daemon down Pi sends m0 text; after a store reset the summary is sent once as content; navigation before the compaction restores full history and refolds keeping the prefix; cold 1M-message Pi and OpenCode sessions upload one half-cap suffix and fire the summarizer",
@@ -128,8 +136,8 @@
         },
         {
             "path": "tests/pi-smoke.test.ts",
-            "tier": "pi-smoke",
-            "rationale": "the Pi RPC process loads the built extension, completes one mock turn with eidnara_search, eidnara_memory, and eidnara_note registered, and leaves no storage file in the isolated data directory",
+            "tier": "pi-rust",
+            "rationale": "the Pi RPC process dials the direct-host fixture through its user-tier connection file, loads the built extension, completes one mock turn with eidnara_search, eidnara_memory, and eidnara_note registered, serves the daemon's m0 first, and leaves no storage file in the isolated plugin data directory",
             "contract_refs": [
                 "U5-PORT"
             ]
@@ -202,6 +210,14 @@
             "path": "tests/rust-multi-frame-delta.test.ts",
             "tier": "rust-only",
             "rationale": "with no coverage every pass sends the whole captured array as one unpaged request, and a large provider-visible tail under the store's durable text limit stays intact",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-native-delivery.test.ts",
+            "tier": "rust-only",
+            "rationale": "OpenCode knowledge delivery under native authority against the direct-host fixture: with an empty summarizer chain and OpenCode's own compaction on, a stored project memory reaches m0 exactly once per request over three turns, the provider sees one main request per turn, and the fixture reports no summarizer firing",
             "contract_refs": [
                 "U5-PORT"
             ]
