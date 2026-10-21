@@ -25,6 +25,7 @@ import {
     TransformCaptureAdmission,
 } from "./transform-capture";
 import { hostIdFilter, scanHostIds } from "./transform-session-client";
+import { HALF_CAP_BLOCKS } from "./window-cap";
 
 /** The OpenCode adapter's discovery view, read through the client's id scan and filter. */
 function scanMessageIds(host: unknown[], stop: (id: string, index: number) => boolean): number {
@@ -1304,6 +1305,164 @@ describe("window-scoped fail-open", () => {
         await editedTransform.run(edited, editedOutput);
         expect(editedDaemon.bodies[1]?.boundary).toEqual({ mid: "m-2", sequence: 5 });
         expect(editedOutput.messages).toEqual(editedHost);
+    });
+});
+
+describe("cold import by fold authority", () => {
+    const deps = (compactionOff: boolean): RustModeTransformDeps => ({
+        ...makeDeps(),
+        compactionOff,
+    });
+    const synthetic = (sessionId: string, id: string): MessageLike => ({
+        info: { id: `eidnara-${id}`, role: "user", sessionID: sessionId },
+        parts: [{ type: "text", text: id }],
+    });
+    const additive = (sessionId: string, body: Body, m0 = "m0"): Body => ({
+        base_revision: body.base_revision,
+        output_revision: `additive-${String(body.base_revision)}`,
+        boundary: null,
+        operations: [
+            { op: "insert", values: [synthetic(sessionId, m0), synthetic(sessionId, "m1")] },
+            {
+                op: "keep",
+                source: "input",
+                start: 0,
+                count: (body.native_messages as unknown[]).length,
+            },
+        ],
+    });
+    const beyondHalfCap = (sessionId: string) => hostArray(sessionId, HALF_CAP_BLOCKS + 1);
+
+    it("submits and publishes the whole array past half the cap under native authority", async () => {
+        const sessionId = `native-whole-${Date.now()}`;
+        const { client, bodies } = fakeDaemon({ transform: (body) => additive(sessionId, body) });
+        const transform = createRustModeTransform(deps(true), { moduleClient: client });
+        const host = beyondHalfCap(sessionId);
+        const output = { messages: [...host] as unknown[] };
+
+        await transform.run(sessionId, output);
+
+        expect(bodies[0]?.boundary).toBeNull();
+        expect(bodies[0]?.native_messages).toEqual(host);
+        expect(output.messages).toHaveLength(host.length + 2);
+        for (const [index, member] of host.entries())
+            expect(output.messages[index + 2]).toBe(member);
+
+        const grown = hostArray(sessionId, HALF_CAP_BLOCKS + 3);
+        const again = { messages: [...grown] as unknown[] };
+        await transform.run(sessionId, again);
+        expect(bodies[1]?.native_messages).toEqual(grown);
+        expect(again.messages.slice(2)).toEqual(grown);
+    });
+
+    it("sends the half-cap suffix and keeps its head pinned while Eidnara folds", async () => {
+        const sessionId = `folding-suffix-${Date.now()}`;
+        const { client, bodies } = fakeDaemon({});
+        const transform = createRustModeTransform(deps(false), { moduleClient: client });
+        const host = beyondHalfCap(sessionId);
+
+        await transform.run(sessionId, { messages: [...host] });
+        await transform.run(sessionId, {
+            messages: [...hostArray(sessionId, HALF_CAP_BLOCKS + 3)],
+        });
+
+        const sent = bodies.map((body) => body.native_messages as MessageLike[]);
+        expect(sent[0]).toEqual(host.slice(1));
+        expect(sent[1]?.[0]).toEqual(host[1]);
+        expect(sent[1]).toHaveLength(HALF_CAP_BLOCKS + 2);
+    });
+
+    it("declines a candidate over the invocation budget and leaves the host array unchanged", async () => {
+        const sessionId = `native-invocation-${Date.now()}`;
+        const model = { providerID: "eidnara-test", modelID: "native-window" };
+        const host = beyondHalfCap(sessionId).map((member) => {
+            (member.info as Record<string, unknown>).model = model;
+            return member;
+        });
+        const bytes = (values: readonly unknown[]): number =>
+            values.map(canonicalJsonLength).reduce((sum, length) => sum + length, 0);
+        const limit = chargeInvocation(host.map(canonicalJsonLength), {
+            headroomPermille: 250,
+            profile: "opencode-heuristic",
+        }).chargedTokens;
+        const { client, bodies } = fakeDaemon({
+            transform: (body) => additive(sessionId, body, "m".repeat(400_000)),
+        });
+        const limitSpy = spyOn(eventResolvers, "resolveTrustedContextLimit").mockImplementation(
+            (providerID, modelID) =>
+                providerID === model.providerID && modelID === model.modelID ? limit : undefined,
+        );
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            const transform = createRustModeTransform(deps(true), { moduleClient: client });
+            const output = { messages: [...host] as unknown[] };
+            await transform.run(sessionId, output);
+
+            expect(bodies[0]?.native_messages).toEqual(host);
+            expect(bytes(output.messages)).toBe(bytes(host));
+            for (const [index, member] of host.entries())
+                expect(output.messages[index]).toBe(member);
+            expect(output.messages).toHaveLength(host.length);
+            const passLine = logsOf(debug, sessionId).find((line) => line.startsWith("rust pass:"));
+            expect(passLine).toContain("decision=declined:invocation_budget");
+        } finally {
+            debug.mockRestore();
+            limitSpy.mockRestore();
+        }
+    });
+
+    it("publishes the retained output and the new tail when a later native pass declines", async () => {
+        const sessionId = `native-fail-open-${Date.now()}`;
+        const { client, bodies } = fakeDaemon({
+            transform: (body, index) => {
+                if (index > 0)
+                    throw Object.assign(new Error("transform queue is full"), {
+                        code: "queue_full",
+                    });
+                return additive(sessionId, body);
+            },
+        });
+        const transform = createRustModeTransform(deps(true), { moduleClient: client });
+        const host = beyondHalfCap(sessionId);
+        await transform.run(sessionId, { messages: [...host] });
+
+        const grown = hostArray(sessionId, HALF_CAP_BLOCKS + 3);
+        const output = { messages: [...grown] as unknown[] };
+        await transform.run(sessionId, output);
+
+        expect(bodies).toHaveLength(2);
+        expect(bodies[1]?.native_messages).toEqual(grown);
+        expect(output.messages.slice(0, 2)).toEqual([
+            synthetic(sessionId, "m0"),
+            synthetic(sessionId, "m1"),
+        ]);
+        expect(output.messages.slice(2)).toEqual(grown);
+    });
+
+    it("sends the same pass fields under either authority", async () => {
+        const sent: Body[] = [];
+        for (const compactionOff of [false, true]) {
+            const sessionId = `authority-fields-${compactionOff}-${Date.now()}`;
+            const { client, bodies } = fakeDaemon({});
+            const transform = createRustModeTransform(deps(compactionOff), {
+                moduleClient: client,
+            });
+            await transform.run(sessionId, { messages: hostArray(sessionId, 3) });
+            sent.push(bodies[0] ?? {});
+        }
+        // Capability fields follow the adapter's registration rules for each mode.
+        const perSession = new Set([
+            "session_id",
+            "base_revision",
+            "native_messages",
+            "request_observed_at_ms",
+            "tool_present",
+            "todo_tool_present",
+        ]);
+        const shared = (body: Body) =>
+            Object.fromEntries(Object.entries(body).filter(([key]) => !perSession.has(key)));
+        expect(Object.keys(sent[1] ?? {}).sort()).toEqual(Object.keys(sent[0] ?? {}).sort());
+        expect(shared(sent[1] ?? {})).toEqual(shared(sent[0] ?? {}));
     });
 });
 

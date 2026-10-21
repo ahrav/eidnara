@@ -391,7 +391,10 @@ export function createRustModeTransform(
                 return directory;
             },
             readWindow: (start, end) => copyWindow(target, start, end),
-            measure: () => openCodeSlotSizes(target),
+            // A cold import narrows to the half-cap suffix only while Eidnara folds; under
+            // native authority the pass submits the whole array, so an additive output
+            // omits no host message.
+            ...(deps.compactionOff === true ? {} : { measure: () => openCodeSlotSizes(target) }),
             idOf: messageId,
             liveWindow: (start, end) =>
                 readOwnDataProperty(output, "messages") === target &&
