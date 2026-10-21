@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { createHash } from "node:crypto";
-
+import { memoryId, occurrences, textOf } from "../src/pi-runner/rust-fixture";
 import { RustTestHarness } from "../src/rust-harness";
 import { buildDirectHostFixture, HermeticHostStack } from "../src/rust-runner/hermetic-host";
 import { runScriptedToolCall } from "../src/scripted-tool-call";
@@ -9,25 +8,6 @@ const prereqs = RustTestHarness.detectPrereqs();
 
 const PROJECT_MEMORY = "<project-memory>";
 const MEMORY = { category: "PROJECT_RULES", text: "Serve every OpenCode message after m0 and m1." };
-
-function memoryId(label: string): string {
-    return `mem_${createHash("sha256").update(label).digest("hex").slice(0, 32)}`;
-}
-
-function occurrences(haystack: string, needle: string): number {
-    return haystack.split(needle).length - 1;
-}
-
-function wireText(message: unknown): string {
-    const content = (message as { content?: unknown }).content;
-    if (typeof content === "string") return content;
-    if (!Array.isArray(content)) return "";
-    return content
-        .map((block) =>
-            (block as { type?: string }).type === "text" ? (block as { text: string }).text : "",
-        )
-        .join("");
-}
 
 describe.skipIf(!prereqs.ok)("opencode knowledge delivery under native authority", () => {
     it("serves stored project memory once per request over three turns", async () => {
@@ -66,16 +46,23 @@ describe.skipIf(!prereqs.ok)("opencode knowledge delivery under native authority
                 await h.sendPrompt(sessionId, `turn ${turn}`);
                 const requests = h.mainRequests();
                 expect(requests).toHaveLength(turn);
-                const messages = (requests.at(-1)?.body.messages ?? []) as unknown[];
-                const first = wireText(messages[0]);
-                const whole = JSON.stringify(messages);
+                const body = requests.at(-1)?.body ?? {};
+                const messages = (body.messages ?? []) as unknown[];
+                const first = textOf(messages[0]);
                 expect(first).toContain("<session-history></session-history>");
                 expect(occurrences(first, PROJECT_MEMORY)).toBe(1);
-                expect(occurrences(whole, PROJECT_MEMORY)).toBe(1);
+                expect(occurrences(JSON.stringify(messages), PROJECT_MEMORY)).toBe(1);
                 expect(first).toContain(line);
-                expect(occurrences(whole, line)).toBe(1);
-                expect(wireText(messages.at(-1))).toContain(`turn ${turn}`);
+                expect(occurrences(JSON.stringify(body), line)).toBe(1);
+                expect(textOf(messages.at(-1))).toContain(`turn ${turn}`);
             }
+            const others = h.mock
+                .requests()
+                .filter((request) => !h.mainRequests().includes(request));
+            for (const request of others)
+                expect(JSON.stringify(request.body)).not.toContain(PROJECT_MEMORY);
+            // OpenCode titles the new session once; every other provider request is a turn.
+            expect(others.length).toBeLessThanOrEqual(1);
             expect(await h.host.historySummarizerLive()).toBe(false);
             expect((await h.host.backendCounters()).started).toBe(0);
         } finally {

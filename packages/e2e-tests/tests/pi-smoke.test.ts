@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiTestHarness } from "../src/pi-harness";
-import { awaitStore } from "../src/pi-runner/rust-fixture";
+import { awaitStore, textOf } from "../src/pi-runner/rust-fixture";
 import { detectPiPrereqs } from "../src/pi-runner/spawn";
 import {
     buildDirectHostFixture,
@@ -26,17 +26,6 @@ const REGISTERED_TOOLS = ["eidnara_search", "eidnara_memory", "eidnara_note"] as
 
 function listRecursive(dir: string): string[] {
     return readdirSync(dir, { recursive: true, encoding: "utf8" }).sort();
-}
-
-function wireText(message: unknown): string {
-    const content = (message as { content?: unknown } | undefined)?.content;
-    if (typeof content === "string") return content;
-    if (!Array.isArray(content)) return "";
-    return content
-        .map((block) =>
-            (block as { type?: string }).type === "text" ? (block as { text: string }).text : "",
-        )
-        .join("");
 }
 
 describe.skipIf(!prereqs.ok)("pi smoke", () => {
@@ -84,11 +73,14 @@ describe.skipIf(!prereqs.ok)("pi smoke", () => {
         expect(req).not.toBeNull();
         expect(JSON.stringify(req!.body)).toContain("hello from pi smoke");
         const messages = (req!.body.messages ?? []) as unknown[];
-        expect(wireText(messages[0])).toContain("<session-history>");
-        expect(wireText(messages.at(-1))).toContain("hello from pi smoke");
+        expect(textOf(messages[0])).toContain("<session-history>");
+        expect(textOf(messages.at(-1))).toContain("hello from pi smoke");
         for (const tool of REGISTERED_TOOLS) {
             expect(publishedToolName(req!.body, tool), `${tool} in req.body.tools`).toBe(tool);
         }
+
+        expect(await stack?.historySummarizerLive()).toBe(false);
+        expect((await stack?.backendCounters())?.started).toBe(0);
 
         const listing = listRecursive(h.env.dataDir);
         const storageFiles = listing.filter((entry) => STORAGE_FILE.test(entry));

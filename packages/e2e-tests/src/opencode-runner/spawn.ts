@@ -236,7 +236,6 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         // `autoupdate: false` disables telemetry-style checks that make network requests.
         autoupdate: false,
         // OpenCode enables compaction by default; Eidnara disables its conflict detector when compaction is enabled.
-        // When compaction is enabled, Eidnara disables its conflict detector and the plugin does nothing.
         compaction: { auto: false, prune: false },
         provider: {
             ...(contributedProviders &&

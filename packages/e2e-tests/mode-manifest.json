@@ -113,7 +113,7 @@
         {
             "path": "tests/pi-rust-delivery.test.ts",
             "tier": "pi-rust",
-            "rationale": "Pi knowledge delivery under native authority against the direct-host fixture: a compaction-off Pi session with a stored project memory gets it in m0 exactly once per request across turns and one Pi compaction, a memory written mid-session reaches the next pass, Pi's compaction request carries no m0 text, the provider sees one request per completed turn, and the fixture reports no summarizer firing",
+            "rationale": "Pi knowledge delivery under native authority against the direct-host fixture: a compaction-off Pi session with a stored project memory gets it in m0 exactly once per request across turns and one Pi compaction, a memory written mid-session reaches the next pass, Pi's compaction requests carry no project-memory block or session-history shell, the provider sees one request per completed turn, and the fixture reports no summarizer firing",
             "contract_refs": [
                 "U5-PORT"
             ]

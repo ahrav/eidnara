@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,13 +21,23 @@ export const body = (n: number) => `message ${n} body`;
 export const TOOL_CALL_ID = "call-covered-end";
 
 export function textOf(message: unknown): string {
-    const record = message as { content?: unknown; parts?: unknown };
-    const content = record.content ?? record.parts;
+    const record = message as { content?: unknown; parts?: unknown } | undefined;
+    const content = record?.content ?? record?.parts;
     if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
     return (content as { type?: string; text?: string }[])
         .filter((part) => part.type === "text")
         .map((part) => part.text ?? "")
         .join("");
+}
+
+/** A deterministic memory object id for `label`, in the kernel's `mem_` id shape. */
+export function memoryId(label: string): string {
+    return `mem_${createHash("sha256").update(label).digest("hex").slice(0, 32)}`;
+}
+
+export function occurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
 }
 
 /**
