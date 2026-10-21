@@ -607,6 +607,15 @@ fn assert_inserts_then_input_keep(response: &Value, rows: &[Value], context: &st
     );
 }
 
+/// Asserts a recipe that serves the whole retained output, m0 and m1 included, as one keep.
+fn assert_whole_previous_keep(response: &Value, rows: &[Value], context: &str) {
+    assert_eq!(
+        response["operations"],
+        json!([{ "op": "keep", "source": "previous", "start": 0, "count": rows.len() + 2 }]),
+        "{context}: {response}"
+    );
+}
+
 /// Asserts the additive-only state a committed native pass leaves, with the ingress scalars of the
 /// pass over `rows` at `usage`.
 fn assert_native_commit(store: &MemoryStore, rows: &[Value], usage: (u64, u64), context: &str) {
@@ -624,7 +633,13 @@ fn assert_native_commit(store: &MemoryStore, rows: &[Value], usage: (u64, u64), 
     let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
     let decoded = codec::pi::decode_pi_rows(&shared).unwrap();
     let newest = decoded.messages.last().unwrap();
-    let newest_block = format!("{}#{}", newest.mid, newest.ck.content().len() - 1);
+    let last_id = rows.last().unwrap()["id"].as_str().unwrap();
+    assert_eq!(newest.mid, last_id, "{context}");
+    let blocks = newest.ck.content().len();
+    let newest_block = format!(
+        "{last_id}#{}",
+        blocks.checked_sub(1).expect("the row has a block")
+    );
     assert_eq!(
         meta.newest_live_block_id.as_deref(),
         Some(newest_block.as_str()),
@@ -803,12 +818,7 @@ async fn a_repeated_native_pi_window_reconstructs_identical_rows() {
                 revisions[revisions.len() - 1],
                 "{arm}"
             );
-            assert_eq!(
-                keeps_from(&repeat, "previous"),
-                1,
-                "{arm}: the repeat keeps the retained output: {repeat}"
-            );
-            assert_eq!(keeps_from(&repeat, "input"), 0, "{arm}: {repeat}");
+            assert_whole_previous_keep(&repeat, &rows, arm);
         } else {
             assert_eq!(keeps_from(&repeat, "previous"), 0, "{arm}: {repeat}");
             assert_inserts_then_input_keep(&repeat, &rows, arm);
@@ -905,6 +915,7 @@ async fn a_canonical_memory_write_rerenders_native_pi_m0_as_hard() {
 
     // A state-sync epoch bump marks the project-memory epoch pending; the next pass re-renders m0
     // with the same memory once and clears the flag.
+    // The complete seed carries no history segments; it only advances the epoch.
     let mut sync = seed_batch(0, 1, 0, 0);
     sync["project_memory_epoch"] = json!(7);
     let synced = handler.dispatch_value(test_route(7), sync).await;
@@ -926,7 +937,9 @@ async fn a_canonical_memory_write_rerenders_native_pi_m0_as_hard() {
     assert_native_commit(&store, &rows, (1_000, 200_000), "epoch HARD");
 
     let third = serve(&handler, &rows, 1_000, 200_000).await;
-    assert_ne!(third["action"], "HARD", "{third}");
+    assert_eq!(third["action"], "SOFT+", "{third}");
+    assert_eq!(third["committed"], false, "{third}");
+    assert_whole_previous_keep(&third, &rows, "after the memory HARD");
     assert_eq!(
         third["native_messages"], second["native_messages"],
         "{third}"
