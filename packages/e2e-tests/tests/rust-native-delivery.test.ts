@@ -55,6 +55,8 @@ describe.skipIf(!prereqs.ok)("opencode knowledge delivery under native authority
                 expect(first).toContain(line);
                 expect(occurrences(JSON.stringify(body), line)).toBe(1);
                 expect(textOf(messages.at(-1))).toContain(`turn ${turn}`);
+                for (let earlier = 1; earlier <= turn; earlier += 1)
+                    expect(occurrences(JSON.stringify(messages), `turn ${earlier}`)).toBe(1);
             }
             const others = h.mock
                 .requests()

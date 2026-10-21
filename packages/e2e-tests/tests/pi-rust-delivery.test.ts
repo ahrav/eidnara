@@ -181,6 +181,11 @@ describe.skipIf(!active)("pi knowledge delivery under native authority", () => {
                 for (const prompt of prompts)
                     expect(beforeCompaction.filter((text) => text === prompt)).toHaveLength(1);
 
+                const sentinel = "PI-COMPACTION-SUMMARY-7f3a";
+                h.respond([
+                    assistantTurn([{ type: "text", text: sentinel }], "stop"),
+                    assistantTurn([{ type: "text", text: sentinel }], "stop"),
+                ]);
                 const requestsBefore = h.requests.length;
                 const outcome = await h.session.compact().then(
                     () => "compacted",
@@ -188,7 +193,7 @@ describe.skipIf(!active)("pi knowledge delivery under native authority", () => {
                 );
                 expect(outcome).toBe("compacted");
                 compactionRequests = h.requests.length - requestsBefore;
-                expect(compactionRequests).toBeGreaterThan(0);
+                expect(compactionRequests).toBe(2);
                 for (const request of h.requests.slice(requestsBefore)) {
                     const whole = JSON.stringify(request);
                     expect(whole).not.toContain(PROJECT_MEMORY);
@@ -200,8 +205,11 @@ describe.skipIf(!active)("pi knowledge delivery under native authority", () => {
                 const summary = h.sessionManager
                     .getEntries()
                     .find((entry) => entry.type === "compaction")?.summary;
-                expect(summary).toBeTruthy();
+                expect(summary).toContain(sentinel);
                 expect(afterCompaction.some((text) => text.includes(summary ?? ""))).toBe(true);
+                expect(occurrences(JSON.stringify(h.requests.at(-1)?.messages), sentinel)).toBe(
+                    occurrences(summary ?? "", sentinel),
+                );
 
                 expect(await stack.historySummarizerLive()).toBe(false);
                 expect((await stack.backendCounters()).started).toBe(0);
