@@ -162,5 +162,6 @@ Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
 - Findings: Yes. The response settles with `native_authority` and the
   producer counters stay zero. The emergency branch is inferred from the
   scheduler band at that usage; the response does not name the band.
-- Missing evidence: A response field that names the scheduler band.
-- Conclusion: resolved with answer.
+- Missing evidence: None for the settle. No response field names the
+  scheduler band, so the band is inferred from the usage.
+- Conclusion: resolved with answer; the band is inferred.

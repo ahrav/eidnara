@@ -166,7 +166,8 @@ Each record states the evidence for its label.
 | KD-P12 | [`kd-p12-bounded-delivery-published-once`](#kd-p12-bounded-delivery-published-once) | safety | `always-or-unreached` | plugin, pi, daemon | active | yes | #1071 (#1064), #1068 (#1061) |
 
 Owner lists the PR whose recorded run supplies the status, then, after a
-semicolon, the evidence still unowned or the decision that needs human input.
+semicolon, the evidence still unowned, a later PR whose run supplies a
+witness the earlier owner lacked, or the decision that needs human input.
 Semantics: 30 `always`, 12 `always-or-unreached`, 1 `sometimes`, 1
 `unreachable`, 0 `reachable` (the KD records add 13 `always` and 3
 `always-or-unreached`).
@@ -260,8 +261,9 @@ Exercised: yes - the `bun run check:repo` gates of #898 through #904 ran the
 updated predicate test, the tool-registry tests (including an empty chain
 registering the compaction-off tool set), and the command refusal tests; the
 plugin source at HEAD is `d7b330113`'s, which differs from #904's head only
-in comments and generated TUI source, and #859 PR A's `check:repo` ran on it.
-The off-mode Pi host clauses are witnessed by #1069 (#1062, head
+in comments and generated TUI source, and #859 PR A's `check:repo` ran on it;
+this held before #1069 and #1070 changed plugin source. The off-mode Pi host
+clauses are witnessed by #1069 (#1062, head
 `6d527babf`): compaction-off Pi leaves a tagged assistant message unchanged,
 schedules no eviction (also when the session runs in a folding project),
 omits `eidnara_reduce`, and lets `session.compact()` run Pi's own compaction,
@@ -274,8 +276,11 @@ Check: `always` - the predicate equals `compaction?.enabled !== false` and a
 non-empty normalized chain; when it is false the registry omits exactly
 `eidnara_reduce`, the commands stay registered with the "Unavailable"
 description, and flush, recomp, and wrapup refuse without a daemon call.
-`always` because the mode is resolved once per startup on every
-configuration.
+For Pi in compaction-off mode, also: `session_before_compact` answers
+`undefined`, no eviction is scheduled, and a tagged assistant message stays
+unchanged. `always` because the boot latch is resolved once per startup on
+every configuration, and the compaction answer also reads the session's
+project configuration on every call (#1060 OQ-1, owner approval 2026-10-21).
 Fault/timing angle: An empty chain with an absent or true compaction
 setting; a boot latch that disagrees with the session's project.
 Required faults and enabling state: An empty configuration, explicit
@@ -305,9 +310,9 @@ off-mode clauses `packages/pi-plugin/src/transform/pi-delivery.test.ts:257`,
 `packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`.
 Impact: High. Before #898, "enabled" did not establish folding capability.
 Open questions:
-- The refusal notification and the command descriptions say
-  `compaction.enabled: false` even when the cause is an empty chain
-  (`hooks/context/command-handler.ts:505-513`,
+- OQ-4 (#1060, catalog owner): the refusal notification and the command
+  descriptions say `compaction.enabled: false` even when the cause is an
+  empty chain (`hooks/context/command-handler.ts:505-513`,
   `features/builtin-commands/commands.ts:7-8`), and the test pins that text.
   Should the text name both causes? Needs human input.
 - The TUI comment at `packages/opencode-plugin/src/tui/index.tsx:1098` (at
@@ -2190,7 +2195,7 @@ Open questions:
 Specification [#1060](https://github.com/ahrav/eidnara/issues/1060) decouples
 knowledge delivery from compaction. Its Property Catalog section A carries the
 existing-behavior records KD-E01 to KD-E04, and section B the obligations
-KD-P01 to KD-P12. Tickets #1061 to #1064 landed the code and the witnesses in
+KD-P01 to KD-P12. Tickets #1061 to #1064 carry the code and the witnesses in
 the stacked PRs #1068, #1069, #1070, and #1071; this part records them. Every
 `file:line` in these records is verified at `a15da13a4`, the head of #1071,
 which holds all four PRs. Ticket decomposition settled three of the
@@ -2296,16 +2301,20 @@ Open questions: None.
 Type: safety
 Reachability: test-only at `a15da13a4` - the baseline shape needs a
 consumer that supplies the sizing hook under native authority, and neither
-adapter does since #1069 (Pi) and #1070 (OpenCode).
+adapter does since #1069 (Pi) and #1070 (OpenCode). The replacement oracle
+runs in default production: an empty chain binds native authority and every
+cold native pass reaches `coldHead`.
 Status: invalidated
 Invalidated: #1069 supplies Pi's `measure` only when the session's project
 lets Eidnara fold (`packages/pi-plugin/src/index.ts:584`,
 `packages/pi-plugin/src/transform/pi-transform.ts:268-275`); #1070 supplies
 OpenCode's only when `compactionOff` is not `true`
 (`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`).
-Without the hook `coldHead` returns `undefined` and the client submits the
-whole array
-(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851-860`).
+With no pinned head and no hook, `coldHead` returns `undefined` and the
+client submits the whole array
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851-860`);
+a pin from an earlier folding run is consulted first, and that history (a
+project switch) is deferred under OQ-3.
 Exercised: yes - the invalidation is witnessed at the adapter harnesses:
 #1069's "submits the whole array past half the cap while the project
 withdraws fold authority" (401 single-block rows, with and without a leading
@@ -2317,7 +2326,8 @@ m1, the lead slots, and the suffix from the head, omitting the rows between
 lead and head.
 Check: `always` - baseline clause, not checked at HEAD: publication equals
 `[m0, m1, ...H[:lead], ...H[head:]]`. Replacement: for every accepted native
-pass, `output.slice(2)` equals the host array `H`.
+pass of a session with no pin from a folding run, `output.slice(2)` equals
+the host array `H`.
 Fault/timing angle: A cold session crosses the half-cap threshold.
 Required faults and enabling state: No anchor; no prior pin; a host above 400
 CK blocks or 16 MiB; an accepted additive response and publication.
@@ -2390,7 +2400,10 @@ Open questions: None.
 ### kd-p02-daemon-only-authority
 
 Type: safety
-Reachability: default-production - every pass from both plugins.
+Reachability: default-production - every pass from both plugins: Pi
+registers its handler in every mode (`packages/pi-plugin/src/index.ts:565-566`)
+and OpenCode resolves `compactionOff` once for its hook
+(`packages/opencode-plugin/src/hooks/context/hook.ts:227`).
 Status: active
 Exercised: yes - #1069's "carries the same pass fields for sessions the
 daemon binds differently" compares a folding project, a withdrawn project in
@@ -2416,7 +2429,8 @@ Open questions: None.
 ### kd-p03-truthful-capabilities
 
 Type: safety
-Reachability: default-production - every Pi pass.
+Reachability: default-production - every Pi pass carries the field
+(`packages/pi-plugin/src/index.ts:595`).
 Status: active
 Exercised: yes - #1069, as KD-E04 records.
 Guarantee: Every Pi pass reports `tool_present` equal to whether
@@ -2438,7 +2452,10 @@ Open questions: None.
 ### kd-p04-off-mode-compaction-isolation
 
 Type: safety
-Reachability: default-production - compaction-off is the default mode.
+Reachability: default-production - an empty chain, the default, makes
+`isCompactionEnabled` false
+(`packages/opencode-plugin/src/config/agent-disable.ts:21-29`), which latches
+Pi's compaction-off mode (`packages/pi-plugin/src/index.ts:382-384`).
 Status: active
 Exercised: yes - #1069: "leaves compaction, eviction, and assistant tags to
 Pi after additive passes" (boundary-carrying replies, tagged assistant text
@@ -2452,8 +2469,10 @@ eviction, strips an assistant tag, or cancels native compaction;
 `session_before_compact` returns `undefined`.
 Check: `always` - at each relevant event return: the eviction scheduler
 returns before any branch sync (`packages/pi-plugin/src/index.ts:877`), the
-compaction answer is `undefined` (`:953-956`), and the tag strip is skipped
-(`:985`). Falsifier: an additive success schedules `ctx.compact`.
+compaction gate passes the latch (`:953-956`) to
+`handlePiSessionBeforeCompact`, which returns `undefined` (`:154-157`), and
+the tag strip is skipped (`:985`). Falsifier: an additive success schedules
+`ctx.compact`.
 Fault/timing angle: An `agent_end` after an additive success whose reply
 names a boundary.
 Required faults and enabling state: Every compaction reason, a tagged
@@ -2480,9 +2499,12 @@ of `pi-context-handler.test.ts` with no edit other than the
 unresolved-configuration case.
 Guarantee: Compaction-on decisions retain their guards, precedence, and
 outcomes.
-Check: `always-or-unreached` - per guarded event, the existing suites pass
-unchanged; `always-or-unreached` because a compaction-off process never
-reaches the guards. Falsifier: a missing boundary permits an eviction.
+Check: `always-or-unreached` - per guarded event in a compaction-on
+process: a missing or evicted boundary schedules no eviction, an overflow or
+a declined pass over no Eidnara compaction hands compaction back to Pi, and
+a refused eviction backs off; the unchanged suites assert each.
+`always-or-unreached` because a compaction-off process never reaches the
+guards. Falsifier: a missing boundary permits an eviction.
 Fault/timing angle: Overflow, decline, busy host, eviction refusal.
 Required faults and enabling state: The existing folding and eviction
 fixtures.
@@ -2496,7 +2518,10 @@ Open questions: None.
 ### kd-p06-whole-array-native-submission
 
 Type: safety
-Reachability: default-production - a native session past half the cap.
+Reachability: default-production - a native session past half the cap
+reaches `coldHead`
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851`)
+from either adapter.
 Status: active
 Exercised: yes - #1069 (Pi, 401 single-block rows on a first pass and a
 repeat, with and without a leading compaction summary, in compaction-off
@@ -2516,13 +2541,18 @@ Confidence: high -
 Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:318`;
 `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336`.
 Impact: High. See KD-E03.
-Open questions: None.
+Open questions:
+- A pin left by a folding run and carried into native authority across a
+  project switch still narrows the window; OQ-3 defers that history with
+  owner approval on 2026-10-21. The per-project gate follows OQ-1.
 
 ### kd-p07-decline-preserves-host-input
 
 Type: safety
 Reachability: default-production - a native pass the daemon or the budget
-cannot fund.
+cannot fund declines through the shared client
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1707`)
+or Pi's admission (`packages/pi-plugin/src/transform/pi-transform.ts:234`).
 Status: active
 Exercised: yes - #1069 (Pi): `invalid_params`, `queue_full`, and an
 invocation-budget refusal on a first pass and after a prior success, and a
@@ -2578,7 +2608,8 @@ Open questions: None.
 ### kd-p09-unresolved-configuration-requests-delivery
 
 Type: safety
-Reachability: default-production - a malformed project file.
+Reachability: default-production - a malformed project file withdraws fold
+authority in the Pi loader (`packages/pi-plugin/src/config/index.ts:480-482`).
 Status: active
 Exercised: yes - #1069: the unresolved case in `pi-context-handler.test.ts`
 asserts `transforms.length > 0` and `outcome === "compacted"`; "submits
@@ -2597,12 +2628,16 @@ Confidence: high -
 Existing check: `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247`;
 `packages/pi-plugin/src/transform/pi-delivery.test.ts:318`, `:367`.
 Impact: Medium. A malformed file would silence delivery.
-Open questions: None.
+Open questions:
+- A project file breaking mid-process, and a resumed session with applied
+  `eidnara` authority in a now-unresolved project, are deferred under OQ-3
+  (owner approval 2026-10-21).
 
 ### kd-p10-request-local-knowledge
 
 Type: safety
-Reachability: default-production - every native pass.
+Reachability: default-production - every native Pi pass captures from the
+session-derived array (`packages/pi-plugin/src/index.ts:576-579`).
 Status: active
 Exercised: yes - #1069: no submitted row carries an `eidnara:synthetic:` id
 across three turns and across one Pi compaction, whose summary row leads the
@@ -2612,8 +2647,10 @@ session-history shell.
 Guarantee: Successive passes start from the host's session-derived array; a
 served synthetic prefix is never re-ingested, and a host compaction summary
 contains no m0 or m1 text.
-Check: `always` - at capture, the next `native_messages` carries no
-`eidnara:synthetic:` id (`crates/daemon/src/codec/pi.rs:38`, `:1537`).
+Check: `always` - at capture, the next `native_messages` carries no id of
+the `eidnara:synthetic:` form the codec mints
+(`crates/daemon/src/codec/pi.rs:38`, `:1537`); the witness asserts it on
+every submitted body (`packages/pi-plugin/src/transform/pi-delivery.test.ts:182`).
 Falsifier: the second ingress contains the first pass's synthetic prefix.
 Fault/timing angle: Repeated turns, host compaction.
 Required faults and enabling state: Three turns and one Pi compaction.
@@ -2626,14 +2663,16 @@ Open questions: None.
 ### kd-p11-model-free-delivery
 
 Type: safety
-Reachability: default-production - every native pass.
+Reachability: default-production - every native pass reaches the native
+gate (`crates/daemon/src/lib.rs:9651-9662`).
 Status: active
 Exercised: yes - #1071: `pi-rust-delivery` (one provider request per
 completed turn, two pinned compaction requests, fixture
 `historySummarizerLive() === false` and `backendCounters().started === 0`),
 `rust-native-delivery` (one main request per turn and at most one title
 request), and `pi-smoke` (zero summarizer starts); #1068's 96 percent native
-arm for the summarizer gate (FA-N05).
+arm for the summarizer gate (FA-N05). The ContextResearcher clause rests on
+a static read of the callers, not on a test.
 Guarantee: Delivery adds zero model calls; native delivery starts no
 summarizer; `/eidnara-aug` remains the only ContextResearcher entry.
 Check: `always` - per delivery invocation, provider requests equal completed
@@ -2655,13 +2694,16 @@ Open questions: None.
 ### kd-p12-bounded-delivery-published-once
 
 Type: safety
-Reachability: default-production - a project with a stored memory.
+Reachability: default-production - a project with a stored memory reaches
+the rendered-row read on every native pass
+(`crates/daemon/src/transform.rs:2907-2909`).
 Status: active
 Exercised: yes - #1071: the stored memory appears in m0 exactly once per
 request across turns and one Pi compaction on Pi and over three turns on
 OpenCode; a memory seeded mid-session appears once on the next pass; #1068
-for the daemon side (KD-E02). The budget clause is a static review: no PR of
-#1068 to #1071 adds or raises a budget.
+for the daemon side (KD-E02). The budget clause rests on a static review of
+`git diff 08de9051a..a15da13a4`, not on a test: no PR of #1068 to #1071 adds
+or raises a budget.
 Guarantee: Adapters publish accepted daemon knowledge once per request,
 including epoch-HARD updates, and raise no existing budget.
 Check: `always-or-unreached` - at accepted publication, the

@@ -229,12 +229,11 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 
 ## Suspiciously quiet areas
 
-- Before #1068 no native-authority pass ran at or above 95 percent of the
-  context limit (FA-N05); #1068's 96 percent arm now does. The emergency
-  rerun caller is not reachable under native
-  authority: it follows only a completed `Busy` wait, which native
-  preparation never returns (`crates/daemon/src/lib.rs:8957-8974`,
-  `:9433-9437`), so the shared gate covers it structurally.
+- FA-N05's emergency rerun caller has no native witness: it follows only a
+  completed `Busy` wait in `finish_emergency_pass`
+  (`crates/daemon/src/lib.rs:9154` at `a15da13a4`), which native preparation
+  never returns (`:9658-9662`), so the shared gate covers it structurally.
+  #1068's 96 percent arm covers the first-unit caller.
 - The FA-E04 mixed-range witness is a proptest that does not count the
   mixed ranges it generates; the fixed budget-edge fixtures are synthetic
   stress states (FA-E04, FA-N13).

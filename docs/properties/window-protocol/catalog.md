@@ -1937,14 +1937,13 @@ re-evidence is in the dated sections of their evidence files.
 ## Dated note (2026-10-21, #1060)
 
 Dated note, 2026-10-21, #1060 (tickets #1062, #1063, #1065): the cold-import
-rule is authority-conditional. While the consumer's configuration lets
-Eidnara fold, a null window above half the window cap (400 CK blocks or
-16 MiB) is its newest half-cap suffix, pinned until the first anchor exists;
-a consumer whose configuration withdraws fold authority submits its whole
-array, so an applied additive pass carries every host message after the
-daemon's inserted messages. The cold-import half cap is a fold trigger and is
-inert under native authority; only the resident reservation, `queue_full`,
-and the invocation budget decline a native pass. WP-P15 bounds work at a
-fixed window and gives no constant-cost claim for whole-array native
-submission. WP-P01 carries the qualifier; line anchors in its qualifier are
-at `a15da13a4`.
+rule is authority-conditional. While the consumer's configuration lets Eidnara
+fold, a null window above half the window cap (400 CK blocks or 16 MiB) is its
+newest half-cap suffix, pinned until the first anchor exists; a consumer whose
+configuration withdraws fold authority submits its whole array, so an applied
+additive pass carries every host message after the daemon's inserted messages.
+The cold-import half cap is a fold trigger and is inert under native
+authority; only the resident reservation, `queue_full`, and the invocation
+budget decline an oversized native pass. WP-P15 bounds work at a fixed window
+and gives no constant-cost claim for whole-array native submission. WP-P01
+carries the qualifier; line anchors in its qualifier are at `a15da13a4`.
