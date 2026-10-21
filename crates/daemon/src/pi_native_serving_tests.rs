@@ -1,7 +1,10 @@
 //! Native serving of the `pi` serializer profile through the typed transform handler against a
 //! real store.
 
+use super::fold_authority_handler_tests::{assert_native_state, native_config};
 use super::*;
+
+const SYNTHETIC_ID_PREFIX: &str = "eidnara:synthetic:";
 
 fn pi_rows(messages: &[IngressMessage]) -> Vec<Value> {
     messages
@@ -304,11 +307,10 @@ async fn native_serving_admits_pi_and_still_refuses_another_profile_with_no_effe
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn every_closed_role_serves_through_the_handler_and_replays_its_row() {
-    let producer = Arc::new(ProducerState::default());
-    let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-    let rows = vec![
+/// One row of every closed Pi role, led by the summary row Pi's own compaction writes, with the
+/// tool call and its result paired.
+fn every_closed_role_rows() -> Vec<Value> {
+    vec![
         json!({ "id": "eidnara:compactionSummary:c0ffee00", "message": {
             "role": "compactionSummary", "summary": "earlier", "tokensBefore": 10, "timestamp": 1
         } }),
@@ -337,7 +339,14 @@ async fn every_closed_role_serves_through_the_handler_and_replays_its_row() {
             "role": "custom", "customType": "note", "content": "custom", "display": true,
             "timestamp": 7
         } }),
-    ];
+    ]
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_closed_role_serves_through_the_handler_and_replays_its_row() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+    let rows = every_closed_role_rows();
     let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
     let ck = ingress(codec::pi::decode_pi_rows(&shared).unwrap());
     let mut request = native_request("pi", ck, rows.clone());
@@ -473,4 +482,419 @@ fn a_user_hint_in_string_content_counts_as_carried() {
         &absent,
         &outcome
     ));
+}
+
+/// A native binding that keeps the summarizer chain and withdraws fold authority through
+/// `compaction.enabled`, so a native pass has a chain it could fire.
+fn native_config_with_a_live_chain() -> DaemonConfig {
+    let config = DaemonConfig {
+        compaction_enabled: false,
+        ..default_test_config()
+    };
+    assert!(!config.model_chain.is_empty() && !config.eidnara_folds());
+    config
+}
+
+/// A handler over a real store and an open kernel whose route binds `config` for the session's
+/// project, with the project's scope object in place for canonical memory rows.
+async fn pi_handler(
+    producer: &Arc<ProducerState>,
+    config: DaemonConfig,
+) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, SessionBinding) {
+    let (handler, store, dir, project) =
+        handler_with_store_and_kernel(Arc::clone(producer), default_test_config()).await;
+    let mut bound = binding(project.to_str().unwrap(), "ses");
+    bound.config = config;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    kernel
+        .commit(kernel_route_fixtures::intent("project-scope"), |envelope| {
+            let mut domains = HashSet::new();
+            let mut ready = false;
+            let mut refused = None;
+            kernel_routes::commit::ensure_scope(
+                envelope,
+                &bound.kernel_project,
+                &mut ready,
+                &mut domains,
+                &mut refused,
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    handler.bind_route(test_route(7), bound.clone());
+    (handler, store, dir, bound)
+}
+
+/// A Pi pass over `rows` at the stated pressure. The test client names every attempt with a fresh
+/// base revision and offers its applied output as `previous`.
+fn pi_request(rows: &[Value], current_total_input_tokens: u64, context_limit_tokens: u64) -> Value {
+    let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
+    let ck = ingress(codec::pi::decode_pi_rows(&shared).unwrap());
+    let mut request = native_request("pi", ck, rows.to_vec());
+    request["usage"] = json!(ModuleUsage {
+        current_total_input_tokens,
+        context_limit_tokens,
+        ..ModuleUsage::default()
+    });
+    request.as_object_mut().unwrap().remove("base_revision");
+    request
+}
+
+/// Serves one pass, applies its recipe against the submitted rows and the retained output, and
+/// checks that every row an `input` keep serves is the submitted `Arc` itself. Returns the
+/// response with `native_messages` set to the applied rows.
+async fn serve(handler: &Handler, request: Value) -> Value {
+    let request = handler.test_client_prepare_request(request);
+    let outcome = handler
+        .handle_transform_for_test(test_route(7), request.clone())
+        .await;
+    let PreparedOutcome::Response(bytes) = &outcome else {
+        panic!("unexpected handler outcome: {outcome:?}");
+    };
+    let raw: Value = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(raw["status"], "ok", "{raw}");
+    let base = |values: &[Value]| -> (Vec<Arc<Value>>, Vec<usize>) {
+        let values: Vec<Arc<Value>> = values.iter().cloned().map(Arc::new).collect();
+        let lengths = values
+            .iter()
+            .map(|value| edit_recipe::canonical_len(value).unwrap())
+            .collect();
+        (values, lengths)
+    };
+    let (input, input_lengths) = base(request["native_messages"].as_array().unwrap());
+    let input_revision =
+        edit_recipe::Revision::parse(request["base_revision"].as_str().unwrap()).unwrap();
+    let retained = handler
+        .test_client
+        .lock()
+        .unwrap()
+        .get("ses")
+        .and_then(|client| client.applied_native.clone());
+    let previous = retained.as_ref().map(|(revision, values)| {
+        let (values, lengths) = base(values);
+        (
+            edit_recipe::Revision::parse(revision).unwrap(),
+            values,
+            lengths,
+        )
+    });
+    let applied = edit_recipe::Recipe::from_json(&raw)
+        .unwrap()
+        .apply(
+            edit_recipe::SourceBase {
+                revision: &input_revision,
+                values: &input,
+                lengths: &input_lengths,
+            },
+            previous
+                .as_ref()
+                .map(|(revision, values, lengths)| edit_recipe::SourceBase {
+                    revision,
+                    values,
+                    lengths,
+                }),
+        )
+        .unwrap();
+    let mut served = 0;
+    for operation in raw["operations"].as_array().unwrap() {
+        let count = match operation["op"].as_str().unwrap() {
+            "insert" => operation["values"].as_array().unwrap().len(),
+            _ => operation["count"].as_u64().unwrap() as usize,
+        };
+        if operation["op"] == "keep" && operation["source"] == "input" {
+            let start = operation["start"].as_u64().unwrap() as usize;
+            for offset in 0..count {
+                assert!(
+                    Arc::ptr_eq(&applied.values[served + offset], &input[start + offset]),
+                    "served row {} is the submitted row {}",
+                    served + offset,
+                    start + offset
+                );
+            }
+        }
+        served += count;
+    }
+    assert_eq!(served, applied.values.len());
+    let response = tool_body(handler.test_client_apply(&request, outcome));
+    let applied: Vec<Value> = applied
+        .values
+        .iter()
+        .map(|value| (**value).clone())
+        .collect();
+    assert_eq!(response["native_messages"], json!(applied));
+    response
+}
+
+/// The texts of the two synthetic rows that lead an additive Pi output: m0, then m1.
+fn synthetic_texts(applied: &Value) -> Vec<String> {
+    let lead = json!(applied.as_array().unwrap()[..2]);
+    assert!(
+        pi_ids(&lead)
+            .iter()
+            .all(|id| id.starts_with(SYNTHETIC_ID_PREFIX)),
+        "{lead}"
+    );
+    texts("pi", &lead)
+        .into_iter()
+        .map(|text| text.concat())
+        .collect()
+}
+
+/// Asserts the additive shape: two synthetic user rows, then exactly the submitted rows in order.
+fn assert_additive_shape(response: &Value, rows: &[Value], context: &str) {
+    let applied = response["native_messages"].as_array().unwrap();
+    assert_eq!(applied.len(), rows.len() + 2, "{context}: {response}");
+    let ids = pi_ids(&response["native_messages"]);
+    assert!(
+        ids[..2]
+            .iter()
+            .all(|id| id.starts_with(SYNTHETIC_ID_PREFIX)),
+        "{context}: {ids:?}"
+    );
+    assert_eq!(
+        roles("pi", &response["native_messages"])[..2],
+        ["user", "user"],
+        "{context}"
+    );
+    assert_eq!(&applied[2..], rows, "{context}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer() {
+    let rows = every_closed_role_rows();
+    let mut pressured = false;
+    for (arm, config, input_tokens, limit_tokens) in [
+        ("empty chain", native_config(), 1_000, 200_000),
+        (
+            "live chain",
+            native_config_with_a_live_chain(),
+            1_000,
+            200_000,
+        ),
+        (
+            "live chain at 96%",
+            native_config_with_a_live_chain(),
+            48_000,
+            50_000,
+        ),
+    ] {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _bound) = pi_handler(&producer, config).await;
+
+        let response = serve(&handler, pi_request(&rows, input_tokens, limit_tokens)).await;
+
+        assert_eq!(response["boundary"], Value::Null, "{arm}: {response}");
+        assert_eq!(response["action"], "HARD", "{arm}: {response}");
+        assert_eq!(response["materialize_reason"], "first_render", "{arm}");
+        let operations = response["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 2, "{arm}: {response}");
+        assert_eq!(operations[0]["op"], "insert", "{arm}");
+        assert_eq!(
+            operations[0]["values"].as_array().unwrap().len(),
+            2,
+            "{arm}"
+        );
+        assert_eq!(
+            operations[1],
+            json!({ "op": "keep", "source": "input", "start": 0, "count": rows.len() }),
+            "{arm}"
+        );
+        assert_additive_shape(&response, &rows, arm);
+        assert_eq!(
+            pi_ids(&response["native_messages"])[2],
+            "eidnara:compactionSummary:c0ffee00",
+            "{arm}: the host's own summary leads the served window"
+        );
+        let diagnostics = &response["history_summarizer"];
+        assert_eq!(diagnostics["fired"], false, "{arm}: {diagnostics}");
+        assert_eq!(diagnostics["no_fire"], "native_authority", "{arm}");
+        assert_eq!(response["committed"], true, "{arm}: {response}");
+        assert_native_state(&store, "ses", arm);
+        let meta = store.load("ses").unwrap().meta;
+        let usage = meta.last_usage.expect("the pass records its usage");
+        assert_eq!(usage.current_total_input_tokens, input_tokens, "{arm}");
+        assert_eq!(usage.context_limit_tokens, limit_tokens, "{arm}");
+        pressured |= usage.current_total_input_tokens * 100 >= usage.context_limit_tokens * 95;
+        assert!(meta.newest_live_block_id.is_some(), "{arm}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{arm}");
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0, "{arm}");
+    }
+    assert!(pressured, "one arm runs at or above 95 percent pressure");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_same_pi_windows_differ_by_binding_alone() {
+    let closed_roles = every_closed_role_rows();
+    let long = pi_rows(&alternating_transcript());
+    let mut outcomes = BTreeMap::new();
+    for (authority, config) in [
+        ("eidnara", default_test_config()),
+        ("native", native_config_with_a_live_chain()),
+    ] {
+        for (window, rows) in [("closed roles", &closed_roles), ("long", &long)] {
+            let producer = Arc::new(ProducerState::default());
+            let (handler, store, _dir, _bound) = pi_handler(&producer, config.clone()).await;
+            let response = serve(&handler, pi_request(rows, 48_000, 50_000)).await;
+            assert_eq!(
+                store.load("ses").unwrap().meta.eidnara_folds,
+                Some(authority == "eidnara"),
+                "{authority} {window}"
+            );
+            outcomes.insert(
+                (authority, window),
+                (response, producer.starts.load(Ordering::SeqCst)),
+            );
+        }
+    }
+
+    // The closed-role window is too short to fold: both authorities serve it whole, and only the
+    // Eidnara binding evaluates the fold trigger.
+    let (eidnara, eidnara_starts) = &outcomes[&("eidnara", "closed roles")];
+    let (native, native_starts) = &outcomes[&("native", "closed roles")];
+    assert_eq!(eidnara["native_messages"], native["native_messages"]);
+    assert_additive_shape(native, &closed_roles, "native closed roles");
+    assert_eq!(
+        eidnara["history_summarizer"]["no_fire"], "trigger_false",
+        "{eidnara}"
+    );
+    assert!(
+        eidnara["timings"]["trigger_tokenized_blocks"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        native["history_summarizer"]["no_fire"], "native_authority",
+        "{native}"
+    );
+    assert_eq!(native["timings"]["trigger_tokenized_blocks"], 0, "{native}");
+    assert_eq!((*eidnara_starts, *native_starts), (0, 0));
+
+    // The long window at 96 percent folds under Eidnara, as the folding Pi case above records, and
+    // is served whole under native authority with no summarizer start.
+    let (eidnara, eidnara_starts) = &outcomes[&("eidnara", "long")];
+    let (native, native_starts) = &outcomes[&("native", "long")];
+    assert_eq!(*eidnara_starts, 1, "{eidnara}");
+    assert!(
+        synthetic_texts(&eidnara["native_messages"])[0].contains("autonomous summary"),
+        "{eidnara}"
+    );
+    assert!(eidnara["native_messages"].as_array().unwrap().len() < long.len() + 2);
+    assert_eq!(*native_starts, 0, "{native}");
+    assert_eq!(
+        native["history_summarizer"]["no_fire"], "native_authority",
+        "{native}"
+    );
+    assert_additive_shape(native, &long, "native long window");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_repeated_native_pi_window_reconstructs_identical_rows() {
+    let rows = every_closed_role_rows();
+    let producer = Arc::new(ProducerState::default());
+    let (handler, store, _dir, _bound) =
+        pi_handler(&producer, native_config_with_a_live_chain()).await;
+    let first = serve(&handler, pi_request(&rows, 1_000, 200_000)).await;
+    assert_eq!(first["committed"], true, "{first}");
+    assert_native_state(&store, "ses", "first pass");
+
+    let mut revisions = vec![first["output_revision"].clone()];
+    for (arm, input_tokens) in [("unchanged", 1_000), ("again", 1_000), ("new usage", 2_000)] {
+        let before = store.load("ses").unwrap();
+        let repeat = serve(&handler, pi_request(&rows, input_tokens, 200_000)).await;
+        let after = store.load("ses").unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&repeat["native_messages"]).unwrap(),
+            serde_json::to_string(&first["native_messages"]).unwrap(),
+            "{arm}"
+        );
+        assert!(
+            !revisions.contains(&repeat["output_revision"]),
+            "{arm}: a fresh output revision: {repeat}"
+        );
+        revisions.push(repeat["output_revision"].clone());
+        assert_eq!(
+            repeat["previous_output_revision"],
+            revisions[revisions.len() - 2],
+            "{arm}"
+        );
+        assert_eq!(
+            keeps_from(&repeat, "previous"),
+            1,
+            "{arm}: the repeat keeps the retained output: {repeat}"
+        );
+        assert_eq!(keeps_from(&repeat, "input"), 0, "{arm}: {repeat}");
+        let metadata_changed = after.meta != before.meta || after.row_version != before.row_version;
+        assert_eq!(
+            repeat["committed"] == true,
+            metadata_changed,
+            "{arm}: {repeat}"
+        );
+        if input_tokens == 1_000 {
+            assert_eq!(repeat["committed"], false, "{arm}: {repeat}");
+        }
+        assert_native_state(&store, "ses", arm);
+    }
+    assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_canonical_memory_write_rerenders_native_pi_m0_as_hard() {
+    let rows = every_closed_role_rows();
+    let producer = Arc::new(ProducerState::default());
+    let (handler, store, _dir, bound) =
+        pi_handler(&producer, native_config_with_a_live_chain()).await;
+    let first = serve(&handler, pi_request(&rows, 1_000, 200_000)).await;
+    assert_eq!(first["materialize_reason"], "first_render", "{first}");
+    assert!(
+        !synthetic_texts(&first["native_messages"])[0].contains("<project-memory>"),
+        "{first}"
+    );
+
+    let kernel = handler.kernel.kernel_store().unwrap();
+    kernel_route_fixtures::commit_verified_memory(
+        &kernel,
+        "native-rule",
+        "mem-native",
+        &bound.kernel_project.scope_id(),
+        "PROJECT_RULES",
+        "Serve the window additively.",
+    );
+    let line = "mem-native: Serve the window additively.";
+
+    let second = serve(&handler, pi_request(&rows, 1_000, 200_000)).await;
+
+    assert_eq!(second["action"], "HARD", "{second}");
+    assert_eq!(
+        second["materialize_reason"], "project_memory_epoch",
+        "{second}"
+    );
+    assert_additive_shape(&second, &rows, "after the memory write");
+    let synthetic = synthetic_texts(&second["native_messages"]);
+    assert_eq!(
+        synthetic[0].matches("<project-memory>").count(),
+        1,
+        "{synthetic:?}"
+    );
+    assert_eq!(synthetic[0].matches(line).count(), 1, "{synthetic:?}");
+    let served = serde_json::to_string(&second["native_messages"]).unwrap();
+    assert_eq!(
+        served.matches(line).count(),
+        1,
+        "one copy per request: {served}"
+    );
+    let meta = store.load("ses").unwrap().meta;
+    assert!(!meta.project_memory_epoch_pending);
+    assert_native_state(&store, "ses", "memory HARD");
+
+    let third = serve(&handler, pi_request(&rows, 1_000, 200_000)).await;
+    assert_ne!(third["action"], "HARD", "{third}");
+    assert_eq!(
+        third["native_messages"], second["native_messages"],
+        "{third}"
+    );
+    assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
 }

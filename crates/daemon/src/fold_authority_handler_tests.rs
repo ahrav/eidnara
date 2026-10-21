@@ -1,6 +1,6 @@
 use super::*;
 
-fn native_config() -> DaemonConfig {
+pub(super) fn native_config() -> DaemonConfig {
     let mut config = default_test_config();
     config.model_chain.clear();
     config
@@ -16,7 +16,7 @@ fn stored_authority(store: &MemoryStore) -> Option<bool> {
     store.load("ses").unwrap().meta.eidnara_folds
 }
 
-fn assert_native_state(store: &MemoryStore, session: &str, context: &str) {
+pub(super) fn assert_native_state(store: &MemoryStore, session: &str, context: &str) {
     let meta = store.load(session).unwrap().meta;
     assert_eq!(meta.eidnara_folds, Some(false), "{context}");
     assert!(
