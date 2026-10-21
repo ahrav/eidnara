@@ -591,7 +591,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                         providerId: model?.provider ?? null,
                         modelKey,
                         systemPromptHash: piSystemPromptStateFor(sessionId)?.systemPromptHash ?? "",
-                        reduceRegistered: !compactionOff,
+                        // `eidnara_reduce` registration is process-wide and latched at boot.
+                    reduceRegistered: !compactionOff,
                         todowriteRegistered: todowriteEnabled,
                         messages,
                         completedAtMs,

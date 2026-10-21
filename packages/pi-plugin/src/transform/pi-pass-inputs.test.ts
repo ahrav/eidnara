@@ -100,6 +100,7 @@ describe("Pi pass previous response time", () => {
 describe("Pi pass capability fields", () => {
     it.each([
         [true, true],
+        [true, false],
         [false, true],
         [false, false],
     ])("reports eidnara_reduce registered %p and todowrite registered %p", (reduce, todo) => {

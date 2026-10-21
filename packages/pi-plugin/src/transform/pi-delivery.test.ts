@@ -142,10 +142,40 @@ function daemonError(code: string): () => never {
     };
 }
 
-function preloaded(cwd: string, rows: number): SessionManager {
+function preloaded(cwd: string, rows: number, compacted = false): SessionManager {
     const manager = SessionManager.inMemory(cwd);
-    for (let n = 0; n < rows; n += 1) manager.appendMessage(userMessage(`row ${n}`, 1_000 + n));
+    const ids: string[] = [];
+    for (let n = 0; n < rows; n += 1)
+        ids.push(manager.appendMessage(userMessage(`row ${n}`, 1_000 + n)));
+    if (compacted && ids[0]) manager.appendCompaction("pi summary", ids[0], 100);
     return manager;
+}
+
+const TAGGED = "\u00a73\u00a7 tagged answer";
+
+async function taggedTurns(config: Json) {
+    writeUserConfig(config);
+    const { call, transforms } = daemon((body) =>
+        additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
+    );
+    harness = await createTestAgentSession({
+        cwd: root,
+        extensionFactories: [eidnaraPiExtension],
+        settings: PI_SETTINGS,
+    });
+    for (const turn of [1, 2, 3]) {
+        harness.respond([fauxAssistantMessage(TAGGED)]);
+        await harness.session.prompt(`turn ${turn} ${"x".repeat(400)}`);
+        await Bun.sleep(20);
+    }
+    return { h: harness, call, transforms };
+}
+
+function assistantTexts(h: TestAgentSession): string[] {
+    return h.sessionManager
+        .getEntries()
+        .filter((entry) => entry.type === "message" && entry.message.role === "assistant")
+        .map((entry) => textOf((entry as { message: never }).message));
 }
 
 describe("Pi context handler in compaction-off mode", () => {
@@ -203,82 +233,93 @@ describe("Pi context handler in compaction-off mode", () => {
         writeUserConfig({});
         const compactionOff = await firstPass(root);
 
-        const fields = (sent: Json) => Object.keys(sent).sort();
-        expect(fields(withdrawnProject)).toEqual(fields(foldingProject));
-        expect(fields(compactionOff)).toEqual(fields(foldingProject));
+        const perSession = new Set([
+            "session_id",
+            "base_revision",
+            "native_messages",
+            "request_observed_at_ms",
+            "system_prompt_hash",
+            "render_config",
+            "tool_present",
+        ]);
+        const shared = (sent: Json) =>
+            Object.fromEntries(Object.entries(sent).filter(([key]) => !perSession.has(key)));
+        expect(Object.keys(withdrawnProject).sort()).toEqual(Object.keys(foldingProject).sort());
+        expect(Object.keys(compactionOff).sort()).toEqual(Object.keys(foldingProject).sort());
+        expect(shared(withdrawnProject)).toEqual(shared(foldingProject));
+        expect(shared(compactionOff)).toEqual(shared(foldingProject));
         const capabilities = (sent: Json) => [sent.tool_present, sent.todo_tool_present];
         expect(capabilities(foldingProject)).toEqual([true, true]);
         expect(capabilities(withdrawnProject)).toEqual([true, true]);
         expect(capabilities(compactionOff)).toEqual([false, true]);
     });
 
-    it("leaves compaction, eviction, and assistant tags to Pi after additive passes", async () => {
-        const tagged = "\u00a73\u00a7 tagged answer";
-        const replyWithBoundary = (body: Json) =>
-            additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 });
-        for (const [mode, config] of [
-            ["compaction-on", CHAIN],
-            ["compaction-off", {}],
-        ] as const) {
-            writeUserConfig(config);
-            const { call, transforms } = daemon(replyWithBoundary);
-            try {
-                harness = await createTestAgentSession({
-                    cwd: root,
-                    extensionFactories: [eidnaraPiExtension],
-                    settings: PI_SETTINGS,
-                });
-                const h = harness;
-                for (const turn of [1, 2, 3]) {
-                    h.respond([fauxAssistantMessage(tagged)]);
-                    await h.session.prompt(`turn ${turn} ${"x".repeat(400)}`);
-                    await Bun.sleep(20);
-                }
-                const assistants = h.sessionManager
-                    .getEntries()
-                    .filter(
-                        (entry) => entry.type === "message" && entry.message.role === "assistant",
-                    )
-                    .map((entry) => textOf((entry as { message: never }).message));
-                if (mode === "compaction-on") {
-                    expect(compactions(h).length).toBeGreaterThan(0);
-                    expect(assistants.every((text) => text === "tagged answer")).toBe(true);
-                    continue;
-                }
-                expect(compactions(h)).toHaveLength(0);
-                expect(assistants).toEqual([tagged, tagged, tagged]);
-                expect(h.session.getAllTools().map((tool) => tool.name)).not.toContain(
-                    "eidnara_reduce",
-                );
-
-                const outcome = await h.session.compact().then(
-                    () => "compacted",
-                    (error: Error) => error.message,
-                );
-                expect(outcome).toBe("compacted");
-                const [native] = compactions(h);
-                expect(native).toMatchObject({ fromHook: false });
-                await h.session.prompt("after compaction");
-
-                const rows = rowsOf(transforms.at(-1) ?? {});
-                expect(rows[0]?.id).toBe(`eidnara:compactionSummary:${native?.id}`);
-                expect(rows).toHaveLength(h.session.messages.length - 1);
-                const request = h.requests.at(-1);
-                expect(served(request).slice(0, 2)).toEqual([M0, M1]);
-                expect(served(request)[2]).toContain(
-                    (native as { summary: string } | undefined)?.summary ?? "",
-                );
-                expect(transforms.every(noSyntheticRow)).toBe(true);
-            } finally {
-                call.mockRestore();
-                await disposeHarness();
-            }
+    it("evicts and strips assistant tags in a compaction-on process", async () => {
+        const { h, call } = await taggedTurns(CHAIN);
+        try {
+            expect(compactions(h).length).toBeGreaterThan(0);
+            expect(assistantTexts(h)).toEqual(["tagged answer", "tagged answer", "tagged answer"]);
+        } finally {
+            call.mockRestore();
         }
     });
 
-    it("submits the whole array past half the cap while the project withdraws fold authority", async () => {
+    it("leaves compaction, eviction, and assistant tags to Pi after additive passes", async () => {
+        const { h, call, transforms } = await taggedTurns({});
+        try {
+            expect(compactions(h)).toHaveLength(0);
+            expect(assistantTexts(h)).toEqual([TAGGED, TAGGED, TAGGED]);
+            expect(h.session.getAllTools().map((tool) => tool.name)).not.toContain(
+                "eidnara_reduce",
+            );
+
+            const outcome = await h.session.compact().then(
+                () => "compacted",
+                (error: Error) => error.message,
+            );
+            expect(outcome).toBe("compacted");
+            const [native] = compactions(h);
+            expect(native).toMatchObject({ fromHook: false });
+            await h.session.prompt("after compaction");
+
+            const rows = rowsOf(transforms.at(-1) ?? {});
+            expect(rows[0]?.id).toBe(`eidnara:compactionSummary:${native?.id}`);
+            expect(rows).toHaveLength(h.session.messages.length - 1);
+            const request = h.requests.at(-1);
+            expect(served(request).slice(0, 2)).toEqual([M0, M1]);
+            expect(served(request)[2]).toContain(
+                (native as { summary: string } | undefined)?.summary ?? "",
+            );
+            expect(transforms.every(noSyntheticRow)).toBe(true);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("schedules no eviction in a compaction-off process whose session runs in a folding project", async () => {
+        const bootDir = process.cwd();
+        process.chdir(unresolvedProject());
+        try {
+            const { h, call, transforms } = await taggedTurns(CHAIN);
+            try {
+                expect(transforms.every((sent) => sent.tool_present === false)).toBe(true);
+                expect(compactions(h)).toHaveLength(0);
+                expect(assistantTexts(h)).toEqual([TAGGED, TAGGED, TAGGED]);
+            } finally {
+                call.mockRestore();
+            }
+        } finally {
+            process.chdir(bootDir);
+        }
+    });
+
+    it.each([
+        ["", false],
+        [" behind Pi's compaction summary", true],
+    ])("submits the whole array past half the cap%s while the project withdraws fold authority", async (_, compacted) => {
         const unresolved = unresolvedProject();
         const preloadedRows = HALF_CAP_BLOCKS;
+        const lead = compacted ? 1 : 0;
         const passes = async (config: Json, cwd: string): Promise<Row[][]> => {
             writeUserConfig(config);
             const { call, transforms } = daemon(keepWindow);
@@ -286,7 +327,7 @@ describe("Pi context handler in compaction-off mode", () => {
                 harness = await createTestAgentSession({
                     cwd,
                     extensionFactories: [eidnaraPiExtension],
-                    sessionManager: preloaded(cwd, preloadedRows),
+                    sessionManager: preloaded(cwd, preloadedRows, compacted),
                 });
                 await harness.session.prompt("now");
                 await harness.session.prompt("again");
@@ -296,8 +337,10 @@ describe("Pi context handler in compaction-off mode", () => {
                 await disposeHarness();
             }
         };
+        const leadsWithSummary = (rows: Row[] | undefined) =>
+            rows?.[0]?.id.startsWith("eidnara:compactionSummary:") === true;
 
-        const wholeArrays = [preloadedRows + 1, preloadedRows + 3];
+        const wholeArrays = [lead + preloadedRows + 1, lead + preloadedRows + 3];
         for (const [arm, config, cwd] of [
             ["compaction-off", {}, root],
             ["an unresolved project in a compaction-on process", CHAIN, unresolved],
@@ -307,14 +350,16 @@ describe("Pi context handler in compaction-off mode", () => {
                 sent.map((rows) => rows.length),
                 arm,
             ).toEqual(wholeArrays);
-            expect(sent[0]?.[0]?.message.content, arm).toBe("row 0");
+            expect(sent.every(leadsWithSummary), arm).toBe(compacted);
+            expect(sent[0]?.[lead]?.message.content, arm).toBe("row 0");
         }
 
         const folding = await passes(CHAIN, root);
         expect(folding[0]).toHaveLength(HALF_CAP_BLOCKS);
-        expect(folding[0]?.[0]?.message.content).toBe("row 1");
-        expect(folding[1]?.[0]?.id).toBe(folding[0]?.[0]?.id ?? "");
-        expect(folding[1]).toHaveLength(preloadedRows + 2);
+        expect(folding.every(leadsWithSummary)).toBe(compacted);
+        expect(folding[0]?.[lead]?.message.content).toBe(`row ${1 + lead}`);
+        expect(folding[1]?.[lead]?.id).toBe(folding[0]?.[lead]?.id ?? "");
+        expect(folding[1]).toHaveLength(HALF_CAP_BLOCKS + 2);
     });
 
     it("submits passes when the boot project's configuration is unresolved", async () => {
@@ -377,7 +422,7 @@ describe("Pi context handler in compaction-off mode", () => {
         }
     });
 
-    it("leaves Pi's array unchanged when the capture admission refuses the pass", async () => {
+    it("leaves Pi's array unchanged when the capture admission refuses a pass", async () => {
         writeUserConfig({});
         const { call, transforms } = daemon((body) => additive(body));
         try {
@@ -385,19 +430,26 @@ describe("Pi context handler in compaction-off mode", () => {
                 cwd: root,
                 extensionFactories: [eidnaraPiExtension],
             });
-            const sessionId = harness.sessionManager.getSessionId();
-            await harness.session.prompt("first");
-            const held = defaultTransformCaptureAdmission.admit(sessionId);
-            if (!("lease" in held)) throw new Error("the session's pass lease is free");
-            try {
-                await harness.session.prompt("second");
-            } finally {
-                held.lease.release();
-            }
+            const h = harness;
+            const refused = async (prompt: string) => {
+                const held = defaultTransformCaptureAdmission.admit(
+                    h.sessionManager.getSessionId(),
+                );
+                if (!("lease" in held)) throw new Error("the session's pass lease is free");
+                try {
+                    await h.session.prompt(prompt);
+                } finally {
+                    held.lease.release();
+                }
+            };
+            await refused("first");
+            await h.session.prompt("second");
+            await refused("third");
 
             expect(transforms).toHaveLength(1);
-            expect(served(harness.requests[0])).toEqual([M0, M1, "first"]);
-            expect(served(harness.requests[1])).toEqual(["first", "ok", "second"]);
+            expect(served(h.requests[0])).toEqual(["first"]);
+            expect(served(h.requests[1])).toEqual([M0, M1, "first", "ok", "second"]);
+            expect(served(h.requests[2])).toEqual(["first", "ok", "second", "ok", "third"]);
         } finally {
             call.mockRestore();
         }
