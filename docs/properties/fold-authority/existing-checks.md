@@ -229,8 +229,9 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 
 ## Suspiciously quiet areas
 
-- No native-authority pass runs at or above 95 percent of the context
-  limit (FA-N05). The emergency rerun caller is not reachable under native
+- Before #1068 no native-authority pass ran at or above 95 percent of the
+  context limit (FA-N05); #1068's 96 percent arm now does. The emergency
+  rerun caller is not reachable under native
   authority: it follows only a completed `Busy` wait, which native
   preparation never returns (`crates/daemon/src/lib.rs:8957-8974`,
   `:9433-9437`), so the shared gate covers it structurally.
@@ -243,3 +244,40 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 - No transform-level test refuses a first commit over the durable-text
   guard and checks that the row stays absent, and no durable-text refusal
   checks the covered-system rows (FA-E03, shared with WP-E10).
+
+## Knowledge delivery (#1060)
+
+Rows located with `git grep` at `a15da13a4`, the head of #1071. Each row ran
+green in the recorded run of the PR it names (see `catalog.md`, "Update for
+#1060").
+
+| Check | Location | Records | Recorded run | Status |
+| --- | --- | --- | --- | --- |
+| `a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer` | `crates/daemon/src/pi_native_serving_tests.rs:652` | FA-E01 (output clause), FA-N05 (96 percent), FA-N06 | #1068 (#1061) | unaudited |
+| `the_same_pi_windows_differ_by_binding_alone` | `crates/daemon/src/pi_native_serving_tests.rs:710` | FA-E01, FA-N05 (Eidnara control) | #1068 (#1061) | unaudited |
+| `a_repeated_native_pi_window_reconstructs_identical_rows` | `crates/daemon/src/pi_native_serving_tests.rs:778` | KD-E01, FA-N06 | #1068 (#1061) | unaudited |
+| `a_canonical_memory_write_rerenders_native_pi_m0_as_hard` | `crates/daemon/src/pi_native_serving_tests.rs:843` | KD-E02, FA-N06 | #1068 (#1061) | unaudited |
+| "serves m0, m1, then every Pi message on each context event under %s" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:182` | KD-P01, KD-P03, KD-E04, KD-P10 | #1069 (#1062) | unaudited |
+| "carries the same pass fields for sessions the daemon binds differently" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:213` | KD-P02, KD-P03, KD-E04 | #1069 (#1062) | unaudited |
+| "evicts and strips assistant tags in a compaction-on process" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:257` | KD-P04 (control), FA-E02 | #1069 (#1062) | unaudited |
+| "leaves compaction, eviction, and assistant tags to Pi after additive passes" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:267` | KD-P04, KD-P10, FA-E02 | #1069 (#1062) | unaudited |
+| "schedules no eviction in a compaction-off process whose session runs in a folding project" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:301` | KD-P04, FA-E02 | #1069 (#1062) | unaudited |
+| "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` | KD-P06, KD-P08, KD-P09, KD-E03 | #1069 (#1062) | unaudited |
+| "submits passes when the boot project's configuration is unresolved" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:367` | KD-P01, KD-P09 | #1069 (#1062) | unaudited |
+| "leaves Pi's array unchanged when %s declines the pass" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:394` | KD-P07 | #1069 (#1062) | unaudited |
+| "leaves Pi's array unchanged when the capture admission refuses a pass" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:427` | KD-P07 | #1069 (#1062) | unaudited |
+| "Pi pass capability fields" | `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100` | KD-E04, KD-P03 | #1069 (#1062) | unaudited |
+| "submits passes and leaves compaction to Pi in a project whose configuration is unresolved" | `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247` | KD-P09, KD-P01 | #1069 (#1062) | unaudited |
+| "submits and publishes the whole array past half the cap under native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336` | KD-P06, KD-E03 | #1070 (#1063) | unaudited |
+| "sends the half-cap suffix and keeps its head pinned while Eidnara folds" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1358` | KD-P08 | #1070 (#1063) | unaudited |
+| "declines a candidate over the invocation budget and leaves the host array unchanged" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1375` | KD-P07 | #1070 (#1063) | unaudited |
+| "publishes the retained output and the new tail when a later native pass declines" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1410` | KD-P07 (OQ-2 option a) | #1070 (#1063) | unaudited |
+| "sends the same pass fields under either authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1438` | KD-P02 | #1070 (#1063) | unaudited |
+| "serves stored project memory once per request across turns and a Pi compaction" | `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109` | KD-P11, KD-P12, KD-P10, KD-E02 | #1071 (#1064) | unaudited |
+| "serves stored project memory once per request over three turns" | `packages/e2e-tests/tests/rust-native-delivery.test.ts:13` | KD-P11, KD-P12 | #1071 (#1064) | unaudited |
+| "loads the built extension, completes one mock turn, and leaves no storage file" | `packages/e2e-tests/tests/pi-smoke.test.ts:58` | KD-P11 | #1071 (#1064) | unaudited |
+
+Quiet areas after #1060: no end-to-end arm runs a native session above half
+the cap (KD-E03's invalidation rests on the adapter harnesses); no response
+field names the scheduler band, so FA-N05's 96 percent arm infers
+`Emergency95` from the usage.

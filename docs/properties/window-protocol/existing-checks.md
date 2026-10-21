@@ -265,3 +265,15 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Dated note (2026-10-21, #1060)
+
+Rows located at `a15da13a4`. They ran green in the recorded runs of #1069
+(head `6d527babf`) and #1070 (head `dbdac1150`).
+
+| Check | Location | Records | Recorded run | Status |
+| --- | --- | --- | --- | --- |
+| "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` | WP-P01 (authority qualifier) | #1069 | unaudited |
+| "submits and publishes the whole array past half the cap under native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336` | WP-P01 (authority qualifier), WP-E06 | #1070 | unaudited |
+| "sends the half-cap suffix and keeps its head pinned while Eidnara folds" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1358` | WP-P01 (folding clause) | #1070 | unaudited |
+| "publishes the retained output and the new tail when a later native pass declines" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1410` | WP-P11 (native fail-open) | #1070 | unaudited |

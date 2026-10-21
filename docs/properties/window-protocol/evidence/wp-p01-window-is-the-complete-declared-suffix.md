@@ -144,3 +144,40 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Update for #1060 at `a15da13a4`
+
+Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
+(head `dbdac1150`).
+
+- Contract versus code at `08de9051a`: the record's "null submits the whole
+  host array" disagreed with wire section 7.10 and with `coldHead`, which
+  narrowed a null window above half the cap to its newest suffix. #1060's
+  property catalog directs a correction.
+- Wire: `docs/host-wire-protocol.md:955` (the `boundary` row), `:982` (the
+  window rules), and `:996` (the cold-import rule) state that the half-cap
+  suffix applies while the consumer's configuration lets Eidnara fold and
+  that a consumer whose configuration withdraws fold authority submits its
+  whole array.
+- Code: `coldHead` consults the pin, then `source.measure?.()`
+  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851-860`).
+  Pi spreads `measure` only under `inputs.eidnaraFolds`
+  (`packages/pi-plugin/src/transform/pi-transform.ts:268-275`), set per run
+  from the session's project configuration
+  (`packages/pi-plugin/src/index.ts:584`). OpenCode spreads it only when
+  `compactionOff` is not `true`
+  (`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`).
+- Witnesses: `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` (401
+  rows whole under native authority; the 400-block suffix and its pin while
+  folding); `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336`
+  (whole array and publication by identity) and `:1358` (suffix and pin).
+
+### Q: Does the null-window clause hold under native authority?
+
+- Sources examined: the files above.
+- Findings: Yes. Both consumers submit the whole host array with a null
+  boundary under native authority, and the folding arms keep the half-cap
+  suffix and its pin.
+- Missing evidence: A pin from a folding run carried into native authority
+  across a project switch is not constructed; #1060 OQ-3 defers it.
+- Conclusion: resolved with answer; the record carries the qualifier.

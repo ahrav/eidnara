@@ -107,7 +107,9 @@ the same field.
 Skipped, as in catalog revision 2: the frame protocol and shared-memory
 transport (preserved; application revision 3 is a separate version), codec
 unification and CK removal (revision 4), oversized unmanaged cold import
-(non-goal; refusal belongs to window admission), host loading of all N
+(non-goal; refusal belongs to window admission; since #1060 the half-cap cold
+import applies only while the consumer's configuration lets Eidnara fold, and
+a native consumer submits its whole array), host loading of all N
 messages (outside plugin and daemon ownership), and distributed consensus (no
 such mechanism on this surface).
 
@@ -155,7 +157,7 @@ Distribution: 27 `default-production`, 3 `explicit-config-only`, 7 `test-only`.
 | WP-E10 | [`wp-e10-durable-meta-bound-refuses-the-cliff`](#wp-e10-durable-meta-bound-refuses-the-cliff) | safety | `always` | store | active | partial | #873, #881, #833; refusal witness unowned |
 | WP-E11 | [`wp-e11-head-fail-open-does-not-publish-a-failed-candidate`](#wp-e11-head-fail-open-does-not-publish-a-failed-candidate) | safety | `always` | plugin | invalidated | yes | #878, #884 |
 | WP-E12 | [`wp-e12-revert-epoch-invalidates-retained-output`](#wp-e12-revert-epoch-invalidates-retained-output) | safety | `always` | store | active | yes | #879, #881, #833 |
-| WP-P01 | [`wp-p01-window-is-the-complete-declared-suffix`](#wp-p01-window-is-the-complete-declared-suffix) | safety | `always` | plugin | active | yes | #875, #881, #883 |
+| WP-P01 | [`wp-p01-window-is-the-complete-declared-suffix`](#wp-p01-window-is-the-complete-declared-suffix) | safety | `always` | plugin | active | yes | #875, #881, #883; #1069, #1070 (authority qualifier) |
 | WP-P02 | [`wp-p02-anchor-resolution-uses-authoritative-snapshot`](#wp-p02-anchor-resolution-uses-authoritative-snapshot) | safety | `always` | daemon | active | yes | #875, #881 |
 | WP-P03 | [`wp-p03-ordinals-derive-from-the-effective-anchor`](#wp-p03-ordinals-derive-from-the-effective-anchor) | safety | `always` | daemon | active | yes | #875, #881 |
 | WP-P04 | [`wp-p04-session-serialization-preserves-capture-order`](#wp-p04-session-serialization-preserves-capture-order) | safety | `always` | daemon | active | yes | #875 |
@@ -741,13 +743,17 @@ in the #883 (head `d7712d75`) and #884 (head `f8734c12`) `bun run check:repo`
 gates.
 Guarantee: A non-null boundary names the first message of the complete host
 suffix submitted in both representations, while null submits the whole host
-array.
+array, or, while the consumer's configuration lets Eidnara fold and that
+array exceeds half the window cap, its newest half-cap suffix; a consumer
+whose configuration withdraws fold authority submits its whole array.
 Check: `always` - At capture and send, native membership is exactly
 `host[boundaryIndex..capturedLength)`, CK represents that same ordered suffix,
 and the first mid equals the declared mid; ids inside the window are unique;
-sequence is a JavaScript safe integer. Input admissibility must hold on every
-request. Falsifier: capture the first and last tail messages but omit a middle
-one.
+sequence is a JavaScript safe integer. With a null boundary under native
+authority, membership is the whole host array; while Eidnara folds it is the
+whole array or the pinned half-cap suffix. Input admissibility must hold on
+every request. Falsifier: capture the first and last tail messages but omit
+a middle one; under native authority, submit a half-cap suffix.
 Fault/timing angle: Interior omission, duplicate id, or oversized input is
 mistaken for a smaller valid window.
 Required faults and enabling state: Covered prefix, multiple tail messages,
@@ -760,6 +766,20 @@ the admission cap is indirect: #884's "serves the last applied output plus the
 appended messages on a capture_bytes decline"
 (`rust-mode-transform.test.ts:3653`) declines an oversized capture rather than
 sending a smaller window. The trusted-producer assumption is contract C7.
+Authority qualifier, verified at `a15da13a4` (#1060): the record said "null
+submits the whole host array" while the wire document and `coldHead` narrowed
+a null window above half the cap to its newest suffix; the record is
+corrected. The wire now states the authority-conditional rule
+(`docs/host-wire-protocol.md:955`, `:982`, `:996`); Pi supplies the sizing
+hook only while the session's project lets Eidnara fold
+(`packages/pi-plugin/src/index.ts:584`,
+`packages/pi-plugin/src/transform/pi-transform.ts:268-275`; #1069) and
+OpenCode only when `compactionOff` is not `true`
+(`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`;
+#1070); without it `coldHead` submits the whole array
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851-860`).
+The knowledge-delivery records are in `docs/properties/fold-authority/`
+(KD-E03, KD-P06, KD-P08).
 Existing check: `crates/daemon/src/window_coverage/tests.rs:217`
 `impossible_declarations_are_invalid_params` (#875);
 `crates/daemon/src/transform/window_admission.rs:183`
@@ -771,7 +791,10 @@ renamed by #989);
 the declared window in both representations and publishes the recipe at
 boundaryIndex + i", `:228` "rejects a duplicate id inside the window and ignores
 one outside it", and `:845` "declines when the host moves the discovered anchor
-before the window is copied" (#883).
+before the window is copied" (#883); authority qualifier, at `a15da13a4`:
+`packages/pi-plugin/src/transform/pi-delivery.test.ts:318` (#1069),
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336`
+and `:1358` (#1070).
 Impact: High. An omitted tail message becomes silent context loss.
 Open questions: None. C7 states the trusted-producer assumption; the daemon
 does not prove host completeness.
@@ -1910,3 +1933,18 @@ content returns false within that bound. A refused reservation leaves the
 tapes out and the rechecks compare the digest. Pi's private window rechecks
 member identity as before. WP-P13, WP-P22, and WP-P23 keep their checks; the
 re-evidence is in the dated sections of their evidence files.
+
+## Dated note (2026-10-21, #1060)
+
+Dated note, 2026-10-21, #1060 (tickets #1062, #1063, #1065): the cold-import
+rule is authority-conditional. While the consumer's configuration lets
+Eidnara fold, a null window above half the window cap (400 CK blocks or
+16 MiB) is its newest half-cap suffix, pinned until the first anchor exists;
+a consumer whose configuration withdraws fold authority submits its whole
+array, so an applied additive pass carries every host message after the
+daemon's inserted messages. The cold-import half cap is a fold trigger and is
+inert under native authority; only the resident reservation, `queue_full`,
+and the invocation budget decline a native pass. WP-P15 bounds work at a
+fixed window and gives no constant-cost claim for whole-array native
+submission. WP-P01 carries the qualifier; line anchors in its qualifier are
+at `a15da13a4`.

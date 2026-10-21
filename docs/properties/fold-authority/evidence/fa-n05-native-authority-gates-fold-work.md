@@ -130,3 +130,37 @@ and boundary reads.
 - Missing evidence: None.
 - Conclusion: resolved with answer: the guarantee holds; the record stays
   `active`.
+
+## Update for #1060 at `a15da13a4`
+
+Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
+`a15da13a4`.
+
+- The gate is the first statement of `prepare_history_summarizer_with`
+  (`crates/daemon/src/lib.rs:9651-9662`); `prepare_history_summarizer`
+  (`:9638-9649`) builds its inputs from the pass's applied authority
+  (`:9646`), and the non-emergency first unit does the same (`:9110`,
+  `:9118`). The fire path is `prepare_history_summarizer_fire` (`:5463`),
+  and `record_no_fire` is `:6074`.
+- At 48,000 of 50,000 tokens the hard-wall band is `Emergency95`
+  (`crates/daemon/src/scheduler.rs:489-497`, `:716-718`), so the pass takes
+  the emergency branch of the first unit (`lib.rs:9095-9096`). Native
+  preparation returns `Complete`, which settles at `:9133-9149`.
+- `a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer`
+  (`crates/daemon/src/pi_native_serving_tests.rs:652`) runs its third arm on
+  a long Pi window (`:530`) at that pressure under a binding with a live
+  chain and `compaction.enabled: false` (`:489`). It asserts `no_fire`
+  `native_authority`, zero `trigger_tokenized_blocks` and `trigger_eval`, and
+  zero producer starts and connects. `the_same_pi_windows_differ_by_binding_alone`
+  (`:710`) shows that window folds with one start under an Eidnara binding,
+  so the native arm is not vacuous.
+
+### Q: Does a native pass at or above 95 percent settle in the first unit with `native_authority`?
+
+- Sources examined: the files above; the test's response, which carries no
+  continuation.
+- Findings: Yes. The response settles with `native_authority` and the
+  producer counters stay zero. The emergency branch is inferred from the
+  scheduler band at that usage; the response does not name the band.
+- Missing evidence: A response field that names the scheduler band.
+- Conclusion: resolved with answer.
