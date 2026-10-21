@@ -284,7 +284,9 @@ describe("Pi context handler in compaction-off mode", () => {
 
             const rows = rowsOf(transforms.at(-1) ?? {});
             expect(rows[0]?.id).toBe(`eidnara:compactionSummary:${native?.id}`);
-            expect(rows).toHaveLength(h.session.messages.length - 1);
+            expect(rows.slice(1).map((row) => row.message)).toEqual(
+                h.session.messages.slice(1, -1),
+            );
             const request = h.requests.at(-1);
             expect(served(request).slice(0, 2)).toEqual([M0, M1]);
             expect(served(request)[2]).toContain(
