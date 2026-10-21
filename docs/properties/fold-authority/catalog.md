@@ -91,7 +91,7 @@ the verification blocks of these PR descriptions:
 | #1070 | #1063 | `delivery/1063-opencode-whole-array` | `dbdac1150` | #1069 | `bun run check:repo` exit 0 at `6c6368174`; opencode-plugin 3,786 passed and smoke green at `dbdac1150` |
 | #1071 | #1064 | `delivery/1064-e2e-delivery-witnesses` | `a15da13a4` | #1070 | the three new end-to-end files green against the built fixture; `validate-mode-manifest` and `check:repo` green |
 
-The PRs are stacked drafts, not yet merged; a record that cites one of them
+The PRs are stacked drafts awaiting merge; a record that cites one of them
 cites the stack head above.
 
 ## Scope
@@ -2204,8 +2204,7 @@ which holds all four PRs. Ticket decomposition settled three of the
 specification's open questions with the owner's approval on 2026-10-21:
 
 - OQ-1: Pi evaluates "Eidnara folds" for the window-sizing hook from the
-  session's resolved project configuration on every run, not from the boot
-  latch (#1062).
+  session's resolved project configuration on every run (#1062).
 - OQ-2: option (a). For OpenCode, "no host message omitted" replaces "the
   array stays as it was" after a prior successful native pass; the existing
   fail-open path publishes the retained output and the new tail (#1063).

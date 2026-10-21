@@ -42,6 +42,6 @@ Sessions bound folding and native in one process; both OpenCode modes.
 
 - Sources examined: the observed differing fields during #1069.
 - Findings: Both carry the system prompt's hash, which names the session's
-  working directory; they differ per session, not per authority.
+  working directory, so they vary per session and carry no authority.
 - Missing evidence: None.
 - Conclusion: resolved with answer.
