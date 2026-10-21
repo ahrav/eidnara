@@ -1332,10 +1332,83 @@ describe("cold import by fold authority", () => {
         ],
     });
     const beyondHalfCap = (sessionId: string) => hostArray(sessionId, HALF_CAP_BLOCKS + 1);
+    const nativeAuthority = {
+        fired: false,
+        state: "disabled",
+        reason: "native_authority; fold authority pending eidnara: another binding is open on this session",
+        no_fire: "native_authority",
+    };
+
+    it("declines a cold suffix the daemon serves under native authority and submits the whole array next", async () => {
+        const sessionId = `pending-native-${Date.now()}`;
+        const { client, bodies } = fakeDaemon({
+            transform: (body) => ({
+                ...additive(sessionId, body),
+                history_summarizer: nativeAuthority,
+            }),
+        });
+        const debug = spyOn(logger.sessionLog, "debug");
+        try {
+            const transform = createRustModeTransform(deps(false), { moduleClient: client });
+            const host = beyondHalfCap(sessionId);
+            const output = { messages: [...host] as unknown[] };
+            await transform.run(sessionId, output);
+
+            expect(bodies[0]?.native_messages).toEqual(host.slice(1));
+            expect(output.messages).toHaveLength(host.length);
+            for (const [index, member] of host.entries())
+                expect(output.messages[index]).toBe(member);
+            const passLine = logsOf(debug, sessionId).find((line) => line.startsWith("rust pass:"));
+            expect(passLine).toContain("decision=declined:native_authority");
+
+            const grown = hostArray(sessionId, HALF_CAP_BLOCKS + 3);
+            const again = { messages: [...grown] as unknown[] };
+            await transform.run(sessionId, again);
+            expect(bodies[1]?.native_messages).toEqual(grown);
+            expect(again.messages).toHaveLength(grown.length + 2);
+            for (const [index, member] of grown.entries())
+                expect(again.messages[index + 2]).toBe(member);
+        } finally {
+            debug.mockRestore();
+        }
+    });
+
+    it("returns to the pinned suffix once the daemon no longer reports native authority", async () => {
+        const sessionId = `authority-settled-${Date.now()}`;
+        const { client, bodies } = fakeDaemon({
+            transform: (body, index) =>
+                index === 0
+                    ? { ...additive(sessionId, body), history_summarizer: nativeAuthority }
+                    : {
+                          ...keepAll(body, null),
+                          history_summarizer: {
+                              fired: false,
+                              state: "idle",
+                              no_fire: "below_threshold",
+                          },
+                      },
+        });
+        const transform = createRustModeTransform(deps(false), { moduleClient: client });
+        await transform.run(sessionId, { messages: beyondHalfCap(sessionId) });
+        const whole = hostArray(sessionId, HALF_CAP_BLOCKS + 2);
+        await transform.run(sessionId, { messages: [...whole] });
+        const grown = hostArray(sessionId, HALF_CAP_BLOCKS + 3);
+        await transform.run(sessionId, { messages: [...grown] });
+
+        expect(bodies[1]?.native_messages).toEqual(whole);
+        const sent = bodies[2]?.native_messages as MessageLike[];
+        expect(sent).toHaveLength(HALF_CAP_BLOCKS);
+        expect(sent).toEqual(grown.slice(3));
+    });
 
     it("submits and publishes the whole array past half the cap under native authority", async () => {
         const sessionId = `native-whole-${Date.now()}`;
-        const { client, bodies } = fakeDaemon({ transform: (body) => additive(sessionId, body) });
+        const { client, bodies } = fakeDaemon({
+            transform: (body) => ({
+                ...additive(sessionId, body),
+                history_summarizer: nativeAuthority,
+            }),
+        });
         const transform = createRustModeTransform(deps(true), { moduleClient: client });
         const host = beyondHalfCap(sessionId);
         const output = { messages: [...host] as unknown[] };
