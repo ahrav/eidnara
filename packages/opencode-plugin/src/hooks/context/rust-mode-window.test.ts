@@ -1375,18 +1375,15 @@ describe("cold import by fold authority", () => {
     it("declines a candidate over the invocation budget and leaves the host array unchanged", async () => {
         const sessionId = `native-invocation-${Date.now()}`;
         const model = { providerID: "eidnara-test", modelID: "native-window" };
-        const host = beyondHalfCap(sessionId).map((member) => {
-            (member.info as Record<string, unknown>).model = model;
-            return member;
-        });
-        const bytes = (values: readonly unknown[]): number =>
-            values.map(canonicalJsonLength).reduce((sum, length) => sum + length, 0);
+        const host = beyondHalfCap(sessionId);
+        for (const member of host) (member.info as Record<string, unknown>).model = model;
         const limit = chargeInvocation(host.map(canonicalJsonLength), {
             headroomPermille: 250,
             profile: "opencode-heuristic",
         }).chargedTokens;
+        const oversizedM0 = "m".repeat(400_000);
         const { client, bodies } = fakeDaemon({
-            transform: (body) => additive(sessionId, body, "m".repeat(400_000)),
+            transform: (body) => additive(sessionId, body, oversizedM0),
         });
         const limitSpy = spyOn(eventResolvers, "resolveTrustedContextLimit").mockImplementation(
             (providerID, modelID) =>
@@ -1399,10 +1396,9 @@ describe("cold import by fold authority", () => {
             await transform.run(sessionId, output);
 
             expect(bodies[0]?.native_messages).toEqual(host);
-            expect(bytes(output.messages)).toBe(bytes(host));
+            expect(output.messages).toHaveLength(host.length);
             for (const [index, member] of host.entries())
                 expect(output.messages[index]).toBe(member);
-            expect(output.messages).toHaveLength(host.length);
             const passLine = logsOf(debug, sessionId).find((line) => line.startsWith("rust pass:"));
             expect(passLine).toContain("decision=declined:invocation_budget");
         } finally {
@@ -1447,7 +1443,7 @@ describe("cold import by fold authority", () => {
             const transform = createRustModeTransform(deps(compactionOff), {
                 moduleClient: client,
             });
-            await transform.run(sessionId, { messages: hostArray(sessionId, 3) });
+            await transform.run(sessionId, { messages: beyondHalfCap(sessionId) });
             sent.push(bodies[0] ?? {});
         }
         // Capability fields follow the adapter's registration rules for each mode.
