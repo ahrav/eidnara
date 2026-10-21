@@ -16,7 +16,7 @@ test, not proof. Records for proposed behavior describe obligations the
 milestones U1 to U6 must make checkable; none is exercised at HEAD.
 
 The published specification issue reference is recorded here after
-publication: `<issue URL>`.
+publication: [https://github.com/ahrav/eidnara/issues/1067](https://github.com/ahrav/eidnara/issues/1067).
 
 ## Parts
 
