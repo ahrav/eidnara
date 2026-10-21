@@ -121,7 +121,7 @@ Each record states the evidence for its label.
 | ID | Record | Type | Check | Surface | Status | Exercised | Owner |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | FA-E01 | [`fa-e01-additive-retains-ingress-identities`](#fa-e01-additive-retains-ingress-identities) | safety | `always` | daemon | invalidated | yes | #903 (#855), #905 (#857); #1068 (#1061) output-shape witness |
-| FA-E02 | [`fa-e02-raw-mode-controls-host-surfaces`](#fa-e02-raw-mode-controls-host-surfaces) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856); #1069 (#1062) off-mode Pi clauses; refusal text for an empty chain (needs human input) |
+| FA-E02 | [`fa-e02-raw-mode-controls-host-surfaces`](#fa-e02-raw-mode-controls-host-surfaces) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856); #1069 (#1062) off-mode Pi clauses; OQ-4 refusal text for an empty chain (needs human input) |
 | FA-E03 | [`fa-e03-whole-meta-refuses-oversize`](#fa-e03-whole-meta-refuses-oversize) | safety | `always` | store | active | partial | #905 (#857), #859 PR A, #859 PR C; first-commit refusal witness unowned (shared with WP-E10); covered-row refusal witness unowned |
 | FA-E04 | [`fa-e04-selected-identities-follow-the-whole-range`](#fa-e04-selected-identities-follow-the-whole-range) | safety | `always-or-unreached` | summarizer | invalidated | yes | #859 PR C, #859 PR A, #905 (#857) |
 | FA-E05 | [`fa-e05-empty-chain-refusal-is-late-and-change-gated`](#fa-e05-empty-chain-refusal-is-late-and-change-gated) | safety | `always` | daemon | invalidated | partial | #903 (#855), #904 (#856); #859 PR A; ignored no-fire commit error unowned |
@@ -168,6 +168,7 @@ Each record states the evidence for its label.
 Owner lists the PR whose recorded run supplies the status, then, after a
 semicolon, the evidence still unowned, a later PR whose run supplies a
 witness the earlier owner lacked, or the decision that needs human input.
+PRs that jointly supply a status are comma-separated.
 Semantics: 30 `always`, 12 `always-or-unreached`, 1 `sometimes`, 1
 `unreachable`, 0 `reachable` (the KD records add 13 `always` and 3
 `always-or-unreached`).
@@ -279,8 +280,9 @@ description, and flush, recomp, and wrapup refuse without a daemon call.
 For Pi in compaction-off mode, also: `session_before_compact` answers
 `undefined`, no eviction is scheduled, and a tagged assistant message stays
 unchanged. `always` because the boot latch is resolved once per startup on
-every configuration, and the compaction answer also reads the session's
-project configuration on every call (#1060 OQ-1, owner approval 2026-10-21).
+every configuration, and in a compaction-on process the compaction answer
+also reads the session's project configuration on every call outside the
+plugin's own eviction (#1060 OQ-1, owner approval 2026-10-21).
 Fault/timing angle: An empty chain with an absent or true compaction
 setting; a boot latch that disagrees with the session's project.
 Required faults and enabling state: An empty configuration, explicit
@@ -2258,7 +2260,7 @@ Type: safety
 Reachability: default-production - a native session takes the additive
 path (`crates/daemon/src/transform.rs:3341-3342`), and every project with a
 canonical memory row reaches the rendered-row revision read
-(`transform.rs:2907-2909`).
+(`transform.rs:2898-2910`).
 Status: active
 Exercised: yes - #1068: `a_canonical_memory_write_rerenders_native_pi_m0_as_hard`
 makes a real kernel `commit_verified_memory` write between two Pi passes
@@ -2672,7 +2674,7 @@ completed turn, two pinned compaction requests, fixture
 `rust-native-delivery` (one main request per turn and at most one title
 request), and `pi-smoke` (zero summarizer starts); #1068's 96 percent native
 arm for the summarizer gate (FA-N05). The ContextResearcher clause rests on
-a static read of the callers, not on a test.
+a static read of the callers.
 Guarantee: Delivery adds zero model calls; native delivery starts no
 summarizer; `/eidnara-aug` remains the only ContextResearcher entry.
 Check: `always` - per delivery invocation, provider requests equal completed
@@ -2695,15 +2697,15 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - a project with a stored memory reaches
-the rendered-row read on every native pass
-(`crates/daemon/src/transform.rs:2907-2909`).
+the m1 revision read and the project-memory epoch check on every native pass
+(`crates/daemon/src/transform.rs:2898-2910`).
 Status: active
 Exercised: yes - #1071: the stored memory appears in m0 exactly once per
 request across turns and one Pi compaction on Pi and over three turns on
 OpenCode; a memory seeded mid-session appears once on the next pass; #1068
 for the daemon side (KD-E02). The budget clause rests on a static review of
-`git diff 08de9051a..a15da13a4`, not on a test: no PR of #1068 to #1071 adds
-or raises a budget.
+`git diff 08de9051a..a15da13a4`: no PR of #1068 to #1071 adds or raises a
+budget.
 Guarantee: Adapters publish accepted daemon knowledge once per request,
 including epoch-HARD updates, and raise no existing budget.
 Check: `always-or-unreached` - at accepted publication, the
