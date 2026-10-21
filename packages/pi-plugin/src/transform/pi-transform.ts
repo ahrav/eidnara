@@ -160,6 +160,11 @@ export interface PiPassInputs {
     messages: readonly Json[];
     reader: PiBranchReader;
     projectRoot: string;
+    /**
+     * Whether the session's project configuration lets Eidnara fold. Only then does a cold
+     * session submit the half-cap suffix; otherwise the pass submits the whole array.
+     */
+    eidnaraFolds: boolean;
     contextLimit: number | undefined;
     /** `completedAtMs(index)` returns the session-write timestamp for the message at `index`. */
     fields(
@@ -260,10 +265,14 @@ export function createPiTransform(options: PiTransformOptions) {
             },
             preflight: async () => inputs.projectRoot,
             readWindow: rows,
-            measure: () => (index) => {
-                const row = rows(index, index + 1)?.[0];
-                return row && piRowSize(row);
-            },
+            ...(inputs.eidnaraFolds
+                ? {
+                      measure: () => (index: number) => {
+                          const row = rows(index, index + 1)?.[0];
+                          return row && piRowSize(row);
+                      },
+                  }
+                : {}),
             // A `toolResult` row answers a `toolCall` in an earlier assistant row.
             startsWindow: (index) =>
                 (inputs.messages[index] as Json | undefined)?.role !== "toolResult",

@@ -274,6 +274,7 @@ function passOver(
         messages,
         reader: manager,
         projectRoot: "/project",
+        eidnaraFolds: true,
         contextLimit: undefined,
         fields: () => ({ model_key: "faux/faux-model" }),
         branch,

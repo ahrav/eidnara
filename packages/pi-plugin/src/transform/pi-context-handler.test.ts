@@ -244,7 +244,7 @@ describe("Pi context handler under createAgentSession", () => {
         }
     });
 
-    it("leaves folding and compaction to Pi in a project whose configuration is unresolved", async () => {
+    it("submits passes and leaves compaction to Pi in a project whose configuration is unresolved", async () => {
         const { call, transforms } = daemon(keepWindow);
         try {
             const project = join(root, "unresolved");
@@ -257,7 +257,7 @@ describe("Pi context handler under createAgentSession", () => {
             });
             for (const turn of [1, 2, 3])
                 await harness.session.prompt(`turn ${turn} ${"x".repeat(400)}`);
-            expect(transforms).toHaveLength(0);
+            expect(transforms.length).toBeGreaterThan(0);
             const outcome = await harness.session.compact().then(
                 () => "compacted",
                 (error: Error) => error.message,
