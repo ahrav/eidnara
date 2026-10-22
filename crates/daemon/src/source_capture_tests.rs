@@ -1027,3 +1027,72 @@ async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
     drop(held);
     assert_eq!(report(&handler)["retained_bytes"], 0);
 }
+
+/// AC10 (U3): Pi rows that carry their entry's `type` and `parentId` publish their tool results, rows without them are counted adapter refusals, and the wire response is the same bytes either way.
+#[tokio::test]
+async fn pi_entry_identity_on_the_row_decides_capture_and_never_the_response() {
+    let rows = |identity: bool| -> Vec<Value> {
+        let mut rows = vec![
+            pi_row(
+                "pi-u1",
+                None,
+                json!({ "role": "user", "content": "list the files", "timestamp": 1_700_000_000_000u64 }),
+            ),
+            pi_row(
+                "pi-a1",
+                Some("pi-u1"),
+                json!({ "role": "assistant", "timestamp": 1_700_000_000_100u64, "stopReason": "toolUse",
+                        "usage": {}, "content": [
+                            { "type": "toolCall", "id": "call_ls", "name": "bash", "arguments": {} }
+                        ] }),
+            ),
+            pi_row(
+                "pi-t1",
+                Some("pi-a1"),
+                json!({ "role": "toolResult", "toolCallId": "call_ls", "toolName": "bash", "isError": false,
+                        "timestamp": 1_700_000_000_200u64,
+                        "content": [ { "type": "text", "text": "Cargo.toml\n" }, { "type": "text", "text": "src\n" } ] }),
+            ),
+        ];
+        if !identity {
+            for row in &mut rows {
+                let row = row.as_object_mut().unwrap();
+                row.remove("type");
+                row.remove("parentId");
+            }
+        }
+        rows
+    };
+    let mut responses = Vec::new();
+    for identity in [true, false] {
+        let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+        let mut bound = binding_with_harness(project.to_str().unwrap(), "pi", SESSION);
+        bound.config = capture_config(true);
+        handler.bind_route(test_route(7), bound);
+        // The wire response: the recipe the daemon returns, before a client applies it.
+        let request = handler.test_client_prepare_request(pi_request(&rows(identity), "base-1"));
+        let mut outcome = handler
+            .handle_transform_for_test(test_route(7), request)
+            .await;
+        let after = outcome.take_after_response();
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("unexpected outcome {outcome:?}");
+        };
+        let mut response: Value = serde_json::from_slice(&bytes).unwrap();
+        for field in ["timings", "output_revision", "previous_output_revision"] {
+            response.as_object_mut().unwrap().remove(field);
+        }
+        responses.push(response);
+        after.expect("the window is charged").run();
+        settle(&handler).await;
+        let tools = live(&kernel_store(&handler), OccurrenceClass::RawToolSpans);
+        if identity {
+            assert_eq!(tools.len(), 2, "one unit per tool result text item");
+            assert_eq!(report(&handler)["adapter_refused"], 0);
+        } else {
+            assert!(tools.is_empty());
+            assert_eq!(report(&handler)["adapter_refused"], 3);
+        }
+    }
+    assert_eq!(responses[0], responses[1]);
+}

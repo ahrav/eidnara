@@ -495,7 +495,7 @@ fn rewrite_single_block(
         }
         _ => return None,
     };
-    let mut row = clone_without(raw, "message");
+    let mut row = row_shell(raw);
     set_value(&mut row, "message", message);
     Some(row)
 }
@@ -583,7 +583,7 @@ fn rewrite_parts_in_place(
     );
     let mut message = clone_without(native, "content");
     set_value(&mut message, "content", Value::Array(content));
-    let mut row = clone_without(raw, "message");
+    let mut row = row_shell(raw);
     set_value(&mut row, "message", message);
     Some(row)
 }
@@ -1240,12 +1240,24 @@ fn encode_with_meta(
             })
         }
     };
-    let mut row = clone_without(raw, "message");
+    let mut row = row_shell(raw);
     set_value(&mut row, "message", message);
     Some(Arc::new(row))
 }
 
 /// Clones `value` without its `key` field; a value that is not an object clones whole.
+/// The row a re-rendered message is set into: its id alone. The session entry's `type` and `parentId` travel on the request only, so a response is the same bytes with or without them.
+fn row_shell(raw: &Value) -> Value {
+    Value::Object(
+        raw.as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(field, _)| field.as_str() == "id")
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+    )
+}
+
 fn clone_without(value: &Value, key: &str) -> Value {
     match value.as_object() {
         Some(object) => Value::Object(

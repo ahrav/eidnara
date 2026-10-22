@@ -574,9 +574,32 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         ),
         (1, "0", "user")
     );
+    // AC10 and OQ10: a row names its entry type, and only a message entry holds sources. Coverage witness `pi_wire_row_without_type`: the `{id, message}` row a pre-U3 plugin sent.
+    for (row, refusal) in [
+        (
+            json!({ "id": "pi-u1", "message": { "role": "user", "content": "x", "timestamp": 1 } }),
+            AdapterRefusal::MissingIdentity("type"),
+        ),
+        (
+            json!({ "type": "compaction", "id": "x", "parentId": "pi-u1" }),
+            AdapterRefusal::UnsupportedShape("type"),
+        ),
+        (
+            json!({ "type": "session", "id": "x" }),
+            AdapterRefusal::UnsupportedShape("type"),
+        ),
+        (
+            json!({ "type": 7, "id": "x" }),
+            AdapterRefusal::UnsupportedShape("type"),
+        ),
+    ] {
+        assert_eq!(pi_units(&pi_session(), &row), Err(refusal), "{row}");
+    }
+    let mut orphan = pi_tool_result("pi-t9", "pi-a1", false, 6000);
+    orphan.as_object_mut().unwrap().remove("parentId");
     assert_eq!(
-        pi_units(&pi_session(), &json!({ "type": "session", "id": "x" })).unwrap(),
-        vec![]
+        pi_units(&pi_session(), &orphan),
+        Err(AdapterRefusal::MissingIdentity("parentId"))
     );
     // The captured Pi shape: a content array with an image beside the text; the image is not a text source.
     let units = pi_units(&pi_session(), &pi_user_with_image("pi-u2", 5600)).unwrap();

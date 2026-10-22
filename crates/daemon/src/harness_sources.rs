@@ -297,11 +297,11 @@ pub fn opencode_units(
     Ok(units)
 }
 
-/// Units of one Pi session entry: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. Entries of other types contribute nothing. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
+/// Units of one Pi transform row, which carries its session entry's `type` and `parentId` beside its `id` and `message`: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
 ///
 /// # Errors
 ///
-/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
+/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, a row without `type` (`MissingIdentity("type")`) or whose `type` is not `"message"` (`UnsupportedShape("type")`), missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
 pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
@@ -312,8 +312,11 @@ pub fn pi_units(
     if !entry.is_object() {
         return Err(AdapterRefusal::NotAnObject);
     }
-    if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return Ok(Vec::new());
+    // The row carries its session entry's type; only a message entry holds text or a tool result.
+    match entry.get("type") {
+        None => return Err(AdapterRefusal::MissingIdentity("type")),
+        Some(Value::String(kind)) if kind == "message" => {}
+        Some(_) => return Err(AdapterRefusal::UnsupportedShape("type")),
     }
     let entry_id = field(entry, "id")?;
     let message = entry

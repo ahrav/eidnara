@@ -6,7 +6,7 @@ import { HALF_CAP_BLOCKS } from "@eidnara/opencode/hooks/context/window-cap";
 
 import { PiBranchIndex, type PiBranchReader } from "./pi-branch";
 import { type PiRow, piRowSize } from "./pi-ck";
-import { createPiTransform, PiAlignment } from "./pi-transform";
+import { createPiTransform, entryRow, PiAlignment } from "./pi-transform";
 
 type Json = Record<string, unknown>;
 
@@ -467,6 +467,44 @@ async function coldWindow(messages: Json[]): Promise<{ id: string; role: unknown
         role: row.message.role,
     }));
 }
+
+describe("Pi native entry identity", () => {
+    it("sends each row with its session entry's type and parentId", async () => {
+        const messages: Json[] = [user("first"), toolCall("call-1"), toolResult("call-1")];
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [] })],
+            transform: [rawReply],
+        });
+        const reader = branchOver(messages);
+        const pass = passOver(reader, messages);
+        await transformOver(transport.client, pass.branch).run(pass);
+        const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
+        expect(
+            (sent.native_messages as PiRow[]).map(({ id, type, parentId }) => ({
+                id,
+                type,
+                parentId,
+            })),
+        ).toEqual([
+            { id: "e1", type: "message", parentId: null },
+            { id: "e2", type: "message", parentId: "e1" },
+            { id: "e3", type: "message", parentId: "e2" },
+        ]);
+    });
+
+    it("keeps a row whose entry cannot be read to its id and message", () => {
+        const messages: Json[] = [user("first")];
+        const reader = branchOver(messages);
+        const message = messages[0] as Json;
+        expect(entryRow("e1", message, reader)).toEqual({
+            id: "e1",
+            type: "message",
+            parentId: null,
+            message,
+        });
+        expect(entryRow("e9", message, reader)).toEqual({ id: "e9", message });
+    });
+});
 
 describe("Pi cold import", () => {
     it("starts its suffix after a tool result whose call the half cap leaves out", async () => {
