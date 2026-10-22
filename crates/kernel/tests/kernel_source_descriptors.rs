@@ -2363,29 +2363,37 @@ fn a_tool_descriptor_stores_a_validated_outcome_record() {
     );
 }
 
-/// The narrowed in-commit inventory: `live_source_descriptors_with` returns exactly the live descriptors whose identity field holds one of the values, including a value that JSON escapes, pages across a small page bound, and sees the commit's own retirement. A field outside the class's identity is invalid input.
+/// The `call-other` fixture embeds a wanted `tool_call_id` pair in `parent_message_id` to exercise field-specific identity matching.
 #[test]
 fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
     let fixture = Fixture::open();
     let text = "output";
     let evidence = fixture.retain("tool", text);
-    let call = |tool_call_id: &'static str| -> Vec<(&'static str, &'static str)> {
-        TOOL.iter()
-            .map(|&(name, value)| {
-                (
-                    name,
-                    if name == "tool_call_id" {
-                        tool_call_id
-                    } else {
-                        value
-                    },
-                )
-            })
-            .collect()
-    };
+    let call =
+        |tool_call_id: &'static str, parent: &'static str| -> Vec<(&'static str, &'static str)> {
+            TOOL.iter()
+                .map(|&(name, value)| {
+                    (
+                        name,
+                        match name {
+                            "tool_call_id" => tool_call_id,
+                            "parent_message_id" => parent,
+                            _ => value,
+                        },
+                    )
+                })
+                .collect()
+        };
     let mut wanted = Vec::new();
-    for tool_call_id in ["call \"q\\ 9", "call-b", "call-c", "call-other"] {
-        let identity = call(tool_call_id);
+    for (tool_call_id, parent) in [
+        ("call \"q\\ 9", "msg-002"),
+        ("call-b", "msg-002"),
+        ("call-c", "msg-002"),
+        ("call \"]\\", "msg-002"),
+        ("\u{547c}\u{3073}\u{51fa}\u{3057}-\u{e9}", "msg-002"),
+        ("call-other", "[\"tool_call_id\",\"call-b\"]"),
+    ] {
+        let identity = call(tool_call_id, parent);
         let (published, _, _) = fixture
             .publish(
                 tool_call_id,
@@ -2407,7 +2415,13 @@ fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
         }
     }
     wanted.sort();
-    let values = ["call \"q\\ 9", "call-b", "call-c"];
+    let values = [
+        "call \"q\\ 9",
+        "call-b",
+        "call-c",
+        "call \"]\\",
+        "\u{547c}\u{3073}\u{51fa}\u{3057}-\u{e9}",
+    ];
     let one = std::num::NonZeroUsize::new(1).unwrap();
     fixture
         .store
@@ -2453,6 +2467,130 @@ fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
                     .map(|page| page.rows.len()),
                 Err(KernelError::InvalidInput)
             );
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// Every one- and two-character value over JSON's structural and escaped characters, plus longer values built from them, is found by the narrowed read, and only in its own field. Each value has two decoys: one whose `parent_message_id` spells the value's `["tool_call_id", value]` pair, and one whose `session_id` holds the value itself.
+#[test]
+fn a_narrowed_read_finds_every_escaped_value_in_its_own_field() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let alphabet = ["\"", "\\", "[", "]", ",", "a", "\u{e9}"];
+    let mut values: Vec<String> = alphabet.iter().map(|one| (*one).to_owned()).collect();
+    for first in alphabet {
+        for second in alphabet {
+            values.push(format!("{first}{second}"));
+        }
+    }
+    values.extend(
+        [
+            "\"]",
+            "\\\"]",
+            "\\\\\"]",
+            "\",\"",
+            "[\"tool_call_id\",\"x\"]",
+            "\\u0022",
+            "\u{2028}\u{2029}",
+        ]
+        .map(str::to_owned),
+    );
+    let mut seen = std::collections::HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+    let identity = |tool_call_id: &str, session: &str, parent: &str| -> Vec<(String, String)> {
+        TOOL.iter()
+            .map(|&(name, value)| {
+                let value = match name {
+                    "tool_call_id" => tool_call_id,
+                    "session_id" => session,
+                    "parent_message_id" => parent,
+                    _ => value,
+                };
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+    };
+    let mut wanted = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        let pair = serde_json::to_string(&("tool_call_id", value)).unwrap();
+        for (key, fields, keep) in [
+            (
+                format!("value-{index}"),
+                identity(value, "sess-01", "msg-002"),
+                true,
+            ),
+            (
+                format!("pair-{index}"),
+                identity(&format!("decoy-pair-{index}"), "sess-01", &pair),
+                false,
+            ),
+            (
+                format!("field-{index}"),
+                identity(&format!("decoy-field-{index}"), value, "msg-002"),
+                false,
+            ),
+        ] {
+            let fields: Vec<(&str, &str)> = fields
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            let (published, _, _) = fixture
+                .publish(
+                    &key,
+                    &request(
+                        Occurrence {
+                            class: "raw_tool_spans",
+                            identity: &fields,
+                            revision: "1",
+                            representation: "tool_output",
+                            span: None,
+                        },
+                        &evidence,
+                        text,
+                    ),
+                )
+                .unwrap();
+            if keep {
+                wanted.push(published.object_id);
+            }
+        }
+    }
+    wanted.sort();
+    let wanted_values: Vec<&str> = values.iter().map(String::as_str).collect();
+    let seven = std::num::NonZeroUsize::new(7).unwrap();
+    fixture
+        .store
+        .commit(intent("read-escaped"), |envelope| {
+            let mut found = Vec::new();
+            let mut after = None;
+            loop {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    &wanted_values,
+                    after.as_deref(),
+                    seven,
+                )?;
+                found.extend(page.rows.into_iter().map(|row| row.object_id));
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(found, wanted, "every value, and no decoy");
+            for value in &values {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    &[value.as_str()],
+                    None,
+                    seven,
+                )?;
+                assert_eq!(page.rows.len(), 1, "{value:?} alone");
+                assert_eq!(page.rows[0].detail.identity[4].1, *value);
+            }
             Ok(String::new())
         })
         .unwrap();
