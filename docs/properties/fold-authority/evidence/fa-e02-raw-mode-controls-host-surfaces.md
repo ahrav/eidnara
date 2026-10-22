@@ -126,8 +126,15 @@ for an empty chain.
 ## Update for #1060 at `07ea883b5`
 
 Tickets #1062 and #1065. #1069 makes the Pi `context` transform run in every
-mode; the compaction-only machinery keeps the boot latch. Pi's mode is
-decided in two places, verified at `07ea883b5`:
+mode; the compaction-only machinery keeps the boot latch. This record's
+surviving Pi clauses are the `eidnara_reduce` omission and the fold-command
+refusals (`packages/pi-plugin/src/tools/index.test.ts:19`,
+`packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`,
+`packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131`); the
+per-event consequences of the latch below (eviction, tag strip, compaction
+answer) are KD-P04's guarantee, and their witnesses are listed here for the
+latch trail only. Pi's mode is decided in two places, verified at
+`07ea883b5`:
 
 - The boot latch `compactionOff` (`packages/pi-plugin/src/index.ts:382-384`)
   gates `eidnara_reduce` registration (`:384`), the pass's `tool_present`
@@ -138,8 +145,9 @@ decided in two places, verified at `07ea883b5`:
   configuration (`:955-958`): a project whose configuration withdraws fold
   authority leaves compaction to Pi inside a compaction-on process.
 
-Witnesses in `packages/pi-plugin/src/transform/pi-delivery.test.ts` (#1069,
-`bun run check:repo` exit 0 at `6d527babf`):
+KD-P04's witnesses in `packages/pi-plugin/src/transform/pi-delivery.test.ts`
+(#1069, `bun run check:repo` exit 0 at `6d527babf`); of these, only `:290`
+serves this record, for its `eidnara_reduce` absence:
 
 - `:280` "evicts and strips assistant tags in a compaction-on process", the
   control: replies that name a rendered boundary produce an eviction and

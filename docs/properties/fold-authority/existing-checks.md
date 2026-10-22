@@ -258,9 +258,9 @@ green in the recorded run of the PR it names (see `catalog.md`, "Update for
 | `a_canonical_memory_write_rerenders_native_pi_m0_as_hard` | `crates/daemon/src/pi_native_serving_tests.rs:843` | KD-E02, FA-N06 | #1068 (#1061) | unaudited |
 | "serves m0, m1, then every Pi message on each context event under %s" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:184` | KD-P01, KD-P03, KD-E04, KD-P10 | #1069 (#1062) | unaudited |
 | "carries the same pass fields for sessions the daemon binds differently" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:236` | KD-P02, KD-P03, KD-E04 | #1069 (#1062) | unaudited |
-| "evicts and strips assistant tags in a compaction-on process" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:280` | KD-P04 (control), FA-E02 | #1069 (#1062) | unaudited |
-| "leaves compaction, eviction, and assistant tags to Pi after additive passes" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:290` | KD-P04, KD-P10, FA-E02 | #1069 (#1062) | unaudited |
-| "schedules no eviction in a compaction-off process whose session runs in a folding project" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:324` | KD-P04, FA-E02 | #1069 (#1062) | unaudited |
+| "evicts and strips assistant tags in a compaction-on process" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:280` | KD-P04 (control) | #1069 (#1062) | unaudited |
+| "leaves compaction, eviction, and assistant tags to Pi after additive passes" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:290` | KD-P04, KD-P10, FA-E02 (the `eidnara_reduce` omission only) | #1069 (#1062) | unaudited |
+| "schedules no eviction in a compaction-off process whose session runs in a folding project" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:324` | KD-P04 | #1069 (#1062) | unaudited |
 | "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:341` | KD-P06, KD-P08, KD-P09, KD-E03 | #1069 (#1062) | unaudited |
 | "submits the whole array after the daemon serves a cold suffix under native authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:390` | KD-P06 (stored authority still native under a folding configuration) | #1069 (#1062) | unaudited |
 | "submits passes when the boot project's configuration is unresolved" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:422` | KD-P01, KD-P09 | #1069 (#1062) | unaudited |
@@ -285,7 +285,7 @@ green in the recorded run of the PR it names (see `catalog.md`, "Update for
 | "registers exactly the tool and command set each registration option selects" | `packages/pi-plugin/src/tools/index.test.ts:19` | FA-E02, KD-E04 (the registration set) | #1069 (#1062) | unaudited |
 | "refuses in compaction-off mode without calling the daemon" | `packages/pi-plugin/src/commands/eidnara-commands.test.ts:109` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
 | "refuses in compaction-off mode" | `packages/pi-plugin/src/commands/eidnara-commands.test.ts:369` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
-| "refuses in compaction-off mode without calling the daemon" | `packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131` | KD-P04 | #1069 (#1062) | unaudited |
+| "refuses in compaction-off mode without calling the daemon" | `packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
 | "answers an overflow with the fold and completes the turn on the retry" | `packages/pi-plugin/src/transform/pi-eviction.test.ts:223` | KD-P05 (eviction precedence over hand-back) | #1069 (#1062) | unaudited |
 | `untouched_golden_rows_replay_by_pointer_and_edits_re_encode` | `crates/daemon/src/codec/pi.rs:2422` | FA-E01 (kept-row identity at the codec seam) | #1068 (#1061) | unaudited |
 | `identical_pi_passes_re_encode_identical_rows` | `crates/daemon/src/pi_native_serving_tests.rs:241` | KD-E01 (folding binding counterpart) | #1068 (#1061) | unaudited |

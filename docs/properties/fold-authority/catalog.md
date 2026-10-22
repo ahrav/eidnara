@@ -309,9 +309,11 @@ that is not false"; `packages/opencode-plugin/src/plugin/tool-registry.test.ts:1
 and `:154` "an empty summarizer chain registers the compaction-off tool set";
 `packages/opencode-plugin/src/hooks/context/command-handler.test.ts:144`
 "refuses /${command} without a daemon call when compaction is off"; Pi
-tool omission and command refusals `packages/pi-plugin/src/tools/index.test.ts:19`
-and `packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`
-(#1069); the Pi eviction, tag-strip, and compaction-answer witnesses
+tool omission and command refusals `packages/pi-plugin/src/tools/index.test.ts:19`,
+`packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`, and
+`packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131` (#1069), with
+`pi-delivery.test.ts:290` for the `eidnara_reduce` omission in a running
+session; the Pi eviction, tag-strip, and compaction-answer witnesses
 (`pi-delivery.test.ts:280`, `:290`, `:324`) are KD-P04's.
 Impact: High. Before #898, "enabled" did not establish folding capability.
 Open questions:
