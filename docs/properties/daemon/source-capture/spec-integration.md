@@ -10,6 +10,7 @@ metadata, not names of anything in the tree.
 
 | Requirement | Unit | Record | Tests |
 | --- | --- | --- | --- |
+| R1 | U2, U3, U10 | [`sc-consented-window-reaches-publisher`](catalog.md#sc-consented-window-reaches-publisher) | `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss`, `a_pi_window_publishes_user_text_and_tool_results`, `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires` |
 | R1 | U2, U3 | [`sc-pending-unit-publishes-next-ready-pass`](catalog.md#sc-pending-unit-publishes-next-ready-pass) | `a_unit_pending_behind_a_starting_kernel_publishes_on_the_next_ready_pass`, `a_33_unit_window_publishes_32_and_the_next_pass_publishes_the_deferred_one`, `a_revision_lead_leaves_the_unit_pending` |
 | R1 | U2, U3 | [`sc-harness-classes-have-no-production-publisher`](catalog.md#sc-harness-classes-have-no-production-publisher) | `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss`, `capture_off_memory_off_or_a_subagent_session_runs_no_adapter` |
 | R1 | U2, U3 | [`sc-unfinished-assistant-text-deferred`](catalog.md#sc-unfinished-assistant-text-deferred) | `unfinished_assistant_text_is_deferred_but_settled_tools_publish`, `an_interrupted_call_waits_for_its_turn_to_complete` |
@@ -56,5 +57,5 @@ metadata, not names of anything in the tree.
 | Captured evidence becomes model-visible under a weaker disclosure policy | `sc-sensitive-denied-remote-hidden-from-auto-surfaces`, `sc-capture-creates-no-decision` |
 | Captured text admits under an event kind other than `Other` | `sc-admission-fixed-class-pair-under-event-other` |
 | `RepositoryProvenance` is constructed for working-tree bytes | `sc-capture-creates-no-decision`; the CI "Invented provenance" gate over `harness_sources.rs`, `source_capture*`, and `project_docs.rs` |
-| A second durable store for capture state appears | `sc-terminal-disposition-never-retried` (the memo is process-local; Kernel receipts are the only durable record) |
+| A second durable store for capture state appears | `sc-capture-state-has-one-durable-store` (`capture_state_has_one_durable_store`) |
 | The transform response waits on Kernel publication | `sc-response-independent-of-publication` |

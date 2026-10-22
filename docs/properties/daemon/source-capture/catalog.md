@@ -42,8 +42,9 @@ Part A records describe behavior that existed at the baseline. Two of them
 are `invalidated` because a unit of the stack inverted them; each names the
 record that now carries its obligation. Part B records were `proposed` in the
 specification and are `active` here because each has a landed check that was
-read at authoring time. The gap record covers the resource bounds the
-portfolio evaluation queued.
+read at authoring time. The gap records cover the resource bounds the
+specification's evaluation queued and the R1 reach and single-store stop
+condition this catalog's evaluation queued.
 
 ## Index
 
@@ -91,11 +92,13 @@ portfolio evaluation queued.
 | [`sc-repodoc-one-live-revision-above-historical-head`](#sc-repodoc-one-live-revision-above-historical-head) | B | U9, U10 | R7 | safety | explicit-config-only | active | `always` | yes |
 | [`sc-repodoc-raw-bytes-separate-from-prompt-hash`](#sc-repodoc-raw-bytes-separate-from-prompt-hash) | B | U10 | R7 | safety | explicit-config-only | active | `always` | yes |
 | [`sc-repodoc-only-verified-missing-retires`](#sc-repodoc-only-verified-missing-retires) | B | U10 | R7 | safety | explicit-config-only | active | `always` | yes |
+| [`sc-consented-window-reaches-publisher`](#sc-consented-window-reaches-publisher) | gap | U2, U3, U10 | R1 | reachability | explicit-config-only | active | `reachable` | yes |
+| [`sc-capture-state-has-one-durable-store`](#sc-capture-state-has-one-durable-store) | gap | U2 | stop condition | safety | explicit-config-only | active | `always` | yes |
 | [`sc-capture-resource-bounds`](#sc-capture-resource-bounds) | gap | U1, U2, U5, U10 | R8, R10, R14 | safety | explicit-config-only | active | `always` | partial |
 
-Semantics distribution: 39 `always` and 4 `always(!X)` over 43 records
-(active records: 38 and 3); 3 of the `always` records are liveness records
-with an explicit bound. The eight `sometimes` coverage markers are registered
+Semantics distribution: 40 `always`, 4 `always(!X)`, and 1 `reachable` over
+45 records (active records: 39, 3, and 1); 3 of the `always` records are
+liveness records with an explicit bound. The eight `sometimes` coverage markers are registered
 in `crates/eval-core/src/markers.rs` and listed in
 [`fault-map.md`](fault-map.md#coverage-witnesses).
 
@@ -145,7 +148,7 @@ Check: `always` - a second `publish` of an equal unit returns `Ok(Published { re
 Fault/timing angle: a receipt committed by another writer after the preview and before the commit: `publish_within` returns the `(Ok(receipt), None)` replay arm; `publish_batch` returns `BatchRefusal { error: Conflict, unit: None }` when its main key replayed, and treats a per-unit receipt `Conflict` inside the commit as unattributed so the next preview decides replay or conflict.
 Required faults and enabling state: restart or memo loss between publications (F3); a publisher field, text, or outcome change at one identity and revision (F4); a second writer of the same unit (F5), both before the preview (constructed) and between preview and commit (not constructed).
 Confidence: high - [evidence](evidence/sc-receipt-replays-equal-digest-conflicts-otherwise.md). `receipt_key`, `request_digest`, `digest_inputs`, `stored_receipt`, `publish_within`, and `publish_batch` read at HEAD; each test above read.
-Existing check: `hs-tests` `publication_receipt_digest_layout_is_pinned`, `publication_receipt_conflicts_on_provider_egress_change`, `publication_receipt_distinguishes_delimiters_inside_fields`, `equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically`, `capture_batch_names_the_unit_whose_receipt_conflicts`, `receipts_written_before_the_outcome_record_replay_under_v2`; `sc-tests` `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss` (witness `replay_after_memo_loss`), `changed_bytes_under_one_identity_are_terminal_and_never_retried`, `a_concurrent_publication_of_a_unit_replays_or_conflicts`; unaudited.
+Existing check: `hs-tests` `publication_receipt_digest_layout_is_pinned`, `publication_receipt_conflicts_on_provider_egress_change`, `publication_receipt_distinguishes_delimiters_inside_fields`, `equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically`, `capture_batch_names_the_unit_whose_receipt_conflicts`, `receipts_written_before_the_outcome_record_replay_under_v2`; `sc-tests` `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss` (replay after memo loss; the `replay_after_memo_loss` marker is recorded in `a_rerun_keeps_one_live_generation_across_a_restart`), `changed_bytes_under_one_identity_are_terminal_and_never_retried`, `a_concurrent_publication_of_a_unit_replays_or_conflicts`; unaudited.
 Impact: A digest change under an unchanged key would make every stored receipt conflict; a missing conflict would let changed bytes overwrite an identity's evidence silently.
 Open questions:
 - How U5 reads a v1 receipt under a v2 digest (OQ9). Resolved in U5: `stored_receipt` probes the `source-request.v2` digest, then the frozen `LEGACY_REQUEST_DIGEST_FORMAT` (`source-request.v1`) digest, for both the descriptor and the evidence receipt, and a key holding neither is `Conflict`. Verified in `ticket-1085.md`, `stored_receipt`, and `receipts_written_before_the_outcome_record_replay_under_v2`.
@@ -319,7 +322,7 @@ Exercised: yes - `crates/daemon/src/history_summarizer_chunk.rs::tool_output_con
 Guarantee: At both `TC:` construction sites a tool call renders as `TC: {description}`, `TC: {name}({key_arg})`, or `TC: {name}`, and a tool result renders that summary followed by the outcome digest from `tool_outcome::outcome_digest`; no tool output byte outside the `head` and `tail` excerpts enters the chunk; tool-only parts are `transformed: true`; native marker brackets are escaped; an alias cut by truncation is withdrawn.
 Check: `always` - every call summary starts with `TC: `; the key argument is the first of `filePath|path|pattern|query` cut at 60 scalars with `…`, else the first of `symbol|module|action` uncut; no sentinel placed on a tool output line other than the first and last nonblank lines appears in the chunk at either site; every tool-only `FrozenAlias.transformed == true`; after `presented_input` every remaining alias's `marker + presented` occurs in order in the kept prefix; asserted on every built chunk because the chunk is a pure function of its blocks and budget
 Fault/timing angle: a token budget cutting inside a digest (F16); a forged alias marker in output (F17)
-Required faults and enabling state: tool results whose middle lines carry a sentinel, at both sites (`tool_output_contains_sentinel` precondition); an error result; F16; F17; an unanswered call in a message with and without narrative
+Required faults and enabling state: tool results whose middle lines carry a sentinel, at both sites (the `tool_output_contains_sentinel` marker is recorded at the chunk-builder site; `the_boundary_chunk_renders_digests_for_answered_calls` covers the boundary site); an error result; F16; F17; an unanswered call in a message with and without narrative
 Confidence: high - [evidence](evidence/sc-tool-call-line-carries-no-outcome.md). Read `format_tool_summary`, `tool_parts`, `ChunkBuilder::part`, `presented_input`, `extract_key_arg`, `tool_outcome::{from_output, outcome_digest, digest, append_digests}`, and the boundary `tool_results`, `tool_call_parts`, `chunk_message_part`; read each named test; verified both sites share one formatter and pass `exit_code: None`
 Existing check: the six tests named in `Exercised`; `crates/daemon/tests/history_summarizer_truncate_differential.rs::optimized_matches_frozen_reference_at_production_windows` covers the truncation function the withdrawal relies on; all unaudited
 Impact: The full log, or a secret in its middle, reaching the summarizer prompt; a citation naming bytes the model never saw whole
@@ -917,7 +920,7 @@ Open questions:
 ### sc-delete-retry-recovers-crash-between-stores
 
 Type: liveness
-Reachability: default-production - the retry path is the same route; the window holds state only when the session has captures, which are `explicit-config-only`
+Reachability: explicit-config-only - the window between the two stores holds state only when the session has captures, which exist only with `source_capture.enabled`; the retry route itself runs under `DaemonConfig::default()`
 Status: active
 Exercised: partial - `crates/daemon/src/source_capture_tests.rs::session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores` sets `stop_after_retirement`, gets `injected_stop`, then one retry answers `ok` with `deleted_rows > 0` and an unchanged Kernel tip; `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages` stops after one page of two rows and one delete completes; the cut runs in one process, so process restart and power loss are not exercised
 Guarantee: After a stop between the Kernel retirement commit and the memory-store delete, one retry of `session.delete` with a ready Kernel and an open memory store answers `ok`, commits nothing new in the Kernel, and completes the memory-store delete.
@@ -998,7 +1001,82 @@ Impact: a transient read failure erases the revision trail
 Open questions:
 - A document past a cap keeps a live revision that no longer matches the file (needs human input)
 
-## Gap record
+## Gap records
+
+### sc-consented-window-reaches-publisher
+
+Type: reachability
+Reachability: explicit-config-only - `Handler::capture_after_response` builds
+  an `Offer` only when `source_capture::consents` holds, and
+  `source_capture.enabled` defaults to false.
+Status: active
+Exercised: yes - `sc-tests`
+  `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss`
+  drives an OpenCode window through the transform route and reads a
+  `messages` descriptor, a `raw_tool_spans` descriptor with representation
+  `tool_error`, and one with `tool_output`; `a_pi_window_publishes_user_text_and_tool_results`
+  does the same for a Pi window; `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires`
+  reaches the document batch.
+Guarantee: Every OpenCode and Pi message text block, tool output, and tool
+  error in a consented transform window, and every configured document the
+  pass read, reaches `harness_sources::publish_screened` through
+  `CaptureJob::publish_locked` or `CaptureJob::capture_documents`, unless the
+  adapter refuses its record or a bound defers it.
+Check: `reachable` - for each harness (OpenCode, Pi) and each class and
+  representation (`messages` text, `raw_tool_spans` `tool_output` and
+  `tool_error`, `repository_documents` text), a consented pass yields a live
+  descriptor of that class and representation after the job settles.
+  `reachable` because the obligation is that the production path executes
+  for each kind of unit.
+Fault/timing angle: none; the units arrive after the response settles, so
+  each test settles the capture job before reading the store.
+Required faults and enabling state: `source_capture.enabled` and
+  `memory.enabled` on, a non-subagent session on a native serializer profile,
+  and a window holding each kind of unit.
+Confidence: high - [evidence](evidence/sc-consented-window-reaches-publisher.md).
+  Read the call chain from `capture_after_response` through `SourceCapture::offer`,
+  `CaptureHandoff::into_job`, `CaptureJob::units`, and `publish_locked`, and
+  the three tests.
+Existing check: `sc-tests`
+  `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss`,
+  `a_pi_window_publishes_user_text_and_tool_results`,
+  `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires`;
+  all `unaudited`.
+Impact: a consented window whose units never reach the publisher leaves no
+  source to recover after compaction, which is the gap R1 closes.
+Open questions: None.
+
+### sc-capture-state-has-one-durable-store
+
+Type: safety
+Reachability: explicit-config-only - the capture modules run only under
+  consent; the scanned source is the production code of those modules.
+Status: active
+Exercised: yes - `sc.rs` unit test `capture_state_has_one_durable_store`
+  scans the production source of `source_capture.rs`, `harness_sources.rs`,
+  `tool_outcome.rs`, and `project_docs.rs` for file-write, SQLite, and store
+  open calls.
+Guarantee: Capture keeps durable state in the Kernel alone: its modules write
+  through `KernelStore` commits, and the memo, the slot, and the document
+  slot live in process.
+Check: `always` - the production source of the capture modules contains no
+  `rusqlite::`, `OpenOptions`, `fs::write`, `File::create`, `create_dir`,
+  `MemoryStore::open`, or `KernelStore::open`. `always` because a second
+  durable store would appear only through one of these calls in those
+  modules.
+Fault/timing angle: none.
+Required faults and enabling state: none; the check reads the source.
+Confidence: medium - [evidence](evidence/sc-capture-state-has-one-durable-store.md).
+  The scan covers the four capture modules and the named call forms; a store
+  opened through another module and handed to capture would pass it.
+Existing check: `sc.rs` `capture_state_has_one_durable_store` (`unaudited`);
+  the CI "Invented provenance" gate scans the same paths for another
+  property.
+Impact: a second durable store for capture state is a stop condition of the
+  specification; it would need its own retention, deletion, and recovery.
+Open questions:
+- Should the scan widen to the handler code in `lib.rs` that builds the
+  offer? (unresolved, needs a `/testing:test-strategy` decision)
 
 ### sc-capture-resource-bounds
 
@@ -1056,6 +1134,8 @@ Open questions:
 - Repository documents: `sc-project-docs-canonical-hash-over-fixed-list` is
   the prompt-side read; `sc-repodoc-raw-bytes-separate-from-prompt-hash` and
   `sc-repodoc-only-verified-missing-retires` are the capture side.
-- Production reach: `sc-harness-classes-have-no-production-publisher` is
+- Production reach: `sc-consented-window-reaches-publisher` carries R1's
+  reach and `sc-capture-state-has-one-durable-store` the single-store stop
+  condition; `sc-harness-classes-have-no-production-publisher` is
   invalidated by U2; `sc-ready-snapshot-drops-native-messages` and
   `sc-unfinished-assistant-text-deferred` describe what the publisher sees.

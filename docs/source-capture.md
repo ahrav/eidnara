@@ -158,7 +158,9 @@ digest binds the text, domain, scope, role, sensitivity, provider egress,
 and the outcome record under the tag `source-request.v2`. `stored_receipt`
 probes the `v2` digest and then the frozen `source-request.v1` digest, so a
 receipt written before the outcome record replays as written. A key holding
-neither digest is a conflict and the unit is `IdentityReused`.
+neither digest is a conflict: the batch is refused, and
+`BatchRefusal::conflicting_unit` names the unit, which becomes terminal under
+`units_identity_conflict`.
 
 The memo is process-local and bounded at 4 MiB (`MEMO_BUDGET_BYTES`),
 charging each entry two key copies, its digest, and 192 bytes of
@@ -233,9 +235,9 @@ then `STRUCTURE.md`, read when the pass composes its m0 prompt block.
 256 KiB, and decodes UTF-8. `leave_reads` hands the raw bytes to the
 offer's sink; a failed pass and each retried composition clear the sink, so
 capture sees the bytes of the composition the pass sent. The prompt keeps
-its canonical block and hash; the descriptor holds the raw bytes, so a
-whitespace-only edit publishes a new revision while the prompt hash stays
-equal.
+its canonical block and hash; the descriptor holds the raw bytes, so an edit
+that changes only a BOM, line endings, or trailing whitespace publishes a new
+revision while the prompt hash stays equal.
 
 `plan_document` decides each read against the project's live document rows:
 
@@ -255,7 +257,8 @@ project root reads `Unreadable`. Only `Missing` retires. A deadline, a failed
 preview, a failed retirement, or a refused publication inside the document
 batch counts every remaining read in `documents_refused`. A job that ends
 before the document batch (`discarded`, `kernel_unavailable`, `deadline`,
-`refused_resident_short`, `session_invalidated`, or a scope failure) drops
+`refused_resident_short`, `session_invalidated`, an incarnation-read
+failure, or a scope failure) drops
 its reads uncounted. Document evidence is `canonical` and
 carries no retention deadline. `session.delete` leaves document lineages in
 place.

@@ -2115,7 +2115,7 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
         Some(3)
     );
     // Preconditions of `retired_lineage_republished`: the lineage holds no live row and its historical head is 3.
-    assert_eq!(fixture.live(&third.object_id), Some(false));
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
     let mut coverage = eval_core::Coverage::default();
     coverage.record("retired_lineage_republished").unwrap();
     coverage

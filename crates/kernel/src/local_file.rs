@@ -843,12 +843,7 @@ mod tests {
             [("harness".to_string(), "harness-object".to_string())],
             "only the harness row is a harness candidate"
         );
-        // Preconditions of `expired_capture_pinned_mid_sweep`: the reader selected the expired row, and the commit below lands a pin before the writer recheck.
         let mut coverage = eval_core::Coverage::default();
-        coverage.record("expired_capture_pinned_mid_sweep").unwrap();
-        coverage
-            .complete("crates/kernel/src/local_file.rs::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept")
-            .unwrap();
         let outcome = store.commit(intent("pinned"), |envelope| {
             // A hold lands between the reader's selection and this writer commit.
             envelope
@@ -861,8 +856,22 @@ mod tests {
                      VALUES ('pin','harness',NULL);",
                 )
                 .unwrap();
+            // Preconditions of `expired_capture_pinned_mid_sweep`: the reader selected the expired row above, and the pin now names it inside the writer transaction.
+            let pinned: i64 = envelope
+                .tx
+                .query_row(
+                    "SELECT COUNT(*) FROM capture_pin_refs WHERE evidence_id='harness'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(pinned, 1);
+            coverage.record("expired_capture_pinned_mid_sweep").unwrap();
             retire_expired_capture(envelope, &HARNESS_CAPTURES, NOW, "harness", "harness-object")
         });
+        coverage
+            .complete("crates/kernel/src/local_file.rs::tests::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept")
+            .unwrap();
         assert_eq!(
             outcome,
             Err(KernelError::Conflict),

@@ -8,7 +8,7 @@ pub struct Marker {
     pub test: &'static str,
 }
 
-/// Every marker the evaluator's suites may record, globally unique by name.
+/// Every coverage marker a test may record, the evaluator's suites and the source-capture witnesses alike, globally unique by name.
 pub const MARKERS: [Marker; 74] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
@@ -289,11 +289,11 @@ pub const MARKERS: [Marker; 74] = [
     },
     Marker {
         name: "tool_output_contains_sentinel",
-        test: "crates/daemon/src/history_summarizer_chunk.rs::tool_output_contains_sentinel",
+        test: "crates/daemon/src/history_summarizer_chunk.rs::digest_chunk_tests::tool_output_contains_sentinel",
     },
     Marker {
         name: "expired_capture_pinned_mid_sweep",
-        test: "crates/kernel/src/local_file.rs::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept",
+        test: "crates/kernel/src/local_file.rs::tests::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept",
     },
     Marker {
         name: "retired_lineage_republished",

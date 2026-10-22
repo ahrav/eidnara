@@ -43,7 +43,7 @@ All `unaudited`.
 | `kernel_exact_artifacts.rs` `a_secret_is_refused_before_persistence_with_a_reason_that_names_no_content` | exact lane refuses secrets |
 | `kernel_exact_artifacts.rs` `oversized_and_non_utf8_payloads_are_refused_before_materialization` | exact lane refuses non-UTF-8 |
 | `kernel_cas.rs` `unproven_normal_and_non_utf8_are_clamped_sensitive` | clamp on the redacting lane; Remote denied |
-| `sc-tests` `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss` | production publication; tool pair and `Sensitive`; replay after memo loss (witness `replay_after_memo_loss`) |
+| `sc-tests` `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss` | production publication; tool pair and `Sensitive`; replay after memo loss (the `replay_after_memo_loss` marker is recorded in `a_rerun_keeps_one_live_generation_across_a_restart`) |
 | `sc-tests` `capture_off_memory_off_or_a_subagent_session_runs_no_adapter` | no publication without consent |
 | `sc-tests` `changed_bytes_under_one_identity_are_terminal_and_never_retried` | conflict terminal in memo |
 | `sc-tests` `a_concurrent_publication_of_a_unit_replays_or_conflicts` | second writer before the preview (F5, partial) |

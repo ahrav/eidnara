@@ -48,7 +48,8 @@ Re-verified at HEAD `5a842d998`.
   - `capture_batch_names_the_unit_whose_receipt_conflicts`.
   - `crates/daemon/src/source_capture_tests.rs`
     `an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss`
-    (witness `replay_after_memo_loss`): after `forget_memo_for_test` the tip
+    (replay after memo loss; the `replay_after_memo_loss` marker is recorded
+    in `a_rerun_keeps_one_live_generation_across_a_restart`): after `forget_memo_for_test` the tip
     is unchanged and `units_replayed` equals the first pass's publications.
   - `sc-tests` `changed_bytes_under_one_identity_are_terminal_and_never_retried`.
   - `sc-tests` `a_concurrent_publication_of_a_unit_replays_or_conflicts`: the

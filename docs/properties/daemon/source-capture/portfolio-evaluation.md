@@ -11,7 +11,7 @@ evaluation of the baseline catalog is in
 
 ## Mechanical checks
 
-Records, index rows, and evidence files are the same 43 slugs. Every record
+Records, index rows, and evidence files are the same 45 slugs after the two records E2 and E4 added. Every record
 carries the 12 schema fields in order, every evidence file carries the six
 required headings, and every relative link resolves. Every snake_case test
 or function name the catalog files cite exists in `crates/`.
@@ -21,9 +21,9 @@ or function name the catalog files cite exists in `crates/`.
 | Id | Class | Record or file | Finding | Disposition |
 | --- | --- | --- | --- | --- |
 | E1 | gap | coverage witnesses | The eight witnesses were names in comments and could not fire. | Applied: each is a constant marker in `crates/eval-core/src/markers.rs`; its test asserts the preconditions, records the marker, and checks `Coverage::complete` for its own path. `tool_output_contains_sentinel` now asserts the sentinel's placement before recording. |
-| E2 | gap | R1 production reach | No record asserts that every text block, tool output, and tool error of a consented window reaches `publish_screened`. | Queued: a `reachability` record with a `sometimes` marker per class, representation, and harness at the transform-route seam. |
+| E2 | gap | R1 production reach | No record asserts that every text block, tool output, and tool error of a consented window reaches `publish_screened`. | Applied: `sc-consented-window-reaches-publisher`, a `reachable` record over the transform-route tests for each harness, class, and representation. |
 | E3 | gap | R14 budget, C3, C4 | The 5 s budget, the release of slot and charges on physical completion, and the shutdown drain are exercised by side tests that no record's check names. | Queued: one lifecycle record over `a_spent_budget_before_the_writer_commits_nothing` and `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`. |
-| E4 | gap | stop condition "a second durable store" | `spec-integration.md` maps it to a record whose check never names durable stores. | Queued: a record with an executable check that the capture modules open no file or store write path. |
+| E4 | gap | stop condition "a second durable store" | `spec-integration.md` maps it to a record whose check never names durable stores. | Applied: `sc-capture-state-has-one-durable-store`, checked by the `capture_state_has_one_durable_store` source scan. |
 | E5 | refinement | `sc-sensitive-denied-remote-hidden-from-auto-surfaces` | The capture-path AutoInject read cannot tell `Sensitive` hiding from decisionless hiding. | Applied to `Exercised`. |
 | E6 | refinement | `sc-capture-creates-no-decision` | The check gave a rationale and no assertable condition. | Applied: the check names the decision count, the admission row fields, and the evidence provenance and sensitivity. |
 | E7 | refinement | `sc-tool-call-line-carries-no-outcome` | Labelled `default-production` while its sibling digest records are `explicit-config-only` over the same formatter. | Applied: `explicit-config-only`, with the `eidnara_folds` condition and the unverified boundary-trigger path. |
@@ -57,11 +57,12 @@ found" in [`existing-checks.md`](existing-checks.md).
 
 | Dimension | Count |
 | --- | --- |
-| Check `always` | 39, of which 3 are liveness records with stated bounds (one pass, `ceil(N / 64)` calls, one retry) |
+| Check `always` | 40, of which 3 are liveness records with stated bounds (one pass, `ceil(N / 64)` calls, one retry) |
 | Check `always(!X)` | 4 |
-| Type | 40 safety, 3 liveness |
-| Reachability | 17 default-production, 26 explicit-config-only |
-| Status | 41 active, 2 invalidated |
+| Check `reachable` | 1 |
+| Type | 41 safety, 3 liveness, 1 reachability |
+| Reachability | 16 default-production, 29 explicit-config-only |
+| Status | 43 active, 2 invalidated |
 
 ## Biases for a human
 

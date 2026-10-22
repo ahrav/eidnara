@@ -1475,6 +1475,8 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
 
     handler.source_capture.forget_memo_for_test();
     // Preconditions of `replay_after_memo_loss`: a published generation and an emptied memo before the next pass.
+    assert_eq!(live_generations(&store), ["1700000001000"]);
+    assert!(handler.source_capture.memo_is_empty_for_test());
     let mut coverage = eval_core::Coverage::default();
     coverage.record("replay_after_memo_loss").unwrap();
     pass(

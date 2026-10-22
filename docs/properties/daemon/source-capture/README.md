@@ -14,14 +14,15 @@ baseline `08de9051a`: Part A (20 records of existing behavior) and Part B (22
 proposed obligations), with the existing-check inventory, the fault map, the
 coverage markers, and a fresh-context portfolio evaluation. This directory
 carries those 42 records in METHOD form, reconciled with the checks units U1
-to U10 landed, plus the resource-boundary record the portfolio evaluation
-queued. Evidence that the comments held inline lives in `evidence/<slug>.md`.
+to U10 landed, plus three gap records: the resource bounds the
+specification's evaluation queued, and the R1 reach and single-store stop
+condition this catalog's evaluation queued. Evidence that the comments held inline lives in `evidence/<slug>.md`.
 
 ## Layout
 
 | File | Contents |
 | --- | --- |
-| `catalog.md` | Scope, reachability classes, index, the 43 records, relationship map |
+| `catalog.md` | Scope, reachability classes, index, the 45 records, relationship map |
 | `evidence/<slug>.md` | One evidence file per record |
 | `existing-checks.md` | Claim-bearing checks, all `unaudited`, plus areas with no check |
 | `fault-map.md` | Fault classes, coverage witnesses, leverage ranking |
@@ -34,7 +35,7 @@ queued. Evidence that the comments held inline lives in `evidence/<slug>.md`.
 | Unit | Ticket | Records whose check it added |
 | --- | --- | --- |
 | U1 | #1080 | `sc-consent-gate-admits-capture`, `sc-unit-cap-refuses-whole-never-prefix`, `sc-capture-resource-bounds` |
-| U2 | #1082 | `sc-response-independent-of-publication`, `sc-one-outstanding-batch-refuse-newest`, `sc-terminal-disposition-never-retried`, `sc-pending-unit-publishes-next-ready-pass`, `sc-capture-creates-no-decision`, `sc-capture-logs-carry-no-text`; invalidates `sc-harness-classes-have-no-production-publisher` |
+| U2 | #1082 | `sc-consented-window-reaches-publisher`, `sc-capture-state-has-one-durable-store`, `sc-response-independent-of-publication`, `sc-one-outstanding-batch-refuse-newest`, `sc-terminal-disposition-never-retried`, `sc-pending-unit-publishes-next-ready-pass`, `sc-capture-creates-no-decision`, `sc-capture-logs-carry-no-text`; invalidates `sc-harness-classes-have-no-production-publisher` |
 | U3 | #1083 | `sc-adapter-identity-native-or-refused` (the Pi row case) |
 | U4 | #1084 | `sc-harness-capture-deadline-replay-never-renews`, `sc-expiry-descriptor-first-cited-survives`, `sc-expiry-drains-within-page-bound` |
 | U5 | #1085 | `sc-outcome-observed-bounded-occurrence-bound`, `sc-v1-receipt-replays-legacy` |

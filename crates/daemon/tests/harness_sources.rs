@@ -3362,8 +3362,20 @@ fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
     by_evidence.sort_by(|a, b| a.0.cmp(&b.0));
     let (cited_evidence, cited) = by_evidence[0].clone();
     cite(&corpus, &cited_evidence);
-    // Preconditions of `expired_capture_cited_elsewhere`: the first capture in page order is cited and its deadline has passed at the sweep.
-    assert!(evidence_retention(&corpus, &cited.evidence_object_id).1 <= Some(deadline));
+    // Preconditions of `expired_capture_cited_elsewhere`: the first capture in page order is cited by a live independent row and its deadline has passed at the sweep.
+    assert!(matches!(
+        evidence_retention(&corpus, &cited.evidence_object_id).1,
+        Some(until) if until <= deadline
+    ));
+    let citers: i64 = Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND observation_kind='note'",
+            [&cited_evidence],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(citers, 1);
     let mut coverage = eval_core::Coverage::default();
     coverage.record("expired_capture_cited_elsewhere").unwrap();
     coverage

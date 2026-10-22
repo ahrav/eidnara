@@ -468,8 +468,8 @@ Guarantee: Every manifest names how its worlds were ingested; no world is
 Check: `always` - every manifest carries `ingestion`; every Suite C shell
   manifest at HEAD carries `adapter-ingested, production caller: none` and the
   Suite B shell's carries `transform-route, turn by turn`, the daemon's own
-  route; no manifest claims validated real ingestion until a production caller
-  exists.
+  route; no manifest claims validated real ingestion until the evaluator
+  drives a production caller.
 Fault/timing angle: None.
 Required faults and enabling state: A manifest; the ingestion label.
 Confidence: medium -
@@ -493,6 +493,10 @@ Open questions:
   ([#1066](https://github.com/ahrav/eidnara/issues/1066)). Whether an
   evaluator world should ingest through a production caller stays open.
   (needs human input)
+- The wire name `adapter-ingested, production caller: none` and the variant
+  `AdapterIngestedNoProductionCaller` keep their original wording while the
+  label now means that the world bypassed every production caller. Renaming
+  them is a manifest schema-compatibility decision. (needs human input)
 
 ### ing-pi-adapter-unexercised-by-evaluator
 

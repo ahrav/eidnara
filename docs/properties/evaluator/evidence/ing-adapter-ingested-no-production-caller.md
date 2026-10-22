@@ -6,9 +6,12 @@ production caller: none`, the gap is recorded in `docs/properties/`, and
 making an adapter production-live is outside this specification."
 
 ## Evidence trail
-- `crates/eval-core/src/manifest.rs:137` the variant and its wire name.
+- `crates/eval-core/src/manifest.rs`
+  `Ingestion::AdapterIngestedNoProductionCaller`: the variant and its wire
+  name.
 - `docs/properties/evaluator/README.md` "Gaps recorded here": every
-  ingestion entry point lacks a production caller.
+  evaluator world ingests through adapters that tests and the `eval_runner`
+  example drive, outside their production callers.
 - Every Suite C shell manifest (aging, fault, growth, shrink) sets
   `ingestion: Ingestion::AdapterIngestedNoProductionCaller`
   (`crates/daemon/examples/eval_runner/aging.rs` `suite_c_manifest`). The

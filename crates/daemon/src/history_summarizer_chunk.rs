@@ -3222,7 +3222,7 @@ mod digest_chunk_tests {
         coverage.record("tool_output_contains_sentinel").unwrap();
         coverage
             .complete(
-                "crates/daemon/src/history_summarizer_chunk.rs::tool_output_contains_sentinel",
+                "crates/daemon/src/history_summarizer_chunk.rs::digest_chunk_tests::tool_output_contains_sentinel",
             )
             .unwrap();
         let messages = vec![
