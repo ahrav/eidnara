@@ -577,11 +577,16 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         (1, "0", "user")
     );
     // AC10 and OQ10: a row names its entry type, and only a message entry holds sources. Coverage witness `pi_wire_row_without_type`: the `{id, message}` row a pre-U3 plugin sent.
+    let legacy_row =
+        json!({ "id": "pi-u1", "message": { "role": "user", "content": "x", "timestamp": 1 } });
+    assert!(legacy_row.get("type").is_none() && legacy_row.get("parentId").is_none());
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("pi_wire_row_without_type").unwrap();
+    coverage
+        .complete("crates/daemon/tests/harness_sources.rs::adapters_bind_native_identity_exactly_and_refuse_missing_identity")
+        .unwrap();
     for (row, refusal) in [
-        (
-            json!({ "id": "pi-u1", "message": { "role": "user", "content": "x", "timestamp": 1 } }),
-            AdapterRefusal::MissingIdentity("type"),
-        ),
+        (legacy_row, AdapterRefusal::MissingIdentity("type")),
         (
             json!({ "type": "compaction", "id": "x", "parentId": "pi-u1" }),
             AdapterRefusal::UnsupportedShape("type"),
@@ -3326,7 +3331,7 @@ fn harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it()
     );
 }
 
-/// F12, F13, F14: a live hold keeps an expired capture until the hold lapses; a capture another row cites loses its descriptor and keeps its evidence, and leaves the sweep; 65 expired captures with one cited drain in two calls, the cited row blocking nothing behind it in its page.
+/// F12, F13, F14: a live hold keeps an expired capture until the hold lapses; a capture another row cites loses its descriptor and keeps its evidence, and leaves the sweep; 65 expired captures with one cited drain in two calls, the cited row blocking nothing behind it in its page. Coverage witness `expired_capture_cited_elsewhere`: an independent row cites the first expired capture in page order before the sweep runs.
 #[test]
 fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
     let dir = tempfile::tempdir().unwrap();
@@ -3357,6 +3362,13 @@ fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
     by_evidence.sort_by(|a, b| a.0.cmp(&b.0));
     let (cited_evidence, cited) = by_evidence[0].clone();
     cite(&corpus, &cited_evidence);
+    // Preconditions of `expired_capture_cited_elsewhere`: the first capture in page order is cited and its deadline has passed at the sweep.
+    assert!(evidence_retention(&corpus, &cited.evidence_object_id).1 <= Some(deadline));
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("expired_capture_cited_elsewhere").unwrap();
+    coverage
+        .complete("crates/daemon/tests/harness_sources.rs::harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages")
+        .unwrap();
 
     // A live hold pins every capture: the sweep retires none until the hold lapses.
     let hold = corpus

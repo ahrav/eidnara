@@ -459,11 +459,12 @@ Reachability: test-only - `crates/eval-core/tests/manifest.rs` and every
 Status: active
 Exercised: partial -
   `crates/eval-core/tests/manifest.rs::manifest_consistency_refusals_name_their_cause`
-  pins the wire name `adapter-ingested, production caller: none`; no production
-  caller exists to exercise, so the gap is recorded, not closed.
+  pins the wire name `adapter-ingested, production caller: none`. The
+  evaluator's worlds are still ingested by adapters the `eval_runner` example
+  drives, so no world exercises a production caller.
 Guarantee: Every manifest names how its worlds were ingested; no world is
-  labelled "validated real ingestion" until an ingestion entry point has a
-  production caller.
+  labelled "validated real ingestion" until the evaluator drives an ingestion
+  entry point through its production caller.
 Check: `always` - every manifest carries `ingestion`; every Suite C shell
   manifest at HEAD carries `adapter-ingested, production caller: none` and the
   Suite B shell's carries `transform-route, turn by turn`, the daemon's own
@@ -473,15 +474,25 @@ Fault/timing angle: None.
 Required faults and enabling state: A manifest; the ingestion label.
 Confidence: medium -
   [evidence](evidence/ing-adapter-ingested-no-production-caller.md). Read the
-  manifest field and the README gap at HEAD; the gap remains open.
+  manifest field, the README gap, and the production callers at HEAD. The
+  claim adapter runs in production through `ClaimMaterializer`
+  (`crates/daemon/src/search_lifecycle_owner.rs`), and the harness adapters
+  `opencode_units` and `pi_units` run in production through source capture
+  (`crates/daemon/src/source_capture.rs` `CaptureJob::units`, published by
+  `publish_screened`) when a user enables `source_capture.enabled`. The label
+  stays accurate because no evaluator world reaches either caller.
 Existing check: `crates/eval-core/src/manifest.rs`
   `Ingestion::AdapterIngestedNoProductionCaller`; `README.md` "Gaps recorded
   here".
 Impact: A reader would take generated-world results as evidence about a
-  production ingestion path that does not exist.
+  production ingestion path the evaluator never exercised.
 Open questions:
-- Which adapter becomes production-live first, and when, is outside this
-  specification. (needs human input)
+- Which adapter becomes production-live first was answered outside this
+  specification: the claim adapter through `ClaimMaterializer`, then the
+  harness adapters through source capture
+  ([#1066](https://github.com/ahrav/eidnara/issues/1066)). Whether an
+  evaluator world should ingest through a production caller stays open.
+  (needs human input)
 
 ### ing-pi-adapter-unexercised-by-evaluator
 

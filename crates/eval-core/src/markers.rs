@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 66] = [
+pub const MARKERS: [Marker; 74] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -273,6 +273,39 @@ pub const MARKERS: [Marker; 66] = [
     Marker {
         name: "mtr_suite_d_no_containment_skips",
         test: "crates/daemon/tests/eval_suite_d.rs::a_host_without_namespaces_skips_every_task_with_no_containment",
+    },
+    // Source capture (#1066): each test records its marker after asserting the window's independent preconditions.
+    Marker {
+        name: "replay_after_memo_loss",
+        test: "crates/daemon/src/source_capture_tests.rs::a_rerun_keeps_one_live_generation_across_a_restart",
+    },
+    Marker {
+        name: "reversed_generation_delivery",
+        test: "crates/daemon/src/source_capture_tests.rs::a_rerun_keeps_one_live_generation_across_a_restart",
+    },
+    Marker {
+        name: "handoff_refused_slot_busy",
+        test: "crates/daemon/src/source_capture_tests.rs::the_response_is_identical_whatever_capture_and_the_kernel_are_doing",
+    },
+    Marker {
+        name: "tool_output_contains_sentinel",
+        test: "crates/daemon/src/history_summarizer_chunk.rs::tool_output_contains_sentinel",
+    },
+    Marker {
+        name: "expired_capture_pinned_mid_sweep",
+        test: "crates/kernel/src/local_file.rs::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept",
+    },
+    Marker {
+        name: "retired_lineage_republished",
+        test: "crates/kernel/tests/kernel_source_descriptors.rs::repository_document_revisions_exceed_the_historical_head_including_retired_rows",
+    },
+    Marker {
+        name: "pi_wire_row_without_type",
+        test: "crates/daemon/tests/harness_sources.rs::adapters_bind_native_identity_exactly_and_refuse_missing_identity",
+    },
+    Marker {
+        name: "expired_capture_cited_elsewhere",
+        test: "crates/daemon/tests/harness_sources.rs::harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages",
     },
 ];
 

@@ -386,7 +386,7 @@ async fn the_response_is_identical_whatever_capture_and_the_kernel_are_doing() {
     holder.join().unwrap();
     settle(&busy).await;
 
-    // Slot full: the first batch is held inside publication; a second pass is refused and answers the same bytes.
+    // Slot full: the first batch is held inside publication; a second pass is refused and answers the same bytes. Coverage witness `handoff_refused_slot_busy`: the first job holds the slot inside publication when the second pass hands off.
     let (full, _full_dir, _) = capture_handler(capture_config(true), true).await;
     let (entered_tx, entered_rx) = mpsc::channel::<()>();
     let (go_tx, go_rx) = mpsc::channel::<()>();
@@ -404,6 +404,13 @@ async fn the_response_is_identical_whatever_capture_and_the_kernel_are_doing() {
         .await
         .unwrap();
     let retained = report(&full)["retained_bytes"].as_u64().unwrap();
+    // Preconditions of `handoff_refused_slot_busy`: the first job holds the slot inside publication.
+    assert_eq!(report(&full)["active"], 1);
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("handoff_refused_slot_busy").unwrap();
+    coverage
+        .complete("crates/daemon/src/source_capture_tests.rs::the_response_is_identical_whatever_capture_and_the_kernel_are_doing")
+        .unwrap();
     assert_eq!(
         pass(&full, transform_with(&window, "base-2")).await,
         second_baseline
@@ -1467,6 +1474,9 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
     assert_eq!(live_generations(&store), ["1700000001000"]);
 
     handler.source_capture.forget_memo_for_test();
+    // Preconditions of `replay_after_memo_loss`: a published generation and an emptied memo before the next pass.
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("replay_after_memo_loss").unwrap();
     pass(
         &handler,
         transform_with(
@@ -1480,6 +1490,12 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
 
     handler.source_capture.forget_memo_for_test();
     let tip = store.tip().unwrap();
+    // Preconditions of `reversed_generation_delivery`: generation 2 is live and the next window shows generation 1.
+    assert_eq!(live_generations(&store), ["1700000002000"]);
+    coverage.record("reversed_generation_delivery").unwrap();
+    coverage
+        .complete("crates/daemon/src/source_capture_tests.rs::a_rerun_keeps_one_live_generation_across_a_restart")
+        .unwrap();
     pass(
         &handler,
         transform_with(

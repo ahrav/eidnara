@@ -28,8 +28,22 @@ A manifest; the label is a required field.
 
 ## Investigation log
 ### Q: Does any ingestion path have a production caller at HEAD?
-- Sources examined: `SourcePublisher::publish` callers; the harness, claim,
-  and git adapters.
-- Findings: tests only.
-- Missing evidence: a production caller.
-- Conclusion: unresolved, needs a production caller outside this specification.
+- Sources examined: `SourcePublisher::publish`, `publish_batch`, and
+  `publish_screened` callers; the harness, claim, and git adapters.
+- Findings: the earlier "tests only" answer was out of date for the claim
+  adapter. `ClaimMaterializer` (`crates/daemon/src/claim_sources.rs`) runs in
+  production from `crates/daemon/src/search_lifecycle_owner.rs`, where the
+  search lifecycle owner materializes claim sources through
+  `ClaimMaterializer::new`. The source-capture specification
+  ([#1066](https://github.com/ahrav/eidnara/issues/1066), unit U2) gave the
+  harness adapters a production caller: `CaptureJob::units` in
+  `crates/daemon/src/source_capture.rs` calls `opencode_units` and
+  `pi_units`, and `CaptureJob::publish_locked` publishes their units through
+  `harness_sources::publish_screened`. That path runs only when the user tier
+  sets `source_capture.enabled`, which defaults to false.
+- Missing evidence: an evaluator world that ingests through either
+  production caller.
+- Conclusion: resolved with answer. Production callers exist for the claim
+  adapter (default production) and the harness adapters (explicit
+  configuration). The evaluator's worlds reach neither, so the
+  `adapter-ingested, production caller: none` label stays accurate for them.

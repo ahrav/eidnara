@@ -3211,6 +3211,20 @@ mod digest_chunk_tests {
     #[test]
     fn tool_output_contains_sentinel() {
         let output = "first\nSENTINEL-7f3a in the middle\nlast\n";
+        // Preconditions of `tool_output_contains_sentinel`: the sentinel is in the output and on neither outer nonblank line.
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(output.contains("SENTINEL-7f3a"));
+        assert!(
+            !lines[0].contains("SENTINEL-7f3a")
+                && !lines[lines.len() - 1].contains("SENTINEL-7f3a")
+        );
+        let mut coverage = eval_core::Coverage::default();
+        coverage.record("tool_output_contains_sentinel").unwrap();
+        coverage
+            .complete(
+                "crates/daemon/src/history_summarizer_chunk.rs::tool_output_contains_sentinel",
+            )
+            .unwrap();
         let messages = vec![
             msg(
                 "u1",
