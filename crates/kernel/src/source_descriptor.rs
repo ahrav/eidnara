@@ -811,6 +811,15 @@ impl KernelStore {
 }
 
 impl Envelope<'_> {
+    /// [`KernelStore::source_lineage_head`] in this envelope's view, so a preview reads the head and the live rows under one reader wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store failure from the read.
+    pub fn source_lineage_head(&self, lineage_id: &str) -> Result<Option<i64>, KernelError> {
+        historical_head(self.tx, lineage_id)
+    }
+
     /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
     ///
     /// # Errors

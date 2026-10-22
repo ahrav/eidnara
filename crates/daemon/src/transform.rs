@@ -554,7 +554,7 @@ pub struct ProducerContext<'a> {
     pub memory_enabled: bool,
     pub inject_docs: bool,
     /// Where the pass leaves the configured documents it reads, when source capture takes them.
-    pub document_reads: Option<&'a crate::project_docs::DocumentReads>,
+    pub(crate) document_reads: Option<&'a crate::project_docs::DocumentReads>,
     pub temporal_awareness: bool,
     pub now_ms: i64,
     pub execute_threshold_percentage: f64,
@@ -2109,6 +2109,8 @@ fn apply_once_with_estimator(
     let mut attempt = 0;
     let mut reset_row_version = None;
     loop {
+        // An attempt the loop retries discards its composition, and with it the documents that composition read.
+        crate::project_docs::clear_reads(ctx.document_reads);
         let record = store.load_fold_authority(&req.session_id)?;
         let mut authority = fold_authority::plan(record, ctx.fold_authority);
         #[cfg(test)]
@@ -2809,12 +2811,12 @@ fn compose_additive_m0(
         ctx.user_profile_budget_tokens,
         crate::decay_render::counting(estimate_tokens),
     );
-    let docs = if ctx.inject_docs {
+    let mut docs = if ctx.inject_docs {
         read_project_docs_canonical(ctx.project_directory)
     } else {
         crate::project_docs::ProjectDocs::default()
     };
-    crate::project_docs::leave_reads(ctx.document_reads, &docs);
+    crate::project_docs::leave_reads(ctx.document_reads, &mut docs);
     let mut m0_bytes = render_m0(
         &M0Inputs {
             project_docs: &docs.rendered_block,

@@ -21,7 +21,7 @@ pub struct ProjectDocs {
 }
 
 /// Where a pass leaves the configured documents it read for its prompt, for source capture to take once the response is built.
-pub type DocumentReads = std::sync::Mutex<Option<Vec<(&'static str, DocumentRead)>>>;
+pub(crate) type DocumentReads = std::sync::Mutex<Option<Vec<(&'static str, DocumentRead)>>>;
 
 fn canonicalize_doc_content(raw: &str) -> String {
     let no_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
@@ -49,7 +49,7 @@ fn escape_xml_content(s: &str) -> String {
 
 /// What one read of a configured document found.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DocumentRead {
+pub(crate) enum DocumentRead {
     /// The raw UTF-8 text, exactly as read.
     Text(String),
     /// The path does not exist in a directory that does.
@@ -87,10 +87,17 @@ pub(crate) fn read_document(path: &Path) -> DocumentRead {
     }
 }
 
-/// Leaves `docs`' reads in `sink`, replacing any earlier read of the pass, so capture sees the bytes the prompt was built from last.
-pub(crate) fn leave_reads(sink: Option<&DocumentReads>, docs: &ProjectDocs) {
+/// Moves `docs`' reads into `sink`, replacing any earlier read of the pass, so capture sees the bytes the prompt was built from last.
+pub(crate) fn leave_reads(sink: Option<&DocumentReads>, docs: &mut ProjectDocs) {
     if let Some(sink) = sink {
-        *sink.lock().expect("document reads mutex") = Some(docs.reads.clone());
+        *sink.lock().expect("document reads mutex") = Some(std::mem::take(&mut docs.reads));
+    }
+}
+
+/// Empties `sink`, so a composition the pass discards leaves no reads.
+pub(crate) fn clear_reads(sink: Option<&DocumentReads>) {
+    if let Some(sink) = sink {
+        *sink.lock().expect("document reads mutex") = None;
     }
 }
 

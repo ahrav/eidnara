@@ -338,31 +338,32 @@ impl Drop for ActiveSlot {
 }
 
 impl SourceCapture {
-    /// Charges a consented pass's native window for capture. `None` for an empty window, and when the window bound or the budget refuses it; a refusal is counted and retains nothing.
+    /// Charges a consented pass's native window and the documents it read for capture. `None` when the pass leaves neither, and when the window bound or the budget refuses it; a refusal is counted and retains nothing.
     pub(crate) fn offer(self: &Arc<Self>, offer: Offer) -> Option<CaptureHandoff> {
         let harness = profile_harness(offer.profile)?;
-        if offer.window.is_empty() {
-            return None;
-        }
-        // The documents the pass read for its prompt are the ones captured, and their text is charged with the window.
+        // The documents the pass read when it composed its prompt block are the ones captured.
         let documents = offer
             .documents
             .and_then(|reads| reads.lock().expect("document reads mutex").take())
             .unwrap_or_default();
+        if offer.window.is_empty() && documents.is_empty() {
+            return None;
+        }
         let window_bytes: usize = offer
             .window
             .iter()
             .map(|value| crate::retained_size::value_retained_bytes(value))
-            .sum::<usize>()
-            + documents
-                .iter()
-                .map(|(_, read)| match read {
-                    DocumentRead::Text(text) => text.len(),
-                    _ => 0,
-                })
-                .sum::<usize>();
-        // The adapters copy about the window's bytes once more; the job tops up for any excess.
+            .sum();
+        let document_bytes: usize = documents
+            .iter()
+            .map(|(_, read)| match read {
+                DocumentRead::Text(text) => text.len(),
+                _ => 0,
+            })
+            .sum();
+        // The adapters copy about the window's bytes once more, and the job tops up for any excess; a document's text is held once as read and once as its unit's.
         let bytes = window_bytes
+            .saturating_add(document_bytes)
             .saturating_mul(2)
             .saturating_add(ARTIFACT_PREPARATION_BYTES);
         if bytes > MAX_RETAINED_WINDOW_BYTES {
@@ -661,7 +662,7 @@ impl CaptureJob {
         // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
         let gate = self.commit_gate.lock().expect("capture publication mutex");
         let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.publish_locked(&store, &publisher, candidates, keys, &documents)
+            self.publish_locked(&store, &publisher, candidates, keys, documents)
         }));
         drop(gate);
         match published {
@@ -677,7 +678,7 @@ impl CaptureJob {
         publisher: &SourcePublisher<'_>,
         candidates: Vec<SourceUnit>,
         keys: Vec<Option<(String, String)>>,
-        documents: &[(&'static str, DocumentRead)],
+        documents: Vec<(&'static str, DocumentRead)>,
     ) -> Count {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
             return self.end(Count::SessionInvalidated);
@@ -689,7 +690,8 @@ impl CaptureJob {
             return self.end(Count::Deadline);
         }
         if candidates.is_empty() {
-            return self.capture_documents(store, publisher, documents);
+            let end = self.capture_documents(store, publisher, documents);
+            return self.end(end);
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
@@ -713,7 +715,8 @@ impl CaptureJob {
                     }
                 }
                 drop(memo);
-                self.capture_documents(store, publisher, documents)
+                let end = self.capture_documents(store, publisher, documents);
+                self.end(end)
             }
             Err(refusal) => {
                 // A same-key conflict is terminal for its unit; every other unit stays pending for the next pass.
@@ -725,34 +728,62 @@ impl CaptureJob {
                     log("unit terminal", Count::UnitsIdentityConflict, 1);
                 }
                 drop(memo);
+                let documents = self.capture_documents(store, publisher, documents);
+                if documents != Count::Completed {
+                    log("documents ended", documents, 1);
+                }
                 self.end(kernel_end(refusal.error))
             }
         }
     }
 
-    /// Captures the configured documents the pass read for its prompt, in their own batch after the window's, under the commit gate; a document's refusal counts as `documents_refused` and leaves the window's publication as it was. Each document's identity is the project, the project standing in for its repository, and the path. Text whose bytes equal the live revision's artifact is unchanged. Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head, so a head that moved refuses and the next pass proposes from a fresh read. A verified missing file retires its live revision; every other read is counted and retires nothing. The bytes are the ones the pass read when it composed its prompt block. The store's one capture slot runs jobs in handoff order, and a later compose read that differs from the live revision republishes, so the live revision converges on the latest read.
+    /// Captures the configured documents the pass read when it composed its prompt block, in their own batch after the window's, under the commit gate, and returns how the batch ended.
+    ///
+    /// - Identity: the project, the project standing in for its repository, and the path.
+    /// - Text whose bytes equal the live revision's artifact is unchanged.
+    /// - Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head; a head that moved refuses as `documents_refused`.
+    /// - A verified missing file retires its live revision; every other read is counted and retires nothing.
+    ///
+    /// A refused document leaves the window's publication as it was, and a refused window leaves the documents to this batch. A read this job drops, through a refusal, a busy slot, or a deadline, waits for the next pass that composes the block; that compose reads afresh and republishes what differs from the live revision, so the lineage converges on the latest compose read.
     fn capture_documents(
         &self,
         store: &KernelStore,
         publisher: &SourcePublisher<'_>,
-        documents: &[(&'static str, DocumentRead)],
+        documents: Vec<(&'static str, DocumentRead)>,
     ) -> Count {
+        if documents.is_empty() {
+            return Count::Completed;
+        }
+        if self.budget.is_exhausted() {
+            return Count::Deadline;
+        }
+        // The live rows and the lineage heads are read under one reader wait cut to the job's deadline.
+        let steps = store.preview(self.preview_deadline(), |preview| {
+            let live = self.live_documents(preview)?;
+            documents
+                .into_iter()
+                .map(|(path, read)| self.plan_document(preview, &live, path, read))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let steps = match steps {
+            Ok((_, steps)) => steps,
+            Err(error) => return kernel_end(error),
+        };
         let mut units = Vec::new();
-        for (path, read) in documents {
-            match self.plan_document(store, path, read) {
-                Ok(DocumentStep::Publish(unit)) => units.push(unit),
-                Ok(DocumentStep::Retire(object_id)) => {
+        for step in steps {
+            match step {
+                DocumentStep::Publish(unit) => units.push(unit),
+                DocumentStep::Retire(object_id) => {
                     if let Err(error) = self.retire_document(store, &object_id) {
-                        return self.end(kernel_end(error));
+                        return kernel_end(error);
                     }
                     self.capture.counters.add(Count::DocumentsRetired, 1);
                 }
-                Ok(DocumentStep::Skip(count)) => self.capture.counters.add(count, 1),
-                Err(error) => return self.end(kernel_end(error)),
+                DocumentStep::Skip(count) => self.capture.counters.add(count, 1),
             }
         }
         if units.is_empty() {
-            return self.end(Count::Completed);
+            return Count::Completed;
         }
         match publish_screened(publisher, &units, crate::now_ms(), Some(&self.budget)) {
             Ok(dispositions) => {
@@ -766,23 +797,24 @@ impl CaptureJob {
                     };
                     self.capture.counters.add(count, 1);
                 }
-                self.end(Count::Completed)
+                Count::Completed
             }
             Err(refusal) => {
                 self.capture
                     .counters
                     .add(Count::DocumentsRefused, units.len());
-                self.end(kernel_end(refusal.error))
+                kernel_end(refusal.error)
             }
         }
     }
 
-    /// What capture does with one configured document; a read that names no bytes is judged without the store.
+    /// What capture does with one configured document, given the project's live document rows.
     fn plan_document(
         &self,
-        store: &KernelStore,
+        preview: &kernel::Preview<'_>,
+        live: &[kernel::LiveDescriptor],
         path: &'static str,
-        read: &DocumentRead,
+        read: DocumentRead,
     ) -> Result<DocumentStep, KernelError> {
         let text = match read {
             // Text within the read cap but past the unit cap counts with the reads past the read cap.
@@ -796,26 +828,28 @@ impl CaptureJob {
             DocumentRead::NotUtf8 => return Ok(DocumentStep::Skip(Count::DocumentsNotUtf8)),
             DocumentRead::Unreadable => return Ok(DocumentStep::Skip(Count::DocumentsUnreadable)),
         };
-        let project_id = self.session.project_id.as_str();
-        let live = self.live_document(store, path)?;
+        let current = live
+            .iter()
+            .find(|row| crate::git_reconcile::identity_field(row, "relative_path") == Some(path));
         let Some(text) = text else {
             return Ok(
-                live.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
-                    DocumentStep::Retire(row.object_id)
+                current.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
+                    DocumentStep::Retire(row.object_id.clone())
                 }),
             );
         };
-        if live.as_ref().is_some_and(|row| {
+        if current.is_some_and(|row| {
             row.detail.artifact_digest == kernel::source_identity::payload_id(text.as_bytes())
         }) {
             return Ok(DocumentStep::Skip(Count::DocumentsUnchanged));
         }
+        let project_id = self.session.project_id.as_str();
         let identity = vec![
             ("project_id", project_id.to_owned()),
             ("repository_id", project_id.to_owned()),
             ("relative_path", path.to_owned()),
         ];
-        let head = store
+        let head = preview
             .source_lineage_head(&document_lineage(&identity)?)?
             .unwrap_or(0);
         Ok(DocumentStep::Publish(SourceUnit {
@@ -823,42 +857,36 @@ impl CaptureJob {
             identity,
             revision: (head + 1).to_string(),
             representation: Representation::Text,
-            text: text.clone(),
+            text,
             role: "document".to_owned(),
             outcome: None,
         }))
     }
 
-    /// The live revision of this project's document at `path`: every live `repository_documents` descriptor of the project, paged to the end and matched by repository and path.
-    fn live_document(
+    /// Every live `repository_documents` descriptor of this project's repository, paged to the end.
+    fn live_documents(
         &self,
-        store: &KernelStore,
-        path: &str,
-    ) -> Result<Option<kernel::LiveDescriptor>, KernelError> {
+        preview: &kernel::Preview<'_>,
+    ) -> Result<Vec<kernel::LiveDescriptor>, KernelError> {
         let project_id = self.session.project_id.as_str();
-        let (_, live) = store.preview(self.preview_deadline(), |preview| {
-            let mut after = None;
-            loop {
-                let page = preview.live_source_descriptors_with(
-                    OccurrenceClass::RepositoryDocuments,
-                    "project_id",
-                    &[project_id],
-                    after.as_deref(),
-                    std::num::NonZeroUsize::new(64).expect("a nonzero page"),
-                )?;
-                if let Some(row) = page.rows.into_iter().find(|row| {
-                    crate::git_reconcile::identity_field(row, "repository_id") == Some(project_id)
-                        && crate::git_reconcile::identity_field(row, "relative_path") == Some(path)
-                }) {
-                    return Ok(Some(row));
-                }
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => return Ok(None),
-                }
+        let mut rows = Vec::new();
+        let mut after = None;
+        loop {
+            let page = preview.live_source_descriptors_with(
+                OccurrenceClass::RepositoryDocuments,
+                "project_id",
+                &[project_id],
+                after.as_deref(),
+                std::num::NonZeroUsize::new(64).expect("a nonzero page"),
+            )?;
+            rows.extend(page.rows.into_iter().filter(|row| {
+                crate::git_reconcile::identity_field(row, "repository_id") == Some(project_id)
+            }));
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return Ok(rows),
             }
-        })?;
-        Ok(live)
+        }
     }
 
     /// Retires the live revision `object_id` of a document whose file a read found missing, within the job's budget; the receipt is keyed by the revision, so a retry replays it.

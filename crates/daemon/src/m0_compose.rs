@@ -62,7 +62,7 @@ pub struct M0ComposeInputs<'a> {
     /// `inject_docs` matches whether the TypeScript materializer includes the project-docs block.
     pub inject_docs: bool,
     /// Where the pass leaves the configured documents it reads, when source capture takes them.
-    pub document_reads: Option<&'a crate::project_docs::DocumentReads>,
+    pub(crate) document_reads: Option<&'a crate::project_docs::DocumentReads>,
     /// `temporal_awareness` gates temporal heading dates at render time, including rows persisted by a prior pass.
     pub temporal_awareness: bool,
     /// The persisted legacy sequence list; `None` captures it with one scan.
@@ -220,12 +220,12 @@ pub fn compose_m0(
         inputs.user_profile_budget_tokens,
         counting(tokens),
     );
-    let docs = if inputs.inject_docs {
+    let mut docs = if inputs.inject_docs {
         read_project_docs_canonical(inputs.project_directory)
     } else {
         crate::project_docs::ProjectDocs::default()
     };
-    crate::project_docs::leave_reads(inputs.document_reads, &docs);
+    crate::project_docs::leave_reads(inputs.document_reads, &mut docs);
 
     let decay_history_segments = render_owned_rows(history_segments, inputs.temporal_awareness);
     let mut m0_bytes = render_m0_with_decay_pressure_retry(

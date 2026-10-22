@@ -1561,6 +1561,11 @@ fn live_document(store: &KernelStore, path: &str) -> Vec<(String, String)> {
 
 /// One pass as the first of a new session of the project bound to route 7. A session's first pass composes its prompt block, which is where the pass reads the configured documents.
 async fn document_pass(handler: &Handler, base: &str) -> Value {
+    document_pass_with(handler, base, "hello").await
+}
+
+/// [`document_pass`] over a window of one user message holding `text`.
+async fn document_pass_with(handler: &Handler, base: &str, text: &str) -> Value {
     let session = format!("ses-{base}");
     let mut bound = handler
         .bindings
@@ -1578,7 +1583,7 @@ async fn document_pass(handler: &Handler, base: &str) -> Value {
         .count();
     let route = test_route(100 + u16::try_from(routes).expect("few routes"));
     handler.bind_route(route, bound);
-    let mut request = transform_with(&[opencode_user("msg_u1", 1_700_000_000_000, "hello")], base);
+    let mut request = transform_with(&[opencode_user("msg_u1", 1_700_000_000_000, text)], base);
     request["session_id"] = json!(session);
     let response = pass_on(handler, route, request).await;
     settle(handler).await;
@@ -1775,6 +1780,62 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
         decisions,
         "document capture creates no decision"
     );
+}
+
+/// A refused window batch leaves the pass's documents to their own batch: a window whose unit conflicts still captures the edited document its pass composed.
+#[tokio::test]
+async fn a_refused_window_still_captures_its_documents() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let doc = project.join("ARCHITECTURE.md");
+    std::fs::write(&doc, "# Architecture\n").unwrap();
+    let window = |text: &str| [opencode_user("msg_u1", 1_700_000_000_000, text)];
+    pass(&handler, transform_with(&window("original"), "base-1")).await;
+    settle(&handler).await;
+    std::fs::write(&doc, "# Architecture\n\nEdited.\n").unwrap();
+    let mut request = transform_with(&window("edited in place"), "base-2");
+    request["render_config"] = json!("recompose");
+    pass(&handler, request).await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
+    let store = kernel_store(&handler);
+    assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "2");
+}
+
+/// The text of a pass's documents is charged to the retained budget with its window, once as read and once as its unit.
+#[tokio::test]
+async fn a_documents_text_is_charged_with_its_window() {
+    let retained = |document: Option<String>| async move {
+        let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+        if let Some(document) = document {
+            std::fs::write(project.join("ARCHITECTURE.md"), document).unwrap();
+        }
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let go_rx = Arc::new(Mutex::new(go_rx));
+        let entered_tx = Arc::new(Mutex::new(entered_tx));
+        *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+            entered_tx.lock().unwrap().send(()).unwrap();
+            go_rx.lock().unwrap().recv().unwrap();
+        }));
+        pass(
+            &handler,
+            transform_with(
+                &[opencode_user("msg_u1", 1_700_000_000_000, "hello")],
+                "base-1",
+            ),
+        )
+        .await;
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let retained = report(&handler)["retained_bytes"].as_u64().unwrap();
+        go_tx.send(()).unwrap();
+        settle(&handler).await;
+        retained
+    };
+    let without = retained(None).await;
+    let with = retained(Some("x".repeat(60 * 1024))).await;
+    assert!(with - without >= 2 * 60 * 1024, "{without} {with}");
 }
 
 /// AC17: the kernel store serves every project of the home, so a project's document is found among many projects' live documents. An unchanged file publishes nothing and a removal retires its own revision.
