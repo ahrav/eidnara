@@ -96,6 +96,16 @@ pub enum ToolStatus {
     Error,
 }
 
+impl ToolStatus {
+    /// The status as the record and the summarizer's digest spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// The execution-outcome record of one tool occurrence: what the harness reported about the call, never inferred. `truncated`, `exit_code`, and `exception_ref` are present only when the harness reported them; an absent value is unknown, never a default. The stored JSON is at most [`MAX_TEXT_FIELD_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

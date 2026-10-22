@@ -730,9 +730,15 @@ fn chunked_message_estimate_with_estimator(
         .take_while(|message| eligible_end_ordinal.is_none_or(|end| message.message_ordinal < end))
         .filter(|message| message.message_ordinal >= start_ordinal)
         .collect::<Vec<_>>();
+    let results = tool_results(&eligible);
     crate::parallel_map::map_until(
         eligible,
-        |(), message| (message.message_ordinal, chunk_message_part(message)),
+        |(), message| {
+            (
+                message.message_ordinal,
+                chunk_message_part(message, &results),
+            )
+        },
         |(ordinal, part)| builder.push_message(ordinal, part),
     );
     builder.finish(total_message_count, eligible_end_ordinal)
@@ -1748,9 +1754,33 @@ enum ChunkMessagePart {
     },
 }
 
-fn chunk_message_part(message: &BoundaryMsg) -> ChunkMessagePart {
+/// The outcome and output text of every tool result in `messages`, by the arc its call opened. A result whose original bytes do not decode as a block has no entry, and its call renders the bare line.
+fn tool_results(messages: &[&BoundaryMsg]) -> ToolResults {
+    let mut results = ToolResults::new();
+    for block in messages.iter().flat_map(|message| &message.blocks) {
+        let (SelKind::ToolResult { .. }, Some(arc_id)) = (&block.kind, &block.arc_id) else {
+            continue;
+        };
+        if let Ok(wire) = serde_json::from_str::<crate::wire::WireBlock>(&block.original)
+            && let crate::wire::BlockKind::ToolResult {
+                tool_name, output, ..
+            } = wire.kind()
+        {
+            results.insert(
+                arc_id.clone(),
+                crate::tool_outcome::from_output(tool_name, output),
+            );
+        }
+    }
+    results
+}
+
+/// Tool-result outcomes and output texts by call arc.
+type ToolResults = std::collections::HashMap<String, (kernel::ToolOutcome, String)>;
+
+fn chunk_message_part(message: &BoundaryMsg, results: &ToolResults) -> ChunkMessagePart {
     if message.role == Role::User && !has_meaningful_user_text(&message.blocks) {
-        let tc_summaries = extract_tool_call_summaries(&message.blocks);
+        let tc_summaries = extract_tool_call_summaries(&message.blocks, results, true);
         if tc_summaries.is_empty() {
             return ChunkMessagePart::Noise;
         }
@@ -1759,14 +1789,21 @@ fn chunk_message_part(message: &BoundaryMsg) -> ChunkMessagePart {
     let role = compact_role(message.role.as_str());
     let text_parts = text_parts(message);
     let has_narrative = !text_parts.is_empty();
-    let tool_summaries = if has_narrative {
-        Vec::new()
-    } else {
-        extract_tool_call_summaries(&message.blocks)
-    };
+    // A message with narrative shows the digests of its calls whose results are in the set; one without also shows its other calls bare. Digests follow the compacted narrative and bare calls.
+    let (bare, digests): (Vec<_>, Vec<_>) =
+        tool_call_parts(&message.blocks, results, !has_narrative)
+            .into_iter()
+            .partition(|(_, digest)| !digest);
     let mut all_parts = text_parts;
-    all_parts.extend(tool_summaries);
-    let compacted = compact_text_for_summary(all_parts.join(" / "), message.role.as_str());
+    all_parts.extend(bare.into_iter().map(|(part, _)| part));
+    let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role.as_str());
+    // Digests join after compaction, so their bytes are the digest's.
+    for (digest, _) in digests {
+        if !compacted.text.is_empty() {
+            compacted.text.push_str(" / ");
+        }
+        compacted.text.push_str(&digest);
+    }
     if compacted.text.is_empty() {
         return ChunkMessagePart::Noise;
     }
@@ -1815,25 +1852,46 @@ fn text_parts(message: &BoundaryMsg) -> Vec<String> {
         .collect()
 }
 
-fn extract_tool_call_summaries(blocks: &[BoundaryBlock]) -> Vec<String> {
+/// The summaries of the calls in `blocks`: a call whose result is in `results` renders its digest ([`crate::tool_outcome::digest`]); with `bare_calls`, every other call renders its summary alone.
+fn extract_tool_call_summaries(
+    blocks: &[BoundaryBlock],
+    results: &ToolResults,
+    bare_calls: bool,
+) -> Vec<String> {
+    tool_call_parts(blocks, results, bare_calls)
+        .into_iter()
+        .map(|(part, _)| part)
+        .collect()
+}
+
+/// [`extract_tool_call_summaries`] with whether each part is a digest.
+fn tool_call_parts(
+    blocks: &[BoundaryBlock],
+    results: &ToolResults,
+    bare_calls: bool,
+) -> Vec<(String, bool)> {
     let mut summaries = Vec::new();
     for block in blocks {
         let SelKind::ToolCall { name, input } = &block.kind else {
             continue;
         };
-        if let Some(description) = input
+        let summary = if let Some(description) = input
             .get("description")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
         {
-            summaries.push(format!("TC: {description}"));
-            continue;
-        }
-        let key_arg = extract_key_arg(input.as_ref());
-        if let Some(key_arg) = key_arg {
-            summaries.push(format!("TC: {name}({key_arg})"));
+            format!("TC: {description}")
+        } else if let Some(key_arg) = extract_key_arg(input.as_ref()) {
+            format!("TC: {name}({key_arg})")
         } else {
-            summaries.push(format!("TC: {name}"));
+            format!("TC: {name}")
+        };
+        match block.arc_id.as_ref().and_then(|arc_id| results.get(arc_id)) {
+            Some((outcome, text)) => {
+                summaries.push((crate::tool_outcome::digest(&summary, outcome, text), true));
+            }
+            None if bare_calls => summaries.push((summary, false)),
+            None => {}
         }
     }
     summaries
@@ -2969,8 +3027,12 @@ mod tests {
         let total = ordered.last().map_or(0, |message| message.message_ordinal);
         let mut token_estimator = estimate_tokens;
         let mut builder = ChunkBuilder::new(budget_stop, &mut token_estimator);
+        let results = tool_results(&ordered);
         for message in ordered {
-            if !builder.push_message(message.message_ordinal, chunk_message_part(message)) {
+            if !builder.push_message(
+                message.message_ordinal,
+                chunk_message_part(message, &results),
+            ) {
                 break;
             }
         }
@@ -3012,5 +3074,119 @@ mod tests {
                 "budget_stop {budget_stop}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+    use crate::wire::{HarnessMeta, IngressMessage, WireBlock, WireMessage, project_messages};
+    use memory_store::{BlockKind, OutputKind, ProviderExtras, ToolOutput};
+    use serde_json::json;
+
+    fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
+        Arc::new(IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                role,
+                blocks
+                    .into_iter()
+                    .map(|kind| WireBlock::with_provider_extras(kind, ProviderExtras::default()))
+                    .collect(),
+                None,
+                ProviderExtras::default(),
+                HarnessMeta::default(),
+            ),
+        })
+    }
+
+    /// The boundary chunk of `messages` as the transform builds it from their projection: each block keeps its canonical original bytes.
+    fn boundary_chunk(messages: &[Arc<IngressMessage>]) -> Vec<String> {
+        let projection = project_messages(messages).unwrap();
+        let boundary: Vec<BoundaryMsg<'_>> = messages
+            .iter()
+            .map(|message| BoundaryMsg {
+                message_ordinal: message.ordinal,
+                message_id: message.mid.clone(),
+                role: Role::from_provider(&message.ck.role),
+                blocks: projection
+                    .blocks
+                    .iter()
+                    .filter(|block| block.mid == message.mid)
+                    .map(|block| BoundaryBlock {
+                        id: Cow::Borrowed(&block.id),
+                        ordinal: block.ordinal,
+                        kind: match block.wire.kind() {
+                            BlockKind::ToolCall { name, input, .. } => SelKind::ToolCall {
+                                name: name.clone(),
+                                input: Cow::Borrowed(input),
+                            },
+                            BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
+                                tool_name: tool_name.clone(),
+                            },
+                            _ => SelKind::Text,
+                        },
+                        provider_executed: false,
+                        byte_size: block.bytes.len(),
+                        arc_id: block.arc_id.clone(),
+                        original: Arc::clone(&block.bytes),
+                        original_token_count: estimate_tokens(&block.bytes),
+                        rendered: None,
+                        ignored: false,
+                    })
+                    .collect(),
+            })
+            .collect();
+        chunked_message_estimate(&boundary, 1, None, 1e9).formatted_blocks
+    }
+
+    /// OQ17: the boundary site renders the same digest for a call whose result is in the message set, the bare line for one whose result is not, and no output byte outside the two excerpts (`tool_output_contains_sentinel`).
+    #[test]
+    fn the_boundary_chunk_renders_digests_for_answered_calls() {
+        let call = |id: &str, path: &str| BlockKind::ToolCall {
+            id: id.to_owned(),
+            name: "read".to_owned(),
+            input: json!({ "filePath": path }),
+            provider_executed: false,
+        };
+        let messages = vec![
+            msg(
+                "a1",
+                1,
+                "assistant",
+                vec![call("c1", "a.rs"), call("c2", "b.rs")],
+            ),
+            msg(
+                "t2",
+                2,
+                "tool",
+                vec![BlockKind::ToolResult {
+                    id: "c1".to_owned(),
+                    tool_name: "read".to_owned(),
+                    output: ToolOutput::bare(OutputKind::Text {
+                        text: "fn a() {}\nSENTINEL-7f3a\n}\n".to_owned(),
+                    }),
+                    provider_executed: false,
+                }],
+            ),
+        ];
+        let chunk = boundary_chunk(&messages).join("\n");
+        let digest = crate::tool_outcome::digest(
+            "TC: read(a.rs)",
+            &crate::tool_outcome::from_output(
+                "read",
+                &ToolOutput::bare(OutputKind::Text {
+                    text: "fn a() {}\nSENTINEL-7f3a\n}\n".to_owned(),
+                }),
+            )
+            .0,
+            "fn a() {}\nSENTINEL-7f3a\n}\n",
+        );
+        assert!(
+            chunk.contains(&format!("TC: read(b.rs) / {digest}")),
+            "{chunk}"
+        );
+        assert!(!chunk.contains("SENTINEL-7f3a"));
     }
 }

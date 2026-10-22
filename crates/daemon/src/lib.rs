@@ -19840,13 +19840,13 @@ mod tests {
                 let (expected_text, expected_end) = match budget {
                     1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash"
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\""
                             .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\"\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -19878,8 +19878,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "cc8e4171645e669d0e79005cfff6da6e5dfbdf9bf3a45673d0e91200d3759e2a",
-                    128 => "b55fe9c5d4a9fa9e9761af05ae28c8c02067ee78e4aa2780a45f64e0a1091b7e",
-                    _ => "32dc03a8e8ebfe0bb388c8f1b1ed760fb562e195b555e731a81bd06374880054",
+                    128 => "74d1738475d92a8383985a5733703b35109322ad062ab909693192dfc03f9322",
+                    _ => "8e0816dfc8297ff468c8fd662e3982bf78d8866d0a4af825210a43f8a4a2edd1",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),

@@ -167,6 +167,40 @@ default run asserts in memory and writes nothing. The wrapped slice's 105%
 retry is recorded as unobserved; the history body and the wrapped slice are
 measured separately under one named estimator.
 
+### Tool outcome digest
+
+The summarizer sees each tool result as one digest, never as its full
+output:
+
+```text
+TC: <name>(<key arg>); <status>[; exit=N]; bytes=N[; head="…"][; tail="…"]
+```
+
+`crates/daemon/src/tool_outcome.rs` builds it from the result's wire block
+through the same extractor capture publication uses. `status` is `completed`
+or `error` from the output variant; a denied execution is `error`. `bytes` is
+the output's UTF-8 length. `head` and `tail` are the first and last nonblank
+lines, each at most 128 bytes (the claim-value bound) and cut on a character
+boundary with a `…` clip marker; one nonblank line is `head` alone. A double
+quote or a citation-marker bracket inside an excerpt becomes a single quote.
+The wire block carries no harness metadata, so the summarizer's digest names
+no exit code. The whole digest is at most 1 KiB, and no output byte outside
+the two excerpts reaches the summarizer.
+
+Both `TC:` sites render the digest through this one formatter. The chunk
+builder shows it for each result: under its call's summary on a
+result-only message, and after the narrative of a message that holds both
+the call and the result, as an OpenCode assistant message does. The boundary
+chunk shows it for a call whose result is in its message set and the bare
+`TC:` line otherwise. Each digest is a presented part frozen `transformed`
+under its `sN` alias, so a citation through it addresses digest bytes, and
+an alias a budget cut reaches is withdrawn.
+
+C5's bash result is the witness: the tool `completed`, and its `tail` carries
+the `connection refused` line the inference rests on. The replay exposure
+model renders the same digests, so a span annotated on a tool block stays
+`absent` while the excerpts reach the producer.
+
 ### Fixture qualification
 
 The direct-host fixture example (`crates/daemon/examples/direct_host_fixture.rs`
