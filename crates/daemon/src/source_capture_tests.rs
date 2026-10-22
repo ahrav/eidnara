@@ -239,7 +239,7 @@ async fn an_opencode_window_publishes_its_native_sources_once_and_replays_after_
             TaintClass::ToolUntrustedOutput.as_str().to_owned()
         )
     );
-    let published = report(&handler)["units"]["published"].as_u64().unwrap();
+    let published = report(&handler)["units_published"].as_u64().unwrap();
     assert!(published >= 4, "{}", report(&handler));
 
     // The same window again: the memo answers and nothing new reaches the kernel.
@@ -247,7 +247,7 @@ async fn an_opencode_window_publishes_its_native_sources_once_and_replays_after_
     pass(&handler, transform_with(&window, "base-2")).await;
     settle(&handler).await;
     assert_eq!(store.tip().unwrap(), tip);
-    assert!(report(&handler)["units"]["memo_skipped"].as_u64().unwrap() >= published);
+    assert!(report(&handler)["units_memo_skipped"].as_u64().unwrap() >= published);
 
     // A restart empties the memo; the kernel replays its receipts and publishes nothing new.
     handler.source_capture.forget_memo_for_test();
@@ -255,7 +255,7 @@ async fn an_opencode_window_publishes_its_native_sources_once_and_replays_after_
     settle(&handler).await;
     assert_eq!(store.tip().unwrap(), tip);
     assert_eq!(
-        report(&handler)["units"]["replayed"].as_u64().unwrap(),
+        report(&handler)["units_replayed"].as_u64().unwrap(),
         published
     );
 }
@@ -315,7 +315,7 @@ async fn the_response_is_identical_whatever_capture_and_the_kernel_are_doing() {
         starting_baseline
     );
     settle(&starting).await;
-    assert_eq!(report(&starting)["ended"]["kernel_unavailable"], 1);
+    assert_eq!(report(&starting)["kernel_unavailable"], 1);
 
     // Writer busy: another commit holds the writer; the response does not wait for it.
     let (busy, _busy_dir, _) = capture_handler(capture_config(true), true).await;
@@ -379,7 +379,7 @@ async fn the_response_is_identical_whatever_capture_and_the_kernel_are_doing() {
         pass(&full, transform_with(&window, "base-2")).await,
         second_baseline
     );
-    assert_eq!(report(&full)["refused"]["queue_full"], 1);
+    assert_eq!(report(&full)["refused_queue_full"], 1);
     assert_eq!(
         report(&full)["retained_bytes"].as_u64().unwrap(),
         retained,
@@ -414,7 +414,7 @@ async fn a_33_unit_window_publishes_32_and_the_next_pass_publishes_the_deferred_
         live(&store, OccurrenceClass::Messages).len(),
         MAX_SOURCE_BATCH_UNITS
     );
-    assert_eq!(report(&handler)["units"]["deferred"], 1);
+    assert_eq!(report(&handler)["units_deferred"], 1);
     assert!(report(&handler)["oldest_deferred_age_ms"].is_u64());
 
     pass(&handler, transform_with(&window, "base-2")).await;
@@ -424,7 +424,7 @@ async fn a_33_unit_window_publishes_32_and_the_next_pass_publishes_the_deferred_
         MAX_SOURCE_BATCH_UNITS + 1
     );
     assert_eq!(
-        report(&handler)["units"]["memo_skipped"].as_u64().unwrap(),
+        report(&handler)["units_memo_skipped"].as_u64().unwrap(),
         MAX_SOURCE_BATCH_UNITS as u64
     );
     assert!(report(&handler)["oldest_deferred_age_ms"].is_null());
@@ -437,7 +437,7 @@ async fn a_unit_pending_behind_a_starting_kernel_publishes_on_the_next_ready_pas
     let window = [opencode_user("msg_u1", 1_700_000_000_000, "first")];
     pass(&handler, transform_with(&window, "base-1")).await;
     settle(&handler).await;
-    assert_eq!(report(&handler)["ended"]["kernel_unavailable"], 1);
+    assert_eq!(report(&handler)["kernel_unavailable"], 1);
     handler
         .kernel
         .open(
@@ -474,12 +474,12 @@ async fn changed_bytes_under_one_identity_are_terminal_and_never_retried() {
     )];
     pass(&handler, transform_with(&edited, "base-2")).await;
     settle(&handler).await;
-    assert_eq!(report(&handler)["units"]["identity_conflict"], 1);
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
     let store = kernel_store(&handler);
     let tip = store.tip().unwrap();
     pass(&handler, transform_with(&edited, "base-3")).await;
     settle(&handler).await;
-    assert_eq!(report(&handler)["units"]["identity_conflict"], 1);
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
     assert_eq!(store.tip().unwrap(), tip);
     let rows = live(&store, OccurrenceClass::Messages);
     assert_eq!(rows.len(), 1);
@@ -606,7 +606,7 @@ async fn the_capture_report_carries_no_unit_text() {
         pass(&handler, transform_with(&window, base)).await;
         settle(&handler).await;
     }
-    assert_eq!(report(&handler)["units"]["identity_conflict"], 1);
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
     let health = handler.health().await;
     let text = format!("{} {:?}", report(&handler), health.metrics);
     assert!(!text.contains(SENTINEL), "{text}");
@@ -783,9 +783,10 @@ async fn capture_latency_measurement() {
             );
         }
         eprintln!(
-            "capture writer hold {workload}: {} published {}",
-            report(&on)["writer_hold_ms"],
-            report(&on)["units"]["published"]
+            "capture writer hold {workload}: last {} max {} published {}",
+            report(&on)["writer_hold_ms_last"],
+            report(&on)["writer_hold_ms_max"],
+            report(&on)["units_published"]
         );
     }
 }

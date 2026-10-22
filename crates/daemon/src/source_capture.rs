@@ -44,69 +44,85 @@ pub(crate) const RETAINED_BYTES_BOUND: u64 =
 const CAPTURE_DOMAIN_ID: &str = "harness-capture";
 const PRODUCER: &str = "eidnara-daemon/source-capture";
 
-/// Why an offer retained nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    QueueFull,
-    ResidentShort,
-    WindowTooLarge,
-    ShuttingDown,
+/// Declares the closed vocabulary with each variant's report and log name.
+macro_rules! counts {
+    ($($variant:ident => $name:literal,)*) => {
+        /// The closed vocabulary of counters, gauges, job ends, and log reasons; every value is a count, a byte total, or milliseconds.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum Count {
+            $($variant,)*
+        }
+
+        impl Count {
+            const ALL: [Self; [$($name),*].len()] = [$(Self::$variant),*];
+
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)*
+                }
+            }
+        }
+    };
 }
 
-impl Refusal {
-    fn code(self) -> &'static str {
-        match self {
-            Self::QueueFull => "queue_full",
-            Self::ResidentShort => "resident_short",
-            Self::WindowTooLarge => "window_too_large",
-            Self::ShuttingDown => "shutting_down",
-        }
+counts! {
+    Admitted => "admitted",
+    RefusedQueueFull => "refused_queue_full",
+    RefusedResidentShort => "refused_resident_short",
+    RefusedWindowTooLarge => "refused_window_too_large",
+    RefusedShuttingDown => "refused_shutting_down",
+    Completed => "completed",
+    Discarded => "discarded",
+    SessionInvalidated => "session_invalidated",
+    KernelUnavailable => "kernel_unavailable",
+    Deadline => "deadline",
+    KernelError => "kernel_error",
+    WorkerPanicked => "worker_panicked",
+    AdapterRefused => "adapter_refused",
+    UnitsPublished => "units_published",
+    UnitsReplayed => "units_replayed",
+    UnitsMemoSkipped => "units_memo_skipped",
+    UnitsDeferred => "units_deferred",
+    UnitsUnitTooLarge => "units_unit_too_large",
+    UnitsIdentityConflict => "units_identity_conflict",
+    UnitsRefusedTerminal => "units_refused_terminal",
+    UnitsRefusedRetryable => "units_refused_retryable",
+    Active => "active",
+    RetainedBytes => "retained_bytes",
+    WriterHoldMsLast => "writer_hold_ms_last",
+    WriterHoldMsMax => "writer_hold_ms_max",
+}
+
+#[derive(Default)]
+struct Counters([AtomicU64; Count::ALL.len()]);
+
+impl Counters {
+    fn at(&self, count: Count) -> &AtomicU64 {
+        &self.0[count as usize]
+    }
+
+    fn add(&self, count: Count, value: usize) {
+        self.at(count).fetch_add(value as u64, Ordering::Relaxed);
+    }
+
+    fn sub(&self, count: Count, value: usize) {
+        self.at(count).fetch_sub(value as u64, Ordering::Relaxed);
+    }
+
+    fn load(&self, count: Count) -> u64 {
+        self.at(count).load(Ordering::Relaxed)
     }
 }
 
-/// Counters in a closed vocabulary; every value is a count, a byte total, or a duration.
-#[derive(Default)]
-struct Counters {
-    admitted: AtomicU64,
-    refused_queue_full: AtomicU64,
-    refused_resident_short: AtomicU64,
-    refused_window_too_large: AtomicU64,
-    refused_shutting_down: AtomicU64,
-    completed: AtomicU64,
-    discarded: AtomicU64,
-    session_invalidated: AtomicU64,
-    kernel_unavailable: AtomicU64,
-    deadline: AtomicU64,
-    kernel_error: AtomicU64,
-    adapter_refused: AtomicU64,
-    units_published: AtomicU64,
-    units_replayed: AtomicU64,
-    units_memo_skipped: AtomicU64,
-    units_deferred: AtomicU64,
-    units_unit_too_large: AtomicU64,
-    units_identity_conflict: AtomicU64,
-    units_refused_terminal: AtomicU64,
-    units_refused_retryable: AtomicU64,
-    active: AtomicU64,
-    retained_bytes: AtomicU64,
-    writer_hold_ms_last: AtomicU64,
-    writer_hold_ms_max: AtomicU64,
+/// One log line from a fixed stage, a closed reason, and a count; nothing a unit carried reaches it.
+fn log_line(stage: &'static str, reason: Count, count: usize) -> String {
+    format!(
+        "daemon: source capture {stage}: {} ({count})",
+        reason.name()
+    )
 }
 
-fn bump(counter: &AtomicU64) {
-    counter.fetch_add(1, Ordering::Relaxed);
-}
-
-fn add(counter: &AtomicU64, value: usize) {
-    counter.fetch_add(value as u64, Ordering::Relaxed);
-}
-
-/// One log line from fixed codes and a count; nothing a unit carried reaches it.
-fn log_line(stage: &'static str, reason: &'static str, count: usize) -> String {
-    format!("daemon: source capture {stage}: {reason} ({count})")
-}
-
-fn log(stage: &'static str, reason: &'static str, count: usize) {
+fn log(stage: &'static str, reason: Count, count: usize) {
     eprintln!("{}", log_line(stage, reason, count));
 }
 
@@ -243,10 +259,7 @@ struct RetainedCharge {
 
 impl Drop for RetainedCharge {
     fn drop(&mut self) {
-        self.capture
-            .counters
-            .retained_bytes
-            .fetch_sub(self.bytes as u64, Ordering::Relaxed);
+        self.capture.counters.sub(Count::RetainedBytes, self.bytes);
     }
 }
 
@@ -258,19 +271,8 @@ struct ActiveSlot {
 
 impl Drop for ActiveSlot {
     fn drop(&mut self) {
-        self.capture.counters.active.fetch_sub(1, Ordering::Relaxed);
+        self.capture.counters.sub(Count::Active, 1);
     }
-}
-
-/// How one publication pass ended; tests and counters read it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PassEnd {
-    Discarded,
-    SessionInvalidated,
-    KernelUnavailable,
-    Deadline,
-    KernelError,
-    Completed,
 }
 
 impl SourceCapture {
@@ -290,7 +292,7 @@ impl SourceCapture {
         };
         let window = offer.window.filter(|window| !window.is_empty())?;
         let Ok(permit) = Arc::clone(&self.slot).try_acquire_owned() else {
-            self.refuse(Refusal::QueueFull);
+            self.refuse(Count::RefusedQueueFull);
             return None;
         };
         let window_bytes: usize = window
@@ -302,16 +304,14 @@ impl SourceCapture {
             .saturating_mul(2)
             .saturating_add(4 * MAX_SOURCE_BATCH_BYTES);
         if bytes > MAX_RETAINED_WINDOW_BYTES {
-            self.refuse(Refusal::WindowTooLarge);
+            self.refuse(Count::RefusedWindowTooLarge);
             return None;
         }
         let Some(charge) = reserve.try_reserve(bytes) else {
-            self.refuse(Refusal::ResidentShort);
+            self.refuse(Count::RefusedResidentShort);
             return None;
         };
-        self.counters
-            .retained_bytes
-            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.counters.add(Count::RetainedBytes, bytes);
         Some(CaptureHandoff {
             capture: Arc::clone(self),
             window: window.to_vec(),
@@ -343,15 +343,9 @@ impl SourceCapture {
         *self.memo.lock().expect("capture memo mutex") = Memo::default();
     }
 
-    fn refuse(&self, refusal: Refusal) {
-        let counter = match refusal {
-            Refusal::QueueFull => &self.counters.refused_queue_full,
-            Refusal::ResidentShort => &self.counters.refused_resident_short,
-            Refusal::WindowTooLarge => &self.counters.refused_window_too_large,
-            Refusal::ShuttingDown => &self.counters.refused_shutting_down,
-        };
-        bump(counter);
-        log("handoff refused", refusal.code(), 1);
+    fn refuse(&self, refusal: Count) {
+        self.counters.add(refusal, 1);
+        log("handoff refused", refusal, 1);
     }
 
     fn generation(&self, session: &str) -> u64 {
@@ -373,53 +367,29 @@ impl SourceCapture {
             .or_insert(0) += 1;
     }
 
-    /// The observability set: admitted, refused, completed, active versus draining, retained bytes, oldest deferred age, and the writer hold of the last and longest batch.
+    /// The observability set: every [`Count`] by name, with the active slot reported as draining once shutdown began, and the age of the oldest deferred unit.
     pub(crate) fn report(&self, draining: bool, now_ms: i64) -> Value {
-        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
-        let counters = &self.counters;
-        let active = load(&counters.active);
-        let oldest_deferred_age_ms = self
+        let mut report = serde_json::Map::new();
+        for count in Count::ALL {
+            report.insert(count.name().to_owned(), json!(self.counters.load(count)));
+        }
+        let active = self.counters.load(Count::Active);
+        report.insert(
+            "active".to_owned(),
+            json!(if draining { 0 } else { active }),
+        );
+        report.insert(
+            "draining".to_owned(),
+            json!(if draining { active } else { 0 }),
+        );
+        let oldest = self
             .memo
             .lock()
             .expect("capture memo mutex")
             .oldest_pending_since()
             .map(|since| now_ms.saturating_sub(since).max(0));
-        json!({
-            "admitted": load(&counters.admitted),
-            "refused": {
-                "queue_full": load(&counters.refused_queue_full),
-                "resident_short": load(&counters.refused_resident_short),
-                "window_too_large": load(&counters.refused_window_too_large),
-                "shutting_down": load(&counters.refused_shutting_down),
-            },
-            "completed": load(&counters.completed),
-            "ended": {
-                "discarded": load(&counters.discarded),
-                "session_invalidated": load(&counters.session_invalidated),
-                "kernel_unavailable": load(&counters.kernel_unavailable),
-                "deadline": load(&counters.deadline),
-                "kernel_error": load(&counters.kernel_error),
-            },
-            "units": {
-                "published": load(&counters.units_published),
-                "replayed": load(&counters.units_replayed),
-                "memo_skipped": load(&counters.units_memo_skipped),
-                "deferred": load(&counters.units_deferred),
-                "unit_too_large": load(&counters.units_unit_too_large),
-                "identity_conflict": load(&counters.units_identity_conflict),
-                "refused_terminal": load(&counters.units_refused_terminal),
-                "refused_retryable": load(&counters.units_refused_retryable),
-                "adapter_refused": load(&counters.adapter_refused),
-            },
-            "active": if draining { 0 } else { active },
-            "draining": if draining { active } else { 0 },
-            "retained_bytes": load(&counters.retained_bytes),
-            "oldest_deferred_age_ms": oldest_deferred_age_ms,
-            "writer_hold_ms": {
-                "last": load(&counters.writer_hold_ms_last),
-                "max": load(&counters.writer_hold_ms_max),
-            },
-        })
+        report.insert("oldest_deferred_age_ms".to_owned(), json!(oldest));
+        Value::Object(report)
     }
 }
 
@@ -431,8 +401,8 @@ impl CaptureHandoff {
         commit_gate: Arc<Mutex<()>>,
         cancel: CancellationToken,
     ) -> CaptureJob {
-        bump(&self.capture.counters.admitted);
-        self.capture.counters.active.fetch_add(1, Ordering::Relaxed);
+        self.capture.counters.add(Count::Admitted, 1);
+        self.capture.counters.add(Count::Active, 1);
         let interrupt = Arc::new(AtomicBool::new(false));
         CaptureJob {
             budget: EvalBudget::new(
@@ -458,7 +428,7 @@ impl CaptureHandoff {
 
     /// Counts a handoff whose job could not be admitted because shutdown closed admission; dropping it releases the slot and the charge.
     pub(crate) fn refuse_shutting_down(self) {
-        self.capture.refuse(Refusal::ShuttingDown);
+        self.capture.refuse(Count::RefusedShuttingDown);
     }
 }
 
@@ -480,7 +450,7 @@ pub(crate) struct CaptureJob {
 
 impl CaptureJob {
     /// Runs the publication on the blocking pool and returns once it physically completes; cancellation interrupts its budget and still waits for the closure.
-    pub(crate) async fn run(self) -> PassEnd {
+    pub(crate) async fn run(self) -> Count {
         let interrupt = Arc::clone(&self.interrupt);
         let cancel = self.cancel.clone();
         let capture = Arc::clone(&self.capture);
@@ -496,45 +466,36 @@ impl CaptureJob {
             Ok(end) => end,
             Err(_) => {
                 // The slot, the charge, and the window were dropped while the panic unwound.
-                bump(&capture.counters.kernel_error);
-                log("job ended", "worker_panicked", 1);
-                PassEnd::KernelError
+                capture.counters.add(Count::WorkerPanicked, 1);
+                log("job ended", Count::WorkerPanicked, 1);
+                Count::WorkerPanicked
             }
         }
     }
 
-    fn end(&self, end: PassEnd) -> PassEnd {
-        let counters = &self.capture.counters;
-        let (counter, reason) = match end {
-            PassEnd::Discarded => (&counters.discarded, "discarded"),
-            PassEnd::SessionInvalidated => (&counters.session_invalidated, "session_invalidated"),
-            PassEnd::KernelUnavailable => (&counters.kernel_unavailable, "kernel_unavailable"),
-            PassEnd::Deadline => (&counters.deadline, "deadline"),
-            PassEnd::KernelError => (&counters.kernel_error, "kernel_error"),
-            PassEnd::Completed => (&counters.completed, "completed"),
-        };
-        bump(counter);
-        if end != PassEnd::Completed {
-            log("job ended", reason, 1);
+    fn end(&self, end: Count) -> Count {
+        self.capture.counters.add(end, 1);
+        if end != Count::Completed {
+            log("job ended", end, 1);
         }
         end
     }
 
-    fn publish(self) -> PassEnd {
+    fn publish(self) -> Count {
         let _slot = &self.slot;
         let _retained = &self.retained;
         if self.cancel.is_cancelled() {
-            return self.end(PassEnd::Discarded);
+            return self.end(Count::Discarded);
         }
         let Ok(store) = self.kernel.kernel_store() else {
-            return self.end(PassEnd::KernelUnavailable);
+            return self.end(Count::KernelUnavailable);
         };
         if self.budget.is_exhausted() {
-            return self.end(PassEnd::Deadline);
+            return self.end(Count::Deadline);
         }
         let units = self.units();
         if units.is_empty() {
-            return self.end(PassEnd::Completed);
+            return self.end(Count::Completed);
         }
         let incarnation = match store.database_incarnation_id_within_budget(&self.budget) {
             Ok(incarnation) => incarnation,
@@ -571,7 +532,7 @@ impl CaptureJob {
                         if entry.digest == digest
                             && !matches!(entry.disposition, Disposition::Pending { .. }) =>
                     {
-                        bump(&self.capture.counters.units_memo_skipped);
+                        self.capture.counters.add(Count::UnitsMemoSkipped, 1);
                     }
                     _ => {
                         keys.push(Some((key, digest)));
@@ -581,7 +542,7 @@ impl CaptureJob {
             }
         }
         if candidates.is_empty() {
-            return self.end(PassEnd::Completed);
+            return self.end(Count::Completed);
         }
         // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
         let gate = self.commit_gate.lock().expect("capture publication mutex");
@@ -603,9 +564,9 @@ impl CaptureJob {
         incarnation: &str,
         candidates: Vec<SourceUnit>,
         keys: Vec<Option<(String, String)>>,
-    ) -> PassEnd {
+    ) -> Count {
         if self.capture.generation(&self.session.session_id) != self.generation {
-            return self.end(PassEnd::SessionInvalidated);
+            return self.end(Count::SessionInvalidated);
         }
         if let Err(error) = self.ensure_scope(store, incarnation) {
             return self.end(kernel_end(error));
@@ -622,19 +583,21 @@ impl CaptureJob {
             hook();
         }
         if self.cancel.is_cancelled() {
-            return self.end(PassEnd::Discarded);
+            return self.end(Count::Discarded);
         }
         if self.budget.is_exhausted() {
-            return self.end(PassEnd::Deadline);
+            return self.end(Count::Deadline);
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
         let result = publish_screened(publisher, &candidates, observed_at, Some(&self.budget));
         let held = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let counters = &self.capture.counters;
-        counters.writer_hold_ms_last.store(held, Ordering::Relaxed);
         counters
-            .writer_hold_ms_max
+            .at(Count::WriterHoldMsLast)
+            .store(held, Ordering::Relaxed);
+        counters
+            .at(Count::WriterHoldMsMax)
             .fetch_max(held, Ordering::Relaxed);
         let mut memo = self.capture.memo.lock().expect("capture memo mutex");
         match result {
@@ -643,20 +606,23 @@ impl CaptureJob {
                 for (disposition, key) in dispositions.into_iter().zip(keys) {
                     let recorded = match disposition {
                         UnitDisposition::Published(published) => {
-                            bump(if published.replayed {
-                                &counters.units_replayed
-                            } else {
-                                &counters.units_published
-                            });
+                            counters.add(
+                                if published.replayed {
+                                    Count::UnitsReplayed
+                                } else {
+                                    Count::UnitsPublished
+                                },
+                                1,
+                            );
                             Disposition::Published
                         }
                         UnitDisposition::UnitTooLarge => {
-                            bump(&counters.units_unit_too_large);
+                            counters.add(Count::UnitsUnitTooLarge, 1);
                             Disposition::Terminal
                         }
                         UnitDisposition::Deferred => {
                             deferred += 1;
-                            bump(&counters.units_deferred);
+                            counters.add(Count::UnitsDeferred, 1);
                             Disposition::Pending {
                                 since_ms: observed_at,
                             }
@@ -668,19 +634,19 @@ impl CaptureJob {
                     }
                 }
                 if deferred > 0 {
-                    log("batch bounded", "deferred", deferred);
+                    log("batch bounded", Count::UnitsDeferred, deferred);
                 }
                 drop(memo);
-                self.end(PassEnd::Completed)
+                self.end(Count::Completed)
             }
             Err(refusal) => {
                 // A same-key conflict is terminal for its unit; every other unit stays pending for the next pass.
                 if let Some(index) = refusal.conflicting_unit()
                     && let Some(Some((key, digest))) = keys.get(index)
                 {
-                    bump(&counters.units_identity_conflict);
+                    counters.add(Count::UnitsIdentityConflict, 1);
                     memo.record(key.clone(), digest.clone(), Disposition::Terminal);
-                    log("unit terminal", "identity_conflict", 1);
+                    log("unit terminal", Count::UnitsIdentityConflict, 1);
                 }
                 drop(memo);
                 self.end(kernel_end(refusal.error))
@@ -689,19 +655,19 @@ impl CaptureJob {
     }
 
     fn refused(&self, refusal: &PublishError, observed_at: i64) -> Disposition {
-        let counters = &self.capture.counters;
-        if matches!(refusal, PublishError::IdentityReused) {
-            bump(&counters.units_identity_conflict);
-            Disposition::Terminal
+        let (count, disposition) = if matches!(refusal, PublishError::IdentityReused) {
+            (Count::UnitsIdentityConflict, Disposition::Terminal)
         } else if refusal.is_permanent() {
-            bump(&counters.units_refused_terminal);
-            Disposition::Terminal
+            (Count::UnitsRefusedTerminal, Disposition::Terminal)
         } else {
-            bump(&counters.units_refused_retryable);
-            Disposition::Pending {
-                since_ms: observed_at,
-            }
-        }
+            let since_ms = observed_at;
+            (
+                Count::UnitsRefusedRetryable,
+                Disposition::Pending { since_ms },
+            )
+        };
+        self.capture.counters.add(count, 1);
+        disposition
     }
 
     /// Every unit of the window, in record order; a record the adapter refuses contributes none and is counted.
@@ -719,8 +685,8 @@ impl CaptureJob {
             }
         }
         if refused > 0 {
-            add(&self.capture.counters.adapter_refused, refused);
-            log("adapter", "adapter_refused", refused);
+            self.capture.counters.add(Count::AdapterRefused, refused);
+            log("adapter", Count::AdapterRefused, refused);
         }
         units
     }
@@ -773,10 +739,10 @@ impl CaptureJob {
     }
 }
 
-fn kernel_end(error: KernelError) -> PassEnd {
+fn kernel_end(error: KernelError) -> Count {
     match error {
-        KernelError::Deadline => PassEnd::Deadline,
-        _ => PassEnd::KernelError,
+        KernelError::Deadline => Count::Deadline,
+        _ => Count::KernelError,
     }
 }
 
@@ -784,18 +750,11 @@ fn kernel_end(error: KernelError) -> PassEnd {
 mod tests {
     use super::*;
 
-    /// Every log line is built from fixed codes and a count, so no input byte can reach it.
+    /// Every log line is built from a fixed stage, a closed reason, and a count, so no input byte can reach it.
     #[test]
     fn log_lines_carry_only_fixed_codes_and_counts() {
-        let codes = [
-            Refusal::QueueFull,
-            Refusal::ResidentShort,
-            Refusal::WindowTooLarge,
-            Refusal::ShuttingDown,
-        ]
-        .map(Refusal::code);
-        for code in codes {
-            let line = log_line("handoff refused", code, 1);
+        for reason in Count::ALL {
+            let line = log_line("handoff refused", reason, 1);
             assert!(
                 line.bytes()
                     .all(|byte| byte.is_ascii_lowercase() || b" :_()1".contains(&byte)),
