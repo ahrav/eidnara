@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostClient } from "@eidnara/opencode/shared/host-client";
 import { type ReviewCommandDependencies, runReviewCommand } from "../../../cli/src/commands/review";
+import { raiseMemoriesAuthority } from "../bedrock-peer/classify";
+import { waitFor } from "../harness-primitives";
 import { buildDirectHostFixture, detectRustModePrereqs, HermeticHostStack } from "./hermetic-host";
 
 const fixturePrereqs = detectRustModePrereqs();
@@ -98,5 +100,143 @@ describe("review command against the direct host", () => {
             }
         },
         120_000,
+    );
+    it.skipIf(!fixturePrereqs.ok)(
+        "list and show read a fixture-class proposal field for field and a production-class owner_sensitive abstention",
+        async () => {
+            const fixtureBin = await buildDirectHostFixture();
+            const root = mkdtempSync(join(tmpdir(), "eidnara-review-cli-e2e-"));
+            temporaryRoots.push(root);
+            chmodSync(root, 0o700);
+            const project = join(root, "project");
+            mkdirSync(project);
+            const projectRoot = realpathSync.native(project);
+            const stack = await HermeticHostStack.start({ dataDir: root, fixtureBin });
+            try {
+                // The host opens its Memory Store after it publishes its connection file; the authority write waits for it.
+                await waitFor(
+                    "the memories authority reaching MODULE",
+                    () =>
+                        raiseMemoriesAuthority(stack, {
+                            project_root: projectRoot,
+                            harness: "opencode",
+                            session: "review-witness",
+                        }).catch(() => undefined),
+                    30_000,
+                    () => stack.hostLog(),
+                );
+                const witness = await stack.reviewWitness(projectRoot);
+                // One provider exchange per fixture job; the production jobs abstain before any attempt or connection.
+                expect(witness.fixture).toHaveLength(2);
+                expect(witness.production).toHaveLength(3);
+                expect(witness.providerRequests).toBe(2);
+                expect(witness.providerConnections).toBe(2);
+                expect(witness.productionAttempts).toBe(0);
+                const fixtureIdentities = witness.fixture.map(
+                    (read) => read.causal_identity as string,
+                );
+
+                const list = commandDependencies(root);
+                expect(
+                    await runReviewCommand(
+                        ["list", "--project", projectRoot, "--limit", "64", "--json"],
+                        list.deps,
+                    ),
+                ).toBe(0);
+                expect(list.err).toEqual([]);
+                const expectedItems = [
+                    ...fixtureIdentities.map((causal_identity) => ({
+                        causal_identity,
+                        generation: 1,
+                        outcome: "complete",
+                        selected: true,
+                    })),
+                    ...witness.production.map((causal_identity) => ({
+                        causal_identity,
+                        generation: 1,
+                        outcome: "abstained",
+                        reason: "owner_sensitive",
+                        selected: false,
+                    })),
+                ].sort((left, right) => left.causal_identity.localeCompare(right.causal_identity));
+                expect(JSON.parse(list.out[0])).toEqual({
+                    kind: "page",
+                    project_root: projectRoot,
+                    items: expectedItems,
+                    next: null,
+                });
+                expect(list.clients[0]?.isClosed).toBe(true);
+
+                for (const read of witness.fixture) {
+                    const show = commandDependencies(root);
+                    const identity = read.causal_identity as string;
+                    expect(
+                        await runReviewCommand(
+                            ["show", identity, "--project", projectRoot, "--json"],
+                            show.deps,
+                        ),
+                    ).toBe(0);
+                    expect(show.err).toEqual([]);
+                    expect(show.clients[0]?.isClosed).toBe(true);
+                    // The command renders every field the Kernel serializes except the policy dependencies, which stay out of operator output.
+                    const { policy_dependencies, ...rendered } = read.proposal as Record<
+                        string,
+                        unknown
+                    >;
+                    expect(policy_dependencies).toBeDefined();
+                    const shown = JSON.parse(show.out[0]) as Record<string, unknown>;
+                    expect(shown).toEqual({
+                        ...read,
+                        project_root: projectRoot,
+                        proposal: rendered,
+                    });
+                    // The target is the originating decision at its exact tokens, and every citation is a nonempty span of a fixture form.
+                    const proposal = shown.proposal as {
+                        action: string;
+                        target: Record<string, unknown>;
+                        support: { evidence_id: string; span?: { start: number; end: number } }[];
+                    };
+                    expect(proposal.action).toBe("retain");
+                    expect(proposal.target).toEqual({ kind: "memory", ...witness.target });
+                    expect(proposal.support.length).toBeGreaterThan(0);
+                    for (const reference of proposal.support) {
+                        expect(witness.evidence).toContain(reference.evidence_id);
+                        expect(reference.span).toBeDefined();
+                        expect(reference.span?.end ?? 0).toBeGreaterThan(
+                            reference.span?.start ?? 0,
+                        );
+                    }
+                }
+
+                const text = commandDependencies(root);
+                expect(
+                    await runReviewCommand(
+                        ["show", fixtureIdentities[0], "--project", projectRoot],
+                        text.deps,
+                    ),
+                ).toBe(0);
+                expect(text.out[0]).toContain("Action: retain");
+                expect(text.out[0]).toContain("Reference only");
+
+                for (const identity of witness.production) {
+                    const show = commandDependencies(root);
+                    expect(
+                        await runReviewCommand(
+                            ["show", identity, "--project", projectRoot, "--json"],
+                            show.deps,
+                        ),
+                    ).toBe(1);
+                    expect(show.err).toEqual([]);
+                    expect(JSON.parse(show.out[0])).toEqual({
+                        kind: "terminal",
+                        terminal: "not_selected",
+                    });
+                    expect(show.clients[0]?.isClosed).toBe(true);
+                }
+            } finally {
+                await stack.stop();
+            }
+        },
+        180_000,
     );
 });

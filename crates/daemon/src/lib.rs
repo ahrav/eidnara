@@ -13755,6 +13755,12 @@ pub mod kernel_route_fixtures {
         }
     }
 
+    /// The project scope a kernel route materializes for `project_root` on its first commit: the route-owned domain and one exact term naming the root's project digest.
+    pub fn route_project_scope(project_root: &Path) -> ScopeSpec {
+        crate::kernel_routes::ProjectBinding::new(project_root)
+            .scope_spec(crate::kernel_routes::commit::PROJECT_SCOPES_DOMAIN_ID)
+    }
+
     /// A store-direct ingest of `payload` as evidence `evidence-{key}`,
     /// asserted at `sensitivity` and allowed to reach remote providers.
     pub fn ingest_request(
