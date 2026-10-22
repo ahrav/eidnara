@@ -1028,7 +1028,7 @@ async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
     assert_eq!(report(&handler)["retained_bytes"], 0);
 }
 
-/// AC10 (U3): Pi rows that carry their entry's `type` and `parentId` publish their tool results, rows without them are counted adapter refusals, and the wire response is the same bytes either way.
+/// AC10 (U3): Pi rows that carry their entry's `type` and `parentId` publish their tool results, rows without them are counted adapter refusals, and the wire response is the same bytes either way; `codec::pi::tests::re_rendered_rows_carry_no_entry_identity` pins the rows the daemon re-renders.
 #[tokio::test]
 async fn pi_entry_identity_on_the_row_decides_capture_and_never_the_response() {
     let rows = |identity: bool| -> Vec<Value> {

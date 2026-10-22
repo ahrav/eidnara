@@ -301,7 +301,7 @@ pub fn opencode_units(
 ///
 /// # Errors
 ///
-/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, a row without `type` (`MissingIdentity("type")`) or whose `type` is not `"message"` (`UnsupportedShape("type")`), missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
+/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, a row with a missing, null, or empty `type` (`MissingIdentity("type")`) or whose `type` is not `"message"` (`UnsupportedShape("type")`), missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
 pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,

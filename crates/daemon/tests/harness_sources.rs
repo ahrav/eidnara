@@ -592,6 +592,14 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
             json!({ "type": 7, "id": "x" }),
             AdapterRefusal::UnsupportedShape("type"),
         ),
+        (
+            json!({ "type": null, "id": "x" }),
+            AdapterRefusal::MissingIdentity("type"),
+        ),
+        (
+            json!({ "type": "", "id": "x" }),
+            AdapterRefusal::MissingIdentity("type"),
+        ),
     ] {
         assert_eq!(pi_units(&pi_session(), &row), Err(refusal), "{row}");
     }
@@ -2656,6 +2664,15 @@ fn the_shared_pi_fixture_rows_carry_the_entry_identity_the_adapter_reads() {
                 "{}",
                 row["id"]
             );
+            // A reserved row names the entry it came from, and its type is that entry's.
+            let role = row["id"].as_str().unwrap().split(':').nth(1).unwrap();
+            let expected = match role {
+                "custom" => "custom_message",
+                "compactionSummary" => "compaction",
+                "branchSummary" => "branch_summary",
+                other => panic!("unexpected reserved role {other}"),
+            };
+            assert_eq!(row["type"], expected, "{}", row["id"]);
         }
     }
     assert!(messages > 0 && messages < rows.len());
