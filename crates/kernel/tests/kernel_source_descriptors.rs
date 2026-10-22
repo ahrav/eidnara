@@ -2563,33 +2563,33 @@ fn a_narrowed_read_finds_every_escaped_value_in_its_own_field() {
     fixture
         .store
         .commit(intent("read-escaped"), |envelope| {
-            let mut found = Vec::new();
-            let mut after = None;
-            loop {
-                let page = envelope.live_source_descriptors_with(
-                    OccurrenceClass::RawToolSpans,
-                    "tool_call_id",
-                    &wanted_values,
-                    after.as_deref(),
-                    seven,
-                )?;
-                found.extend(page.rows.into_iter().map(|row| row.object_id));
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => break,
+            let read = |values: &[&str]| -> Result<Vec<kernel::LiveDescriptor>, KernelError> {
+                let mut found = Vec::new();
+                let mut after = None;
+                loop {
+                    let page = envelope.live_source_descriptors_with(
+                        OccurrenceClass::RawToolSpans,
+                        "tool_call_id",
+                        values,
+                        after.as_deref(),
+                        seven,
+                    )?;
+                    found.extend(page.rows);
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => return Ok(found),
+                    }
                 }
-            }
+            };
+            let found: Vec<String> = read(&wanted_values)?
+                .into_iter()
+                .map(|row| row.object_id)
+                .collect();
             assert_eq!(found, wanted, "every value, and no decoy");
             for value in &values {
-                let page = envelope.live_source_descriptors_with(
-                    OccurrenceClass::RawToolSpans,
-                    "tool_call_id",
-                    &[value.as_str()],
-                    None,
-                    seven,
-                )?;
-                assert_eq!(page.rows.len(), 1, "{value:?} alone");
-                assert_eq!(page.rows[0].detail.identity[4].1, *value);
+                let rows = read(&[value.as_str()])?;
+                assert_eq!(rows.len(), 1, "{value:?} alone");
+                assert_eq!(rows[0].detail.identity[4].1, *value);
             }
             Ok(String::new())
         })
@@ -2669,6 +2669,73 @@ fn a_narrowed_read_applies_evidence_liveness_to_its_candidates() {
                 after = page.next;
             }
             assert_eq!(found, [published[1].0.clone(), published[2].0.clone()]);
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// The page bound counts examined live descriptors, including those filtered out, so callers can pause between bounded scans.
+#[test]
+fn a_narrowed_page_examines_at_most_its_bound() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let mut matching = None;
+    for call in [
+        "call-other-1",
+        "call-other-2",
+        "call-other-3",
+        "call-wanted",
+    ] {
+        let identity: Vec<(&str, &str)> = TOOL
+            .iter()
+            .map(|&(name, value)| (name, if name == "tool_call_id" { call } else { value }))
+            .collect();
+        let (published, _, _) = fixture
+            .publish(
+                call,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                ),
+            )
+            .unwrap();
+        if call == "call-wanted" {
+            matching = Some(published.object_id);
+        }
+    }
+    let one = std::num::NonZeroUsize::new(1).unwrap();
+    fixture
+        .store
+        .commit(intent("read-bounded"), |envelope| {
+            let mut pages = 0;
+            let mut found = Vec::new();
+            let mut after: Option<String> = None;
+            loop {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    &["call-wanted"],
+                    after.as_deref(),
+                    one,
+                )?;
+                pages += 1;
+                assert!(page.rows.len() <= 1);
+                found.extend(page.rows.into_iter().map(|row| row.object_id));
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(pages, 4, "one page per examined descriptor");
+            assert_eq!(found, [matching.clone().unwrap()]);
             Ok(String::new())
         })
         .unwrap();

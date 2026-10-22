@@ -798,7 +798,7 @@ fn descriptor_rows(
 }
 
 impl Envelope<'_> {
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Each stored payload is tested in place for one of the values' identity pairs before its row is copied or decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Each stored payload is tested in place for one of the values' identity pairs before its row is copied or decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page examines at most `max_rows` live descriptors of the class, matching or not, so one call's work is bounded and a caller can stop between pages. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`.
     ///
     /// # Errors
     ///
@@ -874,10 +874,13 @@ impl<'v> Narrowing<'v> {
         max_rows: std::num::NonZeroUsize,
     ) -> Result<LiveDescriptorPage, KernelError> {
         let bound = max_rows.get();
-        let mut candidates =
-            self.candidates(tx, class, requested, after, bound.saturating_add(1))?;
-        let next = (candidates.len() > bound).then(|| candidates[bound - 1].clone());
-        candidates.truncate(bound);
+        let (candidates, next) = self.candidates(tx, class, requested, after, bound)?;
+        if candidates.is_empty() {
+            return Ok(LiveDescriptorPage {
+                rows: Vec::new(),
+                next,
+            });
+        }
         let ids = serde_json::to_string(&candidates).expect("strings serialize");
         let mut rows = Vec::with_capacity(candidates.len());
         for raw in descriptor_rows(
@@ -896,14 +899,15 @@ impl<'v> Narrowing<'v> {
         Ok(LiveDescriptorPage { rows, next })
     }
 
+    /// `candidates` returns object ids whose payloads may hold a value from the next `examine` live descriptors after `after`, plus the last examined object id if another live descriptor follows.
     fn candidates(
         &self,
         tx: &rusqlite::Transaction<'_>,
         class: OccurrenceClass,
         requested: i64,
         after: Option<&str>,
-        want: usize,
-    ) -> Result<Vec<String>, KernelError> {
+        examine: usize,
+    ) -> Result<(Vec<String>, Option<String>), KernelError> {
         let sql = format!(
             "SELECT o.object_id,b.observation_payload
              FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
@@ -925,20 +929,30 @@ impl<'v> Narrowing<'v> {
             ])
             .map_err(map_sqlite)?;
         let mut candidates = Vec::new();
-        while candidates.len() < want {
-            let Some(row) = stored.next().map_err(map_sqlite)? else {
-                break;
-            };
+        let mut examined = 0;
+        let mut boundary = None;
+        while let Some(row) = stored.next().map_err(map_sqlite)? {
+            if boundary.is_some() {
+                return Ok((candidates, boundary));
+            }
+            examined += 1;
             let payload = row
                 .get_ref(1)
                 .map_err(map_sqlite)?
                 .as_blob()
                 .map_err(|_| KernelError::CorruptCanonicalRow)?;
-            if self.may_hold(payload) {
-                candidates.push(row.get::<_, String>(0).map_err(map_sqlite)?);
+            let held = self.may_hold(payload);
+            if held || examined == examine {
+                let object_id = row.get::<_, String>(0).map_err(map_sqlite)?;
+                if examined == examine {
+                    boundary = Some(object_id.clone());
+                }
+                if held {
+                    candidates.push(object_id);
+                }
             }
         }
-        Ok(candidates)
+        Ok((candidates, None))
     }
 
     /// Whether `payload` may hold one of the values: it contains one of the pairs. True for every payload whose identity holds one.

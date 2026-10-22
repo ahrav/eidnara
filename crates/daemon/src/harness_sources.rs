@@ -1430,7 +1430,7 @@ pub fn publish_screened(
 }
 
 /// Live descriptors one inventory page reads.
-const INVENTORY_PAGE_ROWS: usize = 512;
+const INVENTORY_PAGE_ROWS: usize = 2048;
 /// Leads the bytes a re-run retirement's receipt key and digest bind, so a change to grouping is a new tag.
 const RERUN_RETIREMENT_FORMAT: &str = "source-rerun-retire.v1";
 
@@ -1481,10 +1481,11 @@ type LiveGenerations = HashMap<ToolCall, Vec<(String, i64)>>;
 ///
 /// # Errors
 ///
-/// Returns [`KernelError::CorruptCanonicalRow`] for a live row of one of the calls whose generation does not parse, and the inventory's errors.
+/// Returns [`KernelError::Deadline`] when `budget` is exhausted before a page and [`KernelError::CorruptCanonicalRow`] when a live call row has an unparseable generation. Propagates inventory errors.
 fn live_generations(
     envelope: &kernel::Envelope<'_>,
     calls: &HashSet<ToolCall>,
+    budget: Option<&kernel::applicability::EvalBudget>,
 ) -> Result<LiveGenerations, KernelError> {
     let mut tool_call_ids: Vec<&str> = calls
         .iter()
@@ -1495,6 +1496,9 @@ fn live_generations(
     let mut live = LiveGenerations::new();
     let mut after = None;
     loop {
+        if budget.is_some_and(kernel::applicability::EvalBudget::is_exhausted) {
+            return Err(KernelError::Deadline);
+        }
         let page = envelope.live_source_descriptors_with(
             OccurrenceClass::RawToolSpans,
             "tool_call_id",
@@ -1547,6 +1551,7 @@ struct Rerun {
 struct Reruns {
     snapshot: i64,
     incarnation: kernel::CommitReadIncarnation,
+    budget: Option<kernel::applicability::EvalBudget>,
     reruns: Vec<Rerun>,
 }
 
@@ -1580,7 +1585,7 @@ impl Reruns {
         }
     }
 
-    /// Retires the planned predecessors. When the commit's sequence differs from `snapshot + 1`, or a restore changed `kernel`'s incarnation since the plan, it first reads every call's live generations again in one pass and requires each call's generations to be at most its successor with a predecessor set equal to `retired`; a mismatch returns [`KernelError::Conflict`] before any retirement, and the batch commits nothing.
+    /// Retires the planned predecessors. When the commit's sequence differs from `snapshot + 1`, or a restore changed `kernel`'s incarnation since the plan, it first reads every call's live generations again in one pass and requires each call's generations to be at most its successor with a predecessor set equal to `retired`; a mismatch returns [`KernelError::Conflict`] before any retirement, and the batch commits nothing. The re-read stops with [`KernelError::Deadline`] once the plan's budget is exhausted, so it holds the writer no longer than the batch's budget allows.
     fn apply(
         &self,
         kernel: &KernelStore,
@@ -1592,7 +1597,7 @@ impl Reruns {
         if !planned_store {
             let calls: HashSet<ToolCall> =
                 self.reruns.iter().map(|rerun| rerun.call.clone()).collect();
-            let live = live_generations(envelope, &calls)?;
+            let live = live_generations(envelope, &calls, self.budget.as_ref())?;
             for rerun in &self.reruns {
                 let generations = live.get(&rerun.call).map(Vec::as_slice).unwrap_or_default();
                 if predecessors(generations, rerun.successor).as_ref() != Some(&rerun.retired) {
@@ -1653,7 +1658,7 @@ fn plan_reruns(
         publisher
             .kernel
             .preview(preview_deadline(budget), |preview| {
-                let live = live_generations(preview, &calls)?;
+                let live = live_generations(preview, &calls, budget)?;
                 let mut reconciled = Vec::with_capacity(prepared.len());
                 for (unit, generation) in prepared.iter().zip(&generations) {
                     let stale = generation.as_ref().is_some_and(|(call, generation)| {
@@ -1695,6 +1700,7 @@ fn plan_reruns(
         (!reruns.is_empty()).then_some(Reruns {
             snapshot,
             incarnation,
+            budget: budget.cloned(),
             reruns,
         }),
     ))
@@ -1839,9 +1845,7 @@ mod rerun_tests {
         pi_units(&session, &entry).unwrap().remove(0)
     }
 
-    /// `Reruns::apply` re-reads the call's live generations inside the commit. A live generation newer than the planned successor or a predecessor set differing from the plan causes `Conflict`; otherwise, the commit retires the planned predecessors.
-    #[test]
-    fn a_rerun_retirement_rechecks_the_call_inside_its_commit() {
+    fn seeded_store() -> (tempfile::TempDir, KernelStore) {
         let dir = tempfile::tempdir().unwrap();
         let kernel = KernelStore::open(dir.path()).unwrap();
         kernel
@@ -1873,13 +1877,91 @@ mod rerun_tests {
                 Ok(String::new())
             })
             .unwrap();
-        let publisher = SourcePublisher {
-            kernel: &kernel,
+        (dir, kernel)
+    }
+
+    fn publisher(kernel: &KernelStore) -> SourcePublisher<'_> {
+        SourcePublisher {
+            kernel,
             domain_id: "domain",
             scope_id: Some("project:a"),
             egress: ProviderEgress::LocalOnly,
             sensitivity: Sensitivity::Normal,
+        }
+    }
+
+    fn call_of(unit: &SourceUnit) -> ToolCall {
+        tool_generation(
+            unit.identity
+                .iter()
+                .map(|(name, value)| (*name, value.as_str())),
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn a_tool_inventory_read_stops_at_an_exhausted_budget() {
+        let (_dir, kernel) = seeded_store();
+        let publisher = publisher(&kernel);
+        let (first, second) = (generation(100), generation(200));
+        let published = publish_batch(
+            &kernel,
+            Vec::new(),
+            &[(&publisher, &first), (&publisher, &second)],
+            1_000,
+            None,
+        )
+        .unwrap();
+        let calls: HashSet<ToolCall> = [call_of(&first)].into();
+        let exhausted = kernel::applicability::EvalBudget::unbounded();
+        exhausted.cancel();
+        let (_, read) = kernel
+            .preview(Instant::now() + Duration::from_secs(30), |preview| {
+                Ok((
+                    live_generations(preview, &calls, Some(&exhausted)),
+                    live_generations(preview, &calls, None)
+                        .map(|live| live[&call_of(&first)].len()),
+                ))
+            })
+            .unwrap();
+        assert_eq!(read, (Err(KernelError::Deadline), Ok(2)));
+
+        let reruns = Reruns {
+            snapshot: 0,
+            incarnation: kernel.capture_commit_read_target().unwrap().incarnation,
+            budget: Some(exhausted),
+            reruns: vec![Rerun {
+                call: call_of(&first),
+                successor: 200,
+                retired: vec![published[0].object_id.clone()],
+            }],
         };
+        let tip = kernel.tip().unwrap();
+        assert_eq!(
+            kernel.commit(reruns.intent(), |envelope| reruns.apply(&kernel, envelope)),
+            Err(KernelError::Deadline)
+        );
+        assert_eq!(
+            kernel.tip().unwrap(),
+            tip,
+            "the refused commit writes nothing"
+        );
+        let (_, states) = kernel
+            .object_states(&[published[0].object_id.clone()])
+            .unwrap();
+        assert!(
+            states[0]
+                .as_ref()
+                .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
+        );
+    }
+
+    /// `Reruns::apply` re-reads the call's live generations inside the commit. A live generation newer than the planned successor or a predecessor set differing from the plan causes `Conflict`; otherwise, the commit retires the planned predecessors.
+    #[test]
+    fn a_rerun_retirement_rechecks_the_call_inside_its_commit() {
+        let (_dir, kernel) = seeded_store();
+        let publisher = publisher(&kernel);
         let (first, second) = (generation(100), generation(200));
         // Published without a plan, both generations are live.
         let published = publish_batch(
@@ -1907,6 +1989,7 @@ mod rerun_tests {
         let from_snapshot = |snapshot, rerun| Reruns {
             snapshot,
             incarnation,
+            budget: None,
             reruns: vec![rerun],
         };
         for (label, stale) in [
