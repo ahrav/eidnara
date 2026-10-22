@@ -153,6 +153,7 @@ pub fn publish_fixture_forms(kernel: &KernelStore, scope: &str) -> (String, Vec<
                             sensitivity: kernel::Sensitivity::Normal,
                             observed_at: 1,
                             expected_head: None,
+                            outcome: None,
                         })
                         .unwrap_or_else(|error| panic!("descriptor publication: {error:?}"));
                     // Eligibility judges the descriptor through the reads that serve it, so the fixture admits the descriptor itself.

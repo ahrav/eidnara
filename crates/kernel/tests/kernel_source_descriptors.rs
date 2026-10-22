@@ -486,6 +486,7 @@ fn request<'a>(
         sensitivity: Sensitivity::Normal,
         observed_at: 1,
         expected_head: None,
+        outcome: None,
     }
 }
 
@@ -2225,6 +2226,140 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
             )
             .err(),
         Some(SourceDescriptorError::Kernel(KernelError::InvalidInput))
+    );
+}
+
+fn tool_outcome(byte_length: u64) -> kernel::ToolOutcome {
+    kernel::ToolOutcome {
+        version: kernel::TOOL_OUTCOME_VERSION,
+        status: kernel::ToolStatus::Completed,
+        tool_name: "bash".to_string(),
+        byte_length,
+        truncated: Some(false),
+        exit_code: Some(1),
+        exception_ref: None,
+    }
+}
+
+/// D7: a `raw_tool_spans` descriptor stores its outcome record beside the identity, and the record leaves the occurrence encoding unchanged; a record of exactly 1 KiB is accepted. A record on another class, one describing other bytes than its span selects, one of another version, one whose tool name the redactor would rewrite, one of 1 KiB plus one byte, and one whose status disagrees with the representation are refused and write nothing.
+#[test]
+fn a_tool_descriptor_stores_a_validated_outcome_record() {
+    let fixture = Fixture::open();
+    let tool_text = "error: line 1\nwarning: two\n";
+    let evidence = fixture.retain("tool", tool_text);
+    let span = Some(Span { start: 0, end: 13 });
+    let tool = |revision| Occurrence {
+        class: "raw_tool_spans",
+        identity: TOOL,
+        revision,
+        representation: "tool_output",
+        span,
+    };
+    let recorded = tool_outcome(13);
+    let (published, _, _) = fixture
+        .publish(
+            "tool",
+            &SourceDescriptorRequest {
+                outcome: Some(&recorded),
+                ..request(tool("1"), &evidence, tool_text)
+            },
+        )
+        .unwrap();
+    let detail = fixture.detail(&published.object_id).unwrap();
+    assert_eq!(detail.outcome.as_ref(), Some(&recorded));
+    assert_eq!(
+        detail.occurrence_tuple,
+        encode(&tool("1"), tool_text).unwrap().tuple,
+        "the record is not part of the identity"
+    );
+
+    let message_text = "hello";
+    let message_evidence = fixture.retain("message", message_text);
+    let whole = tool_outcome(tool_text.len() as u64);
+    let mut versioned = tool_outcome(13);
+    versioned.version = 2;
+    let mut secret = tool_outcome(13);
+    secret.tool_name = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678".to_string();
+    // A record of exactly 1 KiB is the largest accepted; one byte more is refused. Both names stay within the identity value bound.
+    let sized = |exception_bytes: usize| {
+        let mut outcome = tool_outcome(13);
+        outcome.tool_name = "t".repeat(512);
+        outcome.exception_ref = Some("E".repeat(exception_bytes));
+        outcome
+    };
+    let fill = 1024 - sized(0).encode().len();
+    assert!(fill <= 512);
+    let largest = sized(fill);
+    assert_eq!(largest.encode().len(), 1024);
+    fixture
+        .publish(
+            "largest",
+            &SourceDescriptorRequest {
+                outcome: Some(&largest),
+                ..request(tool("2"), &evidence, tool_text)
+            },
+        )
+        .unwrap();
+    let oversized = sized(fill + 1);
+    let mut disagreeing = tool_outcome(13);
+    disagreeing.status = kernel::ToolStatus::Error;
+    let tip = fixture.store.tip().unwrap();
+    for (label, refused) in [
+        (
+            "a record on a message",
+            SourceDescriptorRequest {
+                outcome: Some(&recorded),
+                ..request(message(MSG_B, "1"), &message_evidence, message_text)
+            },
+        ),
+        (
+            "a byte length of the whole buffer, not the span",
+            SourceDescriptorRequest {
+                outcome: Some(&whole),
+                ..request(tool("3"), &evidence, tool_text)
+            },
+        ),
+        (
+            "another version",
+            SourceDescriptorRequest {
+                outcome: Some(&versioned),
+                ..request(tool("3"), &evidence, tool_text)
+            },
+        ),
+        (
+            "a secret tool name",
+            SourceDescriptorRequest {
+                outcome: Some(&secret),
+                ..request(tool("3"), &evidence, tool_text)
+            },
+        ),
+        (
+            "a record over 1 KiB",
+            SourceDescriptorRequest {
+                outcome: Some(&oversized),
+                ..request(tool("3"), &evidence, tool_text)
+            },
+        ),
+        (
+            "an error status on a tool output",
+            SourceDescriptorRequest {
+                outcome: Some(&disagreeing),
+                ..request(tool("3"), &evidence, tool_text)
+            },
+        ),
+    ] {
+        assert!(
+            matches!(
+                fixture.publish(label, &refused),
+                Err(SourceDescriptorError::OutcomeRefused)
+            ),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "a refusal writes nothing"
     );
 }
 

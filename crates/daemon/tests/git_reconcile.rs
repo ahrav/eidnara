@@ -333,6 +333,7 @@ impl Corpus {
             representation: Representation::CommitMessage,
             text: "foreign format\n".to_string(),
             role: COMMIT_ROLE.to_string(),
+            outcome: None,
         };
         self.publisher().publish(&unit, NOW).unwrap()
     }
@@ -381,6 +382,7 @@ impl Corpus {
             representation: Representation::Text,
             text: "a message".to_string(),
             role: "user".to_string(),
+            outcome: None,
         };
         self.publisher().publish(&unit, NOW).unwrap();
     }

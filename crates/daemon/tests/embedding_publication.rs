@@ -359,6 +359,7 @@ impl Corpus {
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
                         expected_head: None,
+                        outcome: None,
                     })
                     .unwrap();
                 envelope.record_admission(AdmissionRequest {
@@ -763,6 +764,7 @@ fn canonical_mutations_wait_behind_the_guard_and_stale_inputs_become_obsolete() 
                             sensitivity: Sensitivity::Normal,
                             observed_at: 1,
                             expected_head: None,
+                            outcome: None,
                         })
                         .unwrap();
                     Ok(outcome.replaced_object_id.unwrap_or_default())

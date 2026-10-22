@@ -246,6 +246,7 @@ impl Fixture {
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
                         expected_head: None,
+                        outcome: None,
                     })
                     .unwrap();
                 // Eligibility judges the descriptor through the reads that

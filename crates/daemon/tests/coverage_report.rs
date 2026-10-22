@@ -116,6 +116,7 @@ fn message(id: &str, revision: i64, text: &str) -> SourceUnit {
         representation: Representation::Text,
         text: text.to_string(),
         role: "user".to_string(),
+        outcome: None,
     }
 }
 
@@ -131,6 +132,7 @@ fn document(path: &str, text: &str) -> SourceUnit {
         representation: Representation::Text,
         text: text.to_string(),
         role: "document".to_string(),
+        outcome: None,
     }
 }
 
@@ -150,6 +152,7 @@ fn tool(call: &str, text: &str) -> SourceUnit {
         representation: Representation::ToolOutput,
         text: text.to_string(),
         role: "toolResult".to_string(),
+        outcome: None,
     }
 }
 
@@ -165,6 +168,7 @@ fn commit(oid: &str, text: &str) -> SourceUnit {
         representation: Representation::CommitMessage,
         text: text.to_string(),
         role: "commit".to_string(),
+        outcome: None,
     }
 }
 

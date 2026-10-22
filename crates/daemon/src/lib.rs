@@ -41,6 +41,7 @@ pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
 mod ingress_scan;
+pub mod tool_outcome;
 
 /// Re-exports the publication path's presented-line renderer and
 /// summarizer-output validator for scripted-summary tests.

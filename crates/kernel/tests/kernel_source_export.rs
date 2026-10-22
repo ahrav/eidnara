@@ -9,11 +9,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDeletionKind, ArtifactErrorKind, ExportWindow, KernelError,
     MAX_SOURCE_HOLD_LIFETIME_MS, ObservationPayload, PageBound, SourceCursor,
     SourceDescriptorDetail, SourceExportError, SourceHold, SourceHoldError, SourceHoldInvalidity,
-    SourcePage, SourcePageBounds, SourceRow,
+    SourcePage, SourcePageBounds, SourceRow, TOOL_OUTCOME_VERSION, ToolOutcome, ToolStatus,
 };
 use source_fixture::*;
 
@@ -1600,6 +1601,186 @@ fn dead_holds_and_lost_history_prevent_completion_and_a_reopen_needs_a_new_s() {
         expected_snapshot(&fixture, fresh.snapshot)
     );
     assert_eq!(fixture.checkpoint(), 0);
+}
+
+#[test]
+fn a_stored_outcome_the_commit_would_refuse_is_a_malformed_row() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let export = |fixture: &Fixture| {
+        fixture.store.export_source_page(
+            &binding,
+            &hold.hold_id,
+            hold.captured_at,
+            ExportWindow::Snapshot,
+            None,
+            roomy(),
+        )
+    };
+    let live = |fixture: &Fixture, class: OccurrenceClass| {
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        fixture
+            .store
+            .live_source_descriptors(
+                class,
+                fixture.store.tip().unwrap(),
+                None,
+                NonZeroUsize::new(64).unwrap(),
+                &budget,
+            )
+            .map(|page| page.rows)
+    };
+    let full = export(&fixture).unwrap();
+    let payload_of = |fixture: &Fixture, object_id: &str| -> (Vec<u8>, ObservationPayload) {
+        let bytes: Vec<u8> = fixture
+            .inspect()
+            .query_row(
+                "SELECT observation_payload FROM observations WHERE object_id=?1",
+                [object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload = serde_json::from_slice(&bytes).unwrap();
+        (bytes, payload)
+    };
+    let store_outcome =
+        |fixture: &Fixture, payload: &ObservationPayload, object_id: &str, outcome: ToolOutcome| {
+            let mut detail: SourceDescriptorDetail =
+                serde_json::from_str(payload.detail.as_deref().unwrap()).unwrap();
+            detail.outcome = Some(outcome);
+            let mut payload = payload.clone();
+            payload.detail = Some(serde_json::to_string(&detail).unwrap());
+            fixture.tamper_observation_payload(object_id, &serde_json::to_vec(&payload).unwrap());
+        };
+
+    let tool = full
+        .rows
+        .iter()
+        .find(|row| row.detail.class == "raw_tool_spans")
+        .unwrap()
+        .clone();
+    assert_eq!(tool.detail.representation, "tool_output");
+    assert_eq!(tool.detail.outcome, None);
+    let selected = u64::try_from(tool.text.as_deref().unwrap().len()).unwrap();
+    let (tool_original, tool_payload) = payload_of(&fixture, &tool.object_id);
+    let valid = ToolOutcome {
+        version: TOOL_OUTCOME_VERSION,
+        status: ToolStatus::Completed,
+        tool_name: "bash".to_string(),
+        byte_length: selected,
+        truncated: None,
+        exit_code: Some(0),
+        exception_ref: None,
+    };
+
+    store_outcome(&fixture, &tool_payload, &tool.object_id, valid.clone());
+    let exported = export(&fixture).unwrap();
+    let row = exported
+        .rows
+        .iter()
+        .find(|row| row.object_id == tool.object_id)
+        .unwrap();
+    assert_eq!(row.detail.outcome, Some(valid.clone()));
+    assert_eq!(row.text, tool.text);
+    let listed = live(&fixture, OccurrenceClass::RawToolSpans).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|row| row.object_id == tool.object_id)
+            .unwrap()
+            .detail
+            .outcome,
+        Some(valid.clone())
+    );
+
+    let refused = [
+        (
+            "version",
+            ToolOutcome {
+                version: TOOL_OUTCOME_VERSION + 1,
+                ..valid.clone()
+            },
+        ),
+        (
+            "status",
+            ToolOutcome {
+                status: ToolStatus::Error,
+                ..valid.clone()
+            },
+        ),
+        (
+            "tool name",
+            ToolOutcome {
+                tool_name: String::new(),
+                ..valid.clone()
+            },
+        ),
+        (
+            "exception name",
+            ToolOutcome {
+                exception_ref: Some("line\nbreak".to_string()),
+                ..valid.clone()
+            },
+        ),
+        (
+            "byte length",
+            ToolOutcome {
+                byte_length: selected + 1,
+                ..valid.clone()
+            },
+        ),
+    ];
+    for (name, outcome) in refused {
+        store_outcome(&fixture, &tool_payload, &tool.object_id, outcome);
+        assert_eq!(
+            export(&fixture),
+            Err(SourceExportError::MalformedRow {
+                object_id: tool.object_id.clone(),
+            }),
+            "export with a tampered {name}"
+        );
+        assert_eq!(
+            live(&fixture, OccurrenceClass::RawToolSpans),
+            Err(KernelError::CorruptCanonicalRow),
+            "live page with a tampered {name}"
+        );
+    }
+    fixture.tamper_observation_payload(&tool.object_id, &tool_original);
+    assert_eq!(export(&fixture).unwrap(), full);
+
+    let message = full
+        .rows
+        .iter()
+        .find(|row| row.detail.class == "messages")
+        .unwrap()
+        .clone();
+    let (message_original, message_payload) = payload_of(&fixture, &message.object_id);
+    store_outcome(
+        &fixture,
+        &message_payload,
+        &message.object_id,
+        ToolOutcome {
+            byte_length: u64::try_from(message.text.as_deref().unwrap().len()).unwrap(),
+            ..valid
+        },
+    );
+    assert_eq!(
+        export(&fixture),
+        Err(SourceExportError::MalformedRow {
+            object_id: message.object_id.clone(),
+        })
+    );
+    assert_eq!(
+        live(&fixture, OccurrenceClass::Messages),
+        Err(KernelError::CorruptCanonicalRow)
+    );
+    fixture.tamper_observation_payload(&message.object_id, &message_original);
+    assert_eq!(export(&fixture).unwrap(), full);
 }
 
 #[test]

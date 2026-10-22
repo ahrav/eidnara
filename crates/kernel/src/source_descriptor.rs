@@ -22,7 +22,7 @@ use super::source_identity::{
 };
 use super::{
     CachedSql, KernelError,
-    cas::{ExactEvidence, exact_evidence, is_artifact_digest},
+    cas::{ExactEvidence, MAX_TEXT_FIELD_BYTES, exact_evidence, is_artifact_digest},
     map_sqlite,
 };
 
@@ -81,6 +81,98 @@ pub struct SourceDescriptorRequest<'a> {
     pub observed_at: i64,
     /// The highest revision the caller observed in this lineage, retired rows included; `None` when it observed no revision. A `repository_documents` publication commits only while the lineage's historical head still equals it, and its revision starts at 1 and exceeds that head. The producer keeps revisions contiguous by proposing the head plus one. Every other class passes `None`; a value is invalid input.
     pub expected_head: Option<i64>,
+    /// How the tool call behind a `raw_tool_spans` occurrence settled ([`check_outcome`]). Only that class carries one; it is stored on the descriptor beside the identity, so equal bytes from calls that settled differently are two descriptors citing one artifact. The producer decides whether a tool descriptor carries a record: rows published before the record existed carry none.
+    pub outcome: Option<&'a ToolOutcome>,
+}
+
+/// Version of the [`ToolOutcome`] record a tool descriptor stores. The record decodes strictly inside the descriptor detail, so a new record version is a new [`SOURCE_DESCRIPTOR_DETAIL_VERSION`].
+pub const TOOL_OUTCOME_VERSION: u32 = 1;
+
+/// How a tool call settled, as its harness reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Completed,
+    Error,
+}
+
+/// The execution-outcome record of one tool occurrence: what the harness reported about the call, never inferred. `truncated`, `exit_code`, and `exception_ref` are present only when the harness reported them; an absent value is unknown, never a default. The stored JSON is at most [`MAX_TEXT_FIELD_BYTES`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutcome {
+    pub version: u32,
+    pub status: ToolStatus,
+    pub tool_name: String,
+    /// The UTF-8 byte length of the occurrence's selected bytes.
+    pub byte_length: u64,
+    /// Whether the harness truncated the output it returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// The name the harness gave the exception that ended the assistant turn holding the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_ref: Option<String>,
+}
+
+impl ToolOutcome {
+    /// The record's stored JSON bytes, the bytes a request digest binds.
+    pub fn encode(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("a tool outcome serializes")
+    }
+
+    /// Checks the record against the occurrence it describes: the current version, a status that agrees with `representation` (`error` exactly for `tool_error`), a tool name and exception name that are well-formed identity values the redactor leaves unchanged, a byte length equal to `selected_len`, and stored JSON of at most [`MAX_TEXT_FIELD_BYTES`].
+    fn validate(&self, representation: &str, selected_len: usize) -> bool {
+        let name_ok = |name: &str| well_formed_value(name) && identity(name).is_ok();
+        self.version == TOOL_OUTCOME_VERSION
+            && (self.status == ToolStatus::Error) == (representation == "tool_error")
+            && name_ok(&self.tool_name)
+            && self.exception_ref.as_deref().is_none_or(name_ok)
+            && u64::try_from(selected_len).is_ok_and(|len| len == self.byte_length)
+            && self.encode().len() <= MAX_TEXT_FIELD_BYTES
+    }
+}
+
+/// Judges the outcome record a descriptor of `class` and `representation` would carry over `selected_len` selected bytes: only a `raw_tool_spans` occurrence carries one, and it must describe that occurrence ([`ToolOutcome`]). The descriptor commit applies this check, and a producer applies it before retaining any byte.
+///
+/// # Errors
+///
+/// Returns [`SourceDescriptorError::OutcomeRefused`] for a record on another class or one that fails its checks.
+pub fn check_outcome(
+    outcome: Option<&ToolOutcome>,
+    class: OccurrenceClass,
+    representation: &str,
+    selected_len: usize,
+) -> Result<(), SourceDescriptorError> {
+    match outcome {
+        Some(outcome)
+            if class != OccurrenceClass::RawToolSpans
+                || !outcome.validate(representation, selected_len) =>
+        {
+            Err(SourceDescriptorError::OutcomeRefused)
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn stored_outcome_ok(
+    detail: &SourceDescriptorDetail,
+    class: OccurrenceClass,
+    byte_length: u64,
+) -> bool {
+    let selected = match detail.span {
+        None => byte_length,
+        Some((start, end)) => end.saturating_sub(start),
+    };
+    usize::try_from(selected).is_ok_and(|selected| {
+        check_outcome(
+            detail.outcome.as_ref(),
+            class,
+            &detail.representation,
+            selected,
+        )
+        .is_ok()
+    })
 }
 
 /// Descriptor rows store versioned metadata and encoded identity tuples, not payload text.
@@ -101,6 +193,9 @@ pub struct SourceDescriptorDetail {
     pub payload_id: String,
     pub artifact_digest: String,
     pub evidence_id: String,
+    /// The execution-outcome record of a `raw_tool_spans` descriptor that carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ToolOutcome>,
 }
 
 /// What one publication did.
@@ -146,6 +241,9 @@ pub enum SourceDescriptorError {
     SourcePolicyRefused,
     #[error("descriptor batch exceeds the per-commit bound")]
     BatchTooLarge,
+    /// The execution-outcome record is malformed, describes other bytes, exceeds [`MAX_TEXT_FIELD_BYTES`], or rides a class other than `raw_tool_spans`.
+    #[error("descriptor outcome record is refused")]
+    OutcomeRefused,
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -212,6 +310,7 @@ fn detail_for(
         payload_id: payload_id.to_string(),
         artifact_digest: request.artifact_digest.to_string(),
         evidence_id: request.evidence_id.to_string(),
+        outcome: request.outcome.cloned(),
     }
 }
 
@@ -363,6 +462,12 @@ impl Envelope<'_> {
             None => request.artifact_digest.to_string(),
             Some(span) => payload_id(select(Some(span), request.buffer)),
         };
+        check_outcome(
+            request.outcome,
+            encoded.class,
+            request.occurrence.representation,
+            select(encoded.span, request.buffer).len(),
+        )?;
         let detail = detail_for(request, &encoded, &payload_id);
         let detail_json = serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?;
         if !redact(&detail_json)?.detections.is_empty() {
@@ -633,6 +738,7 @@ struct LiveDescriptorRaw {
     observation_invalidated: Option<i64>,
     evidence_id: String,
     artifact_digest: String,
+    byte_length: i64,
 }
 
 impl KernelStore {
@@ -660,7 +766,7 @@ impl KernelStore {
         // A literal bound keeps the cached statement valid across calls; SQLite expires a statement whose `LIMIT` parameter is rebound.
         let sql = format!(
             "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
-                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
+                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest,e.byte_length
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
@@ -689,6 +795,7 @@ impl KernelStore {
                         observation_invalidated: row.get(10)?,
                         evidence_id: row.get(11)?,
                         artifact_digest: row.get(12)?,
+                        byte_length: row.get(13)?,
                     })
                 },
             )
@@ -701,6 +808,8 @@ impl KernelStore {
             .take(max_rows.get())
             .map(|raw| {
                 let detail = stored_detail(&raw.payload)?;
+                let byte_length =
+                    u64::try_from(raw.byte_length).map_err(|_| KernelError::CorruptCanonicalRow)?;
                 // The registry row and the stored detail must agree, as `source_export::preflight` requires.
                 if raw.created_commit_seq != raw.observation_created
                     || raw.invalidated_commit_seq != raw.observation_invalidated
@@ -712,6 +821,7 @@ impl KernelStore {
                     || detail.revision != raw.revision.to_string()
                     || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
                     || reencoded_identity(&detail).is_none()
+                    || !stored_outcome_ok(&detail, class, byte_length)
                 {
                     return Err(KernelError::CorruptCanonicalRow);
                 }

@@ -304,6 +304,7 @@ pub fn read_selection(
             representation: Representation::CommitMessage,
             text: text.to_owned(),
             role: COMMIT_ROLE.to_owned(),
+            outcome: None,
         });
     }
     Ok(GitSelection {

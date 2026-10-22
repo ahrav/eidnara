@@ -304,6 +304,7 @@ impl Fixture {
             sensitivity: Sensitivity::Normal,
             observed_at: 1,
             expected_head: None,
+            outcome: None,
         };
         let mut outcome = None;
         let receipt = self
