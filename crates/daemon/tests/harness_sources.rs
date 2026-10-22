@@ -3570,7 +3570,7 @@ fn published_units(dispositions: &[UnitDisposition]) -> Vec<&daemon::harness_sou
         .collect()
 }
 
-/// AC14 and C8 (`sc-rerun-exactly-one-live-generation`): a re-run of one call retires the predecessor generation in the commit that publishes the successor, whatever the delivery order. In order (1, 2) the predecessor's invalidation is the successor's creation and its row names no successor, the state the projection tombstones as `Retired`, and its bytes stay readable. A redelivered 1 replays and retires nothing (1, 2, 1); a duplicate 2 replays. Delivered reversed (2, 1), the stale generation is superseded and retains nothing. An error that becomes a success, a re-run with fewer blocks, and two generations in one batch each leave one live generation, and a distinct call with equal text coexists.
+/// AC14 and C8 (`sc-rerun-exactly-one-live-generation`): a re-run of one call retires the predecessor generation in the commit that publishes the successor, whatever the delivery order. In order (1, 2) the predecessor's invalidation is the successor's creation and its row names no successor, the state the projection tombstones as `Retired`, and its bytes stay readable. A redelivered 1 replays and retires nothing (1, 2, 1), a redelivered 1 with other bytes is `IdentityReused`, and a duplicate 2 replays. Delivered reversed (2, 1), the stale generation is superseded and retains nothing. An error that becomes a success, a re-run with fewer blocks, and two generations in one batch each leave one live generation, and a distinct call with equal text coexists.
 #[test]
 fn a_tool_rerun_leaves_exactly_one_live_generation() {
     let dir = tempfile::tempdir().unwrap();
@@ -3620,6 +3620,22 @@ fn a_tool_rerun_leaves_exactly_one_live_generation() {
             "the retired generation's bytes stay as history"
         );
     }
+
+    // A stale generation re-offered with other bytes under its key is the identity conflict it is, not a supersession.
+    let mut changed = first.clone();
+    changed[0].text = "error: rewritten\n".to_owned();
+    changed[0].outcome.as_mut().unwrap().byte_length = changed[0].text.len() as u64;
+    let tip = corpus.tip();
+    let refused = publish_screened(&publisher, &changed[..1], NOW, None).unwrap();
+    assert!(matches!(
+        refused[..],
+        [UnitDisposition::Refused(PublishError::IdentityReused)]
+    ));
+    assert_eq!(corpus.tip(), tip);
+    assert_eq!(
+        live_generation_of(&corpus, "call_a"),
+        [("200".to_owned(), "0".to_owned())]
+    );
 
     // Redelivery of 1, then a duplicate 2: replays that retire nothing.
     let tip = corpus.tip();

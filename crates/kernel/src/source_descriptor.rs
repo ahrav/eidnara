@@ -801,7 +801,7 @@ impl KernelStore {
 }
 
 impl Envelope<'_> {
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. A page can hold fewer rows than `max_rows` and still name a next cursor.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
     ///
     /// # Errors
     ///
