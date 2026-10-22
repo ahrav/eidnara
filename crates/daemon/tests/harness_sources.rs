@@ -2996,3 +2996,322 @@ fn the_shared_pi_fixture_rows_carry_the_entry_identity_the_adapter_reads() {
     }
     assert!(messages > 0 && messages < rows.len());
 }
+
+/// `(retention_class, retain_until, invalidated_commit_seq)` of an evidence row, read straight from the store.
+fn evidence_retention(corpus: &Corpus, object_id: &str) -> (String, Option<i64>, Option<i64>) {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT retention_class,retain_until,invalidated_commit_seq FROM evidence_meta
+             WHERE object_id=?1",
+            [object_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+/// `(invalidated_commit_seq, superseded_by)` of a descriptor's observation row; an invalidation with no successor is what the projection tombstones as `Retired`.
+fn descriptor_retirement(corpus: &Corpus, object_id: &str) -> (Option<i64>, Option<String>) {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT invalidated_commit_seq,superseded_by FROM observations WHERE object_id=?1",
+            [object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// The change kinds one commit recorded, in commit order.
+fn change_kinds(corpus: &Corpus, commit_seq: i64) -> Vec<String> {
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut statement = conn
+        .prepare("SELECT change_kind FROM change_event WHERE commit_seq=?1 ORDER BY ordinal")
+        .unwrap();
+    statement
+        .query_map([commit_seq], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// An observation outside the capture that cites `evidence_id`: independent support expiry must keep.
+fn cite(corpus: &Corpus, evidence_id: &str) {
+    corpus
+        .kernel
+        .commit(intent(&format!("cite:{evidence_id}")), |envelope| {
+            envelope.insert_observation(kernel::ObservationSpec {
+                observation_id: format!("citer:{evidence_id}"),
+                object_id: format!("citer-object:{evidence_id}"),
+                domain_id: "domain".to_string(),
+                proposition_id: None,
+                scope_id: None,
+                anchor_id: None,
+                evidence_id: Some(evidence_id.to_string()),
+                observation_kind: "note".to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "independent support".to_string(),
+                    classification: "note".to_string(),
+                    detail: None,
+                },
+                observed_at: NOW,
+                dependencies: Vec::new(),
+                source_kind: "test".to_string(),
+                source_id: format!("citer:{evidence_id}"),
+                source_revision: 1,
+                sensitivity: Sensitivity::Sensitive,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// The evidence id behind a published unit's evidence object.
+fn evidence_id_of(corpus: &Corpus, evidence_object_id: &str) -> String {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT evidence_id FROM evidence_meta WHERE object_id=?1",
+            [evidence_object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// AC11 and F11: captured message and tool evidence is `harness_capture` owned for 30 days from observation; a replay, even one observed after the deadline, leaves the deadline where the first publication set it; at `retain_until - 1` the capture survives and at `retain_until` its descriptor is retired without a successor and then its evidence, in one commit; a `canonical` row in the same store never ages out.
+#[test]
+fn harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let message =
+        &opencode_units(&opencode_session(), &opencode_user("msg_1", "keep me", 100)).unwrap()[0];
+    let tools = pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200)).unwrap();
+    let tool = tools
+        .iter()
+        .find(|unit| unit.class == OccurrenceClass::RawToolSpans)
+        .unwrap();
+    let published = publisher.publish(message, NOW).unwrap();
+    let tool_published = publisher.publish(tool, NOW + 5).unwrap();
+    let deadline = NOW + 30 * DAY_MS;
+    assert_eq!(
+        daemon::harness_sources::HARNESS_CAPTURE_RETENTION_MS,
+        30 * DAY_MS
+    );
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id),
+        (
+            kernel::HARNESS_CAPTURE_RETENTION_CLASS.to_owned(),
+            Some(deadline),
+            None
+        )
+    );
+    assert_eq!(
+        evidence_retention(&corpus, &tool_published.evidence_object_id).1,
+        Some(deadline + 5),
+        "tool evidence carries its own observation's deadline"
+    );
+    // A canonical row beside the captures carries no deadline.
+    corpus
+        .kernel
+        .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+            intent: intent("canonical"),
+            payload: b"a canonical claim's bytes".to_vec(),
+            evidence_id: "canonical".to_string(),
+            object_id: "canonical-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "git_commit".to_string(),
+            source_id: "canonical".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap();
+
+    // The same unit observed again after its deadline replays the first rows: the deadline is the first owner's.
+    let again = publisher.publish(message, deadline + DAY_MS).unwrap();
+    assert!(again.replayed);
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id).1,
+        Some(deadline),
+        "a replay never renews the deadline"
+    );
+
+    let tip = corpus.tip();
+    assert_eq!(
+        corpus.kernel.expire_harness_captures(deadline - 1).unwrap(),
+        kernel::CaptureExpiry::default(),
+        "one millisecond before the deadline nothing expires"
+    );
+    assert_eq!(corpus.tip(), tip, "an empty sweep commits nothing");
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id).2,
+        None
+    );
+    let swept = corpus.kernel.expire_harness_captures(deadline).unwrap();
+    assert_eq!(
+        (swept.retired, swept.retained),
+        (1, 0),
+        "only the message is due"
+    );
+    let (retired_at, successor) = descriptor_retirement(&corpus, &published.object_id);
+    assert_eq!(successor, None, "retired, not superseded");
+    let retired_at = retired_at.expect("the descriptor is retired");
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id).2,
+        Some(retired_at),
+        "the evidence goes in the descriptor's commit"
+    );
+    let kinds = change_kinds(&corpus, retired_at);
+    let descriptor = kinds.iter().position(|kind| kind != "evidence_retire");
+    let evidence = kinds.iter().position(|kind| kind == "evidence_retire");
+    assert!(
+        descriptor < evidence && descriptor.is_some(),
+        "descriptor first, evidence second: {kinds:?}"
+    );
+
+    // Publishing the unit once more after its capture expired still answers from the receipts: nothing is re-retained and the deadline stays.
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let after = publisher.publish(message, deadline + 2 * DAY_MS);
+    assert!(
+        after.as_ref().is_ok_and(|published| published.replayed),
+        "{after:?}"
+    );
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id),
+        (
+            kernel::HARNESS_CAPTURE_RETENTION_CLASS.to_owned(),
+            Some(deadline),
+            Some(retired_at)
+        )
+    );
+
+    // Far past every deadline, the tool capture goes and the canonical row stays.
+    let late = corpus
+        .kernel
+        .expire_harness_captures(NOW + 32 * DAY_MS)
+        .unwrap();
+    assert_eq!((late.retired, late.retained), (1, 0));
+    assert_eq!(
+        evidence_retention(&corpus, "canonical-object"),
+        ("canonical".to_owned(), None, None),
+        "canonical evidence never ages out"
+    );
+    assert_eq!(
+        corpus
+            .kernel
+            .expire_harness_captures(NOW + 32 * DAY_MS)
+            .unwrap(),
+        kernel::CaptureExpiry::default()
+    );
+}
+
+/// F12, F13, F14: a live hold keeps an expired capture until the hold lapses; a capture another row cites loses its descriptor and keeps its evidence, and leaves the sweep; 65 expired captures with one cited drain in two calls, the cited row blocking nothing behind it in its page.
+#[test]
+fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let published: Vec<_> = (0..65)
+        .map(|index| {
+            let unit = &opencode_units(
+                &opencode_session(),
+                &opencode_user(&format!("msg_{index:02}"), &format!("text {index}"), 100),
+            )
+            .unwrap()[0];
+            publisher.publish(unit, NOW).unwrap()
+        })
+        .collect();
+    let deadline = NOW + 30 * DAY_MS;
+    // The first capture in page order is cited by an independent row.
+    let mut by_evidence: Vec<_> = published
+        .iter()
+        .map(|published| {
+            (
+                evidence_id_of(&corpus, &published.evidence_object_id),
+                published,
+            )
+        })
+        .collect();
+    by_evidence.sort_by(|a, b| a.0.cmp(&b.0));
+    let (cited_evidence, cited) = by_evidence[0].clone();
+    cite(&corpus, &cited_evidence);
+
+    // A live hold pins every capture: the sweep retires none until the hold lapses.
+    let hold = corpus
+        .kernel
+        .capture_source_hold(
+            &corpus.binding(),
+            SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
+                admission: SourceHoldAdmission {
+                    max_references: NonZeroUsize::new(128).unwrap(),
+                    max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                },
+                expiry_ms: NonZeroU64::new(DAY_MS as u64).unwrap(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        corpus.kernel.expire_harness_captures(deadline).unwrap(),
+        kernel::CaptureExpiry::default(),
+        "held captures are skipped"
+    );
+    assert!(published.iter().all(|published| {
+        evidence_retention(&corpus, &published.evidence_object_id)
+            .2
+            .is_none()
+    }));
+    drop(hold);
+
+    // Past the hold's own expiry the captures are due again: 64 in the first call, the cited one among them kept.
+    let after_hold = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 2 * DAY_MS;
+    let first = corpus.kernel.expire_harness_captures(after_hold).unwrap();
+    assert_eq!((first.retired, first.retained), (63, 1));
+    assert!(
+        descriptor_retirement(&corpus, &cited.object_id).0.is_some(),
+        "the cited capture's descriptor is retired"
+    );
+    assert_eq!(
+        evidence_retention(&corpus, &cited.evidence_object_id).2,
+        None,
+        "evidence another row cites is kept"
+    );
+    let second = corpus.kernel.expire_harness_captures(after_hold).unwrap();
+    assert_eq!(
+        (second.retired, second.retained),
+        (1, 0),
+        "ceil(65 / 64) calls drain the backlog"
+    );
+    assert!(
+        published
+            .iter()
+            .filter(|published| published.object_id != cited.object_id)
+            .all(
+                |published| evidence_retention(&corpus, &published.evidence_object_id)
+                    .2
+                    .is_some()
+            )
+    );
+    assert_eq!(
+        corpus.kernel.expire_harness_captures(after_hold).unwrap(),
+        kernel::CaptureExpiry::default(),
+        "a retained capture leaves the sweep while it is cited"
+    );
+}

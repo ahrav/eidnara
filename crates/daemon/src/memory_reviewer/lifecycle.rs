@@ -307,7 +307,7 @@ pub fn reconcile_review_holds(
     Ok(Some(released))
 }
 
-/// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step.
+/// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step. The MemoryReviewer and harness capture sweeps run first, so the artifact walk in staging maintenance sees the references they retired.
 fn kernel_slice(
     kernel: &kernel::KernelStore,
     now_ms: i64,
@@ -317,7 +317,13 @@ fn kernel_slice(
         return Ok(None);
     }
     let expiry = kernel.expire_local_file_captures(now_ms)?;
-    let advanced = expiry.retired + expiry.retained > 0;
+    let mut advanced = expiry.retired + expiry.retained > 0;
+    if cancelled() {
+        return Ok(None);
+    }
+    let harness = kernel.expire_harness_captures(now_ms)?;
+    crate::source_capture::record_expiry(harness);
+    advanced |= harness.retired + harness.retained > 0;
     Ok(
         maintenance_slice(cancelled, || kernel.run_staging_maintenance(now_ms))?
             .map(|maintained| advanced || maintained),
@@ -677,6 +683,81 @@ mod tests {
         let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
             .expect("not cancelled");
         assert!(!again.advanced, "nothing was left to retire");
+    }
+
+    /// The maintenance slice runs the harness-capture sweep: an expired `harness_capture` row is retired by one pass, and the capture report's expiry progress counts it.
+    #[test]
+    fn the_maintenance_slice_expires_harness_captures_and_reports_progress() {
+        use sha2::Digest as _;
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-memory_reviewer-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        let intent = |key: &str| kernel::CommitIntent {
+            producer: "lifecycle-test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: format!("{:x}", sha2::Sha256::digest(key.as_bytes())),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        };
+        kernel_store
+            .commit(intent("domain"), |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "domain".to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "domain".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        kernel_store
+            .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+                intent: intent("capture"),
+                payload: b"captured message".to_vec(),
+                evidence_id: "harness".to_string(),
+                object_id: "harness-object".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: "messages".to_string(),
+                source_id: "message".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: kernel::HARNESS_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(5_000),
+                asserted_sensitivity: kernel::Sensitivity::Sensitive,
+                provider_egress: kernel::ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+        let reported = |name: &str| {
+            crate::source_capture::SourceCapture::default().report(false, 0)[name].clone()
+        };
+        assert_eq!(reported("expiry_retired"), 0);
+        let early = sweep_and_sample(&store, Some(&kernel_store), 4_999, None, &|| false)
+            .expect("not cancelled");
+        assert!(!early.advanced, "not yet due");
+        let pass = sweep_and_sample(&store, Some(&kernel_store), 5_000, None, &|| false)
+            .expect("not cancelled");
+        assert!(pass.healthy && pass.advanced);
+        assert_eq!(reported("expiry_retired"), 1);
+        assert_eq!(reported("expiry_retained"), 0);
+        let (_, states) = kernel_store
+            .object_states(&["harness-object".to_string()])
+            .unwrap();
+        assert!(
+            states[0]
+                .as_ref()
+                .is_some_and(|state| state.object.invalidated_commit_seq.is_some()),
+            "the expired evidence is retired"
+        );
     }
 
     fn maintenance(

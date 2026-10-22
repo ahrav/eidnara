@@ -92,6 +92,15 @@ counts! {
     PublishMsMax => "publish_ms_max",
 }
 
+/// Harness-capture expiry progress across this process's maintenance passes, `[retired, retained]`: the Kernel maintenance slice records every sweep, and [`SourceCapture::report`] reports the totals as `expiry_retired` and `expiry_retained`.
+static EXPIRY: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Adds one harness-capture sweep's progress to the reported totals.
+pub(crate) fn record_expiry(expiry: kernel::CaptureExpiry) {
+    EXPIRY[0].fetch_add(expiry.retired as u64, Ordering::Relaxed);
+    EXPIRY[1].fetch_add(expiry.retained as u64, Ordering::Relaxed);
+}
+
 #[derive(Default)]
 struct Counters([AtomicU64; Count::ALL.len()]);
 
@@ -434,6 +443,14 @@ impl SourceCapture {
             .oldest_pending_since()
             .map(|since| now_ms.saturating_sub(since).max(0));
         report.insert("oldest_deferred_age_ms".to_owned(), json!(oldest));
+        report.insert(
+            "expiry_retired".to_owned(),
+            json!(EXPIRY[0].load(Ordering::Relaxed)),
+        );
+        report.insert(
+            "expiry_retained".to_owned(),
+            json!(EXPIRY[1].load(Ordering::Relaxed)),
+        );
         Value::Object(report)
     }
 }

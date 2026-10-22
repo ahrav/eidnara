@@ -151,6 +151,9 @@ pub struct ArtifactIngestRequest {
 /// `retention_class` of evidence a MemoryReviewer run captured for itself; an ingest request for such a row must carry a finite `retain_until`, and a new reference commits only while that deadline is still ahead of the store clock. An identical request whose receipt already committed replays regardless. The text is a storage-format value matched byte for byte against stored rows by the capture expiry sweep, abandonment, and retention extension; it is independent of its Rust identifier.
 pub const MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS: &str = "curator_capture";
 
+/// `retention_class` of evidence the daemon captured from a harness transform window (message text and tool results); an ingest request for such a row must carry a finite `retain_until`, after which the harness-capture sweep retires the capture's descriptors and evidence. Like every retention class, the text is a storage-format value matched byte for byte.
+pub const HARNESS_CAPTURE_RETENTION_CLASS: &str = "harness_capture";
+
 /// Stable identifiers returned after artifact bytes and evidence are committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactHandle {

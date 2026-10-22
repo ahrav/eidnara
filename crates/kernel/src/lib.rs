@@ -60,7 +60,6 @@ pub use backup::{
     RestoreFault, RestorePhase, owner_is_current_for_test, restore_marker_is_valid_for_test,
     sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test,
 };
-pub use cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS;
 pub use cas::{
     ARTIFACT_DELETION_SOURCE_KIND, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts,
@@ -73,6 +72,7 @@ pub use cas::{
     ArtifactDeletionFault, ArtifactDeletionHook, ArtifactGcFault, ArtifactIngestFault,
     ArtifactIngestHook,
 };
+pub use cas::{HARNESS_CAPTURE_RETENTION_CLASS, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS};
 pub use claim_causality::{
     CLAIM_CAUSALITY_DETAIL_VERSION, CLAIM_CAUSALITY_KIND, CausalClass, CausalEvidence,
     CausalOperation, CausalReading, CausalRecord, ClaimCausalityError, ClaimCausalityOutcome,
