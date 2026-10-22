@@ -2384,6 +2384,37 @@ fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {
     );
 }
 
+#[test]
+fn capture_batch_refuses_a_secret_unit_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let units = [
+        pi_text_unit("pi-secret", &format!("token {SECRET}")),
+        pi_text_unit("pi-clean", "a clean sibling"),
+    ];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    match &dispositions[0] {
+        UnitDisposition::Refused(refusal @ PublishError::Artifact(_)) => {
+            assert!(refusal.is_permanent(), "{refusal:?}");
+        }
+        other => panic!("expected an artifact refusal, got {other:?}"),
+    }
+    assert!(!published(&dispositions[1]).replayed);
+    assert_eq!(evidence_rows(&corpus).0, 1, "only the sibling is retained");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged + 1,
+        "only the sibling is staged"
+    );
+    assert!(
+        !inventory(&corpus)
+            .iter()
+            .any(|(_, text, _)| text.contains(SECRET))
+    );
+}
+
 /// One window naming a unit twice: an equal repeat waits for a later pass, and a changed repeat under the same identity and revision is refused on its own while the first publishes.
 #[test]
 fn capture_batch_screens_a_repeated_identity_per_unit() {

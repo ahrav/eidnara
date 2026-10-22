@@ -662,6 +662,32 @@ so `metadata_headroom_bytes` reaching zero means new review work is refused
 until a new incarnation; it is a safety ceiling, not a measured service
 lifetime.
 
+The `context` component MAY also carry a sanitized `metrics.source_capture`
+object describing source capture (Section 7.9), the background publication of
+consented message text and tool results as Kernel source descriptors. The
+counters are process-local and start at zero when the daemon starts. The block
+is sanitized field by field: any object survives, a non-object drops the block
+whole, and every field is kept or dropped on its own. Every field is
+content-free: a count, a byte total, or milliseconds. No field carries unit
+text, an identity, a path, a digest, or a project.
+
+| field | type | rule |
+| --- | --- | --- |
+| `admitted` | unsigned integer | capture jobs that started |
+| `refused_queue_full`, `refused_resident_short`, `refused_window_too_large`, `refused_shutting_down` | unsigned integer | windows refused before or at handoff, by reason; `refused_resident_short` also counts jobs whose unit copies the capture budget refused |
+| `completed`, `discarded`, `session_invalidated`, `kernel_unavailable`, `deadline`, `kernel_error`, `worker_panicked` | unsigned integer | job ends by reason |
+| `adapter_refused` | unsigned integer | native records the adapters refused |
+| `units_published`, `units_replayed`, `units_memo_skipped`, `units_deferred`, `units_unit_too_large`, `units_identity_conflict`, `units_refused_terminal`, `units_refused_retryable` | unsigned integer | unit dispositions |
+| `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
+| `retained_bytes` | unsigned integer | bytes the capture budget holds now |
+| `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
+
+The same integer rules as `kernel` apply: every integer MUST be no greater
+than 2^53; a larger, negative, non-integer, or `null` value is dropped to
+absent, except `oldest_deferred_age_ms`, where `null` is a declared value;
+unknown fields are dropped; fields are additive.
+
 The `model_execution` component MAY also carry a sanitized
 `metrics.aws_credentials` object: the host's cached observation of the
 selected AWS credential source, read from a shared cell with no credential

@@ -111,6 +111,18 @@ impl SourceUnit {
             .map(|(_, value)| value.as_str())
     }
 
+    pub(crate) fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.text.len()
+            + self.role.len()
+            + self.revision.len()
+            + self
+                .identity
+                .iter()
+                .map(|(_, value)| 48 + value.len())
+                .sum::<usize>()
+    }
+
     /// The actor a unit's commits and evidence are recorded under: the harness that produced it, the repository a commit came from, or the canonical role for a unit derived from a kernel decision.
     fn origin(&self) -> &str {
         self.identity_value("harness")
@@ -227,6 +239,20 @@ pub fn opencode_units(
     session: &SessionIdentity,
     message: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    opencode_units_within(session, message, &mut |_| true)
+        .map(|units| units.expect("an allowance that admits every unit never stops"))
+}
+
+/// `opencode_units_within` follows [`opencode_units`]'s rules and calls `admit` with each unit's retained byte count as the unit is built. If `admit` returns `false`, the function drops that unit and returns `Ok(None)`.
+///
+/// # Errors
+///
+/// As [`opencode_units`].
+pub fn opencode_units_within(
+    session: &SessionIdentity,
+    message: &Value,
+    admit: &mut dyn FnMut(usize) -> bool,
+) -> Result<Option<Vec<SourceUnit>>, AdapterRefusal> {
     if session.harness != Harness::OpenCode {
         return Err(AdapterRefusal::UnsupportedShape("harness"));
     }
@@ -253,7 +279,7 @@ pub fn opencode_units(
         .get("parts")
         .and_then(Value::as_array)
         .ok_or(AdapterRefusal::UnsupportedShape("parts"))?;
-    let mut units = Vec::new();
+    let mut kept = Kept::new(admit);
     for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
             // An ignored text part is not conversation text.
@@ -264,7 +290,15 @@ pub fn opencode_units(
                     .get("text")
                     .and_then(Value::as_str)
                     .ok_or(AdapterRefusal::UnsupportedShape("text part"))?;
-                units.push(session.message_unit(message_id, index, &message_revision, role, text));
+                if !kept.keep(session.message_unit(
+                    message_id,
+                    index,
+                    &message_revision,
+                    role,
+                    text,
+                )) {
+                    return Ok(None);
+                }
             }
             Some("tool") => {
                 let state = part
@@ -289,12 +323,14 @@ pub fn opencode_units(
                     is_error,
                 };
                 // One settled tool part carries one output string: its only output block.
-                units.push(session.tool_unit(&tool, 0, output));
+                if !kept.keep(session.tool_unit(&tool, 0, output)) {
+                    return Ok(None);
+                }
             }
             _ => {}
         }
     }
-    Ok(units)
+    Ok(Some(kept.units))
 }
 
 /// Units of one Pi session entry: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. Entries of other types contribute nothing. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
@@ -306,6 +342,20 @@ pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    pi_units_within(session, entry, &mut |_| true)
+        .map(|units| units.expect("an allowance that admits every unit never stops"))
+}
+
+/// `pi_units_within` follows [`pi_units`]'s rules and calls `admit` with each unit's retained byte count as the unit is built. If `admit` returns `false`, the function drops that unit and returns `Ok(None)`.
+///
+/// # Errors
+///
+/// As [`pi_units`].
+pub fn pi_units_within(
+    session: &SessionIdentity,
+    entry: &Value,
+    admit: &mut dyn FnMut(usize) -> bool,
+) -> Result<Option<Vec<SourceUnit>>, AdapterRefusal> {
     if session.harness != Harness::Pi {
         return Err(AdapterRefusal::UnsupportedShape("harness"));
     }
@@ -313,7 +363,7 @@ pub fn pi_units(
         return Err(AdapterRefusal::NotAnObject);
     }
     if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     let entry_id = field(entry, "id")?;
     let message = entry
@@ -325,7 +375,7 @@ pub fn pi_units(
         return Err(AdapterRefusal::UnsupportedShape("message.role"));
     }
     let stamp = revision(message.get("timestamp"), "timestamp")?;
-    let mut units = Vec::new();
+    let mut kept = Kept::new(admit);
     if role == "toolResult" {
         let tool = ToolBlock {
             parent_message_id: field(entry, "parentId")?,
@@ -342,13 +392,17 @@ pub fn pi_units(
                 .and_then(Value::as_str)
                 .filter(|_| item.get("type").and_then(Value::as_str) == Some("text"))
                 .ok_or(AdapterRefusal::UnsupportedShape("tool result item"))?;
-            units.push(session.tool_unit(&tool, index, text));
+            if !kept.keep(session.tool_unit(&tool, index, text)) {
+                return Ok(None);
+            }
         }
-        return Ok(units);
+        return Ok(Some(kept.units));
     }
     match message.get("content") {
         Some(Value::String(text)) => {
-            units.push(session.message_unit(entry_id, 0, &stamp, role, text))
+            if !kept.keep(session.message_unit(entry_id, 0, &stamp, role, text)) {
+                return Ok(None);
+            }
         }
         _ => {
             for (index, item) in content_items(message)?.iter().enumerate() {
@@ -357,12 +411,36 @@ pub fn pi_units(
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or(AdapterRefusal::UnsupportedShape("text item"))?;
-                    units.push(session.message_unit(entry_id, index, &stamp, role, text));
+                    if !kept.keep(session.message_unit(entry_id, index, &stamp, role, text)) {
+                        return Ok(None);
+                    }
                 }
             }
         }
     }
-    Ok(units)
+    Ok(Some(kept.units))
+}
+
+struct Kept<'a> {
+    units: Vec<SourceUnit>,
+    admit: &'a mut dyn FnMut(usize) -> bool,
+}
+
+impl<'a> Kept<'a> {
+    fn new(admit: &'a mut dyn FnMut(usize) -> bool) -> Self {
+        Self {
+            units: Vec::new(),
+            admit,
+        }
+    }
+
+    fn keep(&mut self, unit: SourceUnit) -> bool {
+        let admitted = (self.admit)(unit.retained_bytes());
+        if admitted {
+            self.units.push(unit);
+        }
+        admitted
+    }
 }
 
 fn content_items(message: &Value) -> Result<&Vec<Value>, AdapterRefusal> {
@@ -692,27 +770,6 @@ impl SourcePublisher<'_> {
         })
     }
 
-    /// The unit's receipt key and request digest, the pair a stored receipt answers for, or `None` when its identity does not encode. Changed bytes or publishing context under one key give another digest.
-    pub fn receipt_identity(&self, unit: &SourceUnit) -> Option<(String, String)> {
-        let identity: Vec<(&str, &str)> = unit
-            .identity
-            .iter()
-            .map(|(name, value)| (*name, value.as_str()))
-            .collect();
-        let encoded = encode_preserving_span(&Occurrence {
-            class: unit.class.code(),
-            identity: &identity,
-            revision: &unit.revision,
-            representation: unit.representation.as_str(),
-            span: None,
-        })
-        .ok()?;
-        Some((
-            receipt_key(&encoded, unit.representation),
-            self.request_digest(unit),
-        ))
-    }
-
     fn check_scope(
         &self,
         unit: &Prepared<'_>,
@@ -912,6 +969,24 @@ impl SourcePublisher<'_> {
         });
         identity_digest(&bytes)
     }
+}
+
+/// Both receipts of `unit` share this key.
+pub(crate) fn receipt_key_of(unit: &SourceUnit) -> Option<String> {
+    let identity: Vec<(&str, &str)> = unit
+        .identity
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let encoded = encode_preserving_span(&Occurrence {
+        class: unit.class.code(),
+        identity: &identity,
+        revision: &unit.revision,
+        representation: unit.representation.as_str(),
+        span: None,
+    })
+    .ok()?;
+    Some(receipt_key(&encoded, unit.representation))
 }
 
 /// Both receipts of a unit are keyed by its occurrence, revision, and representation.
@@ -1186,7 +1261,7 @@ pub enum UnitDisposition {
 
 /// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
 ///
-/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit under an admitted unit's key is [`UnitDisposition::Deferred`] when it repeats that request and [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`] when it changes it. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
+/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit within the bounds whose text exact retention refuses, such as text holding a recognized secret, is [`UnitDisposition::Refused`] with that [`PublishError::Artifact`] kind and takes no admission slot. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit under an admitted unit's key is [`UnitDisposition::Deferred`] when it repeats that request and [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`] when it changes it. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
 ///
 /// # Errors
 ///
@@ -1253,6 +1328,10 @@ pub fn publish_screened(
         {
             full = true;
             dispositions.push(Some(UnitDisposition::Deferred));
+            continue;
+        }
+        if let Some(kind) = kernel::exact_text_refusal(&unit.text) {
+            dispositions.push(Some(UnitDisposition::Refused(PublishError::Artifact(kind))));
             continue;
         }
         admitted_keys.insert(prepared.key, prepared.request_digest);

@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
     Harness, MAX_SOURCE_BATCH_BYTES, PublishError, SessionIdentity, SourcePublisher, SourceUnit,
-    UnitDisposition, opencode_units, pi_units, publish_screened,
+    UnitDisposition, opencode_units_within, pi_units_within, publish_screened, receipt_key_of,
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
@@ -287,6 +287,37 @@ impl Drop for RetainedCharge {
     }
 }
 
+/// The top-up target amortizes budget charges across copied units; admission falls back to the exact deficit when the target charge fails.
+const COPY_TOP_UP_BYTES: usize = 64 * 1024;
+
+struct CopyCharge<'a> {
+    capture: &'a Arc<SourceCapture>,
+    granted: usize,
+    used: usize,
+    top_ups: Vec<RetainedCharge>,
+}
+
+impl CopyCharge<'_> {
+    fn admit(&mut self, bytes: usize) -> bool {
+        self.used = self.used.saturating_add(bytes);
+        let Some(deficit) = self
+            .used
+            .checked_sub(self.granted)
+            .filter(|deficit| *deficit > 0)
+        else {
+            return true;
+        };
+        let Some(charge) = RetainedCharge::take(self.capture, deficit.max(COPY_TOP_UP_BYTES))
+            .or_else(|| RetainedCharge::take(self.capture, deficit))
+        else {
+            return false;
+        };
+        self.granted += charge.bytes;
+        self.top_ups.push(charge);
+        true
+    }
+}
+
 /// Counts the slot as active while the permit lives, so a panicking job releases both.
 struct ActiveSlot {
     capture: Arc<SourceCapture>,
@@ -511,25 +542,7 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
-        let units = self.units();
-        // The adapters' copies beyond the window charge are charged as soon as they exist.
-        let copies: usize = units
-            .iter()
-            .map(|unit| {
-                size_of::<SourceUnit>()
-                    + unit.text.len()
-                    + unit.role.len()
-                    + unit.revision.len()
-                    + unit
-                        .identity
-                        .iter()
-                        .map(|(_, value)| 48 + value.len())
-                        .sum::<usize>()
-            })
-            .sum();
-        let Some(_copies) =
-            RetainedCharge::take(&self.capture, copies.saturating_sub(self.window_bytes))
-        else {
+        let Some((units, _copies)) = self.units() else {
             return self.end(Count::RefusedResidentShort);
         };
         if units.is_empty() {
@@ -575,15 +588,31 @@ impl CaptureJob {
                 .collect()
         };
         let (mut pending, mut unknown) = (Vec::new(), Vec::new());
-        let mut seen = HashSet::with_capacity(identities.len());
+        // Each `seen` entry records the first occurrence's digest and whether this pass offers that occurrence.
+        let mut seen: HashMap<String, (String, bool)> = HashMap::with_capacity(identities.len());
+        let mut conflicts = 0;
         for ((unit, (key, digest)), found) in units.into_iter().zip(identities).zip(found) {
-            let keyed = found.is_some() || publisher.receipt_identity(&unit).is_some();
+            let keyed = found.is_some() || receipt_key_of(&unit).is_some();
+            if keyed {
+                if let Some((first, offered)) = seen.get(&key) {
+                    if *offered && *first != digest {
+                        conflicts += 1;
+                    }
+                    continue;
+                }
+                seen.insert(key.clone(), (digest.clone(), found != Some(false)));
+            }
             match found {
-                _ if keyed && !seen.insert(key.clone()) => {}
                 Some(true) => pending.push((unit, Some((key, digest)))),
                 Some(false) => self.capture.counters.add(Count::UnitsMemoSkipped, 1),
                 None => unknown.push((unit, keyed.then_some((key, digest)))),
             }
+        }
+        if conflicts > 0 {
+            self.capture
+                .counters
+                .add(Count::UnitsIdentityConflict, conflicts);
+            log("unit terminal", Count::UnitsIdentityConflict, conflicts);
         }
         let (candidates, keys): (Vec<SourceUnit>, Vec<Option<(String, String)>>) =
             pending.into_iter().chain(unknown).unzip();
@@ -672,17 +701,29 @@ impl CaptureJob {
         }
     }
 
-    /// Every unit of the window, in record order; a record the adapter refuses contributes none and is counted.
-    fn units(&self) -> Vec<SourceUnit> {
+    /// Every unit of the window, in record order, with the charges for copies beyond the window share the offer charged; a record the adapter refuses contributes none and is counted. `None` once the budget refuses a unit's copy, which the adapter drops before building the next one.
+    fn units(&self) -> Option<(Vec<SourceUnit>, Vec<RetainedCharge>)> {
         let mut units = Vec::new();
         let mut refused = 0;
+        let mut copies = CopyCharge {
+            capture: &self.capture,
+            granted: self.window_bytes,
+            used: 0,
+            top_ups: Vec::new(),
+        };
+        let mut stopped = false;
         for record in &self.window {
+            let admit = &mut |bytes| copies.admit(bytes);
             let adapted = match self.session.harness {
-                Harness::OpenCode => opencode_units(&self.session, record),
-                Harness::Pi => pi_units(&self.session, record),
+                Harness::OpenCode => opencode_units_within(&self.session, record, admit),
+                Harness::Pi => pi_units_within(&self.session, record, admit),
             };
             match adapted {
-                Ok(adapted) => units.extend(adapted),
+                Ok(Some(adapted)) => units.extend(adapted),
+                Ok(None) => {
+                    stopped = true;
+                    break;
+                }
                 Err(_) => refused += 1,
             }
         }
@@ -690,7 +731,7 @@ impl CaptureJob {
             self.capture.counters.add(Count::AdapterRefused, refused);
             log("adapter", Count::AdapterRefused, refused);
         }
-        units
+        (!stopped).then_some((units, copies.top_ups))
     }
 
     /// Materializes the capture domain and the project's scope; the receipt makes every later attempt a replay.

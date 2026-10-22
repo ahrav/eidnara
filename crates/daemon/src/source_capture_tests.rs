@@ -565,6 +565,76 @@ async fn an_identity_that_does_not_encode_never_shadows_a_memo_entry() {
     assert_eq!(identity_of(&rows[0])[3], ("message_id", "msg_ok"));
 }
 
+#[tokio::test]
+async fn a_secret_bearing_unit_is_terminal_and_its_siblings_publish() {
+    const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [
+        opencode_user("msg_secret", 1_700_000_000_000, &format!("token {SECRET}")),
+        opencode_user("msg_clean", 1_700_000_000_001, "a clean sibling"),
+    ];
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(
+        end,
+        source_capture::Count::Completed,
+        "{}",
+        report(&handler)
+    );
+    assert_eq!(report(&handler)["units_published"], 1);
+    assert_eq!(report(&handler)["units_refused_terminal"], 1);
+    assert_eq!(report(&handler)["kernel_error"], 0);
+
+    let store = kernel_store(&handler);
+    let tip = store.tip().unwrap();
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    assert_eq!(report(&handler)["units_memo_skipped"], 2);
+    assert_eq!(store.tip().unwrap(), tip);
+    let rows = live(&store, OccurrenceClass::Messages);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(bytes_of(&store, &rows[0]), "a clean sibling");
+}
+
+#[tokio::test]
+async fn a_changed_repeat_in_one_window_counts_one_identity_conflict() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [
+        opencode_user("msg_twice", 1_700_000_000_000, "first bytes"),
+        opencode_user("msg_twice", 1_700_000_000_000, "first bytes"),
+        opencode_user("msg_twice", 1_700_000_000_000, "second bytes"),
+    ];
+    for _ in 0..2 {
+        let end = capture_job(&handler, &project, SESSION, &window).await;
+        assert_eq!(end, source_capture::Count::Completed);
+    }
+    assert_eq!(report(&handler)["units_published"], 1);
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
+    assert_eq!(report(&handler)["units_memo_skipped"], 1);
+    let store = kernel_store(&handler);
+    let rows = live(&store, OccurrenceClass::Messages);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(bytes_of(&store, &rows[0]), "first bytes");
+}
+
+/// The window passes the offer's charge, but its units repeat a 1 MiB message id: their copies exceed the budget, so the job stops adapting, publishes nothing, and releases every charge.
+#[tokio::test]
+async fn unit_copies_past_the_budget_end_resident_short_and_publish_nothing() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let parts: Vec<Value> = (0..64)
+        .map(|_| json!({ "type": "text", "text": "" }))
+        .collect();
+    let window = [json!({
+        "info": { "id": "m".repeat(1 << 20), "sessionID": SESSION, "role": "user",
+                  "time": { "created": 1_700_000_000_000u64 } },
+        "parts": parts,
+    })];
+    let tip = kernel_store(&handler).tip().unwrap();
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::RefusedResidentShort);
+    assert_eq!(report(&handler)["retained_bytes"], 0);
+    assert_eq!(kernel_store(&handler).tip().unwrap(), tip);
+}
+
 /// C4: shutdown with a batch in flight accepts no new handoff, lets the batch finish, and releases the slot and the charge; a job that panics releases them too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot() {
@@ -733,6 +803,32 @@ async fn the_capture_report_carries_no_unit_text() {
     assert!(!text.contains(SENTINEL), "{text}");
     assert!(!text.contains("msg_sentinel"), "{text}");
     assert!(!text.contains(binding.digest()), "{text}");
+}
+
+#[tokio::test]
+async fn the_capture_report_reaches_host_status_field_for_field() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [opencode_user("msg_u1", 1_700_000_000_000, "hello")];
+    assert_eq!(
+        capture_job(&handler, &project, SESSION, &window).await,
+        source_capture::Count::Completed
+    );
+    let metrics = handler.health().await.metrics.expect("context metrics");
+    let composite = host_runtime::HealthReport {
+        status: host_runtime::HealthStatus::Ok,
+        detail: None,
+        metrics: Some(json!({
+            "components": { "context": { "status": "ok", "metrics": metrics.clone() } }
+        })),
+    };
+    let status: Value = serde_json::from_slice(&host_runtime::host_status_response_json(
+        &composite,
+        json!({ "state": "healthy" }),
+    ))
+    .unwrap();
+    let forwarded = &status["metrics"]["components"]["context"]["metrics"]["source_capture"];
+    assert_eq!(forwarded, &metrics["source_capture"]);
+    assert_eq!(forwarded["units_published"], 1);
 }
 
 fn pi_row(id: &str, parent: Option<&str>, message: Value) -> Value {
