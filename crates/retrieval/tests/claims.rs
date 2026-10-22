@@ -550,7 +550,7 @@ mod live_rows {
             schema_version: retrieval::SCHEMA_VERSION,
             kernel_incarnation_id: kernel_incarnation_id.to_string(),
             projection_policy_version: "policy".to_string(),
-            identity_contract_version: "search-projection-identity-v3".to_string(),
+            identity_contract_version: "search-projection-identity-v4".to_string(),
             limit_manifest_protocol_version: "limits.v1".to_string(),
             embedding_model: "model".to_string(),
             tokenizer_fingerprint: "fingerprint".to_string(),

@@ -6,10 +6,15 @@ Proposed record FA-N05 of #834 (D3a: one gate in the shared preparation
 entry, both callers, plus a `session.wrapup` refusal; no durable no-fire
 write). Ticket #855; PR #903. Surface: daemon.
 
-Exercised status: partial - the first-unit caller and the wrapup refusal are
-witnessed under a stored native authority with a non-empty live chain. The
-emergency rerun caller under native authority has no witness, and the
-wrapup refusal's snapshot and boundary work are not counted.
+Exercised status: partial - the first-unit caller and the wrapup refusal
+are witnessed under a stored native authority with a non-empty live chain,
+at 90 percent by #903 and at 96 percent by #1068 (see "Update for #1060 at
+`07ea883b5`"). The emergency rerun caller under native authority is not a
+reachable state and has structural coverage through the shared gate. The
+Guarantee's wrapup ordering clause, "before snapshot or boundary work", is
+read from the handler (`crates/daemon/src/lib.rs:7450-7468`) and has no
+counter in `wrapup_is_refused_under_native_authority`, so the record stays
+partial until that clause is witnessed or dropped (needs human input).
 
 ## Evidence trail
 
@@ -114,8 +119,9 @@ and boundary reads.
   gate.
 - Missing evidence: A native first-unit pass at or above 95 percent.
 - Conclusion: resolved with answer for the rerun caller (structural
-  coverage only); unresolved, needs the native high-pressure first-unit
-  witness.
+  coverage only); unresolved at `0ff62b29a`, needs the native high-pressure
+  first-unit witness; superseded for the first-unit caller by the resolved
+  entry under "Update for #1060 at `07ea883b5`".
 
 ### Q: Do the window-cap firing and the archive that `main` added stay behind the gate?
 
@@ -130,3 +136,38 @@ and boundary reads.
 - Missing evidence: None.
 - Conclusion: resolved with answer: the guarantee holds; the record stays
   `active`.
+
+## Update for #1060 at `07ea883b5`
+
+Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
+`07ea883b5`.
+
+- The gate is the first statement of `prepare_history_summarizer_with`
+  (`crates/daemon/src/lib.rs:9653-9664`); `prepare_history_summarizer`
+  (`:9640-9651`) builds its inputs from the pass's applied authority
+  (`:9648`), and the non-emergency first unit does the same (`:9112`,
+  `:9120`). The fire path is `prepare_history_summarizer_fire` (`:5463`),
+  and `record_no_fire` is `:6074`.
+- At 48,000 of 50,000 tokens the hard-wall band is `Emergency95`
+  (`crates/daemon/src/scheduler.rs:489-497`, `:716-718`), so the pass takes
+  the emergency branch of the first unit (`lib.rs:9097-9098`). Native
+  preparation returns `Complete`, which settles at `:9135-9151`.
+- `a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer`
+  (`crates/daemon/src/pi_native_serving_tests.rs:652`) runs its third arm on
+  a long Pi window (`:530`) at that pressure under a binding with a live
+  chain and `compaction.enabled: false` (`:489`). It asserts `no_fire`
+  `native_authority`, zero `trigger_tokenized_blocks` and `trigger_eval`, and
+  zero producer starts and connects. `the_same_pi_windows_differ_by_binding_alone`
+  (`:710`) shows that window folds with one start under an Eidnara binding,
+  so the native arm is not vacuous.
+
+### Q: Does a native pass at or above 95 percent settle in the first unit with `native_authority`?
+
+- Sources examined: the files above; the test's response, which carries no
+  continuation.
+- Findings: Yes. The response settles with `native_authority` and the
+  producer counters stay zero. The emergency branch is inferred from the
+  scheduler band at that usage; the response does not name the band.
+- Missing evidence: None for the settle. No response field names the
+  scheduler band, so the band is inferred from the usage.
+- Conclusion: resolved with answer; the band is inferred.

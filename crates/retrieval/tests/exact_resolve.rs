@@ -38,7 +38,7 @@ const PROJECT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const SCOPE_A: &str = "project:a";
 const SCOPE_B: &str = "project:b";
 const HOLD: &str = "hold-1";
-const CONTRACT: &str = "search-projection-identity-v3";
+const CONTRACT: &str = "search-projection-identity-v4";
 const EPOCH: &str = "inventory-epoch-1";
 const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 

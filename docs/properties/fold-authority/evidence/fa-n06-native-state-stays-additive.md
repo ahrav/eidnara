@@ -20,9 +20,10 @@ All references are verified at HEAD `0ff62b29a`.
   switch to `apply_additive_only` (`crates/daemon/src/transform.rs:3217-3219`).
 - The additive path calls only `apply_ingress_scalars` (`:2904`), which sets
   `newest_live_block_id`, `newest_live_ordinal`, and `last_usage`
-  (`:5593-5608`). Identity insertion, provisional-tail removal, tail and basis
+  (`:5583-5598`). Identity insertion, provisional-tail removal, tail and basis
   re-adoption, and their counters live in `apply_ingress_identities`
-  (`:5612`), called only on the folding path (`:4169`).
+  (`:5602`), called only on the folding path (`:4159`). Correction, checked
+  at `0ff62b29a`: these anchors were `:5593-5608`, `:5612`, and `:4169`.
 - The additive commit carries no identity upserts and no derived state: its
   `TransformCommit` (`:3124-3143`) sets no identity delta, and its result
   sets `derived: None` (`:3162`), so no served fingerprints or baseline parts
@@ -123,3 +124,35 @@ empty and the ingress scalars updated.
 - Missing evidence: None.
 - Conclusion: resolved with answer: evidence updated; the record stays
   `active`.
+
+## Update for #1060 at `07ea883b5`
+
+Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
+`07ea883b5`.
+
+- The additive path calls only `apply_ingress_scalars`
+  (`crates/daemon/src/transform.rs:3038`, defined at `:5740`), which sets
+  `newest_live_block_id` and `newest_live_ordinal` from the newest
+  non-synthetic block and records non-zero usage (`:5745-5752`).
+  `apply_ingress_identities` (`:5759`) is called from the folding path
+  (`:4303`). The additive result carries `derived: None` (`:3296`).
+- Native state sync empties the segment batch
+  (`crates/memory-store/src/lib.rs:12099-12104`).
+- `assert_native_commit` (`crates/daemon/src/pi_native_serving_tests.rs:621`)
+  runs `assert_native_state` (`crates/daemon/src/fold_authority_handler_tests.rs:19`)
+  and also asserts `last_usage`, `newest_live_block_id`, and
+  `newest_live_ordinal` against the pass's own rows and usage. It runs after
+  every native commit in the tests at
+  `crates/daemon/src/pi_native_serving_tests.rs:652` (`:701`), `:778`
+  (`:787`, `:836`), and `:843` (`:854`, `:914` after the memory HARD, `:937`
+  after the state-sync epoch bump, `:947`), and each history holds at least
+  one committed pass.
+
+### Q: Do Pi-profile native passes keep the additive-only state?
+
+- Sources examined: the files above.
+- Findings: Yes, for the histories the Pi witnesses construct: a first pass,
+  repeats with and without retained output, a canonical memory write, and a
+  state-sync epoch bump.
+- Missing evidence: The "bootstrap" writer question stays open.
+- Conclusion: resolved with answer for the Pi histories.

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,13 +21,23 @@ export const body = (n: number) => `message ${n} body`;
 export const TOOL_CALL_ID = "call-covered-end";
 
 export function textOf(message: unknown): string {
-    const record = message as { content?: unknown; parts?: unknown };
-    const content = record.content ?? record.parts;
+    const record = message as { content?: unknown; parts?: unknown } | undefined;
+    const content = record?.content ?? record?.parts;
     if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
     return (content as { type?: string; text?: string }[])
         .filter((part) => part.type === "text")
         .map((part) => part.text ?? "")
         .join("");
+}
+
+/** A deterministic memory object id for `label`, in the kernel's `mem_` id shape. */
+export function memoryId(label: string): string {
+    return `mem_${createHash("sha256").update(label).digest("hex").slice(0, 32)}`;
+}
+
+export function occurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
 }
 
 /**
@@ -161,19 +172,23 @@ export async function startFixture(
         if (result.status !== 0) throw new Error(`scale-seed failed: ${result.stderr}`);
     }
     const stack = await HermeticHostStack.start({ dataDir, fixtureBin, startTimeoutMs: 120_000 });
-    // The fixture opens its store after it reports ready; a pass sent before then declines.
+    await awaitStore(stack, root);
+    return { root, stack };
+}
+
+/** The fixture opens its store after it reports ready; a pass sent before then declines. */
+export async function awaitStore(stack: HermeticHostStack, root: string): Promise<void> {
     const deadline = Date.now() + 60_000;
     for (;;) {
         try {
             await stack.primaryStatus("store-probe", root, "session.status");
-            break;
+            return;
         } catch (error) {
             const code = (error as { code?: unknown }).code;
             if (code !== "store_unavailable" || Date.now() > deadline) throw error;
             await Bun.sleep(100);
         }
     }
-    return { root, stack };
 }
 
 export async function pluginModules() {
@@ -188,7 +203,7 @@ export async function pluginModules() {
     return { adapter, transport, maps, agent, extension };
 }
 
-export function userConfig(configHome: string, connectionFile: string): void {
+export function userConfig(configHome: string, connectionFile: string, extra: Json = {}): void {
     mkdirSync(join(configHome, "eidnara"), { recursive: true });
     writeFileSync(
         join(configHome, "eidnara", "eidnara.jsonc"),
@@ -196,6 +211,7 @@ export function userConfig(configHome: string, connectionFile: string): void {
             history_summarizer: { model: "fixture/deterministic" },
             host: { connection_file: connectionFile },
             memory: { auto_search: { enabled: false } },
+            ...extra,
         }),
     );
 }

@@ -13,21 +13,19 @@ use daemon::memory_reviewer::coordinator::{InvestigationPermits, Rejection};
 use daemon::memory_reviewer::handoff::review_binding;
 use daemon::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
 use daemon::memory_reviewer::model_request::{Endpoint, Providers};
-use daemon::memory_reviewer::selection::{
-    MEMORY_CLASSES, PRODUCTION_SELECTION_OPEN, SelectionScope, select_review_targets,
-};
+use daemon::memory_reviewer::selection::{MEMORY_CLASSES, PRODUCTION_SELECTION_OPEN};
 use daemon::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
 use host_runtime::model_execution::supervisor::Supervisor;
 use kernel::KernelStore;
 use kernel::source_identity::OccurrenceClass;
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{
-    CausalInputs, EnqueueOutcome, EvidenceAvailability, FrozenSelectionPage,
-    MemoryReviewerJobInput, MemoryReviewerJobOutcome, MemoryReviewerJobState, ProducerBinding,
-    ReserveOutcome, ReviewTarget,
+    CausalInputs, FrozenSelectionPage, MemoryReviewerJobInput, MemoryReviewerJobOutcome,
+    MemoryReviewerJobState, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
 use sha2::Digest;
+use support::memory_reviewer_forms::{self as forms, stepping_as};
 use support::memory_reviewer_gate::{
     Deployment, NoPublicModel, activation_record, write_activation_record,
 };
@@ -50,32 +48,6 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn worker_intent(key: &str) -> kernel::CommitIntent {
-    kernel::CommitIntent {
-        producer: "memory_reviewer-worker-test".to_string(),
-        operation_key: key.to_string(),
-        request_digest: format!("{:x}", sha2::Sha256::digest(key.as_bytes())),
-        actor: "test".to_string(),
-        cause: "fixture".to_string(),
-    }
-}
-
-fn admission(object_id: &str) -> kernel::AdmissionRequest {
-    kernel::AdmissionRequest {
-        candidate_id: None,
-        subject_object_id: Some(object_id.to_string()),
-        source_class: Some(kernel::SourceClass::ExplicitUser),
-        taint_class: Some(kernel::TaintClass::UserExplicit),
-        event: kernel::AdmissionEvent {
-            kind: kernel::EventKind::Other,
-            trigger_object_id: None,
-            approval_object_id: None,
-            evidence_id: None,
-            reason: "test".to_string(),
-        },
-    }
-}
-
 struct Rig {
     _dirs: Vec<tempfile::TempDir>,
     home: std::path::PathBuf,
@@ -94,7 +66,7 @@ impl Rig {
         let kernel = Arc::new(KernelStore::open(kernel_dir.path()).unwrap());
         // The memory domain every production Kernel commits before a job can exist; holds pin the commit snapshot.
         kernel
-            .commit(worker_intent("domain"), |envelope| {
+            .commit(forms::intent("domain"), |envelope| {
                 envelope.insert_domain(kernel::DomainSpec {
                     domain_id: "memory".to_string(),
                     object_id: "domain-memory".to_string(),
@@ -303,7 +275,7 @@ impl Rig {
             .unwrap();
         if states[0].is_none() {
             self.kernel
-                .commit(worker_intent("scope"), |envelope| {
+                .commit(forms::intent("scope"), |envelope| {
                     envelope.insert_scope(kernel::ScopeSpec {
                         scope_id: scope.clone(),
                         object_id: scope.clone(),
@@ -388,218 +360,31 @@ impl Rig {
 
     /// The production selector over `classes` from a fresh cursor, under the production policy versions.
     fn select(&self, classes: &[OccurrenceClass]) -> FrozenSelectionPage {
-        select_review_targets(
-            &self.kernel,
-            &self.store,
-            &SelectionScope {
-                project: &kernel::ProjectScope::new(PROJECT_DIGEST).unwrap(),
-                ledger_project: PROJECT,
-                classes,
-                policy_versions: &daemon::memory_reviewer::handoff::review_policy_versions(),
-            },
-            None,
-            &kernel::applicability::EvalBudget::unbounded(),
-        )
-        .unwrap()
+        forms::select(&self.kernel, &self.store, PROJECT, PROJECT_DIGEST, classes)
     }
 
-    /// Freezes `page` and enqueues it under the scheduler's selection slot identities: a lease, the frozen page, and one atomic enqueue that completes the slot. Every reference becomes a ready job.
     fn enqueue_selection(&self, page: &FrozenSelectionPage, now: i64) {
-        use daemon::selection_slot;
-        let command = format!("{}@{now}", selection_slot::TASK);
-        let generation = self
-            .store
-            .next_memory_classifier_scheduler_generation(selection_slot::INSTANCE)
-            .unwrap();
-        let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = self
-            .store
-            .acquire_memory_classifier_task(
-                PROJECT,
-                &command,
-                selection_slot::INSTANCE,
-                selection_slot::LEDGER_SLOT,
-                generation,
-                selection_slot::TASK_ID,
-                now,
-                now,
-            )
-            .unwrap()
-        else {
-            panic!("the selection slot is claimed")
-        };
-        let frozen = self
-            .store
-            .freeze_selection(PROJECT, selection_slot::TASK, &command, page, now)
-            .unwrap();
-        let enqueued = self
-            .store
-            .enqueue_frozen_selection(
-                PROJECT,
-                &claim.claim_id,
-                &format!("{command}:complete"),
-                selection_slot::INSTANCE,
-                selection_slot::LEDGER_SLOT,
-                &frozen,
-                &ProducerBinding {
-                    producer: selection_slot::PRODUCER.to_string(),
-                    firing_id: command.clone(),
-                    ordinal: 0,
-                },
-                now,
-            )
-            .unwrap();
-        assert!(
-            matches!(enqueued, EnqueueOutcome::Enqueued { jobs, .. } if jobs == page.references.len()),
-            "{enqueued:?}"
-        );
+        forms::enqueue_selection(&self.store, PROJECT, page, now);
     }
 
-    /// Inserts and admits one positive-category decision in the memory domain under the project scope, then runs the production claim materializer over it with the egress `search_lifecycle_owner` gives it, `LocalOnly`. The materializer publishes one `canonical_claims` descriptor per nonempty representation and one `promoted_memory` descriptor, each over an artifact ingest stores `Sensitive` because it has no repository provenance. Returns the decision's object id.
+    /// [`forms::materialize_decision`] under the project scope; the episode publishes the decision's three production forms.
     fn materialize_decision(&self, now: i64) -> String {
-        use daemon::claim_sources::ClaimMaterializer;
         let scope = self.ensure_scope();
-        let decision = "decision-materialized";
-        ClaimMaterializer::register(&self.kernel, now).unwrap();
-        self.commit_decision(decision, &scope);
-        let report = ClaimMaterializer::new(&self.kernel, kernel::ProviderEgress::LocalOnly)
-            .run_episode(
-                kernel::CommitPageBounds {
-                    max_commits: std::num::NonZeroUsize::new(8).unwrap(),
-                    max_rows: std::num::NonZeroUsize::new(64).unwrap(),
-                    max_payload_bytes: std::num::NonZeroU64::new(1 << 20).unwrap(),
-                },
-                now,
-            )
-            .unwrap();
-        assert_eq!(report.published, 3, "{report:?}");
-        decision.to_string()
+        let (decision, published) = forms::materialize_decision(&self.kernel, &scope, now);
+        assert_eq!(published, 3);
+        decision
     }
 
-    /// Fixture only: an admitted decision with one `canonical_claims` and one `promoted_memory` descriptor, each over evidence whose repository provenance the test supplies, which ingest keeps `Normal`. No production path issues provenance to a decision's evidence. Returns the decision's object id and each descriptor's evidence id.
     fn publish_fixture_forms(&self) -> (String, Vec<String>) {
         let scope = self.ensure_scope();
-        let decision = "decision-fixture";
-        self.commit_decision(decision, &scope);
-        let forms = [
-            (
-                OccurrenceClass::CanonicalClaims,
-                "decision_summary",
-                "bun builds the workspace",
-            ),
-            (
-                OccurrenceClass::PromotedMemory,
-                "summary",
-                "the workspace builds with bun",
-            ),
-        ];
-        let evidence = forms
-            .iter()
-            .map(|(class, representation, text)| {
-                let key = class.code();
-                let handle = support::host_ingest::ingest(
-                    &self.kernel,
-                    support::host_ingest::HostEvidence {
-                        intent: worker_intent(&format!("fixture-evidence-{key}")),
-                        payload: text,
-                        evidence_id: format!("evidence-fixture-{key}"),
-                        object_id: format!("evidence-object-fixture-{key}"),
-                        domain_id: "memory",
-                        source_kind: "conversation",
-                        source_id: format!("src/fixture-{key}"),
-                        repository_id: Some("repo-fixture"),
-                    },
-                );
-                self.kernel
-                    .commit(
-                        worker_intent(&format!("fixture-descriptor-{key}")),
-                        |envelope| {
-                            let outcome = envelope
-                                .publish_source_descriptor(&kernel::SourceDescriptorRequest {
-                                    occurrence: kernel::source_identity::Occurrence {
-                                        class: key,
-                                        identity: &[(class.identity_fields()[0], decision)],
-                                        revision: "1",
-                                        representation,
-                                        span: None,
-                                    },
-                                    source_policy: kernel::SourceDescriptorPolicy::Native,
-                                    domain_id: "memory",
-                                    scope_id: Some(&scope),
-                                    evidence_id: &handle.evidence_id,
-                                    artifact_digest: &handle.digest,
-                                    buffer: text,
-                                    sensitivity: kernel::Sensitivity::Normal,
-                                    observed_at: 1,
-                                    expected_head: None,
-                                })
-                                .unwrap_or_else(|error| {
-                                    panic!("descriptor publication: {error:?}")
-                                });
-                            // Eligibility judges the descriptor through the reads that serve it, so the fixture admits the descriptor itself.
-                            envelope.record_admission(admission(&outcome.object_id))?;
-                            Ok(String::new())
-                        },
-                    )
-                    .unwrap();
-                handle.evidence_id
-            })
-            .collect();
-        (decision.to_string(), evidence)
+        forms::publish_fixture_forms(&self.kernel, &scope)
     }
 
-    fn commit_decision(&self, object_id: &str, scope: &str) {
-        self.kernel
-            .commit(
-                worker_intent(&format!("decision-{object_id}")),
-                |envelope| {
-                    envelope.insert_decision(kernel::DecisionSpec {
-                        decision_id: format!("{object_id}-id"),
-                        object_id: object_id.to_string(),
-                        domain_id: "memory".to_string(),
-                        proposition_id: None,
-                        scope_id: Some(scope.to_string()),
-                        anchor_id: None,
-                        evidence_id: None,
-                        decision_kind: "ARCHITECTURE".to_string(),
-                        payload: kernel::DecisionPayload {
-                            summary: "bun builds the workspace".to_string(),
-                            rationale: "the lockfile is bun's".to_string(),
-                        },
-                        source_kind: "assistant".to_string(),
-                        source_id: format!("{object_id}-lineage"),
-                        source_revision: 1,
-                        sensitivity: kernel::Sensitivity::Normal,
-                    })?;
-                    envelope.record_admission(admission(object_id))?;
-                    Ok(String::new())
-                },
-            )
-            .unwrap();
-    }
-
-    /// Every live descriptor of `classes` at the tip, in walk order.
     fn live_descriptors(
         &self,
         classes: &[OccurrenceClass],
     ) -> Vec<(OccurrenceClass, kernel::LiveDescriptor)> {
-        let tip = self.kernel.tip().unwrap();
-        classes
-            .iter()
-            .flat_map(|class| {
-                let page = self
-                    .kernel
-                    .live_source_descriptors(
-                        *class,
-                        tip,
-                        None,
-                        std::num::NonZeroUsize::new(64).unwrap(),
-                        &kernel::applicability::EvalBudget::unbounded(),
-                    )
-                    .unwrap();
-                assert!(page.next.is_none(), "one page holds the inventory");
-                page.rows.into_iter().map(|row| (*class, row))
-            })
-            .collect()
+        forms::live_descriptors(&self.kernel, classes)
     }
 
     fn reserve_ready(&self, now: i64, message: &str, target: ReviewTarget) -> String {
@@ -1655,15 +1440,6 @@ async fn the_bedrock_identity_follows_the_key_id_and_region() {
     );
 }
 
-/// A response reporting `model` whose text is `step`.
-fn stepping_as(model: &str, step: &str) -> Vec<u8> {
-    let text = serde_json::to_string(step).unwrap();
-    let body = format!(
-        r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{model}","content":[{{"type":"text","text":{text}}}],"stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
-    );
-    json_response("200 OK", &body, "")
-}
-
 /// U8's eligibility witness: a commit published through the Git publisher is repository-backed evidence the production policy makes Remote-eligible. The production selector function, given the test-only `git_commits` class because `MEMORY_CLASSES` walks only the decision-derived classes, picks it under production policy versions; the store primitives the scheduler's selection slot composes (its lease, frozen page, and atomic enqueue under the slot's own identities) admit it; and the production worker runs it through the coordinator to a scripted, non-abstaining `retain` that cites the subject. The completed receipt selects a readable proposal over the memory at its unchanged tokens, and the Kernel tip does not move. The production-class positive witness stays gated with `PRODUCTION_SELECTION_OPEN`; the production refusal and decision-derived fixture witnesses follow at the end of this file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_selected_repository_commit_reaches_a_readable_non_abstaining_proposal() {
@@ -1845,28 +1621,7 @@ async fn production_classes_are_refused_the_remote_model_at_selection_and_in_the
             .unwrap()
             .is_empty()
     );
-    let forced = FrozenSelectionPage {
-        references: descriptors
-            .iter()
-            .map(|(_, row)| CausalInputs {
-                target: ReviewTarget::Memory {
-                    object_id: row.object_id.clone(),
-                    source_revision: row.detail.revision.parse().unwrap(),
-                },
-                question_template:
-                    daemon::memory_reviewer::broker::QuestionTemplate::ExtractedFacts
-                        .id()
-                        .to_string(),
-                signals: vec![],
-                required_evidence: vec![EvidenceAvailability {
-                    evidence_id: row.detail.evidence_id.clone(),
-                    available: true,
-                }],
-                policy_versions: daemon::memory_reviewer::handoff::review_policy_versions(),
-            })
-            .collect(),
-        next_cursor: None,
-    };
+    let forced = forms::frozen_inputs(&descriptors);
     rig.enqueue_selection(&forced, now);
     rig.write_activation();
     assert_eq!(
@@ -1930,6 +1685,11 @@ async fn fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting
     let (decision, evidence) = rig.publish_fixture_forms();
     let page = rig.select(MEMORY_CLASSES);
     assert_eq!(page.references.len(), 2, "both forms are selected");
+    assert_eq!(
+        forms::frozen_inputs(&rig.live_descriptors(MEMORY_CLASSES)).references,
+        page.references,
+        "the inputs the production witnesses enqueue past the selector are the ones it freezes"
+    );
     let mut objects = vec![decision.clone()];
     for inputs in &page.references {
         let ReviewTarget::Memory { object_id, .. } = &inputs.target else {
@@ -1949,10 +1709,7 @@ async fn fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting
     rig.enqueue_selection(&page, now);
 
     rig.write_activation();
-    let retain = stepping_as(
-        "claude-test",
-        r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":null,"support":[{"alias":"ref-1"}],"contradictions":[],"limitations":["only the form itself was read"],"uncertainty":"medium"}}"#,
-    );
+    let retain = stepping_as("claude-test", forms::RETAIN_STEP);
     let server = rig.peer.serve_script(vec![retain.clone(), retain]);
     assert_eq!(rig.worker().pass(&CancellationToken::new()).await, 2);
     assert_eq!(

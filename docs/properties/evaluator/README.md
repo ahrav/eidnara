@@ -356,7 +356,7 @@ unchanged.
 Identity rule (`crates/kernel/tests/eval_identity.rs`):
 
 - `the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder`
-  (`wm-occurrence-identity-recomputation`) encodes all 23 records of the
+  (`wm-occurrence-identity-recomputation`) encodes all 24 records of the
   independent identity goldens with the evaluator's copy and the kernel's
   `encode_preserving_span`, expects both to equal the expected occurrence and
   lineage ids, pins `OCCURRENCE_ENCODING_VERSION`, the contract version,
