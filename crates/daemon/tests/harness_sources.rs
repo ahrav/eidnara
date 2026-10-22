@@ -2236,6 +2236,11 @@ fn capture_batch_defers_units_beyond_its_bounds() {
         .collect();
     assert_eq!(deferred, vec![MAX_SOURCE_BATCH_UNITS]);
     assert_eq!(inventory(&corpus).len(), MAX_SOURCE_BATCH_UNITS);
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        MAX_SOURCE_BATCH_UNITS as i64,
+        "the deferred unit retained nothing"
+    );
 
     // The next pass replays the 32 and publishes the deferred unit.
     let dispositions = publish_screened(&publisher, &units[1..], NOW, None).unwrap();
@@ -2327,7 +2332,10 @@ fn capture_batch_refusals_take_no_admission_slot() {
         .collect();
     let mut malformed = pi_text_unit("pi-malformed", "refused identity");
     malformed.identity[2].1 = "s".repeat(600);
-    units.insert(10, pi_text_unit("pi-big", &"b".repeat(MAX_SOURCE_UNIT_BYTES + 1)));
+    units.insert(
+        10,
+        pi_text_unit("pi-big", &"b".repeat(MAX_SOURCE_UNIT_BYTES + 1)),
+    );
     units.insert(20, malformed);
     let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
     assert!(matches!(dispositions[10], UnitDisposition::UnitTooLarge));
@@ -2369,25 +2377,104 @@ fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {
         dispositions[0]
     );
     assert!(!published(&dispositions[1]).replayed);
-    assert_eq!(evidence_rows(&corpus).0, 1, "the foreign unit retained nothing");
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        1,
+        "the foreign unit retained nothing"
+    );
 }
 
-/// Two units of one identity and revision with different bytes in one window claim one receipt key: the attempt commits nothing and names the second unit as the conflict.
+/// One window naming a unit twice: an equal repeat waits for a later pass, and a changed repeat under the same identity and revision is refused on its own while the first publishes.
 #[test]
-fn capture_batch_names_a_unit_that_conflicts_inside_the_commit() {
+fn capture_batch_screens_a_repeated_identity_per_unit() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
-    let tip = corpus.tip();
     let units = [
+        pi_text_unit("pi-twice", "first bytes"),
         pi_text_unit("pi-twice", "first bytes"),
         pi_text_unit("pi-twice", "second bytes"),
     ];
-    let refusal = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap_err();
-    assert_eq!(refusal.conflicting_unit(), Some(1), "{refusal:?}");
-    assert_eq!(corpus.tip(), tip, "nothing committed");
-    assert_eq!(evidence_rows(&corpus).0, 0);
-
-    let dispositions = publish_screened(&corpus.publisher(), &units[..1], NOW, None).unwrap();
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
     assert!(!published(&dispositions[0]).replayed);
+    assert!(matches!(dispositions[1], UnitDisposition::Deferred));
+    assert!(matches!(
+        dispositions[2],
+        UnitDisposition::Refused(PublishError::IdentityReused)
+    ));
+    assert_eq!(evidence_rows(&corpus).0, 1);
+
+    let again = publish_screened(&corpus.publisher(), &units[1..2], NOW, None).unwrap();
+    assert!(published(&again[0]).replayed);
+}
+
+/// `publish_batch` names the unit whose step refused the attempt and commits nothing; only a receipt conflict is a terminal conflict.
+#[test]
+fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
+    use daemon::harness_sources::publish_batch;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    publisher
+        .publish(
+            &pi_units(&pi_session(), &pi_user("pi-stale", "newer", 200))
+                .unwrap()
+                .remove(0),
+            NOW,
+        )
+        .unwrap();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let fresh = pi_text_unit("pi-fresh", "fresh sibling");
+
+    // Two requests under one key in one batch: the later one is the conflict.
+    let changed = pi_text_unit("pi-fresh", "changed sibling");
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &fresh), (&publisher, &changed)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.conflicting_unit(), Some(1), "{refusal:?}");
+
+    // A foreign project fails the receipt preview's scope check: named, not terminal.
+    let mut foreign = pi_text_unit("pi-foreign", "another project");
+    foreign.identity[0].1 = "b".repeat(64);
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &foreign), (&publisher, &fresh)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, kernel::KernelError::NotFound);
+    assert_eq!(refusal.unit, Some(0));
+    assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "refusals before the transaction stage no bytes"
+    );
+
+    // A revision below the live one passes the preview and is refused by its descriptor inside the commit.
+    let stale = pi_units(&pi_session(), &pi_user("pi-stale", "older", 100))
+        .unwrap()
+        .remove(0);
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &fresh), (&publisher, &stale)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, kernel::KernelError::InvalidInput);
+    assert_eq!(refusal.unit, Some(1));
+    assert_eq!(refusal.conflicting_unit(), None);
+
+    assert_eq!(corpus.tip(), tip, "no refused attempt committed");
 }

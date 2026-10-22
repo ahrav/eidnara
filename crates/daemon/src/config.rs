@@ -2387,7 +2387,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 26);
+        assert_eq!(ConfigKey::ALL.len(), 27);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the

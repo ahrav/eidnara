@@ -118,6 +118,21 @@
             "project": {},
             "expected_enabled": false,
             "expected_project_warning": false
+        },
+        {
+            "name": "a non-boolean project switch",
+            "user": {
+                "source_capture": {
+                    "enabled": true
+                }
+            },
+            "project": {
+                "source_capture": {
+                    "enabled": "yes"
+                }
+            },
+            "expected_enabled": true,
+            "expected_project_warning": true
         }
     ]
 }

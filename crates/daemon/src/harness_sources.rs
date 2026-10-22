@@ -1094,7 +1094,12 @@ pub fn publish_batch(
                     }
                     Ok((descriptor, provenance))
                 };
-                let (descriptor, provenance) = step().inspect_err(|_| culprit = Some(index))?;
+                // A receipt conflict here is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
+                let (descriptor, provenance) = step().inspect_err(|error| {
+                    if *error != KernelError::Conflict {
+                        culprit = Some(index);
+                    }
+                })?;
                 if !records_receipt {
                     main_result = Some(descriptor.object_id.clone());
                 }
@@ -1135,7 +1140,7 @@ pub fn publish_batch(
 pub struct BatchRefusal {
     /// The cause: [`KernelError::Conflict`] when `unit`'s key already holds a receipt under another request digest.
     pub error: KernelError,
-    /// The position, among the units the caller passed, of the unit whose step failed: its identity, its scope check, its receipt lookup, or its descriptor commit. That step's cause can be transient, such as [`KernelError::Deadline`] or [`KernelError::Busy`], so only [`Self::conflicting_unit`] names a unit unchanged input refuses again. `None` when the refusal belongs to the batch, one of its writes, or a receipt committed by another writer after this attempt's preview; the next attempt's preview names that unit.
+    /// The position, among the units the caller passed, of the unit whose step failed: its identity, its scope check, its receipt lookup, or its descriptor commit. That step's cause can be transient, such as [`KernelError::Deadline`] or [`KernelError::Busy`], so only [`Self::conflicting_unit`] names a unit unchanged input refuses again. `None` when the refusal belongs to the batch, one of its writes, or a receipt committed by another writer after this attempt's preview; the next attempt's preview replays that receipt or names the unit it conflicts with.
     pub unit: Option<usize>,
 }
 
@@ -1161,7 +1166,7 @@ pub enum UnitDisposition {
 
 /// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
 ///
-/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A batch with no admitted unit commits nothing.
+/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit under an admitted unit's key is [`UnitDisposition::Deferred`] when it repeats that request and [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`] when it changes it. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
 ///
 /// # Errors
 ///
@@ -1175,6 +1180,8 @@ pub fn publish_screened(
     let mut dispositions: Vec<Option<UnitDisposition>> = Vec::with_capacity(units.len());
     let mut terms: Option<Option<Vec<kernel::ScopeTermSpec>>> = None;
     let mut admitted = Vec::new();
+    let mut admitted_keys: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut admitted_bytes = 0usize;
     let mut full = false;
     for (index, unit) in units.iter().enumerate() {
@@ -1213,12 +1220,22 @@ pub fn publish_screened(
                 continue;
             }
         }
+        // One window can name a unit twice: the same request replays on a later pass, and another request under the same key is refused as the conflict it is.
+        if let Some(digest) = admitted_keys.get(prepared.key.as_str()) {
+            dispositions.push(Some(if *digest == prepared.request_digest {
+                UnitDisposition::Deferred
+            } else {
+                UnitDisposition::Refused(PublishError::IdentityReused)
+            }));
+            continue;
+        }
         if admitted.len() == MAX_SOURCE_BATCH_UNITS || admitted_bytes + len > MAX_SOURCE_BATCH_BYTES
         {
             full = true;
             dispositions.push(Some(UnitDisposition::Deferred));
             continue;
         }
+        admitted_keys.insert(prepared.key, prepared.request_digest);
         admitted.push(index);
         admitted_bytes += len;
         dispositions.push(None);
