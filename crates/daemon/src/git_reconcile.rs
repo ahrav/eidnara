@@ -411,7 +411,8 @@ fn cancelled_or_failed(error: KernelError, phase: ReconcilePhase) -> Stop {
     }
 }
 
-fn identity_field<'d>(descriptor: &'d LiveDescriptor, name: &str) -> Option<&'d str> {
+/// The value `descriptor`'s identity holds for `name`.
+pub(crate) fn identity_field<'d>(descriptor: &'d LiveDescriptor, name: &str) -> Option<&'d str> {
     descriptor
         .detail
         .identity

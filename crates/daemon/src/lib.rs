@@ -6792,12 +6792,56 @@ impl HandlerCore {
         }
     }
 
+    /// Step 1 of `session.delete`: retires the bound session's captured sources in the Kernel. The caller holds the capture commit gate. A deployment without a kernel holds no captured sources. A Kernel that is starting or unavailable, or a transient inventory or commit failure, is the retryable `kernel_unavailable`; a corrupt row or a page that replays is `source_retirement_failed`, which a retry meets again.
+    fn retire_captured_sources(
+        &self,
+        binding: &SessionBinding,
+        session_id: &str,
+    ) -> Result<(), PreparedOutcome> {
+        if !self.kernel.expected() {
+            return Ok(());
+        }
+        let kernel = self
+            .kernel
+            .kernel_store()
+            .map_err(|state| PreparedOutcome::Error {
+                code: "kernel_unavailable".to_string(),
+                message: state.state_key(),
+            })?;
+        let session = source_capture::CapturedSession {
+            project_id: binding.kernel_project.digest(),
+            harness: &binding.harness,
+            session_id,
+        };
+        let page_rows = std::num::NonZeroUsize::new(source_capture::SESSION_RETIREMENT_PAGE)
+            .expect("a nonzero page");
+        source_capture::retire_session_pages(&kernel, session, page_rows, usize::MAX)
+            .map(|_| ())
+            .map_err(|error| PreparedOutcome::Error {
+                code: match error {
+                    kernel::KernelError::Conflict
+                    | kernel::KernelError::CorruptCanonicalRow
+                    | kernel::KernelError::InvalidInput => "source_retirement_failed",
+                    _ => "kernel_unavailable",
+                }
+                .to_string(),
+                message: format!("captured sources not retired: {error}"),
+            })
+    }
+
     /// `session.delete` removes the bound session in two stores, in order, under the capture commit gate:
     ///
     /// 1. The Kernel retires every live `messages` and `raw_tool_spans` descriptor the bound project, harness, and session own, in receipt-keyed pages. The retired rows stay readable as history.
     /// 2. The memory store deletes the session's rows, and the capture memo and generation ticket drop the session's pending work.
     ///
-    /// Outcomes: `{ok: true, deleted_rows}` once both steps completed. `kernel_unavailable` when the Kernel is starting or unavailable, or its inventory or a page commit fails; nothing is deleted from the memory store, and a retry continues from what is still live. A deployment without a kernel skips step 1. A retry after a failure between the steps completes both. A harness session that keeps running after the delete republishes its sources on its next pass: stored receipts answer for its earlier units, and new messages publish fresh descriptors.
+    /// Outcomes, each safe to retry with the same session:
+    /// - `{ok: true, deleted_rows}` once both steps completed. A repeat answers `ok` again.
+    /// - `kernel_unavailable` when the Kernel is starting or unavailable, or its inventory or a page commit fails transiently. The memory store is untouched, and a retry continues from what is still live.
+    /// - `source_retirement_failed` when the inventory reads a corrupt row or a page replays. The memory store is untouched, and a retry meets the same fault until the Kernel is repaired.
+    /// - `store_write_failed` when the memory-store delete fails after step 1 committed. The captured sources are already retired, and a retry completes step 2.
+    /// - `store_unavailable` when the blocking work did not report back. Either step may have committed, and a retry converges.
+    ///
+    /// A deployment without a kernel skips step 1. Recovery from a failed outcome is the caller's next `session.delete` of the session. A harness session that keeps running after the delete republishes its sources on its next pass: stored receipts answer for its earlier units, and new messages publish fresh descriptors.
     async fn handle_session_delete_value(
         self: &Arc<Self>,
         channel: RouteHandle,
@@ -6830,25 +6874,7 @@ impl HandlerCore {
                     .lock()
                     .expect("capture publication mutex");
                 // Captured sources retire before the memory rows go, so no deleted session keeps a live descriptor.
-                if core.kernel.expected() {
-                    let kernel =
-                        core.kernel
-                            .kernel_store()
-                            .map_err(|state| PreparedOutcome::Error {
-                                code: "kernel_unavailable".to_string(),
-                                message: state.state_key(),
-                            })?;
-                    source_capture::retire_session_sources(
-                        &kernel,
-                        binding.kernel_project.digest(),
-                        &binding.harness,
-                        &session_id,
-                    )
-                    .map_err(|error| PreparedOutcome::Error {
-                        code: "kernel_unavailable".to_string(),
-                        message: format!("captured sources not retired: {error}"),
-                    })?;
-                }
+                core.retire_captured_sources(&binding, &session_id)?;
                 #[cfg(test)]
                 if core
                     .source_capture
@@ -9016,16 +9042,19 @@ impl HandlerCore {
             self.spawn_tracked_task(checkpoint.run());
         }
         // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.
-        let capture =
-            source_capture::consents(&binding.config, parsed.is_subagent, serializer_profile).then(
-                || source_capture::Offer {
-                    profile: serializer_profile,
-                    session_id: parsed.session_id.clone(),
-                    project: binding.kernel_project.clone(),
-                    window: parsed.native_messages.clone().unwrap_or_default(),
-                    epoch: self.source_capture.epoch(),
-                },
-            );
+        let capture = source_capture::consents(
+            &binding.config,
+            parsed.is_subagent,
+            serializer_profile,
+            &binding.harness,
+        )
+        .then(|| source_capture::Offer {
+            profile: serializer_profile,
+            session_id: parsed.session_id.clone(),
+            project: binding.kernel_project.clone(),
+            window: parsed.native_messages.clone().unwrap_or_default(),
+            epoch: self.source_capture.epoch(),
+        });
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the
         // pass then serves that binding detached.

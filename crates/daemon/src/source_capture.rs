@@ -238,16 +238,27 @@ impl Default for SourceCapture {
     }
 }
 
-/// Whether the route's consent snapshot, the session, and the profile admit capture at all; otherwise no adapter runs.
+/// Whether the route's consent snapshot, the session, and the profile admit capture at all; otherwise no adapter runs. The profile's harness must be the one the route claims, so the harness capture stamps on a descriptor is the one `session.delete` retires by.
 pub(crate) fn consents(
     config: &crate::config::DaemonConfig,
     is_subagent: bool,
     profile: SerializerProfile,
+    route_harness: &str,
 ) -> bool {
     config.source_capture_enabled
         && config.memory_enabled
         && !is_subagent
         && profile.serves_native()
+        && profile_harness(profile).is_some_and(|harness| harness.as_str() == route_harness)
+}
+
+/// The harness whose native records a serializer profile carries.
+fn profile_harness(profile: SerializerProfile) -> Option<Harness> {
+    match profile {
+        SerializerProfile::Pi => Some(Harness::Pi),
+        SerializerProfile::OpencodeAiSdk => Some(Harness::OpenCode),
+        _ => None,
+    }
 }
 
 /// A consented pass's native window, held by the pass until its response is built.
@@ -311,11 +322,7 @@ impl Drop for ActiveSlot {
 impl SourceCapture {
     /// Charges a consented pass's native window for capture. `None` for an empty window, and when the window bound or the budget refuses it; a refusal is counted and retains nothing.
     pub(crate) fn offer(self: &Arc<Self>, offer: Offer) -> Option<CaptureHandoff> {
-        let harness = match offer.profile {
-            SerializerProfile::Pi => Harness::Pi,
-            SerializerProfile::OpencodeAiSdk => Harness::OpenCode,
-            _ => return None,
-        };
+        let harness = profile_harness(offer.profile)?;
         if offer.window.is_empty() {
             return None;
         }
@@ -758,89 +765,100 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
 }
 
 /// Live descriptors one session-retirement page retires.
-const SESSION_RETIREMENT_PAGE: usize = 256;
+pub(crate) const SESSION_RETIREMENT_PAGE: usize = 256;
 /// How long a session-retirement preview waits for a pooled reader.
 const SESSION_RETIREMENT_WAIT: Duration = Duration::from_secs(5);
 /// Leads the bytes a session-retirement page's receipt key binds.
 const SESSION_RETIREMENT_FORMAT: &str = "source-session-retire.v1";
 
-/// Retires every live `messages` and `raw_tool_spans` descriptor whose identity names `project_id`, `harness`, and `session_id`, and returns how many retired. Each page of at most [`SESSION_RETIREMENT_PAGE`] descriptors is one commit keyed by the session and the page's sorted object ids, never the clock, so a retry after a lost reply replays a committed page and the next inventory lists only what is still live. The caller holds the capture commit gate, so no capture publication interleaves with the inventory.
+/// One captured session: the identity fields its `messages` and `raw_tool_spans` descriptors name.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CapturedSession<'a> {
+    pub(crate) project_id: &'a str,
+    pub(crate) harness: &'a str,
+    pub(crate) session_id: &'a str,
+}
+
+/// Retires every live `messages` and `raw_tool_spans` descriptor of `session`, at most `pages` pages of at most `page_rows` descriptors, and returns whether none remains live. Each page is one commit that retires the rows its inventory listed, so a retry inventories again and finds only what is still live. A page's receipt is keyed by the session and the page's sorted object ids, never the clock ([`session_page_intent`]); a page that replays means the inventory listed rows a committed page retired, which is [`KernelError::Conflict`]. The caller holds the capture commit gate, so no capture publication interleaves; the maintenance expiry sweep can retire listed rows first, and the page then retires the rest.
 ///
 /// # Errors
 ///
-/// Returns the first inventory or commit error; pages committed before it stay retired, and the next call continues from what is still live.
-pub(crate) fn retire_session_sources(
+/// Returns the first inventory or commit error; pages committed before it stay retired.
+pub(crate) fn retire_session_pages(
     store: &KernelStore,
-    project_id: &str,
-    harness: &str,
-    session_id: &str,
-) -> Result<usize, KernelError> {
-    let mut retired = 0;
-    loop {
+    session: CapturedSession<'_>,
+    page_rows: std::num::NonZeroUsize,
+    pages: usize,
+) -> Result<bool, KernelError> {
+    for _ in 0..pages {
         let (_, page) = store.preview(Instant::now() + SESSION_RETIREMENT_WAIT, |preview| {
-            session_page(preview, project_id, harness, session_id)
+            session_page(preview, session, page_rows)
         })?;
         if page.is_empty() {
-            return Ok(retired);
+            return Ok(true);
         }
-        let mut bytes = Vec::new();
-        for part in [SESSION_RETIREMENT_FORMAT, project_id, harness, session_id]
-            .into_iter()
-            .chain(page.iter().map(String::as_str))
-        {
-            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(part.as_bytes());
-        }
-        let digest = kernel::source_identity::identity_digest(&bytes);
-        let receipt = store.commit(
-            CommitIntent {
-                producer: PRODUCER.to_owned(),
-                operation_key: format!("source-session-retire:{digest}"),
-                request_digest: digest,
-                actor: harness.to_owned(),
-                cause: "session deleted".to_owned(),
-            },
-            |envelope| crate::harness_sources::retire_descriptors(envelope, &page),
-        )?;
-        // A committed page retired its rows, so an inventory that lists them again is not the store this loop reads.
+        let receipt = store.commit(session_page_intent(session, &page), |envelope| {
+            crate::harness_sources::retire_descriptors(envelope, &page)
+        })?;
         if receipt.replayed {
             return Err(KernelError::Conflict);
         }
-        retired += page.len();
+    }
+    Ok(false)
+}
+
+/// The receipt of one session-retirement page: keyed and fingerprinted by the format tag, the session's identity fields, and the page's sorted object ids.
+pub(crate) fn session_page_intent(session: CapturedSession<'_>, page: &[String]) -> CommitIntent {
+    let mut bytes = Vec::new();
+    for part in [
+        SESSION_RETIREMENT_FORMAT,
+        session.project_id,
+        session.harness,
+        session.session_id,
+    ]
+    .into_iter()
+    .chain(page.iter().map(String::as_str))
+    {
+        bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    let digest = kernel::source_identity::identity_digest(&bytes);
+    CommitIntent {
+        producer: PRODUCER.to_owned(),
+        operation_key: format!("source-session-retire:{digest}"),
+        request_digest: digest,
+        actor: session.harness.to_owned(),
+        cause: "session deleted".to_owned(),
     }
 }
 
-/// Up to [`SESSION_RETIREMENT_PAGE`] live captured descriptors of the session, sorted by object id.
+/// Up to `page_rows` live captured descriptors of `session`, sorted by object id.
 fn session_page(
     preview: &kernel::Envelope<'_>,
-    project_id: &str,
-    harness: &str,
-    session_id: &str,
+    session: CapturedSession<'_>,
+    page_rows: std::num::NonZeroUsize,
 ) -> Result<Vec<String>, KernelError> {
     let mut page = Vec::new();
     for class in [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans] {
         let mut after = None;
-        while page.len() < SESSION_RETIREMENT_PAGE {
+        while let Some(room) = std::num::NonZeroUsize::new(page_rows.get() - page.len()) {
             let rows = preview.live_source_descriptors_with(
                 class,
                 "session_id",
-                &[session_id],
+                &[session.session_id],
                 after.as_deref(),
-                std::num::NonZeroUsize::new(SESSION_RETIREMENT_PAGE).expect("a nonzero page"),
+                room,
             )?;
             page.extend(
                 rows.rows
-                    .into_iter()
+                    .iter()
                     .filter(|row| {
-                        let identity = &row.detail.identity;
-                        identity
-                            .iter()
-                            .any(|(name, value)| name == "project_id" && value == project_id)
-                            && identity
-                                .iter()
-                                .any(|(name, value)| name == "harness" && value == harness)
+                        crate::git_reconcile::identity_field(row, "project_id")
+                            == Some(session.project_id)
+                            && crate::git_reconcile::identity_field(row, "harness")
+                                == Some(session.harness)
                     })
-                    .map(|row| row.object_id),
+                    .map(|row| row.object_id.clone()),
             );
             match rows.next {
                 Some(next) => after = Some(next),
@@ -848,7 +866,6 @@ fn session_page(
             }
         }
     }
-    page.truncate(SESSION_RETIREMENT_PAGE);
     page.sort();
     Ok(page)
 }
