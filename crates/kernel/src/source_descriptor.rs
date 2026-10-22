@@ -79,7 +79,7 @@ pub struct SourceDescriptorRequest<'a> {
     pub buffer: &'a str,
     pub sensitivity: Sensitivity,
     pub observed_at: i64,
-    /// The highest revision the caller observed in this lineage, retired rows included; `None` when it observed no revision. A `repository_documents` publication commits only while the lineage's historical head still equals it, and its revision starts at 1. Every other class passes `None`; a value is invalid input.
+    /// The highest revision the caller observed in this lineage, retired rows included; `None` when it observed no revision. A `repository_documents` publication commits only while the lineage's historical head still equals it, and its revision starts at 1 and exceeds that head. The producer keeps revisions contiguous by proposing the head plus one. Every other class passes `None`; a value is invalid input.
     pub expected_head: Option<i64>,
 }
 

@@ -2095,11 +2095,11 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
     assert_eq!(
         fixture
             .publish(
-                "doc-4-foreign",
+                "doc-2-foreign",
                 &SourceDescriptorRequest {
                     domain_id: "other-domain",
-                    expected_head: Some(3),
-                    ..request(document("4"), &evidence[3], texts[3])
+                    expected_head: Some(2),
+                    ..request(document("2"), &evidence[1], texts[1])
                 },
             )
             .err(),
@@ -2149,6 +2149,67 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
     );
     fixture
         .publish("structure-1", &request(other("1"), &evidence[0], texts[0]))
+        .unwrap();
+
+    // Two producers read head 1 and both propose 2: the second is refused as stale, and a fresh read of the head publishes 3.
+    let structure = encode(&other("2"), texts[1]).unwrap().lineage_id;
+    let observed = fixture.store.source_lineage_head(&structure).unwrap();
+    assert_eq!(observed, Some(1));
+    fixture
+        .publish(
+            "structure-2-first",
+            &SourceDescriptorRequest {
+                expected_head: observed,
+                ..request(other("2"), &evidence[1], texts[1])
+            },
+        )
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .publish(
+                "structure-2-second",
+                &SourceDescriptorRequest {
+                    expected_head: observed,
+                    ..request(other("2"), &evidence[2], texts[2])
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    let fresh = fixture.store.source_lineage_head(&structure).unwrap();
+    assert_eq!(fresh, Some(2));
+    fixture
+        .publish(
+            "structure-3",
+            &SourceDescriptorRequest {
+                expected_head: fresh,
+                ..request(other("3"), &evidence[2], texts[2])
+            },
+        )
+        .unwrap();
+
+    // An empty lineage starts at 1: revision 0 is refused there too.
+    const NEW_DOC: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("repository_id", "repo-0"),
+        ("relative_path", "docs/NEW.md"),
+    ];
+    let fresh_path = |revision| Occurrence {
+        identity: NEW_DOC,
+        ..document(revision)
+    };
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .publish("new-0", &request(fresh_path("0"), &evidence[0], texts[0]))
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    fixture
+        .publish("new-1", &request(fresh_path("1"), &evidence[0], texts[0]))
         .unwrap();
 
     // Other classes name no head.

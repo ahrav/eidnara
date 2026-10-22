@@ -2549,6 +2549,8 @@ fn repository_documents_publish_untrusted_supersede_and_project() {
     for (revision, refusal) in [
         ("0", SourceDescriptorError::RevisionNotAdvanced),
         ("5", SourceDescriptorError::HeadMismatch),
+        // A counter is never judged against the clock: a far revision is a head mismatch, never a revision lead.
+        ("99999999999999", SourceDescriptorError::HeadMismatch),
     ] {
         let refused = publisher.publish(
             &document_unit("ARCHITECTURE.md", revision, "# again\n"),
