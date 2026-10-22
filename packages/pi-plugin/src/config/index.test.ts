@@ -409,27 +409,6 @@ describe("loadPiConfig", () => {
                 read: (config) => config.storage.enforce_private_permissions,
                 expected: false,
             },
-            {
-                key: "source_capture",
-                user: { source_capture: { enabled: false } },
-                project: { source_capture: { enabled: true } },
-                read: (config) => config.source_capture?.enabled,
-                expected: false,
-            },
-            {
-                key: "source_capture",
-                user: { source_capture: { enabled: true } },
-                project: { source_capture: { enabled: false } },
-                read: (config) => config.source_capture?.enabled,
-                expected: true,
-            },
-            {
-                key: "source_capture",
-                user: {},
-                project: { source_capture: { enabled: true } },
-                read: (config) => config.source_capture?.enabled,
-                expected: false,
-            },
         ];
         for (const row of rows) {
             const cwd = makeTempRoot("eidnara-pi-cwd-");
@@ -760,13 +739,13 @@ describe("source-capture parity fixture", () => {
             expect({
                 name: row.name,
                 enabled: result.config.source_capture?.enabled,
-                warned: result.warnings.some((warning) =>
+                warned: result.warnings.filter((warning) =>
                     warning.includes("Ignoring source_capture from project config"),
-                ),
+                ).length,
             }).toEqual({
                 name: row.name,
                 enabled: row.expected_enabled,
-                warned: row.expected_project_warning,
+                warned: row.expected_project_warning ? 1 : 0,
             });
         }
     });

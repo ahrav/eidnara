@@ -76,6 +76,11 @@ describe("stripUnsafeProjectConfigFields", () => {
                 expect.stringContaining("Ignoring source_capture from project config"),
             ]);
         }
+        for (const sourceCapture of [{}, true, null]) {
+            const raw: Record<string, unknown> = { source_capture: sourceCapture };
+            expect(stripUnsafeProjectConfigFields(raw)).toEqual([]);
+            expect(raw).toEqual({});
+        }
     });
 
     it("strips sqlite.* from project config (resource-exhaustion vector)", () => {

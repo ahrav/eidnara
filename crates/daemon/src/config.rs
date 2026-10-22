@@ -2218,53 +2218,6 @@ mod tests {
         }
     }
 
-    /// `source_capture.enabled` defaults off, parses from the user tier, and is
-    /// ignored with the user-only warning from the project tier in either
-    /// direction.
-    #[test]
-    fn source_capture_is_a_user_only_switch_that_defaults_off() {
-        assert!(!DaemonConfig::default().source_capture_enabled);
-        assert_eq!(
-            ConfigKey::SourceCaptureEnabled.pointer(),
-            "/source_capture/enabled"
-        );
-        assert!(matches!(
-            ConfigKey::SourceCaptureEnabled.tier_class(),
-            TierClass::UserOnly
-        ));
-
-        let (unset, warnings) = merge_tiers_with_warnings(Some(&serde_json::json!({})), None);
-        assert!(!unset.source_capture_enabled);
-        assert!(warnings.is_empty(), "{warnings:?}");
-
-        let on = serde_json::json!({ "source_capture": { "enabled": true } });
-        let off = serde_json::json!({ "source_capture": { "enabled": false } });
-        let (user_on, warnings) = merge_tiers_with_warnings(Some(&on), None);
-        assert!(user_on.source_capture_enabled);
-        assert!(warnings.is_empty(), "{warnings:?}");
-
-        for (user, project, expected) in [(&off, &on, false), (&on, &off, true)] {
-            let (cfg, warnings) = merge_tiers_with_warnings(Some(user), Some(project));
-            assert_eq!(cfg.source_capture_enabled, expected);
-            assert_eq!(
-                warnings,
-                vec![
-                    "ignoring /source_capture/enabled from project tier; setting is user-tier only"
-                        .to_string()
-                ]
-            );
-        }
-
-        let (malformed, _) = merge_tiers_with_warnings(
-            Some(&serde_json::json!({ "source_capture": { "enabled": "yes" } })),
-            None,
-        );
-        assert!(
-            !malformed.source_capture_enabled,
-            "a non-boolean leaves the default"
-        );
-    }
-
     /// A project tier that sets every key the merge reads changes no privileged
     /// value and warns once per key it cannot set.
     #[test]
@@ -3288,13 +3241,17 @@ mod source_capture_parity {
                 "{}",
                 row["name"]
             );
-            assert_eq!(
-                warnings
-                    .iter()
-                    .any(|warning| warning.contains("/source_capture/enabled from project tier")),
+            let expected_warnings = usize::from(
                 row["expected_project_warning"]
                     .as_bool()
                     .expect("expected_project_warning"),
+            );
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|warning| warning.contains("/source_capture/enabled from project tier"))
+                    .count(),
+                expected_warnings,
                 "{}: {warnings:?}",
                 row["name"]
             );

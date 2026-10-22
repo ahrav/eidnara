@@ -2315,3 +2315,79 @@ fn capture_batch_names_the_unit_whose_receipt_conflicts() {
     let dispositions = publish_screened(&publisher, &units[..1], NOW, None).unwrap();
     assert!(!published(&dispositions[0]).replayed);
 }
+
+/// Refused and oversized units take no admission slot: 32 valid units around them all publish.
+#[test]
+fn capture_batch_refusals_take_no_admission_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let mut units: Vec<SourceUnit> = (0..MAX_SOURCE_BATCH_UNITS)
+        .map(|index| pi_text_unit(&format!("pi-{index}"), &format!("unit {index}")))
+        .collect();
+    let mut malformed = pi_text_unit("pi-malformed", "refused identity");
+    malformed.identity[2].1 = "s".repeat(600);
+    units.insert(10, pi_text_unit("pi-big", &"b".repeat(MAX_SOURCE_UNIT_BYTES + 1)));
+    units.insert(20, malformed);
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(matches!(dispositions[10], UnitDisposition::UnitTooLarge));
+    assert!(matches!(
+        dispositions[20],
+        UnitDisposition::Refused(PublishError::Descriptor { .. })
+    ));
+    let published = dispositions
+        .iter()
+        .filter(|disposition| matches!(disposition, UnitDisposition::Published(_)))
+        .count();
+    assert_eq!(published, MAX_SOURCE_BATCH_UNITS);
+    assert!(
+        !dispositions
+            .iter()
+            .any(|disposition| matches!(disposition, UnitDisposition::Deferred))
+    );
+}
+
+/// A unit whose project the publisher's stored scope does not name is refused on its own before the transaction; its sibling publishes.
+#[test]
+fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let mut foreign = pi_text_unit("pi-foreign", "another project");
+    foreign.identity[0].1 = "b".repeat(64);
+    let units = [foreign, pi_text_unit("pi-home", "this project")];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(
+        matches!(
+            &dispositions[0],
+            UnitDisposition::Refused(PublishError::Kernel {
+                error: kernel::KernelError::NotFound,
+                evidence: None,
+            })
+        ),
+        "{:?}",
+        dispositions[0]
+    );
+    assert!(!published(&dispositions[1]).replayed);
+    assert_eq!(evidence_rows(&corpus).0, 1, "the foreign unit retained nothing");
+}
+
+/// Two units of one identity and revision with different bytes in one window claim one receipt key: the attempt commits nothing and names the second unit as the conflict.
+#[test]
+fn capture_batch_names_a_unit_that_conflicts_inside_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let tip = corpus.tip();
+    let units = [
+        pi_text_unit("pi-twice", "first bytes"),
+        pi_text_unit("pi-twice", "second bytes"),
+    ];
+    let refusal = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap_err();
+    assert_eq!(refusal.conflicting_unit(), Some(1), "{refusal:?}");
+    assert_eq!(corpus.tip(), tip, "nothing committed");
+    assert_eq!(evidence_rows(&corpus).0, 0);
+
+    let dispositions = publish_screened(&corpus.publisher(), &units[..1], NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+}

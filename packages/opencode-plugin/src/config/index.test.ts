@@ -1086,13 +1086,13 @@ describe("source-capture parity fixture", () => {
             expect({
                 name: row.name,
                 enabled: result.config.source_capture?.enabled,
-                warned: (result.config.configWarnings ?? []).some((warning) =>
+                warned: (result.config.configWarnings ?? []).filter((warning) =>
                     warning.includes("Ignoring source_capture from project config"),
-                ),
+                ).length,
             }).toEqual({
                 name: row.name,
                 enabled: row.expected_enabled,
-                warned: row.expected_project_warning,
+                warned: row.expected_project_warning ? 1 : 0,
             });
         }
     });
