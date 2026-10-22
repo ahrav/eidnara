@@ -1197,3 +1197,105 @@ async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
     drop(held);
     assert_eq!(report(&handler)["retained_bytes"], 0);
 }
+
+/// C2: the memo keys and digests a job builds are copies the budget charges. A window whose adapter copies fit the remaining budget but whose keys do not ends resident short and publishes nothing.
+#[tokio::test]
+async fn identity_keys_past_the_remaining_budget_end_resident_short() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let filler = vec![Arc::new(json!("x".repeat(9 * 1024 * 1024)))];
+    let held = handler
+        .source_capture
+        .offer(source_capture::Offer {
+            profile: SerializerProfile::OpencodeAiSdk,
+            session_id: SESSION.to_owned(),
+            project: binding,
+            window: filler,
+            epoch: handler.source_capture.epoch(),
+        })
+        .expect("the filler fits");
+    let parts: Vec<Value> = (0..9_000)
+        .map(|_| json!({ "type": "text", "text": "" }))
+        .collect();
+    let window = [json!({
+        "info": { "id": "m".repeat(500), "sessionID": SESSION, "role": "user",
+                  "time": { "created": 1_700_000_000_000u64 } },
+        "parts": parts,
+    })];
+    let tip = kernel_store(&handler).tip().unwrap();
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::RefusedResidentShort);
+    assert_eq!(kernel_store(&handler).tip().unwrap(), tip);
+    assert_eq!(report(&handler)["units_published"], 0);
+    drop(held);
+    assert_eq!(report(&handler)["retained_bytes"], 0);
+}
+
+/// D13: a same-key conflict inside the commit makes that unit terminal and leaves its sibling pending, so the report shows the sibling's age and the next pass publishes it from the memo's pending set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conflict_in_the_commit_leaves_the_sibling_pending() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_seed", 1_700_000_000_000, "seed")],
+            "base-0",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let session = crate::harness_sources::SessionIdentity {
+        project_id: binding.digest().to_owned(),
+        harness: crate::harness_sources::Harness::OpenCode,
+        session_id: SESSION.to_owned(),
+    };
+    let raced = opencode_user("msg_raced", 1_700_000_000_100, "raced");
+    let unit = crate::harness_sources::opencode_units(&session, &raced)
+        .unwrap()
+        .remove(0);
+    let (racing_store, scope_id) = (Arc::clone(&store), binding.scope_id());
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        crate::harness_sources::SourcePublisher {
+            kernel: &racing_store,
+            domain_id: "harness-capture",
+            scope_id: Some(&scope_id),
+            egress: kernel::ProviderEgress::LocalOnly,
+            sensitivity: kernel::Sensitivity::Normal,
+        }
+        .publish(&unit, now_ms())
+        .unwrap();
+    }));
+    let window = [
+        raced,
+        opencode_user("msg_sibling", 1_700_000_000_200, "a clean sibling"),
+    ];
+    pass(&handler, transform_with(&window, "base-1")).await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
+    assert_eq!(report(&handler)["kernel_error"], 1);
+    assert!(
+        report(&handler)["oldest_deferred_age_ms"].is_u64(),
+        "the sibling waits as pending: {}",
+        report(&handler)
+    );
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+    pass(&handler, transform_with(&window, "base-2")).await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_published"], 2);
+    assert_eq!(
+        report(&handler)["units_memo_skipped"],
+        1,
+        "the memo answers for the terminal unit"
+    );
+    assert_eq!(report(&handler)["oldest_deferred_age_ms"], Value::Null);
+    let published: Vec<String> = live(&store, OccurrenceClass::Messages)
+        .iter()
+        .map(|row| identity_of(row)[3].1.to_owned())
+        .collect();
+    assert!(
+        published.contains(&"msg_sibling".to_owned()),
+        "{published:?}"
+    );
+}

@@ -542,7 +542,7 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
-        let Some((units, _copies)) = self.units() else {
+        let Some((units, mut copies)) = self.units() else {
             return self.end(Count::RefusedResidentShort);
         };
         if units.is_empty() {
@@ -561,19 +561,22 @@ impl CaptureJob {
             sensitivity: Sensitivity::Sensitive,
         };
         // A memo key names the unit's native identity in class field order with its revision and representation; `well_formed_value` rejects control characters, so U+001F separates encodable identity fields unambiguously.
-        let identities: Vec<(String, String)> = units
-            .iter()
-            .map(|unit| {
-                let fields = unit.class.identity_fields().iter();
-                let key = [incarnation.as_str(), unit.class.code(), &unit.revision]
-                    .into_iter()
-                    .chain([unit.representation.as_str()])
-                    .chain(fields.map(|field| unit.identity_value(field).unwrap_or_default()))
-                    .collect::<Vec<_>>()
-                    .join("\u{1f}");
-                (key, publisher.request_digest(unit))
-            })
-            .collect();
+        let mut identities: Vec<(String, String)> = Vec::with_capacity(units.len());
+        for unit in &units {
+            let fields = unit.class.identity_fields().iter();
+            let key = [incarnation.as_str(), unit.class.code(), &unit.revision]
+                .into_iter()
+                .chain([unit.representation.as_str()])
+                .chain(fields.map(|field| unit.identity_value(field).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            let digest = publisher.request_digest(unit);
+            // `seen` holds a second copy of the key and digest.
+            if !copies.admit(2 * (key.len() + digest.len())) {
+                return self.end(Count::RefusedResidentShort);
+            }
+            identities.push((key, digest));
+        }
         let found: Vec<Option<bool>> = {
             let memo = self.capture.memo();
             let known = |(key, digest): &(String, String)| {
@@ -687,13 +690,24 @@ impl CaptureJob {
                 self.end(Count::Completed)
             }
             Err(refusal) => {
-                // A same-key conflict is terminal for its unit; every other unit stays pending for the next pass.
-                if let Some(index) = refusal.conflicting_unit()
-                    && let Some(Some((key, digest))) = keys.get(index)
-                {
-                    counters.add(Count::UnitsIdentityConflict, 1);
-                    memo.record(key.clone(), digest.clone(), Disposition::Terminal);
-                    log("unit terminal", Count::UnitsIdentityConflict, 1);
+                let culprit = refusal.conflicting_unit();
+                for (index, key) in keys.iter().enumerate() {
+                    let Some((key, digest)) = key else {
+                        continue;
+                    };
+                    if culprit == Some(index) {
+                        counters.add(Count::UnitsIdentityConflict, 1);
+                        memo.record(key.clone(), digest.clone(), Disposition::Terminal);
+                        log("unit terminal", Count::UnitsIdentityConflict, 1);
+                    } else {
+                        memo.record(
+                            key.clone(),
+                            digest.clone(),
+                            Disposition::Pending {
+                                since_ms: observed_at,
+                            },
+                        );
+                    }
                 }
                 drop(memo);
                 self.end(kernel_end(refusal.error))
@@ -702,7 +716,7 @@ impl CaptureJob {
     }
 
     /// Every unit of the window, in record order, with the charges for copies beyond the window share the offer charged; a record the adapter refuses contributes none and is counted. `None` once the budget refuses a unit's copy, which the adapter drops before building the next one.
-    fn units(&self) -> Option<(Vec<SourceUnit>, Vec<RetainedCharge>)> {
+    fn units(&self) -> Option<(Vec<SourceUnit>, CopyCharge<'_>)> {
         let mut units = Vec::new();
         let mut refused = 0;
         let mut copies = CopyCharge {
@@ -731,7 +745,7 @@ impl CaptureJob {
             self.capture.counters.add(Count::AdapterRefused, refused);
             log("adapter", Count::AdapterRefused, refused);
         }
-        (!stopped).then_some((units, copies.top_ups))
+        (!stopped).then_some((units, copies))
     }
 
     /// Materializes the capture domain and the project's scope; the receipt makes every later attempt a replay.
