@@ -6880,8 +6880,11 @@ fn sel_item_from_flat<'a>(
             name: name.clone(),
             input: Cow::Borrowed(input),
         },
-        wire::BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
+        wire::BlockKind::ToolResult {
+            tool_name, output, ..
+        } => SelKind::ToolResult {
             tool_name: tool_name.clone(),
+            output: Some(output),
         },
         wire::BlockKind::Reasoning { .. } => SelKind::Reasoning,
         wire::BlockKind::Text { .. } => SelKind::Text,

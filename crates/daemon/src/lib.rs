@@ -18019,6 +18019,10 @@ fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
         },
         "tool_result" => SelKind::ToolResult {
             tool_name: block.name.clone().unwrap_or_default(),
+            output: match block.wire.kind() {
+                crate::wire::BlockKind::ToolResult { output, .. } => Some(output),
+                _ => None,
+            },
         },
         "reasoning" => SelKind::Reasoning,
         "redacted_reasoning" => SelKind::RedactedReasoning,

@@ -169,37 +169,52 @@ measured separately under one named estimator.
 
 ### Tool outcome digest
 
-The summarizer sees each tool result as one digest, never as its full
-output:
+The summarizer sees each tool result as one digest:
 
 ```text
-TC: <name>(<key arg>); <status>[; exit=N]; bytes=N[; head="…"][; tail="…"]
+<call>; <status>[; exit=N]; bytes=N[; head="…"][; tail="…"]
 ```
 
-`crates/daemon/src/tool_outcome.rs` builds it from the result's wire block
-through the same extractor capture publication uses. `status` is `completed`
-or `error` from the output variant; a denied execution is `error`. `bytes` is
-the output's UTF-8 length. `head` and `tail` are the first and last nonblank
-lines, each at most 128 bytes (the claim-value bound) and cut on a character
-boundary with a `…` clip marker; one nonblank line is `head` alone. A double
-quote or a citation-marker bracket inside an excerpt becomes a single quote.
-The wire block carries no harness metadata, so the summarizer's digest names
-no exit code. The whole digest is at most 1 KiB, and no output byte outside
-the two excerpts reaches the summarizer.
+`<call>` is the call's `TC:` summary: `TC: <description>`, `TC: <name>(<key
+arg>)`, or `TC: <name>`, and `TC: <tool name>` for a result whose call is
+not in the chunk. `crates/daemon/src/tool_outcome.rs` reads the result's
+status and text from its wire block with `from_output`, and `outcome_digest`
+and `digest` render the rest:
 
-Both `TC:` sites render the digest through this one formatter. The chunk
-builder shows it for each result: under its call's summary on a
-result-only message, and after the narrative of a message that holds both
-the call and the result, as an OpenCode assistant message does. The boundary
-chunk shows it for a call whose result is in its message set and the bare
-`TC:` line otherwise. Each digest is a presented part frozen `transformed`
-under its `sN` alias, so a citation through it addresses digest bytes, and
-an alias a budget cut reaches is withdrawn.
+- `status` is `completed` or `error`. An error output variant or a denied
+  execution is `error`.
+- `exit=N` appears when the record carries an exit code. The summarizer reads
+  wire blocks, whose records hold status and text only, so its digests show
+  `status` and `bytes`.
+- `bytes` is the byte length of the result's text: a text variant as is, a
+  JSON value serialized, content blocks' text joined by newlines, or a
+  denial's reason.
+- `head` and `tail` are the first and last nonblank lines with trailing
+  whitespace trimmed; one nonblank line is `head` alone. A double quote or a
+  citation-marker bracket in a line becomes a single quote, and each excerpt
+  is then clipped to 128 bytes (the claim-value bound) on a character
+  boundary with a `…` clip marker.
+- The whole digest is at most 1 KiB; a longer call summary is clipped the
+  same way. Output bytes reach the summarizer only through the two excerpts.
 
-C5's bash result is the witness: the tool `completed`, and its `tail` carries
-the `connection refused` line the inference rests on. The replay exposure
-model renders the same digests, so a span annotated on a tool block stays
-`absent` while the excerpts reach the producer.
+Both `TC:` sites render the digest through this one formatter and the one
+call-summary formatter. The chunk builder shows it for each result: under
+its call's summary on a result-only message, and after the narrative of a
+message that holds both the call and the result, as an OpenCode assistant
+message does. The boundary chunk shows it for a call whose result is in its
+message set; on a message without narrative, a call whose result is not in
+the set shows its bare `TC:` line, and a message with narrative shows only
+its answered calls' digests.
+
+In the chunk builder, a digest joins its message's presented part, frozen
+`transformed` under that part's `sN` alias, so a citation through it
+addresses digest bytes, and an alias a budget cut reaches is withdrawn.
+
+C5's bash result is the witness: the tool `completed`, and its `tail`
+carries the `connection refused` line the inference rests on. The replay
+exposure model appends the same digests after the text of each record that
+carries text, so a span annotated on a tool block stays `absent` while the
+excerpts reach the producer.
 
 ### Fixture qualification
 
