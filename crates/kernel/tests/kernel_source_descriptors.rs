@@ -2457,3 +2457,101 @@ fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
         })
         .unwrap();
 }
+
+/// One escape-free value reads its descriptors through the payload search: a row whose payload holds the value's text in another identity field, or inside a longer value, is not a match, and the result equals the JSON narrowing a two-value set takes. Paging by one row walks the matches in object id order, the commit's own retirement is seen, and a value no payload holds answers an empty last page.
+#[test]
+fn a_writer_reads_one_escape_free_identity_value_through_the_payload_search() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let tool =
+        |parent: &'static str, tool_call_id: &'static str| -> Vec<(&'static str, &'static str)> {
+            TOOL.iter()
+                .map(|&(name, value)| match name {
+                    "parent_message_id" => (name, parent),
+                    "tool_call_id" => (name, tool_call_id),
+                    _ => (name, value),
+                })
+                .collect()
+        };
+    let mut wanted = Vec::new();
+    for (key, parent, tool_call_id) in [
+        ("b-1", "msg-1", "call-b"),
+        ("b-2", "msg-2", "call-b"),
+        ("longer", "msg-3", "call-bb"),
+        ("parent", "call-b", "call-x"),
+        ("other", "msg-4", "call-c"),
+    ] {
+        let identity = tool(parent, tool_call_id);
+        let (published, _, _) = fixture
+            .publish(
+                key,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                ),
+            )
+            .unwrap();
+        if tool_call_id == "call-b" {
+            wanted.push(published.object_id);
+        }
+    }
+    wanted.sort();
+    let one = std::num::NonZeroUsize::new(1).unwrap();
+    let read =
+        |envelope: &kernel::Envelope<'_>, values: &[&str]| -> Result<Vec<String>, KernelError> {
+            let mut found = Vec::new();
+            let mut after = None;
+            loop {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    values,
+                    after.as_deref(),
+                    one,
+                )?;
+                found.extend(page.rows.into_iter().map(|row| row.object_id));
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => return Ok(found),
+                }
+            }
+        };
+    fixture
+        .store
+        .commit(intent("read-one"), |envelope| {
+            assert_eq!(
+                read(envelope, &["call-b"])?,
+                wanted,
+                "exactly the matching rows"
+            );
+            assert_eq!(
+                read(envelope, &["call-b", "call-none"])?,
+                wanted,
+                "the JSON narrowing agrees"
+            );
+            envelope.retire_observation(&wanted[0])?;
+            assert_eq!(
+                read(envelope, &["call-b"])?,
+                wanted[1..],
+                "the commit's own retirement is seen"
+            );
+            let page = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                &["call-none"],
+                None,
+                one,
+            )?;
+            assert!(page.rows.is_empty() && page.next.is_none());
+            Ok(String::new())
+        })
+        .unwrap();
+}

@@ -718,6 +718,20 @@ impl KernelStore {
         after: Option<&str>,
         max_rows: std::num::NonZeroUsize,
     ) -> Result<LiveDescriptorPage, KernelError> {
+        let candidates = match narrowing.and_then(|narrowing| narrowing.needle) {
+            Some(needle) => needle_candidates(tx, needle, after.unwrap_or(""))?,
+            None => None,
+        };
+        if candidates.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(LiveDescriptorPage {
+                rows: Vec::new(),
+                next: None,
+            });
+        }
+        let candidates = candidates
+            .map(|ids| serde_json::to_string(&ids))
+            .transpose()
+            .map_err(|_| KernelError::InvalidInput)?;
         let limit = i64::try_from(max_rows.get())
             .unwrap_or(i64::MAX)
             .saturating_add(1);
@@ -726,6 +740,7 @@ impl KernelStore {
             "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
                     o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
              {rows}
+               AND (?6 IS NULL OR o.object_id IN (SELECT value FROM json_each(?6)))
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
                AND o.object_id>?3
@@ -744,7 +759,8 @@ impl KernelStore {
                     requested,
                     after.unwrap_or(""),
                     narrowing.map(|narrowing| narrowing.path.as_str()),
-                    narrowing.map(|narrowing| narrowing.values.as_str())
+                    narrowing.map(|narrowing| narrowing.values.as_str()),
+                    candidates
                 ],
                 |row| {
                     Ok(LiveDescriptorRaw {
@@ -801,7 +817,7 @@ impl KernelStore {
 }
 
 impl Envelope<'_> {
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows. For one value that needs no JSON escape, a sequential pass over the stored payloads first keeps the rows that contain the value's text, and the field is read only from those; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
     ///
     /// # Errors
     ///
@@ -823,6 +839,10 @@ impl Envelope<'_> {
         let narrowing = Narrowing {
             path: format!("$.identity[{position}][1]"),
             values: serde_json::to_string(values).map_err(|_| KernelError::InvalidInput)?,
+            needle: match values {
+                [value] if value.bytes().all(|byte| !needs_json_escape(byte)) => Some(*value),
+                _ => None,
+            },
         };
         KernelStore::live_descriptor_page(
             self.tx,
@@ -836,7 +856,52 @@ impl Envelope<'_> {
 }
 
 /// An identity value set a page matches in each stored detail: the JSON path of the field's value and the values as a JSON array.
-struct Narrowing {
+struct Narrowing<'v> {
     path: String,
     values: String,
+    /// Text every matching stored payload contains, which [`needle_candidates`] searches for before the page parses any JSON. A single value qualifies when none of its bytes needs a JSON escape: the payload is the JSON text of an object whose `detail` string holds the detail's JSON text, and JSON serialization keeps such a value's bytes verbatim at both levels.
+    needle: Option<&'v str>,
+}
+
+fn needs_json_escape(byte: u8) -> bool {
+    byte == b'"' || byte == b'\\' || byte < 0x20
+}
+
+/// The most candidate ids [`needle_candidates`] collects; past it, the page narrows by the stored field alone.
+const NEEDLE_CANDIDATES: usize = 65_536;
+
+/// The descriptor object ids past `after` whose stored payload may contain `needle`, read in one sequential pass over the observation rows of every class, or `None` past [`NEEDLE_CANDIDATES`]. The page decides the class, liveness, and the exact identity match.
+fn needle_candidates(
+    tx: &rusqlite::Transaction<'_>,
+    needle: &str,
+    after: &str,
+) -> Result<Option<Vec<String>>, KernelError> {
+    let mut statement = tx
+        .prepare_cached(&format!(
+            "SELECT object_id,observation_payload FROM observations NOT INDEXED
+             WHERE observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+               AND object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*' AND object_id>?1"
+        ))
+        .map_err(map_sqlite)?;
+    let mut rows = statement.query([after]).map_err(map_sqlite)?;
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next().map_err(map_sqlite)? {
+        let payload = row
+            .get_ref(1)
+            .map_err(map_sqlite)?
+            .as_bytes()
+            .map_err(|_| KernelError::CorruptCanonicalRow)?;
+        let contains = match std::str::from_utf8(payload) {
+            Ok(text) => text.contains(needle),
+            Err(_) => true,
+        };
+        if !contains {
+            continue;
+        }
+        if candidates.len() == NEEDLE_CANDIDATES {
+            return Ok(None);
+        }
+        candidates.push(row.get::<_, String>(0).map_err(map_sqlite)?);
+    }
+    Ok(Some(candidates))
 }
