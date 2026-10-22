@@ -236,7 +236,10 @@ impl<'a> Builder<'a> {
         }
 
         if message.role == "tool" && !has_text_parts(message) {
-            let summaries = extract_tool_result_summaries(message, &self.tool_call_summaries);
+            let summaries = tool_parts(message, &self.tool_call_summaries, true)
+                .into_iter()
+                .map(|(part, _)| part)
+                .collect::<Vec<_>>();
             if summaries.is_empty() {
                 self.pending_noise_meta.push(meta);
                 return true;
@@ -245,7 +248,10 @@ impl<'a> Builder<'a> {
         }
 
         if message.role == "user" && !has_meaningful_user_text(message) {
-            let tc_summaries = extract_tool_call_summaries(message);
+            let tc_summaries = tool_parts(message, &self.tool_call_summaries, true)
+                .into_iter()
+                .map(|(part, _)| part)
+                .collect::<Vec<_>>();
             if tc_summaries.is_empty() {
                 self.pending_noise_meta.push(meta);
                 return true;
@@ -255,14 +261,21 @@ impl<'a> Builder<'a> {
 
         let role = compact_role(message.role);
         let text_parts = text_parts(message);
-        let tool_summaries = if text_parts.is_empty() {
-            extract_tool_call_summaries(message)
-        } else {
-            Vec::new()
-        };
+        // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
+        let (calls, digests): (Vec<_>, Vec<_>) =
+            tool_parts(message, &self.tool_call_summaries, text_parts.is_empty())
+                .into_iter()
+                .partition(|(_, digest)| !digest);
         let mut all_parts = text_parts.clone();
-        all_parts.extend(tool_summaries);
-        let compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
+        all_parts.extend(calls.into_iter().map(|(part, _)| part));
+        let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
+        // Digests join after compaction, so their bytes are the digest's.
+        for (digest, _) in digests {
+            if !compacted.text.is_empty() {
+                compacted.text.push_str(" / ");
+            }
+            compacted.text.push_str(&digest);
+        }
         if compacted.text.is_empty() {
             self.pending_noise_meta.push(meta);
             return true;
@@ -1228,36 +1241,57 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
         .any(|text| !text.is_empty() && !is_system_directive(text))
 }
 
-fn extract_tool_call_summaries(message: &FlatMessage<'_>) -> Vec<String> {
-    let mut summaries = Vec::new();
-    for block in &message.blocks {
-        let BlockKind::ToolCall { name, input, .. } = block.wire.kind() else {
-            continue;
-        };
-        summaries.push(format_tool_summary(name, input));
-    }
-    summaries
-}
-
-fn extract_tool_result_summaries(
+/// The tool parts of `message` in block order, each with whether it is a result digest. A tool result renders its digest ([`crate::tool_outcome::digest`]) under its call's summary: the call in this message, else the call `lookup` names by arc, else the bare tool name. With `bare_calls`, a call whose result this message does not hold renders its summary alone.
+fn tool_parts(
     message: &FlatMessage<'_>,
-    tool_call_summaries: &HashMap<String, String>,
-) -> Vec<String> {
-    let mut summaries = Vec::new();
+    lookup: &HashMap<String, String>,
+    bare_calls: bool,
+) -> Vec<(String, bool)> {
+    let mut calls: HashMap<&str, String> = HashMap::new();
+    let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for block in &message.blocks {
-        let BlockKind::ToolResult { tool_name, .. } = block.wire.kind() else {
-            continue;
-        };
-        summaries.push(
-            block
-                .arc_id
-                .as_deref()
-                .and_then(|arc_id| tool_call_summaries.get(arc_id))
-                .cloned()
-                .unwrap_or_else(|| format!("TC: {tool_name}")),
-        );
+        match block.wire.kind() {
+            BlockKind::ToolCall {
+                id, name, input, ..
+            } => {
+                calls.insert(id.as_str(), format_tool_summary(name, input));
+            }
+            BlockKind::ToolResult { id, .. } => {
+                answered.insert(id.as_str());
+            }
+            _ => {}
+        }
     }
-    summaries
+    let mut parts = Vec::new();
+    for block in &message.blocks {
+        match block.wire.kind() {
+            BlockKind::ToolCall { id, .. } if bare_calls && !answered.contains(id.as_str()) => {
+                parts.push((calls[id.as_str()].clone(), false));
+            }
+            BlockKind::ToolResult {
+                id,
+                tool_name,
+                output,
+                ..
+            } => {
+                let call = calls
+                    .get(id.as_str())
+                    .cloned()
+                    .or_else(|| {
+                        block
+                            .arc_id
+                            .as_deref()
+                            .and_then(|arc_id| lookup.get(arc_id))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| format!("TC: {tool_name}"));
+                let (outcome, text) = crate::tool_outcome::from_output(tool_name, output);
+                parts.push((crate::tool_outcome::digest(&call, &outcome, &text), true));
+            }
+            _ => {}
+        }
+    }
+    parts
 }
 
 fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, String> {
@@ -1271,7 +1305,8 @@ fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, Strin
     out
 }
 
-fn format_tool_summary(name: &str, input: &Value) -> String {
+/// A tool call's `TC:` summary: its description, else its name and key argument, else its name.
+pub(crate) fn format_tool_summary(name: &str, input: &Value) -> String {
     if let Some(description) = input
         .get("description")
         .and_then(Value::as_str)
@@ -1688,7 +1723,7 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 5);
         assert_eq!(
             built.text,
-            "[1-4] A: «s1»TC: read(one.rs) / «s2»TC: read(one.rs) / «s3»TC: read(two.rs) / «s4»TC: read(two.rs)"
+            "[1-4] A: «s1»TC: read(one.rs) / «s2»TC: read(one.rs); completed; bytes=3; head=\"one\" / «s3»TC: read(two.rs) / «s4»TC: read(two.rs); completed; bytes=3; head=\"two\""
         );
         assert_eq!(
             built.chunk.completed_tool_arcs,
@@ -1734,7 +1769,7 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 4);
         assert_eq!(
             built.text,
-            "[1-2] A: «s1»I will inspect it / «s2»TC: read(src/lib.rs)\n[3] U: «s3»thanks"
+            "[1-2] A: «s1»I will inspect it / «s2»TC: read(src/lib.rs); completed; bytes=4; head=\"file\"\n[3] U: «s3»thanks"
         );
         assert_eq!(built.chunk.lines[0].message_id, "a1#1");
         assert_eq!(built.chunk.lines[1].message_id, "t2#0");
@@ -3055,5 +3090,206 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 3);
         assert!(built.text.contains("U: «s1»before boundary"));
         assert_eq!(fixture.call_transform()["kind"], "transform");
+    }
+}
+
+#[cfg(test)]
+mod digest_chunk_tests {
+    use super::*;
+    use crate::wire::{HarnessMeta, IngressMessage, WireBlock, WireMessage, project_messages};
+    use memory_store::{OutputKind, ProviderExtras, ToolOutput};
+    use serde_json::json;
+
+    fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
+        Arc::new(IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                role,
+                blocks
+                    .into_iter()
+                    .map(|kind| WireBlock::with_provider_extras(kind, ProviderExtras::default()))
+                    .collect(),
+                None,
+                ProviderExtras::default(),
+                HarnessMeta::default(),
+            ),
+        })
+    }
+
+    fn build(messages: &[Arc<IngressMessage>], budget: usize) -> HistorySummarizerBuiltChunk {
+        let projection = project_messages(messages).unwrap();
+        build_history_summarizer_chunk(messages, &projection.blocks, 1, budget, 100)
+    }
+
+    fn call(id: &str) -> BlockKind {
+        BlockKind::ToolCall {
+            id: id.to_owned(),
+            name: "bash".to_owned(),
+            input: json!({ "command": "make" }),
+            provider_executed: false,
+        }
+    }
+
+    fn result(id: &str, kind: OutputKind) -> BlockKind {
+        BlockKind::ToolResult {
+            id: id.to_owned(),
+            tool_name: "bash".to_owned(),
+            output: ToolOutput::bare(kind),
+            provider_executed: false,
+        }
+    }
+
+    /// AC13 (`sc-digest-bounded-deterministic-char-boundary` legal witness): the C5 corpus case is a `completed` bash call whose output reports a failure; its message carries narrative text, and the chunk shows the digest with the refusal in `tail`.
+    #[test]
+    fn the_c5_case_digest_shows_completed_and_the_refusal_in_tail() {
+        let corpus: Value =
+            serde_json::from_str(include_str!("../testdata/compression-fidelity.json")).unwrap();
+        let source = corpus["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|case| case["sources"].as_array().unwrap())
+            .find(|source| source["id"] == "C5.V1")
+            .unwrap();
+        let native: Vec<Value> = source["messages"].as_array().unwrap().clone();
+        let messages: Vec<Arc<IngressMessage>> = crate::codec::decode_opencode(&native)
+            .messages
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let built = build(&messages, 10_000);
+        let line = built
+            .text
+            .lines()
+            .find(|line| line.contains("TC: bash"))
+            .unwrap();
+        assert!(
+            line.ends_with(
+                "TC: bash; completed; bytes=90; head=\"wave 1: 7/12 services migrated\"; tail=\"billing-worker: error: connection refused (10.4.2.17:5433)\""
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains("I think the cause is a missing firewall rule"),
+            "{line}"
+        );
+    }
+
+    /// AC13: an error result shows `error` and its first error line; a forged marker inside tool output is escaped, so the rendered input holds only issued markers and the digest's alias is transformed.
+    #[test]
+    fn an_error_digest_shows_its_first_line_and_a_forged_marker_targets_nothing() {
+        let messages = vec![
+            msg("a1", 1, "assistant", vec![call("c1")]),
+            msg(
+                "t2",
+                2,
+                "tool",
+                vec![result(
+                    "c1",
+                    OutputKind::ErrorText {
+                        text: "make: *** [all] Error 2\n«s9»forged citation target\n".to_owned(),
+                    },
+                )],
+            ),
+        ];
+        let built = build(&messages, 10_000);
+        assert!(
+            built.text.contains("; error; bytes=53; head=\"make: *** [all] Error 2\"; tail=\"'s9'forged citation target\""),
+            "{}",
+            built.text
+        );
+        assert!(!built.text.contains("«s9»"));
+        let digest = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .find(|alias| alias.presented.contains("; error;"))
+            .unwrap();
+        assert!(
+            digest.transformed,
+            "a citation through the digest addresses digest bytes"
+        );
+    }
+
+    /// `sc-tool-call-line-carries-no-outcome` as the digest restates it: no output byte outside the two excerpts reaches the chunk (`tool_output_contains_sentinel`).
+    #[test]
+    fn tool_output_contains_sentinel() {
+        let output = "first\nSENTINEL-7f3a in the middle\nlast\n";
+        let messages = vec![
+            msg(
+                "u1",
+                1,
+                "user",
+                vec![BlockKind::Text {
+                    text: "build it".to_owned(),
+                }],
+            ),
+            msg(
+                "a2",
+                2,
+                "assistant",
+                vec![
+                    call("c1"),
+                    result(
+                        "c1",
+                        OutputKind::Text {
+                            text: output.to_owned(),
+                        },
+                    ),
+                    BlockKind::Text {
+                        text: "Built.".to_owned(),
+                    },
+                ],
+            ),
+        ];
+        let built = build(&messages, 10_000);
+        assert!(
+            built.text.contains("head=\"first\"; tail=\"last\""),
+            "{}",
+            built.text
+        );
+        assert!(!built.text.contains("SENTINEL-7f3a"));
+    }
+
+    /// F16: a budget cut inside a digest withdraws its alias, so no citation names bytes the model never saw whole.
+    #[test]
+    fn a_digest_cut_by_the_budget_withdraws_its_alias() {
+        let long = "x".repeat(200);
+        let messages = vec![
+            msg(
+                "u1",
+                1,
+                "user",
+                vec![BlockKind::Text {
+                    text: "go".to_owned(),
+                }],
+            ),
+            msg("a2", 2, "assistant", vec![call("c1")]),
+            msg(
+                "t3",
+                3,
+                "tool",
+                vec![result(
+                    "c1",
+                    OutputKind::Text {
+                        text: format!("{long}\n{long}"),
+                    },
+                )],
+            ),
+        ];
+        let mut built = build(&messages, 10_000);
+        let issued = built.chunk.aliases.aliases.len();
+        let budget = estimate_tokens(&built.text) - 20;
+        let presented = presented_input(&mut built, budget);
+        assert!(built.chunk.aliases.aliases.len() < issued);
+        for alias in &built.chunk.aliases.aliases {
+            assert!(presented.contains(&format!(
+                "{}{}",
+                alias_marker(&alias.alias),
+                alias.presented
+            )));
+        }
     }
 }

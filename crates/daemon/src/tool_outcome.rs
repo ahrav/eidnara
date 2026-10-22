@@ -82,3 +82,208 @@ fn is_exception_name(name: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
+
+/// The outcome and output text of a tool result as its wire block holds it, the shape the summarizer reads. An error output variant or a denied execution is `error`; the wire block carries no harness metadata, so the record leaves `truncated`, `exit_code`, and `exception_ref` unset.
+pub fn from_output(tool_name: &str, output: &memory_store::ToolOutput) -> (ToolOutcome, String) {
+    use memory_store::{OutputKind, ResultBlockKind};
+    let text_of = |blocks: &[memory_store::ResultBlock]| {
+        blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                ResultBlockKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (status, text) = match &output.kind {
+        OutputKind::Text { text } => (ToolStatus::Completed, text.clone()),
+        OutputKind::Json { value } => (ToolStatus::Completed, value.to_string()),
+        OutputKind::Content { blocks } => (ToolStatus::Completed, text_of(blocks)),
+        OutputKind::ErrorText { text } => (ToolStatus::Error, text.clone()),
+        OutputKind::ErrorJson { value } => (ToolStatus::Error, value.to_string()),
+        OutputKind::ErrorContent { blocks } => (ToolStatus::Error, text_of(blocks)),
+        OutputKind::ExecutionDenied { reason } => {
+            (ToolStatus::Error, reason.clone().unwrap_or_default())
+        }
+    };
+    let outcome = ToolOutcome {
+        version: TOOL_OUTCOME_VERSION,
+        status,
+        tool_name: tool_name.to_owned(),
+        byte_length: text.len() as u64,
+        truncated: None,
+        exit_code: None,
+        exception_ref: None,
+    };
+    (outcome, text)
+}
+
+/// The largest digest the summarizer sees for one tool result.
+pub const MAX_DIGEST_BYTES: usize = 1024;
+/// Marks an excerpt or a call summary clipped to its bound.
+const CLIP_MARKER: &str = "…";
+
+/// The summarizer's view of one tool result: `<call>; <status>[; exit=N]; bytes=N[; head="…"][; tail="…"]`, at most [`MAX_DIGEST_BYTES`]. `call` is the call's `TC:` summary. `head` and `tail` are the output's first and last nonblank lines, each at most the claim-value bound and cut on a character boundary with a clip marker; a single nonblank line is `head` alone. A double quote or a citation-marker bracket inside an excerpt becomes a single quote, so each excerpt stays one quoted field and holds no marker. Equal inputs give equal bytes, and no output byte outside the two excerpts appears.
+pub fn digest(call: &str, outcome: &ToolOutcome, output: &str) -> String {
+    let mut rest = format!("; {}", outcome.status.as_str());
+    if let Some(exit_code) = outcome.exit_code {
+        rest.push_str(&format!("; exit={exit_code}"));
+    }
+    rest.push_str(&format!("; bytes={}", output.len()));
+    let mut lines = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty());
+    let head = lines.next();
+    let tail = lines.next_back();
+    for (label, line) in [("head", head), ("tail", tail)] {
+        if let Some(line) = line {
+            let excerpt = clip(
+                &line.replace(['"', '\u{ab}', '\u{bb}'], "'"),
+                crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES,
+            );
+            rest.push_str(&format!("; {label}=\"{excerpt}\""));
+        }
+    }
+    let mut digest = clip(call, MAX_DIGEST_BYTES - rest.len());
+    digest.push_str(&rest);
+    digest
+}
+
+/// `text` within `max` bytes: whole when it fits, otherwise its longest prefix that ends on a character boundary and leaves room for the clip marker, followed by the marker.
+fn clip(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max.saturating_sub(CLIP_MARKER.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{CLIP_MARKER}", &text[..end])
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    fn completed(output: &str) -> (ToolOutcome, String) {
+        from_output(
+            "bash",
+            &memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
+                text: output.to_owned(),
+            }),
+        )
+    }
+
+    /// `sc-digest-bounded-deterministic-char-boundary`: CRLF lines lose their carriage returns; a single nonblank line is `head` alone; equal inputs give equal bytes; only the first and last nonblank lines appear.
+    #[test]
+    fn a_digest_shows_status_bytes_and_the_outer_nonblank_lines() {
+        let output = "\r\n  first line\r\nSENTINEL middle\r\n\r\nlast \"quoted\" line\r\n\r\n";
+        let (outcome, text) = completed(output);
+        let digest = digest("TC: bash(run)", &outcome, &text);
+        assert_eq!(
+            digest,
+            format!(
+                "TC: bash(run); completed; bytes={}; head=\"  first line\"; tail=\"last 'quoted' line\"",
+                output.len()
+            )
+        );
+        assert_eq!(digest, super::digest("TC: bash(run)", &outcome, &text));
+        assert!(!digest.contains("SENTINEL") && !digest.contains('\r'));
+
+        let (outcome, text) = completed("only line\n");
+        assert_eq!(
+            super::digest("TC: read(a.rs)", &outcome, &text),
+            "TC: read(a.rs); completed; bytes=10; head=\"only line\""
+        );
+        let (outcome, text) = completed("");
+        assert_eq!(
+            super::digest("TC: read(a.rs)", &outcome, &text),
+            "TC: read(a.rs); completed; bytes=0"
+        );
+    }
+
+    /// Excerpts are at most the claim-value bound and cut on a character boundary with the clip marker; a call summary that would push the digest past 1 KiB is clipped the same way; an exit code shows when the record has one.
+    #[test]
+    fn a_digest_clips_on_character_boundaries_within_its_bounds() {
+        let line = "é".repeat(100);
+        let (outcome, text) = completed(&format!("{line}\n{}", "日本".repeat(60)));
+        let digest = digest("TC: bash", &outcome, &text);
+        let head = digest
+            .split("head=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let tail = digest
+            .split("tail=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        for excerpt in [head, tail] {
+            assert!(excerpt.len() <= crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES);
+            assert!(excerpt.ends_with(CLIP_MARKER), "{excerpt}");
+        }
+        assert!(head.starts_with("éé") && tail.starts_with("日本"));
+
+        let mut failed = outcome.clone();
+        failed.status = ToolStatus::Error;
+        failed.exit_code = Some(2);
+        let long_call = format!("TC: {}", "word ".repeat(400));
+        let digest = super::digest(&long_call, &failed, &text);
+        assert!(digest.len() <= MAX_DIGEST_BYTES, "{}", digest.len());
+        assert!(digest.contains("…; error; exit=2; bytes="), "{digest}");
+    }
+
+    /// An error variant or a denied execution is `error`; content blocks join their text.
+    #[test]
+    fn a_wire_output_maps_its_variant_to_the_status() {
+        use memory_store::{OutputKind, ResultBlock, ResultBlockKind, ToolOutput};
+        let error = from_output(
+            "bash",
+            &ToolOutput::bare(OutputKind::ErrorText {
+                text: "exit 2: cargo not found\n".to_owned(),
+            }),
+        );
+        assert_eq!(error.0.status, ToolStatus::Error);
+        assert_eq!(
+            super::digest("TC: bash", &error.0, &error.1),
+            "TC: bash; error; bytes=24; head=\"exit 2: cargo not found\""
+        );
+        let denied = from_output(
+            "bash",
+            &ToolOutput::bare(OutputKind::ExecutionDenied { reason: None }),
+        );
+        assert_eq!(
+            (denied.0.status, denied.1.as_str()),
+            (ToolStatus::Error, "")
+        );
+        let content = from_output(
+            "read",
+            &ToolOutput::bare(OutputKind::Content {
+                blocks: vec![
+                    ResultBlock {
+                        kind: ResultBlockKind::Text {
+                            text: "a".to_owned(),
+                        },
+                        provider_extras: Default::default(),
+                    },
+                    ResultBlock {
+                        kind: ResultBlockKind::Text {
+                            text: "b".to_owned(),
+                        },
+                        provider_extras: Default::default(),
+                    },
+                ],
+            }),
+        );
+        assert_eq!(
+            (content.0.status, content.1.as_str()),
+            (ToolStatus::Completed, "a\nb")
+        );
+    }
+}
