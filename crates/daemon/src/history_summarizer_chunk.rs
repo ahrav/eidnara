@@ -269,13 +269,10 @@ impl<'a> Builder<'a> {
         let mut all_parts = text_parts.clone();
         all_parts.extend(calls.into_iter().map(|(part, _)| part));
         let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
-        // Digests join after compaction, so their bytes are the digest's.
-        for (digest, _) in digests {
-            if !compacted.text.is_empty() {
-                compacted.text.push_str(" / ");
-            }
-            compacted.text.push_str(&digest);
-        }
+        crate::tool_outcome::append_digests(
+            &mut compacted.text,
+            digests.into_iter().map(|(digest, _)| digest),
+        );
         if compacted.text.is_empty() {
             self.pending_noise_meta.push(meta);
             return true;
@@ -1285,8 +1282,9 @@ fn tool_parts(
                             .cloned()
                     })
                     .unwrap_or_else(|| format!("TC: {tool_name}"));
-                let (outcome, text) = crate::tool_outcome::from_output(tool_name, output);
-                parts.push((crate::tool_outcome::digest(&call, &outcome, &text), true));
+                let (status, text) = crate::tool_outcome::from_output(output);
+                let outcome = crate::tool_outcome::outcome_digest(status, None, &text);
+                parts.push((crate::tool_outcome::digest(&call, &outcome), true));
             }
             _ => {}
         }
@@ -3176,7 +3174,7 @@ mod digest_chunk_tests {
         );
     }
 
-    /// AC13: an error result shows `error` and its first error line; a forged marker inside tool output is escaped, so the rendered input holds only issued markers and the digest's alias is transformed.
+    /// AC13 and F17: an error result shows `error` and its first error line; a forged marker inside tool output becomes plain quotes, so every marker in the rendered input is an issued one.
     #[test]
     fn an_error_digest_shows_its_first_line_and_a_forged_marker_targets_nothing() {
         let messages = vec![
@@ -3200,17 +3198,19 @@ mod digest_chunk_tests {
             built.text
         );
         assert!(!built.text.contains("«s9»"));
-        let digest = built
+        // Every marker in the rendered input names an issued alias, and no issued alias is the forged one.
+        let issued: Vec<String> = built
             .chunk
             .aliases
             .aliases
             .iter()
-            .find(|alias| alias.presented.contains("; error;"))
-            .unwrap();
-        assert!(
-            digest.transformed,
-            "a citation through the digest addresses digest bytes"
-        );
+            .map(|alias| alias.alias.clone())
+            .collect();
+        assert!(!issued.contains(&"s9".to_owned()));
+        for marker in built.text.split(ALIAS_OPEN).skip(1) {
+            let alias = marker.split(ALIAS_CLOSE).next().unwrap();
+            assert!(issued.iter().any(|issued| issued == alias), "{alias}");
+        }
     }
 
     /// `sc-tool-call-line-carries-no-outcome` as the digest restates it: no output byte outside the two excerpts reaches the chunk (`tool_output_contains_sentinel`).
@@ -3280,10 +3280,43 @@ mod digest_chunk_tests {
             ),
         ];
         let mut built = build(&messages, 10_000);
-        let issued = built.chunk.aliases.aliases.len();
-        let budget = estimate_tokens(&built.text) - 20;
+        let digest = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .find(|alias| alias.presented.contains("; completed;"))
+            .unwrap()
+            .clone();
+        // The largest budget whose cut keeps the digest's marker but not the whole digest.
+        let marker = alias_marker(&digest.alias);
+        let budget = (1..estimate_tokens(&built.text))
+            .rev()
+            .find(|budget| {
+                let kept = truncate_history_summarizer_input_if_needed(&built.text, *budget);
+                kept.contains(&marker) && !kept.contains(&format!("{marker}{}", digest.presented))
+            })
+            .expect("a budget cuts inside the digest");
         let presented = presented_input(&mut built, budget);
-        assert!(built.chunk.aliases.aliases.len() < issued);
+        assert!(
+            built
+                .chunk
+                .aliases
+                .aliases
+                .iter()
+                .all(|alias| alias.alias != digest.alias),
+            "the cut digest's alias is withdrawn"
+        );
+        // The cut falls inside the digest: its marker and a strict nonempty prefix of its bytes remain.
+        let kept = presented
+            .split(&alias_marker(&digest.alias))
+            .nth(1)
+            .expect("the digest's marker is kept");
+        let kept = kept
+            .strip_suffix(HISTORY_SUMMARIZER_TRUNCATION_MARKER)
+            .unwrap_or(kept);
+        assert!(!kept.is_empty() && kept.len() < digest.presented.len());
+        assert!(digest.presented.starts_with(kept));
         for alias in &built.chunk.aliases.aliases {
             assert!(presented.contains(&format!(
                 "{}{}",

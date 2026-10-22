@@ -153,6 +153,8 @@ mod reference {
         },
         ToolResult {
             tool_name: String,
+            /// Mirrors the production variant's output field; the reference reads only the name.
+            output: Option<()>,
         },
         Reasoning,
         Text,
@@ -369,7 +371,7 @@ mod reference {
                     entry.call_bytes += item.byte_size;
                     entry.provider_executed = item.provider_executed;
                 }
-                SelKind::ToolResult { tool_name } => {
+                SelKind::ToolResult { tool_name, .. } => {
                     if entry.name.is_empty() {
                         entry.name = normalize_tool_name(tool_name);
                         entry.dedup_name = tool_name.clone();
@@ -1701,6 +1703,7 @@ macro_rules! build_inputs {
                     },
                     KIND_TOOL_RESULT => K::ToolResult {
                         tool_name: TOOLS[usize::from(s.tool)].to_string(),
+                        output: None,
                     },
                     KIND_REASONING => K::Reasoning,
                     KIND_REDACTED_REASONING => K::RedactedReasoning,
@@ -2716,6 +2719,7 @@ fn every_production_variant_is_generated() {
         },
         SelKind::ToolResult {
             tool_name: "edit".to_string(),
+            output: None,
         },
         SelKind::Reasoning,
         SelKind::RedactedReasoning,

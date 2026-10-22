@@ -1,4 +1,4 @@
-//! The execution-outcome extractor: one reading of what a harness reported about a settled tool call. Each field comes from a named native field, and an absent or malformed optional field is `None`, meaning unknown.
+//! The execution-outcome extractor: one reading of what a harness reported about a settled tool call. [`opencode`] and [`pi`] read each record field from a named native field, and an absent or malformed optional field is `None`, meaning unknown. `from_output` reads a result's status and text from its wire block, and `digest` renders the summarizer's view of it.
 //!
 //! OpenCode (`MessageV2` tool part, verified against the OpenCode 1.19.0 session store in `testdata/opencode-tool-outcome-trace.json`):
 //! - `status` is `state.status`, `completed` or `error`.
@@ -89,8 +89,8 @@ fn is_exception_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-/// The outcome and output text of a tool result as its wire block holds it, the shape the summarizer reads. An error output variant or a denied execution is `error`; the wire block carries no harness metadata, so the record leaves `truncated`, `exit_code`, and `exception_ref` unset.
-pub fn from_output(tool_name: &str, output: &memory_store::ToolOutput) -> (ToolOutcome, String) {
+/// The status and output text of a tool result as its wire block holds it, the shape the summarizer reads. An error output variant or a denied execution is `error`. The text is the output variant's text as is, its JSON serialized, the text of its content blocks joined by newlines, or a denial's reason.
+pub(crate) fn from_output(output: &memory_store::ToolOutput) -> (ToolStatus, String) {
     use memory_store::{OutputKind, ResultBlockKind};
     let text_of = |blocks: &[memory_store::ResultBlock]| {
         blocks
@@ -102,7 +102,7 @@ pub fn from_output(tool_name: &str, output: &memory_store::ToolOutput) -> (ToolO
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let (status, text) = match &output.kind {
+    match &output.kind {
         OutputKind::Text { text } => (ToolStatus::Completed, text.clone()),
         OutputKind::Json { value } => (ToolStatus::Completed, value.to_string()),
         OutputKind::Content { blocks } => (ToolStatus::Completed, text_of(blocks)),
@@ -112,31 +112,21 @@ pub fn from_output(tool_name: &str, output: &memory_store::ToolOutput) -> (ToolO
         OutputKind::ExecutionDenied { reason } => {
             (ToolStatus::Error, reason.clone().unwrap_or_default())
         }
-    };
-    let outcome = ToolOutcome {
-        version: TOOL_OUTCOME_VERSION,
-        status,
-        tool_name: tool_name.to_owned(),
-        byte_length: text.len() as u64,
-        truncated: None,
-        exit_code: None,
-        exception_ref: None,
-    };
-    (outcome, text)
+    }
 }
 
 /// The largest digest the summarizer sees for one tool result.
-pub const MAX_DIGEST_BYTES: usize = 1024;
+pub(crate) const MAX_DIGEST_BYTES: usize = 1024;
 /// Marks an excerpt or a call summary clipped to its bound.
 const CLIP_MARKER: &str = "…";
 
-/// The summarizer's view of one tool result: `<call>; <status>[; exit=N]; bytes=N[; head="…"][; tail="…"]`, at most [`MAX_DIGEST_BYTES`]. `call` is the call's `TC:` summary. `head` and `tail` are the output's first and last nonblank lines, each at most the claim-value bound and cut on a character boundary with a clip marker; a single nonblank line is `head` alone. A double quote or a citation-marker bracket inside an excerpt becomes a single quote, so each excerpt stays one quoted field and holds no marker. Equal inputs give equal bytes, and no output byte outside the two excerpts appears.
-pub fn digest(call: &str, outcome: &ToolOutcome, output: &str) -> String {
-    let mut rest = format!("; {}", outcome.status.as_str());
-    if let Some(exit_code) = outcome.exit_code {
-        rest.push_str(&format!("; exit={exit_code}"));
+/// The outcome half of a tool result's digest: `; <status>[; exit=N]; bytes=N[; head="…"][; tail="…"]`. `bytes` is the byte length of `output`. `head` and `tail` are its first and last nonblank lines with trailing whitespace trimmed; a single nonblank line is `head` alone. A double quote or a citation-marker bracket inside an excerpt becomes a single quote, so each excerpt is one quoted field, and each excerpt is then clipped to the claim-value bound on a character boundary with a clip marker. Output bytes reach the digest only through the two excerpts, and equal inputs give equal bytes.
+pub(crate) fn outcome_digest(status: ToolStatus, exit_code: Option<i64>, output: &str) -> String {
+    let mut digest = format!("; {}", status.as_str());
+    if let Some(exit_code) = exit_code {
+        digest.push_str(&format!("; exit={exit_code}"));
     }
-    rest.push_str(&format!("; bytes={}", output.len()));
+    digest.push_str(&format!("; bytes={}", output.len()));
     let mut lines = output
         .lines()
         .map(str::trim_end)
@@ -149,12 +139,27 @@ pub fn digest(call: &str, outcome: &ToolOutcome, output: &str) -> String {
                 &line.replace(['"', '\u{ab}', '\u{bb}'], "'"),
                 crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES,
             );
-            rest.push_str(&format!("; {label}=\"{excerpt}\""));
+            digest.push_str(&format!("; {label}=\"{excerpt}\""));
         }
     }
-    let mut digest = clip(call, MAX_DIGEST_BYTES - rest.len());
-    digest.push_str(&rest);
     digest
+}
+
+/// The summarizer's view of one tool result: `call`, the call's `TC:` summary, followed by its [`outcome_digest`], at most [`MAX_DIGEST_BYTES`]. A call summary that would pass the bound is clipped on a character boundary with a clip marker.
+pub(crate) fn digest(call: &str, outcome: &str) -> String {
+    let mut digest = clip(call, MAX_DIGEST_BYTES - outcome.len());
+    digest.push_str(outcome);
+    digest
+}
+
+/// `text` followed by each of `digests`, joined by the chunk's part separator. A digest joins after text compaction, so its bytes are the digest's.
+pub(crate) fn append_digests(text: &mut String, digests: impl IntoIterator<Item = String>) {
+    for digest in digests {
+        if !text.is_empty() {
+            text.push_str(" / ");
+        }
+        text.push_str(&digest);
+    }
 }
 
 /// `text` within `max` bytes: whole when it fits, otherwise its longest prefix that ends on a character boundary and leaves room for the clip marker, followed by the marker.
@@ -172,124 +177,154 @@ fn clip(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod digest_tests {
     use super::*;
+    use crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES;
+    use proptest::prelude::*;
 
-    fn completed(output: &str) -> (ToolOutcome, String) {
-        from_output(
-            "bash",
-            &memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
-                text: output.to_owned(),
-            }),
-        )
+    fn completed(call: &str, output: &str) -> String {
+        digest(call, &outcome_digest(ToolStatus::Completed, None, output))
     }
 
-    /// `sc-digest-bounded-deterministic-char-boundary`: CRLF lines lose their carriage returns; a single nonblank line is `head` alone; equal inputs give equal bytes; only the first and last nonblank lines appear.
+    /// `sc-digest-bounded-deterministic-char-boundary`: CRLF lines lose their carriage returns and trailing whitespace; a single nonblank line is `head` alone; quotes and marker brackets become single quotes; only the first and last nonblank lines appear.
     #[test]
     fn a_digest_shows_status_bytes_and_the_outer_nonblank_lines() {
-        let output = "\r\n  first line\r\nSENTINEL middle\r\n\r\nlast \"quoted\" line\r\n\r\n";
-        let (outcome, text) = completed(output);
-        let digest = digest("TC: bash(run)", &outcome, &text);
+        let output =
+            "\r\n  first line \r\nSENTINEL middle\r\n\r\nlast «s9» \"quoted\" line\r\n\r\n";
         assert_eq!(
-            digest,
+            completed("TC: bash(run)", output),
             format!(
-                "TC: bash(run); completed; bytes={}; head=\"  first line\"; tail=\"last 'quoted' line\"",
+                "TC: bash(run); completed; bytes={}; head=\"  first line\"; tail=\"last 's9' 'quoted' line\"",
                 output.len()
             )
         );
-        assert_eq!(digest, super::digest("TC: bash(run)", &outcome, &text));
-        assert!(!digest.contains("SENTINEL") && !digest.contains('\r'));
-
-        let (outcome, text) = completed("only line\n");
         assert_eq!(
-            super::digest("TC: read(a.rs)", &outcome, &text),
+            completed("TC: read(a.rs)", "only line\n"),
             "TC: read(a.rs); completed; bytes=10; head=\"only line\""
         );
-        let (outcome, text) = completed("");
         assert_eq!(
-            super::digest("TC: read(a.rs)", &outcome, &text),
+            completed("TC: read(a.rs)", ""),
             "TC: read(a.rs); completed; bytes=0"
+        );
+        assert_eq!(
+            digest(
+                "TC: bash",
+                &outcome_digest(ToolStatus::Error, Some(2), "boom\n")
+            ),
+            "TC: bash; error; exit=2; bytes=5; head=\"boom\""
         );
     }
 
-    /// Excerpts are at most the claim-value bound and cut on a character boundary with the clip marker; a call summary that would push the digest past 1 KiB is clipped the same way; an exit code shows when the record has one.
+    /// An excerpt is the longest prefix that fits the claim-value bound with its clip marker, cut on a character boundary for two- and three-byte characters; a call summary that would push the digest past 1 KiB is clipped the same way.
     #[test]
     fn a_digest_clips_on_character_boundaries_within_its_bounds() {
-        let line = "é".repeat(100);
-        let (outcome, text) = completed(&format!("{line}\n{}", "日本".repeat(60)));
-        let digest = digest("TC: bash", &outcome, &text);
-        let head = digest
-            .split("head=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
-        let tail = digest
-            .split("tail=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
-        for excerpt in [head, tail] {
-            assert!(excerpt.len() <= crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES);
-            assert!(excerpt.ends_with(CLIP_MARKER), "{excerpt}");
-        }
-        assert!(head.starts_with("éé") && tail.starts_with("日本"));
-
-        let mut failed = outcome.clone();
-        failed.status = ToolStatus::Error;
-        failed.exit_code = Some(2);
+        let output = format!("{}\n{}", "é".repeat(100), "日本".repeat(60));
+        assert_eq!(
+            outcome_digest(ToolStatus::Completed, None, &output),
+            format!(
+                "; completed; bytes={}; head=\"{}…\"; tail=\"{}日…\"",
+                output.len(),
+                "é".repeat(62),
+                "日本".repeat(20)
+            )
+        );
         let long_call = format!("TC: {}", "word ".repeat(400));
-        let digest = super::digest(&long_call, &failed, &text);
-        assert!(digest.len() <= MAX_DIGEST_BYTES, "{}", digest.len());
-        assert!(digest.contains("…; error; exit=2; bytes="), "{digest}");
+        let digest = digest(
+            &long_call,
+            &outcome_digest(ToolStatus::Error, None, &output),
+        );
+        assert_eq!(
+            digest.len(),
+            MAX_DIGEST_BYTES,
+            "the clipped call fills the bound"
+        );
+        assert!(digest.contains("…; error; bytes="), "{digest}");
     }
 
     /// An error variant or a denied execution is `error`; content blocks join their text.
     #[test]
     fn a_wire_output_maps_its_variant_to_the_status() {
         use memory_store::{OutputKind, ResultBlock, ResultBlockKind, ToolOutput};
-        let error = from_output(
-            "bash",
-            &ToolOutput::bare(OutputKind::ErrorText {
-                text: "exit 2: cargo not found\n".to_owned(),
-            }),
-        );
-        assert_eq!(error.0.status, ToolStatus::Error);
         assert_eq!(
-            super::digest("TC: bash", &error.0, &error.1),
-            "TC: bash; error; bytes=24; head=\"exit 2: cargo not found\""
-        );
-        let denied = from_output(
-            "bash",
-            &ToolOutput::bare(OutputKind::ExecutionDenied { reason: None }),
+            from_output(&ToolOutput::bare(OutputKind::ErrorText {
+                text: "exit 2\n".to_owned()
+            })),
+            (ToolStatus::Error, "exit 2\n".to_owned())
         );
         assert_eq!(
-            (denied.0.status, denied.1.as_str()),
-            (ToolStatus::Error, "")
+            from_output(&ToolOutput::bare(OutputKind::ExecutionDenied {
+                reason: None
+            })),
+            (ToolStatus::Error, String::new())
         );
-        let content = from_output(
-            "read",
-            &ToolOutput::bare(OutputKind::Content {
-                blocks: vec![
-                    ResultBlock {
-                        kind: ResultBlockKind::Text {
-                            text: "a".to_owned(),
-                        },
-                        provider_extras: Default::default(),
-                    },
-                    ResultBlock {
-                        kind: ResultBlockKind::Text {
-                            text: "b".to_owned(),
-                        },
-                        provider_extras: Default::default(),
-                    },
-                ],
-            }),
-        );
+        let text = |text: &str| ResultBlock {
+            kind: ResultBlockKind::Text {
+                text: text.to_owned(),
+            },
+            provider_extras: Default::default(),
+        };
         assert_eq!(
-            (content.0.status, content.1.as_str()),
-            (ToolStatus::Completed, "a\nb")
+            from_output(&ToolOutput::bare(OutputKind::Content {
+                blocks: vec![text("a"), text("b")],
+            })),
+            (ToolStatus::Completed, "a\nb".to_owned())
         );
+    }
+
+    /// The status spelling the digest uses is the record's stored spelling.
+    #[test]
+    fn a_status_spells_as_the_record_stores_it() {
+        for status in [ToolStatus::Completed, ToolStatus::Error] {
+            assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
+        }
+    }
+
+    fn line() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop_oneof![
+                Just("é".to_owned()),
+                Just("日".to_owned()),
+                Just("🙂".to_owned()),
+                Just("\"".to_owned()),
+                Just("«".to_owned()),
+                Just("»".to_owned()),
+                Just(" ".to_owned()),
+                Just("\t".to_owned()),
+                Just("\r".to_owned()),
+                "[a-z]{1,8}",
+            ],
+            0..120,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    proptest! {
+        /// Over arbitrary lines with CRLF, multibyte characters, quotes, and marker brackets: the digest is at most 1 KiB, each excerpt is at most the claim-value bound, holds no quote or bracket, and is the clip of the escaped first or last nonblank line, and a sentinel on a middle line never appears.
+        #[test]
+        fn every_digest_is_bounded_and_shows_only_its_outer_lines(
+            first in line(),
+            last in line(),
+            call in "[ -~é日]{0,1500}",
+            crlf in any::<bool>(),
+        ) {
+            let newline = if crlf { "\r\n" } else { "\n" };
+            let output = format!("a{first}{newline}SENTINEL-mid{newline}{last}z{newline}");
+            let built = digest(&call, &outcome_digest(ToolStatus::Completed, None, &output));
+            prop_assert!(built.len() <= MAX_DIGEST_BYTES);
+            prop_assert!(!built.contains("SENTINEL-mid"));
+            let lines: Vec<&str> = output
+                .lines()
+                .map(str::trim_end)
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            for (label, expected) in [("head", lines.first()), ("tail", lines.last())] {
+                let Some(field) = built.split(&format!("; {label}=\"")).nth(1) else {
+                    continue;
+                };
+                let excerpt = field.split('"').next().unwrap();
+                prop_assert!(excerpt.len() <= CLAIM_VALUE_MAX_BYTES);
+                prop_assert!(!excerpt.contains(['«', '»']));
+                let escaped = expected.unwrap().replace(['"', '«', '»'], "'");
+                prop_assert_eq!(excerpt, clip(&escaped, CLAIM_VALUE_MAX_BYTES));
+            }
+        }
     }
 }
