@@ -929,7 +929,7 @@ pub struct KeyedWrite<'a> {
 
 /// Commits `writes` in order and then publishes every unit of `units` under its publisher, all in one kernel commit, and returns each unit's outcome in order.
 ///
-/// A write or unit whose receipt is already recorded is skipped, and a skipped unit reports a replayed publication. The commit records every other write's and unit's own receipt, and every retained text's evidence receipt, so a later commit of any one of them alone replays. Units of one publisher with equal text cite one evidence object, and a unit whose evidence an earlier publication retained cites that evidence. A unit's descriptor carries the class the store recorded for its evidence, and its admission classes are read in the commit.
+/// A write or unit whose receipt is already recorded is skipped, and a skipped unit reports a replayed publication. The commit records every other write's and unit's own receipt, and every retained text's evidence receipt, so a later commit of any one of them alone replays. Units of one publisher with equal class and text cite one evidence object, and a unit whose evidence an earlier publication retained cites that evidence. A unit's descriptor carries the class the store recorded for its evidence, and its admission classes are read in the commit.
 ///
 /// # Errors
 ///
@@ -1039,7 +1039,6 @@ pub fn publish_batch(
                 .collect());
         }
     };
-    // A unit cites the evidence of the first pending unit of its publisher with its text.
     let owners: Vec<usize> = pending
         .iter()
         .map(|&index| {
@@ -1047,6 +1046,7 @@ pub fn publish_batch(
                 .iter()
                 .find(|&&owner| {
                     std::ptr::eq(units[owner].0, units[index].0)
+                        && units[owner].1.class == units[index].1.class
                         && units[owner].1.text == units[index].1.text
                 })
                 .expect("a unit owns its own text")

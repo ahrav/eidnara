@@ -2614,6 +2614,47 @@ fn repository_documents_gap_refusal_is_retryable_once_the_gap_closes() {
     assert_eq!(live[0].text.as_deref(), Some("# four\n"));
 }
 
+/// A repository document retains its own `Sensitive` evidence even when its text equals a commit message in the same screened batch.
+#[test]
+fn repository_documents_keep_their_own_evidence_beside_an_equal_commit_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let text = "Release notes\n";
+    let commit = SourceUnit {
+        class: OccurrenceClass::GitCommits,
+        identity: vec![
+            ("repository_id", PROJECT.to_string()),
+            ("object_format", "sha1".to_string()),
+            ("oid", "b".repeat(40)),
+        ],
+        revision: "1".to_string(),
+        representation: Representation::CommitMessage,
+        text: text.to_string(),
+        role: "commit".to_string(),
+    };
+    let units = [commit, document_unit("NOTES.md", "1", text)];
+
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let commit = published(&dispositions[0]);
+    let document = published(&dispositions[1]);
+    assert_ne!(commit.evidence_object_id, document.evidence_object_id);
+    assert_eq!(
+        document.provenance,
+        (
+            SourceClass::UntrustedRepoText,
+            TaintClass::RepoUntrustedText
+        )
+    );
+    let rows = corpus.export();
+    let row = rows
+        .iter()
+        .find(|row| row.object_id == document.object_id)
+        .unwrap();
+    assert_eq!(row.sensitivity, Sensitivity::Sensitive);
+}
+
 /// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below the retired head or past the head plus one is refused while the head plus one republishes; and a projection builds from a store holding the class.
 #[test]
 fn repository_documents_publish_untrusted_supersede_and_project() {
