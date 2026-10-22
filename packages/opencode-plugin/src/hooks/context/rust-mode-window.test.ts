@@ -1345,11 +1345,23 @@ describe("cold import by fold authority", () => {
             transform: (body) => ({
                 ...additive(sessionId, body),
                 history_summarizer: nativeAuthority,
+                note_deliveries: [{ transform_pass_id: "pass-native" }],
             }),
         });
+        const dispositions: Array<{ method: string; passId: unknown }> = [];
+        const recording: RustModeModuleClient = {
+            call: async (args) => {
+                if (args.method === "transform.ack" || args.method === "transform.nack")
+                    dispositions.push({
+                        method: args.method,
+                        passId: (args.body as Body).transform_pass_id,
+                    });
+                return client.call(args);
+            },
+        };
         const debug = spyOn(logger.sessionLog, "debug");
         try {
-            const transform = createRustModeTransform(deps(false), { moduleClient: client });
+            const transform = createRustModeTransform(deps(false), { moduleClient: recording });
             const host = beyondHalfCap(sessionId);
             const output = { messages: [...host] as unknown[] };
             await transform.run(sessionId, output);
@@ -1360,6 +1372,7 @@ describe("cold import by fold authority", () => {
                 expect(output.messages[index]).toBe(member);
             const passLine = logsOf(debug, sessionId).find((line) => line.startsWith("rust pass:"));
             expect(passLine).toContain("decision=declined:native_authority");
+            expect(dispositions).toEqual([{ method: "transform.nack", passId: "pass-native" }]);
 
             const grown = hostArray(sessionId, HALF_CAP_BLOCKS + 3);
             const again = { messages: [...grown] as unknown[] };

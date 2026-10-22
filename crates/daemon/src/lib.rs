@@ -9088,7 +9088,9 @@ impl HandlerCore {
                 .settle_first_pass(bind_seq);
         }
         let emergency = pass.result.scheduler_pass == scheduler::PassDecision::Emergency95;
-        let action = if env.parsed.is_subagent {
+        // A subagent's own no-fire applies while Eidnara folds; under native fold authority
+        // the pass reports `native_authority` as the no-fire reason.
+        let action = if env.parsed.is_subagent && pass.result.fold_authority.eidnara_folds {
             PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics::disabled(
                 "subagent_session",
             ))
