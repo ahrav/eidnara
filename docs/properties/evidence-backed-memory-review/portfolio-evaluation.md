@@ -213,6 +213,3 @@ Lenses for this change: over-engineering, complexity, testing, Rust code review,
   the policy-validating broker.
 - Class tightening and wrong-scope decisions at the coordinator seam remain
   unconstructed; the broker seam covers both; see `existing-checks.md`.
-- A TypeScript-driven positive `review show` against the hermetic host needs
-  a fixture control that publishes a proposal with nonempty spans; queued
-  under the direct-host fixture owner.

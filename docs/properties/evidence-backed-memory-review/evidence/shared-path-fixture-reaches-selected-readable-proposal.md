@@ -47,8 +47,10 @@ proposal with nonempty spans, and the command reading it in one process.
   reaches the selected read over the real handler, and the command's decoder
   is exercised on the same shape in unit tests. The joint is the wire
   document, which both sides cite.
-- Missing evidence: a TypeScript-driven positive read in one process.
-- Conclusion: superseded by the next question.
+- Missing evidence: none; the fixture's `review-witness` control supplies the
+  publish path, and the next question records the read it drives.
+- Conclusion: resolved with answer: yes, through the `review-witness` control;
+  see the next question.
 
 ### Q: Does the command render a real host's selected proposal field for field?
 
