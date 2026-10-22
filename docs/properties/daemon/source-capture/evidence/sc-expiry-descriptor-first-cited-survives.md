@@ -85,9 +85,11 @@ for every retired evidence row that its commit also retired its descriptors
 and that no live citer or live pin existed at that commit. The legal witness
 is a capture shared by a held descriptor that is skipped and retired on a
 later sweep. Coverage witnesses `expired_capture_pinned_mid_sweep` and
-`expired_capture_cited_elsewhere` mark the two preconditions; the lead names
-them in parallel, and they were not present in the files at the HEAD read
-for this record.
+`expired_capture_cited_elsewhere` mark the two preconditions. They are
+registered in `crates/eval-core/src/markers.rs` and recorded by
+`crates/kernel/src/local_file.rs::tests::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept`
+and
+`crates/daemon/tests/harness_sources.rs::harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`.
 
 ## Investigation log
 

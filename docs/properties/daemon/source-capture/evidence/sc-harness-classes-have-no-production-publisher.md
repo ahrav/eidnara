@@ -35,8 +35,9 @@ Re-verified at HEAD `5a842d998`, where it is invalidated.
   asserts every report counter is 0 and the kernel tip is unchanged for key
   off, memory off, and a subagent session.
 - Label: `crates/eval-core/src/manifest.rs` `Ingestion::AdapterIngestedNoProductionCaller`
-  still exists, and the `enum Ingestion` doc comment still says no ingestion
-  adapter has a production caller.
+  still exists with the serde name `adapter-ingested, production caller:
+  none`. The `enum Ingestion` doc comment says the evaluator drives its
+  ingestion adapters outside their production callers.
 
 ## Failure scenario
 
@@ -44,6 +45,9 @@ This record is invalidated, so its original falsifier (any harness descriptor
 after a production pass) now fires by design with the key on. The live risk
 moves to the consent predicate: publication with the key off, memory off, or a
 subagent session. That obligation belongs to `sc-consent-gate-admits-capture`.
+The R1 reach obligation, that every text block, tool output, and tool error of
+a consented window reaches `publish_screened`, belongs to
+`sc-consented-window-reaches-publisher`.
 
 ## Timing windows and dependencies
 
@@ -66,8 +70,9 @@ cases with an unchanged tip. Both exist at HEAD.
 - Findings: U2 (#1082) added the supervisor and the production call to
   `publish_screened`.
 - Missing evidence: none.
-- Conclusion: resolved with answer: invalidated by U2; obligation carried by
-  `sc-consent-gate-admits-capture`.
+- Conclusion: resolved with answer: invalidated by U2; the consent bound is
+  carried by `sc-consent-gate-admits-capture` and the R1 reach obligation by
+  `sc-consented-window-reaches-publisher`.
 
 ### Q: Does the default daemon still publish nothing?
 - Sources examined: `config.rs` default, `consents`.
@@ -81,8 +86,12 @@ cases with an unchanged tip. Both exist at HEAD.
 ### Q: Is the evaluator label consistent with HEAD?
 - Sources examined: `crates/eval-core/src/manifest.rs`,
   `crates/daemon/examples/eval_runner/aging.rs`.
-- Findings: the variant is still used by the aging runner, and its doc comment
-  states no adapter has a production caller.
-- Missing evidence: whether the evaluator part plans to rename the label.
-- Conclusion: unresolved, needs the evaluator catalog owner to decide whether
-  the label and comment change; reported to the lead.
+- Findings: the variant is still used by the aging runner. Its doc comment
+  says the evaluator drives its ingestion adapters outside their production
+  callers, which agrees with HEAD; only the serde name keeps the wording
+  `production caller: none`.
+- Missing evidence: whether the evaluator part renames the label.
+- Conclusion: the doc comment is resolved with answer. The rename is a
+  manifest schema-compatibility decision recorded as an open question on
+  `ing-adapter-ingested-no-production-caller` in
+  `docs/properties/evaluator/catalog.md` (needs human input).
