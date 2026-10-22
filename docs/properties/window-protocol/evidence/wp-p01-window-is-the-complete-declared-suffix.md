@@ -168,6 +168,15 @@ Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
   authority clears the pin too and declines a cold-narrowed pass
   (`:1669-1680`); later null passes send the whole array while
   `state.nativeAuthority` holds (`:1361`).
+  The reset is visible without an anchor: the first suffix starts at
+  `host[1]` and the suffix after the authority settles at `grown[3]`
+  (`rust-mode-window.test.ts:1389-1414`), while the wire text keeps the same
+  pinned message until the first anchor exists; recorded as a disagreement.
+  Tool pairing moves the head: `windowStart` (`:898-903`) walks later past a
+  tool result whose call is outside the suffix, or back to the message
+  carrying the calls, which can carry the suffix past half the cap, as the
+  wire permits (`docs/host-wire-protocol.md:996`) and
+  `packages/pi-plugin/src/transform/pi-transform.test.ts:488` constructs.
   Pi spreads `measure` only under `inputs.eidnaraFolds`
   (`packages/pi-plugin/src/transform/pi-transform.ts:268-275`), set per run
   from the session's project configuration

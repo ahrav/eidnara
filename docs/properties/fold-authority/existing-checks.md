@@ -287,6 +287,9 @@ green in the recorded run of the PR it names (see `catalog.md`, "Update for
 | "refuses in compaction-off mode" | `packages/pi-plugin/src/commands/eidnara-commands.test.ts:369` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
 | "refuses in compaction-off mode without calling the daemon" | `packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
 | "answers an overflow with the fold and completes the turn on the retry" | `packages/pi-plugin/src/transform/pi-eviction.test.ts:223` | KD-P05 (eviction precedence over hand-back) | #1069 (#1062) | unaudited |
+| "answers with the eviction of the acknowledged boundary, or cancels without one" | `packages/pi-plugin/src/index.test.ts:67` | KD-P05 (the compaction gate's eviction-versus-cancel answer) | #1069 (#1062) | unaudited |
+| "hands compaction back to Pi after a declined pass only when no eviction is available" | `packages/pi-plugin/src/index.test.ts:80` | KD-P05 (eviction precedence over `handBack`) | #1069 (#1062) | unaudited |
+| "lets native compaction proceed in compaction-off mode" | `packages/pi-plugin/src/index.test.ts:97` | KD-P04 (`session_before_compact` answers `undefined`) | #1069 (#1062) | unaudited |
 | `untouched_golden_rows_replay_by_pointer_and_edits_re_encode` | `crates/daemon/src/codec/pi.rs:2422` | FA-E01 (kept-row identity at the codec seam) | #1068 (#1061) | unaudited |
 | `identical_pi_passes_re_encode_identical_rows` | `crates/daemon/src/pi_native_serving_tests.rs:241` | KD-E01 (folding binding counterpart) | #1068 (#1061) | unaudited |
 | `project_memory_revision_change_requests_a_hard_fold` | `crates/daemon/src/transform.rs:13958` | KD-E02 (folding counterpart) | #1068 (#1061) | unaudited |

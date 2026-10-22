@@ -759,12 +759,24 @@ and the first mid equals the declared mid; ids inside the window are unique;
 sequence is a JavaScript safe integer. With a null boundary and no sizing
 hook, or with the latest transformed response naming native authority,
 membership is the whole host array; while Eidnara folds and the hook is
-supplied it is the whole array or the wire's newest half-cap suffix. The
+supplied it is the whole array or the wire's newest half-cap suffix, whose
+head `windowStart` moves later past a tool result whose call is outside the
+suffix, or, when every newer slot is such a result, back to the message
+carrying the calls, which can carry the suffix past half the cap
+(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:996`;
+`packages/pi-plugin/src/transform/pi-transform.test.ts:488`). The
 implementation's folding cold window is `host[:lead] + host[head:]`, the
 cold lead slots (`coldLead`, one for a leading Pi compaction summary)
 followed by the pinned suffix, which is not a contiguous suffix when `lead`
 is non-zero; that is the contract-versus-code disagreement in Open
-questions, not part of the guarantee. Input admissibility must hold on every
+questions, not part of the guarantee. The pin is reset, not kept, across a
+native-authority transition: the response naming native authority clears
+`pinnedHead` (`:1673-1674`), and once a later response names another
+authority `coldHead` selects a fresh head from the grown array
+(`rust-mode-window.test.ts:1389`: the first suffix starts at `host[1]`, the
+later one at `grown[3]`), while the wire text keeps "the same pinned message
+on every pass until the first anchor exists"; that is the second
+disagreement in Open questions. Input admissibility must hold on every
 request. Falsifier: capture the first and last tail messages but omit a
 middle one; without the sizing hook, submit a half-cap suffix; publish a
 cold suffix the daemon answered under native authority.
@@ -841,6 +853,15 @@ Open questions:
   Unresolved, needs the wire document owner to either state the lead slots
   in the wire and every peer in one change or have the consumers drop them
   (needs human input).
+- The wire text says the folding suffix is headed by the same pinned
+  message on every pass until the first anchor exists
+  (`docs/host-wire-protocol.md:955`, `:982`), while the client clears the pin
+  when a response names native authority
+  (`transform-session-client.ts:1673-1674`) and pins a fresh head on the
+  first folding pass after that authority settles
+  (`rust-mode-window.test.ts:1389`). Unresolved, needs the wire document
+  owner to state the pin's reset across the authority transition or the
+  client to keep it (needs human input).
 
 ### wp-p02-anchor-resolution-uses-authoritative-snapshot
 
