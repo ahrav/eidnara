@@ -718,20 +718,6 @@ impl KernelStore {
         after: Option<&str>,
         max_rows: std::num::NonZeroUsize,
     ) -> Result<LiveDescriptorPage, KernelError> {
-        let candidates = match narrowing.and_then(|narrowing| narrowing.needle) {
-            Some(needle) => needle_candidates(tx, needle, after.unwrap_or(""))?,
-            None => None,
-        };
-        if candidates.as_ref().is_some_and(Vec::is_empty) {
-            return Ok(LiveDescriptorPage {
-                rows: Vec::new(),
-                next: None,
-            });
-        }
-        let candidates = candidates
-            .map(|ids| serde_json::to_string(&ids))
-            .transpose()
-            .map_err(|_| KernelError::InvalidInput)?;
         let limit = i64::try_from(max_rows.get())
             .unwrap_or(i64::MAX)
             .saturating_add(1);
@@ -740,10 +726,10 @@ impl KernelStore {
             "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
                     o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
              {rows}
-               AND (?6 IS NULL OR o.object_id IN (SELECT value FROM json_each(?6)))
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
                AND o.object_id>?3
+               AND (?6 IS NULL OR instr(b.observation_payload,?6)>0)
                AND (?4 IS NULL OR json_extract(json_extract(b.observation_payload,'$.detail'),?4)
                                   IN (SELECT value FROM json_each(?5)))
              ORDER BY o.object_id
@@ -760,7 +746,9 @@ impl KernelStore {
                     after.unwrap_or(""),
                     narrowing.map(|narrowing| narrowing.path.as_str()),
                     narrowing.map(|narrowing| narrowing.values.as_str()),
-                    candidates
+                    narrowing
+                        .and_then(|narrowing| narrowing.needle)
+                        .map(str::as_bytes)
                 ],
                 |row| {
                     Ok(LiveDescriptorRaw {
@@ -817,7 +805,7 @@ impl KernelStore {
 }
 
 impl Envelope<'_> {
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows. For one value that needs no JSON escape, a sequential pass over the stored payloads first keeps the rows that contain the value's text, and the field is read only from those; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows. For one value that needs no JSON escape, the page first checks each row's stored payload for the value's text, and reads the field only from rows that contain it; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
     ///
     /// # Errors
     ///
@@ -830,20 +818,7 @@ impl Envelope<'_> {
         after: Option<&str>,
         max_rows: std::num::NonZeroUsize,
     ) -> Result<LiveDescriptorPage, KernelError> {
-        let position = class
-            .identity_fields()
-            .iter()
-            .position(|name| *name == field)
-            .ok_or(KernelError::InvalidInput)?;
-        // The stored detail lists identity pairs in the class's field order.
-        let narrowing = Narrowing {
-            path: format!("$.identity[{position}][1]"),
-            values: serde_json::to_string(values).map_err(|_| KernelError::InvalidInput)?,
-            needle: match values {
-                [value] if value.bytes().all(|byte| !needs_json_escape(byte)) => Some(*value),
-                _ => None,
-            },
-        };
+        let narrowing = Narrowing::for_field(class, field, values)?;
         KernelStore::live_descriptor_page(
             self.tx,
             class,
@@ -859,49 +834,145 @@ impl Envelope<'_> {
 struct Narrowing<'v> {
     path: String,
     values: String,
-    /// Text every matching stored payload contains, which [`needle_candidates`] searches for before the page parses any JSON. A single value qualifies when none of its bytes needs a JSON escape: the payload is the JSON text of an object whose `detail` string holds the detail's JSON text, and JSON serialization keeps such a value's bytes verbatim at both levels.
+    /// Text every matching stored payload contains. Only a single value whose bytes need no JSON escape qualifies, because such bytes stay verbatim through both serialization levels: the detail JSON and the outer object's `detail` string.
     needle: Option<&'v str>,
+}
+
+impl<'v> Narrowing<'v> {
+    fn for_field(
+        class: OccurrenceClass,
+        field: &str,
+        values: &[&'v str],
+    ) -> Result<Self, KernelError> {
+        let position = class
+            .identity_fields()
+            .iter()
+            .position(|name| *name == field)
+            .ok_or(KernelError::InvalidInput)?;
+        // The stored detail lists identity pairs in the class's field order.
+        Ok(Self {
+            path: format!("$.identity[{position}][1]"),
+            values: serde_json::to_string(values).map_err(|_| KernelError::InvalidInput)?,
+            needle: match values {
+                [value] if value.bytes().all(|byte| !needs_json_escape(byte)) => Some(*value),
+                _ => None,
+            },
+        })
+    }
 }
 
 fn needs_json_escape(byte: u8) -> bool {
     byte == b'"' || byte == b'\\' || byte < 0x20
 }
 
-/// The most candidate ids [`needle_candidates`] collects; past it, the page narrows by the stored field alone.
-const NEEDLE_CANDIDATES: usize = 65_536;
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The descriptor object ids past `after` whose stored payload may contain `needle`, read in one sequential pass over the observation rows of every class, or `None` past [`NEEDLE_CANDIDATES`]. The page decides the class, liveness, and the exact identity match.
-fn needle_candidates(
-    tx: &rusqlite::Transaction<'_>,
-    needle: &str,
-    after: &str,
-) -> Result<Option<Vec<String>>, KernelError> {
-    let mut statement = tx
-        .prepare_cached(&format!(
-            "SELECT object_id,observation_payload FROM observations NOT INDEXED
-             WHERE observation_kind='{SOURCE_DESCRIPTOR_KIND}'
-               AND object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*' AND object_id>?1"
-        ))
-        .map_err(map_sqlite)?;
-    let mut rows = statement.query([after]).map_err(map_sqlite)?;
-    let mut candidates = Vec::new();
-    while let Some(row) = rows.next().map_err(map_sqlite)? {
-        let payload = row
-            .get_ref(1)
-            .map_err(map_sqlite)?
-            .as_bytes()
-            .map_err(|_| KernelError::CorruptCanonicalRow)?;
-        let contains = match std::str::from_utf8(payload) {
-            Ok(text) => text.contains(needle),
-            Err(_) => true,
-        };
-        if !contains {
-            continue;
+    use rusqlite::{Connection, params};
+
+    use super::{KernelStore, Narrowing, OccurrenceClass};
+    use crate::schema::apply_kernel_schema;
+
+    /// A single-value page reads only the requested class's index range: the work of a lookup that matches nothing stays flat while the store gains rows of another descriptor class and observations of another kind, both of which carry the looked-up text.
+    #[test]
+    fn a_single_value_page_does_not_scan_unrelated_history() {
+        const SESSION: &str = "ses_wanted";
+        let mut baseline = None;
+        for unrelated in [32, 2_048] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "INSERT INTO commit_log VALUES (1,'needle-scan',1,'test','seed','digest',0,'test','test');
+                 INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain','domain','domain',1,1,'normal'),
+                        ('evidence','evidence','domain','artifact','evidence',1,1,'normal');
+                 INSERT INTO domains(domain_id,object_id,name,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain',1,'normal');
+                 INSERT INTO evidence_meta(evidence_id,object_id,artifact_reference,artifact_digest,
+                     byte_length,media_type,retention_class,provider_egress_class,redaction_metadata,
+                     created_commit_seq,sensitivity_class)
+                 VALUES ('evidence','evidence','object','digest',1,'text/plain','canonical',
+                         'local_only',x'5b5d',1,'normal');",
+            )
+            .unwrap();
+            let insert = |id: &str, class: &str, kind: &str, payload: &str| {
+                tx.execute(
+                    "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,
+                         source_id,source_revision,created_commit_seq,sensitivity_class)
+                     VALUES (?1,'observation','domain',?2,?1,1,1,'normal')",
+                    params![id, class],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO observations(observation_id,object_id,evidence_id,
+                         observation_kind,observation_payload,observed_at,created_commit_seq,
+                         sensitivity_class)
+                     VALUES (?1,?1,'evidence',?2,?3,0,1,'normal')",
+                    params![id, kind, payload.as_bytes()],
+                )
+                .unwrap();
+            };
+            // A fixed handful of rows in the looked-up class, none holding the value.
+            for index in 0..8 {
+                insert(
+                    &format!("srcdesc:msg{index:06}:1"),
+                    "messages",
+                    "source_descriptor",
+                    "{}",
+                );
+            }
+            // Unrelated history that does hold the value's text.
+            let carrying = format!("{{\"detail\":\"{SESSION}\"}}");
+            for index in 0..unrelated {
+                insert(
+                    &format!("srcdesc:doc{index:06}:1"),
+                    "repository_documents",
+                    "source_descriptor",
+                    &carrying,
+                );
+                insert(
+                    &format!("other:{index:06}:1"),
+                    "messages",
+                    "other",
+                    &carrying,
+                );
+            }
+            let steps = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&steps);
+            tx.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+            let narrowing =
+                Narrowing::for_field(OccurrenceClass::Messages, "session_id", &[SESSION]).unwrap();
+            let page = KernelStore::live_descriptor_page(
+                &tx,
+                OccurrenceClass::Messages,
+                1,
+                Some(&narrowing),
+                None,
+                NonZeroUsize::new(16).unwrap(),
+            )
+            .unwrap();
+            tx.progress_handler(0, None::<fn() -> bool>).unwrap();
+            assert!(page.rows.is_empty() && page.next.is_none());
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!("single-value page: unrelated={unrelated}, steps={steps}");
+            let baseline = *baseline.get_or_insert(steps);
+            assert!(
+                steps <= baseline * 2,
+                "page work grew from {baseline} to {steps} steps with unrelated history"
+            );
         }
-        if candidates.len() == NEEDLE_CANDIDATES {
-            return Ok(None);
-        }
-        candidates.push(row.get::<_, String>(0).map_err(map_sqlite)?);
     }
-    Ok(Some(candidates))
 }
