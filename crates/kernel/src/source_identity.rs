@@ -204,13 +204,16 @@ fn push_str(out: &mut Vec<u8>, text: &str) {
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-fn lower_hex(digest: &[u8]) -> String {
-    let mut hex = String::with_capacity(2 * digest.len());
-    for &byte in digest {
-        hex.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        hex.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+/// The lowercase hex spelling of `digest`, two digits per byte, as [`identity_digest`] spells a SHA-256 digest.
+pub fn lower_hex(digest: &[u8]) -> String {
+    let mut hex = vec![0; 2 * digest.len()];
+    for (pair, &byte) in hex.as_chunks_mut::<2>().0.iter_mut().zip(digest) {
+        *pair = [
+            HEX_DIGITS[usize::from(byte >> 4)],
+            HEX_DIGITS[usize::from(byte & 0x0f)],
+        ];
     }
-    hex
+    String::from_utf8(hex).expect("hex digits are ASCII")
 }
 
 /// Whether `hex` is the lowercase hex spelling of `digest`.
@@ -280,14 +283,24 @@ pub fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option
 pub fn well_formed_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTITY_VALUE_BYTES
-        && !value.chars().any(char::is_control)
+        // Printable ASCII holds no control character, so only other text needs the char scan.
+        && (value.bytes().all(|byte| (0x20..0x7f).contains(&byte))
+            || !value.chars().any(char::is_control))
 }
 
 /// A revision is the shortest decimal spelling of a nonnegative integer that
 /// fits `i64`, so one number has one spelling.
 fn canonical_revision(revision: &str) -> Option<i64> {
-    let value: i64 = revision.parse().ok()?;
-    (value >= 0 && value.to_string() == revision).then_some(value)
+    // A digit string without a leading zero, or "0", is the spelling of the value it parses to;
+    // `parse` refuses one above `i64::MAX`.
+    let digits = revision.as_bytes();
+    if digits.is_empty()
+        || !digits.iter().all(u8::is_ascii_digit)
+        || (digits.len() > 1 && digits[0] == b'0')
+    {
+        return None;
+    }
+    revision.parse().ok()
 }
 
 fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<Span>) -> Vec<u8> {
@@ -484,27 +497,77 @@ pub(crate) fn encode_metadata(
 pub fn encode_preserving_span(
     occurrence: &Occurrence<'_>,
 ) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+    let (class, prefix, revision) = validated_prefix(occurrence)?;
+    let span = occurrence.span;
+    let tuple = occurrence_tuple(&prefix, occurrence);
+    let lineage = finish(&prefix, ROLE_LINEAGE, &[occurrence.representation], span);
+    Ok(EncodedOccurrence {
+        class,
+        occurrence_id: identity_digest(&tuple),
+        lineage_id: identity_digest(&lineage),
+        tuple,
+        revision,
+        span,
+    })
+}
+
+/// The `occurrence_id` and `revision` [`encode_preserving_span`] reports for `occurrence`, and its refusal when it refuses, without deriving the lineage.
+pub fn occurrence_id_preserving_span(
+    occurrence: &Occurrence<'_>,
+) -> Result<(String, i64), OccurrenceRefusal> {
+    let (_, prefix, revision) = validated_prefix(occurrence)?;
+    Ok((
+        identity_digest(&occurrence_tuple(&prefix, occurrence)),
+        revision,
+    ))
+}
+
+/// The occurrence tuple: the identity prefix, then the revision, the representation, and the span.
+fn occurrence_tuple(prefix: &[u8], occurrence: &Occurrence<'_>) -> Vec<u8> {
+    finish(
+        prefix,
+        ROLE_OCCURRENCE,
+        &[occurrence.revision, occurrence.representation],
+        occurrence.span,
+    )
+}
+
+/// Runs every identity, revision, and representation check in refusal order, then returns the class, the identity prefix both the tuple and the lineage open with, and the canonical revision.
+fn validated_prefix(
+    occurrence: &Occurrence<'_>,
+) -> Result<(OccurrenceClass, Vec<u8>, i64), OccurrenceRefusal> {
     let class =
         OccurrenceClass::from_code(occurrence.class).ok_or(OccurrenceRefusal::UnknownClass)?;
     let fields = class.identity_fields();
+    // An identity supplied in tuple order names every field once; any other order is searched.
+    let in_order = occurrence.identity.len() == fields.len()
+        && occurrence
+            .identity
+            .iter()
+            .zip(fields)
+            .all(|((name, _), field)| name == field);
     let mut values: Vec<&str> = Vec::with_capacity(fields.len());
-    for field in fields {
-        let value = occurrence
-            .identity
-            .iter()
-            .find(|(name, _)| name == field)
-            .map(|(_, value)| *value)
-            .ok_or(OccurrenceRefusal::MissingIdentityField)?;
-        values.push(value);
-    }
-    // Every supplied name is a class field, and each field appears once.
-    if occurrence.identity.len() != fields.len()
-        || occurrence
-            .identity
-            .iter()
-            .any(|(name, _)| !fields.contains(name))
-    {
-        return Err(OccurrenceRefusal::UnknownIdentityField);
+    if in_order {
+        values.extend(occurrence.identity.iter().map(|(_, value)| *value));
+    } else {
+        for field in fields {
+            let value = occurrence
+                .identity
+                .iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, value)| *value)
+                .ok_or(OccurrenceRefusal::MissingIdentityField)?;
+            values.push(value);
+        }
+        // Every supplied name is a class field, and each field appears once.
+        if occurrence.identity.len() != fields.len()
+            || occurrence
+                .identity
+                .iter()
+                .any(|(name, _)| !fields.contains(name))
+        {
+            return Err(OccurrenceRefusal::UnknownIdentityField);
+        }
     }
     if !values.iter().all(|value| well_formed_value(value)) {
         return Err(OccurrenceRefusal::MalformedIdentityValue);
@@ -533,30 +596,22 @@ pub fn encode_preserving_span(
     if !class.representations().contains(&occurrence.representation) {
         return Err(OccurrenceRefusal::UnknownRepresentation);
     }
-    let span = occurrence.span;
-
-    let mut prefix = Vec::new();
+    let mut prefix = Vec::with_capacity(
+        2 * LENGTH_PREFIX_BYTES
+            + class.code().len()
+            + fields
+                .iter()
+                .zip(&values)
+                .map(|(field, value)| 2 * LENGTH_PREFIX_BYTES + field.len() + value.len())
+                .sum::<usize>(),
+    );
     push_str(&mut prefix, class.code());
     prefix.extend_from_slice(&u32::try_from(fields.len()).expect("small").to_be_bytes());
     for (field, value) in fields.iter().zip(&values) {
         push_str(&mut prefix, field);
         push_str(&mut prefix, value);
     }
-    let tuple = finish(
-        &prefix,
-        ROLE_OCCURRENCE,
-        &[occurrence.revision, occurrence.representation],
-        span,
-    );
-    let lineage = finish(&prefix, ROLE_LINEAGE, &[occurrence.representation], span);
-    Ok(EncodedOccurrence {
-        class,
-        occurrence_id: identity_digest(&tuple),
-        lineage_id: identity_digest(&lineage),
-        tuple,
-        revision,
-        span,
-    })
+    Ok((class, prefix, revision))
 }
 
 #[cfg(test)]
@@ -803,6 +858,185 @@ mod tests {
                 "decision_summary",
                 span
             ));
+        }
+    }
+
+    /// An identity in any order encodes as it does in tuple order, and a repeated, extra, misspelled, or missing name is refused by the first check it fails.
+    #[test]
+    fn identity_order_and_names_decide_the_refusal() {
+        let in_order = [
+            ("project_id", "p"),
+            ("harness", "pi"),
+            ("session_id", "s"),
+            ("parent_message_id", "m"),
+            ("tool_call_id", "call"),
+            ("result_revision", "17"),
+            ("block_index", "0"),
+        ];
+        let encode = |identity: &[(&str, &str)]| {
+            occurrence_id_preserving_span(&Occurrence {
+                class: "raw_tool_spans",
+                identity,
+                revision: "17",
+                representation: "tool_output",
+                span: None,
+            })
+        };
+        let mut reversed = in_order;
+        reversed.reverse();
+        assert!(encode(&in_order).is_ok());
+        assert_eq!(encode(&reversed), encode(&in_order));
+        let mut repeated = in_order;
+        repeated[1] = repeated[0];
+        assert_eq!(
+            encode(&repeated),
+            Err(OccurrenceRefusal::MissingIdentityField)
+        );
+        let mut extra = in_order.to_vec();
+        extra.push(("object_id", "o"));
+        assert_eq!(encode(&extra), Err(OccurrenceRefusal::UnknownIdentityField));
+        let mut misspelled = in_order;
+        misspelled[3] = ("parent_id", "m");
+        assert_eq!(
+            encode(&misspelled),
+            Err(OccurrenceRefusal::MissingIdentityField)
+        );
+        let mut missing_and_malformed = in_order[1..].to_vec();
+        missing_and_malformed[0] = ("harness", "");
+        assert_eq!(
+            encode(&missing_and_malformed),
+            Err(OccurrenceRefusal::MissingIdentityField)
+        );
+        let mut malformed = in_order;
+        malformed[2] = ("session_id", "s\u{85}");
+        assert_eq!(
+            encode(&malformed),
+            Err(OccurrenceRefusal::MalformedIdentityValue)
+        );
+    }
+
+    /// Identity values refuse every control character, ASCII, DEL, or C1, and accept other text; a revision is accepted only in the shortest decimal spelling of a nonnegative `i64`.
+    #[test]
+    fn values_and_revisions_keep_their_spelling_rules() {
+        for (value, accepted) in [
+            ("abc~ !", true),
+            ("\u{e9}", true),
+            ("\u{a0}", true),
+            ("\u{65e5}\u{672c}", true),
+            ("", false),
+            ("tab\t", false),
+            ("\u{7f}", false),
+            ("a\u{80}", false),
+            ("\u{85}", false),
+            ("\u{9f}z", false),
+            ("ab\u{85}", false),
+        ] {
+            assert_eq!(well_formed_value(value), accepted, "{value:?}");
+        }
+        assert!(well_formed_value(&"y".repeat(MAX_IDENTITY_VALUE_BYTES)));
+        assert!(!well_formed_value(
+            &"y".repeat(MAX_IDENTITY_VALUE_BYTES + 1)
+        ));
+        for (revision, value) in [
+            ("0", Some(0)),
+            ("7", Some(7)),
+            ("1780000000000", Some(1_780_000_000_000)),
+            ("9223372036854775807", Some(i64::MAX)),
+            ("9223372036854775808", None),
+            ("01", None),
+            ("00", None),
+            ("+1", None),
+            ("-0", None),
+            ("-1", None),
+            ("", None),
+            ("1.5", None),
+            (" 1", None),
+            ("1 ", None),
+            ("\u{661}", None),
+        ] {
+            assert_eq!(canonical_revision(revision), value, "{revision:?}");
+        }
+    }
+
+    /// The lineage-free identifier is the full encoder's `occurrence_id` and `revision`, and refuses exactly where it refuses.
+    #[test]
+    fn the_occurrence_id_agrees_with_the_full_encoding() {
+        let oid = "b".repeat(40);
+        let long = "v".repeat(MAX_IDENTITY_VALUE_BYTES + 1);
+        let cases = [
+            (
+                "canonical_claims",
+                vec![("object_id", "obj:\u{e9}")],
+                "3",
+                "rationale",
+            ),
+            (
+                "raw_tool_spans",
+                vec![
+                    ("project_id", "p"),
+                    ("harness", "pi"),
+                    ("session_id", "s"),
+                    ("parent_message_id", "m"),
+                    ("tool_call_id", "call|item"),
+                    ("result_revision", "17"),
+                    ("block_index", "0"),
+                ],
+                "17",
+                "tool_error",
+            ),
+            (
+                "git_commits",
+                vec![
+                    ("repository_id", "r"),
+                    ("object_format", "sha1"),
+                    ("oid", oid.as_str()),
+                ],
+                "0",
+                "commit_message",
+            ),
+            ("nope", vec![("object_id", "o")], "1", "summary"),
+            ("promoted_memory", vec![], "1", "summary"),
+            (
+                "promoted_memory",
+                vec![("decision_object_id", "a\u{85}")],
+                "1",
+                "summary",
+            ),
+            (
+                "promoted_memory",
+                vec![("decision_object_id", long.as_str())],
+                "1",
+                "summary",
+            ),
+            (
+                "promoted_memory",
+                vec![("decision_object_id", "o")],
+                "01",
+                "summary",
+            ),
+            (
+                "promoted_memory",
+                vec![("decision_object_id", "o")],
+                "1",
+                "text",
+            ),
+        ];
+        for (class, identity, revision, representation) in &cases {
+            for span in [None, Some(Span { start: 1, end: 2 })] {
+                let occurrence = Occurrence {
+                    class,
+                    identity,
+                    revision,
+                    representation,
+                    span,
+                };
+                assert_eq!(
+                    occurrence_id_preserving_span(&occurrence),
+                    encode_preserving_span(&occurrence)
+                        .map(|encoded| (encoded.occurrence_id, encoded.revision)),
+                    "{occurrence:?}"
+                );
+            }
         }
     }
 
