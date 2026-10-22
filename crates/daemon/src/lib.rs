@@ -6831,7 +6831,7 @@ impl HandlerCore {
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
                 // A source capture handed off before this delete rechecks its ticket under the same gate and publishes nothing.
-                core.source_capture.invalidate_session(&session_id);
+                core.source_capture.invalidate_sessions();
                 deleted
             };
             core.cancel_history_summarizer_work(&session_id);
@@ -8983,6 +8983,7 @@ impl HandlerCore {
                     session_id: parsed.session_id.clone(),
                     project: binding.kernel_project.clone(),
                     window: parsed.native_messages.clone().unwrap_or_default(),
+                    epoch: self.source_capture.epoch(),
                 },
             );
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A

@@ -192,22 +192,6 @@ impl Memo {
         }
     }
 
-    /// Drops every entry whose key names `session`, the key's fourth field.
-    fn forget_session(&mut self, session: &str) {
-        let named = |key: &str| key.split('\u{1f}').nth(3) == Some(session);
-        self.order.retain(|key| !named(key));
-        let entries = &mut self.entries;
-        let mut freed = 0;
-        entries.retain(|key, entry| {
-            let keep = !named(key);
-            if !keep {
-                freed += Self::entry_bytes(key, &entry.digest);
-            }
-            keep
-        });
-        self.bytes -= freed;
-    }
-
     fn oldest_pending_since(&self) -> Option<i64> {
         self.entries
             .values()
@@ -263,6 +247,8 @@ pub(crate) struct Offer {
     pub session_id: String,
     pub project: ProjectBinding,
     pub window: Vec<Arc<Value>>,
+    /// [`SourceCapture::epoch`] before the pass ran.
+    pub epoch: u64,
 }
 
 /// A charged window waiting for its response to reach the wire writer. Dropping it releases the charge.
@@ -272,6 +258,7 @@ pub(crate) struct CaptureHandoff {
     session: SessionIdentity,
     project: ProjectBinding,
     epoch: u64,
+    window_bytes: usize,
     retained: RetainedCharge,
 }
 
@@ -317,16 +304,20 @@ impl SourceCapture {
     pub(crate) fn offer(self: &Arc<Self>, offer: Offer) -> Option<CaptureHandoff> {
         let harness = match offer.profile {
             SerializerProfile::Pi => Harness::Pi,
-            _ => Harness::OpenCode,
+            SerializerProfile::OpencodeAiSdk => Harness::OpenCode,
+            _ => return None,
         };
         if offer.window.is_empty() {
             return None;
         }
-        let bytes = offer
+        let window_bytes: usize = offer
             .window
             .iter()
             .map(|value| crate::retained_size::value_retained_bytes(value))
-            .sum::<usize>()
+            .sum();
+        // The adapters copy about the window's bytes once more; the job tops up for any excess.
+        let bytes = window_bytes
+            .saturating_mul(2)
             .saturating_add(ARTIFACT_PREPARATION_BYTES);
         if bytes > MAX_RETAINED_WINDOW_BYTES {
             self.refuse(Count::RefusedWindowTooLarge);
@@ -345,7 +336,8 @@ impl SourceCapture {
                 session_id: offer.session_id,
             },
             project: offer.project,
-            epoch: self.delete_epoch.load(Ordering::Acquire),
+            epoch: offer.epoch,
+            window_bytes,
             retained,
         })
     }
@@ -370,16 +362,22 @@ impl SourceCapture {
     /// A poisoned memo is a lost cache: it starts empty and the kernel's receipts answer.
     fn memo(&self) -> MutexGuard<'_, Memo> {
         self.memo.lock().unwrap_or_else(|poisoned| {
+            self.memo.clear_poison();
             let mut memo = poisoned.into_inner();
             *memo = Memo::default();
             memo
         })
     }
 
-    /// Invalidates every handoff taken before now and forgets `session`'s memo entries; the caller holds the capture commit gate, so a job that rechecks under it sees the change.
-    pub(crate) fn invalidate_session(&self, session: &str) {
+    /// The delete epoch a pass samples before it runs.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.delete_epoch.load(Ordering::Acquire)
+    }
+
+    /// Invalidates every handoff whose pass began before now and empties the memo, so the next pass of any session asks the kernel, as after a restart; the caller holds the capture commit gate, so a job that rechecks under it sees the change.
+    pub(crate) fn invalidate_sessions(&self) {
         self.delete_epoch.fetch_add(1, Ordering::AcqRel);
-        self.memo().forget_session(session);
+        *self.memo() = Memo::default();
     }
 
     /// The observability set: every [`Count`] by name, the active slot reported as draining once shutdown began, and the age of the oldest pending unit.
@@ -447,6 +445,7 @@ impl CaptureHandoff {
             session: self.session,
             project: self.project,
             epoch: self.epoch,
+            window_bytes: self.window_bytes,
         })
     }
 }
@@ -465,6 +464,7 @@ pub(crate) struct CaptureJob {
     session: SessionIdentity,
     project: ProjectBinding,
     epoch: u64,
+    window_bytes: usize,
 }
 
 impl CaptureJob {
@@ -486,7 +486,7 @@ impl CaptureJob {
         let end = match joined {
             Ok(end) => return end,
             Err(error) if error.is_panic() => Count::WorkerPanicked,
-            Err(_) => Count::KernelError,
+            Err(_) => Count::Discarded,
         };
         capture.counters.add(end, 1);
         log("job ended", end, 1);
@@ -512,8 +512,8 @@ impl CaptureJob {
             return self.end(Count::Deadline);
         }
         let units = self.units();
-        // The adapters' copies are charged before anything else holds them.
-        let copies = units
+        // The adapters' copies beyond the window charge are charged as soon as they exist.
+        let copies: usize = units
             .iter()
             .map(|unit| {
                 size_of::<SourceUnit>()
@@ -527,7 +527,9 @@ impl CaptureJob {
                         .sum::<usize>()
             })
             .sum();
-        let Some(_copies) = RetainedCharge::take(&self.capture, copies) else {
+        let Some(_copies) =
+            RetainedCharge::take(&self.capture, copies.saturating_sub(self.window_bytes))
+        else {
             return self.end(Count::RefusedResidentShort);
         };
         if units.is_empty() {
@@ -764,28 +766,13 @@ mod tests {
     }
 
     #[test]
-    fn the_memo_stays_within_its_byte_budget_keeps_the_first_deferral_and_forgets_a_session() {
+    fn the_memo_stays_within_its_byte_budget_and_keeps_the_first_deferral() {
         let mut memo = Memo::default();
-        memo.record(
-            "i\u{1f}p\u{1f}h\u{1f}gone\u{1f}k".into(),
-            "d".into(),
-            Disposition::Pending { since_ms: 5 },
-        );
-        memo.record(
-            "i\u{1f}p\u{1f}h\u{1f}gone\u{1f}k".into(),
-            "d".into(),
-            Disposition::Pending { since_ms: 9 },
-        );
+        memo.record("k".into(), "d".into(), Disposition::Pending { since_ms: 5 });
+        memo.record("k".into(), "d".into(), Disposition::Pending { since_ms: 9 });
         assert_eq!(memo.oldest_pending_since(), Some(5));
-        memo.record(
-            "i\u{1f}p\u{1f}h\u{1f}kept\u{1f}k".into(),
-            "d".into(),
-            Disposition::Published,
-        );
-        memo.forget_session("gone");
+        memo.record("k".into(), "d".into(), Disposition::Published);
         assert_eq!(memo.oldest_pending_since(), None);
-        assert_eq!(memo.entries.len(), 1);
-        assert_eq!(memo.order.len(), 1);
         for index in 0..100_000 {
             memo.record(
                 format!("key-{index:064}"),
@@ -801,9 +788,6 @@ mod tests {
                 .map(|(key, entry)| Memo::entry_bytes(key, &entry.digest))
                 .sum::<usize>()
         );
-        assert!(
-            memo.get("i\u{1f}p\u{1f}h\u{1f}kept\u{1f}k").is_none(),
-            "the oldest entries were evicted"
-        );
+        assert!(memo.get("k").is_none(), "the oldest entries were evicted");
     }
 }

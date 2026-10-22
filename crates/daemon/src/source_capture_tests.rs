@@ -629,6 +629,7 @@ async fn the_capture_report_carries_no_unit_text() {
             session_id: SESSION.to_owned(),
             project: binding.clone(),
             window: window.to_vec(),
+            epoch: handler.source_capture.epoch(),
         })
     };
     let foreign = vec![Arc::new(json!({
@@ -827,8 +828,8 @@ async fn capture_latency_measurement() {
         }
         eprintln!(
             "capture writer hold {workload}: last {} max {} published {}",
-            report(&on)["writer_hold_ms_last"],
-            report(&on)["writer_hold_ms_max"],
+            report(&on)["publish_ms_last"],
+            report(&on)["publish_ms_max"],
             report(&on)["units_published"]
         );
     }
@@ -857,7 +858,7 @@ async fn a_delete_after_the_handoff_publishes_nothing_for_the_queued_window() {
         .unwrap();
     {
         let _gate = handler.capture_commit_gate.lock().unwrap();
-        handler.source_capture.invalidate_session(SESSION);
+        handler.source_capture.invalidate_sessions();
     }
     go_tx.send(()).unwrap();
     settle(&handler).await;
@@ -964,6 +965,12 @@ async fn a_concurrent_publication_of_a_unit_replays_or_conflicts() {
         tip,
         "the terminal unit is never offered again"
     );
+    assert_eq!(report(&handler)["units_identity_conflict"], 1);
+    assert_eq!(
+        report(&handler)["units_memo_skipped"],
+        1,
+        "the memo, not a second kernel conflict, answers for the terminal unit"
+    );
 }
 
 /// F25: a revision that leads the clock is a retryable refusal; the unit waits as pending, and the report shows its age.
@@ -982,6 +989,18 @@ async fn a_revision_lead_leaves_the_unit_pending() {
     settle(&handler).await;
     assert_eq!(report(&handler)["units_refused_retryable"], 1);
     assert!(report(&handler)["oldest_deferred_age_ms"].is_u64());
+    // A pending unit is offered to the kernel again on the next pass.
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_ahead", ahead, "from the future")],
+            "base-2",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_refused_retryable"], 2);
+    assert_eq!(report(&handler)["units_memo_skipped"], 0);
     assert!(live(&kernel_store(&handler), OccurrenceClass::Messages).is_empty());
 }
 
@@ -990,13 +1009,14 @@ async fn a_revision_lead_leaves_the_unit_pending() {
 async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
     let binding = kernel_routes::ProjectBinding::new(&project);
-    let window = vec![Arc::new(json!("x".repeat(17 * 1024 * 1024)))];
+    let window = vec![Arc::new(json!("x".repeat(9 * 1024 * 1024)))];
     let offer = || {
         handler.source_capture.offer(source_capture::Offer {
             profile: SerializerProfile::OpencodeAiSdk,
             session_id: SESSION.to_owned(),
             project: binding.clone(),
             window: window.clone(),
+            epoch: handler.source_capture.epoch(),
         })
     };
     let held = offer().expect("the first window fits");
