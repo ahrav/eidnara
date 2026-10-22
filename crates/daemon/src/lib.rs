@@ -3911,6 +3911,7 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
         let memory_reviewer_status = Arc::clone(&self.memory_reviewer_status);
+        let source_capture = Arc::clone(&self.source_capture);
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
         let memory_reviewer_host = self
             .memory_reviewer_host
@@ -3950,6 +3951,7 @@ impl HandlerCore {
                         Arc::clone(&memory_reviewer_status),
                         store,
                         Arc::clone(&kernel),
+                        Arc::clone(&source_capture),
                         cancel.clone(),
                     ));
                 }

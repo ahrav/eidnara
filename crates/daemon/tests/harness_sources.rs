@@ -3135,6 +3135,15 @@ fn harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it()
         })
         .unwrap();
 
+    // A repository document published beside the captures is canonical evidence.
+    let document = publisher
+        .publish(&document_unit("README.md", "1", "# Readme\n"), NOW)
+        .unwrap();
+    assert_eq!(
+        evidence_retention(&corpus, &document.evidence_object_id),
+        ("canonical".to_owned(), None, None)
+    );
+
     // The same unit observed again after its deadline replays the first rows: the deadline is the first owner's.
     let again = publisher.publish(message, deadline + DAY_MS).unwrap();
     assert!(again.replayed);
@@ -3169,12 +3178,10 @@ fn harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it()
         Some(retired_at),
         "the evidence goes in the descriptor's commit"
     );
-    let kinds = change_kinds(&corpus, retired_at);
-    let descriptor = kinds.iter().position(|kind| kind != "evidence_retire");
-    let evidence = kinds.iter().position(|kind| kind == "evidence_retire");
-    assert!(
-        descriptor < evidence && descriptor.is_some(),
-        "descriptor first, evidence second: {kinds:?}"
+    assert_eq!(
+        change_kinds(&corpus, retired_at),
+        ["observation_retire", "evidence_retire"],
+        "descriptor first, evidence second"
     );
 
     // Publishing the unit once more after its capture expired still answers from the receipts: nothing is re-retained and the deadline stays.
@@ -3200,11 +3207,13 @@ fn harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it()
         .expire_harness_captures(NOW + 32 * DAY_MS)
         .unwrap();
     assert_eq!((late.retired, late.retained), (1, 0));
-    assert_eq!(
-        evidence_retention(&corpus, "canonical-object"),
-        ("canonical".to_owned(), None, None),
-        "canonical evidence never ages out"
-    );
+    for object in ["canonical-object", document.evidence_object_id.as_str()] {
+        assert_eq!(
+            evidence_retention(&corpus, object),
+            ("canonical".to_owned(), None, None),
+            "canonical evidence never ages out"
+        );
+    }
     assert_eq!(
         corpus
             .kernel
@@ -3313,5 +3322,23 @@ fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
         corpus.kernel.expire_harness_captures(after_hold).unwrap(),
         kernel::CaptureExpiry::default(),
         "a retained capture leaves the sweep while it is cited"
+    );
+    // Once the citation goes, the kept evidence is due again and retires. Expiry receipts are keyed by the cutoff, so a sweep at the same cutoff replays the earlier `retained` receipt; the next pass runs at a later clock.
+    corpus
+        .kernel
+        .commit(intent("uncite"), |envelope| {
+            envelope.retire_observation(&format!("citer-object:{cited_evidence}"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let last = corpus
+        .kernel
+        .expire_harness_captures(after_hold + 1)
+        .unwrap();
+    assert_eq!((last.retired, last.retained), (1, 0));
+    assert!(
+        evidence_retention(&corpus, &cited.evidence_object_id)
+            .2
+            .is_some()
     );
 }

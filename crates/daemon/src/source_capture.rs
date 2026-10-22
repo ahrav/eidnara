@@ -90,15 +90,8 @@ counts! {
     RetainedBytes => "retained_bytes",
     PublishMsLast => "publish_ms_last",
     PublishMsMax => "publish_ms_max",
-}
-
-/// Harness-capture expiry progress across this process's maintenance passes, `[retired, retained]`: the Kernel maintenance slice records every sweep, and [`SourceCapture::report`] reports the totals as `expiry_retired` and `expiry_retained`.
-static EXPIRY: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-
-/// Adds one harness-capture sweep's progress to the reported totals.
-pub(crate) fn record_expiry(expiry: kernel::CaptureExpiry) {
-    EXPIRY[0].fetch_add(expiry.retired as u64, Ordering::Relaxed);
-    EXPIRY[1].fetch_add(expiry.retained as u64, Ordering::Relaxed);
+    ExpiryRetired => "expiry_retired",
+    ExpiryRetained => "expiry_retained",
 }
 
 #[derive(Default)]
@@ -420,6 +413,12 @@ impl SourceCapture {
         *self.memo() = Memo::default();
     }
 
+    /// Adds one Kernel maintenance pass's harness-capture expiry progress: captures retired outright, and captures whose descriptors were retired while a citation kept their evidence.
+    pub(crate) fn record_expiry(&self, expiry: kernel::CaptureExpiry) {
+        self.counters.add(Count::ExpiryRetired, expiry.retired);
+        self.counters.add(Count::ExpiryRetained, expiry.retained);
+    }
+
     /// The observability set: every [`Count`] by name, the active slot reported as draining once shutdown began, and the age of the oldest pending unit.
     pub(crate) fn report(&self, draining: bool, now_ms: i64) -> Value {
         let mut report = serde_json::Map::new();
@@ -443,14 +442,6 @@ impl SourceCapture {
             .oldest_pending_since()
             .map(|since| now_ms.saturating_sub(since).max(0));
         report.insert("oldest_deferred_age_ms".to_owned(), json!(oldest));
-        report.insert(
-            "expiry_retired".to_owned(),
-            json!(EXPIRY[0].load(Ordering::Relaxed)),
-        );
-        report.insert(
-            "expiry_retained".to_owned(),
-            json!(EXPIRY[1].load(Ordering::Relaxed)),
-        );
         Value::Object(report)
     }
 }
