@@ -132,7 +132,8 @@ impl PreparedArtifact {
             || request.source_revision < 0
             || request.retain_until.is_some_and(|value| value < 0)
             // A MemoryReviewer capture carries a finite acquisition reference; its liveness is judged in the reference commit, after the receipt lookup, so an identical committed request still replays.
-            || (request.retention_class == super::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
+            || ((request.retention_class == super::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
+                || request.retention_class == super::HARNESS_CAPTURE_RETENTION_CLASS)
                 && request.retain_until.is_none())
         {
             return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));

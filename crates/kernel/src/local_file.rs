@@ -31,8 +31,27 @@ pub struct CaptureExpiry {
     pub retired: usize,
     pub retained: usize,
 }
-/// The reserved producer expiry receipts are written under; a caller cannot commit under it, so a receipt found under an expiry key was written by this sweep.
-const EXPIRY_PRODUCER: &str = "local-file-expiry";
+/// An expiring evidence class: its retention class, the observation kind of the rows that own its evidence, and the reserved producer its expiry receipts are written under. A caller cannot commit under a reserved producer, so a receipt found under an expiry key was written by that sweep.
+struct ExpiringClass {
+    retention_class: &'static str,
+    owner_kind: &'static str,
+    producer: &'static str,
+    cause: &'static str,
+}
+
+const MEMORY_REVIEWER_CAPTURES: ExpiringClass = ExpiringClass {
+    retention_class: super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
+    owner_kind: LOCAL_FILE_KIND,
+    producer: "local-file-expiry",
+    cause: "acquisition reference expired",
+};
+
+const HARNESS_CAPTURES: ExpiringClass = ExpiringClass {
+    retention_class: super::cas::HARNESS_CAPTURE_RETENTION_CLASS,
+    owner_kind: super::source_descriptor::SOURCE_DESCRIPTOR_KIND,
+    producer: "harness-capture-expiry",
+    cause: "harness capture retention expired",
+};
 /// The reserved producer under which a run abandons a capture it could not complete.
 const ABANDON_PRODUCER: &str = "local-file-abandon";
 
@@ -199,9 +218,26 @@ impl KernelStore {
     ///
     /// Returns the first storage, lock, or fence error; captures retired before it stay retired.
     pub fn expire_local_file_captures(&self, now: i64) -> Result<CaptureExpiry, KernelError> {
+        self.expire_captures(&MEMORY_REVIEWER_CAPTURES, now)
+    }
+
+    /// Retires the source descriptors and evidence of every harness capture (`harness_capture` evidence) whose `retain_until` has passed and that no live hold pins, by the same rules as [`Self::expire_local_file_captures`]: at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] captures per call, oldest deadline first, one commit per capture that rechecks the deadline and pins under the writer. Each commit retires the capture's live descriptors first and its evidence second; evidence another live row still cites is kept and leaves the sweep until that citation is gone, and a refused row is skipped so the rest of its page proceeds. The bound counts captures, not time. Canonical, git, and every other retention class are untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first storage, lock, or fence error; captures retired before it stay retired.
+    pub fn expire_harness_captures(&self, now: i64) -> Result<CaptureExpiry, KernelError> {
+        self.expire_captures(&HARNESS_CAPTURES, now)
+    }
+
+    fn expire_captures(
+        &self,
+        class: &ExpiringClass,
+        now: i64,
+    ) -> Result<CaptureExpiry, KernelError> {
         let expired = {
             let reader = self.lock_reader()?;
-            expired_captures(&reader, now)?
+            expired_captures(&reader, class, now)?
         };
         let mut sweep = CaptureExpiry::default();
         for (evidence_id, evidence_object) in expired {
@@ -209,8 +245,10 @@ impl KernelStore {
             let outcome = commit_with_writer(
                 &mut writer,
                 self.lease_epoch(),
-                expiry_intent(now, &evidence_id),
-                |envelope| retire_expired_capture(envelope, now, &evidence_id, &evidence_object),
+                expiry_intent(class, now, &evidence_id),
+                |envelope| {
+                    retire_expired_capture(envelope, class, now, &evidence_id, &evidence_object)
+                },
                 || Ok(()),
             );
             match outcome {
@@ -288,7 +326,9 @@ impl KernelStore {
                 if pinned {
                     return Err(KernelError::Conflict);
                 }
-                for observation in live_capture_observations(envelope, &evidence_id)? {
+                for observation in
+                    live_capture_observations(envelope, LOCAL_FILE_KIND, &evidence_id)?
+                {
                     envelope.retire_capture_observation(&observation)?;
                 }
                 if cited_elsewhere(envelope, &evidence_id)? {
@@ -345,22 +385,24 @@ impl KernelStore {
 }
 
 /// The intent of one capture's expiry commit, keyed by the cutoff and the evidence id under the reserved producer.
-fn expiry_intent(now: i64, evidence_id: &str) -> CommitIntent {
+fn expiry_intent(class: &ExpiringClass, now: i64, evidence_id: &str) -> CommitIntent {
     CommitIntent {
         producer: format!(
-            "{}{EXPIRY_PRODUCER}",
-            CommitIntent::RESERVED_PRODUCER_PREFIX
+            "{}{}",
+            CommitIntent::RESERVED_PRODUCER_PREFIX,
+            class.producer
         ),
         operation_key: format!("{now}:{evidence_id}"),
         request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
-        actor: EXPIRY_PRODUCER.to_string(),
-        cause: "acquisition reference expired".to_string(),
+        actor: class.producer.to_string(),
+        cause: class.cause.to_string(),
     }
 }
 
 /// Retires one candidate inside its own transaction: the capture's own observations, then the evidence unless another live row cites it. The candidate list was read outside this transaction, so the expiry and pin predicate is checked again first; a capture a hold has pinned since then is left alone as `Conflict`, which the sweep skips without a commit.
 fn retire_expired_capture(
     envelope: &mut Envelope<'_>,
+    class: &ExpiringClass,
     now: i64,
     evidence_id: &str,
     evidence_object: &str,
@@ -372,18 +414,14 @@ fn retire_expired_capture(
                 "SELECT EXISTS(SELECT 1 FROM evidence_meta e
                                WHERE e.evidence_id=?3 AND {EXPIRED_UNPINNED_SQL})"
             ),
-            params![
-                super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
-                now,
-                evidence_id
-            ],
+            params![class.retention_class, now, evidence_id],
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
     if !still_expired {
         return Err(KernelError::Conflict);
     }
-    for observation in live_capture_observations(envelope, evidence_id)? {
+    for observation in live_capture_observations(envelope, class.owner_kind, evidence_id)? {
         envelope.retire_capture_observation(&observation)?;
     }
     if cited_elsewhere(envelope, evidence_id)? {
@@ -416,6 +454,7 @@ const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commi
 /// Live MemoryReviewer captures whose acquisition reference has passed, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
 fn expired_captures(
     connection: &rusqlite::Connection,
+    class: &ExpiringClass,
     now: i64,
 ) -> Result<Vec<(String, String)>, KernelError> {
     let mut statement = connection
@@ -424,10 +463,10 @@ fn expired_captures(
     let rows = statement
         .query_map(
             params![
-                super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
+                class.retention_class,
                 now,
                 i64::try_from(MAX_EXPIRED_CAPTURES_PER_CALL).unwrap_or(i64::MAX),
-                LOCAL_FILE_KIND
+                class.owner_kind
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -457,6 +496,7 @@ fn expired_captures_sql() -> String {
 /// The object ids of the live capture observations citing `evidence_id`. The capture writer creates one per evidence row; every live one is retired so that `retire_evidence` sees only foreign citations.
 fn live_capture_observations(
     envelope: &Envelope<'_>,
+    owner_kind: &str,
     evidence_id: &str,
 ) -> Result<Vec<String>, KernelError> {
     let mut statement = envelope
@@ -467,7 +507,7 @@ fn live_capture_observations(
         )
         .map_err(map_sqlite)?;
     let rows = statement
-        .query_map(params![evidence_id, LOCAL_FILE_KIND], |row| row.get(0))
+        .query_map(params![evidence_id, owner_kind], |row| row.get(0))
         .map_err(map_sqlite)?
         .collect::<rusqlite::Result<_>>()
         .map_err(map_sqlite)?;
@@ -497,10 +537,11 @@ mod tests {
     use sha2::Digest as _;
 
     use super::{
-        CaptureExpiry, LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
-        commit_with_writer, expired_captures_sql, expiry_intent, retire_expired_capture,
+        CaptureExpiry, HARNESS_CAPTURES, LOCAL_FILE_KIND, LocalFileCaptureRequest,
+        MAX_EXPIRED_CAPTURES_PER_CALL, MEMORY_REVIEWER_CAPTURES, commit_with_writer,
+        expired_captures_sql, expiry_intent, retire_expired_capture,
     };
-    use crate::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS;
+    use crate::cas::{HARNESS_CAPTURE_RETENTION_CLASS, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS};
     use crate::schema::apply_kernel_schema;
     use crate::{
         ArtifactIngestRequest, CommitIntent, DomainSpec, KernelError, KernelStore,
@@ -603,7 +644,10 @@ mod tests {
         let now = lapses_at + 1;
         // A caller commits under the very intent the sweep will use for this capture at this cutoff, claiming it was retained.
         assert_eq!(
-            store.commit(expiry_intent(now, "cap"), |_| Ok("retained".to_string())),
+            store.commit(
+                expiry_intent(&MEMORY_REVIEWER_CAPTURES, now, "cap"),
+                |_| Ok("retained".to_string())
+            ),
             Err(KernelError::InvalidInput),
             "the expiry producer is reserved to the store"
         );
@@ -621,7 +665,7 @@ mod tests {
         commit_with_writer(
             &mut writer,
             store.lease_epoch(),
-            expiry_intent(now, "cap"),
+            expiry_intent(&MEMORY_REVIEWER_CAPTURES, now, "cap"),
             |_| Ok("retired".to_string()),
             || Ok(()),
         )
@@ -644,7 +688,13 @@ mod tests {
             .acquire_execution_hold(&binding, &["cap".to_string()], now + 60_000)
             .unwrap();
         let outcome = store.commit(intent("expire"), |envelope| {
-            retire_expired_capture(envelope, now, "cap", "cap-object")
+            retire_expired_capture(
+                envelope,
+                &MEMORY_REVIEWER_CAPTURES,
+                now,
+                "cap",
+                "cap-object",
+            )
         });
         assert_eq!(
             outcome,
@@ -660,11 +710,91 @@ mod tests {
         let (store, _, lapses_at) = store_with_lapsing_capture(unpinned.path());
         let receipt = store
             .commit(intent("expire"), |envelope| {
-                retire_expired_capture(envelope, lapses_at + 1, "cap", "cap-object")
+                retire_expired_capture(
+                    envelope,
+                    &MEMORY_REVIEWER_CAPTURES,
+                    lapses_at + 1,
+                    "cap",
+                    "cap-object",
+                )
             })
             .unwrap();
         assert_eq!(receipt.result, "retired");
         assert!(store.local_file_capture("cap").unwrap().is_none());
+    }
+
+    /// F12 for the harness class: a pin taken on an expired `harness_capture` row after the sweep selected it is seen by the writer recheck, so the row is kept; without the pin the same commit retires it.
+    #[test]
+    fn a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _, _) = store_with_lapsing_capture(root.path());
+        store
+            .ingest_exact_artifact(ArtifactIngestRequest {
+                intent: intent("harness"),
+                payload: b"captured tool output".to_vec(),
+                evidence_id: "harness".to_string(),
+                object_id: "harness-object".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: "raw_tool_spans".to_string(),
+                source_id: "tool".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: HARNESS_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(NOW),
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress: ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+        let selected = {
+            let reader = store.lock_reader().unwrap();
+            super::expired_captures(&reader, &HARNESS_CAPTURES, NOW).unwrap()
+        };
+        assert_eq!(
+            selected,
+            [("harness".to_string(), "harness-object".to_string())],
+            "only the harness row is a harness candidate"
+        );
+        let outcome = store.commit(intent("pinned"), |envelope| {
+            // A hold lands between the reader's selection and this writer commit.
+            envelope
+                .tx
+                .execute_batch(
+                    "INSERT INTO capture_pins(capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,
+                         writer_epoch,created_at,expires_at,released_at,purge_degraded_at,purge_barrier_id)
+                     VALUES ('pin','source_hold','owner',1,1,1,0,NULL,NULL,NULL,NULL);
+                     INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
+                     VALUES ('pin','harness',NULL);",
+                )
+                .unwrap();
+            retire_expired_capture(envelope, &HARNESS_CAPTURES, NOW, "harness", "harness-object")
+        });
+        assert_eq!(
+            outcome,
+            Err(KernelError::Conflict),
+            "the recheck sees the pin"
+        );
+        // The MemoryReviewer sweep retires its own lapsed capture and never the harness row.
+        let far = crate::current_time_ms() + 120_000;
+        let curator = store.expire_local_file_captures(far).unwrap();
+        assert_eq!((curator.retired, curator.retained), (1, 0));
+        assert_eq!(
+            store.expire_local_file_captures(far).unwrap(),
+            CaptureExpiry::default()
+        );
+        let receipt = store
+            .commit(intent("unpinned"), |envelope| {
+                retire_expired_capture(
+                    envelope,
+                    &HARNESS_CAPTURES,
+                    NOW,
+                    "harness",
+                    "harness-object",
+                )
+            })
+            .unwrap();
+        assert_eq!(receipt.result, "retired");
     }
 
     /// One live capture whose acquisition reference lapsed at `NOW`, with its capture observation, plus `history` captures earlier sweeps already retired.

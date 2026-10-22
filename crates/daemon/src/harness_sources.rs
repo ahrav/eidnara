@@ -463,6 +463,10 @@ const REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
 /// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
 pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
 
+/// How long captured harness evidence is owned after its observation: the capture replay retention, 30 days.
+pub const HARNESS_CAPTURE_RETENTION_MS: i64 =
+    memory_store::memory_capture::CAPTURE_REPLAY_RETENTION_MS;
+
 /// The largest unit text capture retains: the memory store's source bound.
 pub const MAX_SOURCE_UNIT_BYTES: usize = memory_store::memory_capture::MAX_CAPTURE_SOURCE_BYTES;
 /// The most units one capture batch admits: the memory-capture message bound.
@@ -695,6 +699,7 @@ impl SourcePublisher<'_> {
             request_digest: self.request_digest(unit),
             origin: unit.origin().to_owned(),
             project,
+            observed_at,
         })
     }
 
@@ -814,7 +819,18 @@ impl SourcePublisher<'_> {
         )
     }
 
+    /// The evidence ingest for `unit`. Captured message text and tool results are `harness_capture` evidence owned for [`HARNESS_CAPTURE_RETENTION_MS`] from `observed_at`; every other class is `canonical` and never ages out. The deadline is set only when the evidence row is first created: the evidence receipt is keyed by the unit's identity and revision and its request digest excludes the clock, so a later attempt of the same unit replays the first row and its deadline.
     fn evidence_request(&self, unit: &Prepared<'_>) -> ArtifactIngestRequest {
+        let (retention_class, retain_until) = match unit.unit.class {
+            OccurrenceClass::Messages | OccurrenceClass::RawToolSpans => (
+                kernel::HARNESS_CAPTURE_RETENTION_CLASS,
+                Some(
+                    unit.observed_at
+                        .saturating_add(HARNESS_CAPTURE_RETENTION_MS),
+                ),
+            ),
+            _ => ("canonical", None),
+        };
         ArtifactIngestRequest {
             intent: self.evidence_intent(unit),
             payload: unit.unit.text.as_bytes().to_vec(),
@@ -826,8 +842,8 @@ impl SourcePublisher<'_> {
             source_id: format!("{}:{}", unit.origin, unit.key),
             source_revision: unit.revision,
             media_type: "text/plain".to_owned(),
-            retention_class: "canonical".to_owned(),
-            retain_until: None,
+            retention_class: retention_class.to_owned(),
+            retain_until,
             asserted_sensitivity: self.sensitivity,
             provider_egress: self.egress,
             // Only the git publisher's commit provenance is retained; this publisher constructs none.
@@ -1296,6 +1312,7 @@ struct Prepared<'u> {
     request_digest: String,
     origin: String,
     project: Option<ProjectScope>,
+    observed_at: i64,
 }
 
 impl Prepared<'_> {
