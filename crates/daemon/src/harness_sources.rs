@@ -1072,33 +1072,33 @@ pub fn publish_batch(
                     .unwrap_or_else(|| &handles[request_of[&owner]]);
                 let evidence_object_id = prepared[owner].evidence_object_id();
                 let records_receipt = main_is_write || !published.is_empty();
+                // The error carries whether the unit's own receipt write refused.
                 let mut step = || {
                     let sensitivity = envelope
-                        .object_state(&evidence_object_id)?
-                        .ok_or(KernelError::NotFound)?
+                        .object_state(&evidence_object_id)
+                        .and_then(|state| state.ok_or(KernelError::NotFound))
+                        .map_err(|error| (error, false))?
                         .object
                         .sensitivity;
-                    let (descriptor, provenance) = publisher.apply(
-                        envelope,
-                        unit,
-                        handle,
-                        sensitivity,
-                        observed_at,
-                        &mut None,
-                    )?;
+                    let (descriptor, provenance) = publisher
+                        .apply(envelope, unit, handle, sensitivity, observed_at, &mut None)
+                        .map_err(|error| (error, false))?;
                     if records_receipt {
-                        envelope.record_receipt(
-                            publisher.descriptor_intent(unit),
-                            &descriptor.object_id,
-                        )?;
+                        envelope
+                            .record_receipt(
+                                publisher.descriptor_intent(unit),
+                                &descriptor.object_id,
+                            )
+                            .map_err(|error| (error, true))?;
                     }
                     Ok((descriptor, provenance))
                 };
-                // A receipt conflict here is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
-                let (descriptor, provenance) = step().inspect_err(|error| {
-                    if *error != KernelError::Conflict {
+                // A conflict on the unit's own receipt is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
+                let (descriptor, provenance) = step().map_err(|(error, receipt)| {
+                    if !(receipt && error == KernelError::Conflict) {
                         culprit = Some(index);
                     }
+                    error
                 })?;
                 if !records_receipt {
                     main_result = Some(descriptor.object_id.clone());
