@@ -87,7 +87,7 @@ condition this catalog's evaluation queued.
 | [`sc-digest-citations-never-reach-artifact`](#sc-digest-citations-never-reach-artifact) | B | U6 | R9 | safety | explicit-config-only | active | `always(!X)` | partial |
 | [`sc-rerun-exactly-one-live-generation`](#sc-rerun-exactly-one-live-generation) | B | U7 | R5 | safety | explicit-config-only | active | `always` | yes |
 | [`sc-delete-retires-before-memory-store-delete`](#sc-delete-retires-before-memory-store-delete) | B | U8 | R6 | safety | default-production | active | `always` | yes |
-| [`sc-delete-retry-recovers-crash-between-stores`](#sc-delete-retry-recovers-crash-between-stores) | B | U8 | R6 | liveness | default-production | active | `always` | partial |
+| [`sc-delete-retry-recovers-crash-between-stores`](#sc-delete-retry-recovers-crash-between-stores) | B | U8 | R6 | liveness | explicit-config-only | active | `always` | partial |
 | [`sc-deleted-session-not-resurrected-by-queued-capture`](#sc-deleted-session-not-resurrected-by-queued-capture) | B | U8 | R6 | safety | explicit-config-only | active | `always(!X)` | yes |
 | [`sc-repodoc-one-live-revision-above-historical-head`](#sc-repodoc-one-live-revision-above-historical-head) | B | U9, U10 | R7 | safety | explicit-config-only | active | `always` | yes |
 | [`sc-repodoc-raw-bytes-separate-from-prompt-hash`](#sc-repodoc-raw-bytes-separate-from-prompt-hash) | B | U10 | R7 | safety | explicit-config-only | active | `always` | yes |
@@ -1006,7 +1006,7 @@ Open questions:
 ### sc-consented-window-reaches-publisher
 
 Type: reachability
-Reachability: explicit-config-only - `Handler::capture_after_response` builds
+Reachability: explicit-config-only - `Handler::handle_transform_typed` builds
   an `Offer` only when `source_capture::consents` holds, and
   `source_capture.enabled` defaults to false.
 Status: active
@@ -1015,7 +1015,8 @@ Exercised: yes - `sc-tests`
   drives an OpenCode window through the transform route and reads a
   `messages` descriptor, a `raw_tool_spans` descriptor with representation
   `tool_error`, and one with `tool_output`; `a_pi_window_publishes_user_text_and_tool_results`
-  does the same for a Pi window; `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires`
+  does the same for a Pi window, reading a `tool_output` and a `tool_error`
+  row; `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires`
   reaches the document batch.
 Guarantee: Every OpenCode and Pi message text block, tool output, and tool
   error in a consented transform window, and every configured document the
@@ -1034,7 +1035,8 @@ Required faults and enabling state: `source_capture.enabled` and
   `memory.enabled` on, a non-subagent session on a native serializer profile,
   and a window holding each kind of unit.
 Confidence: high - [evidence](evidence/sc-consented-window-reaches-publisher.md).
-  Read the call chain from `capture_after_response` through `SourceCapture::offer`,
+  Read the call chain from `handle_transform_typed` and
+  `capture_after_response` through `SourceCapture::offer`,
   `CaptureHandoff::into_job`, `CaptureJob::units`, and `publish_locked`, and
   the three tests.
 Existing check: `sc-tests`
@@ -1070,8 +1072,8 @@ Confidence: medium - [evidence](evidence/sc-capture-state-has-one-durable-store.
   The scan covers the four capture modules and the named call forms; a store
   opened through another module and handed to capture would pass it.
 Existing check: `sc.rs` `capture_state_has_one_durable_store` (`unaudited`);
-  the CI "Invented provenance" gate scans the same paths for another
-  property.
+  the CI "Invented provenance" gate scans `harness_sources.rs`,
+  `source_capture*`, and `project_docs.rs` for another property.
 Impact: a second durable store for capture state is a stop condition of the
   specification; it would need its own retention, deletion, and recovery.
 Open questions:

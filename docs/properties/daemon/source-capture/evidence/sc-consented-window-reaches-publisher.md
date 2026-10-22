@@ -17,10 +17,10 @@ publication may happen; this record states that it does happen.
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs` `Handler::capture_after_response` builds a
-  `source_capture::Offer` when `source_capture::consents` holds and hands it
-  to `SourceCapture::offer`, which charges the window and returns a
-  `CaptureHandoff`.
+- `crates/daemon/src/lib.rs` `Handler::handle_transform_typed` builds a
+  `source_capture::Offer` when `source_capture::consents` holds, and
+  `Handler::capture_after_response` hands it to `SourceCapture::offer`, which
+  charges the window and returns a `CaptureHandoff`.
 - `sc.rs` `CaptureHandoff::into_job` takes the slot after the response
   settles; `CaptureJob::publish` runs `CaptureJob::units`, which calls
   `opencode_units` or `pi_units` for every record, and
@@ -34,8 +34,9 @@ publication may happen; this record states that it does happen.
   and reads the `messages`, `tool_error`, and `tool_output` descriptors with
   their exact bytes.
 - `sc-tests` `a_pi_window_publishes_user_text_and_tool_results` sends Pi rows
-  carrying `type` and `parentId` and reads the user text and each tool
-  result text item.
+  carrying `type` and `parentId`, one tool result with `isError: false` and
+  one with `isError: true`, and reads the user text, a `tool_output` row,
+  and a `tool_error` row.
 - `sc-tests`
   `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires`
   reads the `repository_documents` descriptor a composing pass publishes.
@@ -65,11 +66,11 @@ descriptors by class and representation.
 
 ### Q: Does every kind of unit have a reaching test?
 - Sources examined: the three tests above and `CaptureJob::units`.
-- Findings: OpenCode text, `tool_output`, and `tool_error`; Pi text and tool
-  results; and repository documents each reach a live descriptor in a test.
-- Missing evidence: a Pi `tool_error` row through the transform route.
-- Conclusion: resolved with answer for every kind except the Pi tool error,
-  which the adapter tests in `hs-tests` cover below the route.
+- Findings: OpenCode text, `tool_output`, and `tool_error`; Pi text,
+  `tool_output`, and `tool_error`; and repository documents each reach a
+  live descriptor in a test.
+- Missing evidence: none for the kinds the check names.
+- Conclusion: resolved with answer.
 
 ### Q: Is `reachable` the right semantics?
 - Sources examined: `../../../METHOD.md` check semantics.

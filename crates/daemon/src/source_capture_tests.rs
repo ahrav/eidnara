@@ -868,7 +868,7 @@ fn pi_row(id: &str, parent: Option<&str>, message: Value) -> Value {
     json!({ "type": "message", "id": id, "parentId": parent, "message": message })
 }
 
-/// A Pi window whose rows carry the native entry type and parent publishes its user text and each tool result text item.
+/// A Pi window whose rows carry the native entry type and parent publishes its user text and each tool result text item, a failed tool's as `tool_error`.
 #[tokio::test]
 async fn a_pi_window_publishes_user_text_and_tool_results() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
@@ -887,7 +887,8 @@ async fn a_pi_window_publishes_user_text_and_tool_results() {
             json!({ "role": "assistant", "timestamp": 1_700_000_000_100u64, "stopReason": "toolUse",
                     "usage": {}, "content": [
                         { "type": "text", "text": "Listing." },
-                        { "type": "toolCall", "id": "call_ls", "name": "bash", "arguments": { "command": "ls" } }
+                        { "type": "toolCall", "id": "call_ls", "name": "bash", "arguments": { "command": "ls" } },
+                        { "type": "toolCall", "id": "call_cat", "name": "bash", "arguments": { "command": "cat missing" } }
                     ] }),
         ),
         pi_row(
@@ -896,6 +897,13 @@ async fn a_pi_window_publishes_user_text_and_tool_results() {
             json!({ "role": "toolResult", "toolCallId": "call_ls", "toolName": "bash", "isError": false,
                     "timestamp": 1_700_000_000_200u64,
                     "content": [ { "type": "text", "text": "Cargo.toml\nsrc\n" } ] }),
+        ),
+        pi_row(
+            "pi-t2",
+            Some("pi-a1"),
+            json!({ "role": "toolResult", "toolCallId": "call_cat", "toolName": "bash", "isError": true,
+                    "timestamp": 1_700_000_000_300u64,
+                    "content": [ { "type": "text", "text": "cat: missing: No such file\n" } ] }),
         ),
     ];
     let decoded =
@@ -915,9 +923,18 @@ async fn a_pi_window_publishes_user_text_and_tool_results() {
             .any(|row| bytes_of(&store, row) == "list the files")
     );
     let tools = live(&store, OccurrenceClass::RawToolSpans);
-    assert_eq!(tools.len(), 1);
-    assert_eq!(bytes_of(&store, &tools[0]), "Cargo.toml\nsrc\n");
-    assert_eq!(identity_of(&tools[0])[3], ("parent_message_id", "pi-a1"));
+    assert_eq!(tools.len(), 2);
+    let output = tools
+        .iter()
+        .find(|row| row.detail.representation == "tool_output")
+        .unwrap();
+    assert_eq!(bytes_of(&store, output), "Cargo.toml\nsrc\n");
+    assert_eq!(identity_of(output)[3], ("parent_message_id", "pi-a1"));
+    let error = tools
+        .iter()
+        .find(|row| row.detail.representation == "tool_error")
+        .unwrap();
+    assert_eq!(bytes_of(&store, error), "cat: missing: No such file\n");
 }
 
 fn pi_request(rows: &[Value], base: &str) -> Value {
