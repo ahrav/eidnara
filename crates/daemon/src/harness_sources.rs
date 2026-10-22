@@ -290,9 +290,7 @@ pub fn opencode_units(
                     _ => continue,
                 };
                 // A call the turn's abort interrupted is read once the turn completes, when the abort's named error is final; its outcome names that error.
-                let interrupted =
-                    state.pointer("/metadata/interrupted") == Some(&Value::Bool(true));
-                if interrupted && completed.is_none() {
+                if crate::tool_outcome::opencode_interrupted(state) && completed.is_none() {
                     continue;
                 }
                 let output = state

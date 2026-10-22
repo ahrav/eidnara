@@ -968,7 +968,7 @@ fn unfinished_assistant_text_is_deferred_but_settled_tools_publish() {
     publisher.publish(&user[0], 6000).unwrap();
 }
 
-/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned `source-request.v2` values fail this test whenever the layout moves: a message unit, whose record is absent, a Pi tool unit, and an OpenCode tool unit whose record carries every optional field, whose record bytes the digest binds. The frozen v1 value is pinned in `receipts_written_before_the_outcome_record_replay_under_v2`.
+/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned `source-request.v2` values fail this test whenever the layout moves: a message unit, whose record is absent, a Pi tool unit, and an OpenCode tool unit whose record carries truncation and an exit code; the digest binds each record's bytes. The frozen v1 value is pinned in `receipts_written_before_the_outcome_record_replay_under_v2`.
 #[test]
 fn publication_receipt_digest_layout_is_pinned() {
     let dir = tempfile::tempdir().unwrap();
@@ -983,7 +983,7 @@ fn publication_receipt_digest_layout_is_pinned() {
         .remove(0);
     let conn =
         Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    // An OpenCode record with every optional field present: truncation and an exit code.
+    // An OpenCode record carrying truncation and an exit code.
     let trace: Value =
         serde_json::from_str(include_str!("../testdata/opencode-tool-outcome-trace.json")).unwrap();
     let exit_1 = opencode_units(

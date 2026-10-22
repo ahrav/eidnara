@@ -4,7 +4,7 @@
 //! - `status` is `state.status`, `completed` or `error`.
 //! - `truncated` is the boolean `state.metadata.truncated`, which completed tools report.
 //! - `exit_code` is the integer `state.metadata.exit` of a `bash` call; a null `exit` is unknown.
-//! - `exception_ref` is the `name` of the enclosing assistant message's `info.error` for a call whose `state.metadata.interrupted` is `true`: the abort that interrupted the call is the exception the harness named. A call that settled on its own keeps the record its first observation saw, so a later abort of the turn leaves its record, and its request digest, unchanged.
+//! - `exception_ref` is the `name` of the enclosing assistant message's `info.error` for a call whose `state.metadata.interrupted` is `true`: the abort that interrupted the call is the exception the harness named. A call that settled on its own keeps the record its first observation saw, so a later abort of the turn leaves its record, and its request digest, unchanged. The adapter reads an interrupted call only once its turn has `time.completed` ([`opencode_interrupted`]); the record's stability rests on OpenCode writing the abort's `info.error` no later than that completion timestamp, which the 1.19.0 store shows on every aborted turn it holds, and a turn that never completes leaves its interrupted call unpublished.
 //!
 //! Pi (`toolResult` message): `status` follows `isError`, and `truncated` is the boolean `details.truncation.truncated` the bash tool reports. A Pi session entry carries status and truncation only, so a Pi record leaves `exit_code` and `exception_ref` unset.
 
@@ -24,6 +24,7 @@ pub fn opencode(part: &Value, message_error: Option<&Value>, output: &str) -> Op
         _ => return None,
     };
     let metadata = state.get("metadata");
+    let interrupted = opencode_interrupted(state);
     let exit_code = (tool_name == "bash")
         .then(|| metadata.and_then(|metadata| metadata.get("exit")))
         .flatten()
@@ -37,16 +38,19 @@ pub fn opencode(part: &Value, message_error: Option<&Value>, output: &str) -> Op
             .and_then(|metadata| metadata.get("truncated"))
             .and_then(Value::as_bool),
         exit_code,
-        exception_ref: metadata
-            .and_then(|metadata| metadata.get("interrupted"))
-            .and_then(Value::as_bool)
-            .filter(|interrupted| *interrupted)
-            .and(message_error)
+        exception_ref: interrupted
+            .then_some(message_error)
+            .flatten()
             .and_then(|error| error.get("name"))
             .and_then(Value::as_str)
             .filter(|name| is_exception_name(name))
             .map(str::to_owned),
     })
+}
+
+/// Whether an OpenCode tool `state` records that the turn's abort interrupted the call (`metadata.interrupted` is `true`).
+pub fn opencode_interrupted(state: &Value) -> bool {
+    state.pointer("/metadata/interrupted") == Some(&Value::Bool(true))
 }
 
 /// The outcome of one text block, `output`, of a Pi `toolResult` message. `None` when the message names no tool or carries no boolean `isError`.
