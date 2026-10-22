@@ -314,7 +314,10 @@ pub fn pi_units(
     }
     // The row carries its session entry's type; only a message entry holds text or a tool result.
     match entry.get("type") {
-        None => return Err(AdapterRefusal::MissingIdentity("type")),
+        None | Some(Value::Null) => return Err(AdapterRefusal::MissingIdentity("type")),
+        Some(Value::String(kind)) if kind.is_empty() => {
+            return Err(AdapterRefusal::MissingIdentity("type"));
+        }
         Some(Value::String(kind)) if kind == "message" => {}
         Some(_) => return Err(AdapterRefusal::UnsupportedShape("type")),
     }

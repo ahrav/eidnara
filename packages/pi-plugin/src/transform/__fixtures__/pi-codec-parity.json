@@ -851,7 +851,7 @@
     },
     {
       "id": "eidnara:compactionSummary:b0077e58",
-      "type": "custom_message",
+      "type": "compaction",
       "parentId": "c280850c",
       "message": {
         "role": "compactionSummary",
@@ -862,7 +862,7 @@
     },
     {
       "id": "eidnara:branchSummary:d4e5f607",
-      "type": "custom_message",
+      "type": "branch_summary",
       "parentId": "b0077e58",
       "message": {
         "fromId": "781a4cd4",

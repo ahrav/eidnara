@@ -1245,19 +1245,16 @@ fn encode_with_meta(
     Some(Arc::new(row))
 }
 
-/// Clones `value` without its `key` field; a value that is not an object clones whole.
 /// The row a re-rendered message is set into: its id alone. The session entry's `type` and `parentId` travel on the request only, so a response is the same bytes with or without them.
 fn row_shell(raw: &Value) -> Value {
-    Value::Object(
-        raw.as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(field, _)| field.as_str() == "id")
-            .map(|(field, value)| (field.clone(), value.clone()))
-            .collect(),
-    )
+    let mut row = serde_json::Map::new();
+    if let Some(id) = raw.get("id") {
+        row.insert("id".to_owned(), id.clone());
+    }
+    Value::Object(row)
 }
 
+/// Clones `value` without its `key` field; a value that is not an object clones whole.
 fn clone_without(value: &Value, key: &str) -> Value {
     match value.as_object() {
         Some(object) => Value::Object(
@@ -2500,6 +2497,52 @@ mod tests {
             encoded[tool_result]["message"]["content"],
             json!([{ "type": "text", "text": "reduced" }])
         );
+    }
+
+    /// A row the daemon re-renders carries its id and message alone, so a request whose rows carry their entry's `type` and `parentId` encodes the same rows as one whose rows do not.
+    #[test]
+    fn re_rendered_rows_carry_no_entry_identity() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/pi-golden.json")).unwrap();
+        let bare: Vec<Arc<Value>> = golden["cases"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+        let typed: Vec<Arc<Value>> = bare
+            .iter()
+            .map(|row| {
+                let mut row = (**row).clone();
+                row["type"] = json!("message");
+                row["parentId"] = json!("parent");
+                Arc::new(row)
+            })
+            .collect();
+        let edit = |rows: &[Arc<Value>]| {
+            let decoded = decode_pi_rows(rows).unwrap();
+            let mut edited = cks(&decoded);
+            let tool_result = edited
+                .iter()
+                .position(|message| message.role == "tool")
+                .unwrap();
+            let BlockKind::ToolResult { output, .. } =
+                edited[tool_result].content_mut()[0].kind_mut()
+            else {
+                unreachable!()
+            };
+            *output = ToolOutput::bare(OutputKind::Text {
+                text: "reduced".to_string(),
+            });
+            let encoded = encode_pi_rows(&edited, &retained_rows_of(&decoded), &[]);
+            (tool_result, encoded)
+        };
+        let (index, from_typed) = edit(&typed);
+        let (_, from_bare) = edit(&bare);
+        let keys: Vec<&String> = from_typed[index].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["id", "message"]);
+        assert_eq!(from_typed[index], from_bare[index]);
     }
 
     #[test]

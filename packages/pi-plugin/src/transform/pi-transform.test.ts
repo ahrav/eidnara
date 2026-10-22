@@ -503,6 +503,37 @@ describe("Pi native entry identity", () => {
             message,
         });
         expect(entryRow("e9", message, reader)).toEqual({ id: "e9", message });
+        expect(entryRow("eidnara:custom", message, reader)).toEqual({
+            id: "eidnara:custom",
+            message,
+        });
+    });
+
+    it("reads a reserved row's entry by its entry id and copies its own type and parent", () => {
+        const custom = { role: "custom", customType: "note", content: "x", timestamp: 9 };
+        const entries = new Map<string, SessionEntry>([
+            [
+                "c7",
+                {
+                    type: "custom_message",
+                    id: "c7",
+                    parentId: "root-outside-window",
+                    timestamp: new Date(9).toISOString(),
+                    customType: "note",
+                    content: "x",
+                } as unknown as SessionEntry,
+            ],
+        ]);
+        const reader: PiBranchReader = {
+            getLeafId: () => "c7",
+            getEntry: (id) => entries.get(id),
+        };
+        expect(entryRow("eidnara:custom:c7", custom, reader)).toEqual({
+            id: "eidnara:custom:c7",
+            type: "custom_message",
+            parentId: "root-outside-window",
+            message: custom,
+        });
     });
 });
 

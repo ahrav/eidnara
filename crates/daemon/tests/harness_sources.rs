@@ -2622,3 +2622,41 @@ fn repository_documents_publish_untrusted_supersede_and_project() {
         .unwrap();
     assert_eq!(dense, 0, "repository documents stay lexical-only");
 }
+
+/// The shared Pi codec fixture is the producer's row shape: every message entry row reaches the adapter's sources, and every other entry type is refused by its type alone.
+#[test]
+fn the_shared_pi_fixture_rows_carry_the_entry_identity_the_adapter_reads() {
+    let fixture: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    let mut messages = 0;
+    for row in rows {
+        let adapted = pi_units(&pi_session(), row);
+        if row["type"] == "message" {
+            messages += 1;
+            assert!(
+                !matches!(
+                    adapted,
+                    Err(AdapterRefusal::MissingIdentity("type")
+                        | AdapterRefusal::UnsupportedShape("type"))
+                ),
+                "{}: {adapted:?}",
+                row["id"]
+            );
+        } else {
+            assert_eq!(
+                adapted,
+                Err(AdapterRefusal::UnsupportedShape("type")),
+                "{}",
+                row["id"]
+            );
+        }
+    }
+    assert!(messages > 0 && messages < rows.len());
+}
