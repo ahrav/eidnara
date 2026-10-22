@@ -1753,7 +1753,7 @@ enum ChunkMessagePart {
     },
 }
 
-/// The outcome half of each tool result's digest in `messages` ([`crate::tool_outcome::outcome_digest`]), by the arc its call opened. A result whose block carries no output renders its call bare.
+/// The outcome half of each tool result's digest in `messages` ([`crate::tool_outcome::outcome_digest`]), by the arc its call opened. A result whose block carries no output has no entry, and its call renders as one without a result.
 fn tool_results(messages: &[&BoundaryMsg]) -> ToolResults {
     let mut results = ToolResults::new();
     for block in messages.iter().flat_map(|message| &message.blocks) {
