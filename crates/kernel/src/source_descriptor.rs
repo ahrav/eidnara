@@ -706,76 +706,139 @@ impl KernelStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
-        let limit = i64::try_from(max_rows.get())
-            .unwrap_or(i64::MAX)
-            .saturating_add(1);
-        // A literal bound keeps the cached statement valid across calls; SQLite expires a statement whose `LIMIT` parameter is rebound.
-        let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
-                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
-             {rows}
-               AND o.source_kind=?1 AND o.object_kind='observation'
-               AND {live}
-               AND o.object_id>?3
-             ORDER BY o.object_id
-             LIMIT {limit}",
-            rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
-            live = Descriptors::LiveAtEnd.predicate("?2", "0"),
-        );
-        let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
-        let raw: Vec<LiveDescriptorRaw> = statement
-            .query_map(
-                rusqlite::params![class.code(), requested, after.unwrap_or("")],
-                |row| {
-                    Ok(LiveDescriptorRaw {
-                        object_id: row.get(0)?,
-                        domain_id: row.get(1)?,
-                        sensitivity: row.get(2)?,
-                        registry_sensitivity: row.get(3)?,
-                        created_commit_seq: row.get(4)?,
-                        payload: row.get(5)?,
-                        revision: row.get(6)?,
-                        source_id: row.get(7)?,
-                        invalidated_commit_seq: row.get(8)?,
-                        observation_created: row.get(9)?,
-                        observation_invalidated: row.get(10)?,
-                        evidence_id: row.get(11)?,
-                        artifact_digest: row.get(12)?,
-                    })
-                },
-            )
-            .map_err(map_sqlite)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(map_sqlite)?;
-        let next = (raw.len() > max_rows.get()).then(|| raw[max_rows.get() - 1].object_id.clone());
-        let rows = raw
-            .into_iter()
-            .take(max_rows.get())
-            .map(|raw| {
-                let detail = stored_detail(&raw.payload)?;
-                // The registry row and the stored detail must agree, as `source_export::preflight` requires.
-                if raw.created_commit_seq != raw.observation_created
-                    || raw.invalidated_commit_seq != raw.observation_invalidated
-                    || raw.sensitivity != raw.registry_sensitivity
-                    || detail.lineage_id != raw.source_id
-                    || detail.evidence_id != raw.evidence_id
-                    || detail.artifact_digest != raw.artifact_digest
-                    || detail.class != class.code()
-                    || detail.revision != raw.revision.to_string()
-                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
-                    || reencoded_identity(&detail).is_none()
-                {
-                    return Err(KernelError::CorruptCanonicalRow);
-                }
-                Ok(LiveDescriptor {
-                    object_id: raw.object_id,
-                    domain_id: raw.domain_id,
-                    sensitivity: Sensitivity::from_stored(&raw.sensitivity),
-                    created_commit_seq: raw.created_commit_seq,
-                    detail,
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(LiveDescriptorPage { rows, next })
+        live_descriptor_page(&tx, class, requested, None, after, max_rows)
     }
+}
+
+impl Envelope<'_> {
+    /// The descriptors of `class` live in this envelope's view, keyset-paged by object id from `after`: committed rows and the rows this commit wrote, less the rows it retired. The page applies [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, so a writer can read a class's inventory and act on it in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] when a stored descriptor does not decode or re-encode to its stored identity, and storage errors.
+    pub fn live_source_descriptors(
+        &self,
+        class: OccurrenceClass,
+        after: Option<&str>,
+        max_rows: std::num::NonZeroUsize,
+    ) -> Result<LiveDescriptorPage, KernelError> {
+        live_descriptor_page(self.tx, class, self.commit_seq, None, after, max_rows)
+    }
+
+    /// [`Self::live_source_descriptors`] narrowed to descriptors whose identity holds `field` with `value`. The store matches the pair's encoding in each stored detail before decoding any row, so the read decodes the matching rows rather than the class; each returned row's identity holds the pair exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Self::live_source_descriptors`] returns.
+    pub fn live_source_descriptors_with(
+        &self,
+        class: OccurrenceClass,
+        field: &str,
+        value: &str,
+        after: Option<&str>,
+        max_rows: std::num::NonZeroUsize,
+    ) -> Result<LiveDescriptorPage, KernelError> {
+        // The detail is a JSON string inside the stored payload, so the pair appears there encoded twice.
+        let pair = serde_json::to_string(&(field, value)).map_err(|_| KernelError::InvalidInput)?;
+        let stored = serde_json::to_string(&pair).map_err(|_| KernelError::InvalidInput)?;
+        let needle = &stored.as_bytes()[1..stored.len() - 1];
+        let mut page = live_descriptor_page(
+            self.tx,
+            class,
+            self.commit_seq,
+            Some(needle),
+            after,
+            max_rows,
+        )?;
+        page.rows.retain(|row| {
+            row.detail
+                .identity
+                .iter()
+                .any(|(name, held)| name == field && held == value)
+        });
+        Ok(page)
+    }
+}
+
+/// One page of the descriptors of `class` live at `requested` on `tx`.
+fn live_descriptor_page(
+    tx: &rusqlite::Transaction<'_>,
+    class: OccurrenceClass,
+    requested: i64,
+    needle: Option<&[u8]>,
+    after: Option<&str>,
+    max_rows: std::num::NonZeroUsize,
+) -> Result<LiveDescriptorPage, KernelError> {
+    let limit = i64::try_from(max_rows.get())
+        .unwrap_or(i64::MAX)
+        .saturating_add(1);
+    // A literal bound keeps the cached statement valid across calls; SQLite expires a statement whose `LIMIT` parameter is rebound.
+    let sql = format!(
+        "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
+                o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
+         {rows}
+           AND o.source_kind=?1 AND o.object_kind='observation'
+           AND {live}
+           AND o.object_id>?3
+           AND (?4 IS NULL OR instr(b.observation_payload,?4)>0)
+         ORDER BY o.object_id
+         LIMIT {limit}",
+        rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
+        live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+    );
+    let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
+    let raw: Vec<LiveDescriptorRaw> = statement
+        .query_map(
+            rusqlite::params![class.code(), requested, after.unwrap_or(""), needle],
+            |row| {
+                Ok(LiveDescriptorRaw {
+                    object_id: row.get(0)?,
+                    domain_id: row.get(1)?,
+                    sensitivity: row.get(2)?,
+                    registry_sensitivity: row.get(3)?,
+                    created_commit_seq: row.get(4)?,
+                    payload: row.get(5)?,
+                    revision: row.get(6)?,
+                    source_id: row.get(7)?,
+                    invalidated_commit_seq: row.get(8)?,
+                    observation_created: row.get(9)?,
+                    observation_invalidated: row.get(10)?,
+                    evidence_id: row.get(11)?,
+                    artifact_digest: row.get(12)?,
+                })
+            },
+        )
+        .map_err(map_sqlite)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(map_sqlite)?;
+    let next = (raw.len() > max_rows.get()).then(|| raw[max_rows.get() - 1].object_id.clone());
+    let rows = raw
+        .into_iter()
+        .take(max_rows.get())
+        .map(|raw| {
+            let detail = stored_detail(&raw.payload)?;
+            // The registry row and the stored detail must agree, as `source_export::preflight` requires.
+            if raw.created_commit_seq != raw.observation_created
+                || raw.invalidated_commit_seq != raw.observation_invalidated
+                || raw.sensitivity != raw.registry_sensitivity
+                || detail.lineage_id != raw.source_id
+                || detail.evidence_id != raw.evidence_id
+                || detail.artifact_digest != raw.artifact_digest
+                || detail.class != class.code()
+                || detail.revision != raw.revision.to_string()
+                || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
+                || reencoded_identity(&detail).is_none()
+            {
+                return Err(KernelError::CorruptCanonicalRow);
+            }
+            Ok(LiveDescriptor {
+                object_id: raw.object_id,
+                domain_id: raw.domain_id,
+                sensitivity: Sensitivity::from_stored(&raw.sensitivity),
+                created_commit_seq: raw.created_commit_seq,
+                detail,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(LiveDescriptorPage { rows, next })
 }

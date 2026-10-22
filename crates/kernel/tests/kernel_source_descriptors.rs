@@ -2362,3 +2362,71 @@ fn a_tool_descriptor_stores_a_validated_outcome_record() {
         "a refusal writes nothing"
     );
 }
+
+/// The narrowed in-commit inventory: `live_source_descriptors_with` returns exactly the live descriptors whose identity holds the pair, including a value that JSON escapes, and sees the commit's own retirement.
+#[test]
+fn a_writer_reads_the_live_descriptors_of_one_identity_value() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let call = |tool_call_id: &'static str| -> Vec<(&'static str, &'static str)> {
+        TOOL.iter()
+            .map(|&(name, value)| {
+                (
+                    name,
+                    if name == "tool_call_id" {
+                        tool_call_id
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect()
+    };
+    let quoted = call("call \"q\\ 9");
+    let plain = call("call-plain");
+    let tool = |identity| Occurrence {
+        class: "raw_tool_spans",
+        identity,
+        revision: "1",
+        representation: "tool_output",
+        span: None,
+    };
+    let (target, _, _) = fixture
+        .publish("quoted", &request(tool(&quoted), &evidence, text))
+        .unwrap();
+    fixture
+        .publish("plain", &request(tool(&plain), &evidence, text))
+        .unwrap();
+    let page_size = std::num::NonZeroUsize::new(8).unwrap();
+    fixture
+        .store
+        .commit(intent("read"), |envelope| {
+            let found = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                "call \"q\\ 9",
+                None,
+                page_size,
+            )?;
+            assert_eq!(
+                found
+                    .rows
+                    .iter()
+                    .map(|row| row.object_id.as_str())
+                    .collect::<Vec<_>>(),
+                [target.object_id.as_str()]
+            );
+            envelope.retire_observation(&target.object_id)?;
+            let after = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                "call \"q\\ 9",
+                None,
+                page_size,
+            )?;
+            assert!(after.rows.is_empty(), "the commit's own retirement is seen");
+            Ok(String::new())
+        })
+        .unwrap();
+}

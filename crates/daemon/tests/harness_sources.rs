@@ -3528,3 +3528,207 @@ fn receipts_written_before_the_outcome_record_replay_under_v2() {
     assert!(!publisher.publish(&fresh[0], NOW).unwrap().replayed);
     assert!(publisher.publish(&fresh[0], NOW).unwrap().replayed);
 }
+
+/// A Pi tool result of call `call` at native timestamp `stamp`, with the given text blocks.
+fn pi_rerun(call: &str, stamp: u64, is_error: bool, blocks: &[&str]) -> Vec<SourceUnit> {
+    let mut entry = pi_tool_result(&format!("pi-t-{stamp}"), "pi-a1", is_error, stamp);
+    entry["message"]["toolCallId"] = json!(call);
+    entry["message"]["content"] = json!(
+        blocks
+            .iter()
+            .map(|text| json!({ "type": "text", "text": text }))
+            .collect::<Vec<_>>()
+    );
+    pi_units(&pi_session(), &entry).unwrap()
+}
+
+/// The live tool descriptors of `call`: `(result_revision, block_index)` pairs, sorted.
+fn live_generation_of(corpus: &Corpus, call: &str) -> Vec<(String, String)> {
+    let mut live: Vec<(String, String)> = corpus
+        .export()
+        .into_iter()
+        .filter(|row| row.detail.class == "raw_tool_spans")
+        .filter(|row| row.detail.identity[4].1 == call)
+        .map(|row| {
+            (
+                row.detail.identity[5].1.clone(),
+                row.detail.identity[6].1.clone(),
+            )
+        })
+        .collect();
+    live.sort();
+    live
+}
+
+fn published_units(dispositions: &[UnitDisposition]) -> Vec<&daemon::harness_sources::Published> {
+    dispositions
+        .iter()
+        .map(|disposition| match disposition {
+            UnitDisposition::Published(published) => published,
+            other => panic!("expected a publication, got {other:?}"),
+        })
+        .collect()
+}
+
+/// AC14 and C8 (`sc-rerun-exactly-one-live-generation`): a re-run of one call retires the predecessor generation in the commit that publishes the successor, whatever the delivery order. In order (1, 2) the predecessor's invalidation is the successor's creation and has no successor of its own, so export tombstones it `Retired`, and its bytes stay readable. A redelivered 1 replays and retires nothing (1, 2, 1); a duplicate 2 replays. Delivered reversed (2, 1), the stale generation is superseded and retains nothing. An error that becomes a success, a re-run with fewer blocks, and two generations in one batch each leave one live generation, and a distinct call with equal text coexists.
+#[test]
+fn a_tool_rerun_leaves_exactly_one_live_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    // In order, an error that became a success with fewer blocks.
+    let first = pi_rerun("call_a", 100, true, &["error: one\n", "error: two\n"]);
+    let second = pi_rerun("call_a", 200, false, &["ok\n"]);
+    let sibling = pi_rerun("call_b", 100, true, &["error: one\n", "error: two\n"]);
+    let gen1 = published_units(&publish_screened(&publisher, &first, NOW, None).unwrap())
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    publish_screened(&publisher, &sibling, NOW, None).unwrap();
+    let gen2 =
+        published_units(&publish_screened(&publisher, &second, NOW, None).unwrap())[0].clone();
+    assert!(!gen2.replayed);
+    assert_eq!(
+        live_generation_of(&corpus, "call_a"),
+        [("200".to_owned(), "0".to_owned())]
+    );
+    assert_eq!(
+        live_generation_of(&corpus, "call_b").len(),
+        2,
+        "a distinct call with equal text coexists"
+    );
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let created: i64 = conn
+        .query_row(
+            "SELECT created_commit_seq FROM observations WHERE object_id=?1",
+            [&gen2.object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for old in &gen1 {
+        assert_eq!(
+            descriptor_retirement(&corpus, &old.object_id),
+            (Some(created), None),
+            "retired in the successor's commit, with no successor of its own"
+        );
+        assert_eq!(
+            evidence_retention(&corpus, &old.evidence_object_id).2,
+            None,
+            "the retired generation's bytes stay as history"
+        );
+    }
+
+    // Redelivery of 1, then a duplicate 2: replays that retire nothing.
+    let tip = corpus.tip();
+    for window in [&first, &second] {
+        let replays = publish_screened(&publisher, window, NOW, None).unwrap();
+        assert!(
+            published_units(&replays)
+                .iter()
+                .all(|published| published.replayed)
+        );
+    }
+    assert_eq!(corpus.tip(), tip, "a replay commits nothing");
+    assert_eq!(
+        live_generation_of(&corpus, "call_a"),
+        [("200".to_owned(), "0".to_owned())]
+    );
+
+    // Reversed: 2 first, then a 1 that was never published.
+    let newer = pi_rerun("call_c", 200, false, &["ok\n"]);
+    let older = pi_rerun("call_c", 100, false, &["stale\n"]);
+    publish_screened(&publisher, &newer, NOW, None).unwrap();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let stale = publish_screened(&publisher, &older, NOW, None).unwrap();
+    assert!(matches!(stale[..], [UnitDisposition::Superseded]));
+    assert_eq!(corpus.tip(), tip, "a stale generation commits nothing");
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+    assert_eq!(
+        live_generation_of(&corpus, "call_c"),
+        [("200".to_owned(), "0".to_owned())]
+    );
+
+    // Two generations of one call in one batch: the older is superseded.
+    let mut both = pi_rerun("call_d", 100, false, &["first\n"]);
+    both.extend(pi_rerun("call_d", 300, false, &["third\n"]));
+    let dispositions = publish_screened(&publisher, &both, NOW, None).unwrap();
+    assert!(matches!(dispositions[0], UnitDisposition::Superseded));
+    assert!(matches!(dispositions[1], UnitDisposition::Published(_)));
+    assert_eq!(
+        live_generation_of(&corpus, "call_d"),
+        [("300".to_owned(), "0".to_owned())]
+    );
+}
+
+/// OQ11 measurement: the cost of one re-run publication against a store holding 10 000 live `raw_tool_spans` descriptors, against the 500 ms criterion. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement"]
+fn rerun_lookup_cost_at_ten_thousand_live_tool_descriptors() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    for batch in 0..10 {
+        let units: Vec<SourceUnit> = (0..1000)
+            .flat_map(|index| {
+                pi_rerun(
+                    &format!("call_{batch}_{index}"),
+                    100,
+                    false,
+                    &[&format!("output {batch}")],
+                )
+            })
+            .collect();
+        let pairs: Vec<(&SourcePublisher<'_>, &SourceUnit)> =
+            units.iter().map(|unit| (&publisher, unit)).collect();
+        daemon::harness_sources::publish_batch(&corpus.kernel, Vec::new(), &pairs, NOW, None)
+            .unwrap();
+    }
+    let mut samples = Vec::new();
+    for round in 0..5u64 {
+        let rerun = pi_rerun("call_0_0", 200 + round, false, &["re-run\n"]);
+        let started = std::time::Instant::now();
+        let dispositions = publish_screened(&publisher, &rerun, NOW, None).unwrap();
+        samples.push(started.elapsed());
+        assert!(matches!(dispositions[0], UnitDisposition::Published(_)));
+    }
+    samples.sort();
+    println!(
+        "rerun publication at 10000 live tool descriptors: min {:?} median {:?} max {:?}",
+        samples[0], samples[2], samples[4]
+    );
+    // The same store publishing message text, which reads no tool inventory: the difference is the lookup.
+    let mut baseline = Vec::new();
+    for round in 0..5u64 {
+        let message = pi_units(
+            &pi_session(),
+            &pi_user(&format!("pi-m{round}"), "baseline", 100 + round),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        publish_screened(&publisher, &message, NOW, None).unwrap();
+        baseline.push(started.elapsed());
+    }
+    baseline.sort();
+    println!(
+        "message publication on the same store: min {:?} median {:?} max {:?}",
+        baseline[0], baseline[2], baseline[4]
+    );
+    // Each re-run retired its predecessor: the call has one live descriptor, the last.
+    let live: i64 =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM observations
+             WHERE observation_kind='source_descriptor' AND invalidated_commit_seq IS NULL
+               AND instr(observation_payload, ?1) > 0",
+                [r#"[\"tool_call_id\",\"call_0_0\"]"#],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(live, 1);
+}

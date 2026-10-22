@@ -21,6 +21,7 @@ use kernel::{
     SourceDescriptorRequest, TaintClass, ToolOutcome,
 };
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1302,6 +1303,8 @@ pub enum UnitDisposition {
     Deferred,
     /// Refused by its identity, revision, or scope binding before the transaction. Nothing was retained; [`PublishError::is_permanent`] says whether unchanged input refuses again. A project the publisher's stored scope does not name is [`PublishError::Kernel`] with [`KernelError::NotFound`].
     Refused(PublishError),
+    /// A tool result whose call has a newer generation live or in this batch, and which was never published. Nothing was retained, and the newer generation stays the call's only live one.
+    Superseded,
 }
 
 /// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
@@ -1320,6 +1323,7 @@ pub fn publish_screened(
     let mut dispositions: Vec<Option<UnitDisposition>> = Vec::with_capacity(units.len());
     let mut terms: Option<Option<Vec<kernel::ScopeTermSpec>>> = None;
     let mut admitted = Vec::new();
+    let mut admitted_prepared = Vec::new();
     let mut admitted_keys: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut admitted_bytes = 0usize;
@@ -1375,17 +1379,37 @@ pub fn publish_screened(
             dispositions.push(Some(UnitDisposition::Deferred));
             continue;
         }
-        admitted_keys.insert(prepared.key, prepared.request_digest);
+        admitted_keys.insert(prepared.key.clone(), prepared.request_digest.clone());
         admitted.push(index);
+        admitted_prepared.push(prepared);
         admitted_bytes += len;
         dispositions.push(None);
     }
-    if !admitted.is_empty() {
+    let (superseded, reruns) = plan_reruns(publisher, &admitted_prepared, budget)
+        .map_err(|error| BatchRefusal { error, unit: None })?;
+    let admitted: Vec<usize> = admitted
+        .into_iter()
+        .zip(superseded)
+        .filter_map(|(index, superseded)| {
+            if superseded {
+                dispositions[index] = Some(UnitDisposition::Superseded);
+            }
+            (!superseded).then_some(index)
+        })
+        .collect();
+    let writes: Vec<KeyedWrite<'_>> = reruns
+        .into_iter()
+        .map(|rerun| KeyedWrite {
+            intent: rerun.intent(),
+            write: Box::new(move |envelope: &mut kernel::Envelope<'_>| rerun.apply(envelope)),
+        })
+        .collect();
+    if !admitted.is_empty() || !writes.is_empty() {
         let batch: Vec<(&SourcePublisher<'_>, &SourceUnit)> = admitted
             .iter()
             .map(|&index| (publisher, &units[index]))
             .collect();
-        let published = publish_batch(publisher.kernel, Vec::new(), &batch, observed_at, budget)
+        let published = publish_batch(publisher.kernel, writes, &batch, observed_at, budget)
             .map_err(|refusal| BatchRefusal {
                 unit: refusal.unit.map(|position| admitted[position]),
                 ..refusal
@@ -1398,6 +1422,224 @@ pub fn publish_screened(
         .into_iter()
         .map(|disposition| disposition.expect("every unit has a disposition"))
         .collect())
+}
+
+/// Live descriptors one inventory page reads.
+const INVENTORY_PAGE_ROWS: usize = 512;
+/// Each tool call's live descriptor object ids with their generations.
+type LiveGenerations = HashMap<Vec<String>, Vec<(String, i64)>>;
+/// Where `tool_call_id` sits in a [`tool_generation`] call: after the project, harness, session, and parent message.
+const TOOL_CALL_ID_POSITION: usize = 4;
+
+/// A tool generation: the native call a `raw_tool_spans` identity answers (every identity value but `result_revision` and `block_index`, in identity order) and its `result_revision`. A re-run of one call is a newer generation of it; a new `tool_call_id` is another call.
+fn tool_generation<'a>(
+    identity: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Option<(Vec<String>, i64)> {
+    let mut call = Vec::new();
+    let mut generation = None;
+    for (name, value) in identity {
+        match name {
+            "result_revision" => generation = value.parse().ok(),
+            "block_index" => {}
+            _ => call.push(value.to_owned()),
+        }
+    }
+    Some((call, generation?))
+}
+
+/// The live generations of each of `calls` in `envelope`'s view, read through the `raw_tool_spans` inventory narrowed in the store to each call's `tool_call_id`: each call's live descriptor object ids with their generations.
+fn live_generations(
+    envelope: &kernel::Envelope<'_>,
+    calls: &HashSet<Vec<String>>,
+) -> Result<LiveGenerations, KernelError> {
+    let mut live = LiveGenerations::new();
+    let tool_call_ids: HashSet<&str> = calls
+        .iter()
+        .filter_map(|call| call.get(TOOL_CALL_ID_POSITION).map(String::as_str))
+        .collect();
+    for tool_call_id in tool_call_ids {
+        let mut after = None;
+        loop {
+            let page = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                tool_call_id,
+                after.as_deref(),
+                std::num::NonZeroUsize::new(INVENTORY_PAGE_ROWS).expect("a nonzero page"),
+            )?;
+            for row in page.rows {
+                let identity = row.detail.identity.iter();
+                if let Some((call, generation)) =
+                    tool_generation(identity.map(|(name, value)| (name.as_str(), value.as_str())))
+                    && calls.contains(&call)
+                {
+                    live.entry(call)
+                        .or_default()
+                        .push((row.object_id, generation));
+                }
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+    }
+    Ok(live)
+}
+
+/// The retirement one tool re-run commits beside its successor: the call, the successor generation, and the predecessor descriptors it retires, sorted and deduplicated.
+struct Rerun {
+    call: Vec<String>,
+    successor: i64,
+    retired: Vec<String>,
+    origin: String,
+}
+
+impl Rerun {
+    /// Keyed by the call, the successor generation, and the retirement set, so one key never names two different replacement batches; the digest binds the set.
+    fn intent(&self) -> CommitIntent {
+        let successor = self.successor.to_string();
+        let mut bytes = Vec::new();
+        for part in self
+            .call
+            .iter()
+            .chain(std::iter::once(&successor))
+            .chain(&self.retired)
+        {
+            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(part.as_bytes());
+        }
+        CommitIntent {
+            producer: PRODUCER.to_owned(),
+            operation_key: format!("source-rerun-retire:{}", identity_digest(&bytes)),
+            request_digest: identity_digest(self.retired.join("\u{1f}").as_bytes()),
+            actor: self.origin.clone(),
+            cause: "tool re-run retirement".to_owned(),
+        }
+    }
+
+    /// Reads the call's live generations again inside the commit. A generation newer than the successor, or a predecessor set other than the one planned, is [`KernelError::Conflict`], and the batch commits nothing; otherwise every planned predecessor still live is retired.
+    fn apply(&self, envelope: &mut kernel::Envelope<'_>) -> Result<String, KernelError> {
+        let live = live_generations(envelope, &HashSet::from([self.call.clone()]))?
+            .remove(&self.call)
+            .unwrap_or_default();
+        let mut predecessors: Vec<String> = Vec::new();
+        for (object_id, generation) in live {
+            if generation > self.successor {
+                return Err(KernelError::Conflict);
+            }
+            if generation < self.successor {
+                predecessors.push(object_id);
+            }
+        }
+        predecessors.sort();
+        predecessors.dedup();
+        if predecessors != self.retired {
+            return Err(KernelError::Conflict);
+        }
+        retire_descriptors(envelope, &self.retired)
+    }
+}
+
+/// Reconciles the tool generations of a screened batch with the store. Each call's successor is its newest generation in the batch or live in the store. A unit of an older generation is superseded unless it replays a stored receipt, so a stale result never becomes live; a call whose successor is in the batch retires its live predecessors in the batch's commit. Returns which of `prepared` are superseded and the retirements to commit.
+fn plan_reruns(
+    publisher: &SourcePublisher<'_>,
+    prepared: &[Prepared<'_>],
+    budget: Option<&kernel::applicability::EvalBudget>,
+) -> Result<(Vec<bool>, Vec<Rerun>), KernelError> {
+    let generations: Vec<Option<(Vec<String>, i64)>> = prepared
+        .iter()
+        .map(|unit| {
+            (unit.unit.class == OccurrenceClass::RawToolSpans)
+                .then(|| tool_generation(unit.identity.iter().copied()))
+                .flatten()
+        })
+        .collect();
+    let mut newest: HashMap<Vec<String>, i64> = HashMap::new();
+    for (call, generation) in generations.iter().flatten() {
+        let entry = newest.entry(call.clone()).or_insert(*generation);
+        *entry = (*entry).max(*generation);
+    }
+    if newest.is_empty() {
+        return Ok((vec![false; prepared.len()], Vec::new()));
+    }
+    let calls: HashSet<Vec<String>> = newest.keys().cloned().collect();
+    let (_, (live, superseded)) =
+        publisher
+            .kernel
+            .preview(preview_deadline(budget), |preview| {
+                let live = live_generations(preview, &calls)?;
+                let head = |call: &Vec<String>| {
+                    live.get(call)
+                        .into_iter()
+                        .flatten()
+                        .map(|(_, generation)| *generation)
+                        .fold(newest[call], i64::max)
+                };
+                let mut superseded = Vec::with_capacity(prepared.len());
+                for (unit, generation) in prepared.iter().zip(&generations) {
+                    let stale = match generation {
+                        Some((call, generation)) if *generation < head(call) => {
+                            // A stale generation published before replays its receipt and retires nothing.
+                            match stored_receipt(
+                                preview,
+                                publisher.descriptor_intent(unit),
+                                &unit.legacy_digest,
+                            ) {
+                                Ok(Some(_)) => false,
+                                Ok(None) | Err(KernelError::Conflict) => true,
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        _ => false,
+                    };
+                    superseded.push(stale);
+                }
+                Ok((live, superseded))
+            })?;
+    let mut reruns = Vec::new();
+    for (call, successor) in newest {
+        let generations = live.get(&call).map(Vec::as_slice).unwrap_or_default();
+        if generations
+            .iter()
+            .any(|(_, generation)| *generation > successor)
+        {
+            continue;
+        }
+        let mut retired: Vec<String> = generations
+            .iter()
+            .filter(|(_, generation)| *generation < successor)
+            .map(|(object_id, _)| object_id.clone())
+            .collect();
+        retired.sort();
+        retired.dedup();
+        if !retired.is_empty() {
+            let origin = call.get(1).cloned().unwrap_or_default();
+            reruns.push(Rerun {
+                call,
+                successor,
+                retired,
+                origin,
+            });
+        }
+    }
+    Ok((superseded, reruns))
+}
+
+/// Retires each of `ids` that names a live descriptor.
+pub(crate) fn retire_descriptors(
+    envelope: &mut kernel::Envelope<'_>,
+    ids: &[String],
+) -> Result<String, KernelError> {
+    for id in ids {
+        if envelope
+            .object_state(id)?
+            .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
+        {
+            envelope.retire_observation(id)?;
+        }
+    }
+    Ok(String::new())
 }
 
 struct Prepared<'u> {
@@ -1494,5 +1736,134 @@ mod pins {
     #[test]
     fn revision_lead_matches_the_evaluator_pin() {
         assert_eq!(super::MAX_REVISION_LEAD_MS, eval_core::MAX_REVISION_LEAD_MS);
+    }
+}
+
+#[cfg(test)]
+mod rerun_tests {
+    use super::*;
+
+    fn intent(key: &str) -> CommitIntent {
+        CommitIntent {
+            producer: "rerun-test".to_owned(),
+            operation_key: key.to_owned(),
+            request_digest: identity_digest(key.as_bytes()),
+            actor: "test".to_owned(),
+            cause: "test".to_owned(),
+        }
+    }
+
+    fn generation(revision: u64) -> SourceUnit {
+        let session = SessionIdentity {
+            harness: Harness::Pi,
+            project_id: "a".repeat(64),
+            session_id: "pi-session".to_owned(),
+        };
+        let entry = serde_json::json!({ "type": "message", "id": format!("t{revision}"), "parentId": "a1",
+            "message": { "role": "toolResult", "toolCallId": "call", "toolName": "bash", "isError": false,
+                         "timestamp": revision, "content": [{ "type": "text", "text": format!("run {revision}") }] } });
+        pi_units(&session, &entry).unwrap().remove(0)
+    }
+
+    /// C8: the retirement re-reads the call's live generations inside its commit. A generation newer than its successor, or a predecessor set other than the planned one, refuses the commit as `Conflict`; the planned set retires.
+    #[test]
+    fn a_rerun_retirement_rechecks_the_call_inside_its_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = KernelStore::open(dir.path()).unwrap();
+        kernel
+            .commit(intent("domain"), |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "domain".to_owned(),
+                    object_id: "domain-object".to_owned(),
+                    name: "domain".to_owned(),
+                    source_kind: "test".to_owned(),
+                    source_id: "domain".to_owned(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                envelope.insert_scope(kernel::ScopeSpec {
+                    scope_id: "project:a".to_owned(),
+                    object_id: "project:a".to_owned(),
+                    source_id: "project:a".to_owned(),
+                    domain_id: "domain".to_owned(),
+                    source_kind: "kernel_route".to_owned(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                    terms: vec![kernel::ScopeTermSpec {
+                        dimension: kernel::Dimension::Project.as_str().to_owned(),
+                        operator: "exact".to_owned(),
+                        exact_value: Some("a".repeat(64)),
+                        ..kernel::ScopeTermSpec::default()
+                    }],
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let publisher = SourcePublisher {
+            kernel: &kernel,
+            domain_id: "domain",
+            scope_id: Some("project:a"),
+            egress: ProviderEgress::LocalOnly,
+            sensitivity: Sensitivity::Normal,
+        };
+        let (first, second) = (generation(100), generation(200));
+        // Published without a plan, both generations are live.
+        let published = publish_batch(
+            &kernel,
+            Vec::new(),
+            &[(&publisher, &first), (&publisher, &second)],
+            1_000,
+            None,
+        )
+        .unwrap();
+        let (call, _) = tool_generation(
+            first
+                .identity
+                .iter()
+                .map(|(name, value)| (*name, value.as_str())),
+        )
+        .unwrap();
+        let rerun = |successor, retired: &[&String]| Rerun {
+            call: call.clone(),
+            successor,
+            retired: retired.iter().map(|id| (*id).clone()).collect(),
+            origin: "pi".to_owned(),
+        };
+        for (label, stale) in [
+            ("a newer generation is live", rerun(100, &[])),
+            ("a predecessor is missing from the plan", rerun(200, &[])),
+        ] {
+            assert_eq!(
+                kernel.commit(stale.intent(), |envelope| stale.apply(envelope)),
+                Err(KernelError::Conflict),
+                "{label}"
+            );
+        }
+        let planned = rerun(200, &[&published[0].object_id]);
+        kernel
+            .commit(planned.intent(), |envelope| planned.apply(envelope))
+            .unwrap();
+        let (_, states) = kernel
+            .object_states(&[
+                published[0].object_id.clone(),
+                published[1].object_id.clone(),
+            ])
+            .unwrap();
+        assert!(
+            states[0]
+                .as_ref()
+                .unwrap()
+                .object
+                .invalidated_commit_seq
+                .is_some()
+        );
+        assert!(
+            states[1]
+                .as_ref()
+                .unwrap()
+                .object
+                .invalidated_commit_seq
+                .is_none()
+        );
     }
 }
