@@ -47,7 +47,7 @@ Tests read at HEAD:
   handler and asserts the lease's request has no native messages and a charge
   under 64 KiB.
 - `transform/surface_census.rs::auto_search_is_enabled_by_the_wire_default_and_drives_the_hint_query`
-  asserts a CK-profile request parses with no native window; it does not touch
+  asserts a request on a non-native serializer profile parses with no native window; it does not touch
   the snapshot.
 
 ## Failure scenario

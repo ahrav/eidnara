@@ -65,7 +65,7 @@ Check: `always` - `request.ready_snapshot().native_messages.is_none()`; `Arc::pt
 Fault/timing angle: none
 Required faults and enabling state: a request with `native_messages: Some` (`opencode-aisdk` or `pi` profile) and a large native payload; a pass reaching ready
 Confidence: high - [evidence](evidence/sc-ready-snapshot-drops-native-messages.md). Read `ready_snapshot`, `snapshot_retained_bytes`, `finish_ready`, the handler's snapshot and `source_capture::Offer` construction, and `SourceCapture::offer`; read both named tests
-Existing check: the two `lib.rs` tests named in `Exercised`; the `debug_assert!` in `finish_ready`; `crates/daemon/src/transform/surface_census.rs::auto_search_is_enabled_by_the_wire_default_and_drives_the_hint_query` asserts a CK-profile request has no native window and does not exercise the snapshot; all unaudited
+Existing check: the two `lib.rs` tests named in `Exercised`; the `debug_assert!` in `finish_ready`; `crates/daemon/src/transform/surface_census.rs::auto_search_is_enabled_by_the_wire_default_and_drives_the_hint_query` asserts a request on a non-native serializer profile has no native window and does not exercise the snapshot; all unaudited
 Impact: The ready LRU and active-lease budget under-charging the native bytes a snapshot pins; D1 holds because capture takes its own charged reference instead of the snapshot's
 Open questions:
 - Should release builds enforce the absence in `finish_ready`? (unresolved, needs `/low-level-systems:defensive-assertions-and-invariant-guards`)
