@@ -463,7 +463,7 @@ class code, the identity fields in class order, the canonical decimal
 revision, the representation, and the span, under `OCCURRENCE_ENCODING_VERSION`
 2 and `IDENTITY_CONTRACT_VERSION` `search-projection-identity-v4`. Payload
 bytes never enter. The refusal order (`EncodingRefusal`) is the kernel's. The
-kernel test `eval_identity.rs` reproduces all 23 identity goldens with both
+kernel test `eval_identity.rs` reproduces all 24 identity goldens with both
 encoders, pins the two version constants and the shared limits
 (`MAX_IDENTITY_VALUE_BYTES`, `HARNESSES`, `OBJECT_FORMATS`) equal, and shows
 the twin rule that
