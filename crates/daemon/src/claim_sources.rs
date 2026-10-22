@@ -1427,7 +1427,7 @@ impl<'a> ClaimMaterializer<'a> {
                 self.count_retired(&retirements, report)?;
                 Ok(true)
             }
-            Err(KernelError::Deadline) if self.budget.is_some() => {
+            Err(refusal) if refusal.error == KernelError::Deadline && self.budget.is_some() => {
                 Err(Stop::Failed(KernelError::Deadline))
             }
             Err(_) => Ok(false),

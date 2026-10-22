@@ -282,6 +282,12 @@ export interface EidnaraConfig {
     host?: HostConnectionConfig;
     /** Only developers can enable `shadow_embedding`. */
     shadow_embedding?: ShadowEmbeddingConfig;
+    /**
+     * User-only consent to retain the exact bytes of message text and tool results as Kernel
+     * source descriptors. The daemon reads this key itself; capture also requires
+     * `memory.enabled`, and subagent sessions never capture. Defaults to off.
+     */
+    source_capture?: { enabled: boolean };
     memory: {
         enabled: boolean;
         injection_budget_tokens: number;
@@ -555,6 +561,17 @@ export const EidnaraConfigSchema = z
             })
             .default({ enabled: false })
             .describe("Developer-only LocalEmbeddings shadow embedding lane."),
+        source_capture: z
+            .strictObject({
+                enabled: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "User-only: retain the exact bytes of user message text, tool outputs, and tool errors as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
+                    ),
+            })
+            .default({ enabled: false })
+            .describe("User-only exact source capture of message text and tool results."),
         temporal_awareness: z
             .boolean()
             .default(true)

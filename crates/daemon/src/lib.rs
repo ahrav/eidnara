@@ -25894,6 +25894,7 @@ mod tests {
             compaction_enabled: true,
             memory_enabled: true,
             memory_auto_capture: false,
+            source_capture_enabled: false,
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,

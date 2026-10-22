@@ -503,6 +503,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    if ("source_capture" in projectRaw) {
+        delete projectRaw.source_capture;
+        warnings.push(
+            "Ignoring source_capture from project config (security: retaining exact conversation and tool bytes requires user-level consent).",
+        );
+    }
+
     for (const field of ["host", "shadow_embedding"] as const) {
         if (field in projectRaw) {
             delete projectRaw[field];

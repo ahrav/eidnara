@@ -918,7 +918,15 @@ abandoned lease may first need to expire.
 Abandoned sources count as `failed`, not `pending`. Completed sources may
 contain zero facts. `memory.auto_capture` is user-only and defaults to true.
 It, `memory.enabled`, and `memory.auto_promote` must all
-permit capture. Captured facts remain labeled model inference for explicit
+permit capture. `source_capture.enabled` is user-only and defaults to false;
+the daemon ignores a project-tier value with a warning, and each plugin strips
+it from the project tier before merging. It grants a different capture: the
+daemon retains the exact bytes of user message text, tool outputs, and tool
+errors as Kernel source descriptors. Source capture runs when
+`source_capture.enabled` and `memory.enabled` both permit it; a session marked
+`is_subagent` never captures. `memory.auto_capture` and `memory.auto_promote`
+gate only model-extracted facts from redacted text.
+Captured facts remain labeled model inference for explicit
 search, not human approval or automatic-context eligibility. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs

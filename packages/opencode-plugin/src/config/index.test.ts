@@ -1064,6 +1064,40 @@ describe("loadPluginConfigDetailed — prompt-surface registration owner", () =>
     });
 });
 
+describe("source-capture parity fixture", () => {
+    interface SourceCaptureRow {
+        name: string;
+        user: Record<string, unknown>;
+        project: Record<string, unknown>;
+        expected_enabled: boolean;
+        expected_project_warning: boolean;
+    }
+    const fixture = JSON.parse(
+        readFileSync(join(import.meta.dir, "__fixtures__", "source-capture-parity.json"), "utf-8"),
+    ) as { rows: SourceCaptureRow[] };
+
+    it("every row matches through the production loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const result = loadDetailedWithTierFiles(
+                { "eidnara.jsonc": JSON.stringify(row.user) },
+                { "eidnara.jsonc": JSON.stringify(row.project) },
+            );
+            expect({
+                name: row.name,
+                enabled: result.config.source_capture?.enabled,
+                warned: (result.config.configWarnings ?? []).some((warning) =>
+                    warning.includes("Ignoring source_capture from project config"),
+                ),
+            }).toEqual({
+                name: row.name,
+                enabled: row.expected_enabled,
+                warned: row.expected_project_warning,
+            });
+        }
+    });
+});
+
 describe("fold-authority parity fixture", () => {
     interface ParityRow {
         name: string;

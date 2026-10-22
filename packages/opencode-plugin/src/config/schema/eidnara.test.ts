@@ -41,6 +41,23 @@ describe("EidnaraConfigSchema", () => {
             expect(result.context_researcher).toBeUndefined();
             expect(result.pi).toBeUndefined();
         });
+
+        it("keeps source capture off unless the key enables it", () => {
+            expect(EidnaraConfigSchema.parse({}).source_capture).toEqual({ enabled: false });
+            expect(EidnaraConfigSchema.parse({ source_capture: {} }).source_capture).toEqual({
+                enabled: false,
+            });
+            expect(
+                EidnaraConfigSchema.parse({ source_capture: { enabled: true } }).source_capture,
+            ).toEqual({ enabled: true });
+            expect(
+                EidnaraConfigSchema.safeParse({ source_capture: { enabled: "yes" } }).success,
+            ).toBe(false);
+            expect(
+                EidnaraConfigSchema.safeParse({ source_capture: { enabled: true, extra: 1 } })
+                    .success,
+            ).toBe(false);
+        });
     });
 
     describe("budget configuration", () => {
@@ -101,6 +118,9 @@ describe("EidnaraConfigSchema", () => {
                 },
                 smart_drops: false,
                 shadow_embedding: {
+                    enabled: false,
+                },
+                source_capture: {
                     enabled: false,
                 },
                 terse_text_compression: {

@@ -1,0 +1,52 @@
+{
+    "description": "Shared source-capture consent parity fixture. The Rust daemon (crates/daemon/src/config.rs), the OpenCode plugin loader (packages/opencode-plugin/src/config/index.ts), and the Pi plugin loader (packages/pi-plugin/src/config/index.ts) load every row through their production loaders and must produce the same effective source_capture.enabled value.",
+    "contract": [
+        "A row's user tier is written as eidnara.jsonc under the user config directory and its project tier as <project>/.eidnara/eidnara.jsonc; an empty object writes an empty document.",
+        "expected_enabled is the effective source_capture.enabled. The key is user-only and defaults to false, so the project tier never changes it in either direction.",
+        "expected_project_warning is true when the project tier sets the key; every loader then reports that it ignored source_capture from the project tier."
+    ],
+    "rows": [
+        {
+            "name": "absent from both tiers",
+            "user": {},
+            "project": {},
+            "expected_enabled": false,
+            "expected_project_warning": false
+        },
+        {
+            "name": "the user tier enables it",
+            "user": { "source_capture": { "enabled": true } },
+            "project": {},
+            "expected_enabled": true,
+            "expected_project_warning": false
+        },
+        {
+            "name": "the user tier disables it explicitly",
+            "user": { "source_capture": { "enabled": false } },
+            "project": {},
+            "expected_enabled": false,
+            "expected_project_warning": false
+        },
+        {
+            "name": "the project tier cannot enable it",
+            "user": {},
+            "project": { "source_capture": { "enabled": true } },
+            "expected_enabled": false,
+            "expected_project_warning": true
+        },
+        {
+            "name": "the project tier cannot override a user disable",
+            "user": { "source_capture": { "enabled": false } },
+            "project": { "source_capture": { "enabled": true } },
+            "expected_enabled": false,
+            "expected_project_warning": true
+        },
+        {
+            "name": "the project tier cannot disable a user enable",
+            "user": { "source_capture": { "enabled": true } },
+            "project": { "source_capture": { "enabled": false } },
+            "expected_enabled": true,
+            "expected_project_warning": true
+        }
+    ]
+}

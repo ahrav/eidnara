@@ -409,6 +409,27 @@ describe("loadPiConfig", () => {
                 read: (config) => config.storage.enforce_private_permissions,
                 expected: false,
             },
+            {
+                key: "source_capture",
+                user: { source_capture: { enabled: false } },
+                project: { source_capture: { enabled: true } },
+                read: (config) => config.source_capture?.enabled,
+                expected: false,
+            },
+            {
+                key: "source_capture",
+                user: { source_capture: { enabled: true } },
+                project: { source_capture: { enabled: false } },
+                read: (config) => config.source_capture?.enabled,
+                expected: true,
+            },
+            {
+                key: "source_capture",
+                user: {},
+                project: { source_capture: { enabled: true } },
+                read: (config) => config.source_capture?.enabled,
+                expected: false,
+            },
         ];
         for (const row of rows) {
             const cwd = makeTempRoot("eidnara-pi-cwd-");
@@ -704,6 +725,50 @@ describe("loadPiConfig", () => {
         expect(warnings).toContain("config root must be a JSON object, got null");
         expect(warnings).toContain("[project config]");
         expect(warnings).toContain("config root must be a JSON object, got array, 2 items");
+    });
+});
+
+describe("source-capture parity fixture", () => {
+    interface SourceCaptureRow {
+        name: string;
+        user: Record<string, unknown>;
+        project: Record<string, unknown>;
+        expected_enabled: boolean;
+        expected_project_warning: boolean;
+    }
+    const fixture = JSON.parse(
+        readFileSync(
+            join(
+                import.meta.dir,
+                "../../../opencode-plugin/src/config/__fixtures__/source-capture-parity.json",
+            ),
+            "utf-8",
+        ),
+    ) as { rows: SourceCaptureRow[] };
+
+    it("every row matches through the Pi loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const cwd = makeTempRoot("eidnara-pi-cwd-");
+            const home = makeTempRoot("eidnara-pi-home-");
+            withHome(home);
+            writeUserConfig(home, JSON.stringify(row.user));
+            writeProjectConfig(cwd, JSON.stringify(row.project));
+
+            const result = loadPiConfigDetailed({ cwd });
+
+            expect({
+                name: row.name,
+                enabled: result.config.source_capture?.enabled,
+                warned: result.warnings.some((warning) =>
+                    warning.includes("Ignoring source_capture from project config"),
+                ),
+            }).toEqual({
+                name: row.name,
+                enabled: row.expected_enabled,
+                warned: row.expected_project_warning,
+            });
+        }
     });
 });
 
