@@ -18,6 +18,12 @@ All references are verified at `a15da13a4`, the head of #1071, which holds
 - On-mode guards: the eviction scheduler's `due()` and refusal backoff
   (`packages/pi-plugin/src/index.ts:875-918`), the compaction answer and
   `handBack` (`:946-976`).
+- Precedence: `handlePiSessionBeforeCompact` returns an available eviction
+  before it reads `handBack` (`index.ts:158-162`, `:163-166`), so an
+  overflow with an acknowledged boundary on the branch gets the fold, and
+  only an overflow with no eviction hands compaction back to Pi.
+  `pi-eviction.test.ts` "answers an overflow with the fold and completes the
+  turn on the retry" asserts the fold with no compaction model call.
 
 ## Failure scenario
 

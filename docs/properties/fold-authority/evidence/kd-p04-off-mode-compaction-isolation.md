@@ -44,8 +44,9 @@ latch that disagrees with the session's project.
 ### Q: Is the latch return in `scheduleEviction` load-bearing?
 
 - Sources examined: `index.ts:875-880`; `pi-delivery.test.ts:301`.
-- Findings: Yes, when the boot latch is off while the session's project
-  folds (an unresolved boot project). In every other off-mode history
-  `due()` is already false.
+- Findings: Yes, when the boot latch is on (`compactionOff === true`,
+  `index.ts:382-383`, because the boot project is unresolved) while the
+  session's project folds. In every other off-mode history `due()` is
+  already false.
 - Missing evidence: None.
 - Conclusion: resolved with answer.

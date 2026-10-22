@@ -10,9 +10,10 @@ spec's D3b moves identity adoption to the folding path; #855 records the
 replacement for this catalog ("FA-E01 ... is replaced. The additive path
 retains none.").
 
-Exercised status: partial - the replacement state (no identity under native
+Exercised status: yes - the replacement state (no identity under native
 authority) is witnessed by #903's handler test, green again in #859 PR A's run at
-`fd0b52aa5`. The surviving output clause has no named witness.
+`fd0b52aa5`. The surviving output clause had no named witness at
+`0ff62b29a`; #1068 supplies it (see "Update for #1060 at `a15da13a4`").
 
 ## Evidence trail
 
@@ -27,12 +28,14 @@ References are verified at `0ff62b29a` unless another tree is named.
   `compaction.enabled: false`, hence the record's explicit-config label.
 - Output: `apply_additive_only` (`transform.rs:2710`) builds the served list
   as the m0 unit, the m1 unit, then every ingress message cloned in order
-  (`:3064-3074`). This is the surviving clause.
+  (`:3054-3065`). This is the surviving clause.
 - Ingress update: the additive path calls only `apply_ingress_scalars`
-  (`:2914`; body `:5593-5608`: newest-live block and ordinal, last usage).
+  (`:2904`; body `:5583-5598`: newest-live block and ordinal, last usage).
   Identity insertion, provisional-tail removal, tail and basis re-adoption,
-  and the re-adoption counter live in `apply_ingress_identities` (`:5612`),
-  called only on the folding path.
+  and the re-adoption counter live in `apply_ingress_identities` (`:5602`),
+  called only on the folding path. Correction, checked at `0ff62b29a`: these
+  anchors were `:3064-3074`, `:2914`, `:5593-5608`, and `:5612`, which ran
+  past each construct.
 - #855 (PR #903, `8b1e04944`) made that split. #857 (PR #905, `871ebfb08`)
   removed `ModuleMeta.block_identity_by_mid`; identities are rows written as
   explicit deltas on the folding path, so "retain" no longer describes a
@@ -83,7 +86,8 @@ messages in order, and that no identity row exists.
 - Findings: These tests check recorded reasons, history retention, retries,
   and native state. None asserts the served list's shape.
 - Missing evidence: An output-shape assertion on a native pass.
-- Conclusion: unresolved, needs that assertion.
+- Conclusion: unresolved at `0ff62b29a`, needs that assertion; superseded
+  by the resolved entry under "Update for #1060 at `a15da13a4`".
 
 ### Q: Which record replaces the identity clause?
 

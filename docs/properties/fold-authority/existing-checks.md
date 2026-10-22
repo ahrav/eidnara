@@ -275,6 +275,16 @@ green in the recorded run of the PR it names (see `catalog.md`, "Update for
 | "serves stored project memory once per request across turns and a Pi compaction" | `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109` | KD-P11, KD-P12, KD-P10, KD-E02 | #1071 (#1064) | unaudited |
 | "serves stored project memory once per request over three turns" | `packages/e2e-tests/tests/rust-native-delivery.test.ts:13` | KD-P11, KD-P12 | #1071 (#1064) | unaudited |
 | "loads the built extension, completes one mock turn, and leaves no storage file" | `packages/e2e-tests/tests/pi-smoke.test.ts:58` | KD-P11 | #1071 (#1064) | unaudited |
+| "registers the full runtime when the subagent guard is absent" | `packages/pi-plugin/src/index-env-guard.test.ts:54` | KD-P01 | #1069 (#1062) | unaudited |
+| "registers exactly the tool and command set each registration option selects" | `packages/pi-plugin/src/tools/index.test.ts:19` | FA-E02, KD-E04 (the registration set) | #1069 (#1062) | unaudited |
+| "refuses in compaction-off mode without calling the daemon" | `packages/pi-plugin/src/commands/eidnara-commands.test.ts:109` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
+| "refuses in compaction-off mode" | `packages/pi-plugin/src/commands/eidnara-commands.test.ts:369` | FA-E02, KD-P04 | #1069 (#1062) | unaudited |
+| "refuses in compaction-off mode without calling the daemon" | `packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131` | KD-P04 | #1069 (#1062) | unaudited |
+| "answers an overflow with the fold and completes the turn on the retry" | `packages/pi-plugin/src/transform/pi-eviction.test.ts:223` | KD-P05 (eviction precedence over hand-back) | #1069 (#1062) | unaudited |
+| `untouched_golden_rows_replay_by_pointer_and_edits_re_encode` | `crates/daemon/src/codec/pi.rs:2422` | FA-E01 (kept-row identity at the codec seam) | #1068 (#1061) | unaudited |
+| `identical_pi_passes_re_encode_identical_rows` | `crates/daemon/src/pi_native_serving_tests.rs:241` | KD-E01 (folding binding counterpart) | #1068 (#1061) | unaudited |
+| `project_memory_revision_change_requests_a_hard_fold` | `crates/daemon/src/transform.rs:13958` | KD-E02 (folding counterpart) | #1068 (#1061) | unaudited |
+| `a_project_memory_revision_is_a_hard_member_too` | `crates/daemon/src/transform/must_not_wait.rs:280` | KD-E02 (folding counterpart) | #1068 (#1061) | unaudited |
 
 Quiet areas after #1060: no end-to-end arm runs a native session above half
 the cap (KD-E03's invalidation rests on the adapter harnesses); no response

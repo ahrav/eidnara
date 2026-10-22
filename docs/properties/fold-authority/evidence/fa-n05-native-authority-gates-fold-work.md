@@ -6,10 +6,12 @@ Proposed record FA-N05 of #834 (D3a: one gate in the shared preparation
 entry, both callers, plus a `session.wrapup` refusal; no durable no-fire
 write). Ticket #855; PR #903. Surface: daemon.
 
-Exercised status: partial - the first-unit caller and the wrapup refusal are
-witnessed under a stored native authority with a non-empty live chain. The
-emergency rerun caller under native authority has no witness, and the
-wrapup refusal's snapshot and boundary work are not counted.
+Exercised status: yes - the first-unit caller and the wrapup refusal are
+witnessed under a stored native authority with a non-empty live chain, at
+90 percent by #903 and at 96 percent by #1068 (see "Update for #1060 at
+`a15da13a4`"). The emergency rerun caller under native authority is not a
+reachable state and has structural coverage through the shared gate, and
+the wrapup refusal's snapshot and boundary work are not counted.
 
 ## Evidence trail
 
@@ -114,8 +116,9 @@ and boundary reads.
   gate.
 - Missing evidence: A native first-unit pass at or above 95 percent.
 - Conclusion: resolved with answer for the rerun caller (structural
-  coverage only); unresolved, needs the native high-pressure first-unit
-  witness.
+  coverage only); unresolved at `0ff62b29a`, needs the native high-pressure
+  first-unit witness; superseded for the first-unit caller by the resolved
+  entry under "Update for #1060 at `a15da13a4`".
 
 ### Q: Do the window-cap firing and the archive that `main` added stay behind the gate?
 

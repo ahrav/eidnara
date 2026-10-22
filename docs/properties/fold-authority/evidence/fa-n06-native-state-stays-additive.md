@@ -20,9 +20,10 @@ All references are verified at HEAD `0ff62b29a`.
   switch to `apply_additive_only` (`crates/daemon/src/transform.rs:3217-3219`).
 - The additive path calls only `apply_ingress_scalars` (`:2904`), which sets
   `newest_live_block_id`, `newest_live_ordinal`, and `last_usage`
-  (`:5593-5608`). Identity insertion, provisional-tail removal, tail and basis
+  (`:5583-5598`). Identity insertion, provisional-tail removal, tail and basis
   re-adoption, and their counters live in `apply_ingress_identities`
-  (`:5612`), called only on the folding path (`:4169`).
+  (`:5602`), called only on the folding path (`:4159`). Correction, checked
+  at `0ff62b29a`: these anchors were `:5593-5608`, `:5612`, and `:4169`.
 - The additive commit carries no identity upserts and no derived state: its
   `TransformCommit` (`:3124-3143`) sets no identity delta, and its result
   sets `derived: None` (`:3162`), so no served fingerprints or baseline parts

@@ -123,7 +123,7 @@ Each record states the evidence for its label.
 | FA-E01 | [`fa-e01-additive-retains-ingress-identities`](#fa-e01-additive-retains-ingress-identities) | safety | `always` | daemon | invalidated | yes | #903 (#855), #905 (#857); #1068 (#1061) output-shape witness |
 | FA-E02 | [`fa-e02-raw-mode-controls-host-surfaces`](#fa-e02-raw-mode-controls-host-surfaces) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856); #1069 (#1062) off-mode Pi clauses; OQ-4 refusal text for an empty chain (needs human input) |
 | FA-E03 | [`fa-e03-whole-meta-refuses-oversize`](#fa-e03-whole-meta-refuses-oversize) | safety | `always` | store | active | partial | #905 (#857), #859 PR A, #859 PR C; first-commit refusal witness unowned (shared with WP-E10); covered-row refusal witness unowned |
-| FA-E04 | [`fa-e04-selected-identities-follow-the-whole-range`](#fa-e04-selected-identities-follow-the-whole-range) | safety | `always-or-unreached` | summarizer | invalidated | yes | #859 PR C, #859 PR A, #905 (#857) |
+| FA-E04 | [`fa-e04-selected-identities-follow-the-whole-range`](#fa-e04-selected-identities-follow-the-whole-range) | safety | `always-or-unreached` | summarizer | invalidated | partial | #859 PR C, #859 PR A, #905 (#857); mixed-range count unasserted |
 | FA-E05 | [`fa-e05-empty-chain-refusal-is-late-and-change-gated`](#fa-e05-empty-chain-refusal-is-late-and-change-gated) | safety | `always` | daemon | invalidated | partial | #903 (#855), #904 (#856); #859 PR A; ignored no-fire commit error unowned |
 | FA-E06 | [`fa-e06-route-snapshots-and-background-work-have-different-lifetimes`](#fa-e06-route-snapshots-and-background-work-have-different-lifetimes) | reachability | `sometimes` | daemon | active | partial | #903 (#855); #859 PR A; firing across route teardown unowned |
 | FA-E07 | [`fa-e07-empty-baseline-and-absent-baseline-have-permissive-helper-semantics`](#fa-e07-empty-baseline-and-absent-baseline-have-permissive-helper-semantics) | safety | `always` | daemon | active | yes | #906 |
@@ -132,7 +132,7 @@ Each record states the evidence for its label.
 | FA-E10 | [`fa-e10-rust-model-resolution-is-user-jsonc-only`](#fa-e10-rust-model-resolution-is-user-jsonc-only) | safety | `always` | daemon | invalidated | partial | #898 (#852); #859 PR A; final-component symlink witness unowned |
 | FA-E11 | [`fa-e11-typescript-expands-user-config-and-rejects-module-keys`](#fa-e11-typescript-expands-user-config-and-rejects-module-keys) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856) last TypeScript gate |
 | FA-E12 | [`fa-e12-cli-mode-resolution-does-not-use-the-plugin-loader`](#fa-e12-cli-mode-resolution-does-not-use-the-plugin-loader) | safety | `always` | cli | invalidated | yes | #898 (#852), #900 (#854); #904 (#856) last TypeScript gate |
-| FA-E13 | [`fa-e13-conflicts-disable-and-repair-toward-off`](#fa-e13-conflicts-disable-and-repair-toward-off) | safety | `always` | plugin, cli | invalidated | yes | #899 (#853), #900 (#854); #904 (#856) last TypeScript gate; TUI startup witness unowned |
+| FA-E13 | [`fa-e13-conflicts-disable-and-repair-toward-off`](#fa-e13-conflicts-disable-and-repair-toward-off) | safety | `always` | plugin, cli | invalidated | partial | #899 (#853), #900 (#854); #904 (#856) last TypeScript gate; TUI startup witness unowned |
 | FA-E14 | [`fa-e14-native-status-conflates-pruning-with-folding`](#fa-e14-native-status-conflates-pruning-with-folding) | safety | `always` | plugin | invalidated | yes | #899 (#853), #904 (#856) |
 | FA-N01 | [`fa-n01-config-derived-authority`](#fa-n01-config-derived-authority) | safety | `always` | daemon, plugin, pi, cli | active | yes | #898 (#852); #859 PR A; #904 (#856) last TypeScript gate; "never `false`" reading (needs human input) |
 | FA-N02 | [`fa-n02-first-commit-adopts-authority`](#fa-n02-first-commit-adopts-authority) | safety | `always` | daemon, store | active | yes | #903 (#855); #859 PR A; two-route concurrent adoption unowned (refinement) |
@@ -173,8 +173,10 @@ Semantics: 30 `always`, 12 `always-or-unreached`, 1 `sometimes`, 1
 `unreachable`, 0 `reachable` (the KD records add 13 `always` and 3
 `always-or-unreached`).
 
-Exercise distribution: 36 `yes`, 8 `partial` (FA-E03, FA-E05, FA-E06,
-FA-E09, FA-E10, FA-N04, FA-N06, FA-N07), 0 `not yet`.
+Exercise distribution: 34 `yes`, 10 `partial` (FA-E03, FA-E04, FA-E05,
+FA-E06, FA-E09, FA-E10, FA-E13, FA-N04, FA-N06, FA-N07), 0 `not yet`. The
+FA-E04 and FA-E13 index rows read `yes` before #1065 while their records
+read `partial`; the rows now follow the records.
 Status: 34 `active`, 10 `invalidated` (FA-E01, FA-E02, FA-E04, FA-E05,
 FA-E10, FA-E11, FA-E12, FA-E13, FA-E14, KD-E03).
 
@@ -224,8 +226,9 @@ Confidence: high -
 scalar-only ingress update on the additive path is `:3038` (calling
 `apply_ingress_scalars`, `:5740`), and the folding-only
 `apply_ingress_identities` (`:5759`) is called from the folding path
-(`:4303`); at `0ff62b29a` they were `:3064-3074`, `:2904`, `:5593-5608`, and
-`:5612`. Correction: the spec's existing check
+(`:4303`); at `0ff62b29a` they were `:3054-3065`, `:2904`, `:5583-5598`, and
+`:5602` (corrected from `:3064-3074`, `:5593-5608`, and `:5612`, which ran
+past each construct). Correction: the spec's existing check
 `compaction_mode_projection_cache_reclassifies_synthetic_prefix` (D`lib.rs:42489`
 at `265df096`) was deleted on `main` by `252d9e179` and does not exist at
 HEAD.
@@ -1330,7 +1333,9 @@ step of the bounded histories; the store test
 `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`
 covers state sync with seeds. #1068 (#1061, head `f04c54e4d`) adds Pi-profile
 passes: `assert_native_commit` runs `assert_native_state` after every native
-commit of the four Pi witnesses and also asserts the ingress scalars
+commit of three Pi witnesses (`pi_native_serving_tests.rs:652`, `:778`, and
+`:843`; the binding comparison at `:710` checks only the stored authority)
+and also asserts the ingress scalars
 (`newest_live_block_id`, `newest_live_ordinal`, and `last_usage` equal the
 pass's), with at least one committed pass in each history, including after
 a memory HARD and a state-sync epoch bump. The "bootstrap" writer the record
@@ -2409,14 +2414,20 @@ Status: active
 Exercised: yes - #1069's "carries the same pass fields for sessions the
 daemon binds differently" compares a folding project, a withdrawn project in
 the same compaction-on process, and a compaction-off process: equal field
-names and equal values once per-session fields are excluded; #1070's "sends
+names and equal values once per-session and capability fields are excluded,
+with `tool_present` asserted `[true, true, false]` across the three
+(`packages/pi-plugin/src/transform/pi-delivery.test.ts:236-254`); #1070's "sends
 the same pass fields under either authority" does the same for OpenCode past
 half the cap.
 Guarantee: Neither plugin sends a per-request instruction that selects fold
 versus additive processing.
-Check: `always` - at dispatch, the request's field set and its non-session
-values are identical across differently bound sessions; the daemon's stored
-authority alone selects the path (`crates/daemon/src/transform.rs:3341`).
+Check: `always` - at dispatch, the request's field set is identical across
+differently bound sessions, and its values are identical once the
+per-session fields and the capability fields are excluded; `tool_present`
+(both plugins) and `todo_tool_present` (OpenCode) follow each process's
+registration and are checked against it under KD-P03, not for equality.
+The daemon's stored authority alone selects the path
+(`crates/daemon/src/transform.rs:3341`).
 Falsifier: a `deliver_only` flag overrides stored authority.
 Fault/timing angle: None.
 Required faults and enabling state: Sessions bound folding and native in one
@@ -2501,9 +2512,12 @@ unresolved-configuration case.
 Guarantee: Compaction-on decisions retain their guards, precedence, and
 outcomes.
 Check: `always-or-unreached` - per guarded event in a compaction-on
-process: a missing or evicted boundary schedules no eviction, an overflow or
-a declined pass over no Eidnara compaction hands compaction back to Pi, and
-a refused eviction backs off; the unchanged suites assert each.
+process: a missing or evicted boundary schedules no eviction; an available
+eviction answers every compaction reason first, overflow included
+(`packages/pi-plugin/src/index.ts:158-162`); with no eviction available, an
+overflow or a declined pass over no Eidnara compaction hands compaction back
+to Pi (`:163-166`, `:960-966`), and any other reason cancels; and a refused
+eviction backs off. The unchanged suites assert each.
 `always-or-unreached` because a compaction-off process never reaches the
 guards. Falsifier: a missing boundary permits an eviction.
 Fault/timing angle: Overflow, decline, busy host, eviction refusal.
@@ -2676,8 +2690,13 @@ arm for the summarizer gate (FA-N05). The ContextResearcher clause rests on
 a static read of the callers.
 Guarantee: Delivery adds zero model calls; native delivery starts no
 summarizer; `/eidnara-aug` remains the only ContextResearcher entry.
-Check: `always` - per delivery invocation, provider requests equal completed
-turns and the fixture's summarizer start count stays zero; the only
+Check: `always` - per delivery invocation, each completed turn adds exactly
+one provider request, and every other request belongs to a class the host
+issues itself: Pi's own compaction requests (two per `session.compact()` in
+`packages/e2e-tests/tests/pi-rust-delivery.test.ts:160`, `:196`) and at
+most one OpenCode session-title request
+(`packages/e2e-tests/tests/rust-native-delivery.test.ts:61-67`); the
+fixture's summarizer start count stays zero; the only
 `runContextResearcher` caller is the `/eidnara-aug` command path
 (`packages/opencode-plugin/src/hooks/context/command-handler.ts:342`;
 Pi's `packages/pi-plugin/src/commands/eidnara-aug.ts`). Falsifier: the

@@ -24,6 +24,10 @@ All references are verified at `a15da13a4`, the head of #1071, which holds
   `packages/pi-plugin/src/index.ts:508`).
 - `historySummarizerLive` reports only a firing in flight; the start
   counter is the cumulative oracle.
+- The request oracle counts per class: one request per completed turn,
+  plus the host's own compaction and title requests. A bare "requests equal
+  turns" equality fails on correct code at the Pi compaction (`:196`) and
+  on OpenCode's title request (`:67`).
 
 ## Failure scenario
 
