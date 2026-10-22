@@ -847,16 +847,21 @@ export function hostIdFilter(
  * sends the whole array: a host within half the cap, one with no accepted head after its lead
  * slots, or one with a slot `measure` cannot size, which is a slot the source's capture refuses,
  * so that pass declines. A head found here is pinned in `state` until the first anchor exists.
+ * A source without `measure` sends its whole array and clears any head an earlier pass pinned.
  */
 function coldHead(state: TransformSessionState, source: TransformPassSource): number | undefined {
     const { host } = source;
     const lead = source.coldLead ?? 0;
+    if (!source.measure) {
+        state.pinnedHead = undefined;
+        return undefined;
+    }
     if (state.pinnedHead !== undefined) {
         const pinned = scanHostIds(host, (id) => id === state.pinnedHead);
         if (pinned >= lead) return pinned;
         state.pinnedHead = undefined;
     }
-    const sizeOf = host.length > lead ? source.measure?.() : undefined;
+    const sizeOf = host.length > lead ? source.measure() : undefined;
     if (!sizeOf) return undefined;
     const size: TransformWindowSize = { blocks: 0, bytes: 0 };
     let unmeasured = false;
