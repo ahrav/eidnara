@@ -96,3 +96,27 @@ describe("Pi pass previous response time", () => {
         expect(fields(messages, () => Number.NaN).prev_response_completed_at_ms).toBeUndefined();
     });
 });
+
+describe("Pi pass capability fields", () => {
+    it.each([
+        [true, true],
+        [true, false],
+        [false, true],
+        [false, false],
+    ])("reports eidnara_reduce registered %p and todowrite registered %p", (reduce, todo) => {
+        const sent = piPassFields({
+            config,
+            geometry,
+            providerId: "faux",
+            modelKey: "faux/faux-model",
+            systemPromptHash: "",
+            reduceRegistered: reduce,
+            todowriteRegistered: todo,
+            messages: [{ role: "user", content: "a", timestamp: 900 }],
+            completedAtMs: () => undefined,
+            now: 2_000,
+        });
+        expect(sent.tool_present).toBe(reduce);
+        expect(sent.todo_tool_present).toBe(todo);
+    });
+});

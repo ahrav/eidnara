@@ -274,6 +274,7 @@ function passOver(
         messages,
         reader: manager,
         projectRoot: "/project",
+        eidnaraFolds: true,
         contextLimit: undefined,
         fields: () => ({ model_key: "faux/faux-model" }),
         branch,
@@ -499,6 +500,33 @@ describe("Pi cold import", () => {
         const sent = await coldWindow(messages);
         expect(sent[0]).toEqual({ id: "e11", role: "assistant" });
         expect(sent).toHaveLength(calls.length + 1);
+    });
+
+    it("submits and publishes the whole array once the project withdraws fold authority after a pinned cold pass", async () => {
+        const messages: Json[] = Array.from({ length: HALF_CAP_BLOCKS + 10 }, (_, n) =>
+            user(`row ${n}`),
+        );
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [] }), () => ({ anchors: [] })],
+            transform: [
+                () => {
+                    throw new Error("queue_full");
+                },
+                rawReply,
+            ],
+        });
+        const reader = branchOver(messages);
+        const pass = passOver(reader, messages);
+        const transform = transformOver(transport.client, pass.branch);
+        expect((await transform.run(pass)).messages).toBeUndefined();
+        const folding = transport.calls.filter((call) => call.method === "transform")[0]?.body;
+        expect(folding?.native_messages).toHaveLength(HALF_CAP_BLOCKS);
+
+        const withdrawn = await transform.run({ ...pass, eidnaraFolds: false });
+        expect(withdrawn.outcome?.kind).toBe("applied");
+        const additive = transport.calls.filter((call) => call.method === "transform")[1]?.body;
+        expect(additive?.native_messages).toHaveLength(messages.length);
+        expect(withdrawn.messages).toEqual(messages);
     });
 });
 

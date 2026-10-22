@@ -891,6 +891,30 @@ describe("transform session client cold import", () => {
         expect(none.pinned).toBeUndefined();
     });
 
+    it("sends the whole array and drops a pinned head for a source without a cold import", async () => {
+        const host = plainHost(HALF_CAP_BLOCKS * 2);
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [] }), () => ({ anchors: [] })],
+            transform: [
+                () => {
+                    throw new Error("daemon unavailable");
+                },
+                coldReply(null),
+            ],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admission = new TransformCaptureAdmission();
+        await coldPass(client, admission, sizedSource(host));
+        expect(client.state("ses").pinnedHead).toBe(`m${HALF_CAP_BLOCKS + 1}`);
+
+        const outcome = await coldPass(client, admission, source(host));
+        expect(outcome.kind).toBe("applied");
+        const second = transport.calls.filter((call) => call.method === "transform")[1]?.body ?? {};
+        expect(ids(second.native_messages)).toHaveLength(HALF_CAP_BLOCKS * 2);
+        expect(ids(host.published[0])).toEqual(ids(second.native_messages));
+        expect(client.state("ses").pinnedHead).toBeUndefined();
+    });
+
     it("sends the whole array below half the cap", async () => {
         const host = plainHost(HALF_CAP_BLOCKS - 1);
         const transport = fakeTransport({

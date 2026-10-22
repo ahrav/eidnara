@@ -562,52 +562,54 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         }
         return branch;
     }
-    const piTransform = compactionOff ? undefined : createPiTransform({ moduleClient, branchOf });
-    if (piTransform) {
-        pi.on("context", async (event, ctx) => {
-            const sessionId = sessionIdFromContext(ctx);
-            if (!sessionId) return;
-            try {
-                const deps = resolveCurrentProjectDeps(ctx);
-                // A project whose configuration withdraws fold authority leaves folding to Pi.
-                if (!isCompactionEnabled(deps.config)) return undefined;
-                const model = ctx.model;
-                const geometry = model
-                    ? resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
-                    : undefined;
-                const modelKey = model ? canonicalPiModelKey(model.provider, model.id) : null;
-                const result = await piTransform.run({
-                    sessionId,
-                    messages: event.messages as unknown as Record<string, unknown>[],
-                    reader: ctx.sessionManager,
-                    projectRoot: deps.projectDir,
-                    contextLimit: geometry?.usableSoft,
-                    fields: (messages, completedAtMs) =>
-                        piPassFields({
-                            config: deps.config,
-                            promptSurfaceRuntime,
-                            geometry,
-                            providerId: model?.provider ?? null,
-                            modelKey,
-                            systemPromptHash:
-                                piSystemPromptStateFor(sessionId)?.systemPromptHash ?? "",
-                            reduceRegistered: true,
-                            todowriteRegistered: todowriteEnabled,
-                            messages,
-                            completedAtMs,
-                            now: Date.now(),
-                        }),
-                });
-                return result.messages
-                    ? { messages: result.messages as unknown as typeof event.messages }
-                    : undefined;
-            } catch (error) {
-                warn("context transform declined:", error);
-                return undefined;
-            }
-        });
-        info("registered context transform handler");
-    }
+    const piTransform = createPiTransform({ moduleClient, branchOf });
+    pi.on("context", async (event, ctx) => {
+        const sessionId = sessionIdFromContext(ctx);
+        if (!sessionId) return;
+        try {
+            const deps = resolveCurrentProjectDeps(ctx);
+            const eidnaraFolds = isCompactionEnabled(deps.config);
+            if (!eidnaraFolds && !deps.projectIdentity) return undefined;
+            const model = ctx.model;
+            const geometry = model
+                ? resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
+                : undefined;
+            const modelKey = model ? canonicalPiModelKey(model.provider, model.id) : null;
+            const result = await piTransform.run({
+                sessionId,
+                messages: event.messages as unknown as Record<string, unknown>[],
+                reader: ctx.sessionManager,
+                projectRoot: deps.projectDir,
+                // The daemon's stored authority decides fold versus additive serving; a
+                // project whose configuration withdraws fold authority submits its whole
+                // array, so an additive pass omits no host message.
+                eidnaraFolds,
+                contextLimit: geometry?.usableSoft,
+                fields: (messages, completedAtMs) =>
+                    piPassFields({
+                        config: deps.config,
+                        promptSurfaceRuntime,
+                        geometry,
+                        providerId: model?.provider ?? null,
+                        modelKey,
+                        systemPromptHash: piSystemPromptStateFor(sessionId)?.systemPromptHash ?? "",
+                        // `eidnara_reduce` registration is process-wide and latched at boot.
+                        reduceRegistered: !compactionOff,
+                        todowriteRegistered: todowriteEnabled,
+                        messages,
+                        completedAtMs,
+                        now: Date.now(),
+                    }),
+            });
+            return result.messages
+                ? { messages: result.messages as unknown as typeof event.messages }
+                : undefined;
+        } catch (error) {
+            warn("context transform declined:", error);
+            return undefined;
+        }
+    });
+    info("registered context transform handler");
 
     pi.on("before_agent_start", async (event, ctx) => {
         scheduleMemoryDrainFor(ctx);
@@ -874,7 +876,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
      */
     function scheduleEviction(ctx: ExtensionContext): void {
         const sessionId = sessionIdFromContext(ctx);
-        if (!sessionId || !piTransform || evicting.has(sessionId)) return;
+        if (compactionOff || !sessionId || evicting.has(sessionId)) return;
         const due = () =>
             isCompactionEnabled(resolveCurrentProjectDeps(ctx).config) &&
             piTransform.eviction(sessionId, ctx.sessionManager, 0) !== undefined;
@@ -958,15 +960,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             // threshold compaction proceeds only for a session with no Eidnara compaction; over
             // one it cancels, so the fail-open array keeps m0.
             handBack:
+                !compactionOff &&
                 !ownEviction &&
                 sessionId !== undefined &&
-                piTransform !== undefined &&
                 (event.reason === "overflow" ||
                     (piTransform.folds(sessionId) === false &&
                         !piTransform.ownsCompaction(sessionId, ctx.sessionManager))),
             eviction: () =>
                 sessionId && !offered.has(sessionId)
-                    ? piTransform?.eviction(
+                    ? piTransform.eviction(
                           sessionId,
                           ctx.sessionManager,
                           event.preparation.tokensBefore,
@@ -1023,7 +1025,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     function releaseSessionResources(sessionId: string): void {
         checkpointedLeafBySession.delete(sessionId);
         branchIndexes.delete(sessionId);
-        piTransform?.clearSession(sessionId);
+        piTransform.clearSession(sessionId);
         offered.delete(sessionId);
         refusals.delete(sessionId);
         clearPiSystemPromptSession(sessionId);

@@ -63,8 +63,9 @@ describe("Pi full extension subagent env guard", () => {
         expect(registrations.commands.length).toBeGreaterThan(0);
         expect(registrations.entryRenderers).toEqual(["eidnara-status"]);
         expect(registrations.events).toContain("before_agent_start");
-        // The daemon owns the transform, so the entry registers no `context` handler.
-        expect(registrations.events).not.toContain("context");
+        // The transform submits a pass in every compaction mode, so the entry registers its
+        // `context` handler with no summarizer chain configured.
+        expect(registrations.events).toContain("context");
         expect(registrations.tools).toContain("eidnara_search");
         expect(registrations.commands).toContain("eidnara-status");
     }, 15_000);
