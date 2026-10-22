@@ -491,6 +491,80 @@ async fn changed_bytes_under_one_identity_are_terminal_and_never_retried() {
     assert_eq!(bytes_of(&store, &rows[0]), "original");
 }
 
+async fn capture_job(
+    handler: &Handler,
+    project: &Path,
+    session_id: &str,
+    window: &[Value],
+) -> source_capture::Count {
+    handler
+        .source_capture
+        .offer(source_capture::Offer {
+            profile: SerializerProfile::OpencodeAiSdk,
+            session_id: session_id.to_owned(),
+            project: kernel_routes::ProjectBinding::new(project),
+            window: window.iter().cloned().map(Arc::new).collect(),
+            epoch: handler.source_capture.epoch(),
+        })
+        .unwrap()
+        .into_job(
+            Arc::clone(&handler.kernel),
+            Arc::clone(&handler.capture_commit_gate),
+            handler.cancel.clone(),
+        )
+        .unwrap()
+        .run()
+        .await
+}
+
+/// The session identity scopes memo entries, so equal message ids and text in two sessions publish independently and each session's next pass hits its own memo entry.
+#[tokio::test]
+async fn equal_native_ids_in_two_sessions_publish_and_memoize_apart() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = |session: &str| {
+        [json!({
+            "info": { "id": "msg_u1", "sessionID": session, "role": "user",
+                      "time": { "created": 1_700_000_000_000u64 } },
+            "parts": [{ "type": "text", "text": "same id, same text" }],
+        })]
+    };
+    for _ in 0..2 {
+        for session in ["ses_a", "ses_b"] {
+            let end = capture_job(&handler, &project, session, &window(session)).await;
+            assert_eq!(end, source_capture::Count::Completed);
+        }
+    }
+    assert_eq!(report(&handler)["units_published"], 2);
+    assert_eq!(report(&handler)["units_memo_skipped"], 2);
+    assert_eq!(report(&handler)["units_replayed"], 0);
+    let sessions: std::collections::BTreeSet<String> =
+        live(&kernel_store(&handler), OccurrenceClass::Messages)
+            .iter()
+            .map(|row| identity_of(row)[2].1.to_owned())
+            .collect();
+    assert_eq!(sessions, ["ses_a".to_owned(), "ses_b".to_owned()].into());
+}
+
+/// A message id containing the memo key separator U+001F receives a terminal refusal, preserving the encodable sibling's memo entry: the sibling publishes once and is a memo hit on the next pass.
+#[tokio::test]
+async fn an_identity_that_does_not_encode_never_shadows_a_memo_entry() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [
+        opencode_user("msg_ok", 1_700_000_000_000, "encodable"),
+        opencode_user("msg_ok\u{1f}0", 1_700_000_000_000, "encodable"),
+    ];
+    for _ in 0..2 {
+        let end = capture_job(&handler, &project, SESSION, &window).await;
+        assert_eq!(end, source_capture::Count::Completed);
+    }
+    assert_eq!(report(&handler)["units_published"], 1);
+    assert_eq!(report(&handler)["units_memo_skipped"], 1);
+    assert!(report(&handler)["units_refused_terminal"].as_u64().unwrap() >= 1);
+    let rows = live(&kernel_store(&handler), OccurrenceClass::Messages);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(identity_of(&rows[0])[3], ("message_id", "msg_ok"));
+}
+
 /// C4: shutdown with a batch in flight accepts no new handoff, lets the batch finish, and releases the slot and the charge; a job that panics releases them too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot() {

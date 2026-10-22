@@ -892,8 +892,8 @@ impl SourcePublisher<'_> {
     }
 
     /// The request digest binds text, domain, scope, role, sensitivity, and provider-egress policy. Changing any of these under the same receipt key conflicts rather than replaying.
-    fn request_digest(&self, unit: &SourceUnit) -> String {
-        let mut bytes = Vec::new();
+    pub(crate) fn request_digest(&self, unit: &SourceUnit) -> String {
+        let mut bytes = Vec::with_capacity(unit.text.len() + 256);
         for part in [
             REQUEST_DIGEST_FORMAT,
             unit.text.as_str(),

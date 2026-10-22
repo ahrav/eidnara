@@ -2,7 +2,7 @@
 //!
 //! Capture runs when `source_capture.enabled` and `memory.enabled` both permit it in the route's consent snapshot and the session is not a subagent's; otherwise the adapters never run. Once the pass has built its response, the handler offers the pass's native records to [`SourceCapture::offer`], which charges the retained window to the supervisor's own byte budget. When the response is handed to the wire writer, [`CaptureHandoff::into_job`] takes the store's single publication slot; a refused offer or handoff (`refused_window_too_large`, `refused_resident_short`, `refused_queue_full`, `refused_shutting_down`) drops its reference and charge at once. The accepted job owns the slot permit, the charges, and its completion: it runs the adapters, charges their copies, skips units the memo already knows, and publishes at most one screened batch under a 5 s budget whose origin is the handoff's acceptance. The response bytes never wait on the kernel or the job.
 //!
-//! Kernel receipts are the durable record. The memo is a bounded, process-local cache keyed by the store's incarnation, the session, and each unit's receipt key; an entry holds the request digest, a disposition, and the time a pending unit first waited, never window bytes. A memo hit with an equal digest suppresses the kernel probe; after a restart the memo is empty and the kernel answers from its receipts. Pending units are offered ahead of units the memo does not know. A window refused at a full slot and never offered again is lost to capture; the next pass that carries it is captured.
+//! Kernel receipts are the durable record. The memo is a bounded, process-local cache keyed by the store's incarnation and each unit's native identity, revision, and representation; an entry holds the request digest, a disposition, and the time a pending unit first waited, never window bytes. A memo hit with an equal digest suppresses the kernel probe; after a restart the memo is empty and the kernel answers from its receipts. Pending units are offered ahead of units the memo does not know. A window refused at a full slot and never offered again is lost to capture; the next pass that carries it is captured.
 //!
 //! Logs and counters carry a closed vocabulary of stages and reasons with counts and byte totals, never unit text, paths, identities, or digests.
 
@@ -547,40 +547,42 @@ impl CaptureJob {
             egress: ProviderEgress::LocalOnly,
             sensitivity: Sensitivity::Sensitive,
         };
-        let prefix = format!(
-            "{incarnation}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
-            self.session.project_id,
-            self.session.harness.as_str(),
-            self.session.session_id
-        );
-        let identities: Vec<Option<(String, String)>> = units
+        // A memo key names the unit's native identity in class field order with its revision and representation; `well_formed_value` rejects control characters, so U+001F separates encodable identity fields unambiguously.
+        let identities: Vec<(String, String)> = units
             .iter()
             .map(|unit| {
-                let (key, digest) = publisher.receipt_identity(unit)?;
-                Some((format!("{prefix}{key}"), digest))
+                let fields = unit.class.identity_fields().iter();
+                let key = [incarnation.as_str(), unit.class.code(), &unit.revision]
+                    .into_iter()
+                    .chain([unit.representation.as_str()])
+                    .chain(fields.map(|field| unit.identity_value(field).unwrap_or_default()))
+                    .collect::<Vec<_>>()
+                    .join("\u{1f}");
+                (key, publisher.request_digest(unit))
             })
             .collect();
-        // Pending units go first, then units the memo does not know; a known unit with an equal digest, and a repeat within the window, is skipped.
-        let (mut pending, mut unknown) = (Vec::new(), Vec::new());
-        {
+        let found: Vec<Option<bool>> = {
             let memo = self.capture.memo();
-            let mut seen = HashSet::new();
-            for (unit, identity) in units.into_iter().zip(identities) {
-                let entry = identity.as_ref().and_then(|(key, _)| memo.get(key));
-                let fresh = identity
-                    .as_ref()
-                    .is_none_or(|(key, _)| seen.insert(key.clone()));
-                match entry {
-                    _ if !fresh => {}
-                    Some(entry) if entry.digest == identity.as_ref().expect("keyed").1 => {
-                        if matches!(entry.disposition, Disposition::Pending { .. }) {
-                            pending.push((unit, identity));
-                        } else {
-                            self.capture.counters.add(Count::UnitsMemoSkipped, 1);
-                        }
-                    }
-                    _ => unknown.push((unit, identity)),
-                }
+            let known = |(key, digest): &(String, String)| {
+                memo.get(key).filter(|entry| entry.digest == *digest)
+            };
+            identities
+                .iter()
+                .map(|identity| {
+                    known(identity)
+                        .map(|entry| matches!(entry.disposition, Disposition::Pending { .. }))
+                })
+                .collect()
+        };
+        let (mut pending, mut unknown) = (Vec::new(), Vec::new());
+        let mut seen = HashSet::with_capacity(identities.len());
+        for ((unit, (key, digest)), found) in units.into_iter().zip(identities).zip(found) {
+            let keyed = found.is_some() || publisher.receipt_identity(&unit).is_some();
+            match found {
+                _ if keyed && !seen.insert(key.clone()) => {}
+                Some(true) => pending.push((unit, Some((key, digest)))),
+                Some(false) => self.capture.counters.add(Count::UnitsMemoSkipped, 1),
+                None => unknown.push((unit, keyed.then_some((key, digest)))),
             }
         }
         let (candidates, keys): (Vec<SourceUnit>, Vec<Option<(String, String)>>) =
