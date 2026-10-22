@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { __setProjectIdentityTestHooks } from "@eidnara/opencode/features/context/project-identity";
 import { HostModuleTransport } from "@eidnara/opencode/hooks/context/module-transport";
 import { defaultTransformCaptureAdmission } from "@eidnara/opencode/hooks/context/transform-capture";
 import { HALF_CAP_BLOCKS } from "@eidnara/opencode/hooks/context/window-cap";
@@ -57,6 +58,7 @@ afterEach(async () => {
     await harness?.dispose();
     harness = undefined;
     __test.clearPiEidnaraActive();
+    __setProjectIdentityTestHooks({});
     for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -205,6 +207,27 @@ describe("Pi context handler in compaction-off mode", () => {
             expect(rowsOf(transforms[2] ?? {}).map((row) => row.id)).toEqual(
                 messageEntryIds(harness).slice(0, 5),
             );
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it.each(
+        COMPACTION_OFF_MODES,
+    )("submits no pass for a home-directory session without allow_home_project under %s", async (_, config) => {
+        writeUserConfig(config);
+        __setProjectIdentityTestHooks({ homeDirectory: () => root });
+        const { call, transforms } = daemon((body) => additive(body));
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+            });
+            for (const turn of ["first", "second"]) await harness.session.prompt(turn);
+
+            expect(transforms).toHaveLength(0);
+            expect(served(harness.requests[0])).toEqual(["first"]);
+            expect(served(harness.requests[1])).toEqual(["first", "ok", "second"]);
         } finally {
             call.mockRestore();
         }

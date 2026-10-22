@@ -568,6 +568,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         if (!sessionId) return;
         try {
             const deps = resolveCurrentProjectDeps(ctx);
+            const eidnaraFolds = isCompactionEnabled(deps.config);
+            if (!eidnaraFolds && !deps.projectIdentity) return undefined;
             const model = ctx.model;
             const geometry = model
                 ? resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
@@ -581,7 +583,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                 // The daemon's stored authority decides fold versus additive serving; a
                 // project whose configuration withdraws fold authority submits its whole
                 // array, so an additive pass omits no host message.
-                eidnaraFolds: isCompactionEnabled(deps.config),
+                eidnaraFolds,
                 contextLimit: geometry?.usableSoft,
                 fields: (messages, completedAtMs) =>
                     piPassFields({
