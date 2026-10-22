@@ -1131,7 +1131,7 @@ fn opencode_rerun(end: u64, output: &str) -> Value {
     })
 }
 
-/// AC14 through the capture path (`replay_after_memo_loss`, `reversed_generation_delivery`): the OpenCode call re-runs in place with a new `state.time.end`. Generation 1 publishes; after a restart empties the memo, generation 2 retires it in its own commit; a window still showing generation 1 replays and retires nothing. The call keeps exactly one live generation throughout.
+/// AC14 through the capture path (`replay_after_memo_loss`, `reversed_generation_delivery`): the OpenCode call re-runs in place with a new `state.time.end`. Generation 1 publishes; after a restart empties the memo, generation 2 retires it in its own commit; a window still showing generation 1 replays and retires nothing; an older generation that never published is superseded and terminal. The call keeps exactly one live generation throughout.
 #[tokio::test]
 async fn a_rerun_keeps_one_live_generation_across_a_restart() {
     let (handler, _dir, _project) = capture_handler(capture_config(true), true).await;
@@ -1185,6 +1185,24 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
         store.tip().unwrap(),
         tip,
         "a redelivered generation commits nothing"
+    );
+    assert_eq!(live_generations(&store), ["1700000002000"]);
+
+    // A generation older than the live one that never published is superseded, retains nothing, and is not offered again.
+    let stale = [
+        opencode_user("msg_u1", 1_700_000_000_000, "run the tests"),
+        opencode_rerun(1_700_000_001_500, "flaky\n"),
+    ];
+    pass(&handler, transform_with(&stale, "base-4")).await;
+    settle(&handler).await;
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(report(&handler)["units_superseded"], 1);
+    pass(&handler, transform_with(&stale, "base-5")).await;
+    settle(&handler).await;
+    assert_eq!(
+        report(&handler)["units_superseded"],
+        1,
+        "a superseded unit is terminal"
     );
     assert_eq!(live_generations(&store), ["1700000002000"]);
 }

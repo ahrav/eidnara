@@ -2363,9 +2363,9 @@ fn a_tool_descriptor_stores_a_validated_outcome_record() {
     );
 }
 
-/// The narrowed in-commit inventory: `live_source_descriptors_with` returns exactly the live descriptors whose identity holds the pair, including a value that JSON escapes, and sees the commit's own retirement.
+/// The narrowed in-commit inventory: `live_source_descriptors_with` returns exactly the live descriptors whose identity field holds one of the values, including a value that JSON escapes, pages across a small page bound, and sees the commit's own retirement. A field outside the class's identity is invalid input.
 #[test]
-fn a_writer_reads_the_live_descriptors_of_one_identity_value() {
+fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
     let fixture = Fixture::open();
     let text = "output";
     let evidence = fixture.retain("tool", text);
@@ -2383,49 +2383,76 @@ fn a_writer_reads_the_live_descriptors_of_one_identity_value() {
             })
             .collect()
     };
-    let quoted = call("call \"q\\ 9");
-    let plain = call("call-plain");
-    let tool = |identity| Occurrence {
-        class: "raw_tool_spans",
-        identity,
-        revision: "1",
-        representation: "tool_output",
-        span: None,
-    };
-    let (target, _, _) = fixture
-        .publish("quoted", &request(tool(&quoted), &evidence, text))
-        .unwrap();
-    fixture
-        .publish("plain", &request(tool(&plain), &evidence, text))
-        .unwrap();
-    let page_size = std::num::NonZeroUsize::new(8).unwrap();
+    let mut wanted = Vec::new();
+    for tool_call_id in ["call \"q\\ 9", "call-b", "call-c", "call-other"] {
+        let identity = call(tool_call_id);
+        let (published, _, _) = fixture
+            .publish(
+                tool_call_id,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                ),
+            )
+            .unwrap();
+        if tool_call_id != "call-other" {
+            wanted.push(published.object_id);
+        }
+    }
+    wanted.sort();
+    let values = ["call \"q\\ 9", "call-b", "call-c"];
+    let one = std::num::NonZeroUsize::new(1).unwrap();
     fixture
         .store
         .commit(intent("read"), |envelope| {
-            let found = envelope.live_source_descriptors_with(
-                OccurrenceClass::RawToolSpans,
-                "tool_call_id",
-                "call \"q\\ 9",
-                None,
-                page_size,
-            )?;
+            let read = |envelope: &kernel::Envelope<'_>| -> Result<Vec<String>, KernelError> {
+                let mut found = Vec::new();
+                let mut after = None;
+                loop {
+                    let page = envelope.live_source_descriptors_with(
+                        OccurrenceClass::RawToolSpans,
+                        "tool_call_id",
+                        &values,
+                        after.as_deref(),
+                        one,
+                    )?;
+                    found.extend(page.rows.into_iter().map(|row| row.object_id));
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => return Ok(found),
+                    }
+                }
+            };
             assert_eq!(
-                found
-                    .rows
-                    .iter()
-                    .map(|row| row.object_id.as_str())
-                    .collect::<Vec<_>>(),
-                [target.object_id.as_str()]
+                read(envelope)?,
+                wanted,
+                "every matching row, in object id order"
             );
-            envelope.retire_observation(&target.object_id)?;
-            let after = envelope.live_source_descriptors_with(
-                OccurrenceClass::RawToolSpans,
-                "tool_call_id",
-                "call \"q\\ 9",
-                None,
-                page_size,
-            )?;
-            assert!(after.rows.is_empty(), "the commit's own retirement is seen");
+            envelope.retire_observation(&wanted[0])?;
+            assert_eq!(
+                read(envelope)?,
+                wanted[1..],
+                "the commit's own retirement is seen"
+            );
+            assert_eq!(
+                envelope
+                    .live_source_descriptors_with(
+                        OccurrenceClass::RawToolSpans,
+                        "not_an_identity_field",
+                        &values,
+                        None,
+                        one,
+                    )
+                    .map(|page| page.rows.len()),
+                Err(KernelError::InvalidInput)
+            );
             Ok(String::new())
         })
         .unwrap();

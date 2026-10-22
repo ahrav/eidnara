@@ -3570,7 +3570,7 @@ fn published_units(dispositions: &[UnitDisposition]) -> Vec<&daemon::harness_sou
         .collect()
 }
 
-/// AC14 and C8 (`sc-rerun-exactly-one-live-generation`): a re-run of one call retires the predecessor generation in the commit that publishes the successor, whatever the delivery order. In order (1, 2) the predecessor's invalidation is the successor's creation and has no successor of its own, so export tombstones it `Retired`, and its bytes stay readable. A redelivered 1 replays and retires nothing (1, 2, 1); a duplicate 2 replays. Delivered reversed (2, 1), the stale generation is superseded and retains nothing. An error that becomes a success, a re-run with fewer blocks, and two generations in one batch each leave one live generation, and a distinct call with equal text coexists.
+/// AC14 and C8 (`sc-rerun-exactly-one-live-generation`): a re-run of one call retires the predecessor generation in the commit that publishes the successor, whatever the delivery order. In order (1, 2) the predecessor's invalidation is the successor's creation and its row names no successor, the state the projection tombstones as `Retired`, and its bytes stay readable. A redelivered 1 replays and retires nothing (1, 2, 1); a duplicate 2 replays. Delivered reversed (2, 1), the stale generation is superseded and retains nothing. An error that becomes a success, a re-run with fewer blocks, and two generations in one batch each leave one live generation, and a distinct call with equal text coexists.
 #[test]
 fn a_tool_rerun_leaves_exactly_one_live_generation() {
     let dir = tempfile::tempdir().unwrap();
@@ -3652,6 +3652,31 @@ fn a_tool_rerun_leaves_exactly_one_live_generation() {
         [("200".to_owned(), "0".to_owned())]
     );
 
+    // A window holding the published generation 1 beside a new generation 2, as a Pi transcript does: 1 replays and 2 retires it in the same commit.
+    let shown = pi_rerun("call_e", 100, false, &["first\n"]);
+    let gen1 =
+        published_units(&publish_screened(&publisher, &shown, NOW, None).unwrap())[0].clone();
+    let mut window = shown.clone();
+    window.extend(pi_rerun("call_e", 200, false, &["second\n"]));
+    let dispositions = publish_screened(&publisher, &window, NOW, None).unwrap();
+    let both = published_units(&dispositions);
+    assert!(both[0].replayed && !both[1].replayed);
+    let created: i64 = conn
+        .query_row(
+            "SELECT created_commit_seq FROM observations WHERE object_id=?1",
+            [&both[1].object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        descriptor_retirement(&corpus, &gen1.object_id).0,
+        Some(created)
+    );
+    assert_eq!(
+        live_generation_of(&corpus, "call_e"),
+        [("200".to_owned(), "0".to_owned())]
+    );
+
     // Two generations of one call in one batch: the older is superseded.
     let mut both = pi_rerun("call_d", 100, false, &["first\n"]);
     both.extend(pi_rerun("call_d", 300, false, &["third\n"]));
@@ -3664,7 +3689,7 @@ fn a_tool_rerun_leaves_exactly_one_live_generation() {
     );
 }
 
-/// OQ11 measurement: the cost of one re-run publication against a store holding 10 000 live `raw_tool_spans` descriptors, against the 500 ms criterion. Run with `--ignored --nocapture`.
+/// OQ11 measurement: the cost of one capture batch of re-runs against a store holding 10 000 live `raw_tool_spans` descriptors, against the 500 ms criterion: a full 32-unit window of distinct calls, every one retiring a predecessor. Run with `cargo +1.98 nextest run --locked -p daemon --all-features --run-ignored only -E 'test(rerun_lookup_cost)' --no-capture`.
 #[test]
 #[ignore = "measurement"]
 fn rerun_lookup_cost_at_ten_thousand_live_tool_descriptors() {
@@ -3688,17 +3713,29 @@ fn rerun_lookup_cost_at_ten_thousand_live_tool_descriptors() {
         daemon::harness_sources::publish_batch(&corpus.kernel, Vec::new(), &pairs, NOW, None)
             .unwrap();
     }
+    // A full capture window: 32 tool results of distinct calls, every one a re-run, so the batch reads 32 calls and retires 32 predecessors.
     let mut samples = Vec::new();
     for round in 0..5u64 {
-        let rerun = pi_rerun("call_0_0", 200 + round, false, &["re-run\n"]);
+        let window: Vec<SourceUnit> = (0..MAX_SOURCE_BATCH_UNITS)
+            .flat_map(|index| {
+                pi_rerun(
+                    &format!("call_{round}_{index}"),
+                    200 + round,
+                    false,
+                    &["re-run\n"],
+                )
+            })
+            .collect();
         let started = std::time::Instant::now();
-        let dispositions = publish_screened(&publisher, &rerun, NOW, None).unwrap();
+        let dispositions = publish_screened(&publisher, &window, NOW, None).unwrap();
         samples.push(started.elapsed());
-        assert!(matches!(dispositions[0], UnitDisposition::Published(_)));
+        assert!(dispositions
+            .iter()
+            .all(|disposition| matches!(disposition, UnitDisposition::Published(published) if !published.replayed)));
     }
     samples.sort();
     println!(
-        "rerun publication at 10000 live tool descriptors: min {:?} median {:?} max {:?}",
+        "32-call re-run window at 10000 live tool descriptors: min {:?} median {:?} max {:?}",
         samples[0], samples[2], samples[4]
     );
     // The same store publishing message text, which reads no tool inventory: the difference is the lookup.
