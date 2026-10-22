@@ -6792,6 +6792,12 @@ impl HandlerCore {
         }
     }
 
+    /// `session.delete` removes the bound session in two stores, in order, under the capture commit gate:
+    ///
+    /// 1. The Kernel retires every live `messages` and `raw_tool_spans` descriptor the bound project, harness, and session own, in receipt-keyed pages. The retired rows stay readable as history.
+    /// 2. The memory store deletes the session's rows, and the capture memo and generation ticket drop the session's pending work.
+    ///
+    /// Outcomes: `{ok: true, deleted_rows}` once both steps completed. `kernel_unavailable` when the Kernel is starting or unavailable, or its inventory or a page commit fails; nothing is deleted from the memory store, and a retry continues from what is still live. A deployment without a kernel skips step 1. A retry after a failure between the steps completes both. A harness session that keeps running after the delete republishes its sources on its next pass: stored receipts answer for its earlier units, and new messages publish fresh descriptors.
     async fn handle_session_delete_value(
         self: &Arc<Self>,
         channel: RouteHandle,
@@ -6823,6 +6829,37 @@ impl HandlerCore {
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
+                // Captured sources retire before the memory rows go, so no deleted session keeps a live descriptor.
+                if core.kernel.expected() {
+                    let kernel =
+                        core.kernel
+                            .kernel_store()
+                            .map_err(|state| PreparedOutcome::Error {
+                                code: "kernel_unavailable".to_string(),
+                                message: state.state_key(),
+                            })?;
+                    source_capture::retire_session_sources(
+                        &kernel,
+                        binding.kernel_project.digest(),
+                        &binding.harness,
+                        &session_id,
+                    )
+                    .map_err(|error| PreparedOutcome::Error {
+                        code: "kernel_unavailable".to_string(),
+                        message: format!("captured sources not retired: {error}"),
+                    })?;
+                }
+                #[cfg(test)]
+                if core
+                    .source_capture
+                    .stop_after_retirement
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    return Err(PreparedOutcome::Error {
+                        code: "injected_stop".to_string(),
+                        message: "stopped between the Kernel and memory-store commits".to_string(),
+                    });
+                }
                 let deleted = store
                     .delete_session(&session_id, &note_project_path)
                     .map_err(|error| PreparedOutcome::Error {
@@ -24128,6 +24165,8 @@ mod tests {
             Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
         let handler = Handler::with_producer_factory_config_resolver(factory, config, resolver);
         handler.install_store_for_test(Arc::clone(&store));
+        // A handler opens no kernel until a test asks for one, as a deployment without a kernel does.
+        handler.kernel.set_expected(false);
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
         handler.bind_route(
@@ -24143,6 +24182,7 @@ mod tests {
     ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         let (handler, store, dir, project) = handler_with_store(state, config);
         let root = dir.path().join("kernel");
+        handler.kernel.set_expected(true);
         handler
             .kernel
             .open(root, StoreOpenPolicy::default(), handler.cancel.clone())

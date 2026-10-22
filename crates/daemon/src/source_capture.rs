@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use host_runtime::wire::{ByteBudget, ByteCharge};
 use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
 use kernel::{CommitIntent, KernelError, KernelStore, ProviderEgress, Sensitivity};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -216,6 +217,9 @@ pub(crate) struct SourceCapture {
     counters: Counters,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// F23: when set, `session.delete` stops after the Kernel retirement commits and before the memory-store delete, as a process killed between the two commits would.
+    #[cfg(test)]
+    pub(crate) stop_after_retirement: AtomicBool,
 }
 
 impl Default for SourceCapture {
@@ -228,6 +232,8 @@ impl Default for SourceCapture {
             counters: Counters::default(),
             #[cfg(test)]
             before_publish: Mutex::new(None),
+            #[cfg(test)]
+            stop_after_retirement: AtomicBool::new(false),
         }
     }
 }
@@ -749,6 +755,102 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
         UnitDisposition::Refused(_) => (Count::UnitsRefusedRetryable, pending),
         UnitDisposition::Superseded => (Count::UnitsSuperseded, Disposition::Terminal),
     }
+}
+
+/// Live descriptors one session-retirement page retires.
+const SESSION_RETIREMENT_PAGE: usize = 256;
+/// How long a session-retirement preview waits for a pooled reader.
+const SESSION_RETIREMENT_WAIT: Duration = Duration::from_secs(5);
+/// Leads the bytes a session-retirement page's receipt key binds.
+const SESSION_RETIREMENT_FORMAT: &str = "source-session-retire.v1";
+
+/// Retires every live `messages` and `raw_tool_spans` descriptor whose identity names `project_id`, `harness`, and `session_id`, and returns how many retired. Each page of at most [`SESSION_RETIREMENT_PAGE`] descriptors is one commit keyed by the session and the page's sorted object ids, never the clock, so a retry after a lost reply replays a committed page and the next inventory lists only what is still live. The caller holds the capture commit gate, so no capture publication interleaves with the inventory.
+///
+/// # Errors
+///
+/// Returns the first inventory or commit error; pages committed before it stay retired, and the next call continues from what is still live.
+pub(crate) fn retire_session_sources(
+    store: &KernelStore,
+    project_id: &str,
+    harness: &str,
+    session_id: &str,
+) -> Result<usize, KernelError> {
+    let mut retired = 0;
+    loop {
+        let (_, page) = store.preview(Instant::now() + SESSION_RETIREMENT_WAIT, |preview| {
+            session_page(preview, project_id, harness, session_id)
+        })?;
+        if page.is_empty() {
+            return Ok(retired);
+        }
+        let mut bytes = Vec::new();
+        for part in [SESSION_RETIREMENT_FORMAT, project_id, harness, session_id]
+            .into_iter()
+            .chain(page.iter().map(String::as_str))
+        {
+            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(part.as_bytes());
+        }
+        let digest = kernel::source_identity::identity_digest(&bytes);
+        let receipt = store.commit(
+            CommitIntent {
+                producer: PRODUCER.to_owned(),
+                operation_key: format!("source-session-retire:{digest}"),
+                request_digest: digest,
+                actor: harness.to_owned(),
+                cause: "session deleted".to_owned(),
+            },
+            |envelope| crate::harness_sources::retire_descriptors(envelope, &page),
+        )?;
+        // A committed page retired its rows, so an inventory that lists them again is not the store this loop reads.
+        if receipt.replayed {
+            return Err(KernelError::Conflict);
+        }
+        retired += page.len();
+    }
+}
+
+/// Up to [`SESSION_RETIREMENT_PAGE`] live captured descriptors of the session, sorted by object id.
+fn session_page(
+    preview: &kernel::Envelope<'_>,
+    project_id: &str,
+    harness: &str,
+    session_id: &str,
+) -> Result<Vec<String>, KernelError> {
+    let mut page = Vec::new();
+    for class in [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans] {
+        let mut after = None;
+        while page.len() < SESSION_RETIREMENT_PAGE {
+            let rows = preview.live_source_descriptors_with(
+                class,
+                "session_id",
+                &[session_id],
+                after.as_deref(),
+                std::num::NonZeroUsize::new(SESSION_RETIREMENT_PAGE).expect("a nonzero page"),
+            )?;
+            page.extend(
+                rows.rows
+                    .into_iter()
+                    .filter(|row| {
+                        let identity = &row.detail.identity;
+                        identity
+                            .iter()
+                            .any(|(name, value)| name == "project_id" && value == project_id)
+                            && identity
+                                .iter()
+                                .any(|(name, value)| name == "harness" && value == harness)
+                    })
+                    .map(|row| row.object_id),
+            );
+            match rows.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+    }
+    page.truncate(SESSION_RETIREMENT_PAGE);
+    page.sort();
+    Ok(page)
 }
 
 fn kernel_end(error: KernelError) -> Count {

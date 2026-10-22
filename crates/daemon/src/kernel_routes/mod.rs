@@ -157,6 +157,11 @@ impl KernelOpenCoordinator {
         self.expected.store(expected, Ordering::Release);
     }
 
+    /// Whether this deployment provisions a kernel; one that does not holds no captured sources.
+    pub(crate) fn expected(&self) -> bool {
+        self.expected.load(Ordering::Acquire)
+    }
+
     /// Whether `block` downgrades the daemon's health status; never for a
     /// deployment that does not provision a kernel.
     pub(crate) fn health_degrades(&self, block: &health::KernelHealthBlock) -> bool {

@@ -86,9 +86,13 @@ fn transform_with(native: &[Value], base: &str) -> Value {
 
 /// Runs one pass as the transport does: the response settles, then its after-response work starts. Returns the response without its timings and its output revisions, which name the daemon incarnation that served them.
 async fn pass(handler: &Handler, request: Value) -> Value {
+    pass_on(handler, test_route(7), request).await
+}
+
+async fn pass_on(handler: &Handler, route: RouteHandle, request: Value) -> Value {
     let request = handler.test_client_prepare_request(request);
     let mut outcome = handler
-        .handle_transform_for_test(test_route(7), request.clone())
+        .handle_transform_for_test(route, request.clone())
         .await;
     let after = outcome.take_after_response();
     let applied = handler.test_client_apply(&request, outcome);
@@ -1205,4 +1209,161 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
         "a superseded unit is terminal"
     );
     assert_eq!(live_generations(&store), ["1700000002000"]);
+}
+
+async fn delete_session(handler: &Handler, session_id: &str) -> Value {
+    delete_on(&handler.core, session_id).await
+}
+
+async fn delete_on(core: &Arc<HandlerCore>, session_id: &str) -> Value {
+    let outcome = core
+        .handle_session_delete_value(
+            test_route(7),
+            &json!({ "method": "session.delete", "session_id": session_id }),
+        )
+        .await;
+    match outcome {
+        PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        PreparedOutcome::Error { code, message } => json!({ "error": code, "message": message }),
+        other => panic!("unexpected outcome {other:?}"),
+    }
+}
+
+/// The live captured descriptors naming `session_id`, across both classes.
+fn live_for_session(store: &KernelStore, session_id: &str) -> Vec<LiveDescriptor> {
+    [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans]
+        .into_iter()
+        .flat_map(|class| live(store, class))
+        .filter(|row| identity_of(row)[2] == ("session_id", session_id))
+        .collect()
+}
+
+/// AC5 and AC15 (`sc-delete-retires-before-memory-store-delete`, `sc-delete-retry-recovers-crash-between-stores`): `session.delete` retires every live `messages` and `raw_tool_spans` descriptor the session owns before the memory-store delete. The retired rows stay readable as history, and another session of the project keeps its descriptors. A stop between the Kernel commit and the memory-store delete (F23) leaves the memory rows; one retry answers `ok`, replays nothing new, and completes the delete.
+#[tokio::test]
+async fn session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [
+        opencode_user("msg_u1", 1_700_000_000_000, "please run the tests"),
+        opencode_assistant_with_tools("msg_a1", 1_700_000_001_000),
+    ];
+    pass(&handler, transform_with(&window, "base-1")).await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    // Another session of the same project, captured through its own route.
+    let mut other = binding_with_harness(project.to_str().unwrap(), "opencode", "ses_other");
+    other.config = capture_config(true);
+    handler.bind_route(test_route(8), other);
+    let other_window: Vec<Value> = window
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            message["info"]["sessionID"] = json!("ses_other");
+            message
+        })
+        .collect();
+    let mut request = transform_with(&other_window, "base-o");
+    request["session_id"] = json!("ses_other");
+    pass_on(&handler, test_route(8), request).await;
+    settle(&handler).await;
+    let captured = live_for_session(&store, SESSION);
+    assert!(captured.len() >= 4, "{}", captured.len());
+    let others = live_for_session(&store, "ses_other").len();
+    assert!(others >= 4, "{others}");
+
+    // F23: the Kernel retirement commits, then the delete stops before the memory store.
+    handler
+        .source_capture
+        .stop_after_retirement
+        .store(true, std::sync::atomic::Ordering::Release);
+    let stopped = delete_session(&handler, SESSION).await;
+    assert_eq!(stopped["error"], "injected_stop", "{stopped}");
+    assert!(
+        live_for_session(&store, SESSION).is_empty(),
+        "the Kernel step committed"
+    );
+    let tip = store.tip().unwrap();
+
+    let retried = delete_session(&handler, SESSION).await;
+    assert_eq!(retried["ok"], true, "{retried}");
+    assert!(
+        retried["deleted_rows"].as_u64().unwrap() > 0,
+        "the memory rows were still there"
+    );
+    assert_eq!(store.tip().unwrap(), tip, "the retry retires nothing new");
+    assert_eq!(
+        live_for_session(&store, "ses_other").len(),
+        others,
+        "another session is untouched"
+    );
+    for row in &captured {
+        let (_, states) = store
+            .object_states(std::slice::from_ref(&row.object_id))
+            .unwrap();
+        let state = states[0].as_ref().expect("a retired row stays as history");
+        assert!(state.object.invalidated_commit_seq.is_some());
+        assert_eq!(
+            bytes_of(&store, row).is_empty(),
+            row.detail.artifact_digest == kernel::source_identity::payload_id(b"")
+        );
+    }
+}
+
+/// OQ12 (fail closed): a Kernel still starting answers a retryable `kernel_unavailable`, and the memory store keeps the session.
+#[tokio::test]
+async fn session_delete_with_the_kernel_starting_deletes_nothing() {
+    let (handler, _dir, _project) = capture_handler(capture_config(true), false).await;
+    handler.kernel.set_expected(true);
+    assert_eq!(handler.kernel.state(), kernel_routes::KernelState::Starting);
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hi")],
+            "base-1",
+        ),
+    )
+    .await;
+    let refused = delete_session(&handler, SESSION).await;
+    assert_eq!(refused["error"], "kernel_unavailable", "{refused}");
+    handler.kernel.set_expected(false);
+    let deleted = delete_session(&handler, SESSION).await;
+    assert!(
+        deleted["deleted_rows"].as_u64().unwrap() > 0,
+        "the refused delete left the session's rows: {deleted}"
+    );
+}
+
+/// AC15 second clause (`sc-deleted-session-not-resurrected-by-queued-capture`): a delete that arrives while a capture job holds its handoff, before its first publication, drops the pending units; the job publishes nothing for the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_before_the_first_publication_drops_the_pending_capture() {
+    let (handler, _dir, _project) = capture_handler(capture_config(true), true).await;
+    let (entered, wait_entered) = mpsc::channel::<()>();
+    let (release, wait_release) = mpsc::channel::<()>();
+    let wait_release = Arc::new(Mutex::new(wait_release));
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        entered.send(()).unwrap();
+        wait_release.lock().unwrap().recv().unwrap();
+    }));
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "secret plan")],
+            "base-1",
+        ),
+    )
+    .await;
+    tokio::task::spawn_blocking(move || wait_entered.recv().unwrap())
+        .await
+        .unwrap();
+    let deleting = {
+        let core = Arc::clone(&handler.core);
+        tokio::spawn(async move { delete_on(&core, SESSION).await })
+    };
+    // The delete waits on the gate the job takes next; releasing the job lets one of them win.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.send(()).unwrap();
+    assert_eq!(deleting.await.unwrap()["ok"], true);
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    assert!(live_for_session(&store, SESSION).is_empty());
 }
