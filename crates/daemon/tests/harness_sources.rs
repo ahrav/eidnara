@@ -2117,7 +2117,11 @@ fn c6_original_revision_bytes_read_exactly_after_succession_and_reopen() {
 
 /// One Pi user text unit `id` whose text is `text`.
 fn pi_text_unit(id: &str, text: &str) -> SourceUnit {
-    pi_units(&pi_session(), &pi_user(id, text, 100))
+    pi_text_unit_at(id, text, 100)
+}
+
+fn pi_text_unit_at(id: &str, text: &str, stamp: u64) -> SourceUnit {
+    pi_units(&pi_session(), &pi_user(id, text, stamp))
         .unwrap()
         .remove(0)
 }
@@ -2408,6 +2412,72 @@ fn capture_batch_screens_a_repeated_identity_per_unit() {
     assert!(published(&again[0]).replayed);
 }
 
+#[test]
+fn capture_batch_refuses_a_stale_revision_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    publisher
+        .publish(&pi_text_unit_at("pi-stale", "newer", 200), NOW)
+        .unwrap();
+    let receipts = publisher_receipts(&corpus);
+    let units = [
+        pi_text_unit("pi-fresh", "fresh sibling"),
+        pi_text_unit_at("pi-stale", "older", 100),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    assert!(
+        matches!(
+            &dispositions[1],
+            UnitDisposition::Refused(PublishError::Descriptor {
+                refusal: SourceDescriptorError::RevisionNotAdvanced,
+                evidence: None,
+            })
+        ),
+        "{:?}",
+        dispositions[1]
+    );
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        2,
+        "the stale unit retained no evidence"
+    );
+    assert_eq!(
+        publisher_receipts(&corpus).difference(&receipts).count(),
+        2,
+        "receipts for the sibling only"
+    );
+}
+
+#[test]
+fn capture_batch_defers_a_second_revision_of_an_admitted_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let units = [
+        pi_text_unit_at("pi-edited", "first revision", 100),
+        pi_text_unit("pi-sibling", "sibling"),
+        pi_text_unit_at("pi-edited", "second revision", 200),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let first = published(&dispositions[0]);
+    assert!(!first.replayed);
+    assert!(!published(&dispositions[1]).replayed);
+    assert!(
+        matches!(dispositions[2], UnitDisposition::Deferred),
+        "{:?}",
+        dispositions[2]
+    );
+
+    let again = publish_screened(&publisher, &units[2..], NOW, None).unwrap();
+    let second = published(&again[0]);
+    assert!(!second.replayed);
+    assert_eq!(second.replaced_object_id.as_ref(), Some(&first.object_id));
+}
+
 /// `publish_batch` names the unit whose step refused the attempt and commits nothing; only a receipt conflict is a terminal conflict.
 #[test]
 fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
@@ -2454,6 +2524,7 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
     assert_eq!(refusal.error, kernel::KernelError::NotFound);
     assert_eq!(refusal.unit, Some(0));
     assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(refusal.refusal, None);
     assert_eq!(
         corpus.kernel.staged_artifacts_for_test(),
         staged,
@@ -2475,6 +2546,10 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
     assert_eq!(refusal.error, kernel::KernelError::InvalidInput);
     assert_eq!(refusal.unit, Some(1));
     assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(
+        refusal.refusal,
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
 
     assert_eq!(corpus.tip(), tip, "no refused attempt committed");
 }

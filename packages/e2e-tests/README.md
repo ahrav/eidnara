@@ -14,11 +14,12 @@ The package is private and never published.
   transform mode and no plugin database; the
   harness reads nothing but OpenCode's own session store and the daemon's
   `session.status` route.
-- **Pi load smoke.** `pi-smoke` starts a Pi RPC process with the built Pi
-  extension (`packages/pi-plugin/dist/index.js`), completes one mock turn,
-  checks the tools are registered, and asserts that the isolated data
-  directory contains no storage file afterwards. It makes no stored-data
-  assertions.
+- **Pi load smoke.** `pi-smoke` starts the direct-host fixture and a Pi RPC
+  process with the built Pi extension (`packages/pi-plugin/dist/index.js`)
+  whose user tier names the fixture's connection file. It completes one mock
+  turn, checks the tools are registered and that the daemon's m0 leads the
+  provider request, and asserts that the isolated plugin data directory
+  contains no storage file afterwards.
 - **Mock provider.** `src/mock-provider/server.ts` serves the Anthropic
   Messages API shape (streaming and error bodies) so no test needs a real
   model. `new MockProvider({ forward })` instead forwards every request to one
@@ -42,9 +43,9 @@ The package is private and never published.
 
 ## Retained suite
 
-`mode-manifest.json` lists every test file under `tests/`; each Rust-mode
-entry is `tier: "rust-only"`, `compression-fidelity-pi` is `tier: "pi-rust"`,
-and `pi-smoke` is `tier: "pi-smoke"`. Each
+`mode-manifest.json` lists every test file under `tests/`; each OpenCode
+Rust-mode entry is `tier: "rust-only"`, and each Pi entry, `pi-smoke`
+included, is `tier: "pi-rust"`. Each
 entry names the contracts it covers in `contract_refs`: the port suites carry
 `["U5-PORT"]`, and `compression-fidelity-qualification` carries its
 property-catalog records `cf-fixture-script-qualification` and
@@ -119,6 +120,13 @@ verified project memory into an existing decision's scope,
 ranking trace. The pass line's `admission`, `invocation_bytes`,
 `invocation_charged`, and `history_budget` fields feed both.
 
+`review-cli.test.ts` drives the fixture's `review-witness` control for a root
+whose memories authority is MODULE. It runs one production MemoryReviewer
+worker pass over the host's stores against a scripted local TLS peer: two
+fixture-class forms of one decision reach selected proposals, and three
+production-class forms abstain `owner_sensitive` before any request. It returns
+each selected read and the decision's tokens for the review command to match.
+
 `compression-fidelity-forwarding` runs one OpenCode turn through the
 forwarding mock to an in-process provider double: the double calls `read`, the
 tool-result turn is forwarded and captured, the final answer reaches the
@@ -151,7 +159,8 @@ working `worker_threads.markAsUntransferable` and Node refuses to transfer
 external buffers on its own. A runtime that fails a gated mechanism skips the
 suite and prints `shared-memory channel unavailable on this runtime: <reason>`.
 
-`pi-smoke` is wrapped in `describe.skipIf(!piPrereqs.ok)`. `detectPiPrereqs()`
+`pi-smoke` is wrapped in `describe.skipIf(!prereqs.ok)`, which needs the Rust-mode
+fixture prerequisites and the Pi prerequisites. `detectPiPrereqs()`
 (`src/pi-runner/spawn.ts`) requires `@earendil-works/pi-coding-agent`
 (installed as a dev dependency of `packages/pi-plugin`, resolved from that
 package's `node_modules` or the root `node_modules/.bun`), `node` on `PATH`

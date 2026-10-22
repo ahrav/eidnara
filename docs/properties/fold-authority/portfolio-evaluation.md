@@ -124,3 +124,33 @@ These are proposed queue entries, not tracker items.
    changed #834's constraint C3. The owner decided instead to move covered
    system messages into rows and cap legacy segments (#859 PR B); C3 stands
    unchanged.
+
+## Knowledge delivery records (#1060)
+
+The specification's portfolio evaluation (#1060, Property Catalog section
+A, "Portfolio evaluation (fresh-context, four lenses)") ran before the code
+landed. Its refinements are applied in the KD records: FA-N06 requires a
+committed native pass; KD-E01 pairs `committed: false` with a metadata-change
+repeat; KD-E02 names the reason precedence; WP-P01 corrects its null-window
+clause; KD-E03 is rerouted to OpenCode at baseline and invalidated; FA-E02
+names the per-project gate on the compaction answer.
+
+Dispositions after #1068 to #1071:
+
+| Item | Disposition |
+| --- | --- |
+| Native high-pressure first-unit witness (FA-N05) | Resolved by #1068's 96 percent arm; the band is inferred from usage. |
+| Output-shape witness (FA-E01, FA-FM39) | Resolved by #1068. |
+| Off-mode tag-strip and zero-`ctx.compact` witnesses (FA-E02, KD-P04) | Resolved by #1069, including the latch-disagreement history. |
+| Pi pre-client admission decline (KD-P07) | Resolved by #1069. |
+| Routed unresolved project in a compaction-on Pi process (OQ-1) | Resolved by #1069's whole-array arm and the per-project gate. |
+| Resumed session with applied `eidnara` authority in a now-unresolved project | Deferred under OQ-3 (owner approval 2026-10-21). |
+| Pi project switch mid-session carrying pin and authority | The pin arm is witnessed at `07ea883b5` (`pi-transform.test.ts:505`, `transform-session-client.test.ts:894`; KD-E03, KD-P06); the authority history stays deferred under OQ-3. |
+| A compaction-off process whose routed project resolves folding sends `eidnaraFolds: true` while Pi keeps its compaction | Recorded in #1069; consistent with OQ-1; joins the OQ-3 split-ownership histories. |
+| Refusal text naming only `compaction.enabled` (FA-E02, OQ-4) | Open, needs human input. |
+
+Biases surfaced to a human: the "pi native serving" tests before #1068 ran
+under a folding binding, so their names did not establish native authority;
+#1068's witnesses use native bindings. The acceptance text "identical
+capability fields" in #1062 conflicts with KD-P03, which requires
+`tool_present: false` in compaction-off mode; the tests follow KD-P03.
