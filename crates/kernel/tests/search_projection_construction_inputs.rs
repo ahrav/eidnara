@@ -26,12 +26,13 @@ const ACCEPTANCE_CRITERIA: [&str; 12] = [
 const SEAMS: [&str; 9] = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"];
 const HARNESSES: [&str; 2] = ["opencode", "pi"];
 const ENTRY_POINTS: [&str; 4] = ["startup", "reload", "dispatch", "explicit"];
-const SOURCE_CLASSES: [(&str, bool); 5] = [
+const SOURCE_CLASSES: [(&str, bool); 6] = [
     ("messages", true),
     ("canonical_claims", true),
     ("promoted_memory", true),
     ("git_commits", true),
     ("raw_tool_spans", false),
+    ("repository_documents", false),
 ];
 const HOOKS: [&str; 12] = [
     "search_projection.message_cleanup",

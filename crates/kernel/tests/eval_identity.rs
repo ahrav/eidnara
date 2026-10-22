@@ -61,7 +61,7 @@ fn the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder() {
         assert_eq!(core.representations(), class.representations());
     }
     let records = fixture["records"].as_array().unwrap();
-    assert_eq!(records.len(), 23);
+    assert_eq!(records.len(), 24);
     for record in records {
         let id = record["id"].as_str().unwrap();
         let identity = identity_of(record);

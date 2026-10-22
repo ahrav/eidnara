@@ -97,6 +97,18 @@
       ],
       "span_default": "whole",
       "dense_default": false
+    },
+    "repository_documents": {
+      "identity_fields": [
+        "project_id",
+        "repository_id",
+        "relative_path"
+      ],
+      "representations": [
+        "text"
+      ],
+      "span_default": "whole",
+      "dense_default": false
     }
   },
   "admission_dimensions": [
@@ -179,7 +191,8 @@
           "canonical_claims",
           "promoted_memory",
           "git_commits",
-          "raw_tool_spans"
+          "raw_tool_spans",
+          "repository_documents"
         ],
         "opencode": "required",
         "pi": "required"

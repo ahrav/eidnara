@@ -485,6 +485,7 @@ fn request<'a>(
         buffer,
         sensitivity: Sensitivity::Normal,
         observed_at: 1,
+        expected_head: None,
     }
 }
 
@@ -1982,4 +1983,109 @@ fn retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence() {
         KernelError::NotFound
     );
     assert_eq!(fixture.store.tip().unwrap(), tip + 1);
+}
+
+const DOC: &[(&str, &str)] = &[
+    ("project_id", "proj-a"),
+    ("repository_id", "repo-0"),
+    ("relative_path", "ARCHITECTURE.md"),
+];
+
+fn document(revision: &str) -> Occurrence<'_> {
+    Occurrence {
+        class: "repository_documents",
+        identity: DOC,
+        revision,
+        representation: "text",
+        span: None,
+    }
+}
+
+/// A `repository_documents` revision must exceed every revision its lineage ever held, retired rows included, and commits only while the lineage's historical head equals the caller's expected head (F10). Messages keep the live-predecessor rule.
+#[test]
+fn repository_document_revisions_exceed_the_historical_head_including_retired_rows() {
+    let fixture = Fixture::open();
+    let texts = ["# v1\n", "# v2\n", "# v3\n", "# v4\n"];
+    let evidence: Vec<(String, String)> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| fixture.retain(&format!("doc-{index}"), text))
+        .collect();
+    let publish = |key: &str, revision: &'static str, expected_head, index: usize| {
+        fixture.publish(
+            key,
+            &SourceDescriptorRequest {
+                expected_head,
+                ..request(document(revision), &evidence[index], texts[index])
+            },
+        )
+    };
+
+    assert_eq!(
+        publish("doc-first-claims-a-head", "1", Some(0), 0).err(),
+        Some(SourceDescriptorError::HeadMismatch),
+        "an empty lineage has no head"
+    );
+    let (first, _, _) = publish("doc-1", "1", None, 0).unwrap();
+    let (second, _, _) = publish("doc-2", "2", Some(1), 1).unwrap();
+    assert_eq!(
+        second.replaced_object_id.as_deref(),
+        Some(first.object_id.as_str())
+    );
+    let (third, _, _) = publish("doc-3", "3", Some(2), 2).unwrap();
+    fixture
+        .store
+        .commit(intent("doc-retire-3"), |envelope| {
+            envelope.retire_observation(&third.object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // The lineage is retired with a historical head of 3.
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    assert_eq!(fixture.live(&third.object_id), Some(false));
+    let tip = fixture.store.tip().unwrap();
+
+    assert_eq!(
+        publish("doc-2-after-retire", "2", Some(3), 1).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced),
+        "a revision below the retired head is refused"
+    );
+    assert_eq!(
+        publish("doc-2-stale-head", "2", Some(1), 1).err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
+    assert_eq!(
+        publish("doc-4-stale-head", "4", Some(2), 3).err(),
+        Some(SourceDescriptorError::HeadMismatch),
+        "a stale observation refuses even an advancing revision"
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "every refusal committed nothing"
+    );
+
+    // A fresh observation of the head publishes above it.
+    let (fourth, _, _) = publish("doc-4", "4", Some(3), 3).unwrap();
+    assert!(fourth.replaced_object_id.is_none());
+    assert_eq!(fixture.live(&fourth.object_id), Some(true));
+    assert_eq!(
+        fixture.descriptor_object_ids_at_tip(),
+        vec![fourth.object_id]
+    );
+
+    // Other classes name no head.
+    let message_evidence = fixture.retain("msg-head", "message text");
+    assert_eq!(
+        fixture
+            .publish(
+                "message-with-head",
+                &SourceDescriptorRequest {
+                    expected_head: Some(1),
+                    ..request(message(MSG_A, "1"), &message_evidence, "message text")
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
 }

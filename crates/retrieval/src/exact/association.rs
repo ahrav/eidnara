@@ -62,7 +62,12 @@ pub fn extract(record: &OccurrenceRecord<'_>) -> Vec<AssociationKey> {
         }
         Some(OccurrenceClass::CanonicalClaims) => canonical_object(field("object_id")),
         Some(OccurrenceClass::PromotedMemory) => canonical_object(field("decision_object_id")),
-        Some(OccurrenceClass::Messages | OccurrenceClass::RawToolSpans) | None => Vec::new(),
+        Some(
+            OccurrenceClass::Messages
+            | OccurrenceClass::RawToolSpans
+            | OccurrenceClass::RepositoryDocuments,
+        )
+        | None => Vec::new(),
     }
 }
 

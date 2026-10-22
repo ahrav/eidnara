@@ -774,6 +774,7 @@ impl SourcePublisher<'_> {
                 buffer: &unit.unit.text,
                 sensitivity,
                 observed_at,
+                expected_head: unit.expected_head(),
             })
             .map_err(|error| {
                 *refusal = Some(Err(error));
@@ -1276,6 +1277,12 @@ impl Prepared<'_> {
     fn evidence_object_id(&self) -> String {
         format!("srcev-object:{}", self.key)
     }
+
+    /// A `repository_documents` revision is its lineage's historical head plus one, so the head the publication expects is the revision before it; revision 1 starts an empty lineage. Every other class has no head guard.
+    fn expected_head(&self) -> Option<i64> {
+        (self.unit.class == OccurrenceClass::RepositoryDocuments && self.revision > 1)
+            .then(|| self.revision - 1)
+    }
 }
 
 /// Where a unit's admission classes come from.
@@ -1314,7 +1321,7 @@ impl ProvenanceRule {
     }
 }
 
-/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, a commit message is untrusted repository text, user text is explicit, and other text is model inference. The caller has encoded the unit, so the class's identity field is present.
+/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, a commit message or repository document is untrusted repository text, user text is explicit, and other text is model inference. Only a commit carries repository provenance, so working-tree document bytes store `Sensitive`. The caller has encoded the unit, so the class's identity field is present.
 fn provenance(unit: &SourceUnit) -> ProvenanceRule {
     match (unit.class, unit.role.as_str()) {
         (OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory, _) => {
@@ -1329,10 +1336,12 @@ fn provenance(unit: &SourceUnit) -> ProvenanceRule {
             SourceClass::TrustedToolResult,
             TaintClass::ToolUntrustedOutput,
         ),
-        (OccurrenceClass::GitCommits, _) => ProvenanceRule::Fixed(
-            SourceClass::UntrustedRepoText,
-            TaintClass::RepoUntrustedText,
-        ),
+        (OccurrenceClass::GitCommits | OccurrenceClass::RepositoryDocuments, _) => {
+            ProvenanceRule::Fixed(
+                SourceClass::UntrustedRepoText,
+                TaintClass::RepoUntrustedText,
+            )
+        }
         (_, "user") => ProvenanceRule::Fixed(SourceClass::ExplicitUser, TaintClass::UserExplicit),
         _ => ProvenanceRule::Fixed(SourceClass::ModelInference, TaintClass::AssistantInference),
     }

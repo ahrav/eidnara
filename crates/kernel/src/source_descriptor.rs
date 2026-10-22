@@ -79,6 +79,8 @@ pub struct SourceDescriptorRequest<'a> {
     pub buffer: &'a str,
     pub sensitivity: Sensitivity,
     pub observed_at: i64,
+    /// The highest revision the caller observed in this lineage, retired rows included; `None` when it observed no revision. A `repository_documents` publication commits only while the lineage's historical head still equals it. Every other class passes `None`.
+    pub expected_head: Option<i64>,
 }
 
 /// Descriptor rows store versioned metadata and encoded identity tuples, not payload text.
@@ -129,6 +131,9 @@ pub enum SourceDescriptorError {
     ContentRefused,
     #[error("descriptor revision does not advance its lineage")]
     RevisionNotAdvanced,
+    /// The lineage's historical head differs from the caller's expected head, or a class without a head guard named one. The caller observes the lineage again before proposing another revision.
+    #[error("descriptor lineage head differs from the expected head")]
+    HeadMismatch,
     #[error("descriptor lineage is owned by another domain")]
     DomainMismatch,
     #[error("descriptor lineage id names a different stored tuple")]
@@ -379,6 +384,18 @@ impl Envelope<'_> {
             return Err(SourceDescriptorError::OccurrenceCollision);
         }
         let object_id = descriptor_object_id(&encoded.lineage_id, request.occurrence.revision);
+        // A repository document's revision counts every observation of its path, so it must exceed every revision the lineage ever held, retired rows included, and the caller's view of that head must still hold.
+        if encoded.class == OccurrenceClass::RepositoryDocuments {
+            let head = self.historical_head(&encoded.lineage_id)?;
+            if head != request.expected_head {
+                return Err(SourceDescriptorError::HeadMismatch);
+            }
+            if head.is_some_and(|head| encoded.revision <= head) {
+                return Err(SourceDescriptorError::RevisionNotAdvanced);
+            }
+        } else if request.expected_head.is_some() {
+            return Err(SourceDescriptorError::HeadMismatch);
+        }
         let predecessor = self.live_lineage(request.domain_id, &detail)?;
         if let Some((_, live_revision)) = &predecessor
             && encoded.revision <= *live_revision
@@ -433,6 +450,28 @@ impl Envelope<'_> {
             ExactEvidence::NotExact => Err(SourceDescriptorError::EvidenceNotExact),
             ExactEvidence::Bound => Ok(()),
         }
+    }
+
+    /// The highest revision any descriptor of this lineage was published at, live or retired.
+    fn historical_head(&self, lineage_id: &str) -> Result<Option<i64>, SourceDescriptorError> {
+        let lineage_low = descriptor_object_id(lineage_id, "");
+        let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
+        self.tx
+            .query_row_cached(
+                "SELECT MAX(o.source_revision)
+                 FROM object_registry o
+                 JOIN observations b ON b.object_id=o.object_id
+                 WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id>=?2 AND o.object_id<?4
+                   AND b.observation_kind=?3",
+                [
+                    lineage_id,
+                    lineage_low.as_str(),
+                    SOURCE_DESCRIPTOR_KIND,
+                    lineage_high.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite(error).into())
     }
 
     /// The live descriptor of this lineage and its revision, if any. More

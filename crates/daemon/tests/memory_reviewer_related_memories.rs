@@ -249,6 +249,7 @@ impl Fixture {
                         buffer,
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap_or_else(|error| panic!("descriptor publication: {error:?}"));
                 published = Some(outcome.object_id);

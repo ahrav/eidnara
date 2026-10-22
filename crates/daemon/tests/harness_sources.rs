@@ -2478,3 +2478,117 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
 
     assert_eq!(corpus.tip(), tip, "no refused attempt committed");
 }
+
+/// A configured repository document at `revision`.
+fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
+    SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", PROJECT.to_string()),
+            ("repository_id", PROJECT.to_string()),
+            ("relative_path", path.to_string()),
+        ],
+        revision: revision.to_string(),
+        representation: Representation::Text,
+        text: text.to_string(),
+        role: "document".to_string(),
+    }
+}
+
+/// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below a retired head is refused while the head plus one republishes; and a projection builds from a store holding the class.
+#[test]
+fn repository_documents_publish_untrusted_supersede_and_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    let first = publisher
+        .publish(
+            &document_unit("ARCHITECTURE.md", "1", "# Architecture\n"),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        first.provenance,
+        (
+            SourceClass::UntrustedRepoText,
+            TaintClass::RepoUntrustedText
+        )
+    );
+    let second = publisher
+        .publish(
+            &document_unit("ARCHITECTURE.md", "2", "# Architecture \n"),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        second.replaced_object_id.as_deref(),
+        Some(first.object_id.as_str())
+    );
+    let rows = corpus.export();
+    let live: Vec<&SourceRow> = rows
+        .iter()
+        .filter(|row| {
+            row.detail.class == "repository_documents" && row.invalidated_commit_seq.is_none()
+        })
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].object_id, second.object_id);
+    assert_eq!(live[0].sensitivity, Sensitivity::Sensitive);
+    assert_eq!(live[0].text.as_deref(), Some("# Architecture \n"));
+
+    corpus
+        .kernel
+        .commit(intent("retire-document"), |envelope| {
+            envelope.retire_observation(&second.object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // Revisions 1 and 2 hold receipts; revision 0 is a fresh proposal below the retired head.
+    let stale = publisher.publish(&document_unit("ARCHITECTURE.md", "0", "# again\n"), NOW);
+    assert!(
+        matches!(
+            stale,
+            Err(PublishError::Descriptor {
+                refusal: SourceDescriptorError::HeadMismatch,
+                ..
+            })
+        ),
+        "{stale:?}"
+    );
+    let republished = publisher
+        .publish(&document_unit("ARCHITECTURE.md", "3", "# again\n"), NOW)
+        .unwrap();
+    assert!(republished.replaced_object_id.is_none());
+
+    let data_home = dir.path().join("data");
+    let (projection, rows) = corpus.bootstrap(&data_home);
+    drop(projection);
+    assert!(
+        rows.iter()
+            .any(|row| row.detail.class == "repository_documents")
+    );
+    let conn = Connection::open_with_flags(
+        data_home.join("search").join("search.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let projected: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM occurrences WHERE class='repository_documents'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projected, 1, "the projection holds the live document");
+    let dense: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs j JOIN occurrences o USING(occurrence_id)
+             WHERE o.class='repository_documents'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dense, 0, "repository documents stay lexical-only");
+}

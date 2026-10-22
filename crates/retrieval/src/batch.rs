@@ -107,9 +107,12 @@ pub enum BatchStatus {
     NotApplied,
 }
 
-/// The dense-eligible classes: raw tool spans stay lexical-only. The coverage report reads the same predicate, so `R` is exactly the set that queues work.
+/// The dense-eligible classes: raw tool spans and repository documents stay lexical-only. The coverage report reads the same predicate, so `R` is exactly the set that queues work.
 pub fn dense_eligible(class: OccurrenceClass) -> bool {
-    class != OccurrenceClass::RawToolSpans
+    !matches!(
+        class,
+        OccurrenceClass::RawToolSpans | OccurrenceClass::RepositoryDocuments
+    )
 }
 
 /// The job identity for one occurrence in one generation, so the same work

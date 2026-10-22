@@ -530,6 +530,7 @@ impl Rig {
                                     buffer: text,
                                     sensitivity: kernel::Sensitivity::Normal,
                                     observed_at: 1,
+                                    expected_head: None,
                                 })
                                 .unwrap_or_else(|error| {
                                     panic!("descriptor publication: {error:?}")

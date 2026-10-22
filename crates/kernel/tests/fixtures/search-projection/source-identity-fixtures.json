@@ -400,6 +400,21 @@
       "expected_occurrence_id": "e15547dc796fa1e4fc9e477097dae613aeeaa3351f2b8bdd3d0bf61a24634530",
       "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776",
       "expected_lineage_id": "a0b8b1ac32149589e0037c7c0d1fa2fdbff6fe5b0080c3967ae2059ec2674305"
+    },
+    {
+      "id": "rd1",
+      "class": "repository_documents",
+      "identity": {
+        "project_id": "proj-a",
+        "repository_id": "repo-0",
+        "relative_path": "docs/ARCHITECTURE.md"
+      },
+      "revision": "2",
+      "representation": "text",
+      "payload": "# Architecture\n\nThe daemon owns the store.\n",
+      "expected_occurrence_id": "846263f5657ff3f05478cbb3280d3adddbaf9ac56c9edbd93cc0163a209021d1",
+      "expected_payload_id": "6947803211af64f86b4444e4c5c41c96f7d1a0250362b2fae7480f33f2e95d08",
+      "expected_lineage_id": "58b78558e7d27b45058b0f5b38a1e1a6a5c6ea8ee772c4405710af4d23935b48"
     }
   ],
   "expectations": {

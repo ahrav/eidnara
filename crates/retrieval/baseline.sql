@@ -41,7 +41,7 @@ CREATE TABLE occurrences(
     occurrence_id TEXT PRIMARY KEY,
     tuple BLOB NOT NULL,
     lineage_id TEXT NOT NULL,
-    class TEXT NOT NULL CHECK(class IN ('messages','canonical_claims','promoted_memory','git_commits','raw_tool_spans')),
+    class TEXT NOT NULL CHECK(class IN ('messages','canonical_claims','promoted_memory','git_commits','raw_tool_spans','repository_documents')),
     revision INTEGER NOT NULL CHECK(revision>=0),
     representation TEXT NOT NULL,
     span_start INTEGER,

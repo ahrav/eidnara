@@ -201,6 +201,7 @@ fn publish_span(
                     buffer: message,
                     sensitivity: Sensitivity::Normal,
                     observed_at: 1,
+                    expected_head: None,
                 })
                 .unwrap_or_else(|error| panic!("span descriptor: {error:?}"));
             published = Some(outcome.object_id);

@@ -499,6 +499,7 @@ fn a_name_only_remediation_changes_no_persisted_input() {
                         buffer: text,
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
             }
@@ -703,6 +704,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
                         buffer: text,
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
                 Ok(String::new())
@@ -941,6 +943,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
                     buffer: spanned_buffer,
                     sensitivity: Sensitivity::Normal,
                     observed_at: 1,
+                    expected_head: None,
                 })
                 .unwrap();
             Ok(String::new())

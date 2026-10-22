@@ -272,6 +272,7 @@ impl Fixture {
                         buffer: &format!("claim {object}"),
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
                 descriptor = Some(outcome.object_id);

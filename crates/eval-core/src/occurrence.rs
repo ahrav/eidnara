@@ -17,6 +17,7 @@ pub enum OccurrenceClass {
     PromotedMemory,
     GitCommits,
     RawToolSpans,
+    RepositoryDocuments,
 }
 
 impl OccurrenceClass {
@@ -27,15 +28,17 @@ impl OccurrenceClass {
             Self::PromotedMemory => "promoted_memory",
             Self::GitCommits => "git_commits",
             Self::RawToolSpans => "raw_tool_spans",
+            Self::RepositoryDocuments => "repository_documents",
         }
     }
 
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Messages,
         Self::CanonicalClaims,
         Self::PromotedMemory,
         Self::GitCommits,
         Self::RawToolSpans,
+        Self::RepositoryDocuments,
     ];
 
     pub fn from_code(code: &str) -> Option<Self> {
@@ -64,6 +67,7 @@ impl OccurrenceClass {
                 "result_revision",
                 "block_index",
             ],
+            Self::RepositoryDocuments => &["project_id", "repository_id", "relative_path"],
         }
     }
 
@@ -74,6 +78,7 @@ impl OccurrenceClass {
             Self::PromotedMemory => &["summary"],
             Self::GitCommits => &["commit_message"],
             Self::RawToolSpans => &["tool_output", "tool_error"],
+            Self::RepositoryDocuments => &["text"],
         }
     }
 }

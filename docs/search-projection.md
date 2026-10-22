@@ -6,6 +6,18 @@ selection manager, and the running identity. It advances one durable lifecycle
 record a bounded slice at a time. The kernel stays the canonical authority; the
 projection is a rebuildable derived family.
 
+## Source classes
+
+The projection indexes six Kernel source classes: `messages`,
+`canonical_claims`, `promoted_memory`, `git_commits`, `raw_tool_spans`, and
+`repository_documents`. The retrieval schema's `occurrences.class` CHECK lists
+exactly `OccurrenceClass::ALL`, and the per-class identity contract is in
+[construction contracts](properties/search-projection/construction-contracts.md).
+`repository_documents` joined the set at schema version 8, keyed by
+`(project_id, repository_id, relative_path)` with representation `text`. A
+projection built at an earlier schema version fails `SchemaMismatch` and
+rebuilds from the Kernel; it is never migrated.
+
 ## Records
 
 The lifecycle record lives outside the disposable search database, under the

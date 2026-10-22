@@ -452,6 +452,7 @@ impl Corpus {
                         buffer: text,
                         sensitivity,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
                 if admitted {

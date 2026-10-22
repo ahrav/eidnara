@@ -18,7 +18,7 @@ const ROLE_LINEAGE: u8 = 1;
 /// them.
 pub const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 
-/// The five source classes a projection covers.
+/// The six source classes a projection covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OccurrenceClass {
     Messages,
@@ -26,15 +26,17 @@ pub enum OccurrenceClass {
     PromotedMemory,
     GitCommits,
     RawToolSpans,
+    RepositoryDocuments,
 }
 
 impl OccurrenceClass {
-    pub const ALL: [OccurrenceClass; 5] = [
+    pub const ALL: [OccurrenceClass; 6] = [
         Self::Messages,
         Self::CanonicalClaims,
         Self::PromotedMemory,
         Self::GitCommits,
         Self::RawToolSpans,
+        Self::RepositoryDocuments,
     ];
 
     pub fn code(self) -> &'static str {
@@ -44,6 +46,7 @@ impl OccurrenceClass {
             Self::PromotedMemory => "promoted_memory",
             Self::GitCommits => "git_commits",
             Self::RawToolSpans => "raw_tool_spans",
+            Self::RepositoryDocuments => "repository_documents",
         }
     }
 
@@ -73,6 +76,7 @@ impl OccurrenceClass {
                 "result_revision",
                 "block_index",
             ],
+            Self::RepositoryDocuments => &["project_id", "repository_id", "relative_path"],
         }
     }
 
@@ -83,6 +87,7 @@ impl OccurrenceClass {
             Self::PromotedMemory => &["summary"],
             Self::GitCommits => &["commit_message"],
             Self::RawToolSpans => &["tool_output", "tool_error"],
+            Self::RepositoryDocuments => &["text"],
         }
     }
 }
