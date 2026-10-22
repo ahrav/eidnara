@@ -176,10 +176,11 @@ Semantics: 30 `always`, 12 `always-or-unreached`, 1 `sometimes`, 1
 `unreachable`, 0 `reachable` (the KD records add 13 `always` and 3
 `always-or-unreached`).
 
-Exercise distribution: 34 `yes`, 10 `partial` (FA-E03, FA-E04, FA-E05,
-FA-E06, FA-E09, FA-E10, FA-E13, FA-N04, FA-N06, FA-N07), 0 `not yet`. The
-FA-E04 and FA-E13 index rows read `yes` before #1065 while their records
-read `partial`; the rows now follow the records.
+Exercise distribution: 33 `yes`, 11 `partial` (FA-E03, FA-E04, FA-E05,
+FA-E06, FA-E09, FA-E10, FA-E13, FA-N04, FA-N05, FA-N06, FA-N07), 0 `not
+yet`. The FA-E04 and FA-E13 index rows read `yes` before #1065 while their
+records read `partial`; the rows now follow the records, and FA-N05 stays
+`partial` for its uncounted wrapup ordering clause.
 Status: 34 `active`, 10 `invalidated` (FA-E01, FA-E02, FA-E04, FA-E05,
 FA-E10, FA-E11, FA-E12, FA-E13, FA-E14, KD-E03).
 
@@ -269,12 +270,11 @@ updated predicate test, the tool-registry tests (including an empty chain
 registering the compaction-off tool set), and the command refusal tests; the
 plugin source at HEAD is `d7b330113`'s, which differs from #904's head only
 in comments and generated TUI source, and #859 PR A's `check:repo` ran on it;
-this held before #1069 and #1070 changed plugin source. The off-mode Pi host
-clauses are witnessed by #1069 (#1062, head
-`6d527babf`): compaction-off Pi leaves a tagged assistant message unchanged,
-schedules no eviction (also when the session runs in a folding project),
-omits `eidnara_reduce`, and lets `session.compact()` run Pi's own compaction,
-against a compaction-on control that evicts and strips.
+this held before #1069 and #1070 changed plugin source. Pi's off-mode host
+surfaces (no eviction, no tag strip, `session_before_compact` answering
+`undefined`, `eidnara_reduce` absent) are KD-P04's guarantee and are
+witnessed there by #1069 (#1062, head `6d527babf`); this record's surviving
+clauses for Pi are the tool omission and the command refusals.
 Guarantee: At `265df096`, TypeScript compaction mode depended only on the raw
 `compaction.enabled` boolean, not model availability; off omitted
 `eidnara_reduce` and refused fold commands while keeping their definitions
@@ -282,19 +282,16 @@ registered.
 Check: `always` - the predicate equals `compaction?.enabled !== false` and a
 non-empty normalized chain; when it is false the registry omits exactly
 `eidnara_reduce`, the commands stay registered with the "Unavailable"
-description, and flush, recomp, and wrapup refuse without a daemon call.
-For Pi in compaction-off mode, also: `session_before_compact` answers
-`undefined`, no eviction is scheduled, and a tagged assistant message stays
-unchanged. `always` because the boot latch is resolved once per startup on
-every configuration, and in a compaction-on process the compaction answer
-also reads the session's project configuration on every call outside the
-plugin's own eviction (#1060 OQ-1, owner approval 2026-10-21).
+description, and flush, recomp, and wrapup refuse without a daemon call; on
+Pi the registration set omits `eidnara_reduce` and the fold commands refuse
+without a daemon call. `always` because the boot latch is resolved once per
+startup on every configuration. Pi's off-mode eviction, tag-strip, and
+compaction-answer clauses are KD-P04's check.
 Fault/timing angle: An empty chain with an absent or true compaction
 setting; a boot latch that disagrees with the session's project.
 Required faults and enabling state: An empty configuration, explicit
 `false`, a model with each compaction setting, a blank model; for Pi, a
-tagged assistant message, an `agent_end` after an additive success, and a
-compaction reason.
+compaction-off process issuing a fold command.
 Confidence: high -
 [evidence](evidence/fa-e02-raw-mode-controls-host-surfaces.md). Read at HEAD
 and at `265df096`. Corrections: `agent-disable.ts:19-23` is now `:21-29`,
@@ -302,20 +299,20 @@ and at `265df096`. Corrections: `agent-disable.ts:19-23` is now `:21-29`,
 `compaction-accessor-guard.test.ts:66` is `:67`. Pi decides its mode in two
 places, verified at `07ea883b5`: the boot latch `compactionOff`
 (`packages/pi-plugin/src/index.ts:382-384`; at `0ff62b29a` `:349-356`) gates
-`eidnara_reduce` registration, `tool_present` (`:597`), eviction scheduling
-(`:879`), and the tag strip (`:987`); the `session_before_compact` answer
-also reads the session's project configuration (`:955-958`), so a project
-whose configuration withdraws fold authority leaves Pi's compaction to Pi
-inside a compaction-on process.
+`eidnara_reduce` registration and `tool_present` (`:597`), and the
+`session_before_compact` answer also reads the session's project
+configuration (`:955-958`); the per-event consequences of the latch are
+KD-P04's record (#1060 OQ-1, owner approval 2026-10-21).
 Existing check: `packages/opencode-plugin/src/config/compaction-accessor-guard.test.ts:67`
 "isCompactionEnabled requires a summarizer chain and a compaction setting
 that is not false"; `packages/opencode-plugin/src/plugin/tool-registry.test.ts:127`
 and `:154` "an empty summarizer chain registers the compaction-off tool set";
 `packages/opencode-plugin/src/hooks/context/command-handler.test.ts:144`
 "refuses /${command} without a daemon call when compaction is off"; Pi
-off-mode clauses `packages/pi-plugin/src/transform/pi-delivery.test.ts:280`,
-`:290`, `:324` (#1069), `packages/pi-plugin/src/tools/index.test.ts:19`, and
-`packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`.
+tool omission and command refusals `packages/pi-plugin/src/tools/index.test.ts:19`
+and `packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`
+(#1069); the Pi eviction, tag-strip, and compaction-answer witnesses
+(`pi-delivery.test.ts:280`, `:290`, `:324`) are KD-P04's.
 Impact: High. Before #898, "enabled" did not establish folding capability.
 Open questions:
 - OQ-4 (#1060, catalog owner): the refusal notification and the command
@@ -2312,7 +2309,7 @@ Open questions: None.
 ### kd-e03-native-cold-import-prefix-omission
 
 Type: safety
-Reachability: test-only at `07ea883b5` - the baseline shape needs a
+Reachability: test-only - at `07ea883b5` the baseline shape needs a
 consumer that supplies the sizing hook under native authority and publishes
 the narrowed result; since #1069 (Pi) and #1070 (OpenCode) the adapters
 supply the hook only while the configuration lets Eidnara fold, and a cold
@@ -2484,8 +2481,11 @@ Guarantee: Every Pi pass reports `tool_present` equal to whether
 `eidnara_reduce` is registered, with `todo_tool_present` semantics
 unchanged.
 Check: `always` - at dispatch, `tool_present == !compactionOff`
-(`packages/pi-plugin/src/index.ts:597`). Falsifier: an unregistered reduce
-tool reported `true`. Legal witness: off mode sends `false` while
+(`packages/pi-plugin/src/index.ts:597`) and
+`todo_tool_present == todowriteEnabled` (`:598`); the four registration pairs
+are asserted at `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100`.
+Falsifier: an unregistered reduce tool reported `true`; `todo_tool_present`
+`true` with todowrite disabled. Legal witness: off mode sends `false` while
 `todo_tool_present` stays `true`.
 Fault/timing angle: None.
 Required faults and enabling state: Both modes; todowrite enabled and
@@ -2796,7 +2796,7 @@ for the daemon side (KD-E02). The budget clause rests on a static review of
 `git diff 08de9051a..07ea883b5`: no PR of #1068 to #1071 adds or raises a
 budget.
 Guarantee: Adapters publish accepted daemon knowledge once per request,
-including epoch-HARD updates, and raise no existing budget.
+including epoch-HARD updates.
 Check: `always-or-unreached` - at accepted publication, the
 `<project-memory>` block appears once in the request's messages and each
 memory line appears once inside that block; unreached for a pass with no
@@ -2809,11 +2809,16 @@ Fault/timing angle: A memory created between passes.
 Required faults and enabling state: An admitted verified memory; a second
 memory seeded between turns; a Pi compaction.
 Confidence: high -
-[evidence](evidence/kd-p12-bounded-delivery-published-once.md).
+[evidence](evidence/kd-p12-bounded-delivery-published-once.md). The
+specification's "raise no existing budget" clause rests on the static review
+of `git diff 08de9051a..07ea883b5` above, which is evidence about #1068 to
+#1071 and is not a continuing oracle, so the guarantee does not carry it.
 Existing check: `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`;
 `packages/e2e-tests/tests/rust-native-delivery.test.ts:13`.
 Impact: High. A duplicated block doubles memory tokens per request.
-Open questions: None.
+Open questions:
+- The budget clause has no oracle: a check needs the owner to name the
+  delivery budgets it bounds and their baseline values (needs human input).
 
 ## Relationship map
 

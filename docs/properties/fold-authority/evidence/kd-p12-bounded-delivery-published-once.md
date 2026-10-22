@@ -24,7 +24,9 @@ All references are verified at `07ea883b5`, the head of #1071, which holds
   tag, so the tag count runs over the messages and the line count over the
   whole body.
 - Budget clause: `git diff 08de9051a..07ea883b5` adds no budget constant and
-  raises none.
+  raises none. This is a static review of #1068 to #1071, not an oracle, so
+  the record's guarantee carries only the once-per-request clause and the
+  budget clause is an open question for the owner.
 
 ## Failure scenario
 

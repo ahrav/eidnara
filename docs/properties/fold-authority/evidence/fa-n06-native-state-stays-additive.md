@@ -142,8 +142,10 @@ Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
   runs `assert_native_state` (`crates/daemon/src/fold_authority_handler_tests.rs:19`)
   and also asserts `last_usage`, `newest_live_block_id`, and
   `newest_live_ordinal` against the pass's own rows and usage. It runs after
-  every native commit in `:670`, `:796`, and `:861`, including after a
-  memory HARD and a state-sync epoch bump, and each history holds at least
+  every native commit in the tests at
+  `crates/daemon/src/pi_native_serving_tests.rs:652` (`:701`), `:778`
+  (`:787`, `:836`), and `:843` (`:854`, `:914` after the memory HARD, `:937`
+  after the state-sync epoch bump, `:947`), and each history holds at least
   one committed pass.
 
 ### Q: Do Pi-profile native passes keep the additive-only state?

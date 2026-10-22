@@ -11,7 +11,9 @@ All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - `tool_present` is `!compactionOff` (`packages/pi-plugin/src/index.ts:597`),
-  the latch that registers `eidnara_reduce` (`:384`).
+  the latch that registers `eidnara_reduce` (`:384`); `todo_tool_present` is
+  `todowriteEnabled` (`:598`), and `pi-pass-inputs.test.ts:100` asserts both
+  fields across the four registration pairs, including todowrite disabled.
 - Witnesses as in [KD-E04](kd-e04-pi-tool-present-reflects-registration.md):
   `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100`;
   `packages/pi-plugin/src/transform/pi-delivery.test.ts:184`, `:236`.
