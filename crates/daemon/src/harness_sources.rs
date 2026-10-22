@@ -1309,7 +1309,7 @@ pub enum UnitDisposition {
 
 /// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
 ///
-/// Tool results are reconciled by call (project, harness, session, parent message, tool call; D10). A call's newest generation in the batch retires the call's older live generations in the batch's commit, and the retirement re-reads the call inside the commit. A unit of an older generation than the call's head is [`UnitDisposition::Superseded`] unless it replays its stored receipt. The stale and first-generation decisions are read in a preview, so they hold while every `raw_tool_spans` publication of the store is serialized, as capture's commit gate serializes them; [`SourcePublisher::publish`] and [`publish_batch`] publish tool units without this reconciliation.
+/// [`publish_screened`] reconciles tool results by call (project, harness, session, parent message, tool call). Each call's newest generation in the batch retires its older live generations in the same commit; `Reruns::apply` validates the retirement plan inside that commit. Stored-receipt replays keep their recorded disposition; other units older than the call's head are [`UnitDisposition::Superseded`]. Stale and first-generation decisions remain valid when every publication to the store's `raw_tool_spans` is serialized from preview through commit. Capture's commit gate provides this serialization. [`SourcePublisher::publish`] and [`publish_batch`] publish tool units as given.
 ///
 /// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit under an admitted unit's key is [`UnitDisposition::Deferred`] when it repeats that request and [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`] when it changes it. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
 ///
@@ -1400,12 +1400,10 @@ pub fn publish_screened(
         }
     }
     let admitted = kept;
-    let writes: Vec<KeyedWrite<'_>> = (!reruns.is_empty())
+    let writes: Vec<KeyedWrite<'_>> = (!reruns.reruns.is_empty())
         .then(|| KeyedWrite {
-            intent: Reruns::intent(&reruns),
-            write: Box::new(move |envelope: &mut kernel::Envelope<'_>| {
-                Reruns::apply(&reruns, envelope)
-            }),
+            intent: reruns.intent(),
+            write: Box::new(move |envelope: &mut kernel::Envelope<'_>| reruns.apply(envelope)),
         })
         .into_iter()
         .collect();
@@ -1543,13 +1541,16 @@ struct Rerun {
     retired: Vec<String>,
 }
 
-/// The re-run retirements of one batch, committed as one keyed write.
-struct Reruns;
+/// `Reruns` groups a batch's retirements into one keyed write and records the snapshot tip used to plan them.
+struct Reruns {
+    snapshot: i64,
+    reruns: Vec<Rerun>,
+}
 
 impl Reruns {
-    /// Keyed and fingerprinted by every call, successor generation, and retirement set of the batch, in call order under a versioned tag, so one key never names two different replacement batches.
-    fn intent(reruns: &[Rerun]) -> CommitIntent {
-        let mut sorted: Vec<&Rerun> = reruns.iter().collect();
+    /// The intent derives the batch's key and fingerprint from every call, successor generation, and retirement set in call order under a versioned tag. Identical replacement batches share a key across snapshots.
+    fn intent(&self) -> CommitIntent {
+        let mut sorted: Vec<&Rerun> = self.reruns.iter().collect();
         sorted.sort_by(|a, b| a.call.fields().cmp(&b.call.fields()));
         let mut bytes = Vec::new();
         let mut part = |text: &str| {
@@ -1576,17 +1577,20 @@ impl Reruns {
         }
     }
 
-    /// Reads every call's live generations again inside the commit, in one pass. A generation newer than a call's successor, or a predecessor set other than the one planned, is [`KernelError::Conflict`], and the batch commits nothing; otherwise the planned predecessors retire.
-    fn apply(reruns: &[Rerun], envelope: &mut kernel::Envelope<'_>) -> Result<String, KernelError> {
-        let calls: HashSet<ToolCall> = reruns.iter().map(|rerun| rerun.call.clone()).collect();
-        let live = live_generations(envelope, &calls)?;
-        for rerun in reruns {
-            let generations = live.get(&rerun.call).map(Vec::as_slice).unwrap_or_default();
-            if predecessors(generations, rerun.successor).as_ref() != Some(&rerun.retired) {
-                return Err(KernelError::Conflict);
+    /// Retires the planned predecessors. When the commit's sequence differs from `snapshot + 1`, it first reads every call's live generations again in one pass and requires each call's generations to be at most its successor with a predecessor set equal to `retired`; a mismatch returns [`KernelError::Conflict`] before any retirement, and the batch commits nothing.
+    fn apply(&self, envelope: &mut kernel::Envelope<'_>) -> Result<String, KernelError> {
+        if envelope.commit_seq() != self.snapshot + 1 {
+            let calls: HashSet<ToolCall> =
+                self.reruns.iter().map(|rerun| rerun.call.clone()).collect();
+            let live = live_generations(envelope, &calls)?;
+            for rerun in &self.reruns {
+                let generations = live.get(&rerun.call).map(Vec::as_slice).unwrap_or_default();
+                if predecessors(generations, rerun.successor).as_ref() != Some(&rerun.retired) {
+                    return Err(KernelError::Conflict);
+                }
             }
         }
-        for rerun in reruns {
+        for rerun in &self.reruns {
             retire_descriptors(envelope, &rerun.retired)?;
         }
         Ok(String::new())
@@ -1604,12 +1608,12 @@ enum Reconciled {
     Conflicting,
 }
 
-/// Reconciles the tool generations of a screened batch with the store in one preview. Each call's head is its newest generation in the batch or live in the store. A unit of an older generation is superseded unless it replays a stored receipt; a call whose head is in the batch retires its live predecessors in the batch's commit. Returns each unit's disposition and the retirements to commit.
+/// Reconciles the tool generations of a screened batch with the store in one preview. Each call's head is its newest generation in the batch or live in the store. A unit of an older generation is superseded unless it replays a stored receipt; a call whose head is in the batch retires its live predecessors in the batch's commit. Returns each unit's disposition and the retirements to commit as [`Reruns`].
 fn plan_reruns(
     publisher: &SourcePublisher<'_>,
     prepared: &[Prepared<'_>],
     budget: Option<&kernel::applicability::EvalBudget>,
-) -> Result<(Vec<Reconciled>, Vec<Rerun>), KernelError> {
+) -> Result<(Vec<Reconciled>, Reruns), KernelError> {
     let generations: Vec<Option<(ToolCall, i64)>> = prepared
         .iter()
         .map(|unit| {
@@ -1624,10 +1628,16 @@ fn plan_reruns(
         *entry = (*entry).max(*generation);
     }
     if newest.is_empty() {
-        return Ok((vec![Reconciled::Kept; prepared.len()], Vec::new()));
+        return Ok((
+            vec![Reconciled::Kept; prepared.len()],
+            Reruns {
+                snapshot: 0,
+                reruns: Vec::new(),
+            },
+        ));
     }
     let calls: HashSet<ToolCall> = newest.keys().cloned().collect();
-    let (_, (live, reconciled)) =
+    let (snapshot, (live, reconciled)) =
         publisher
             .kernel
             .preview(preview_deadline(budget), |preview| {
@@ -1668,7 +1678,7 @@ fn plan_reruns(
             })
         })
         .collect();
-    Ok((reconciled, reruns))
+    Ok((reconciled, Reruns { snapshot, reruns }))
 }
 
 /// Retires each of `ids` that names a live descriptor.
@@ -1810,7 +1820,7 @@ mod rerun_tests {
         pi_units(&session, &entry).unwrap().remove(0)
     }
 
-    /// C8: the retirement re-reads the call's live generations inside its commit. A generation newer than its successor, or a predecessor set other than the planned one, refuses the commit as `Conflict`; the planned set retires.
+    /// `Reruns::apply` re-reads the call's live generations inside the commit. A live generation newer than the planned successor or a predecessor set differing from the plan causes `Conflict`; otherwise, the commit retires the planned predecessors.
     #[test]
     fn a_rerun_retirement_rechecks_the_call_inside_its_commit() {
         let dir = tempfile::tempdir().unwrap();
@@ -1873,23 +1883,25 @@ mod rerun_tests {
             successor,
             retired: retired.iter().map(|id| (*id).clone()).collect(),
         };
+        // A plan read at snapshot 0 precedes every commit here, so each commit below reads the call again.
+        let from_snapshot = |snapshot, rerun| Reruns {
+            snapshot,
+            reruns: vec![rerun],
+        };
         for (label, stale) in [
             ("a newer generation is live", rerun(100, &[])),
             ("a predecessor is missing from the plan", rerun(200, &[])),
         ] {
+            let stale = from_snapshot(0, stale);
             assert_eq!(
-                kernel.commit(Reruns::intent(std::slice::from_ref(&stale)), |envelope| {
-                    Reruns::apply(std::slice::from_ref(&stale), envelope)
-                }),
+                kernel.commit(stale.intent(), |envelope| stale.apply(envelope)),
                 Err(KernelError::Conflict),
                 "{label}"
             );
         }
-        let planned = rerun(200, &[&published[0].object_id]);
+        let planned = from_snapshot(0, rerun(200, &[&published[0].object_id]));
         kernel
-            .commit(Reruns::intent(std::slice::from_ref(&planned)), |envelope| {
-                Reruns::apply(std::slice::from_ref(&planned), envelope)
-            })
+            .commit(planned.intent(), |envelope| planned.apply(envelope))
             .unwrap();
         let (_, states) = kernel
             .object_states(&[
@@ -1914,16 +1926,49 @@ mod rerun_tests {
                 .is_none()
         );
 
-        // C8: one key never names two replacement batches; the successor and the set each move the key.
+        // The operation key identifies a replacement batch by its successor and retirement set across snapshots.
         let keys: HashSet<String> = [
-            rerun(200, &[&published[0].object_id]),
-            rerun(300, &[&published[0].object_id]),
-            rerun(200, &[&published[0].object_id, &published[1].object_id]),
-            rerun(200, &[]),
+            from_snapshot(0, rerun(200, &[&published[0].object_id])),
+            from_snapshot(9, rerun(200, &[&published[0].object_id])),
+            from_snapshot(0, rerun(300, &[&published[0].object_id])),
+            from_snapshot(
+                0,
+                rerun(200, &[&published[0].object_id, &published[1].object_id]),
+            ),
+            from_snapshot(0, rerun(200, &[])),
         ]
         .iter()
-        .map(|rerun| Reruns::intent(std::slice::from_ref(rerun)).operation_key)
+        .map(|reruns| reruns.intent().operation_key)
         .collect();
         assert_eq!(keys.len(), 4);
+
+        // A plan whose commit follows another commit reads the call again: generation 300 lands between the plan of 400 and its commit.
+        let fourth = generation(400);
+        let prepared = publisher.prepare(&fourth, 1_000).unwrap();
+        let (_, plan) = plan_reruns(&publisher, std::slice::from_ref(&prepared), None).unwrap();
+        assert_eq!(plan.reruns[0].retired, [published[1].object_id.clone()]);
+        let third = generation(300);
+        let between = publish_batch(&kernel, Vec::new(), &[(&publisher, &third)], 1_000, None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            kernel.commit(plan.intent(), |envelope| plan.apply(envelope)),
+            Err(KernelError::Conflict),
+            "a generation published after the plan's snapshot"
+        );
+        // When the store remains at the replanned snapshot, the commit retires both predecessors.
+        let (_, plan) = plan_reruns(&publisher, std::slice::from_ref(&prepared), None).unwrap();
+        let mut both = vec![published[1].object_id.clone(), between.object_id.clone()];
+        both.sort();
+        assert_eq!(plan.reruns[0].retired, both);
+        kernel
+            .commit(plan.intent(), |envelope| plan.apply(envelope))
+            .unwrap();
+        let (_, states) = kernel.object_states(&both).unwrap();
+        assert!(states.iter().all(|state| {
+            state
+                .as_ref()
+                .is_some_and(|state| state.object.invalidated_commit_seq.is_some())
+        }));
     }
 }
