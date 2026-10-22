@@ -161,12 +161,14 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
             .into_iter()
             .find(|carrier| score.case_id.contains(carrier.label()))
             .unwrap_or_else(|| panic!("{score:?}"));
-        // The daemon presents a message's text to its summarizer and only the
-        // names of its tool calls, never a tool result's output, so a canary
-        // in a tool output is never folded into a segment.
+        // The daemon presents a message's text to its summarizer and, for a
+        // tool result, its outcome digest, whose head and tail excerpts carry
+        // the output's first and last nonblank lines. A canary in a tool
+        // output is folded into a segment through those excerpts, and the
+        // structured arm holds no tool output to retrieve it from.
         let expected = match carrier {
             Carrier::Summary => expected_summary,
-            Carrier::ToolOutput => (AxisValue::No, AxisValue::NotReached),
+            Carrier::ToolOutput => (AxisValue::Yes, AxisValue::No),
             _ => (AxisValue::NotReached, AxisValue::NotReached),
         };
         assert_eq!((score.ingested, score.retrieved), expected, "{score:?}");
