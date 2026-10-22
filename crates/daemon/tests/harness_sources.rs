@@ -968,7 +968,7 @@ fn unfinished_assistant_text_is_deferred_but_settled_tools_publish() {
     publisher.publish(&user[0], 6000).unwrap();
 }
 
-/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned `source-request.v2` values fail this test whenever the layout moves: a message unit, whose record is absent, and a tool unit, whose record bytes the digest binds. The frozen v1 value is pinned in `receipts_written_before_the_outcome_record_replay_under_v2`.
+/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned `source-request.v2` values fail this test whenever the layout moves: a message unit, whose record is absent, a Pi tool unit, and an OpenCode tool unit whose record carries every optional field, whose record bytes the digest binds. The frozen v1 value is pinned in `receipts_written_before_the_outcome_record_replay_under_v2`.
 #[test]
 fn publication_receipt_digest_layout_is_pinned() {
     let dir = tempfile::tempdir().unwrap();
@@ -983,9 +983,19 @@ fn publication_receipt_digest_layout_is_pinned() {
         .remove(0);
     let conn =
         Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    // An OpenCode record with every optional field present: truncation and an exit code.
+    let trace: Value =
+        serde_json::from_str(include_str!("../testdata/opencode-tool-outcome-trace.json")).unwrap();
+    let exit_1 = opencode_units(
+        &opencode_session(),
+        &opencode_record(&trace["cases"][0]["info"], &trace["cases"][0]["part"]),
+    )
+    .unwrap()
+    .remove(0);
     let mut digests = Vec::new();
-    for unit in [&message, &tool] {
-        publisher.publish(unit, NOW).unwrap();
+    for unit in [&message, &tool, &exit_1] {
+        // The trace's timestamps are real OpenCode clock values; the observation follows them.
+        publisher.publish(unit, 1_800_000_000_000).unwrap();
         let (key, _) = publisher.receipt_identity(unit).unwrap();
         let digest: String = conn
             .query_row(
@@ -1001,7 +1011,8 @@ fn publication_receipt_digest_layout_is_pinned() {
         digests,
         [
             "c7d32963a0dadfd9838219b46efd5f79e7f7abd6403242dddb0ff75372716c85",
-            "cfc4bcd532cd5d2151054bcb6dac960de1eeeae9b5236131a0730259b42062e9"
+            "cfc4bcd532cd5d2151054bcb6dac960de1eeeae9b5236131a0730259b42062e9",
+            "bd80d105aa3b57d56c98af10dfb3a8b930f8e59c336d2505311ebcda2982a190"
         ]
     );
 }
@@ -3098,10 +3109,10 @@ fn opencode_tool_outcomes_follow_the_pinned_trace() {
             &opencode_session(),
             &opencode_record(&completed_exit_1["info"], &nameless)
         ),
-        Err(AdapterRefusal::MissingIdentity("tool"))
+        Err(AdapterRefusal::UnsupportedShape("tool"))
     ));
 
-    let aborted = &trace["cases"][4];
+    let aborted = &trace["cases"][5];
     // An aborted turn names the exception only on the call it interrupted.
     let mut settled = aborted["part"].clone();
     settled["state"]["metadata"]["interrupted"] = json!(false);
@@ -3116,12 +3127,51 @@ fn opencode_tool_outcomes_follow_the_pinned_trace() {
         opencode_outcome(&opencode_record(&info, &aborted["part"])).exception_ref,
         None
     );
-    // The interrupted call before its turn records the error has no exception yet.
+    // A completed turn that names no error leaves the interrupted call's exception unknown.
     info.as_object_mut().unwrap().remove("error");
     assert_eq!(
         opencode_outcome(&opencode_record(&info, &aborted["part"])).exception_ref,
         None
     );
+}
+
+/// D8 stability: an interrupted OpenCode call is read once its turn completes, so the abort's error name is final when the record is built. Before completion the call yields no unit; after it, the record names the error and a later observation replays.
+#[test]
+fn an_interrupted_call_waits_for_its_turn_to_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let trace: Value =
+        serde_json::from_str(include_str!("../testdata/opencode-tool-outcome-trace.json")).unwrap();
+    let aborted = &trace["cases"][5];
+    let mut running = aborted["info"].clone();
+    running["time"].as_object_mut().unwrap().remove("completed");
+    running.as_object_mut().unwrap().remove("error");
+    assert!(
+        opencode_units(
+            &opencode_session(),
+            &opencode_record(&running, &aborted["part"])
+        )
+        .unwrap()
+        .is_empty(),
+        "an interrupted call of a running turn is deferred"
+    );
+    let settled = opencode_record(&aborted["info"], &aborted["part"]);
+    let unit = opencode_units(&opencode_session(), &settled)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        unit.outcome.as_ref().unwrap().exception_ref.as_deref(),
+        Some("MessageAbortedError")
+    );
+    // The trace's timestamps are real OpenCode clock values; the observation follows them.
+    let observed_at = 1_800_000_000_000;
+    assert!(!publisher.publish(&unit, observed_at).unwrap().replayed);
+    let again = opencode_units(&opencode_session(), &settled)
+        .unwrap()
+        .remove(0);
+    assert!(publisher.publish(&again, observed_at).unwrap().replayed);
 }
 
 /// AC12 for Pi: a tool result's status follows `isError`, each text block carries its own byte length, truncation is read from the bash tool's `details.truncation`, and a Pi entry yields no exit code or exception name.
@@ -3165,7 +3215,7 @@ fn pi_tool_outcomes_read_status_and_reported_truncation() {
     entry["message"].as_object_mut().unwrap().remove("toolName");
     assert!(matches!(
         pi_units(&pi_session(), &entry),
-        Err(AdapterRefusal::MissingIdentity("toolName"))
+        Err(AdapterRefusal::UnsupportedShape("message.toolName"))
     ));
 }
 
@@ -3205,17 +3255,17 @@ fn equal_tool_bytes_with_different_outcomes_are_two_descriptors_of_one_artifact(
             (outcome.status, outcome.exit_code)
         })
         .collect();
-    outcomes.sort_by_key(|(status, _)| status.as_str());
+    outcomes.sort_by_key(|(_, exit_code)| *exit_code);
     assert_eq!(
         outcomes,
         [
-            (kernel::ToolStatus::Completed, Some(1)),
-            (kernel::ToolStatus::Error, None)
+            (kernel::ToolStatus::Error, None),
+            (kernel::ToolStatus::Completed, Some(1))
         ]
     );
 }
 
-/// AC12: a record the kernel would refuse is refused before any byte is retained: one over 1 KiB, one whose byte length is not its unit's, and one on a class other than `raw_tool_spans`. The screened batch path refuses the same unit and keeps its siblings admissible.
+/// AC12: a record the kernel would refuse is refused before any byte is retained: one over 1 KiB, one whose byte length is not its unit's, one on a class other than `raw_tool_spans`, and one with an empty tool name. The screened batch path refuses the same unit and keeps its siblings admissible.
 #[test]
 fn an_invalid_outcome_record_is_refused_before_retention() {
     let dir = tempfile::tempdir().unwrap();
@@ -3235,9 +3285,12 @@ fn an_invalid_outcome_record_is_refused_before_retention() {
         .unwrap()
         .remove(0);
     message.outcome = tool.outcome.clone();
+    let mut nameless = pi_tool_result("pi-t2", "pi-a1", false, 200);
+    nameless["message"]["toolName"] = json!("");
+    let nameless = pi_units(&pi_session(), &nameless).unwrap().remove(0);
     let tip = corpus.tip();
     let staged = corpus.kernel.staged_artifacts_for_test();
-    for unit in [&oversized, &misdescribed, &message] {
+    for unit in [&oversized, &misdescribed, &message, &nameless] {
         assert!(
             matches!(
                 publisher.publish(unit, NOW),

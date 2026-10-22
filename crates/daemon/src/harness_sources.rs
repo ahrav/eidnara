@@ -232,11 +232,11 @@ struct ToolBlock<'a> {
 
 /// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text and other part kinds contribute nothing.
 ///
-/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored text eligible even when `info.error` is present. Settled tools contribute independently. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
+/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
 ///
 /// # Errors
 ///
-/// The OpenCode adapter refuses a non-OpenCode binding, non-object `info`, missing identities, roles other than `user` or `assistant`, a different session, missing or invalid timestamps, non-array `parts`, non-string selected text, tool parts without `state`, and settled tools without `callID`, `state.time.end`, or string output.
+/// The OpenCode adapter refuses a non-OpenCode binding, non-object `info`, missing identities, roles other than `user` or `assistant`, a different session, missing or invalid timestamps, non-array `parts`, non-string selected text, tool parts without `state`, and settled tools without `callID`, `state.time.end`, string output, or a string `tool` name (`UnsupportedShape("tool")`).
 pub fn opencode_units(
     session: &SessionIdentity,
     message: &Value,
@@ -289,6 +289,12 @@ pub fn opencode_units(
                     Some("error") => true,
                     _ => continue,
                 };
+                // A call the turn's abort interrupted is read once the turn completes, when the abort's named error is final; its outcome names that error.
+                let interrupted =
+                    state.pointer("/metadata/interrupted") == Some(&Value::Bool(true));
+                if interrupted && completed.is_none() {
+                    continue;
+                }
                 let output = state
                     .get(if is_error { "error" } else { "output" })
                     .and_then(Value::as_str)
@@ -303,7 +309,7 @@ pub fn opencode_units(
                     is_error,
                 };
                 let outcome = crate::tool_outcome::opencode(part, info.get("error"), output)
-                    .ok_or(AdapterRefusal::MissingIdentity("tool"))?;
+                    .ok_or(AdapterRefusal::UnsupportedShape("tool"))?;
                 // One settled tool part carries one output string: its only output block.
                 units.push(session.tool_unit(&tool, 0, output, outcome));
             }
@@ -317,7 +323,7 @@ pub fn opencode_units(
 ///
 /// # Errors
 ///
-/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, a row with a missing, null, or empty `type` (`MissingIdentity("type")`) or whose `type` is not `"message"` (`UnsupportedShape("type")`), missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
+/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, a row with a missing, null, or empty `type` (`MissingIdentity("type")`) or whose `type` is not `"message"` (`UnsupportedShape("type")`), missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, boolean `isError`, or string `toolName` (`UnsupportedShape("message.toolName")`), or with non-text content.
 pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
@@ -365,7 +371,7 @@ pub fn pi_units(
                 .filter(|_| item.get("type").and_then(Value::as_str) == Some("text"))
                 .ok_or(AdapterRefusal::UnsupportedShape("tool result item"))?;
             let outcome = crate::tool_outcome::pi(message, text)
-                .ok_or(AdapterRefusal::MissingIdentity("toolName"))?;
+                .ok_or(AdapterRefusal::UnsupportedShape("message.toolName"))?;
             units.push(session.tool_unit(&tool, index, text, outcome));
         }
         return Ok(units);
@@ -475,7 +481,7 @@ impl PublishError {
 
 const PRODUCER: &str = "eidnara-daemon/harness-sources";
 const CAUSE: &str = "source publication";
-/// Leads every request-digest input. The digest is persisted in the descriptor receipt under a key that does not change with it, so a layout change is a new tag, made deliberately, and never a silent reinterpretation of stored receipts. `v2` binds the unit's outcome record after the `v1` inputs.
+/// Leads every request-digest input. The digest is persisted in the descriptor receipt under a key that does not change with it, so a layout change is a new tag, made deliberately, and never a silent reinterpretation of stored receipts. `v2` binds the unit's outcome record after the `v1` inputs, so a change to the fields [`crate::tool_outcome`] extracts or to the record's encoding is also a new tag, with the tag it replaces probed in [`stored_receipt`].
 const REQUEST_DIGEST_FORMAT: &str = "source-request.v2";
 /// The frozen tag of the layout receipts were written under before the outcome record. A key that holds a receipt under this digest replays it ([`stored_receipt`]).
 const LEGACY_REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
@@ -545,20 +551,13 @@ impl SourcePublisher<'_> {
             .kernel
             .preview(preview_deadline(budget), |preview| {
                 self.check_scope(&unit, preview)?;
-                // Evidence an earlier publication retained under the legacy digest replays under that digest.
-                let evidence_intent = self.evidence_intent(&unit);
-                let evidence_digest = match preview.stored_receipt(evidence_intent.clone()) {
-                    Err(KernelError::Conflict) => {
-                        stored_receipt(preview, evidence_intent, &unit.legacy_digest)?;
-                        unit.legacy_digest.clone()
-                    }
-                    other => {
-                        other?;
-                        unit.request_digest.clone()
-                    }
-                };
+                // Evidence an earlier publication retained replays under the digest that wrote it.
+                let evidence_digest =
+                    stored_receipt(preview, self.evidence_intent(&unit), &unit.legacy_digest)?
+                        .map_or_else(|| unit.request_digest.clone(), |(_, digest)| digest);
                 Ok((
-                    stored_receipt(preview, descriptor_intent.clone(), &unit.legacy_digest)?,
+                    stored_receipt(preview, descriptor_intent.clone(), &unit.legacy_digest)?
+                        .map(|(receipt, _)| receipt),
                     unit.rule.resolve(preview)?,
                     evidence_digest,
                 ))
@@ -695,11 +694,12 @@ impl SourcePublisher<'_> {
             evidence: None,
         })?;
         // The outcome record is judged before any byte is retained: only a tool unit carries one, and it must describe the unit's bytes within the record bound.
-        match (&unit.outcome, unit.class) {
-            (Some(outcome), OccurrenceClass::RawToolSpans) => outcome.validate(unit.text.len()),
-            (Some(_), _) => Err(SourceDescriptorError::OutcomeRefused),
-            (None, _) => Ok(()),
-        }
+        kernel::check_outcome(
+            unit.outcome.as_ref(),
+            unit.class,
+            unit.representation.as_str(),
+            unit.text.len(),
+        )
         .map_err(|refusal| PublishError::Descriptor {
             refusal,
             evidence: None,
@@ -981,7 +981,7 @@ impl SourcePublisher<'_> {
         identity_digest(&self.digest_inputs(unit, LEGACY_REQUEST_DIGEST_FORMAT))
     }
 
-    /// The inputs both digest layouts share, led by `format`.
+    /// The inputs both digest layouts share, led by `format`. The `v1` layout is these bytes alone, so they are frozen: a change here moves the legacy digest too.
     fn digest_inputs(&self, unit: &SourceUnit, format: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         for part in [
@@ -1004,21 +1004,21 @@ impl SourcePublisher<'_> {
     }
 }
 
-/// The receipt `preview` holds for `intent`'s key: under `intent`'s digest, or else under `legacy_digest`, the `source-request.v1` digest of the same unit. A receipt written before the outcome record replays as it was written, without enrichment. A key holding neither digest is [`KernelError::Conflict`].
+/// The receipt `preview` holds for `intent`'s key and the digest it was written under: `intent`'s digest, or else `legacy_digest`, the `source-request.v1` digest of the same unit. A receipt written before the outcome record replays as it was written, without enrichment. A key holding neither digest is [`KernelError::Conflict`].
 fn stored_receipt(
     preview: &kernel::Envelope<'_>,
     intent: CommitIntent,
     legacy_digest: &str,
-) -> Result<Option<kernel::CommitReceipt>, KernelError> {
+) -> Result<Option<(kernel::CommitReceipt, String)>, KernelError> {
     match preview.stored_receipt(intent.clone()) {
         Err(KernelError::Conflict) => preview
             .stored_receipt(CommitIntent {
                 request_digest: legacy_digest.to_owned(),
                 ..intent
             })?
-            .map(Some)
+            .map(|receipt| Some((receipt, legacy_digest.to_owned())))
             .ok_or(KernelError::Conflict),
-        other => other,
+        other => Ok(other?.map(|receipt| (receipt, intent.request_digest))),
     }
 }
 
@@ -1102,13 +1102,15 @@ pub fn publish_batch(
                             preview,
                             publisher.descriptor_intent(unit),
                             &unit.legacy_digest,
-                        )?,
+                        )?
+                        .map(|(receipt, _)| receipt),
                         unit.rule.resolve(preview)?,
                         stored_receipt(
                             preview,
                             publisher.evidence_intent(unit),
                             &unit.legacy_digest,
-                        )?,
+                        )?
+                        .map(|(receipt, _)| receipt),
                     ))
                 };
                 previewed.push(step().inspect_err(|_| culprit = Some(index))?);

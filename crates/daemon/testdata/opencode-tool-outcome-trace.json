@@ -45,6 +45,17 @@
       "outcome": { "version": 1, "status": "error", "tool_name": "bash", "byte_length": 73 }
     },
     {
+      "name": "bash error with output-only metadata",
+      "info": { "id": "msg_trace_a7", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1790541642824, "completed": 1790541648814 }, "finish": "tool-calls" },
+      "part": { "type": "tool", "tool": "bash", "callID": "tooluse_trace_output_only",
+                "state": { "status": "error", "input": { "command": "cargo build" },
+                           "error": "Command timed out\n",
+                           "metadata": { "output": "Compiling daemon\n" },
+                           "time": { "start": 1790541646063, "end": 1790541646083 } } },
+      "outcome": { "version": 1, "status": "error", "tool_name": "bash", "byte_length": 18 }
+    },
+    {
       "name": "bash interrupted by an aborted turn",
       "info": { "id": "msg_trace_a5", "sessionID": "ses_trace", "role": "assistant",
                 "time": { "created": 1791298653458, "completed": 1791301391742 },

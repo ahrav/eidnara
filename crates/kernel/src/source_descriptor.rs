@@ -81,11 +81,11 @@ pub struct SourceDescriptorRequest<'a> {
     pub observed_at: i64,
     /// The highest revision the caller observed in this lineage, retired rows included; `None` when it observed no revision. A `repository_documents` publication commits only while the lineage's historical head still equals it, and its revision starts at 1 and exceeds that head. The producer keeps revisions contiguous by proposing the head plus one. Every other class passes `None`; a value is invalid input.
     pub expected_head: Option<i64>,
-    /// How the tool call behind a `raw_tool_spans` occurrence settled. Only that class carries one; it is stored on the descriptor beside the identity, so equal bytes from calls that settled differently are two descriptors citing one artifact.
+    /// How the tool call behind a `raw_tool_spans` occurrence settled ([`check_outcome`]). Only that class carries one; it is stored on the descriptor beside the identity, so equal bytes from calls that settled differently are two descriptors citing one artifact. The producer decides whether a tool descriptor carries a record: rows published before the record existed carry none.
     pub outcome: Option<&'a ToolOutcome>,
 }
 
-/// Version of the [`ToolOutcome`] record a tool descriptor stores.
+/// Version of the [`ToolOutcome`] record a tool descriptor stores. The record decodes strictly inside the descriptor detail, so a new record version is a new [`SOURCE_DESCRIPTOR_DETAIL_VERSION`].
 pub const TOOL_OUTCOME_VERSION: u32 = 1;
 
 /// How a tool call settled, as its harness reported it.
@@ -94,15 +94,6 @@ pub const TOOL_OUTCOME_VERSION: u32 = 1;
 pub enum ToolStatus {
     Completed,
     Error,
-}
-
-impl ToolStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::Error => "error",
-        }
-    }
 }
 
 /// The execution-outcome record of one tool occurrence: what the harness reported about the call, never inferred. `truncated`, `exit_code`, and `exception_ref` are present only when the harness reported them; an absent value is unknown, never a default. The stored JSON is at most [`MAX_TEXT_FIELD_BYTES`].
@@ -130,23 +121,37 @@ impl ToolOutcome {
         serde_json::to_vec(self).expect("a tool outcome serializes")
     }
 
-    /// Checks the record against the bytes it describes: the current version, a tool name and exception name that are well-formed identity values the redactor leaves unchanged, a byte length equal to `selected_len`, and stored JSON of at most [`MAX_TEXT_FIELD_BYTES`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SourceDescriptorError::OutcomeRefused`] when any check fails.
-    pub fn validate(&self, selected_len: usize) -> Result<(), SourceDescriptorError> {
+    /// Checks the record against the occurrence it describes: the current version, a status that agrees with `representation` (`error` exactly for `tool_error`), a tool name and exception name that are well-formed identity values the redactor leaves unchanged, a byte length equal to `selected_len`, and stored JSON of at most [`MAX_TEXT_FIELD_BYTES`].
+    fn validate(&self, representation: &str, selected_len: usize) -> bool {
         let name_ok = |name: &str| well_formed_value(name) && identity(name).is_ok();
-        let valid = self.version == TOOL_OUTCOME_VERSION
+        self.version == TOOL_OUTCOME_VERSION
+            && (self.status == ToolStatus::Error) == (representation == "tool_error")
             && name_ok(&self.tool_name)
             && self.exception_ref.as_deref().is_none_or(name_ok)
             && u64::try_from(selected_len).is_ok_and(|len| len == self.byte_length)
-            && self.encode().len() <= MAX_TEXT_FIELD_BYTES;
-        if valid {
-            Ok(())
-        } else {
+            && self.encode().len() <= MAX_TEXT_FIELD_BYTES
+    }
+}
+
+/// Judges the outcome record a descriptor of `class` and `representation` would carry over `selected_len` selected bytes: only a `raw_tool_spans` occurrence carries one, and it must describe that occurrence ([`ToolOutcome`]). The descriptor commit applies this check, and a producer applies it before retaining any byte.
+///
+/// # Errors
+///
+/// Returns [`SourceDescriptorError::OutcomeRefused`] for a record on another class or one that fails its checks.
+pub fn check_outcome(
+    outcome: Option<&ToolOutcome>,
+    class: OccurrenceClass,
+    representation: &str,
+    selected_len: usize,
+) -> Result<(), SourceDescriptorError> {
+    match outcome {
+        Some(outcome)
+            if class != OccurrenceClass::RawToolSpans
+                || !outcome.validate(representation, selected_len) =>
+        {
             Err(SourceDescriptorError::OutcomeRefused)
         }
+        _ => Ok(()),
     }
 }
 
@@ -437,13 +442,12 @@ impl Envelope<'_> {
             None => request.artifact_digest.to_string(),
             Some(span) => payload_id(select(Some(span), request.buffer)),
         };
-        match (request.outcome, encoded.class) {
-            (Some(outcome), OccurrenceClass::RawToolSpans) => {
-                outcome.validate(select(encoded.span, request.buffer).len())?;
-            }
-            (Some(_), _) => return Err(SourceDescriptorError::OutcomeRefused),
-            (None, _) => {}
-        }
+        check_outcome(
+            request.outcome,
+            encoded.class,
+            request.occurrence.representation,
+            select(encoded.span, request.buffer).len(),
+        )?;
         let detail = detail_for(request, &encoded, &payload_id);
         let detail_json = serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?;
         if !redact(&detail_json)?.detections.is_empty() {

@@ -2241,7 +2241,7 @@ fn tool_outcome(byte_length: u64) -> kernel::ToolOutcome {
     }
 }
 
-/// D7: a `raw_tool_spans` descriptor stores its outcome record beside the identity, and the record leaves the occurrence encoding unchanged. A record on another class, one describing other bytes than its span selects, one of another version, one whose tool name the redactor would rewrite, and one over 1 KiB are refused and write nothing.
+/// D7: a `raw_tool_spans` descriptor stores its outcome record beside the identity, and the record leaves the occurrence encoding unchanged; a record of exactly 1 KiB is accepted. A record on another class, one describing other bytes than its span selects, one of another version, one whose tool name the redactor would rewrite, one of 1 KiB plus one byte, and one whose status disagrees with the representation are refused and write nothing.
 #[test]
 fn a_tool_descriptor_stores_a_validated_outcome_record() {
     let fixture = Fixture::open();
@@ -2280,9 +2280,29 @@ fn a_tool_descriptor_stores_a_validated_outcome_record() {
     versioned.version = 2;
     let mut secret = tool_outcome(13);
     secret.tool_name = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678".to_string();
-    let mut oversized = tool_outcome(13);
-    oversized.tool_name = "t".repeat(512);
-    oversized.exception_ref = Some("E".repeat(512));
+    // A record of exactly 1 KiB is the largest accepted; one byte more is refused. Both names stay within the identity value bound.
+    let sized = |exception_bytes: usize| {
+        let mut outcome = tool_outcome(13);
+        outcome.tool_name = "t".repeat(512);
+        outcome.exception_ref = Some("E".repeat(exception_bytes));
+        outcome
+    };
+    let fill = 1024 - sized(0).encode().len();
+    assert!(fill <= 512);
+    let largest = sized(fill);
+    assert_eq!(largest.encode().len(), 1024);
+    fixture
+        .publish(
+            "largest",
+            &SourceDescriptorRequest {
+                outcome: Some(&largest),
+                ..request(tool("2"), &evidence, tool_text)
+            },
+        )
+        .unwrap();
+    let oversized = sized(fill + 1);
+    let mut disagreeing = tool_outcome(13);
+    disagreeing.status = kernel::ToolStatus::Error;
     let tip = fixture.store.tip().unwrap();
     for (label, refused) in [
         (
@@ -2296,28 +2316,35 @@ fn a_tool_descriptor_stores_a_validated_outcome_record() {
             "a byte length of the whole buffer, not the span",
             SourceDescriptorRequest {
                 outcome: Some(&whole),
-                ..request(tool("2"), &evidence, tool_text)
+                ..request(tool("3"), &evidence, tool_text)
             },
         ),
         (
             "another version",
             SourceDescriptorRequest {
                 outcome: Some(&versioned),
-                ..request(tool("2"), &evidence, tool_text)
+                ..request(tool("3"), &evidence, tool_text)
             },
         ),
         (
             "a secret tool name",
             SourceDescriptorRequest {
                 outcome: Some(&secret),
-                ..request(tool("2"), &evidence, tool_text)
+                ..request(tool("3"), &evidence, tool_text)
             },
         ),
         (
             "a record over 1 KiB",
             SourceDescriptorRequest {
                 outcome: Some(&oversized),
-                ..request(tool("2"), &evidence, tool_text)
+                ..request(tool("3"), &evidence, tool_text)
+            },
+        ),
+        (
+            "an error status on a tool output",
+            SourceDescriptorRequest {
+                outcome: Some(&disagreeing),
+                ..request(tool("3"), &evidence, tool_text)
             },
         ),
     ] {
