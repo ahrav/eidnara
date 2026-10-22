@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use super::cas::ProviderEgress;
-use super::envelope::commit_with_writer;
+use super::envelope::{PreparedIntent, commit_with_writer};
 use super::memory_reviewer_hold::{
     MemoryReviewerHoldBinding, MemoryReviewerHoldKind, load_valid_hold,
 };
@@ -31,13 +31,26 @@ pub struct CaptureExpiry {
     pub retired: usize,
     pub retained: usize,
 }
-/// An expiring evidence class: its retention class, the observation kind of the rows that own its evidence, and the reserved producer its expiry receipts are written under. A caller cannot commit under a reserved producer, so a receipt found under an expiry key was written by that sweep.
+
+impl CaptureExpiry {
+    fn count(&mut self, result: &str) {
+        match result {
+            "retired" => self.retired += 1,
+            "retained" => self.retained += 1,
+            _ => {}
+        }
+    }
+}
+
+/// An expiring evidence class: its retention class, the observation kind of the rows that own its evidence, the reserved producer its expiry receipts are written under, and how many captures one expiry commit retires. A caller cannot commit under a reserved producer, so a receipt found under an expiry key was written by that sweep.
 struct ExpiringClass {
     retention_class: &'static str,
     owner_kind: &'static str,
     /// The reserved producer suffix, also the expiry commit's actor.
     producer: &'static str,
     cause: &'static str,
+    /// The most captures one commit retires. Each capture keeps its own receipt under its own key whatever this bound is.
+    captures_per_commit: usize,
 }
 
 const MEMORY_REVIEWER_CAPTURES: ExpiringClass = ExpiringClass {
@@ -45,6 +58,7 @@ const MEMORY_REVIEWER_CAPTURES: ExpiringClass = ExpiringClass {
     owner_kind: LOCAL_FILE_KIND,
     producer: "local-file-expiry",
     cause: "acquisition reference expired",
+    captures_per_commit: 1,
 };
 
 const HARNESS_CAPTURES: ExpiringClass = ExpiringClass {
@@ -52,6 +66,7 @@ const HARNESS_CAPTURES: ExpiringClass = ExpiringClass {
     owner_kind: super::source_descriptor::SOURCE_DESCRIPTOR_KIND,
     producer: "harness-capture-expiry",
     cause: "harness capture retention expired",
+    captures_per_commit: MAX_EXPIRED_CAPTURES_PER_CALL,
 };
 /// The reserved producer under which a run abandons a capture it could not complete.
 const ABANDON_PRODUCER: &str = "local-file-abandon";
@@ -222,45 +237,74 @@ impl KernelStore {
         self.expire_captures(&MEMORY_REVIEWER_CAPTURES, now)
     }
 
-    /// Retires the source descriptors and evidence of every harness capture (`harness_capture` evidence) whose `retain_until` has passed and that no live hold pins, by the same rules as [`Self::expire_local_file_captures`]: at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] captures per call, oldest deadline first, one commit per capture that rechecks the deadline and pins under the writer. Each commit retires the capture's live descriptors first and its evidence second; evidence another live row still cites is kept and leaves the sweep until that citation is gone, and a refused row is skipped so the rest of its page proceeds. The bound counts captures, not time. Canonical, git, and every other retention class are untouched.
+    /// Retires the source descriptors and evidence of every harness capture (`harness_capture` evidence) whose `retain_until` has passed and that no live hold pins, by the same rules as [`Self::expire_local_file_captures`]: at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] captures per call, oldest deadline first, each rechecked for its deadline and pins under the writer and recorded under its own receipt keyed by `now` and its evidence id. The page commits once. A capture a hold pinned since selection is skipped inside that commit; when the store refuses any other step of a capture, the commit rolls back and the sweep commits the page again without that capture, so the rest of its page proceeds. Each capture retires its live descriptors first and its evidence second; evidence another live row still cites is kept and leaves the sweep until that citation is gone. The bound counts captures, not time. Canonical, git, and every other retention class are untouched.
     ///
     /// # Errors
     ///
-    /// Returns the first storage, lock, or fence error; captures retired before it stay retired.
+    /// Returns the first storage, lock, or fence error; captures committed before it stay retired.
     pub fn expire_harness_captures(&self, now: i64) -> Result<CaptureExpiry, KernelError> {
         self.expire_captures(&HARNESS_CAPTURES, now)
     }
 
+    /// Retires `class` captures due at `now` in commits of at most `class.captures_per_commit`. A commit's own receipt is its first capture's, and every later capture in it records its own receipt. A refused capture leaves the pending list and the rest is committed again.
     fn expire_captures(
         &self,
         class: &ExpiringClass,
         now: i64,
     ) -> Result<CaptureExpiry, KernelError> {
-        let expired = {
+        let mut pending = {
             let reader = self.lock_reader()?;
             expired_captures(&reader, class, now)?
         };
         let mut sweep = CaptureExpiry::default();
-        for (evidence_id, evidence_object) in expired {
+        while !pending.is_empty() {
+            let batch = &pending[..pending.len().min(class.captures_per_commit)];
+            let mut tally = CaptureExpiry::default();
+            let mut refused = 0;
             let mut writer = self.lock_writer()?;
             let outcome = commit_with_writer(
                 &mut writer,
                 self.lease_epoch(),
-                expiry_intent(class, now, &evidence_id),
+                expiry_intent(class, now, &batch[0].0),
                 |envelope| {
-                    retire_expired_capture(envelope, class, now, &evidence_id, &evidence_object)
+                    let (evidence_id, evidence_object) = &batch[0];
+                    let first =
+                        retire_expired_capture(envelope, class, now, evidence_id, evidence_object)?;
+                    tally.count(&first);
+                    for (index, (evidence_id, evidence_object)) in batch.iter().enumerate().skip(1)
+                    {
+                        refused = index;
+                        // A hold acquired since selection keeps the capture; the check only reads.
+                        if !still_expired(envelope, class, now, evidence_id)? {
+                            continue;
+                        }
+                        let result = retire_capture(envelope, class, evidence_id, evidence_object)?;
+                        let intent = PreparedIntent::new(expiry_intent(class, now, evidence_id))?;
+                        envelope.record_reserved_receipt(&intent, &result)?;
+                        tally.count(&result);
+                    }
+                    // A refusal after the captures' own steps belongs to the commit, whose receipt is the first capture's.
+                    refused = 0;
+                    Ok(first)
                 },
                 || Ok(()),
             );
+            drop(writer);
             match outcome {
-                // A replayed receipt is another sweep's retirement at this cutoff; this call's transaction did not run.
-                Ok(receipt) if receipt.replayed => {}
-                Ok(receipt) => match receipt.result.as_str() {
-                    "retired" => sweep.retired += 1,
-                    "retained" => sweep.retained += 1,
-                    _ => {}
-                },
-                Err(KernelError::NotFound | KernelError::Conflict | KernelError::InvalidInput) => {}
+                // A replayed receipt is another sweep's retirement of the first capture at this cutoff; this call's transaction did not run.
+                Ok(receipt) if receipt.replayed => {
+                    pending.remove(0);
+                }
+                Ok(_) => {
+                    sweep.retired += tally.retired;
+                    sweep.retained += tally.retained;
+                    let committed = batch.len();
+                    pending.drain(..committed);
+                }
+                // The store refused the capture the commit stopped on; the transaction rolled back, and the page is committed again without it.
+                Err(KernelError::NotFound | KernelError::Conflict | KernelError::InvalidInput) => {
+                    pending.remove(refused);
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -400,7 +444,6 @@ fn expiry_intent(class: &ExpiringClass, now: i64, evidence_id: &str) -> CommitIn
     }
 }
 
-/// Retires one candidate inside its own transaction: the capture's own observations, then the evidence unless another live row cites it. The candidate list was read outside this transaction, so the expiry and pin predicate is checked again first; a capture a hold has pinned since then is left alone as `Conflict`, which the sweep skips without a commit.
 fn retire_expired_capture(
     envelope: &mut Envelope<'_>,
     class: &ExpiringClass,
@@ -408,7 +451,20 @@ fn retire_expired_capture(
     evidence_id: &str,
     evidence_object: &str,
 ) -> Result<String, KernelError> {
-    let still_expired: bool = envelope
+    if !still_expired(envelope, class, now, evidence_id)? {
+        return Err(KernelError::Conflict);
+    }
+    retire_capture(envelope, class, evidence_id, evidence_object)
+}
+
+/// Whether `evidence_id` is still a live `class` capture past its deadline at `now` that no live hold pins, judged by the candidate predicate inside the writer's transaction. Reads only.
+fn still_expired(
+    envelope: &Envelope<'_>,
+    class: &ExpiringClass,
+    now: i64,
+    evidence_id: &str,
+) -> Result<bool, KernelError> {
+    envelope
         .tx
         .query_row_cached(
             &format!(
@@ -418,10 +474,16 @@ fn retire_expired_capture(
             params![class.retention_class, now, evidence_id],
             |row| row.get(0),
         )
-        .map_err(map_sqlite)?;
-    if !still_expired {
-        return Err(KernelError::Conflict);
-    }
+        .map_err(map_sqlite)
+}
+
+/// Retires the capture's own observations, then the evidence unless another live row cites it, and returns `retired` or `retained`.
+fn retire_capture(
+    envelope: &mut Envelope<'_>,
+    class: &ExpiringClass,
+    evidence_id: &str,
+    evidence_object: &str,
+) -> Result<String, KernelError> {
     for observation in live_capture_observations(envelope, class.owner_kind, evidence_id)? {
         envelope.retire_capture_observation(&observation)?;
     }
@@ -820,6 +882,116 @@ mod tests {
             })
             .unwrap();
         assert_eq!(receipt.result, "retired");
+    }
+
+    /// Pre-existing expiry receipts for `h0` and `h2` at `NOW` exercise refusal of the page's first capture and of an interior one; `h1` and `h3` retire in a single commit, each under its own receipt.
+    #[test]
+    fn a_refused_harness_capture_rolls_back_alone_inside_its_page_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _, _) = store_with_lapsing_capture(root.path());
+        let ids = ["h0", "h1", "h2", "h3"];
+        for id in ids {
+            store
+                .ingest_exact_artifact(ArtifactIngestRequest {
+                    intent: intent(id),
+                    payload: format!("captured tool output {id}").into_bytes(),
+                    evidence_id: id.to_string(),
+                    object_id: format!("{id}-object"),
+                    object_kind: "evidence".to_string(),
+                    domain_id: "domain".to_string(),
+                    source_kind: "raw_tool_spans".to_string(),
+                    source_id: id.to_string(),
+                    source_revision: 1,
+                    media_type: "text/plain".to_string(),
+                    retention_class: HARNESS_CAPTURE_RETENTION_CLASS.to_string(),
+                    retain_until: Some(NOW),
+                    asserted_sensitivity: Sensitivity::Sensitive,
+                    provider_egress: ProviderEgress::LocalOnly,
+                    provenance: None,
+                })
+                .unwrap();
+        }
+        let mut writer = store.lock_writer().unwrap();
+        for id in ["h0", "h2"] {
+            commit_with_writer(
+                &mut writer,
+                store.lease_epoch(),
+                expiry_intent(&HARNESS_CAPTURES, NOW, id),
+                |_| Ok("retired".to_string()),
+                || Ok(()),
+            )
+            .unwrap();
+        }
+        drop(writer);
+        let tip = store.tip().unwrap();
+        assert_eq!(
+            store.expire_harness_captures(NOW).unwrap(),
+            CaptureExpiry {
+                retired: 2,
+                retained: 0
+            }
+        );
+        assert_eq!(store.tip().unwrap(), tip + 1, "one commit for the page");
+        let conn = Connection::open_with_flags(
+            root.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let invalidated: Vec<Option<i64>> = ids
+            .iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT invalidated_commit_seq FROM evidence_meta WHERE evidence_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(invalidated, [None, Some(tip + 1), None, Some(tip + 1)]);
+        let mut statement = conn
+            .prepare(
+                "SELECT change_kind,object_id FROM change_event WHERE commit_seq=?1 ORDER BY ordinal",
+            )
+            .unwrap();
+        let changes: Vec<(String, String)> = statement
+            .query_map([tip + 1], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            changes,
+            [
+                ("evidence_retire".to_string(), "h1-object".to_string()),
+                ("evidence_retire".to_string(), "h3-object".to_string())
+            ],
+            "the rolled-back capture leaves no change event"
+        );
+        let mut statement = conn
+            .prepare(
+                "SELECT operation_key,result_payload FROM operation_receipts
+                 WHERE producer=?1 AND commit_seq=?2 ORDER BY operation_key",
+            )
+            .unwrap();
+        let receipts: Vec<(String, Vec<u8>)> = statement
+            .query_map(
+                params![
+                    expiry_intent(&HARNESS_CAPTURES, NOW, "h1").producer,
+                    tip + 1
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            receipts,
+            [
+                (format!("{NOW}:h1"), b"retired".to_vec()),
+                (format!("{NOW}:h3"), b"retired".to_vec())
+            ],
+            "each retired capture keeps its own receipt"
+        );
     }
 
     /// One live capture whose acquisition reference lapsed at `NOW`, with its capture observation, plus `history` captures earlier sweeps already retired.
