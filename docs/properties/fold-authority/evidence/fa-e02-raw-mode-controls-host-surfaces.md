@@ -48,7 +48,8 @@ At HEAD `0ff62b29a`:
   (`hooks/context/command-handler.ts:505-513`).
 - Pi: `compactionRequested = isCompactionEnabled(config)` and Pi's own
   transform-availability gate decide `compactionOff`
-  (`packages/pi-plugin/src/index.ts:349-356`).
+  (`packages/pi-plugin/src/index.ts:382-384` at `07ea883b5`; `:349-356` at
+  `0ff62b29a`).
 
 Checks at HEAD:
 
@@ -63,7 +64,8 @@ Checks at HEAD:
 
 Citation corrections from `265df096` to HEAD: `agent-disable.ts:19-23` is now
 `:21-29`; `tool-registry.ts:34-48` is `:38-48`; `hook.ts:223` is `:226`;
-`index.ts` (Pi) `:84,349-355` is `:13,349-356`;
+`index.ts` (Pi) `:84,349-355` is `:13,349-356` at `0ff62b29a` and
+`:13,382-384` at `07ea883b5`;
 `compaction-accessor-guard.test.ts:66` is `:67`.
 
 ## Failure scenario
@@ -120,3 +122,49 @@ for an empty chain.
   the chain and `compaction.enabled` arms by reading.
 - Missing evidence: None.
 - Conclusion: resolved with answer.
+
+## Update for #1060 at `07ea883b5`
+
+Tickets #1062 and #1065. #1069 makes the Pi `context` transform run in every
+mode; the compaction-only machinery keeps the boot latch. This record's
+surviving Pi clauses are the `eidnara_reduce` omission and the fold-command
+refusals (`packages/pi-plugin/src/tools/index.test.ts:19`,
+`packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`,
+`packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131`); the
+per-event consequences of the latch below (eviction, tag strip, compaction
+answer) are KD-P04's guarantee, and their witnesses are listed here for the
+latch trail only. Pi's mode is decided in two places, verified at
+`07ea883b5`:
+
+- The boot latch `compactionOff` (`packages/pi-plugin/src/index.ts:382-384`)
+  gates `eidnara_reduce` registration (`:384`), the pass's `tool_present`
+  (`:597`), eviction scheduling, which returns before any branch sync
+  (`:879`), the `handBack` term (`:963`), and the assistant tag strip
+  (`:987-988`).
+- The `session_before_compact` answer also reads the session's project
+  configuration (`:955-958`): a project whose configuration withdraws fold
+  authority leaves compaction to Pi inside a compaction-on process.
+
+KD-P04's witnesses in `packages/pi-plugin/src/transform/pi-delivery.test.ts`
+(#1069, `bun run check:repo` exit 0 at `6d527babf`); of these, only `:290`
+serves this record, for its `eidnara_reduce` absence:
+
+- `:280` "evicts and strips assistant tags in a compaction-on process", the
+  control: replies that name a rendered boundary produce an eviction and
+  stripped tags.
+- `:290` "leaves compaction, eviction, and assistant tags to Pi after
+  additive passes": the same replies in compaction-off mode produce no
+  eviction and leave the tagged text unchanged; `eidnara_reduce` is absent;
+  `session.compact()` resolves "compacted" with `fromHook: false`.
+- `:324` "schedules no eviction in a compaction-off process whose session
+  runs in a folding project": fails when the latch return at `:879` is
+  removed, the only state in which that return decides.
+
+### Q: Is the per-project gate on the compaction answer recorded?
+
+- Sources examined: `index.ts:948-978`; #1060 Property Catalog section A.
+- Findings: Yes, at `07ea883b5`. The answer is `undefined` when the boot
+  latch is on or when the session's project withdraws fold authority and
+  the compaction is not the plugin's own eviction.
+- Missing evidence: None.
+- Conclusion: resolved with answer; the record names both gates.

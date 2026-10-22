@@ -26,6 +26,14 @@ mod eval_cassette;
 #[path = "../tests/support/publish.rs"]
 #[allow(dead_code)]
 mod publish;
+/// The `review-witness` control and the MemoryReviewer fixtures it shares with the worker tests.
+#[cfg(unix)]
+#[path = "direct_host_fixture/review_witness.rs"]
+mod review_witness;
+#[cfg(unix)]
+#[path = "direct_host_fixture/support.rs"]
+#[allow(dead_code)]
+mod support;
 
 #[cfg(unix)]
 mod unix {
@@ -685,6 +693,10 @@ mod unix {
         ScriptSource {
             scenario: String,
         },
+        /// Runs a fixture-class and a production-class MemoryReviewer job over the host's stores for the MODULE root `project_root`, and answers what the review command must read back.
+        ReviewWitness {
+            project_root: String,
+        },
         GracefulShutdown,
     }
 
@@ -818,6 +830,7 @@ mod unix {
             visibility: &'static str,
         },
         Source(serde_json::Value),
+        ReviewWitness(serde_json::Value),
     }
 
     /// One control frame after draining through its newline or end of stream.
@@ -991,6 +1004,11 @@ mod unix {
                                 crate::case_script::source_records(&scenario)
                                     .map(|records| (ControlResult::Source(records), false))
                                     .map_err(|error| error.code())
+                            }
+                            ControlCommand::ReviewWitness { project_root } => {
+                                crate::review_witness::run(&core, &project_root)
+                                    .await
+                                    .map(|witness| (ControlResult::ReviewWitness(witness), false))
                             }
                             ControlCommand::GracefulShutdown => {
                                 Ok((ControlResult::Ack { accepted: true }, true))

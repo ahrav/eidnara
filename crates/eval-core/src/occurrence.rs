@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 /// The kernel's `OCCURRENCE_ENCODING_VERSION`; a kernel test pins the two equal.
 pub const OCCURRENCE_ENCODING_VERSION: u8 = 2;
-pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v3";
+pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v4";
 pub const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 const ROLE_OCCURRENCE: u8 = 0;
 const ROLE_LINEAGE: u8 = 1;
