@@ -473,7 +473,7 @@ pub(crate) fn admit(
 /// route-owned rows, so they hang off a route-owned domain that callers
 /// cannot write into. Scope rows created under an earlier layout keep their
 /// domain; the scope check compares terms only.
-pub(crate) const PROJECT_SCOPES_DOMAIN_ID: &str = "project-scopes";
+const PROJECT_SCOPES_DOMAIN_ID: &str = "project-scopes";
 
 /// A caller-named domain; the route-owned one is refused as invalid input.
 fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {

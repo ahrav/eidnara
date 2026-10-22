@@ -148,6 +148,12 @@ export interface MemoryAdmission {
     visibility: string;
 }
 
+/** One selected read as `review.read` answers it. */
+type ReviewRead = Record<string, unknown> & {
+    causal_identity: string;
+    proposal: Record<string, unknown>;
+};
+
 /** What the review command must read back after the fixture's `review-witness` control. */
 export interface ReviewWitness {
     /** The originating decision's exact tokens as the selector read them. */
@@ -159,8 +165,10 @@ export interface ReviewWitness {
     };
     /** The evidence under the two fixture forms. */
     evidence: string[];
-    /** Each fixture job's selected read, in the shape `review.read` answers. */
-    fixture: Record<string, unknown>[];
+    /** The project's completed outcomes as the ledger lists them, in the shape of `review.list` items. */
+    outcomes: Record<string, unknown>[];
+    /** Each fixture job's selected read and the evidence its causal inputs require. */
+    fixture: { read: ReviewRead; requiredEvidence: string[] }[];
     /** Each production job's causal identity. */
     production: string[];
     providerRequests: number;
@@ -601,6 +609,7 @@ function parseUserHintPass(value: unknown): UserHintPass {
 }
 
 function parseReviewWitness(value: unknown): ReviewWitness {
+    const malformed = () => new Error("fixture control review witness was malformed");
     const object = record(value);
     const target = record(object?.target);
     const counts = ["production_attempts", "provider_connections", "provider_requests"] as const;
@@ -608,7 +617,14 @@ function parseReviewWitness(value: unknown): ReviewWitness {
         Array.isArray(entries) && entries.every((entry) => typeof entry === "string");
     if (
         !object ||
-        !exactKeys(object, ["evidence", "fixture", "production", ...counts, "target"]) ||
+        !exactKeys(object, [
+            "evidence",
+            "fixture",
+            "outcomes",
+            "production",
+            ...counts,
+            "target",
+        ]) ||
         !target ||
         !exactKeys(target, ["commit_token", "known_as_of", "object_id", "source_revision"]) ||
         typeof target.object_id !== "string" ||
@@ -617,16 +633,33 @@ function parseReviewWitness(value: unknown): ReviewWitness {
         ) ||
         !strings(object.evidence) ||
         !strings(object.production) ||
+        !Array.isArray(object.outcomes) ||
+        !object.outcomes.every((entry) => record(entry) !== null) ||
         !Array.isArray(object.fixture) ||
-        !object.fixture.every((entry) => record(entry) !== null) ||
         !counts.every((key) => Number.isSafeInteger(object[key]))
     ) {
-        throw new Error("fixture control review witness was malformed");
+        throw malformed();
     }
+    const fixture = object.fixture.map((entry) => {
+        const job = record(entry);
+        const read = record(job?.read);
+        if (
+            !job ||
+            !exactKeys(job, ["read", "required_evidence"]) ||
+            !read ||
+            typeof read.causal_identity !== "string" ||
+            !record(read.proposal) ||
+            !strings(job.required_evidence)
+        ) {
+            throw malformed();
+        }
+        return { read: read as ReviewRead, requiredEvidence: job.required_evidence };
+    });
     return {
         target: target as ReviewWitness["target"],
         evidence: object.evidence,
-        fixture: object.fixture as Record<string, unknown>[],
+        outcomes: object.outcomes as Record<string, unknown>[],
+        fixture,
         production: object.production,
         providerRequests: object.provider_requests as number,
         providerConnections: object.provider_connections as number,
@@ -1153,7 +1186,7 @@ export class HermeticHostStack {
     }
 
     /** Runs a fixture-class and a production-class MemoryReviewer job over the host's stores for the MODULE root `projectRoot`. */
-    async reviewWitness(projectRoot: string): Promise<ReviewWitness> {
+    reviewWitness(projectRoot: string): Promise<ReviewWitness> {
         return this.requireControl().reviewWitness(projectRoot);
     }
 

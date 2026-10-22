@@ -16,9 +16,9 @@ use super::host_ingest::{HostEvidence, ingest};
 use super::tls_peer::json_response;
 
 /// The decision [`materialize_decision`] commits.
-pub const MATERIALIZED_DECISION: &str = "decision-materialized";
+const MATERIALIZED_DECISION: &str = "decision-materialized";
 /// The decision [`publish_fixture_forms`] commits.
-pub const FIXTURE_DECISION: &str = "decision-fixture";
+const FIXTURE_DECISION: &str = "decision-fixture";
 /// A `retain` step citing the first issued alias, the only one a decision-derived subject's run issues.
 pub const RETAIN_STEP: &str = r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":null,"support":[{"alias":"ref-1"}],"contradictions":[],"limitations":["only the form itself was read"],"uncertainty":"medium"}}"#;
 
@@ -86,6 +86,7 @@ pub fn materialize_decision(kernel: &KernelStore, scope: &str, now: i64) -> (Str
         scope,
         "the workspace pins its bun version",
     );
+    // A host's consumer checkpoint can trail its tip by every commit since the host registered it, so one episode spans far more pages than a fresh store needs.
     let report = ClaimMaterializer::new(kernel, kernel::ProviderEgress::LocalOnly)
         .run_episode(
             kernel::CommitPageBounds {
@@ -211,7 +212,7 @@ pub fn select(
     .unwrap()
 }
 
-/// The inputs the selector freezes for each of `descriptors`: its memory at its revision, the fixed question, its own evidence available, and the production policy versions. A decision that cites no evidence links no rows to them.
+/// The inputs the selector freezes for each of `descriptors`, asserted against the selector's own page by the fixture witness: its memory at its revision, the fixed question, its own evidence available, and the production policy versions. A decision that cites no evidence links no rows to them.
 pub fn frozen_inputs(
     descriptors: &[(OccurrenceClass, kernel::LiveDescriptor)],
 ) -> FrozenSelectionPage {

@@ -13755,10 +13755,21 @@ pub mod kernel_route_fixtures {
         }
     }
 
-    /// The project scope a kernel route materializes for `project_root` on its first commit: the route-owned domain and one exact term naming the root's project digest.
-    pub fn route_project_scope(project_root: &Path) -> ScopeSpec {
-        crate::kernel_routes::ProjectBinding::new(project_root)
-            .scope_spec(crate::kernel_routes::commit::PROJECT_SCOPES_DOMAIN_ID)
+    /// Materializes the project scope of `project_root` and its route-owned domain inside `envelope`, as a kernel route's first commit for the project does. Returns the project digest and the scope id.
+    pub fn ensure_route_scope(
+        envelope: &mut Envelope<'_>,
+        project_root: &Path,
+    ) -> Result<(String, String), KernelError> {
+        let project = crate::kernel_routes::ProjectBinding::new(project_root);
+        let (mut ready, mut refused) = (false, None);
+        crate::kernel_routes::commit::ensure_scope(
+            envelope,
+            &project,
+            &mut ready,
+            &mut std::collections::HashSet::new(),
+            &mut refused,
+        )?;
+        Ok((project.digest().to_string(), project.scope_id()))
     }
 
     /// A store-direct ingest of `payload` as evidence `evidence-{key}`,

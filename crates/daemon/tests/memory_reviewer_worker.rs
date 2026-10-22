@@ -48,16 +48,6 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn worker_intent(key: &str) -> kernel::CommitIntent {
-    kernel::CommitIntent {
-        producer: "memory_reviewer-worker-test".to_string(),
-        operation_key: key.to_string(),
-        request_digest: format!("{:x}", sha2::Sha256::digest(key.as_bytes())),
-        actor: "test".to_string(),
-        cause: "fixture".to_string(),
-    }
-}
-
 struct Rig {
     _dirs: Vec<tempfile::TempDir>,
     home: std::path::PathBuf,
@@ -76,7 +66,7 @@ impl Rig {
         let kernel = Arc::new(KernelStore::open(kernel_dir.path()).unwrap());
         // The memory domain every production Kernel commits before a job can exist; holds pin the commit snapshot.
         kernel
-            .commit(worker_intent("domain"), |envelope| {
+            .commit(forms::intent("domain"), |envelope| {
                 envelope.insert_domain(kernel::DomainSpec {
                     domain_id: "memory".to_string(),
                     object_id: "domain-memory".to_string(),
@@ -285,7 +275,7 @@ impl Rig {
             .unwrap();
         if states[0].is_none() {
             self.kernel
-                .commit(worker_intent("scope"), |envelope| {
+                .commit(forms::intent("scope"), |envelope| {
                     envelope.insert_scope(kernel::ScopeSpec {
                         scope_id: scope.clone(),
                         object_id: scope.clone(),
@@ -1695,6 +1685,11 @@ async fn fixture_canonical_and_promoted_forms_reach_readable_proposals_targeting
     let (decision, evidence) = rig.publish_fixture_forms();
     let page = rig.select(MEMORY_CLASSES);
     assert_eq!(page.references.len(), 2, "both forms are selected");
+    assert_eq!(
+        forms::frozen_inputs(&rig.live_descriptors(MEMORY_CLASSES)).references,
+        page.references,
+        "the inputs the production witnesses enqueue past the selector are the ones it freezes"
+    );
     let mut objects = vec![decision.clone()];
     for inputs in &page.references {
         let ReviewTarget::Memory { object_id, .. } = &inputs.target else {

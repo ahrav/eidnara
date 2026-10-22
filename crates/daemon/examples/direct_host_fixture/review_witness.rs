@@ -9,11 +9,12 @@ use std::sync::{Arc, OnceLock};
 use daemon::memory_reviewer::coordinator::InvestigationPermits;
 use daemon::memory_reviewer::model_request::{Endpoint, Providers};
 use daemon::memory_reviewer::selection::MEMORY_CLASSES;
-use daemon::memory_reviewer::settlement::read_selected_proposal;
+use daemon::memory_reviewer::settlement::{list_review_outcomes, read_selected_proposal};
 use daemon::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
 use host_runtime::model_execution::supervisor::Supervisor;
 use kernel::KernelStore;
 use memory_store::MemoryStore;
+use memory_store::memory_reviewer_ledger::MAX_RECEIPT_PAGE;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -28,29 +29,18 @@ const MODEL: &str = "claude-fixture";
 const CREDENTIAL: &str = "ANTHROPIC_API_KEY";
 const CREDENTIAL_IDENTITY: &str = "fixture-credential-identity";
 
-/// The route-owned project scope of `root`, inserted with its domain when no route has committed for the project yet, beside the memory domain the decisions live in. Returns the project digest and the scope id.
+/// The project scope a kernel route materializes for `root`, and the memory domain the decisions live in. Returns the project digest and the scope id.
 fn ensure_route_scope(kernel: &KernelStore, root: &Path) -> Result<(String, String), &'static str> {
-    use daemon::kernel_route_fixtures::{MEMORY_DOMAIN, ensure_domain, route_project_scope};
-    let spec = route_project_scope(root);
-    let scope_id = spec.scope_id.clone();
-    let digest = spec.terms[0]
-        .exact_value
-        .clone()
-        .ok_or("scope_unavailable")?;
+    use daemon::kernel_route_fixtures::{MEMORY_DOMAIN, ensure_domain, ensure_route_scope};
+    let mut scope = None;
     kernel
-        .commit(
-            forms::intent(&format!("review-witness-scope-{digest}")),
-            |envelope| {
-                ensure_domain(envelope, MEMORY_DOMAIN)?;
-                if envelope.scope_terms(&spec.scope_id)?.is_none() {
-                    ensure_domain(envelope, &spec.domain_id)?;
-                    envelope.insert_scope(spec)?;
-                }
-                Ok(String::new())
-            },
-        )
+        .commit(forms::intent("review-witness-scope"), |envelope| {
+            ensure_domain(envelope, MEMORY_DOMAIN)?;
+            scope = Some(ensure_route_scope(envelope, root)?);
+            Ok(String::new())
+        })
         .map_err(|_| "scope_unavailable")?;
-    Ok((digest, scope_id))
+    scope.ok_or("scope_unavailable")
 }
 
 fn worker(
@@ -88,7 +78,7 @@ fn worker(
     })
 }
 
-/// Runs both classes for the MODULE root `project_root`. Answers the originating decision's exact target tokens, the fixture evidence, each fixture job's selected read in the wire's shape, each production job's identity, and the provider requests, connections, and production attempts the pass made.
+/// Runs both classes for the MODULE root `project_root`, once per host: a second run finds its decisions already committed and refuses. Answers the originating decision's exact target tokens, each fixture job's selected read in the wire's shape with the evidence it must cite, each production job's identity, the project's completed outcomes as the ledger lists them, and the provider requests, connections, and production attempts the pass made. A refused precondition answers its code; a failed store write panics the control connection's task, which closes the connection and leaves the reason in the host log.
 pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value, &'static str> {
     let kernel = core.kernel_store_for_test().ok_or("kernel_unavailable")?;
     let store = core.memory_store_for_test().ok_or("store_unavailable")?;
@@ -107,7 +97,11 @@ pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value
     if published != 3 {
         return Err("materializer_published_other_forms");
     }
+    // The inventory is read before the fixture forms exist, so it holds only the materialized forms.
     let production = forms::frozen_inputs(&forms::live_descriptors(&kernel, MEMORY_CLASSES));
+    if production.references.len() != published {
+        return Err("inventory_holds_other_forms");
+    }
     let (decision, evidence) = forms::publish_fixture_forms(&kernel, &scope_id);
     let page = forms::select(&kernel, &store, project, &digest, MEMORY_CLASSES);
     if page.references.len() != 2 {
@@ -167,12 +161,20 @@ pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value
             .map_err(|_| "identity_unavailable")?;
         let selected = read_selected_proposal(&kernel, &store, project, &identity, now_ms())
             .map_err(|_| "proposal_unreadable")?;
+        let required: Vec<&str> = inputs
+            .required_evidence
+            .iter()
+            .map(|evidence| evidence.evidence_id.as_str())
+            .collect();
         fixture.push(json!({
-            "kind": "proposal",
-            "causal_identity": identity,
-            "reference": selected.reference,
-            "proposal": selected.proposal,
-            "review_expires_at": selected.review_expires_at,
+            "read": {
+                "kind": "proposal",
+                "causal_identity": identity,
+                "reference": selected.reference,
+                "proposal": selected.proposal,
+                "review_expires_at": selected.review_expires_at,
+            },
+            "required_evidence": required,
         }));
     }
     let mut production_identities = Vec::new();
@@ -187,9 +189,27 @@ pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value
             .len();
         production_identities.push(identity);
     }
+    let outcomes: Vec<Value> = list_review_outcomes(&store, project, None, MAX_RECEIPT_PAGE)
+        .map_err(|_| "store_unavailable")?
+        .outcomes
+        .iter()
+        .map(|outcome| {
+            let mut item = json!({
+                "causal_identity": outcome.causal_identity,
+                "generation": outcome.generation,
+                "outcome": outcome.terminal.as_str(),
+                "selected": outcome.selected,
+            });
+            if let Some(reason) = outcome.abstained_reason {
+                item["reason"] = json!(reason.as_str());
+            }
+            item
+        })
+        .collect();
     Ok(json!({
         "target": target,
         "evidence": evidence,
+        "outcomes": outcomes,
         "fixture": fixture,
         "production": production_identities,
         "provider_requests": requests,
