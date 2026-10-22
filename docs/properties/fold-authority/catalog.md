@@ -2663,10 +2663,13 @@ Exercised: yes - #1069's folding arm of the whole-array test sends the
 suffix and keeps its head pinned while Eidnara folds".
 Guarantee: Compaction-on adapters retain cold-import measurement, the pinned
 head, the lead slots, and tool-pairing head adjustment.
-Check: `always-or-unreached` - at cold selection while Eidnara folds, the
-suffix and pin follow `coldHead`
+Check: `always-or-unreached` - at cold selection while the consumer's
+configuration lets Eidnara fold, the suffix and pin follow `coldHead`
 (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860-896`);
-unreached under native authority. Falsifier: on mode also omits the hook.
+unreached while the configuration withdraws fold authority. The first
+dispatch of a session whose stored authority is still native under a folding
+configuration runs this selection and is declined on the response (KD-P06).
+Falsifier: on mode also omits the hook.
 Fault/timing angle: A repeat after the pin.
 Required faults and enabling state: The same oversized input under a chain.
 Confidence: high -
@@ -2687,14 +2690,19 @@ Exercised: yes - #1069: the unresolved case in `pi-context-handler.test.ts`
 asserts `transforms.length > 0` and `outcome === "compacted"`; "submits
 passes when the boot project's configuration is unresolved"; the routed
 unresolved arm of the whole-array test inside a compaction-on process.
-Guarantee: A project whose configuration is unresolved does not bypass the
-pass pipeline.
+Guarantee: A project whose configuration is unresolved and whose project
+identity is admitted does not bypass the pass pipeline; an unresolved
+home-directory project without `allow_home_project` has no admitted
+identity and returns before the pipeline, as KD-P01 records.
 Check: `always` - at context handling, the unresolved project's events
-submit passes and Pi's compaction proceeds. Falsifier: the per-project early
-return survives.
+submit passes and Pi's compaction proceeds while `deps.projectIdentity` is
+non-empty; the one return before the pipeline is
+`!eidnaraFolds && !deps.projectIdentity` (`packages/pi-plugin/src/index.ts:572`),
+and an unresolved configuration makes `eidnaraFolds` false. Falsifier: an
+unresolved project with an admitted identity returns before the pipeline.
 Fault/timing angle: None.
 Required faults and enabling state: A malformed project file at the boot cwd
-and in a routed project.
+and in a routed project, each with an admitted project identity.
 Confidence: high -
 [evidence](evidence/kd-p09-unresolved-configuration-requests-delivery.md).
 Existing check: `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247`;
@@ -2717,13 +2725,19 @@ next pass; #1071: the delivered block appears once per request after a Pi
 compaction, and Pi's compaction requests carry no project-memory block or
 session-history shell.
 Guarantee: Successive passes start from the host's session-derived array; a
-served synthetic prefix is never re-ingested, and a host compaction summary
-contains no m0 or m1 text.
+served synthetic prefix is never re-ingested, and Pi's compaction requests
+carry no `<project-memory>` block and no `<session-history>` shell, so the
+host builds its summary without m0 or m1 text as input.
 Check: `always` - at capture, the next `native_messages` carries no id of
 the `eidnara:synthetic:` form the codec mints
 (`crates/daemon/src/codec/pi.rs:38`, `:1537`); the witness asserts it on
 every submitted body (`packages/pi-plugin/src/transform/pi-delivery.test.ts:184`).
-Falsifier: the second ingress contains the first pass's synthetic prefix.
+At every compaction request, the serialized request contains neither
+`<project-memory>` nor `<session-history>`
+(`packages/e2e-tests/tests/pi-rust-delivery.test.ts:197-201`). The summary's
+own text is the model's output and is not asserted; the input-side condition
+is the oracle. Falsifier: the second ingress contains the first pass's
+synthetic prefix; a compaction request carries either marker.
 Fault/timing angle: Repeated turns, host compaction.
 Required faults and enabling state: Three turns and one Pi compaction.
 Confidence: high - [evidence](evidence/kd-p10-request-local-knowledge.md).
@@ -2785,8 +2799,12 @@ Guarantee: Adapters publish accepted daemon knowledge once per request,
 including epoch-HARD updates, and raise no existing budget.
 Check: `always-or-unreached` - at accepted publication, the
 `<project-memory>` block appears once in the request's messages and each
-memory line once in the whole request; unreached for a pass with no stored
-memory. Falsifier: reusing an old m0 instead of the accepted HARD payload.
+memory line appears once inside that block; unreached for a pass with no
+stored memory. The witnesses count each line over the whole request
+(`packages/e2e-tests/tests/pi-rust-delivery.test.ts:167-169`), a tightening
+that holds because their prompts echo no memory text; a user message that
+quotes a memory line is not a second publication. Falsifier: reusing an old
+m0 instead of the accepted HARD payload; two blocks in one request.
 Fault/timing angle: A memory created between passes.
 Required faults and enabling state: An admitted verified memory; a second
 memory seeded between turns; a Pi compaction.

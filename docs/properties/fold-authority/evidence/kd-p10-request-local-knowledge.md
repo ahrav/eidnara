@@ -39,8 +39,11 @@ Three turns and one Pi compaction.
 
 ### Q: Can Pi's compaction summary contain m0 text?
 
-- Sources examined: `pi-rust-delivery.test.ts:184-201`.
-- Findings: No in the witness; both compaction requests exclude both
-  markers.
-- Missing evidence: None.
+- Sources examined: `pi-rust-delivery.test.ts:184-212`.
+- Findings: The witness asserts the input side: both compaction requests
+  exclude both markers (`:197-201`). The summary text itself is the model's
+  output (`:204-212` check only that the stored summary reaches the next
+  request), so the record's guarantee is scoped to the compaction input.
+- Missing evidence: None for the input clause; the summary's content is not
+  under the adapter's control and is not claimed.
 - Conclusion: resolved with answer.

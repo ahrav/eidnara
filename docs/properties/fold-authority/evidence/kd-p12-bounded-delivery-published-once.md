@@ -14,7 +14,9 @@ All references are verified at `07ea883b5`, the head of #1071, which holds
 - `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`: per turn, m0 is
   `<session-history></session-history>` with one `<project-memory>` block
   (`:163-166`), each memory line appears once in the whole request
-  (`:167-169`), and the prompt is last (`:170`); a memory seeded between
+  (`:167-169`, a tightening of the record's once-in-the-block check that
+  holds because the prompts echo no memory text), and the prompt is last
+  (`:170`); a memory seeded between
   turns two and three appears on turn three; after Pi's compaction the
   summary reaches the next request as often as Pi stored it (`:208-212`).
 - `packages/e2e-tests/tests/rust-native-delivery.test.ts:13`: the block once

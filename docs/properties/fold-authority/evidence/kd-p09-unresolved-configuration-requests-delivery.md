@@ -12,7 +12,11 @@ All references are verified at `07ea883b5`, the head of #1071, which holds
 
 - An unresolved admission withdraws fold authority in the Pi loader
   (`packages/pi-plugin/src/config/index.ts:480-515`), so the session's
-  project resolves compaction off.
+  project resolves compaction off, and `eidnaraFolds` is false at
+  `packages/pi-plugin/src/index.ts:571`. The pipeline then runs only while
+  `deps.projectIdentity` is non-empty (`:572`); an unresolved home-directory
+  project without `allow_home_project` has no identity and returns there
+  (`pi-delivery.test.ts:217`; KD-P01).
 - Witnesses: `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247`
   (routed, asserts `transforms.length > 0` and `outcome === "compacted"`);
   `packages/pi-plugin/src/transform/pi-delivery.test.ts:422` (boot cwd,
@@ -31,7 +35,8 @@ quiescent bind (FA-N03, FA-N04); OQ-3 defers that history.
 
 ## What a test must construct
 
-A malformed project file at the boot cwd and in a routed project.
+A malformed project file at the boot cwd and in a routed project, each
+with an admitted project identity.
 
 ## Investigation log
 
