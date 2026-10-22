@@ -4,7 +4,7 @@
 //! Every key it consumes is a [`ConfigKey`] with one [`TierClass`]: the user
 //! tier sets any key; project values apply only as their class permits.
 //! Model selection, memory and user-profile budgets, history_summarizer context and cache
-//! TTL, unattended task schedules, and docs injection are user-only.
+//! TTL, unattended task schedules, docs injection, and source capture are user-only.
 //! Projects may only raise the execute threshold or close the user-memory gate.
 //! No environment variable supplies a configuration value.
 //!
@@ -96,6 +96,10 @@ pub struct DaemonConfig {
     pub memory_enabled: bool,
     /// User-only consent for unattended extraction from completed conversation text.
     pub memory_auto_capture: bool,
+    /// User-only consent to retain the exact bytes of message text and tool results as
+    /// kernel source descriptors. Capture also requires `memory_enabled` and a session
+    /// that is not a subagent's.
+    pub source_capture_enabled: bool,
     /// Auto-search hint controls operate independently at transform time.
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
@@ -145,6 +149,7 @@ impl Default for DaemonConfig {
             compaction_enabled: true,
             memory_enabled: true,
             memory_auto_capture: true,
+            source_capture_enabled: false,
             auto_search: AutoSearchConfig::default(),
             terse_text_compression: TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -420,6 +425,7 @@ impl MergedConfig {
             compaction_enabled: _,
             memory_enabled: _,
             memory_auto_capture: _,
+            source_capture_enabled: _,
             auto_search: _,
             terse_text_compression: _,
             auto_promote: _,
@@ -900,6 +906,7 @@ pub enum ConfigKey {
     CompactionEnabled,
     MemoryEnabled,
     MemoryAutoCapture,
+    SourceCaptureEnabled,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -935,6 +942,7 @@ impl ConfigKey {
         Self::CompactionEnabled,
         Self::MemoryEnabled,
         Self::MemoryAutoCapture,
+        Self::SourceCaptureEnabled,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -967,6 +975,7 @@ impl ConfigKey {
             Self::CompactionEnabled => "/compaction/enabled",
             Self::MemoryEnabled => "/memory/enabled",
             Self::MemoryAutoCapture => "/memory/auto_capture",
+            Self::SourceCaptureEnabled => "/source_capture/enabled",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -991,7 +1000,8 @@ impl ConfigKey {
     }
 
     /// Whether this key can select a model, spend model budget, run an
-    /// unattended task, or widen what such a task reads. Privileged keys are
+    /// unattended task, widen what such a task reads, or retain conversation
+    /// bytes. Privileged keys are
     /// never `ProjectAllowed`; a `const` assertion below checks that at compile
     /// time.
     ///
@@ -1011,6 +1021,7 @@ impl ConfigKey {
             | Self::UserMemoriesEnabled
             | Self::MemoryClassifierInjectDocs
             | Self::MemoryAutoCapture
+            | Self::SourceCaptureEnabled
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -1042,6 +1053,7 @@ impl ConfigKey {
             | Self::HistorySummarizerContextLimitTokens
             | Self::MemoryClassifierInjectDocs
             | Self::MemoryAutoCapture
+            | Self::SourceCaptureEnabled
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -1168,6 +1180,11 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         ConfigKey::MemoryAutoCapture => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.memory_auto_capture = enabled;
+            }
+        }
+        ConfigKey::SourceCaptureEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.source_capture_enabled = enabled;
             }
         }
         ConfigKey::AutoSearchEnabled => {
@@ -2182,6 +2199,7 @@ mod tests {
                 ConfigKey::HistorySummarizerModel,
                 ConfigKey::HistorySummarizerFallbackModels,
                 ConfigKey::MemoryAutoCapture,
+                ConfigKey::SourceCaptureEnabled,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -2209,6 +2227,7 @@ mod tests {
             "execute_threshold_percentage": 70,
             "user_memories": { "enabled": false },
             "memory": { "auto_capture": false },
+            "source_capture": { "enabled": false },
             "memory_classifier": { "inject_docs": false }
         });
         let project = serde_json::json!({
@@ -2231,6 +2250,7 @@ mod tests {
                 "auto_capture": true
             },
             "terse_text_compression": { "enabled": true, "min_chars": 999 },
+            "source_capture": { "enabled": true },
             "user_memories": { "enabled": true },
             "memory_classifier": {
                 "inject_docs": true,
@@ -2266,6 +2286,10 @@ mod tests {
         assert!(
             !cfg.memory_auto_capture,
             "project tier cannot enable unattended capture"
+        );
+        assert!(
+            !cfg.source_capture_enabled,
+            "project tier cannot enable source capture"
         );
         assert_eq!(cfg.inject_docs, user_only.inject_docs);
         assert_eq!(
@@ -2363,7 +2387,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 26);
+        assert_eq!(ConfigKey::ALL.len(), 27);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the
@@ -3180,6 +3204,58 @@ mod tests {
         });
         let cfg = merge_tiers(Some(&user), None);
         assert_eq!(cfg.model_chain, vec!["a", "b", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod source_capture_parity {
+    use super::*;
+
+    const FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/config/__fixtures__/source-capture-parity.json"
+    );
+
+    fn write_tier(dir: &Path, tier: &Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("eidnara.jsonc"), tier.to_string()).unwrap();
+    }
+
+    #[test]
+    fn every_fixture_row_matches_through_the_configuration_cache() {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("the parity fixture parses");
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert!(!rows.is_empty());
+        for row in rows {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            write_tier(&home.path().join("eidnara"), &row["user"]);
+            write_tier(&project.path().join(".eidnara"), &row["project"]);
+            let (config, warnings) = ConfigCache::default().effective_for_env(
+                home.path().to_str(),
+                None,
+                project.path(),
+            );
+            assert_eq!(
+                config.source_capture_enabled,
+                row["expected_enabled"].as_bool().expect("expected_enabled"),
+                "{}",
+                row["name"]
+            );
+            let expected_warnings = usize::from(
+                row["expected_project_warning"]
+                    .as_bool()
+                    .expect("expected_project_warning"),
+            );
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|warning| warning.contains("/source_capture/enabled from project tier"))
+                    .count(),
+                expected_warnings,
+                "{}: {warnings:?}",
+                row["name"]
+            );
+        }
     }
 }
 

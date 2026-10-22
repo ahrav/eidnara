@@ -503,6 +503,18 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    // The block holds only the user-level consent switch, so the strip removes it whole and warns
+    // when it sets that switch, as the daemon's tier merge does.
+    if ("source_capture" in projectRaw) {
+        const sourceCapture = projectRaw.source_capture;
+        delete projectRaw.source_capture;
+        if (isPlainObject(sourceCapture) && "enabled" in sourceCapture) {
+            warnings.push(
+                "Ignoring source_capture from project config (security: retaining exact conversation and tool bytes requires user-level consent).",
+            );
+        }
+    }
+
     for (const field of ["host", "shadow_embedding"] as const) {
         if (field in projectRaw) {
             delete projectRaw[field];

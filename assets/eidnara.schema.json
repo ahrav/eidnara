@@ -628,6 +628,21 @@
       },
       "additionalProperties": false
     },
+    "source_capture": {
+      "default": {
+        "enabled": false
+      },
+      "description": "User-only exact source capture of message text and tool results.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "User-only: retain the exact bytes of user message text, tool outputs, and tool errors as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "temporal_awareness": {
       "default": true,
       "description": "Inject wall-clock gap markers (<!-- +Xm -->) between user messages where > 5 min elapsed since the previous message, and add compact date ranges to history_segment headings. Gives the agent a sense of session pacing and \"how long ago\" across multi-day sessions. Graduated from experimental.temporal_awareness; default: true (set false to opt out).",

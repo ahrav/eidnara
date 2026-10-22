@@ -3,6 +3,8 @@
 //! Identity is native or refused. A message occurrence names the project, harness, durable session, native message, and block position; a raw tool occurrence names the parent message, tool call, result revision, and output block. A payload hash never stands in for a missing identity. An OpenCode record names its session and is refused when it names another; Pi entries carry no session, so the caller's binding of the session file is the session identity. Message parts that are not text (reasoning, steps, files, patches, images) are not text sources and contribute nothing; a tool result whose content is not text is refused, because the tool string is the source and a non-text one has no disposition here. Tool strings are retained exactly as the codec received them and are never joined; a tool result is never part of a message's text, and its class creates no dense work downstream.
 //!
 //! Publication retains each block's exact bytes, then commits its descriptor and admission. Receipt keys make replays idempotent; changed bytes or publishing context conflict. A newer revision invalidates its predecessor atomically. Permanent descriptor refusals attempt to retire retained evidence. Kernel failures, including unmet preconditions such as a missing scope, preserve it; callers decide whether the failure permits retry.
+//!
+//! [`publish_screened`] refuses units larger than [`MAX_SOURCE_UNIT_BYTES`] whole to preserve exact source text. Each batch admits at most [`MAX_SOURCE_BATCH_UNITS`] units, [`MAX_SOURCE_BATCH_BYTES`] of text, and one unit per lineage; excess units wait for a later pass. Publication checks size, identity, revision lead, and scope per unit before the kernel transaction. When the transaction refuses a descriptor, such as a revision that does not advance its lineage, publication removes that unit and retries the remaining units. Each transaction commits its units atomically.
 
 use kernel::source_identity::{
     HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
@@ -466,8 +468,23 @@ const REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
 /// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
 pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
 
+/// The largest unit text capture retains: the memory store's source bound.
+pub const MAX_SOURCE_UNIT_BYTES: usize = memory_store::memory_capture::MAX_CAPTURE_SOURCE_BYTES;
+/// The most units one capture batch admits: the memory-capture message bound.
+pub const MAX_SOURCE_BATCH_UNITS: usize = crate::memory_capture::MAX_CAPTURE_MESSAGES;
+/// The most text, summed over its admitted units, one capture batch retains: the memory-capture input bound.
+pub const MAX_SOURCE_BATCH_BYTES: usize = crate::memory_capture::MAX_CAPTURE_INPUT_BYTES;
+
 /// How long `publish` waits for a kernel reader to consult the stored receipt before offering bytes to the store.
 const RECEIPT_WAIT: Duration = Duration::from_secs(30);
+
+/// The deadline a batch's receipt preview waits until: the receipt wait, or `budget`'s deadline when that is sooner.
+fn preview_deadline(budget: Option<&kernel::applicability::EvalBudget>) -> Instant {
+    let receipt_wait = Instant::now() + RECEIPT_WAIT;
+    budget
+        .and_then(kernel::applicability::EvalBudget::deadline)
+        .map_or(receipt_wait, |deadline| deadline.min(receipt_wait))
+}
 
 /// `egress` controls the provider policy for retained evidence.
 pub struct SourcePublisher<'a> {
@@ -505,13 +522,9 @@ impl SourcePublisher<'_> {
         let evidence_object_id = unit.evidence_object_id();
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.descriptor_intent(&unit);
-        let receipt_wait = Instant::now() + RECEIPT_WAIT;
-        let preview_deadline = budget
-            .and_then(kernel::applicability::EvalBudget::deadline)
-            .map_or(receipt_wait, |deadline| deadline.min(receipt_wait));
         let (_, (stored, provenance)) = self
             .kernel
-            .preview(preview_deadline, |preview| {
+            .preview(preview_deadline(budget), |preview| {
                 self.check_scope(&unit, preview)?;
                 Ok((
                     preview.stored_receipt(descriptor_intent.clone())?,
@@ -688,6 +701,7 @@ impl SourcePublisher<'_> {
             unit,
             identity,
             occurrence_id: encoded.occurrence_id,
+            lineage_id: encoded.lineage_id,
             revision: encoded.revision,
             rule,
             key,
@@ -702,13 +716,25 @@ impl SourcePublisher<'_> {
         unit: &Prepared<'_>,
         envelope: &kernel::Envelope<'_>,
     ) -> Result<(), KernelError> {
-        if let (Some(project), Some(scope_id)) = (&unit.project, self.scope_id)
-            && let Some(terms) = envelope.scope_terms(scope_id)?
-            && !project.names_project(Some(&terms))
-        {
-            return Err(KernelError::NotFound);
+        match (&unit.project, self.scope_id) {
+            (Some(_), Some(scope_id)) => {
+                let terms = envelope.scope_terms(scope_id)?;
+                if Self::scope_admits(unit, terms.as_deref()) {
+                    Ok(())
+                } else {
+                    Err(KernelError::NotFound)
+                }
+            }
+            _ => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Whether the publisher's stored scope `terms` admit the unit's project; an absent scope row admits it here, and the descriptor commit decides it.
+    fn scope_admits(unit: &Prepared<'_>, terms: Option<&[kernel::ScopeTermSpec]>) -> bool {
+        match (&unit.project, terms) {
+            (Some(project), Some(terms)) => project.names_project(Some(terms)),
+            _ => true,
+        }
     }
 
     fn descriptor_intent(&self, unit: &Prepared<'_>) -> CommitIntent {
@@ -900,42 +926,66 @@ pub struct KeyedWrite<'a> {
 ///
 /// # Errors
 ///
-/// Returns the kernel's refusal of the batch, including any unit [`SourcePublisher::publish_within`] would refuse and an exhausted `budget`. Nothing commits; the refusal does not name the unit or write that caused it.
+/// Returns the kernel's refusal of the batch, including any unit [`SourcePublisher::publish_within`] would refuse and an exhausted `budget`. Nothing commits. The refusal names the unit whose identity, scope, stored receipt, or descriptor refused it. A receipt stored under another request digest for the unit's key, or an earlier unit of the batch under the same key with another request, is [`KernelError::Conflict`] naming that unit.
 pub fn publish_batch(
     kernel: &KernelStore,
     writes: Vec<KeyedWrite<'_>>,
     units: &[(&SourcePublisher<'_>, &SourceUnit)],
     observed_at: i64,
     budget: Option<&kernel::applicability::EvalBudget>,
-) -> Result<Vec<Published>, KernelError> {
-    let prepared = units
-        .iter()
-        .map(|(publisher, unit)| publisher.prepare(unit, observed_at))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| KernelError::InvalidInput)?;
-    let receipt_wait = Instant::now() + RECEIPT_WAIT;
-    let preview_deadline = budget
-        .and_then(kernel::applicability::EvalBudget::deadline)
-        .map_or(receipt_wait, |deadline| deadline.min(receipt_wait));
-    let (_, (written, previewed)) = kernel.preview(preview_deadline, |preview| {
-        let written = writes
-            .iter()
-            .map(|write| Ok(preview.stored_receipt(write.intent.clone())?.is_some()))
-            .collect::<Result<Vec<bool>, KernelError>>()?;
-        let previewed = units
-            .iter()
-            .zip(&prepared)
-            .map(|((publisher, _), unit)| {
-                publisher.check_scope(unit, preview)?;
-                Ok((
-                    preview.stored_receipt(publisher.descriptor_intent(unit))?,
-                    unit.rule.resolve(preview)?,
-                    preview.stored_receipt(publisher.evidence_intent(unit))?,
-                ))
-            })
-            .collect::<Result<Vec<_>, KernelError>>()?;
-        Ok((written, previewed))
-    })?;
+) -> Result<Vec<Published>, BatchRefusal> {
+    let mut prepared = Vec::with_capacity(units.len());
+    for (index, (publisher, unit)) in units.iter().enumerate() {
+        prepared.push(
+            publisher
+                .prepare(unit, observed_at)
+                .map_err(|_| BatchRefusal {
+                    error: KernelError::InvalidInput,
+                    unit: Some(index),
+                    refusal: None,
+                })?,
+        );
+    }
+    // Two units under one key with different requests would claim one receipt twice in this commit; the later one is the conflict.
+    let mut digests = std::collections::HashMap::with_capacity(prepared.len());
+    for (index, unit) in prepared.iter().enumerate() {
+        if let Some(digest) = digests.insert(unit.key.as_str(), unit.request_digest.as_str())
+            && digest != unit.request_digest
+        {
+            return Err(BatchRefusal {
+                error: KernelError::Conflict,
+                unit: Some(index),
+                refusal: None,
+            });
+        }
+    }
+    let preview_deadline = preview_deadline(budget);
+    let mut culprit = None;
+    let (_, (written, previewed)) = kernel
+        .preview(preview_deadline, |preview| {
+            let written = writes
+                .iter()
+                .map(|write| Ok(preview.stored_receipt(write.intent.clone())?.is_some()))
+                .collect::<Result<Vec<bool>, KernelError>>()?;
+            let mut previewed = Vec::with_capacity(units.len());
+            for (index, ((publisher, _), unit)) in units.iter().zip(&prepared).enumerate() {
+                let step = || {
+                    publisher.check_scope(unit, preview)?;
+                    Ok((
+                        preview.stored_receipt(publisher.descriptor_intent(unit))?,
+                        unit.rule.resolve(preview)?,
+                        preview.stored_receipt(publisher.evidence_intent(unit))?,
+                    ))
+                };
+                previewed.push(step().inspect_err(|_| culprit = Some(index))?);
+            }
+            Ok((written, previewed))
+        })
+        .map_err(|error| BatchRefusal {
+            error,
+            unit: culprit,
+            refusal: None,
+        })?;
     let writes: Vec<KeyedWrite<'_>> = writes
         .into_iter()
         .zip(written)
@@ -1005,8 +1055,9 @@ pub fn publish_batch(
     }
     let main_is_write = !writes.is_empty();
     let mut published: Vec<Published> = Vec::with_capacity(pending.len());
-    let receipt =
-        kernel.ingest_exact_artifacts_with(main, requests, budget, |envelope, handles| {
+    let mut culprit = None;
+    let receipt = kernel
+        .ingest_exact_artifacts_with(main, requests, budget, |envelope, handles| {
             let mut main_result = None;
             for (position, write) in writes.into_iter().enumerate() {
                 let intent = write.intent;
@@ -1024,17 +1075,49 @@ pub fn publish_batch(
                     .get(&owner)
                     .unwrap_or_else(|| &handles[request_of[&owner]]);
                 let evidence_object_id = prepared[owner].evidence_object_id();
-                let sensitivity = envelope
-                    .object_state(&evidence_object_id)?
-                    .ok_or(KernelError::NotFound)?
-                    .object
-                    .sensitivity;
-                let (descriptor, provenance) =
-                    publisher.apply(envelope, unit, handle, sensitivity, observed_at, &mut None)?;
-                if main_is_write || !published.is_empty() {
-                    envelope
-                        .record_receipt(publisher.descriptor_intent(unit), &descriptor.object_id)?;
-                } else {
+                let records_receipt = main_is_write || !published.is_empty();
+                let mut refusal = None;
+                // The error carries whether the unit's own receipt write refused.
+                let mut step = || {
+                    let sensitivity = envelope
+                        .object_state(&evidence_object_id)
+                        .and_then(|state| state.ok_or(KernelError::NotFound))
+                        .map_err(|error| (error, false))?
+                        .object
+                        .sensitivity;
+                    let (descriptor, provenance) = publisher
+                        .apply(
+                            envelope,
+                            unit,
+                            handle,
+                            sensitivity,
+                            observed_at,
+                            &mut refusal,
+                        )
+                        .map_err(|error| (error, false))?;
+                    if records_receipt {
+                        envelope
+                            .record_receipt(
+                                publisher.descriptor_intent(unit),
+                                &descriptor.object_id,
+                            )
+                            .map_err(|error| (error, true))?;
+                    }
+                    Ok((descriptor, provenance))
+                };
+                // A conflict on the unit's own receipt is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
+                let (descriptor, provenance) = step().map_err(|(error, receipt)| {
+                    if !(receipt && error == KernelError::Conflict) {
+                        culprit = Some((
+                            index,
+                            refusal.and_then(Result::err).filter(|refusal| {
+                                !matches!(refusal, SourceDescriptorError::Kernel(_))
+                            }),
+                        ));
+                    }
+                    error
+                })?;
+                if !records_receipt {
                     main_result = Some(descriptor.object_id.clone());
                 }
                 published.push(Published {
@@ -1047,10 +1130,19 @@ pub fn publish_batch(
                 });
             }
             Ok(main_result.expect("the batch commits a write or a unit"))
+        })
+        .map_err(|error| BatchRefusal {
+            error,
+            unit: culprit.map(|(index, _)| index),
+            refusal: culprit.and_then(|(_, refusal)| refusal),
         })?;
     // A receipt committed under the main key since the preview ran no operation.
     if receipt.replayed || published.len() != pending.len() {
-        return Err(KernelError::Conflict);
+        return Err(BatchRefusal {
+            error: KernelError::Conflict,
+            unit: None,
+            refusal: None,
+        });
     }
     for (index, published) in pending.into_iter().zip(published) {
         outcomes[index] = Some(published);
@@ -1061,10 +1153,162 @@ pub fn publish_batch(
         .collect())
 }
 
+/// A batch attempt that committed nothing.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the batch committed nothing: {error}")]
+pub struct BatchRefusal {
+    /// The cause: [`KernelError::Conflict`] when `unit`'s key already holds a receipt under another request digest.
+    pub error: KernelError,
+    /// The index in the caller's units whose identity validation, scope check, receipt lookup, or descriptor commit failed. The cause can be transient, such as [`KernelError::Deadline`] or [`KernelError::Busy`]. `None` identifies a refusal involving the batch, one of its writes, or a receipt another writer committed after this attempt's preview.
+    pub unit: Option<usize>,
+    /// The descriptor refusal of `unit` inside the commit, such as [`SourceDescriptorError::RevisionNotAdvanced`]. A kernel failure inside descriptor publication leaves this `None` and is `error`.
+    pub refusal: Option<SourceDescriptorError>,
+}
+
+impl BatchRefusal {
+    /// The unit whose key holds a receipt under another request digest: changed bytes or publishing context under one identity and revision. Unchanged input refuses the same way on every attempt, so the caller marks that unit terminal and offers its siblings again.
+    pub fn conflicting_unit(&self) -> Option<usize> {
+        self.unit.filter(|_| self.error == KernelError::Conflict)
+    }
+}
+
+/// What a screened capture batch did with one unit.
+#[derive(Debug)]
+pub enum UnitDisposition {
+    /// Published in the batch's commit, or answered from a stored receipt.
+    Published(Published),
+    /// The text exceeds [`MAX_SOURCE_UNIT_BYTES`]. Nothing was retained, and unchanged input refuses again.
+    UnitTooLarge,
+    /// The batch reached its unit or byte bound first, or an admitted unit shares the unit's lineage. The unit remains available for a later pass to offer again.
+    Deferred,
+    /// The publisher rejects the unit's identity, revision, or scope binding before the transaction, or the commit rejects its descriptor and [`publish_screened`] retries the batch without it. [`PublishError::is_permanent`] indicates whether unchanged input will be rejected again.
+    Refused(PublishError),
+}
+
+/// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
+///
+/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit of an admitted unit's lineage is [`UnitDisposition::Deferred`], except a changed request under the admitted unit's key, which is [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`]. When the commit refuses an admitted unit's descriptor, that unit is [`UnitDisposition::Refused`] with [`PublishError::Descriptor`], and the remaining admitted units are committed in another attempt. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
+///
+/// # Errors
+///
+/// Returns the scope read's failure with no unit, or [`publish_batch`]'s refusal of the admitted units, whose `unit` is the position in `units`. Nothing commits.
+pub fn publish_screened(
+    publisher: &SourcePublisher<'_>,
+    units: &[SourceUnit],
+    observed_at: i64,
+    budget: Option<&kernel::applicability::EvalBudget>,
+) -> Result<Vec<UnitDisposition>, BatchRefusal> {
+    let mut dispositions: Vec<Option<UnitDisposition>> = Vec::with_capacity(units.len());
+    let mut terms: Option<Option<Vec<kernel::ScopeTermSpec>>> = None;
+    let mut admitted = Vec::new();
+    let mut admitted_lineages: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let mut admitted_bytes = 0usize;
+    let mut full = false;
+    for (index, unit) in units.iter().enumerate() {
+        let len = unit.text.len();
+        if len > MAX_SOURCE_UNIT_BYTES {
+            dispositions.push(Some(UnitDisposition::UnitTooLarge));
+            continue;
+        }
+        if full {
+            dispositions.push(Some(UnitDisposition::Deferred));
+            continue;
+        }
+        let prepared = match publisher.prepare(unit, observed_at) {
+            Ok(prepared) => prepared,
+            Err(refusal) => {
+                dispositions.push(Some(UnitDisposition::Refused(refusal)));
+                continue;
+            }
+        };
+        if let (Some(_), Some(scope_id)) = (&prepared.project, publisher.scope_id) {
+            if terms.is_none() {
+                let (_, read) = publisher
+                    .kernel
+                    .preview(preview_deadline(budget), |preview| {
+                        preview.scope_terms(scope_id)
+                    })
+                    .map_err(|error| BatchRefusal {
+                        error,
+                        unit: None,
+                        refusal: None,
+                    })?;
+                terms = Some(read);
+            }
+            if !SourcePublisher::scope_admits(&prepared, terms.as_ref().and_then(Option::as_deref))
+            {
+                dispositions.push(Some(UnitDisposition::Refused(PublishError::Kernel {
+                    error: KernelError::NotFound,
+                    evidence: None,
+                })));
+                continue;
+            }
+        }
+        // Each commit publishes at most one revision per lineage, so additional nonconflicting units in an admitted lineage wait for another pass.
+        if let Some((key, digest)) = admitted_lineages.get(prepared.lineage_id.as_str()) {
+            dispositions.push(Some(
+                if *key == prepared.key && *digest != prepared.request_digest {
+                    UnitDisposition::Refused(PublishError::IdentityReused)
+                } else {
+                    UnitDisposition::Deferred
+                },
+            ));
+            continue;
+        }
+        if admitted.len() == MAX_SOURCE_BATCH_UNITS || admitted_bytes + len > MAX_SOURCE_BATCH_BYTES
+        {
+            full = true;
+            dispositions.push(Some(UnitDisposition::Deferred));
+            continue;
+        }
+        admitted_lineages.insert(prepared.lineage_id, (prepared.key, prepared.request_digest));
+        admitted.push(index);
+        admitted_bytes += len;
+        dispositions.push(None);
+    }
+    // Each retry removes one admitted unit, so publish attempts are bounded by the initial admitted count.
+    while !admitted.is_empty() {
+        let batch: Vec<(&SourcePublisher<'_>, &SourceUnit)> = admitted
+            .iter()
+            .map(|&index| (publisher, &units[index]))
+            .collect();
+        match publish_batch(publisher.kernel, Vec::new(), &batch, observed_at, budget) {
+            Ok(published) => {
+                for (index, published) in admitted.drain(..).zip(published) {
+                    dispositions[index] = Some(UnitDisposition::Published(published));
+                }
+            }
+            Err(BatchRefusal {
+                unit: Some(position),
+                refusal: Some(refusal),
+                ..
+            }) => {
+                dispositions[admitted.remove(position)] =
+                    Some(UnitDisposition::Refused(PublishError::Descriptor {
+                        refusal,
+                        evidence: None,
+                    }));
+            }
+            Err(refusal) => {
+                return Err(BatchRefusal {
+                    unit: refusal.unit.map(|position| admitted[position]),
+                    ..refusal
+                });
+            }
+        }
+    }
+    Ok(dispositions
+        .into_iter()
+        .map(|disposition| disposition.expect("every unit has a disposition"))
+        .collect())
+}
+
 struct Prepared<'u> {
     unit: &'u SourceUnit,
     identity: Vec<(&'u str, &'u str)>,
     occurrence_id: String,
+    lineage_id: String,
     revision: i64,
     rule: ProvenanceRule,
     key: String,

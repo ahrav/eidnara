@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use daemon::embedding_dispatch::{DispatchBounds, DispatchEvent, EmbeddingDispatcher};
 use daemon::harness_sources::{
-    AdapterRefusal, Harness, PublishError, Representation, SessionIdentity, SourcePublisher,
-    SourceUnit, opencode_units, pi_units,
+    AdapterRefusal, Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_BATCH_UNITS, MAX_SOURCE_UNIT_BYTES,
+    PublishError, Representation, SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition,
+    opencode_units, pi_units, publish_screened,
 };
 use daemon::search_projection::SearchProjection;
 use host_runtime::local_embeddings::inference::InferenceError;
@@ -2112,4 +2113,443 @@ fn c6_original_revision_bytes_read_exactly_after_succession_and_reopen() {
         "consumer_exact_recovery": "unavailable",
     }))
     .emit();
+}
+
+/// One Pi user text unit `id` whose text is `text`.
+fn pi_text_unit(id: &str, text: &str) -> SourceUnit {
+    pi_text_unit_at(id, text, 100)
+}
+
+fn pi_text_unit_at(id: &str, text: &str, stamp: u64) -> SourceUnit {
+    pi_units(&pi_session(), &pi_user(id, text, stamp))
+        .unwrap()
+        .remove(0)
+}
+
+/// `(count, largest byte length)` of the evidence rows the kernel holds.
+fn evidence_rows(corpus: &Corpus) -> (i64, i64) {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(byte_length), 0) FROM evidence_meta",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// Operation keys of every receipt the harness-source publisher recorded.
+fn publisher_receipts(corpus: &Corpus) -> BTreeSet<String> {
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT operation_key FROM operation_receipts
+             WHERE producer='eidnara-daemon/harness-sources'",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn published(disposition: &UnitDisposition) -> &daemon::harness_sources::Published {
+    match disposition {
+        UnitDisposition::Published(published) => published,
+        other => panic!("expected a publication, got {other:?}"),
+    }
+}
+
+/// AC8, first two clauses: a unit of exactly the cap publishes with artifact bytes equal to its text; a unit one byte over is refused whole with no evidence and no receipt while its siblings publish.
+#[test]
+fn capture_batch_refuses_an_oversized_unit_whole_and_publishes_its_siblings() {
+    assert_eq!(MAX_SOURCE_UNIT_BYTES, 64 * 1024);
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    let at_cap = "a".repeat(MAX_SOURCE_UNIT_BYTES - 1) + "\n";
+    let dispositions =
+        publish_screened(&publisher, &[pi_text_unit("pi-cap", &at_cap)], NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    let rows = live_messages_at(&corpus.kernel, corpus.tip());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(read(&corpus.kernel, &rows[0]).unwrap(), at_cap.as_bytes());
+    assert_eq!(evidence_rows(&corpus), (1, MAX_SOURCE_UNIT_BYTES as i64));
+
+    let receipts = publisher_receipts(&corpus);
+    let over_cap = "b".repeat(MAX_SOURCE_UNIT_BYTES + 1);
+    let units = [
+        pi_text_unit("pi-a", "first sibling"),
+        pi_text_unit("pi-big", &over_cap),
+        pi_text_unit("pi-b", "second sibling"),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    assert!(matches!(dispositions[1], UnitDisposition::UnitTooLarge));
+    assert!(!published(&dispositions[2]).replayed);
+    let texts: BTreeSet<String> = inventory(&corpus)
+        .into_iter()
+        .map(|(_, text, _)| text)
+        .collect();
+    assert!(texts.contains("first sibling") && texts.contains("second sibling"));
+    assert_eq!(
+        evidence_rows(&corpus),
+        (3, MAX_SOURCE_UNIT_BYTES as i64),
+        "the oversized unit retained no evidence"
+    );
+    let added: Vec<String> = publisher_receipts(&corpus)
+        .difference(&receipts)
+        .cloned()
+        .collect();
+    assert_eq!(
+        added.len(),
+        4,
+        "a descriptor and an evidence receipt per sibling, none for the refused unit: {added:?}"
+    );
+
+    // The refusal is terminal for unchanged input and still retains nothing.
+    let tip = corpus.tip();
+    let again = publish_screened(&publisher, &units[1..2], NOW, None).unwrap();
+    assert!(matches!(again[0], UnitDisposition::UnitTooLarge));
+    assert_eq!(corpus.tip(), tip);
+}
+
+/// AC8, third clause: a 33-unit window publishes 32 and defers exactly one; a window whose text exceeds the aggregate bound defers the units beyond it.
+#[test]
+fn capture_batch_defers_units_beyond_its_bounds() {
+    assert_eq!(MAX_SOURCE_BATCH_UNITS, 32);
+    assert_eq!(MAX_SOURCE_BATCH_BYTES, 64 * 1024);
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    let units: Vec<SourceUnit> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| pi_text_unit(&format!("pi-{index}"), &format!("unit {index}")))
+        .collect();
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let deferred: Vec<usize> = dispositions
+        .iter()
+        .enumerate()
+        .filter(|(_, disposition)| matches!(disposition, UnitDisposition::Deferred))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(deferred, vec![MAX_SOURCE_BATCH_UNITS]);
+    assert_eq!(inventory(&corpus).len(), MAX_SOURCE_BATCH_UNITS);
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        MAX_SOURCE_BATCH_UNITS as i64,
+        "the deferred unit retained nothing"
+    );
+
+    // The next pass replays the 32 and publishes the deferred unit.
+    let dispositions = publish_screened(&publisher, &units[1..], NOW, None).unwrap();
+    assert!(
+        dispositions[..MAX_SOURCE_BATCH_UNITS - 1]
+            .iter()
+            .all(|disposition| published(disposition).replayed)
+    );
+    assert!(!published(&dispositions[MAX_SOURCE_BATCH_UNITS - 1]).replayed);
+    assert_eq!(inventory(&corpus).len(), MAX_SOURCE_BATCH_UNITS + 1);
+
+    let third = MAX_SOURCE_BATCH_BYTES / 3 + 1;
+    let heavy: Vec<SourceUnit> = ["x", "y", "z"]
+        .iter()
+        .map(|fill| pi_text_unit(&format!("pi-heavy-{fill}"), &fill.repeat(third)))
+        .chain([pi_text_unit("pi-light", "small after the bound")])
+        .collect();
+    let dispositions = publish_screened(&publisher, &heavy, NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    assert!(!published(&dispositions[1]).replayed);
+    assert!(matches!(dispositions[2], UnitDisposition::Deferred));
+    assert!(
+        matches!(dispositions[3], UnitDisposition::Deferred),
+        "admission keeps window order, so a unit after the bound waits too"
+    );
+}
+
+/// Identity refusals are decided per unit before the transaction; a sibling still publishes.
+#[test]
+fn capture_batch_refuses_a_malformed_identity_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let mut oversized_identity = pi_text_unit("pi-x", "refused identity");
+    oversized_identity.identity[2].1 = "s".repeat(600);
+    let units = [oversized_identity, pi_text_unit("pi-ok", "kept")];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(
+        matches!(
+            &dispositions[0],
+            UnitDisposition::Refused(PublishError::Descriptor {
+                refusal: SourceDescriptorError::Occurrence(_),
+                evidence: None,
+            })
+        ),
+        "{:?}",
+        dispositions[0]
+    );
+    assert!(!published(&dispositions[1]).replayed);
+    assert_eq!(evidence_rows(&corpus).0, 1);
+}
+
+/// A same-key digest conflict fails the attempt, commits nothing, and names the conflicting unit, so the caller marks it terminal and its siblings publish on their own.
+#[test]
+fn capture_batch_names_the_unit_whose_receipt_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    publisher
+        .publish(&pi_text_unit("pi-edited", "original"), NOW)
+        .unwrap();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+
+    let units = [
+        pi_text_unit("pi-fresh", "fresh sibling"),
+        pi_text_unit("pi-edited", "edited in place"),
+    ];
+    let refusal = publish_screened(&publisher, &units, NOW, None).unwrap_err();
+    assert_eq!(refusal.error, kernel::KernelError::Conflict);
+    assert_eq!(refusal.unit, Some(1));
+    assert_eq!(refusal.conflicting_unit(), Some(1));
+    assert_eq!(corpus.tip(), tip, "nothing committed");
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+
+    let dispositions = publish_screened(&publisher, &units[..1], NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+}
+
+/// Refused and oversized units take no admission slot: 32 valid units around them all publish.
+#[test]
+fn capture_batch_refusals_take_no_admission_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let mut units: Vec<SourceUnit> = (0..MAX_SOURCE_BATCH_UNITS)
+        .map(|index| pi_text_unit(&format!("pi-{index}"), &format!("unit {index}")))
+        .collect();
+    let mut malformed = pi_text_unit("pi-malformed", "refused identity");
+    malformed.identity[2].1 = "s".repeat(600);
+    units.insert(
+        10,
+        pi_text_unit("pi-big", &"b".repeat(MAX_SOURCE_UNIT_BYTES + 1)),
+    );
+    units.insert(20, malformed);
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(matches!(dispositions[10], UnitDisposition::UnitTooLarge));
+    assert!(matches!(
+        dispositions[20],
+        UnitDisposition::Refused(PublishError::Descriptor { .. })
+    ));
+    let published = dispositions
+        .iter()
+        .filter(|disposition| matches!(disposition, UnitDisposition::Published(_)))
+        .count();
+    assert_eq!(published, MAX_SOURCE_BATCH_UNITS);
+    assert!(
+        !dispositions
+            .iter()
+            .any(|disposition| matches!(disposition, UnitDisposition::Deferred))
+    );
+}
+
+/// A unit whose project the publisher's stored scope does not name is refused on its own before the transaction; its sibling publishes.
+#[test]
+fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let mut foreign = pi_text_unit("pi-foreign", "another project");
+    foreign.identity[0].1 = "b".repeat(64);
+    let units = [foreign, pi_text_unit("pi-home", "this project")];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(
+        matches!(
+            &dispositions[0],
+            UnitDisposition::Refused(PublishError::Kernel {
+                error: kernel::KernelError::NotFound,
+                evidence: None,
+            })
+        ),
+        "{:?}",
+        dispositions[0]
+    );
+    assert!(!published(&dispositions[1]).replayed);
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        1,
+        "the foreign unit retained nothing"
+    );
+}
+
+/// One window naming a unit twice: an equal repeat waits for a later pass, and a changed repeat under the same identity and revision is refused on its own while the first publishes.
+#[test]
+fn capture_batch_screens_a_repeated_identity_per_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let units = [
+        pi_text_unit("pi-twice", "first bytes"),
+        pi_text_unit("pi-twice", "first bytes"),
+        pi_text_unit("pi-twice", "second bytes"),
+    ];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    assert!(matches!(dispositions[1], UnitDisposition::Deferred));
+    assert!(matches!(
+        dispositions[2],
+        UnitDisposition::Refused(PublishError::IdentityReused)
+    ));
+    assert_eq!(evidence_rows(&corpus).0, 1);
+
+    let again = publish_screened(&corpus.publisher(), &units[1..2], NOW, None).unwrap();
+    assert!(published(&again[0]).replayed);
+}
+
+#[test]
+fn capture_batch_refuses_a_stale_revision_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    publisher
+        .publish(&pi_text_unit_at("pi-stale", "newer", 200), NOW)
+        .unwrap();
+    let receipts = publisher_receipts(&corpus);
+    let units = [
+        pi_text_unit("pi-fresh", "fresh sibling"),
+        pi_text_unit_at("pi-stale", "older", 100),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    assert!(
+        matches!(
+            &dispositions[1],
+            UnitDisposition::Refused(PublishError::Descriptor {
+                refusal: SourceDescriptorError::RevisionNotAdvanced,
+                evidence: None,
+            })
+        ),
+        "{:?}",
+        dispositions[1]
+    );
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        2,
+        "the stale unit retained no evidence"
+    );
+    assert_eq!(
+        publisher_receipts(&corpus).difference(&receipts).count(),
+        2,
+        "receipts for the sibling only"
+    );
+}
+
+#[test]
+fn capture_batch_defers_a_second_revision_of_an_admitted_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let units = [
+        pi_text_unit_at("pi-edited", "first revision", 100),
+        pi_text_unit("pi-sibling", "sibling"),
+        pi_text_unit_at("pi-edited", "second revision", 200),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let first = published(&dispositions[0]);
+    assert!(!first.replayed);
+    assert!(!published(&dispositions[1]).replayed);
+    assert!(
+        matches!(dispositions[2], UnitDisposition::Deferred),
+        "{:?}",
+        dispositions[2]
+    );
+
+    let again = publish_screened(&publisher, &units[2..], NOW, None).unwrap();
+    let second = published(&again[0]);
+    assert!(!second.replayed);
+    assert_eq!(second.replaced_object_id.as_ref(), Some(&first.object_id));
+}
+
+/// `publish_batch` names the unit whose step refused the attempt and commits nothing; only a receipt conflict is a terminal conflict.
+#[test]
+fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
+    use daemon::harness_sources::publish_batch;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    publisher
+        .publish(
+            &pi_units(&pi_session(), &pi_user("pi-stale", "newer", 200))
+                .unwrap()
+                .remove(0),
+            NOW,
+        )
+        .unwrap();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let fresh = pi_text_unit("pi-fresh", "fresh sibling");
+
+    // Two requests under one key in one batch: the later one is the conflict.
+    let changed = pi_text_unit("pi-fresh", "changed sibling");
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &fresh), (&publisher, &changed)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.conflicting_unit(), Some(1), "{refusal:?}");
+
+    // A foreign project fails the receipt preview's scope check: named, not terminal.
+    let mut foreign = pi_text_unit("pi-foreign", "another project");
+    foreign.identity[0].1 = "b".repeat(64);
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &foreign), (&publisher, &fresh)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, kernel::KernelError::NotFound);
+    assert_eq!(refusal.unit, Some(0));
+    assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(refusal.refusal, None);
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "refusals before the transaction stage no bytes"
+    );
+
+    // A revision below the live one passes the preview and is refused by its descriptor inside the commit.
+    let stale = pi_units(&pi_session(), &pi_user("pi-stale", "older", 100))
+        .unwrap()
+        .remove(0);
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &fresh), (&publisher, &stale)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, kernel::KernelError::InvalidInput);
+    assert_eq!(refusal.unit, Some(1));
+    assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(
+        refusal.refusal,
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+
+    assert_eq!(corpus.tip(), tip, "no refused attempt committed");
 }

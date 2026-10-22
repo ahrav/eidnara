@@ -62,6 +62,27 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("host"))).toBe(true);
     });
 
+    it("strips source_capture from project config in either direction", () => {
+        for (const enabled of [true, false]) {
+            const raw: Record<string, unknown> = {
+                protected_tags: 3,
+                source_capture: { enabled },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ protected_tags: 3 });
+            expect(warnings).toEqual([
+                expect.stringContaining("Ignoring source_capture from project config"),
+            ]);
+        }
+        for (const sourceCapture of [{}, true, null]) {
+            const raw: Record<string, unknown> = { source_capture: sourceCapture };
+            expect(stripUnsafeProjectConfigFields(raw)).toEqual([]);
+            expect(raw).toEqual({});
+        }
+    });
+
     it("strips sqlite.* from project config (resource-exhaustion vector)", () => {
         const raw: Record<string, unknown> = {
             sqlite: { cache_size_mb: 999_999, mmap_size_mb: 999_999 },
