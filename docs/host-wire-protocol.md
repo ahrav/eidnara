@@ -947,10 +947,10 @@ It, `memory.enabled`, and `memory.auto_promote` must all
 permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
 it from the project tier before merging. It consents to a different capture:
-the daemon retaining the exact bytes of user message text, tool outputs, and
-tool errors as Kernel source descriptors. That capture is reserved: the
-current daemon accepts and merges the key and retains no source bytes. A
-daemon that performs source capture runs it only when
+the daemon retaining the exact bytes of user and completed assistant message
+text, tool outputs, and tool errors as Kernel source descriptors, published by
+a background supervisor after the transform response settles and reported
+through `metrics.source_capture`. Source capture runs only when
 `source_capture.enabled` and `memory.enabled` both permit it, and a session
 marked `is_subagent` never captures. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
