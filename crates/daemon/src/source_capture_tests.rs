@@ -1238,7 +1238,7 @@ fn live_for_session(store: &KernelStore, session_id: &str) -> Vec<LiveDescriptor
         .collect()
 }
 
-/// AC5 and AC15 (`sc-delete-retires-before-memory-store-delete`, `sc-delete-retry-recovers-crash-between-stores`): `session.delete` retires every live `messages` and `raw_tool_spans` descriptor the session owns before the memory-store delete. The retired rows stay readable as history, and another session of the project keeps its descriptors. An application-fault cut between the Kernel commit and the memory-store delete (F23) leaves the memory rows; one retry answers `ok`, commits nothing new, and completes the delete. The cut runs in one process, so it covers the durable state of both stores and leaves the loss of in-memory capture state and power loss to the restart tests.
+/// AC5 and AC15 (`sc-delete-retires-before-memory-store-delete`, `sc-delete-retry-recovers-crash-between-stores`): `session.delete` retires every live `messages` and `raw_tool_spans` descriptor the session owns before the memory-store delete. The retired rows stay readable as history, and another session of the project keeps its descriptors. An application-fault cut between the Kernel commit and the memory-store delete (F23) leaves the memory rows; one retry answers `ok`, commits nothing new, and completes the delete. The cut runs in one process; process restart and power loss are not exercised.
 #[tokio::test]
 async fn session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
@@ -1380,7 +1380,7 @@ async fn a_delete_before_the_first_publication_drops_the_pending_capture() {
     assert!(live_for_session(&store, SESSION).is_empty());
 }
 
-/// D11 scope and the cut between pages: the delete retires exactly the bound project, harness, and session; the same session id under another project or another harness keeps its descriptors. A retirement stopped after its first page leaves the rest live and the memory rows in place, and one `session.delete` then answers `ok` with nothing of the session live.
+/// D11 scope and the cut between pages: the delete retires exactly the bound project, harness, and session; the same session id under another project or another harness keeps its descriptors. A retirement stopped after its first page leaves the rest live, and one `session.delete` then answers `ok` with nothing of the session live; pages of one row walk another project's messages and tool results to the end.
 #[tokio::test]
 async fn session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages() {
     let (handler, dir, project) = capture_handler(capture_config(true), true).await;
@@ -1449,9 +1449,34 @@ async fn session_delete_retires_only_its_own_captures_and_recovers_a_stop_betwee
         others,
         "another project or harness keeps its captures"
     );
+
+    // Pages of one row walk the other project's messages and tool results to the end and leave the Pi rows.
+    let digest_b = kernel_routes::ProjectBinding::new(&elsewhere)
+        .digest()
+        .to_owned();
+    let project_b = source_capture::CapturedSession {
+        project_id: &digest_b,
+        harness: "opencode",
+        session_id: SESSION,
+    };
+    assert!(
+        source_capture::retire_session_pages(
+            &store,
+            project_b,
+            NonZeroUsize::new(1).unwrap(),
+            usize::MAX,
+        )
+        .unwrap()
+    );
+    let left = live_for_session(&store, SESSION);
+    assert!(!left.is_empty());
+    assert!(
+        left.iter()
+            .all(|row| identity_of(row)[1] == ("harness", "pi"))
+    );
 }
 
-/// C8-style page receipts: a page's key and digest depend on the session's identity fields and the page's ids only, so equal inputs give one key and any change gives another; committing the same page again replays, and a replayed page fails the retirement closed.
+/// C8-style page receipts: a page's key and digest depend on the session's identity fields and the page's ids only, so equal inputs give one key and any change gives another; committing the same page again replays.
 #[tokio::test]
 async fn session_retirement_pages_are_keyed_by_session_and_ids() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;

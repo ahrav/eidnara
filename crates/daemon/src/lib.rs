@@ -6815,8 +6815,7 @@ impl HandlerCore {
         };
         let page_rows = std::num::NonZeroUsize::new(source_capture::SESSION_RETIREMENT_PAGE)
             .expect("a nonzero page");
-        source_capture::retire_session_pages(&kernel, session, page_rows, usize::MAX)
-            .map(|_| ())
+        let retired = source_capture::retire_session_pages(&kernel, session, page_rows, usize::MAX)
             .map_err(|error| PreparedOutcome::Error {
                 code: match error {
                     kernel::KernelError::Conflict
@@ -6826,7 +6825,16 @@ impl HandlerCore {
                 }
                 .to_string(),
                 message: format!("captured sources not retired: {error}"),
+            })?;
+        // Every page ran, so the session holds no live captured source; the memory delete may follow.
+        if retired {
+            Ok(())
+        } else {
+            Err(PreparedOutcome::Error {
+                code: "kernel_unavailable".to_string(),
+                message: "captured sources not retired: the page bound ran out".to_string(),
             })
+        }
     }
 
     /// `session.delete` removes the bound session in two stores, in order, under the capture commit gate:
@@ -6839,7 +6847,7 @@ impl HandlerCore {
     /// - `kernel_unavailable` when the Kernel is starting or unavailable, or its inventory or a page commit fails transiently. The memory store is untouched, and a retry continues from what is still live.
     /// - `source_retirement_failed` when the inventory reads a corrupt row or a page replays. The memory store is untouched, and a retry meets the same fault until the Kernel is repaired.
     /// - `store_write_failed` when the memory-store delete fails after step 1 committed. The captured sources are already retired, and a retry completes step 2.
-    /// - `store_unavailable` when the blocking work did not report back. Either step may have committed, and a retry converges.
+    /// - `store_unavailable` when no store is open, before either step, or when the blocking work did not report back, after which either step may have committed. A retry converges.
     ///
     /// A deployment without a kernel skips step 1. Recovery from a failed outcome is the caller's next `session.delete` of the session. A harness session that keeps running after the delete republishes its sources on its next pass: stored receipts answer for its earlier units, and new messages publish fresh descriptors.
     async fn handle_session_delete_value(

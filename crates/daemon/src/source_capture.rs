@@ -217,7 +217,7 @@ pub(crate) struct SourceCapture {
     counters: Counters,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// F23: when set, `session.delete` stops after the Kernel retirement commits and before the memory-store delete, as a process killed between the two commits would.
+    /// F23: when set, `session.delete` returns after the Kernel retirement commits and before the memory-store delete: an application-fault cut between the two commits.
     #[cfg(test)]
     pub(crate) stop_after_retirement: AtomicBool,
 }
