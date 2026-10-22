@@ -1782,6 +1782,24 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     );
 }
 
+/// A rename is a retirement at the old path and a publication at the new one, in one pass.
+#[tokio::test]
+async fn a_renamed_document_retires_the_old_path_and_publishes_the_new() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("STRUCTURE.md"), "# Layout\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    std::fs::rename(
+        project.join("STRUCTURE.md"),
+        project.join("ARCHITECTURE.md"),
+    )
+    .unwrap();
+    document_pass(&handler, "base-2").await;
+    let store = kernel_store(&handler);
+    assert!(live_document(&store, "STRUCTURE.md").is_empty());
+    assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "1");
+    assert_eq!(report(&handler)["documents_retired"], 1);
+}
+
 /// A refused window batch leaves the pass's documents to their own batch: a window whose unit conflicts still captures the edited document its pass composed.
 #[tokio::test]
 async fn a_refused_window_still_captures_its_documents() {

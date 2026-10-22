@@ -742,6 +742,7 @@ impl CaptureJob {
     /// - Identity: the project, the project standing in for its repository, and the path.
     /// - Text whose bytes equal the live revision's artifact is unchanged.
     /// - Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head; a head that moved refuses as `documents_refused`.
+    /// - `documents_refused` also counts every read a deadline, a failed preview, or a failed retirement drops.
     /// - A verified missing file retires its live revision; every other read is counted and retires nothing.
     ///
     /// A refused document leaves the window's publication as it was, and a refused window leaves the documents to this batch. A read this job drops, through a refusal, a busy slot, or a deadline, waits for the next pass that composes the block; that compose reads afresh and republishes what differs from the live revision, so the lineage converges on the latest compose read.
@@ -751,13 +752,14 @@ impl CaptureJob {
         publisher: &SourcePublisher<'_>,
         documents: Vec<(&'static str, DocumentRead)>,
     ) -> Count {
-        if documents.is_empty() {
+        let count = documents.len();
+        if count == 0 {
             return Count::Completed;
         }
         if self.budget.is_exhausted() {
+            self.capture.counters.add(Count::DocumentsRefused, count);
             return Count::Deadline;
         }
-        let count = documents.len();
         // The live rows and the lineage heads are read under one reader wait cut to the job's deadline.
         let steps = store.preview(self.preview_deadline(), |preview| {
             let live = self.live_documents(preview)?;
@@ -774,17 +776,25 @@ impl CaptureJob {
             }
         };
         let mut units = Vec::new();
+        // Reads settled so far; a failed retirement counts every other read as refused.
+        let mut settled = 0;
         for step in steps {
             match step {
                 DocumentStep::Publish(unit) => units.push(unit),
                 DocumentStep::Retire(object_id) => {
                     if let Err(error) = self.retire_document(store, &object_id) {
-                        self.capture.counters.add(Count::DocumentsRefused, 1);
+                        self.capture
+                            .counters
+                            .add(Count::DocumentsRefused, count - settled);
                         return kernel_end(error);
                     }
                     self.capture.counters.add(Count::DocumentsRetired, 1);
+                    settled += 1;
                 }
-                DocumentStep::Skip(count) => self.capture.counters.add(count, 1),
+                DocumentStep::Skip(skip) => {
+                    self.capture.counters.add(skip, 1);
+                    settled += 1;
+                }
             }
         }
         if units.is_empty() {
