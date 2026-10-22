@@ -387,6 +387,38 @@ describe("Pi context handler in compaction-off mode", () => {
         expect(folding[1]).toHaveLength(HALF_CAP_BLOCKS + 2);
     });
 
+    it("submits the whole array after the daemon serves a cold suffix under native authority", async () => {
+        writeUserConfig(CHAIN);
+        const preloadedRows = HALF_CAP_BLOCKS;
+        const { call, transforms } = daemon((body) => ({
+            ...keepWindow(body),
+            history_summarizer: {
+                fired: false,
+                state: "disabled",
+                reason: "native_authority; fold authority pending eidnara: another binding is open on this session",
+                no_fire: "native_authority",
+            },
+        }));
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+                sessionManager: preloaded(root, preloadedRows),
+            });
+            await harness.session.prompt("now");
+            await harness.session.prompt("again");
+
+            const sent = transforms.map(rowsOf);
+            expect(sent.map((rows) => rows.length)).toEqual([HALF_CAP_BLOCKS, preloadedRows + 3]);
+            expect(sent[1]?.[0]?.message.content).toBe("row 0");
+            const first = harness.requests[0];
+            expect(first?.messages).toHaveLength(preloadedRows + 1);
+            expect(textOf(first?.messages[0] as never)).toBe("row 0");
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("submits passes when the boot project's configuration is unresolved", async () => {
         writeUserConfig(CHAIN);
         const unresolved = unresolvedProject();

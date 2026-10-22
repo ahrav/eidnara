@@ -227,6 +227,11 @@ export function parseBoundary(value: unknown): TransformBoundary | null | undefi
         : undefined;
 }
 
+function reportsNativeAuthority(response: Record<string, unknown>): boolean | undefined {
+    const diagnostics = response.history_summarizer;
+    return isRecord(diagnostics) ? diagnostics.no_fire === "native_authority" : undefined;
+}
+
 /** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed or over the page cap. */
 function parseAnchorPage(
     reply: unknown,
@@ -257,6 +262,8 @@ export interface TransformSessionState {
      * window cap sends the suffix from this message until the first anchor exists.
      */
     pinnedHead?: string;
+    /** `true` when the latest transformed response reported native fold authority. */
+    nativeAuthority?: boolean;
     failureCount: number;
     routeRoot: string | null;
 }
@@ -582,7 +589,8 @@ export type PassDeclineReason =
     | "daemon_session_busy"
     | "daemon_status_unrecognized"
     | "boundary_unknown"
-    | "discovery_declined";
+    | "discovery_declined"
+    | "native_authority";
 
 /**
  * Declines that try `serveLastApplied` before raw output, because raw output carries the whole
@@ -1349,7 +1357,8 @@ export function createTransformSessionClient(
             // A decline serves the whole host array, so the slots before the window weigh with it:
             // those before the boundary, or those a cold import skips between its lead and its head.
             let servedBefore: readonly [start: number, end: number] = [0, boundaryIndex];
-            if (boundary !== null) state.pinnedHead = undefined;
+            let coldNarrowed = false;
+            if (boundary !== null || state.nativeAuthority === true) state.pinnedHead = undefined;
             else {
                 const head = coldHead(state, source);
                 if (head !== undefined) {
@@ -1357,6 +1366,7 @@ export function createTransformSessionClient(
                     source = coldSource(source, head);
                     host = source.host;
                     boundaryIndex = 0;
+                    coldNarrowed = true;
                 }
             }
             const servedBeforeWindow = (needed: number): number | undefined =>
@@ -1656,6 +1666,18 @@ export function createTransformSessionClient(
             if (nextBoundary === undefined && response.boundary !== undefined)
                 sessionLog.warn(sessionId, "rust transform response boundary is malformed");
             captureResponseTelemetry(response);
+            const nativeAuthority = reportsNativeAuthority(response);
+            if (nativeAuthority !== undefined) state.nativeAuthority = nativeAuthority;
+            // A native pass keeps its window and inserts ahead of it, so publishing it over a cold
+            // suffix would drop the host messages before the suffix's head.
+            if (nativeAuthority === true && coldNarrowed) {
+                state.pinnedHead = undefined;
+                throw new PassDeclined(
+                    sessionId,
+                    "native_authority",
+                    "cold suffix served under native fold authority",
+                );
+            }
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             // The apply stage runs in laps around the publish recheck, which the prefix guard
             // times, so the two stages stay disjoint.

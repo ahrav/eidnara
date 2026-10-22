@@ -140,6 +140,24 @@ async fn wrapup_is_refused_under_native_authority() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_subagent_pass_under_native_authority_reports_native_authority() {
+    let (handler, store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    bind_with(&handler, &project, 7, native_config());
+    let mut subagent = request(big_messages());
+    subagent["is_subagent"] = json!(true);
+
+    let response = call_transform_request(&handler, subagent).await;
+
+    assert_eq!(response["status"], "ok", "{response}");
+    let diagnostics = &response["history_summarizer"];
+    assert_eq!(diagnostics["fired"], false, "{diagnostics}");
+    assert_eq!(diagnostics["state"], "disabled", "{diagnostics}");
+    assert_eq!(diagnostics["no_fire"], "native_authority", "{diagnostics}");
+    assert_native_state(&store, "ses", "native subagent pass");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn the_first_committing_pass_adopts_over_a_state_sync_row() {
     for eidnara in [false, true] {
         let producer = Arc::new(ProducerState::default());
