@@ -104,7 +104,7 @@ impl std::fmt::Debug for SourceUnit {
 }
 
 impl SourceUnit {
-    fn identity_value(&self, name: &str) -> Option<&str> {
+    pub(crate) fn identity_value(&self, name: &str) -> Option<&str> {
         self.identity
             .iter()
             .find(|(field, _)| *field == name)
@@ -126,10 +126,6 @@ impl SourceUnit {
             },
             _ => SourceDescriptorPolicy::Native,
         }
-    }
-
-    pub(crate) fn identity_value_of(&self, name: &str) -> Option<&str> {
-        self.identity_value(name)
     }
 }
 
@@ -813,7 +809,7 @@ impl SourcePublisher<'_> {
     }
 
     fn evidence_request(&self, unit: &Prepared<'_>) -> ArtifactIngestRequest {
-        let mut request = ArtifactIngestRequest {
+        ArtifactIngestRequest {
             intent: self.evidence_intent(unit),
             payload: unit.unit.text.as_bytes().to_vec(),
             evidence_id: format!("srcev:{}", unit.key),
@@ -828,11 +824,9 @@ impl SourcePublisher<'_> {
             retain_until: None,
             asserted_sensitivity: self.sensitivity,
             provider_egress: self.egress,
-            provenance: None,
-        };
-        // Only the git publisher's commit provenance is ever retained; this publisher constructs none.
-        request.provenance = crate::git_sources::commit_provenance(unit.unit);
-        request
+            // Only the git publisher's commit provenance is retained; this publisher constructs none.
+            provenance: crate::git_sources::commit_provenance(unit.unit),
+        }
     }
 
     /// The class the store recorded for the evidence object at ingest.

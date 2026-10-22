@@ -8975,22 +8975,16 @@ impl HandlerCore {
         ) {
             self.spawn_tracked_task(checkpoint.run());
         }
-        // The native window is held for source capture only after the slot and its charge are taken; the job starts once the response is handed to the wire writer.
-        let source_capture = self
-            .source_capture
-            .offer(
-                source_capture::Offer {
-                    source_capture_enabled: binding.config.source_capture_enabled,
-                    memory_enabled: binding.config.memory_enabled,
-                    is_subagent: parsed.is_subagent,
+        // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.
+        let capture =
+            source_capture::consents(&binding.config, parsed.is_subagent, serializer_profile).then(
+                || source_capture::Offer {
                     profile: serializer_profile,
-                    session_id: &parsed.session_id,
-                    project: &binding.kernel_project,
-                    window: parsed.native_messages.as_deref(),
+                    session_id: parsed.session_id.clone(),
+                    project: binding.kernel_project.clone(),
+                    window: parsed.native_messages.clone().unwrap_or_default(),
                 },
-                entry.meter.reserve(),
-            )
-            .map(|handoff| self.capture_after_response(handoff));
+            );
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the
         // pass then serves that binding detached.
@@ -9037,37 +9031,35 @@ impl HandlerCore {
                 core.first_unit(intake, &signal, permit)
             }))
             .await;
-        let carry = match outcome {
-            Ok(UnitOutcome::Terminal(outcome)) => {
-                return outcome.holding(charges).after_response(source_capture);
-            }
-            Ok(UnitOutcome::Continue(carry)) => *carry,
+        let outcome = match outcome {
+            Ok(UnitOutcome::Terminal(outcome)) => outcome.holding(charges),
+            Ok(UnitOutcome::Continue(carry)) => self
+                .finish_emergency_pass(entry, *carry)
+                .await
+                .holding(charges),
             Err(failed) => return unit_failed_error(failed),
         };
-        self.finish_emergency_pass(entry, carry)
-            .await
-            .holding(charges)
-            .after_response(source_capture)
+        outcome.after_response(capture.and_then(|offer| self.capture_after_response(offer)))
     }
 
-    /// Starts `handoff`'s tracked job when its response settles; a closed admission refuses it, and a response that never settles drops it unrun.
+    /// Charges the built pass's window for source capture and returns the work that starts its tracked job once the response settles: the job takes the publication slot then, and a closed admission or a busy slot refuses it. A response that never settles drops it unrun.
     fn capture_after_response(
         &self,
-        handoff: source_capture::CaptureHandoff,
-    ) -> dispatch::AfterResponse {
+        offer: source_capture::Offer,
+    ) -> Option<dispatch::AfterResponse> {
+        let handoff = self.source_capture.offer(offer)?;
         let admission = self.admission();
         let kernel = Arc::clone(&self.kernel);
         let gate = Arc::clone(&self.capture_commit_gate);
         let cancel = self.cancel.clone();
-        dispatch::AfterResponse::new(move || {
-            let _gate = admission.gate.lock().expect("module spawn gate mutex");
-            if admission.cancel.is_cancelled() {
-                handoff.refuse_shutting_down();
-                return;
+        Some(dispatch::AfterResponse::new(move || {
+            let capture = handoff.supervisor();
+            if let Some(job) = handoff.into_job(kernel, gate, cancel)
+                && admission.spawn(job.run()).is_none()
+            {
+                capture.refuse(source_capture::Count::RefusedShuttingDown);
             }
-            let job = handoff.into_job(kernel, gate, cancel);
-            admission.tasks.spawn(job.run());
-        })
+        }))
     }
 
     /// Waits for a unit permit on the async side, where the wait is abortable; the permit

@@ -1,17 +1,17 @@
 //! Publishes the native message text and tool results of a transform window as kernel source descriptors from a background supervisor, after the transform response is handed to the wire writer.
 //!
-//! Capture runs when `source_capture.enabled` and `memory.enabled` both permit it in the route's consent snapshot and the session is not a subagent's; otherwise the adapters never run. The handler offers the pass's native records to [`SourceCapture::offer`], which holds the store's single publication slot and charges the retained window before any reference outlives the response. A refused offer (`queue_full`, `resident_short`, `window_too_large`) drops its reference and charge at once. The accepted handoff becomes a tracked blocking job that owns the slot permit, the charge, and its completion: it runs the adapters, skips units the memo already knows, and publishes at most one screened batch under a 5 s budget whose origin is the handoff's acceptance. The response bytes never wait on the kernel or the job.
+//! Capture runs when `source_capture.enabled` and `memory.enabled` both permit it in the route's consent snapshot and the session is not a subagent's; otherwise the adapters never run. Once the pass has built its response, the handler offers the pass's native records to [`SourceCapture::offer`], which charges the retained window to the supervisor's own byte budget. When the response is handed to the wire writer, [`CaptureHandoff::into_job`] takes the store's single publication slot; a refused offer or handoff (`refused_window_too_large`, `refused_resident_short`, `refused_queue_full`, `refused_shutting_down`) drops its reference and charge at once. The accepted job owns the slot permit, the charges, and its completion: it runs the adapters, charges their copies, skips units the memo already knows, and publishes at most one screened batch under a 5 s budget whose origin is the handoff's acceptance. The response bytes never wait on the kernel or the job.
 //!
-//! Kernel receipts are the durable record. The memo is a bounded, process-local cache keyed by the store's incarnation, the session, and each unit's receipt key; an entry holds the request digest, a disposition, and the time a pending unit was first deferred, never window bytes. A memo hit with an equal digest suppresses the kernel probe; after a restart the memo is empty and the kernel answers from its receipts. A window refused at a full slot and never offered again is lost to capture; the next pass that carries it is captured.
+//! Kernel receipts are the durable record. The memo is a bounded, process-local cache keyed by the store's incarnation, the session, and each unit's receipt key; an entry holds the request digest, a disposition, and the time a pending unit first waited, never window bytes. A memo hit with an equal digest suppresses the kernel probe; after a restart the memo is empty and the kernel answers from its receipts. Pending units are offered ahead of units the memo does not know. A window refused at a full slot and never offered again is lost to capture; the next pass that carries it is captured.
 //!
 //! Logs and counters carry a closed vocabulary of stages and reasons with counts and byte totals, never unit text, paths, identities, or digests.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use host_runtime::wire::ByteCharge;
+use host_runtime::wire::{ByteBudget, ByteCharge};
 use kernel::applicability::EvalBudget;
 use kernel::{CommitIntent, KernelError, KernelStore, ProviderEgress, Sensitivity};
 use serde_json::{Value, json};
@@ -24,19 +24,18 @@ use crate::harness_sources::{
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
-use crate::metered_decode::ResidentReserve;
 
 /// The cooperative budget of one publication, from handoff acceptance.
 pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
-/// The largest window charge a handoff may hold past its response.
+/// The supervisor's byte budget: the retained window, the adapters' copies, and the batch's artifact preparation.
 const MAX_RETAINED_WINDOW_BYTES: usize = 32 * 1024 * 1024;
-/// The memo's byte budget, counting each entry's key, digest, and bookkeeping.
+/// Artifact preparation copies an admitted batch a bounded number of times.
+const ARTIFACT_PREPARATION_BYTES: usize = 4 * MAX_SOURCE_BATCH_BYTES;
+/// The memo's byte budget, counting each entry's two key copies, digest, and bookkeeping.
 const MEMO_BUDGET_BYTES: usize = 4 * 1024 * 1024;
-/// Bookkeeping bytes charged per memo entry beside its key and digest.
-const MEMO_ENTRY_OVERHEAD_BYTES: usize = 160;
-/// The most project scopes the supervisor remembers as materialized.
-const MAX_READY_SCOPES: usize = 256;
-/// What one offer charges: the retained window, the unit copies the adapters make of it, and the batch's artifact preparation.
+/// Bookkeeping bytes charged per memo entry beside its key copies and digest, including its table slot.
+const MEMO_ENTRY_OVERHEAD_BYTES: usize = 192;
+/// The supervisor's retained bytes: its byte budget plus the memo budget.
 pub(crate) const RETAINED_BYTES_BOUND: u64 =
     MAX_RETAINED_WINDOW_BYTES as u64 + MEMO_BUDGET_BYTES as u64;
 
@@ -89,8 +88,8 @@ counts! {
     UnitsRefusedRetryable => "units_refused_retryable",
     Active => "active",
     RetainedBytes => "retained_bytes",
-    WriterHoldMsLast => "writer_hold_ms_last",
-    WriterHoldMsMax => "writer_hold_ms_max",
+    PublishMsLast => "publish_ms_last",
+    PublishMsMax => "publish_ms_max",
 }
 
 #[derive(Default)]
@@ -147,8 +146,9 @@ struct Memo {
 }
 
 impl Memo {
+    /// Each key lives in the map and in the eviction order.
     fn entry_bytes(key: &str, digest: &str) -> usize {
-        key.len() + digest.len() + MEMO_ENTRY_OVERHEAD_BYTES
+        2 * key.len() + digest.len() + MEMO_ENTRY_OVERHEAD_BYTES
     }
 
     fn get(&self, key: &str) -> Option<&MemoEntry> {
@@ -156,23 +156,25 @@ impl Memo {
     }
 
     fn record(&mut self, key: String, digest: String, disposition: Disposition) {
-        let bytes = Self::entry_bytes(&key, &digest);
-        if let Some(previous) = self.entries.get(&key) {
-            self.bytes -= Self::entry_bytes(&key, &previous.digest);
-        } else {
-            self.order.push_back(key.clone());
-        }
-        // A deferral keeps the time the unit first waited.
-        let disposition = match (self.entries.get(&key), disposition) {
-            (Some(previous), Disposition::Pending { .. })
-                if previous.digest == digest
-                    && matches!(previous.disposition, Disposition::Pending { .. }) =>
-            {
-                previous.disposition.clone()
+        let disposition = match self.entries.get(&key) {
+            Some(previous) => {
+                self.bytes -= Self::entry_bytes(&key, &previous.digest);
+                // A deferral keeps the time the unit first waited.
+                match (&previous.disposition, disposition) {
+                    (Disposition::Pending { .. }, Disposition::Pending { .. })
+                        if previous.digest == digest =>
+                    {
+                        previous.disposition.clone()
+                    }
+                    (_, disposition) => disposition,
+                }
             }
-            (_, disposition) => disposition,
+            None => {
+                self.order.push_back(key.clone());
+                disposition
+            }
         };
-        self.bytes += bytes;
+        self.bytes += Self::entry_bytes(&key, &digest);
         self.entries.insert(
             key,
             MemoEntry {
@@ -190,6 +192,22 @@ impl Memo {
         }
     }
 
+    /// Drops every entry whose key names `session`, the key's fourth field.
+    fn forget_session(&mut self, session: &str) {
+        let named = |key: &str| key.split('\u{1f}').nth(3) == Some(session);
+        self.order.retain(|key| !named(key));
+        let entries = &mut self.entries;
+        let mut freed = 0;
+        entries.retain(|key, entry| {
+            let keep = !named(key);
+            if !keep {
+                freed += Self::entry_bytes(key, &entry.digest);
+            }
+            keep
+        });
+        self.bytes -= freed;
+    }
+
     fn oldest_pending_since(&self) -> Option<i64> {
         self.entries
             .values()
@@ -201,14 +219,13 @@ impl Memo {
     }
 }
 
-/// The daemon's capture supervisor: one publication slot for its one kernel store, the memo, session generations, and counters.
+/// The daemon's capture supervisor: one publication slot for its one kernel store, its byte budget, the memo, the delete epoch, and counters.
 pub(crate) struct SourceCapture {
     slot: Arc<Semaphore>,
+    budget: ByteBudget,
     memo: Mutex<Memo>,
-    /// The generation of each session a delete invalidated; an absent session is at generation 0.
-    generations: Mutex<HashMap<String, u64>>,
-    /// `(incarnation, project)` pairs whose capture domain and scope exist.
-    ready_scopes: Mutex<HashSet<(String, String)>>,
+    /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
+    delete_epoch: AtomicU64,
     counters: Counters,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -218,9 +235,9 @@ impl Default for SourceCapture {
     fn default() -> Self {
         Self {
             slot: Arc::new(Semaphore::new(1)),
+            budget: ByteBudget::new(MAX_RETAINED_WINDOW_BYTES as u64),
             memo: Mutex::default(),
-            generations: Mutex::default(),
-            ready_scopes: Mutex::default(),
+            delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
             #[cfg(test)]
             before_publish: Mutex::new(None),
@@ -228,33 +245,53 @@ impl Default for SourceCapture {
     }
 }
 
-/// What an offer needs from the pass.
-pub(crate) struct Offer<'a> {
-    pub source_capture_enabled: bool,
-    pub memory_enabled: bool,
-    pub is_subagent: bool,
-    pub profile: SerializerProfile,
-    pub session_id: &'a str,
-    pub project: &'a ProjectBinding,
-    pub window: Option<&'a [Arc<Value>]>,
+/// Whether the route's consent snapshot, the session, and the profile admit capture at all; otherwise no adapter runs.
+pub(crate) fn consents(
+    config: &crate::config::DaemonConfig,
+    is_subagent: bool,
+    profile: SerializerProfile,
+) -> bool {
+    config.source_capture_enabled
+        && config.memory_enabled
+        && !is_subagent
+        && profile.serves_native()
 }
 
-/// A window accepted for capture once its response is handed to the wire writer. Dropping it releases the slot and the charge.
+/// A consented pass's native window, held by the pass until its response is built.
+pub(crate) struct Offer {
+    pub profile: SerializerProfile,
+    pub session_id: String,
+    pub project: ProjectBinding,
+    pub window: Vec<Arc<Value>>,
+}
+
+/// A charged window waiting for its response to reach the wire writer. Dropping it releases the charge.
 pub(crate) struct CaptureHandoff {
     capture: Arc<SourceCapture>,
     window: Vec<Arc<Value>>,
     session: SessionIdentity,
     project: ProjectBinding,
-    generation: u64,
+    epoch: u64,
     retained: RetainedCharge,
-    permit: OwnedSemaphorePermit,
 }
 
-/// The resident charge of a retained window, mirrored in the `retained_bytes` gauge while it lives.
+/// A charge against the supervisor's budget, mirrored in the `retained_bytes` gauge while it lives.
 struct RetainedCharge {
     capture: Arc<SourceCapture>,
     bytes: usize,
     _charge: ByteCharge,
+}
+
+impl RetainedCharge {
+    fn take(capture: &Arc<SourceCapture>, bytes: usize) -> Option<Self> {
+        let charge = capture.budget.try_charge(bytes)?;
+        capture.counters.add(Count::RetainedBytes, bytes);
+        Some(Self {
+            capture: Arc::clone(capture),
+            bytes,
+            _charge: charge,
+        })
+    }
 }
 
 impl Drop for RetainedCharge {
@@ -276,58 +313,40 @@ impl Drop for ActiveSlot {
 }
 
 impl SourceCapture {
-    /// Offers a pass's native window. `None` when consent, the profile, or an empty window leaves nothing to capture, and when the slot, the resident pool, or the window bound refuses it; a refusal is counted and retains nothing.
-    pub(crate) fn offer(
-        self: &Arc<Self>,
-        offer: Offer<'_>,
-        reserve: &dyn ResidentReserve,
-    ) -> Option<CaptureHandoff> {
-        if !offer.source_capture_enabled || !offer.memory_enabled || offer.is_subagent {
+    /// Charges a consented pass's native window for capture. `None` for an empty window, and when the window bound or the budget refuses it; a refusal is counted and retains nothing.
+    pub(crate) fn offer(self: &Arc<Self>, offer: Offer) -> Option<CaptureHandoff> {
+        let harness = match offer.profile {
+            SerializerProfile::Pi => Harness::Pi,
+            _ => Harness::OpenCode,
+        };
+        if offer.window.is_empty() {
             return None;
         }
-        let harness = match offer.profile {
-            SerializerProfile::OpencodeAiSdk => Harness::OpenCode,
-            SerializerProfile::Pi => Harness::Pi,
-            _ => return None,
-        };
-        let window = offer.window.filter(|window| !window.is_empty())?;
-        let Ok(permit) = Arc::clone(&self.slot).try_acquire_owned() else {
-            self.refuse(Count::RefusedQueueFull);
-            return None;
-        };
-        let window_bytes: usize = window
+        let bytes = offer
+            .window
             .iter()
             .map(|value| crate::retained_size::value_retained_bytes(value))
-            .sum();
-        // The adapters copy every text and identity out of the window once; artifact preparation copies an admitted batch a bounded number of times.
-        let bytes = window_bytes
-            .saturating_mul(2)
-            .saturating_add(4 * MAX_SOURCE_BATCH_BYTES);
+            .sum::<usize>()
+            .saturating_add(ARTIFACT_PREPARATION_BYTES);
         if bytes > MAX_RETAINED_WINDOW_BYTES {
             self.refuse(Count::RefusedWindowTooLarge);
             return None;
         }
-        let Some(charge) = reserve.try_reserve(bytes) else {
+        let Some(retained) = RetainedCharge::take(self, bytes) else {
             self.refuse(Count::RefusedResidentShort);
             return None;
         };
-        self.counters.add(Count::RetainedBytes, bytes);
         Some(CaptureHandoff {
             capture: Arc::clone(self),
-            window: window.to_vec(),
+            window: offer.window,
             session: SessionIdentity {
                 project_id: offer.project.digest().to_owned(),
                 harness,
-                session_id: offer.session_id.to_owned(),
+                session_id: offer.session_id,
             },
-            project: offer.project.clone(),
-            generation: self.generation(offer.session_id),
-            retained: RetainedCharge {
-                capture: Arc::clone(self),
-                bytes,
-                _charge: charge,
-            },
-            permit,
+            project: offer.project,
+            epoch: self.delete_epoch.load(Ordering::Acquire),
+            retained,
         })
     }
 
@@ -340,37 +359,36 @@ impl SourceCapture {
     /// Empties the memo, as a restart does.
     #[cfg(test)]
     pub(crate) fn forget_memo_for_test(&self) {
-        *self.memo.lock().expect("capture memo mutex") = Memo::default();
+        *self.memo() = Memo::default();
     }
 
-    fn refuse(&self, refusal: Count) {
+    pub(crate) fn refuse(&self, refusal: Count) {
         self.counters.add(refusal, 1);
         log("handoff refused", refusal, 1);
     }
 
-    fn generation(&self, session: &str) -> u64 {
-        self.generations
-            .lock()
-            .expect("capture generations mutex")
-            .get(session)
-            .copied()
-            .unwrap_or(0)
+    /// A poisoned memo is a lost cache: it starts empty and the kernel's receipts answer.
+    fn memo(&self) -> MutexGuard<'_, Memo> {
+        self.memo.lock().unwrap_or_else(|poisoned| {
+            let mut memo = poisoned.into_inner();
+            *memo = Memo::default();
+            memo
+        })
     }
 
-    /// Invalidates every handoff of `session` taken before now; the caller holds the capture commit gate, so a job that rechecks under it sees the change.
+    /// Invalidates every handoff taken before now and forgets `session`'s memo entries; the caller holds the capture commit gate, so a job that rechecks under it sees the change.
     pub(crate) fn invalidate_session(&self, session: &str) {
-        *self
-            .generations
-            .lock()
-            .expect("capture generations mutex")
-            .entry(session.to_owned())
-            .or_insert(0) += 1;
+        self.delete_epoch.fetch_add(1, Ordering::AcqRel);
+        self.memo().forget_session(session);
     }
 
-    /// The observability set: every [`Count`] by name, with the active slot reported as draining once shutdown began, and the age of the oldest deferred unit.
+    /// The observability set: every [`Count`] by name, the active slot reported as draining once shutdown began, and the age of the oldest pending unit.
     pub(crate) fn report(&self, draining: bool, now_ms: i64) -> Value {
         let mut report = serde_json::Map::new();
-        for count in Count::ALL {
+        for count in Count::ALL
+            .into_iter()
+            .filter(|count| *count != Count::Active)
+        {
             report.insert(count.name().to_owned(), json!(self.counters.load(count)));
         }
         let active = self.counters.load(Count::Active);
@@ -383,9 +401,7 @@ impl SourceCapture {
             json!(if draining { active } else { 0 }),
         );
         let oldest = self
-            .memo
-            .lock()
-            .expect("capture memo mutex")
+            .memo()
             .oldest_pending_since()
             .map(|since| now_ms.saturating_sub(since).max(0));
         report.insert("oldest_deferred_age_ms".to_owned(), json!(oldest));
@@ -394,17 +410,25 @@ impl SourceCapture {
 }
 
 impl CaptureHandoff {
-    /// The tracked job for this handoff. Its 5 s budget starts now; `cancel` raises the budget's interrupt, and the job stops before its next kernel wait.
+    /// The supervisor this handoff charges.
+    pub(crate) fn supervisor(&self) -> Arc<SourceCapture> {
+        Arc::clone(&self.capture)
+    }
+
+    /// Takes the store's publication slot and starts the job's 5 s budget. `None` when a batch already holds the slot; the refusal is counted and the handoff's charge released.
     pub(crate) fn into_job(
         self,
         kernel: Arc<KernelOpenCoordinator>,
         commit_gate: Arc<Mutex<()>>,
         cancel: CancellationToken,
-    ) -> CaptureJob {
-        self.capture.counters.add(Count::Admitted, 1);
+    ) -> Option<CaptureJob> {
+        let Ok(permit) = Arc::clone(&self.capture.slot).try_acquire_owned() else {
+            self.capture.refuse(Count::RefusedQueueFull);
+            return None;
+        };
         self.capture.counters.add(Count::Active, 1);
         let interrupt = Arc::new(AtomicBool::new(false));
-        CaptureJob {
+        Some(CaptureJob {
             budget: EvalBudget::new(
                 Some(Instant::now() + CAPTURE_BUDGET),
                 Arc::clone(&interrupt),
@@ -413,26 +437,21 @@ impl CaptureHandoff {
             kernel,
             commit_gate,
             cancel,
-            slot: ActiveSlot {
+            _slot: ActiveSlot {
                 capture: Arc::clone(&self.capture),
-                _permit: self.permit,
+                _permit: permit,
             },
-            retained: self.retained,
+            _retained: self.retained,
             capture: self.capture,
             window: self.window,
             session: self.session,
             project: self.project,
-            generation: self.generation,
-        }
-    }
-
-    /// Counts a handoff whose job could not be admitted because shutdown closed admission; dropping it releases the slot and the charge.
-    pub(crate) fn refuse_shutting_down(self) {
-        self.capture.refuse(Count::RefusedShuttingDown);
+            epoch: self.epoch,
+        })
     }
 }
 
-/// One accepted capture: the blocking closure owns the slot, the charge, and the window until it returns.
+/// One accepted capture: the blocking closure owns the slot, the charges, and the window until it returns.
 pub(crate) struct CaptureJob {
     capture: Arc<SourceCapture>,
     budget: EvalBudget,
@@ -440,17 +459,18 @@ pub(crate) struct CaptureJob {
     kernel: Arc<KernelOpenCoordinator>,
     commit_gate: Arc<Mutex<()>>,
     cancel: CancellationToken,
-    slot: ActiveSlot,
-    retained: RetainedCharge,
+    _slot: ActiveSlot,
+    _retained: RetainedCharge,
     window: Vec<Arc<Value>>,
     session: SessionIdentity,
     project: ProjectBinding,
-    generation: u64,
+    epoch: u64,
 }
 
 impl CaptureJob {
-    /// Runs the publication on the blocking pool and returns once it physically completes; cancellation interrupts its budget and still waits for the closure.
+    /// Runs the publication on the blocking pool and returns once it physically completes. Cancellation interrupts the budget, so the job stops before its next kernel wait; the wait for completion is then bounded by the budget, the capture commit gate's current holder, and the adapters' work on the window.
     pub(crate) async fn run(self) -> Count {
+        self.capture.counters.add(Count::Admitted, 1);
         let interrupt = Arc::clone(&self.interrupt);
         let cancel = self.cancel.clone();
         let capture = Arc::clone(&self.capture);
@@ -462,15 +482,15 @@ impl CaptureJob {
                 join.await
             }
         };
-        match joined {
-            Ok(end) => end,
-            Err(_) => {
-                // The slot, the charge, and the window were dropped while the panic unwound.
-                capture.counters.add(Count::WorkerPanicked, 1);
-                log("job ended", Count::WorkerPanicked, 1);
-                Count::WorkerPanicked
-            }
-        }
+        // A failed join dropped the slot, the charges, and the window while the closure unwound.
+        let end = match joined {
+            Ok(end) => return end,
+            Err(error) if error.is_panic() => Count::WorkerPanicked,
+            Err(_) => Count::KernelError,
+        };
+        capture.counters.add(end, 1);
+        log("job ended", end, 1);
+        end
     }
 
     fn end(&self, end: Count) -> Count {
@@ -482,8 +502,6 @@ impl CaptureJob {
     }
 
     fn publish(self) -> Count {
-        let _slot = &self.slot;
-        let _retained = &self.retained;
         if self.cancel.is_cancelled() {
             return self.end(Count::Discarded);
         }
@@ -494,6 +512,24 @@ impl CaptureJob {
             return self.end(Count::Deadline);
         }
         let units = self.units();
+        // The adapters' copies are charged before anything else holds them.
+        let copies = units
+            .iter()
+            .map(|unit| {
+                size_of::<SourceUnit>()
+                    + unit.text.len()
+                    + unit.role.len()
+                    + unit.revision.len()
+                    + unit
+                        .identity
+                        .iter()
+                        .map(|(_, value)| 48 + value.len())
+                        .sum::<usize>()
+            })
+            .sum();
+        let Some(_copies) = RetainedCharge::take(&self.capture, copies) else {
+            return self.end(Count::RefusedResidentShort);
+        };
         if units.is_empty() {
             return self.end(Count::Completed);
         }
@@ -509,67 +545,46 @@ impl CaptureJob {
             egress: ProviderEgress::LocalOnly,
             sensitivity: Sensitivity::Sensitive,
         };
-        let memo_prefix = format!(
+        let prefix = format!(
             "{incarnation}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
             self.session.project_id,
             self.session.harness.as_str(),
             self.session.session_id
         );
-        let mut candidates = Vec::new();
-        let mut keys = Vec::new();
+        let identities: Vec<Option<(String, String)>> = units
+            .iter()
+            .map(|unit| {
+                let (key, digest) = publisher.receipt_identity(unit)?;
+                Some((format!("{prefix}{key}"), digest))
+            })
+            .collect();
+        // Pending units go first, then units the memo does not know; a known unit with an equal digest, and a repeat within the window, is skipped.
+        let (mut pending, mut unknown) = (Vec::new(), Vec::new());
         {
-            let memo = self.capture.memo.lock().expect("capture memo mutex");
-            for unit in units {
-                let Some((key, digest)) = publisher.receipt_identity(&unit) else {
-                    // The screen refuses the unit with its encoding refusal.
-                    keys.push(None);
-                    candidates.push(unit);
-                    continue;
-                };
-                let key = format!("{memo_prefix}{key}");
-                match memo.get(&key) {
-                    Some(entry)
-                        if entry.digest == digest
-                            && !matches!(entry.disposition, Disposition::Pending { .. }) =>
-                    {
-                        self.capture.counters.add(Count::UnitsMemoSkipped, 1);
+            let memo = self.capture.memo();
+            let mut seen = HashSet::new();
+            for (unit, identity) in units.into_iter().zip(identities) {
+                let entry = identity.as_ref().and_then(|(key, _)| memo.get(key));
+                let fresh = identity
+                    .as_ref()
+                    .is_none_or(|(key, _)| seen.insert(key.clone()));
+                match entry {
+                    _ if !fresh => {}
+                    Some(entry) if entry.digest == identity.as_ref().expect("keyed").1 => {
+                        if matches!(entry.disposition, Disposition::Pending { .. }) {
+                            pending.push((unit, identity));
+                        } else {
+                            self.capture.counters.add(Count::UnitsMemoSkipped, 1);
+                        }
                     }
-                    _ => {
-                        keys.push(Some((key, digest)));
-                        candidates.push(unit);
-                    }
+                    _ => unknown.push((unit, identity)),
                 }
             }
         }
+        let (candidates, keys): (Vec<SourceUnit>, Vec<Option<(String, String)>>) =
+            pending.into_iter().chain(unknown).unzip();
         if candidates.is_empty() {
             return self.end(Count::Completed);
-        }
-        // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
-        let gate = self.commit_gate.lock().expect("capture publication mutex");
-        let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.publish_locked(&store, &publisher, &incarnation, candidates, keys)
-        }));
-        drop(gate);
-        match published {
-            Ok(end) => end,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }
-
-    /// Publishes under the capture commit gate, after the session's ticket still holds.
-    fn publish_locked(
-        &self,
-        store: &KernelStore,
-        publisher: &SourcePublisher<'_>,
-        incarnation: &str,
-        candidates: Vec<SourceUnit>,
-        keys: Vec<Option<(String, String)>>,
-    ) -> Count {
-        if self.capture.generation(&self.session.session_id) != self.generation {
-            return self.end(Count::SessionInvalidated);
-        }
-        if let Err(error) = self.ensure_scope(store, incarnation) {
-            return self.end(kernel_end(error));
         }
         #[cfg(test)]
         let hook = self
@@ -585,56 +600,55 @@ impl CaptureJob {
         if self.cancel.is_cancelled() {
             return self.end(Count::Discarded);
         }
+        // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
+        let gate = self.commit_gate.lock().expect("capture publication mutex");
+        let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.publish_locked(&store, &publisher, &candidates, keys)
+        }));
+        drop(gate);
+        match published {
+            Ok(end) => end,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Publishes under the capture commit gate once the delete epoch still holds; `keys[i]` is the memo key of `candidates[i]`.
+    fn publish_locked(
+        &self,
+        store: &KernelStore,
+        publisher: &SourcePublisher<'_>,
+        candidates: &[SourceUnit],
+        keys: Vec<Option<(String, String)>>,
+    ) -> Count {
+        if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
+            return self.end(Count::SessionInvalidated);
+        }
+        if let Err(error) = self.ensure_scope(store) {
+            return self.end(kernel_end(error));
+        }
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
-        let result = publish_screened(publisher, &candidates, observed_at, Some(&self.budget));
+        let result = publish_screened(publisher, candidates, observed_at, Some(&self.budget));
         let held = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let counters = &self.capture.counters;
         counters
-            .at(Count::WriterHoldMsLast)
+            .at(Count::PublishMsLast)
             .store(held, Ordering::Relaxed);
         counters
-            .at(Count::WriterHoldMsMax)
+            .at(Count::PublishMsMax)
             .fetch_max(held, Ordering::Relaxed);
-        let mut memo = self.capture.memo.lock().expect("capture memo mutex");
+        let mut memo = self.capture.memo();
         match result {
             Ok(dispositions) => {
-                let mut deferred = 0;
                 for (disposition, key) in dispositions.into_iter().zip(keys) {
-                    let recorded = match disposition {
-                        UnitDisposition::Published(published) => {
-                            counters.add(
-                                if published.replayed {
-                                    Count::UnitsReplayed
-                                } else {
-                                    Count::UnitsPublished
-                                },
-                                1,
-                            );
-                            Disposition::Published
-                        }
-                        UnitDisposition::UnitTooLarge => {
-                            counters.add(Count::UnitsUnitTooLarge, 1);
-                            Disposition::Terminal
-                        }
-                        UnitDisposition::Deferred => {
-                            deferred += 1;
-                            counters.add(Count::UnitsDeferred, 1);
-                            Disposition::Pending {
-                                since_ms: observed_at,
-                            }
-                        }
-                        UnitDisposition::Refused(refusal) => self.refused(&refusal, observed_at),
-                    };
+                    let (count, recorded) = classify(disposition, observed_at);
+                    counters.add(count, 1);
                     if let Some((key, digest)) = key {
                         memo.record(key, digest, recorded);
                     }
-                }
-                if deferred > 0 {
-                    log("batch bounded", Count::UnitsDeferred, deferred);
                 }
                 drop(memo);
                 self.end(Count::Completed)
@@ -652,22 +666,6 @@ impl CaptureJob {
                 self.end(kernel_end(refusal.error))
             }
         }
-    }
-
-    fn refused(&self, refusal: &PublishError, observed_at: i64) -> Disposition {
-        let (count, disposition) = if matches!(refusal, PublishError::IdentityReused) {
-            (Count::UnitsIdentityConflict, Disposition::Terminal)
-        } else if refusal.is_permanent() {
-            (Count::UnitsRefusedTerminal, Disposition::Terminal)
-        } else {
-            let since_ms = observed_at;
-            (
-                Count::UnitsRefusedRetryable,
-                Disposition::Pending { since_ms },
-            )
-        };
-        self.capture.counters.add(count, 1);
-        disposition
     }
 
     /// Every unit of the window, in record order; a record the adapter refuses contributes none and is counted.
@@ -691,18 +689,8 @@ impl CaptureJob {
         units
     }
 
-    /// Materializes the capture domain and the project's scope once per store incarnation.
-    fn ensure_scope(&self, store: &KernelStore, incarnation: &str) -> Result<(), KernelError> {
-        let marker = (incarnation.to_owned(), self.project.digest().to_owned());
-        if self
-            .capture
-            .ready_scopes
-            .lock()
-            .expect("capture scopes mutex")
-            .contains(&marker)
-        {
-            return Ok(());
-        }
+    /// Materializes the capture domain and the project's scope; the receipt makes every later attempt a replay.
+    fn ensure_scope(&self, store: &KernelStore) -> Result<(), KernelError> {
         let operation_key = format!("{}:source-capture:scope", self.project.digest());
         let intent = CommitIntent {
             producer: PRODUCER.to_owned(),
@@ -715,8 +703,7 @@ impl CaptureJob {
         store.commit_within_budget(&self.budget, intent, |envelope| {
             let mut domains = HashSet::new();
             crate::kernel_routes::commit::ensure_domain(envelope, CAPTURE_DOMAIN_ID, &mut domains)?;
-            let mut ready = false;
-            let mut refused = None;
+            let (mut ready, mut refused) = (false, None);
             crate::kernel_routes::commit::ensure_scope(
                 envelope,
                 project,
@@ -726,16 +713,29 @@ impl CaptureJob {
             )?;
             Ok(String::new())
         })?;
-        let mut ready = self
-            .capture
-            .ready_scopes
-            .lock()
-            .expect("capture scopes mutex");
-        if ready.len() >= MAX_READY_SCOPES {
-            ready.clear();
-        }
-        ready.insert(marker);
         Ok(())
+    }
+}
+
+/// A unit's counter and the memo disposition its outcome leaves: a publication or replay is known, a size, conflict, or permanent refusal is terminal, and a deferral or retryable refusal waits for the next pass.
+fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Disposition) {
+    let pending = Disposition::Pending {
+        since_ms: observed_at,
+    };
+    match disposition {
+        UnitDisposition::Published(published) if published.replayed => {
+            (Count::UnitsReplayed, Disposition::Published)
+        }
+        UnitDisposition::Published(_) => (Count::UnitsPublished, Disposition::Published),
+        UnitDisposition::UnitTooLarge => (Count::UnitsUnitTooLarge, Disposition::Terminal),
+        UnitDisposition::Deferred => (Count::UnitsDeferred, pending),
+        UnitDisposition::Refused(PublishError::IdentityReused) => {
+            (Count::UnitsIdentityConflict, Disposition::Terminal)
+        }
+        UnitDisposition::Refused(refusal) if refusal.is_permanent() => {
+            (Count::UnitsRefusedTerminal, Disposition::Terminal)
+        }
+        UnitDisposition::Refused(_) => (Count::UnitsRefusedRetryable, pending),
     }
 }
 
@@ -764,13 +764,28 @@ mod tests {
     }
 
     #[test]
-    fn the_memo_stays_within_its_byte_budget_and_keeps_the_first_deferral_time() {
+    fn the_memo_stays_within_its_byte_budget_keeps_the_first_deferral_and_forgets_a_session() {
         let mut memo = Memo::default();
-        memo.record("k".into(), "d".into(), Disposition::Pending { since_ms: 5 });
-        memo.record("k".into(), "d".into(), Disposition::Pending { since_ms: 9 });
+        memo.record(
+            "i\u{1f}p\u{1f}h\u{1f}gone\u{1f}k".into(),
+            "d".into(),
+            Disposition::Pending { since_ms: 5 },
+        );
+        memo.record(
+            "i\u{1f}p\u{1f}h\u{1f}gone\u{1f}k".into(),
+            "d".into(),
+            Disposition::Pending { since_ms: 9 },
+        );
         assert_eq!(memo.oldest_pending_since(), Some(5));
-        memo.record("k".into(), "d".into(), Disposition::Published);
+        memo.record(
+            "i\u{1f}p\u{1f}h\u{1f}kept\u{1f}k".into(),
+            "d".into(),
+            Disposition::Published,
+        );
+        memo.forget_session("gone");
         assert_eq!(memo.oldest_pending_since(), None);
+        assert_eq!(memo.entries.len(), 1);
+        assert_eq!(memo.order.len(), 1);
         for index in 0..100_000 {
             memo.record(
                 format!("key-{index:064}"),
@@ -786,6 +801,9 @@ mod tests {
                 .map(|(key, entry)| Memo::entry_bytes(key, &entry.digest))
                 .sum::<usize>()
         );
-        assert!(memo.get("k").is_none(), "the oldest entries were evicted");
+        assert!(
+            memo.get("i\u{1f}p\u{1f}h\u{1f}kept\u{1f}k").is_none(),
+            "the oldest entries were evicted"
+        );
     }
 }

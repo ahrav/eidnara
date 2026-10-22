@@ -282,7 +282,12 @@ async fn capture_off_memory_off_or_a_subagent_session_runs_no_adapter() {
         let tip = kernel_store(&handler).tip().unwrap();
         pass(&handler, request).await;
         settle(&handler).await;
-        assert_eq!(report(&handler)["admitted"], 0, "{label}");
+        let report = report(&handler);
+        for (name, value) in report.as_object().unwrap() {
+            if name != "oldest_deferred_age_ms" {
+                assert_eq!(value, 0, "{label}: {name}");
+            }
+        }
         assert_eq!(kernel_store(&handler).tip().unwrap(), tip, "{label}");
     }
 }
@@ -496,6 +501,7 @@ async fn shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slo
         Some(Arc::new(|| panic!("injected worker panic")));
     pass(&panicking, transform_with(&window, "base-1")).await;
     settle(&panicking).await;
+    assert_eq!(report(&panicking)["worker_panicked"], 1);
     assert_eq!(report(&panicking)["retained_bytes"], 0);
     assert_eq!(report(&panicking)["active"], 0);
     *panicking.source_capture.before_publish.lock().unwrap() = None;
@@ -529,21 +535,29 @@ async fn shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slo
     while !handler.cancel.is_cancelled() {
         tokio::task::yield_now().await;
     }
-    // Admission is closed: a later window is refused before its job exists.
+    // A later window is charged, but its job is refused once admission has closed.
     let later = [opencode_user("msg_u2", 1_700_000_000_500, "too late")];
     let request = handler.test_client_prepare_request(transform_with(&later, "base-2"));
     let mut outcome = handler
         .handle_transform_for_test(test_route(7), request)
         .await;
+    let after = outcome
+        .take_after_response()
+        .expect("the later window is charged");
     assert!(
         !shutdown.is_finished(),
         "shutdown waits for the in-flight batch"
     );
     go_tx.send(()).unwrap();
     shutdown.await.unwrap().unwrap();
-    if let Some(after) = outcome.take_after_response() {
-        after.run();
-    }
+    assert!(handler.source_capture.is_idle());
+    after.run();
+    assert_eq!(report(&handler)["refused_shutting_down"], 1);
+    assert_eq!(
+        report(&handler)["discarded"],
+        1,
+        "the in-flight batch stopped cooperatively"
+    );
     assert!(handler.source_capture.is_idle());
     assert_eq!(report(&handler)["retained_bytes"], 0);
     assert_eq!(report(&handler)["admitted"], 1);
@@ -580,11 +594,11 @@ async fn captured_units_create_no_decision_and_stay_hidden_from_auto_inject_afte
     drop(handler);
     let reopened = KernelStore::open(dir.path().join("kernel")).unwrap();
     let tip = reopened.tip().unwrap();
-    let visible = reopened.visible_as_of(Surface::AutoInject, tip).unwrap();
+    let visible = reopened
+        .visible_as_of_in_scope(Surface::AutoInject, tip, Some(&captured), None)
+        .unwrap();
     assert!(
-        !format!("{visible:?}")
-            .split('"')
-            .any(|token| captured.iter().any(|id| id == token)),
+        visible.rows.is_empty(),
         "a captured unit is visible to AutoInject"
     );
     assert_eq!(
@@ -597,24 +611,53 @@ async fn captured_units_create_no_decision_and_stay_hidden_from_auto_inject_afte
 /// AC18: no counter or health field carries unit text, and every refusal path leaves only codes and counts.
 #[tokio::test]
 async fn the_capture_report_carries_no_unit_text() {
-    let (handler, _dir, _) = capture_handler(capture_config(true), true).await;
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
     for (base, text) in [
         ("base-1", SENTINEL.to_owned()),
         ("base-2", format!("{SENTINEL} changed")),
     ] {
-        let window = [opencode_user("msg_u1", 1_700_000_000_000, &text)];
+        let window = [opencode_user("msg_sentinel_u1", 1_700_000_000_000, &text)];
         pass(&handler, transform_with(&window, base)).await;
         settle(&handler).await;
     }
     assert_eq!(report(&handler)["units_identity_conflict"], 1);
+    // Adapter and window-too-large refusals report through the same counters.
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let offer = |window: &[Arc<Value>]| {
+        handler.source_capture.offer(source_capture::Offer {
+            profile: SerializerProfile::OpencodeAiSdk,
+            session_id: SESSION.to_owned(),
+            project: binding.clone(),
+            window: window.to_vec(),
+        })
+    };
+    let foreign = vec![Arc::new(json!({
+        "info": { "id": "msg_sentinel_u2", "sessionID": SENTINEL, "role": "user",
+                  "time": { "created": 1_700_000_000_001u64 } },
+        "parts": [{ "type": "text", "text": SENTINEL }],
+    }))];
+    let job = offer(&foreign)
+        .unwrap()
+        .into_job(
+            Arc::clone(&handler.kernel),
+            Arc::clone(&handler.capture_commit_gate),
+            handler.cancel.clone(),
+        )
+        .unwrap();
+    assert_eq!(job.run().await, source_capture::Count::Completed);
+    assert_eq!(
+        report(&handler)["adapter_refused"],
+        1,
+        "the record names another session"
+    );
+    let huge = vec![Arc::new(json!(SENTINEL.repeat(2 * 1024 * 1024)))];
+    assert!(offer(&huge).is_none());
+    assert_eq!(report(&handler)["refused_window_too_large"], 1);
     let health = handler.health().await;
     let text = format!("{} {:?}", report(&handler), health.metrics);
     assert!(!text.contains(SENTINEL), "{text}");
-    assert!(!text.contains("msg_u1"), "{text}");
-    assert!(
-        !text.contains(SESSION) || !text.contains("\"ses\""),
-        "{text}"
-    );
+    assert!(!text.contains("msg_sentinel"), "{text}");
+    assert!(!text.contains(binding.digest()), "{text}");
 }
 
 fn pi_row(id: &str, parent: Option<&str>, message: Value) -> Value {
@@ -789,4 +832,178 @@ async fn capture_latency_measurement() {
             report(&on)["units_published"]
         );
     }
+}
+
+/// C5: a delete that lands after the handoff invalidates the job under the commit gate; it publishes nothing, and the next pass captures the window again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_after_the_handoff_publishes_nothing_for_the_queued_window() {
+    let (handler, _dir, _) = capture_handler(capture_config(true), true).await;
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let go_rx = Arc::new(Mutex::new(go_rx));
+    let entered_tx = Arc::new(Mutex::new(entered_tx));
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        entered_tx.lock().unwrap().send(()).unwrap();
+        go_rx.lock().unwrap().recv().unwrap();
+    }));
+    let window = [opencode_user(
+        "msg_u1",
+        1_700_000_000_000,
+        "deleted before publication",
+    )];
+    pass(&handler, transform_with(&window, "base-1")).await;
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    {
+        let _gate = handler.capture_commit_gate.lock().unwrap();
+        handler.source_capture.invalidate_session(SESSION);
+    }
+    go_tx.send(()).unwrap();
+    settle(&handler).await;
+    assert_eq!(report(&handler)["session_invalidated"], 1);
+    let store = kernel_store(&handler);
+    assert!(live(&store, OccurrenceClass::Messages).is_empty());
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+    pass(&handler, transform_with(&window, "base-2")).await;
+    settle(&handler).await;
+    assert_eq!(live(&store, OccurrenceClass::Messages).len(), 1);
+}
+
+/// C3: a budget spent before the kernel writer is acquired commits nothing; the response was already returned, and the slot and charges are released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spent_budget_before_the_writer_commits_nothing() {
+    let (handler, _dir, _) = capture_handler(capture_config(true), true).await;
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(|| {
+        std::thread::sleep(source_capture::CAPTURE_BUDGET + Duration::from_millis(100))
+    }));
+    let store = kernel_store(&handler);
+    let tip = store.tip().unwrap();
+    let window = [opencode_user("msg_u1", 1_700_000_000_000, "too slow")];
+    let started = Instant::now();
+    pass(&handler, transform_with(&window, "base-1")).await;
+    assert!(started.elapsed() < CAPTURE_TEST_RESPONSE_BOUND);
+    for _ in 0..1_000 {
+        if handler.source_capture.is_idle() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(report(&handler)["deadline"], 1);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(report(&handler)["retained_bytes"], 0);
+}
+
+/// F5: another writer publishes a unit between the handoff and this batch. Equal bytes and context replay; another sensitivity conflicts, and that unit becomes terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_publication_of_a_unit_replays_or_conflicts() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_seed", 1_700_000_000_000, "seed")],
+            "base-0",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let session = crate::harness_sources::SessionIdentity {
+        project_id: binding.digest().to_owned(),
+        harness: crate::harness_sources::Harness::OpenCode,
+        session_id: SESSION.to_owned(),
+    };
+    for (base, sensitivity, message, outcome) in [
+        (
+            "base-1",
+            kernel::Sensitivity::Sensitive,
+            "msg_same",
+            "units_replayed",
+        ),
+        (
+            "base-2",
+            kernel::Sensitivity::Normal,
+            "msg_other",
+            "units_identity_conflict",
+        ),
+    ] {
+        let record = opencode_user(message, 1_700_000_000_100, "raced");
+        let unit = crate::harness_sources::opencode_units(&session, &record)
+            .unwrap()
+            .remove(0);
+        let (store, scope_id) = (Arc::clone(&store), binding.scope_id());
+        *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+            crate::harness_sources::SourcePublisher {
+                kernel: &store,
+                domain_id: "harness-capture",
+                scope_id: Some(&scope_id),
+                egress: kernel::ProviderEgress::LocalOnly,
+                sensitivity,
+            }
+            .publish(&unit, now_ms())
+            .unwrap();
+        }));
+        pass(&handler, transform_with(&[record], base)).await;
+        settle(&handler).await;
+        assert_eq!(report(&handler)[outcome], 1, "{outcome}");
+        *handler.source_capture.before_publish.lock().unwrap() = None;
+    }
+    let tip = store.tip().unwrap();
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_other", 1_700_000_000_100, "raced")],
+            "base-3",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(
+        store.tip().unwrap(),
+        tip,
+        "the terminal unit is never offered again"
+    );
+}
+
+/// F25: a revision that leads the clock is a retryable refusal; the unit waits as pending, and the report shows its age.
+#[tokio::test]
+async fn a_revision_lead_leaves_the_unit_pending() {
+    let (handler, _dir, _) = capture_handler(capture_config(true), true).await;
+    let ahead = now_ms() as u64 + 2 * 60 * 60 * 1_000;
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_ahead", ahead, "from the future")],
+            "base-1",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_refused_retryable"], 1);
+    assert!(report(&handler)["oldest_deferred_age_ms"].is_u64());
+    assert!(live(&kernel_store(&handler), OccurrenceClass::Messages).is_empty());
+}
+
+/// C2: the supervisor's own budget refuses a second window while the first holds most of it, and retains nothing for the refusal.
+#[tokio::test]
+async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let window = vec![Arc::new(json!("x".repeat(17 * 1024 * 1024)))];
+    let offer = || {
+        handler.source_capture.offer(source_capture::Offer {
+            profile: SerializerProfile::OpencodeAiSdk,
+            session_id: SESSION.to_owned(),
+            project: binding.clone(),
+            window: window.clone(),
+        })
+    };
+    let held = offer().expect("the first window fits");
+    let retained = report(&handler)["retained_bytes"].as_u64().unwrap();
+    assert!(offer().is_none());
+    assert_eq!(report(&handler)["refused_resident_short"], 1);
+    assert_eq!(report(&handler)["retained_bytes"], retained);
+    drop(held);
+    assert_eq!(report(&handler)["retained_bytes"], 0);
 }
