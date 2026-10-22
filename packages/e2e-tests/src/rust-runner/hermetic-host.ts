@@ -148,6 +148,34 @@ export interface MemoryAdmission {
     visibility: string;
 }
 
+/** One selected read as `review.read` answers it. */
+type ReviewRead = Record<string, unknown> & {
+    causal_identity: string;
+    proposal: Record<string, unknown>;
+};
+
+/** What the review command must read back after the fixture's `review-witness` control. */
+export interface ReviewWitness {
+    /** The originating decision's exact tokens as the selector read them. */
+    target: {
+        object_id: string;
+        source_revision: number;
+        known_as_of: number;
+        commit_token: number;
+    };
+    /** The evidence under the two fixture forms. */
+    evidence: string[];
+    /** The project's completed outcomes as the ledger lists them, in the shape of `review.list` items. */
+    outcomes: Record<string, unknown>[];
+    /** Each fixture job's selected read and the evidence its causal inputs require. */
+    fixture: { read: ReviewRead; requiredEvidence: string[] }[];
+    /** Each production job's causal identity. */
+    production: string[];
+    providerRequests: number;
+    providerConnections: number;
+    productionAttempts: number;
+}
+
 type ControlCommand =
     | "backend-success"
     | "block-next-call"
@@ -161,6 +189,7 @@ type ControlCommand =
     | "memory-admission"
     | "memory-seed"
     | "user-hint-outcome"
+    | "review-witness"
     | "graceful-shutdown";
 
 type PendingControl = {
@@ -579,6 +608,65 @@ function parseUserHintPass(value: unknown): UserHintPass {
     };
 }
 
+function parseReviewWitness(value: unknown): ReviewWitness {
+    const malformed = () => new Error("fixture control review witness was malformed");
+    const object = record(value);
+    const target = record(object?.target);
+    const counts = ["production_attempts", "provider_connections", "provider_requests"] as const;
+    const strings = (entries: unknown): entries is string[] =>
+        Array.isArray(entries) && entries.every((entry) => typeof entry === "string");
+    if (
+        !object ||
+        !exactKeys(object, [
+            "evidence",
+            "fixture",
+            "outcomes",
+            "production",
+            ...counts,
+            "target",
+        ]) ||
+        !target ||
+        !exactKeys(target, ["commit_token", "known_as_of", "object_id", "source_revision"]) ||
+        typeof target.object_id !== "string" ||
+        !["commit_token", "known_as_of", "source_revision"].every((key) =>
+            Number.isSafeInteger(target[key]),
+        ) ||
+        !strings(object.evidence) ||
+        !strings(object.production) ||
+        !Array.isArray(object.outcomes) ||
+        !object.outcomes.every((entry) => record(entry) !== null) ||
+        !Array.isArray(object.fixture) ||
+        !counts.every((key) => Number.isSafeInteger(object[key]))
+    ) {
+        throw malformed();
+    }
+    const fixture = object.fixture.map((entry) => {
+        const job = record(entry);
+        const read = record(job?.read);
+        if (
+            !job ||
+            !exactKeys(job, ["read", "required_evidence"]) ||
+            !read ||
+            typeof read.causal_identity !== "string" ||
+            !record(read.proposal) ||
+            !strings(job.required_evidence)
+        ) {
+            throw malformed();
+        }
+        return { read: read as ReviewRead, requiredEvidence: job.required_evidence };
+    });
+    return {
+        target: target as ReviewWitness["target"],
+        evidence: object.evidence,
+        outcomes: object.outcomes as Record<string, unknown>[],
+        fixture,
+        production: object.production,
+        providerRequests: object.provider_requests as number,
+        providerConnections: object.provider_connections as number,
+        productionAttempts: object.production_attempts as number,
+    };
+}
+
 function parseMemoryAdmission(value: unknown): MemoryAdmission {
     const object = record(value);
     if (
@@ -776,6 +864,13 @@ class FixtureControlClient {
         );
     }
 
+    /** Runs the fixture-class and production-class MemoryReviewer jobs for a MODULE root; the worker pass and its provider exchanges outlast the default control timeout. */
+    async reviewWitness(projectRoot: string): Promise<ReviewWitness> {
+        return parseReviewWitness(
+            await this.request("review-witness", { project_root: projectRoot }, 30_000),
+        );
+    }
+
     gracefulShutdown(): Promise<void> {
         return this.ack("graceful-shutdown");
     }
@@ -799,6 +894,7 @@ class FixtureControlClient {
     private request(
         command: ControlCommand,
         parameters: Record<string, unknown> = {},
+        timeoutMs = this.timeoutMs,
     ): Promise<unknown> {
         if (!this.socket || this.closed)
             return Promise.reject(new Error("fixture control is unavailable"));
@@ -816,7 +912,7 @@ class FixtureControlClient {
             const timer = setTimeout(() => {
                 this.pending.delete(id);
                 rejectRequest(new Error(`fixture control ${command} timed out`));
-            }, this.timeoutMs);
+            }, timeoutMs);
             this.pending.set(id, {
                 command,
                 resolve: resolveRequest,
@@ -1087,6 +1183,11 @@ export class HermeticHostStack {
         text: string,
     ): Promise<MemoryAdmission> {
         return this.requireControl().memorySeed(anchor, objectId, category, text);
+    }
+
+    /** Runs a fixture-class and a production-class MemoryReviewer job over the host's stores for the MODULE root `projectRoot`. */
+    reviewWitness(projectRoot: string): Promise<ReviewWitness> {
+        return this.requireControl().reviewWitness(projectRoot);
     }
 
     async backendRequestCount(): Promise<number> {

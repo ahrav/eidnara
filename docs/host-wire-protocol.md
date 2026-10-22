@@ -662,6 +662,32 @@ so `metadata_headroom_bytes` reaching zero means new review work is refused
 until a new incarnation; it is a safety ceiling, not a measured service
 lifetime.
 
+The `context` component MAY also carry a sanitized `metrics.source_capture`
+object describing source capture (Section 7.9), the background publication of
+consented message text and tool results as Kernel source descriptors. The
+counters are process-local and start at zero when the daemon starts. The block
+is sanitized field by field: any object survives, a non-object drops the block
+whole, and every field is kept or dropped on its own. Every field is
+content-free: a count, a byte total, or milliseconds. No field carries unit
+text, an identity, a path, a digest, or a project.
+
+| field | type | rule |
+| --- | --- | --- |
+| `admitted` | unsigned integer | capture jobs that started |
+| `refused_queue_full`, `refused_resident_short`, `refused_window_too_large`, `refused_shutting_down` | unsigned integer | windows refused before or at handoff, by reason; `refused_resident_short` also counts jobs whose unit copies the capture budget refused |
+| `completed`, `discarded`, `session_invalidated`, `kernel_unavailable`, `deadline`, `kernel_error`, `worker_panicked` | unsigned integer | job ends by reason |
+| `adapter_refused` | unsigned integer | native records the adapters refused |
+| `units_published`, `units_replayed`, `units_memo_skipped`, `units_deferred`, `units_unit_too_large`, `units_identity_conflict`, `units_refused_terminal`, `units_refused_retryable` | unsigned integer | unit dispositions |
+| `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
+| `retained_bytes` | unsigned integer | bytes the capture budget holds now |
+| `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
+
+The same integer rules as `kernel` apply: every integer MUST be no greater
+than 2^53; a larger, negative, non-integer, or `null` value is dropped to
+absent, except `oldest_deferred_age_ms`, where `null` is a declared value;
+unknown fields are dropped; fields are additive.
+
 The `model_execution` component MAY also carry a sanitized
 `metrics.aws_credentials` object: the host's cached observation of the
 selected AWS credential source, read from a shared cell with no credential
@@ -920,12 +946,14 @@ contain zero facts. `memory.auto_capture` is user-only and defaults to true.
 It, `memory.enabled`, and `memory.auto_promote` must all
 permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
-it from the project tier before merging. It grants a different capture: the
-daemon retains the exact bytes of user message text, tool outputs, and tool
-errors as Kernel source descriptors. Source capture runs when
-`source_capture.enabled` and `memory.enabled` both permit it; a session marked
-`is_subagent` never captures. `memory.auto_capture` and `memory.auto_promote`
-gate only model-extracted facts from redacted text.
+it from the project tier before merging. It consents to a different capture:
+the daemon retaining the exact bytes of user message text, tool outputs, and
+tool errors as Kernel source descriptors. That capture is reserved: the
+current daemon accepts and merges the key and retains no source bytes. A
+daemon that performs source capture runs it only when
+`source_capture.enabled` and `memory.enabled` both permit it, and a session
+marked `is_subagent` never captures. `memory.auto_capture` and
+`memory.auto_promote` gate only model-extracted facts from redacted text.
 Captured facts remain labeled model inference for explicit
 search, not human approval or automatic-context eligibility. Session deletion
 fences publication and removes queued sources; committed memories remain

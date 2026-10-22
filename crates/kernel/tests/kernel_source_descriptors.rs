@@ -2227,3 +2227,111 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
         Some(SourceDescriptorError::Kernel(KernelError::InvalidInput))
     );
 }
+
+/// The historical head and the retired-lineage fallback compare revisions as integers: `srcdesc:<lineage>:10` sorts before `srcdesc:<lineage>:9` as text, so a head read in object id order would report 9. A lineage retired at 10 refuses 9 and 10 and republishes at 11, and the head reader serves every class's lineage.
+#[test]
+fn lineage_heads_compare_revisions_as_integers_across_digit_boundaries() {
+    let fixture = Fixture::open();
+    let text = "# v\n";
+    let evidence = fixture.retain("doc-digits", text);
+    let revisions: Vec<String> = (1..=12).map(|revision| revision.to_string()).collect();
+    let publish = |key: &str, revision: usize, expected_head: Option<i64>| {
+        fixture.publish(
+            key,
+            &SourceDescriptorRequest {
+                expected_head,
+                ..request(document(&revisions[revision - 1]), &evidence, text)
+            },
+        )
+    };
+
+    let mut tenth = None;
+    for revision in 1..=10 {
+        let head = (revision > 1).then(|| i64::try_from(revision - 1).unwrap());
+        let (outcome, _, _) = publish(&format!("doc-digits-{revision}"), revision, head).unwrap();
+        tenth = Some(outcome.object_id);
+    }
+    let tenth = tenth.unwrap();
+    let lineage = encode(&document("1"), text).unwrap().lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(10)
+    );
+
+    fixture
+        .store
+        .commit(intent("doc-digits-retire-10"), |envelope| {
+            envelope.retire_observation(&tenth)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(fixture.live(&tenth), Some(false));
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(10)
+    );
+    let tip = fixture.store.tip().unwrap();
+    for revision in [9, 10] {
+        assert_eq!(
+            publish(&format!("doc-digits-stale-{revision}"), revision, Some(10)).err(),
+            Some(SourceDescriptorError::RevisionNotAdvanced),
+            "revision {revision} is at or below the retired head"
+        );
+    }
+    assert_eq!(
+        publish("doc-digits-11-stale-head", 11, Some(9)).err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "every refusal committed nothing"
+    );
+
+    let (eleventh, _, _) = publish("doc-digits-11", 11, Some(10)).unwrap();
+    assert!(eleventh.replaced_object_id.is_none());
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(11)
+    );
+    let (twelfth, _, _) = publish("doc-digits-12", 12, Some(11)).unwrap();
+    assert_eq!(
+        twelfth.replaced_object_id.as_deref(),
+        Some(eleventh.object_id.as_str())
+    );
+
+    // A message lineage reports its own head; a message keeps the live-predecessor rule.
+    let message_evidence = fixture.retain("msg-digits", "message text");
+    for revision in [9, 10] {
+        fixture
+            .publish(
+                &format!("msg-digits-{revision}"),
+                &request(
+                    message(MSG_A, &revisions[revision - 1]),
+                    &message_evidence,
+                    "message text",
+                ),
+            )
+            .unwrap();
+    }
+    let message_lineage = encode(&message(MSG_A, "1"), "message text")
+        .unwrap()
+        .lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&message_lineage).unwrap(),
+        Some(10)
+    );
+    assert_eq!(
+        fixture
+            .publish(
+                "msg-digits-9-again",
+                &request(
+                    message(MSG_A, &revisions[8]),
+                    &message_evidence,
+                    "message text"
+                ),
+            )
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+}

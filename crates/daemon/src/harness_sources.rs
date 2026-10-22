@@ -4,10 +4,11 @@
 //!
 //! Publication retains each block's exact bytes, then commits its descriptor and admission. Receipt keys make replays idempotent; changed bytes or publishing context conflict. A newer revision invalidates its predecessor atomically. Permanent descriptor refusals attempt to retire retained evidence. Kernel failures, including unmet preconditions such as a missing scope, preserve it; callers decide whether the failure permits retry.
 //!
-//! Capture publication ([`publish_screened`]) bounds what one batch retains. A unit whose text exceeds [`MAX_SOURCE_UNIT_BYTES`] is refused whole, because a spliced prefix is not an exact source. A batch admits at most [`MAX_SOURCE_BATCH_UNITS`] units and [`MAX_SOURCE_BATCH_BYTES`] of text, and defers the rest to a later pass. Size, identity, revision, and scope refusals are decided per unit before the kernel transaction, so they leave every sibling admissible; the transaction stays all-or-nothing over the admitted units.
+//! [`publish_screened`] refuses units larger than [`MAX_SOURCE_UNIT_BYTES`] whole to preserve exact source text. Each batch admits at most [`MAX_SOURCE_BATCH_UNITS`] units, [`MAX_SOURCE_BATCH_BYTES`] of text, and one unit per lineage; excess units wait for a later pass. Publication checks size, identity, revision lead, and scope per unit before the kernel transaction. When the transaction refuses a descriptor, such as a revision that does not advance its lineage, publication removes that unit and retries the remaining units. Each transaction commits its units atomically.
 
 use kernel::source_identity::{
-    HARNESSES, Occurrence, OccurrenceClass, lower_hex, occurrence_id_preserving_span,
+    HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, lower_hex,
+    occurrence_id_preserving_span,
 };
 
 const _: () = assert!(
@@ -110,6 +111,18 @@ impl SourceUnit {
             .iter()
             .find(|(field, _)| *field == name)
             .map(|(_, value)| value.as_str())
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.text.len()
+            + self.role.len()
+            + self.revision.len()
+            + self
+                .identity
+                .iter()
+                .map(|(_, value)| 48 + value.len())
+                .sum::<usize>()
     }
 
     /// The actor a unit's commits and evidence are recorded under: the harness that produced it, the repository a commit came from, or the canonical role for a unit derived from a kernel decision.
@@ -232,6 +245,20 @@ pub fn opencode_units(
     session: &SessionIdentity,
     message: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    opencode_units_within(session, message, &mut |_| true)
+        .map(|units| units.expect("an allowance that admits every unit never stops"))
+}
+
+/// `opencode_units_within` follows [`opencode_units`]'s rules and calls `admit` with each unit's retained byte count as the unit is built. If `admit` returns `false`, the function drops that unit and returns `Ok(None)`.
+///
+/// # Errors
+///
+/// As [`opencode_units`].
+pub fn opencode_units_within(
+    session: &SessionIdentity,
+    message: &Value,
+    admit: &mut dyn FnMut(usize) -> bool,
+) -> Result<Option<Vec<SourceUnit>>, AdapterRefusal> {
     if session.harness != Harness::OpenCode {
         return Err(AdapterRefusal::UnsupportedShape("harness"));
     }
@@ -258,7 +285,7 @@ pub fn opencode_units(
         .get("parts")
         .and_then(Value::as_array)
         .ok_or(AdapterRefusal::UnsupportedShape("parts"))?;
-    let mut units = Vec::new();
+    let mut kept = Kept::new(admit);
     for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
             // An ignored text part is not conversation text.
@@ -269,7 +296,15 @@ pub fn opencode_units(
                     .get("text")
                     .and_then(Value::as_str)
                     .ok_or(AdapterRefusal::UnsupportedShape("text part"))?;
-                units.push(session.message_unit(message_id, index, &message_revision, role, text));
+                if !kept.keep(session.message_unit(
+                    message_id,
+                    index,
+                    &message_revision,
+                    role,
+                    text,
+                )) {
+                    return Ok(None);
+                }
             }
             Some("tool") => {
                 let state = part
@@ -294,12 +329,14 @@ pub fn opencode_units(
                     is_error,
                 };
                 // One settled tool part carries one output string: its only output block.
-                units.push(session.tool_unit(&tool, 0, output));
+                if !kept.keep(session.tool_unit(&tool, 0, output)) {
+                    return Ok(None);
+                }
             }
             _ => {}
         }
     }
-    Ok(units)
+    Ok(Some(kept.units))
 }
 
 /// Units of one Pi transform row, which carries its session entry's `type` and `parentId` beside its `id` and `message`: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
@@ -311,6 +348,20 @@ pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    pi_units_within(session, entry, &mut |_| true)
+        .map(|units| units.expect("an allowance that admits every unit never stops"))
+}
+
+/// `pi_units_within` follows [`pi_units`]'s rules and calls `admit` with each unit's retained byte count as the unit is built. If `admit` returns `false`, the function drops that unit and returns `Ok(None)`.
+///
+/// # Errors
+///
+/// As [`pi_units`].
+pub fn pi_units_within(
+    session: &SessionIdentity,
+    entry: &Value,
+    admit: &mut dyn FnMut(usize) -> bool,
+) -> Result<Option<Vec<SourceUnit>>, AdapterRefusal> {
     if session.harness != Harness::Pi {
         return Err(AdapterRefusal::UnsupportedShape("harness"));
     }
@@ -338,7 +389,7 @@ pub fn pi_units(
         return Err(AdapterRefusal::UnsupportedShape("message.role"));
     }
     let stamp = revision(message.timestamp, "timestamp")?;
-    let mut units = Vec::new();
+    let mut kept = Kept::new(admit);
     if role == "toolResult" {
         let tool = ToolBlock {
             parent_message_id: field(entry, "parentId")?,
@@ -355,13 +406,17 @@ pub fn pi_units(
                 .and_then(Value::as_str)
                 .filter(|_| item.get("type").and_then(Value::as_str) == Some("text"))
                 .ok_or(AdapterRefusal::UnsupportedShape("tool result item"))?;
-            units.push(session.tool_unit(&tool, index, text));
+            if !kept.keep(session.tool_unit(&tool, index, text)) {
+                return Ok(None);
+            }
         }
-        return Ok(units);
+        return Ok(Some(kept.units));
     }
     match message.content {
         Some(Value::String(text)) => {
-            units.push(session.message_unit(entry_id, 0, &stamp, role, text))
+            if !kept.keep(session.message_unit(entry_id, 0, &stamp, role, text)) {
+                return Ok(None);
+            }
         }
         _ => {
             for (index, item) in message.content_items()?.iter().enumerate() {
@@ -370,12 +425,36 @@ pub fn pi_units(
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or(AdapterRefusal::UnsupportedShape("text item"))?;
-                    units.push(session.message_unit(entry_id, index, &stamp, role, text));
+                    if !kept.keep(session.message_unit(entry_id, index, &stamp, role, text)) {
+                        return Ok(None);
+                    }
                 }
             }
         }
     }
-    Ok(units)
+    Ok(Some(kept.units))
+}
+
+struct Kept<'a> {
+    units: Vec<SourceUnit>,
+    admit: &'a mut dyn FnMut(usize) -> bool,
+}
+
+impl<'a> Kept<'a> {
+    fn new(admit: &'a mut dyn FnMut(usize) -> bool) -> Self {
+        Self {
+            units: Vec::new(),
+            admit,
+        }
+    }
+
+    fn keep(&mut self, unit: SourceUnit) -> bool {
+        let admitted = (self.admit)(unit.retained_bytes());
+        if admitted {
+            self.units.push(unit);
+        }
+        admitted
+    }
 }
 
 /// The members of a Pi message the adapter reads, collected in one pass over the message object.
@@ -450,7 +529,7 @@ pub enum PublishError {
     /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
     #[error("the native revision {revision} leads the observation at {observed_at}")]
     RevisionAhead { revision: i64, observed_at: i64 },
-    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, a mismatched domain, or a repository document's lineage head that moved after the evidence was retained. A head another writer advanced refuses this unit as a stale revision, and a proposal past the head plus one as a head mismatch; either refuses the same unit again, so the producer reads the head and proposes a new unit.
+    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, a mismatched domain, or a repository document's lineage head that differs from the head the proposal expected. A stale revision refuses the same unit on every attempt, so the producer reads the head and proposes a new unit. A proposal past the head plus one preserves its evidence on `HeadMismatch`, so the same unit can be offered again when the lineage reaches its expected head.
     #[error("the descriptor was refused: {refusal}")]
     Descriptor {
         refusal: SourceDescriptorError,
@@ -465,7 +544,7 @@ pub enum PublishError {
 }
 
 impl PublishError {
-    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, and revision-lead refusals depend on state that can change and report `false`.
+    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, revision-lead, and head-mismatch refusals depend on state that can change and report `false`.
     pub fn is_permanent(&self) -> bool {
         match self {
             Self::Artifact(kind) => matches!(
@@ -481,7 +560,8 @@ impl PublishError {
                     | ArtifactErrorKind::UnsupportedShape
                     | ArtifactErrorKind::DigestCollision
             ),
-            Self::IdentityReused | Self::Descriptor { .. } => true,
+            Self::IdentityReused => true,
+            Self::Descriptor { refusal, .. } => *refusal != SourceDescriptorError::HeadMismatch,
             Self::UnadmittedSource { .. } | Self::RevisionAhead { .. } | Self::Kernel { .. } => {
                 false
             }
@@ -649,11 +729,15 @@ impl SourcePublisher<'_> {
                         });
                     }
                     Some(Err(refusal)) => {
-                        let evidence = Some(self.retire_evidence(
-                            &unit.key,
-                            &unit.request_digest,
-                            &unit.origin,
-                        ));
+                        // A `HeadMismatch` can resolve as the lineage advances, so its evidence is preserved for the retry. Every other descriptor refusal is permanent and attempts to retire the retained evidence.
+                        let evidence = Some(if refusal == SourceDescriptorError::HeadMismatch {
+                            RetainedEvidence {
+                                object_id: evidence_object_id,
+                                retired: None,
+                            }
+                        } else {
+                            self.retire_evidence(&unit.key, &unit.request_digest, &unit.origin)
+                        });
                         return Err(PublishError::Descriptor { refusal, evidence });
                     }
                     _ => error,
@@ -680,7 +764,7 @@ impl SourcePublisher<'_> {
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
-        let (occurrence_id, revision) = occurrence_id_preserving_span(&Occurrence {
+        let encoded = encode_preserving_span(&Occurrence {
             class: unit.class.code(),
             identity: &identity,
             revision: &unit.revision,
@@ -695,14 +779,18 @@ impl SourcePublisher<'_> {
         // A native timestamp may not lead the observation; a canonical revision and a repository document's observation count are counters, not judged against the clock.
         if !rule.is_inherited()
             && unit.class != OccurrenceClass::RepositoryDocuments
-            && revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
+            && encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
         {
             return Err(PublishError::RevisionAhead {
-                revision,
+                revision: encoded.revision,
                 observed_at,
             });
         }
-        let key = receipt_key(&occurrence_id, revision, unit.representation);
+        let key = receipt_key(
+            &encoded.occurrence_id,
+            encoded.revision,
+            unit.representation,
+        );
         // Reject project-bound units without a scope before retention: no project route serves unscoped rows.
         let project = match (unit.identity_value("project_id"), self.scope_id) {
             (Some(project_id), Some(_)) => Some(ProjectScope::new(project_id).map_err(
@@ -722,8 +810,9 @@ impl SourcePublisher<'_> {
         Ok(Prepared {
             unit,
             identity,
-            occurrence_id,
-            revision,
+            occurrence_id: encoded.occurrence_id,
+            lineage_id: encoded.lineage_id,
+            revision: encoded.revision,
             rule,
             key,
             request_digest: self.request_digest(unit),
@@ -734,23 +823,7 @@ impl SourcePublisher<'_> {
 
     /// The unit's receipt key and request digest, the pair a stored receipt answers for, or `None` when its identity does not encode. Changed bytes or publishing context under one key give another digest.
     pub fn receipt_identity(&self, unit: &SourceUnit) -> Option<(String, String)> {
-        let identity: Vec<(&str, &str)> = unit
-            .identity
-            .iter()
-            .map(|(name, value)| (*name, value.as_str()))
-            .collect();
-        let (occurrence_id, revision) = occurrence_id_preserving_span(&Occurrence {
-            class: unit.class.code(),
-            identity: &identity,
-            revision: &unit.revision,
-            representation: unit.representation.as_str(),
-            span: None,
-        })
-        .ok()?;
-        Some((
-            receipt_key(&occurrence_id, revision, unit.representation),
-            self.request_digest(unit),
-        ))
+        Some((receipt_key_of(unit)?, self.request_digest(unit)))
     }
 
     fn check_scope(
@@ -934,7 +1007,7 @@ impl SourcePublisher<'_> {
     /// The request digest binds text, domain, scope, role, sensitivity, and provider-egress policy. Changing any of these under the same receipt key conflicts rather than replaying.
     ///
     /// The parts are hashed in place, each after its big-endian `u64` length, so the unit's text is read once and never copied.
-    fn request_digest(&self, unit: &SourceUnit) -> String {
+    pub(crate) fn request_digest(&self, unit: &SourceUnit) -> String {
         let mut hasher = Sha256::new();
         for part in [
             REQUEST_DIGEST_FORMAT,
@@ -956,6 +1029,24 @@ impl SourcePublisher<'_> {
         ]);
         lower_hex(&hasher.finalize())
     }
+}
+
+/// Both receipts of `unit` share this key, or `None` when its identity does not encode.
+pub(crate) fn receipt_key_of(unit: &SourceUnit) -> Option<String> {
+    let identity: Vec<(&str, &str)> = unit
+        .identity
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let (occurrence_id, revision) = occurrence_id_preserving_span(&Occurrence {
+        class: unit.class.code(),
+        identity: &identity,
+        revision: &unit.revision,
+        representation: unit.representation.as_str(),
+        span: None,
+    })
+    .ok()?;
+    Some(receipt_key(&occurrence_id, revision, unit.representation))
 }
 
 /// Both receipts of a unit are keyed by its occurrence, revision, and representation: the digest of `occurrence_id`, the decimal revision, and the representation, joined by U+001F.
@@ -981,7 +1072,7 @@ pub struct KeyedWrite<'a> {
 
 /// Commits `writes` in order and then publishes every unit of `units` under its publisher, all in one kernel commit, and returns each unit's outcome in order.
 ///
-/// A write or unit whose receipt is already recorded is skipped, and a skipped unit reports a replayed publication. The commit records every other write's and unit's own receipt, and every retained text's evidence receipt, so a later commit of any one of them alone replays. Units of one publisher with equal text cite one evidence object, and a unit whose evidence an earlier publication retained cites that evidence. A unit's descriptor carries the class the store recorded for its evidence, and its admission classes are read in the commit.
+/// A write or unit whose receipt is already recorded is skipped, and a skipped unit reports a replayed publication. The commit records every other write's and unit's own receipt, and every retained text's evidence receipt, so a later commit of any one of them alone replays. Units of one publisher with equal class and text cite one evidence object, and a unit whose evidence an earlier publication retained cites that evidence. A unit's descriptor carries the class the store recorded for its evidence, and its admission classes are read in the commit.
 ///
 /// # Errors
 ///
@@ -1001,6 +1092,7 @@ pub fn publish_batch(
                 .map_err(|_| BatchRefusal {
                     error: KernelError::InvalidInput,
                     unit: Some(index),
+                    refusal: None,
                 })?,
         );
     }
@@ -1013,6 +1105,7 @@ pub fn publish_batch(
             return Err(BatchRefusal {
                 error: KernelError::Conflict,
                 unit: Some(index),
+                refusal: None,
             });
         }
     }
@@ -1041,6 +1134,7 @@ pub fn publish_batch(
         .map_err(|error| BatchRefusal {
             error,
             unit: culprit,
+            refusal: None,
         })?;
     let writes: Vec<KeyedWrite<'_>> = writes
         .into_iter()
@@ -1087,7 +1181,6 @@ pub fn publish_batch(
                 .collect());
         }
     };
-    // A unit cites the evidence of the first pending unit of its publisher with its text.
     let owners: Vec<usize> = pending
         .iter()
         .map(|&index| {
@@ -1095,6 +1188,7 @@ pub fn publish_batch(
                 .iter()
                 .find(|&&owner| {
                     std::ptr::eq(units[owner].0, units[index].0)
+                        && units[owner].1.class == units[index].1.class
                         && units[owner].1.text == units[index].1.text
                 })
                 .expect("a unit owns its own text")
@@ -1131,6 +1225,7 @@ pub fn publish_batch(
                     .unwrap_or_else(|| &handles[request_of[&owner]]);
                 let evidence_object_id = prepared[owner].evidence_object_id();
                 let records_receipt = main_is_write || !published.is_empty();
+                let mut refusal = None;
                 // The error carries whether the unit's own receipt write refused.
                 let mut step = || {
                     let sensitivity = envelope
@@ -1140,7 +1235,14 @@ pub fn publish_batch(
                         .object
                         .sensitivity;
                     let (descriptor, admission) = publisher
-                        .apply(envelope, unit, handle, sensitivity, observed_at, &mut None)
+                        .apply(
+                            envelope,
+                            unit,
+                            handle,
+                            sensitivity,
+                            observed_at,
+                            &mut refusal,
+                        )
                         .map_err(|error| (error, false))?;
                     if records_receipt {
                         envelope
@@ -1155,7 +1257,12 @@ pub fn publish_batch(
                 // A conflict on the unit's own receipt is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
                 let (descriptor, admission) = step().map_err(|(error, receipt)| {
                     if !(receipt && error == KernelError::Conflict) {
-                        culprit = Some(index);
+                        culprit = Some((
+                            index,
+                            refusal.and_then(Result::err).filter(|refusal| {
+                                !matches!(refusal, SourceDescriptorError::Kernel(_))
+                            }),
+                        ));
                     }
                     error
                 })?;
@@ -1175,13 +1282,15 @@ pub fn publish_batch(
         })
         .map_err(|error| BatchRefusal {
             error,
-            unit: culprit,
+            unit: culprit.map(|(index, _)| index),
+            refusal: culprit.and_then(|(_, refusal)| refusal),
         })?;
     // A receipt committed under the main key since the preview ran no operation.
     if receipt.replayed || published.len() != pending.len() {
         return Err(BatchRefusal {
             error: KernelError::Conflict,
             unit: None,
+            refusal: None,
         });
     }
     for (index, published) in pending.into_iter().zip(published) {
@@ -1199,8 +1308,10 @@ pub fn publish_batch(
 pub struct BatchRefusal {
     /// The cause: [`KernelError::Conflict`] when `unit`'s key already holds a receipt under another request digest.
     pub error: KernelError,
-    /// The position, among the units the caller passed, of the unit whose step failed: its identity, its scope check, its receipt lookup, or its descriptor commit. That step's cause can be transient, such as [`KernelError::Deadline`] or [`KernelError::Busy`], so only [`Self::conflicting_unit`] names a unit unchanged input refuses again. `None` when the refusal belongs to the batch, one of its writes, or a receipt committed by another writer after this attempt's preview; the next attempt's preview replays that receipt or names the unit it conflicts with.
+    /// The index in the caller's units whose identity validation, scope check, receipt lookup, or descriptor commit failed. The cause can be transient, such as [`KernelError::Deadline`] or [`KernelError::Busy`]. `None` identifies a refusal involving the batch, one of its writes, or a receipt another writer committed after this attempt's preview.
     pub unit: Option<usize>,
+    /// The descriptor refusal of `unit` inside the commit, such as [`SourceDescriptorError::RevisionNotAdvanced`]. A kernel failure inside descriptor publication leaves this `None` and is `error`.
+    pub refusal: Option<SourceDescriptorError>,
 }
 
 impl BatchRefusal {
@@ -1217,15 +1328,15 @@ pub enum UnitDisposition {
     Published(Published),
     /// The text exceeds [`MAX_SOURCE_UNIT_BYTES`]. Nothing was retained, and unchanged input refuses again.
     UnitTooLarge,
-    /// The batch reached its unit or byte bound first. Nothing was retained, and a later pass offers the unit again.
+    /// The batch reached its unit or byte bound first, or an admitted unit shares the unit's lineage. The unit remains available for a later pass to offer again.
     Deferred,
-    /// Refused by its identity, revision, or scope binding before the transaction. Nothing was retained; [`PublishError::is_permanent`] says whether unchanged input refuses again. A project the publisher's stored scope does not name is [`PublishError::Kernel`] with [`KernelError::NotFound`].
+    /// The publisher rejects the unit's identity, revision, or scope binding before the transaction, or the commit rejects its descriptor and [`publish_screened`] retries the batch without it. [`PublishError::is_permanent`] indicates whether unchanged input will be rejected again.
     Refused(PublishError),
 }
 
 /// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
 ///
-/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit under an admitted unit's key is [`UnitDisposition::Deferred`] when it repeats that request and [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`] when it changes it. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
+/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit within the bounds whose text exact retention refuses, such as text holding a recognized secret, is [`UnitDisposition::Refused`] with that [`PublishError::Artifact`] kind and takes no admission slot. A unit that replays a stored receipt counts toward the batch bounds. A later unit of an admitted unit's lineage is [`UnitDisposition::Deferred`], except a changed request under the admitted unit's key, which is [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`]. When the commit refuses an admitted unit's descriptor, that unit is [`UnitDisposition::Refused`] with [`PublishError::Descriptor`], and the remaining admitted units are committed in another attempt. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
 ///
 /// # Errors
 ///
@@ -1239,7 +1350,7 @@ pub fn publish_screened(
     let mut dispositions: Vec<Option<UnitDisposition>> = Vec::with_capacity(units.len());
     let mut terms: Option<Option<Vec<kernel::ScopeTermSpec>>> = None;
     let mut admitted = Vec::new();
-    let mut admitted_keys: std::collections::HashMap<String, String> =
+    let mut admitted_lineages: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
     let mut admitted_bytes = 0usize;
     let mut full = false;
@@ -1267,7 +1378,11 @@ pub fn publish_screened(
                     .preview(preview_deadline(budget), |preview| {
                         preview.scope_terms(scope_id)
                     })
-                    .map_err(|error| BatchRefusal { error, unit: None })?;
+                    .map_err(|error| BatchRefusal {
+                        error,
+                        unit: None,
+                        refusal: None,
+                    })?;
                 terms = Some(read);
             }
             if !SourcePublisher::scope_admits(&prepared, terms.as_ref().and_then(Option::as_deref))
@@ -1279,13 +1394,15 @@ pub fn publish_screened(
                 continue;
             }
         }
-        // One window can name a unit twice: the same request replays on a later pass, and another request under the same key is refused as the conflict it is.
-        if let Some(digest) = admitted_keys.get(prepared.key.as_str()) {
-            dispositions.push(Some(if *digest == prepared.request_digest {
-                UnitDisposition::Deferred
-            } else {
-                UnitDisposition::Refused(PublishError::IdentityReused)
-            }));
+        // Each commit publishes at most one revision per lineage, so additional nonconflicting units in an admitted lineage wait for another pass.
+        if let Some((key, digest)) = admitted_lineages.get(prepared.lineage_id.as_str()) {
+            dispositions.push(Some(
+                if *key == prepared.key && *digest != prepared.request_digest {
+                    UnitDisposition::Refused(PublishError::IdentityReused)
+                } else {
+                    UnitDisposition::Deferred
+                },
+            ));
             continue;
         }
         if admitted.len() == MAX_SOURCE_BATCH_UNITS || admitted_bytes + len > MAX_SOURCE_BATCH_BYTES
@@ -1294,23 +1411,44 @@ pub fn publish_screened(
             dispositions.push(Some(UnitDisposition::Deferred));
             continue;
         }
-        admitted_keys.insert(prepared.key, prepared.request_digest);
+        if let Some(kind) = kernel::exact_text_refusal(&unit.text) {
+            dispositions.push(Some(UnitDisposition::Refused(PublishError::Artifact(kind))));
+            continue;
+        }
+        admitted_lineages.insert(prepared.lineage_id, (prepared.key, prepared.request_digest));
         admitted.push(index);
         admitted_bytes += len;
         dispositions.push(None);
     }
-    if !admitted.is_empty() {
+    // Each retry removes one admitted unit, so publish attempts are bounded by the initial admitted count.
+    while !admitted.is_empty() {
         let batch: Vec<(&SourcePublisher<'_>, &SourceUnit)> = admitted
             .iter()
             .map(|&index| (publisher, &units[index]))
             .collect();
-        let published = publish_batch(publisher.kernel, Vec::new(), &batch, observed_at, budget)
-            .map_err(|refusal| BatchRefusal {
-                unit: refusal.unit.map(|position| admitted[position]),
-                ..refusal
-            })?;
-        for (index, published) in admitted.into_iter().zip(published) {
-            dispositions[index] = Some(UnitDisposition::Published(published));
+        match publish_batch(publisher.kernel, Vec::new(), &batch, observed_at, budget) {
+            Ok(published) => {
+                for (index, published) in admitted.drain(..).zip(published) {
+                    dispositions[index] = Some(UnitDisposition::Published(published));
+                }
+            }
+            Err(BatchRefusal {
+                unit: Some(position),
+                refusal: Some(refusal),
+                ..
+            }) => {
+                dispositions[admitted.remove(position)] =
+                    Some(UnitDisposition::Refused(PublishError::Descriptor {
+                        refusal,
+                        evidence: None,
+                    }));
+            }
+            Err(refusal) => {
+                return Err(BatchRefusal {
+                    unit: refusal.unit.map(|position| admitted[position]),
+                    ..refusal
+                });
+            }
         }
     }
     Ok(dispositions
@@ -1323,6 +1461,7 @@ struct Prepared<'u> {
     unit: &'u SourceUnit,
     identity: Vec<(&'u str, &'u str)>,
     occurrence_id: String,
+    lineage_id: String,
     revision: i64,
     rule: ProvenanceRule,
     key: String,

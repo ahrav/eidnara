@@ -460,6 +460,7 @@ pub use deletion::{ArtifactDeletionFault, ArtifactDeletionHook};
 pub use gc::ArtifactGcFault;
 pub use gc::ArtifactGcResult;
 pub(crate) use gc::ObjectPresence;
+pub use ingest::exact_text_refusal;
 pub(crate) use ingest::is_exact_retention;
 pub(crate) use read::egress_facts_tx;
 #[cfg(feature = "test-support")]

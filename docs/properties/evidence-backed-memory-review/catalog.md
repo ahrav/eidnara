@@ -212,16 +212,15 @@ Open questions: None.
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: partial - `crates/daemon/tests/memory_reviewer_wire.rs` reaches a selected proposal over the real handler with a completed receipt through the shared `publish` fixture; `packages/cli/src/commands/review.test.ts` decodes a proposal body with nonempty spans through the command's validator; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives status, list, and show against the direct-host fixture, where no MODULE authority is bound and the answers are refusals
+Exercised: yes - `packages/e2e-tests/src/rust-runner/review-cli.test.ts` raises a hermetic host's root to MODULE through `authority.prepare` begin, complete, and ack, then runs the direct-host fixture's `review-witness` control: a production `Worker` pass over the host's own stores reaches two completed receipts whose selected `retain` proposals target the originating decision and cite nonempty spans of the fixture forms, and abstains `owner_sensitive` on the three production forms with no attempt or connection. The installed command's `review list --json` equals the ledger's list of the five outcomes, `review show --json` equals, field for field, the Kernel's read of each proposal with only `policy_dependencies` withheld, each proposal cites its own form's evidence, and `review show` of a production job answers `not_selected`. `crates/daemon/tests/memory_reviewer_wire.rs` reaches the selected read over the real handler, and `packages/cli/src/commands/review.test.ts` decodes the same shape
 Guarantee: The command's decoder accepts exactly the fields the Kernel's staged `ReviewProposal` serializes, span for span, and the real host answers the command's flat envelopes over the installed transport.
 Check: `sometimes` - a real-store run must reach a selected proposal the command renders; the situation is the selected read, not a branch
 Fault/timing angle: none
 Required faults and enabling state: MODULE authority on a root, a completed receipt, a staged proposal with nonempty spans, the command reading it
-Confidence: medium - [evidence](evidence/shared-path-fixture-reaches-selected-readable-proposal.md). The positive read through the command against a real host is not constructed; the Rust wire test and the command's decoder are joined by the wire document's shape, not by one process
-Existing check: `crates/daemon/tests/memory_reviewer_wire.rs::a_published_proposal_reads_from_every_root_after_a_newer_root_binds`; `packages/cli/src/commands/review.test.ts`::`review show`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Confidence: high - [evidence](evidence/shared-path-fixture-reaches-selected-readable-proposal.md). Verified the command's list and show output against the Kernel's own read of the proposals the real host selected; the fixture class carries test-supplied provenance, so the witness proves the decoding and transport, not production eligibility
+Existing check: `packages/e2e-tests/src/rust-runner/review-cli.test.ts`::`list and show read a fixture-class proposal field for field and a production-class owner_sensitive abstention`; `crates/daemon/tests/memory_reviewer_wire.rs::a_published_proposal_reads_from_every_root_after_a_newer_root_binds`; `packages/cli/src/commands/review.test.ts`::`review show`
 Impact: A field the Kernel serializes differently from the decoder's expectation would refuse every real proposal as malformed
-Open questions:
-- A TypeScript path that activates MODULE authority on the hermetic host and publishes a proposal with nonempty spans is needed to drive `review show` to a rendered proposal in one process (needs human input)
+Open questions: None.
 
 ### reference-only-cli-outcomes-preserve-meaning
 
