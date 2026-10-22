@@ -7,7 +7,8 @@
 //! [`publish_screened`] refuses units larger than [`MAX_SOURCE_UNIT_BYTES`] whole to preserve exact source text. Each batch admits at most [`MAX_SOURCE_BATCH_UNITS`] units, [`MAX_SOURCE_BATCH_BYTES`] of text, and one unit per lineage; excess units wait for a later pass. Publication checks size, identity, revision lead, and scope per unit before the kernel transaction. When the transaction refuses a descriptor, such as a revision that does not advance its lineage, publication removes that unit and retries the remaining units. Each transaction commits its units atomically.
 
 use kernel::source_identity::{
-    HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
+    HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, lower_hex,
+    occurrence_id_preserving_span,
 };
 
 const _: () = assert!(
@@ -16,11 +17,12 @@ const _: () = assert!(
 );
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactErrorKind, ArtifactHandle, ArtifactIngestRequest,
-    CommitIntent, EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceClass, SourceDescriptorError, SourceDescriptorOutcome,
-    SourceDescriptorPolicy, SourceDescriptorRequest, TaintClass,
+    CommitIntent, EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, Sensitivity,
+    SourceClass, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
+    SourceDescriptorRequest, TaintClass,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,11 +106,23 @@ impl std::fmt::Debug for SourceUnit {
 }
 
 impl SourceUnit {
-    fn identity_value(&self, name: &str) -> Option<&str> {
+    pub(crate) fn identity_value(&self, name: &str) -> Option<&str> {
         self.identity
             .iter()
             .find(|(field, _)| *field == name)
             .map(|(_, value)| value.as_str())
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.text.len()
+            + self.role.len()
+            + self.revision.len()
+            + self
+                .identity
+                .iter()
+                .map(|(_, value)| 48 + value.len())
+                .sum::<usize>()
     }
 
     /// The actor a unit's commits and evidence are recorded under: the harness that produced it, the repository a commit came from, or the canonical role for a unit derived from a kernel decision.
@@ -126,17 +140,6 @@ impl SourceUnit {
             },
             _ => SourceDescriptorPolicy::Native,
         }
-    }
-
-    /// A commit's bytes name the repository and object they were read from. The store treats that as affirmative provenance: an asserted `Normal` class is kept instead of folded to `Sensitive`, so the publisher's `sensitivity` decides whether repository text may leave the host. `None` for a unit that is not a commit or lacks either field; the encoder has already refused the latter.
-    fn repository_provenance(&self) -> Option<RepositoryProvenance> {
-        if self.class != OccurrenceClass::GitCommits {
-            return None;
-        }
-        Some(RepositoryProvenance {
-            repository_id: self.identity_value("repository_id")?.to_owned(),
-            revision: self.identity_value("oid")?.to_owned(),
-        })
     }
 }
 
@@ -156,8 +159,12 @@ pub enum AdapterRefusal {
 }
 
 fn field<'v>(value: &'v Value, name: &'static str) -> Result<&'v str, AdapterRefusal> {
+    nonempty(value.get(name), name)
+}
+
+/// The non-empty string `value` holds, or the refusal naming the missing `name`.
+fn nonempty<'v>(value: Option<&'v Value>, name: &'static str) -> Result<&'v str, AdapterRefusal> {
     value
-        .get(name)
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .ok_or(AdapterRefusal::MissingIdentity(name))
@@ -238,6 +245,20 @@ pub fn opencode_units(
     session: &SessionIdentity,
     message: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    opencode_units_within(session, message, &mut |_| true)
+        .map(|units| units.expect("an allowance that admits every unit never stops"))
+}
+
+/// `opencode_units_within` follows [`opencode_units`]'s rules and calls `admit` with each unit's retained byte count as the unit is built. If `admit` returns `false`, the function drops that unit and returns `Ok(None)`.
+///
+/// # Errors
+///
+/// As [`opencode_units`].
+pub fn opencode_units_within(
+    session: &SessionIdentity,
+    message: &Value,
+    admit: &mut dyn FnMut(usize) -> bool,
+) -> Result<Option<Vec<SourceUnit>>, AdapterRefusal> {
     if session.harness != Harness::OpenCode {
         return Err(AdapterRefusal::UnsupportedShape("harness"));
     }
@@ -264,7 +285,7 @@ pub fn opencode_units(
         .get("parts")
         .and_then(Value::as_array)
         .ok_or(AdapterRefusal::UnsupportedShape("parts"))?;
-    let mut units = Vec::new();
+    let mut kept = Kept::new(admit);
     for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
             // An ignored text part is not conversation text.
@@ -275,7 +296,15 @@ pub fn opencode_units(
                     .get("text")
                     .and_then(Value::as_str)
                     .ok_or(AdapterRefusal::UnsupportedShape("text part"))?;
-                units.push(session.message_unit(message_id, index, &message_revision, role, text));
+                if !kept.keep(session.message_unit(
+                    message_id,
+                    index,
+                    &message_revision,
+                    role,
+                    text,
+                )) {
+                    return Ok(None);
+                }
             }
             Some("tool") => {
                 let state = part
@@ -300,87 +329,166 @@ pub fn opencode_units(
                     is_error,
                 };
                 // One settled tool part carries one output string: its only output block.
-                units.push(session.tool_unit(&tool, 0, output));
+                if !kept.keep(session.tool_unit(&tool, 0, output)) {
+                    return Ok(None);
+                }
             }
             _ => {}
         }
     }
-    Ok(units)
+    Ok(Some(kept.units))
 }
 
-/// Units of one Pi session entry: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. Entries of other types contribute nothing. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
+/// Units of one Pi transform row, which carries its session entry's `type` and `parentId` beside its `id` and `message`: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
 ///
 /// # Errors
 ///
-/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
+/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, a row with a missing, null, or empty `type` (`MissingIdentity("type")`) or whose `type` is not `"message"` (`UnsupportedShape("type")`), missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
 pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    pi_units_within(session, entry, &mut |_| true)
+        .map(|units| units.expect("an allowance that admits every unit never stops"))
+}
+
+/// `pi_units_within` follows [`pi_units`]'s rules and calls `admit` with each unit's retained byte count as the unit is built. If `admit` returns `false`, the function drops that unit and returns `Ok(None)`.
+///
+/// # Errors
+///
+/// As [`pi_units`].
+pub fn pi_units_within(
+    session: &SessionIdentity,
+    entry: &Value,
+    admit: &mut dyn FnMut(usize) -> bool,
+) -> Result<Option<Vec<SourceUnit>>, AdapterRefusal> {
     if session.harness != Harness::Pi {
         return Err(AdapterRefusal::UnsupportedShape("harness"));
     }
     if !entry.is_object() {
         return Err(AdapterRefusal::NotAnObject);
     }
-    if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return Ok(Vec::new());
+    // The row carries its session entry's type; only a message entry holds text or a tool result.
+    match entry.get("type") {
+        None | Some(Value::Null) => return Err(AdapterRefusal::MissingIdentity("type")),
+        Some(Value::String(kind)) if kind.is_empty() => {
+            return Err(AdapterRefusal::MissingIdentity("type"));
+        }
+        Some(Value::String(kind)) if kind == "message" => {}
+        Some(_) => return Err(AdapterRefusal::UnsupportedShape("type")),
     }
     let entry_id = field(entry, "id")?;
-    let message = entry
-        .get("message")
-        .filter(|message| message.is_object())
-        .ok_or(AdapterRefusal::MissingIdentity("message"))?;
-    let role = field(message, "role")?;
+    let message = PiMessage::read(
+        entry
+            .get("message")
+            .and_then(Value::as_object)
+            .ok_or(AdapterRefusal::MissingIdentity("message"))?,
+    );
+    let role = nonempty(message.role, "role")?;
     if !matches!(role, "user" | "assistant" | "toolResult") {
         return Err(AdapterRefusal::UnsupportedShape("message.role"));
     }
-    let stamp = revision(message.get("timestamp"), "timestamp")?;
-    let mut units = Vec::new();
+    let stamp = revision(message.timestamp, "timestamp")?;
+    let mut kept = Kept::new(admit);
     if role == "toolResult" {
         let tool = ToolBlock {
             parent_message_id: field(entry, "parentId")?,
-            tool_call_id: field(message, "toolCallId")?,
+            tool_call_id: nonempty(message.tool_call_id, "toolCallId")?,
             result_revision: stamp,
             is_error: message
-                .get("isError")
+                .is_error
                 .and_then(Value::as_bool)
                 .ok_or(AdapterRefusal::UnsupportedShape("message.isError"))?,
         };
-        for (index, item) in content_items(message)?.iter().enumerate() {
+        for (index, item) in message.content_items()?.iter().enumerate() {
             let text = item
                 .get("text")
                 .and_then(Value::as_str)
                 .filter(|_| item.get("type").and_then(Value::as_str) == Some("text"))
                 .ok_or(AdapterRefusal::UnsupportedShape("tool result item"))?;
-            units.push(session.tool_unit(&tool, index, text));
+            if !kept.keep(session.tool_unit(&tool, index, text)) {
+                return Ok(None);
+            }
         }
-        return Ok(units);
+        return Ok(Some(kept.units));
     }
-    match message.get("content") {
+    match message.content {
         Some(Value::String(text)) => {
-            units.push(session.message_unit(entry_id, 0, &stamp, role, text))
+            if !kept.keep(session.message_unit(entry_id, 0, &stamp, role, text)) {
+                return Ok(None);
+            }
         }
         _ => {
-            for (index, item) in content_items(message)?.iter().enumerate() {
+            for (index, item) in message.content_items()?.iter().enumerate() {
                 if item.get("type").and_then(Value::as_str) == Some("text") {
                     let text = item
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or(AdapterRefusal::UnsupportedShape("text item"))?;
-                    units.push(session.message_unit(entry_id, index, &stamp, role, text));
+                    if !kept.keep(session.message_unit(entry_id, index, &stamp, role, text)) {
+                        return Ok(None);
+                    }
                 }
             }
         }
     }
-    Ok(units)
+    Ok(Some(kept.units))
 }
 
-fn content_items(message: &Value) -> Result<&Vec<Value>, AdapterRefusal> {
-    message
-        .get("content")
-        .and_then(Value::as_array)
-        .ok_or(AdapterRefusal::UnsupportedShape("content"))
+struct Kept<'a> {
+    units: Vec<SourceUnit>,
+    admit: &'a mut dyn FnMut(usize) -> bool,
+}
+
+impl<'a> Kept<'a> {
+    fn new(admit: &'a mut dyn FnMut(usize) -> bool) -> Self {
+        Self {
+            units: Vec::new(),
+            admit,
+        }
+    }
+
+    fn keep(&mut self, unit: SourceUnit) -> bool {
+        let admitted = (self.admit)(unit.retained_bytes());
+        if admitted {
+            self.units.push(unit);
+        }
+        admitted
+    }
+}
+
+/// The members of a Pi message the adapter reads, collected in one pass over the message object.
+#[derive(Default)]
+struct PiMessage<'v> {
+    role: Option<&'v Value>,
+    timestamp: Option<&'v Value>,
+    content: Option<&'v Value>,
+    tool_call_id: Option<&'v Value>,
+    is_error: Option<&'v Value>,
+}
+
+impl<'v> PiMessage<'v> {
+    fn read(message: &'v serde_json::Map<String, Value>) -> Self {
+        let mut read = Self::default();
+        for (key, value) in message {
+            let slot = match key.as_str() {
+                "role" => &mut read.role,
+                "timestamp" => &mut read.timestamp,
+                "content" => &mut read.content,
+                "toolCallId" => &mut read.tool_call_id,
+                "isError" => &mut read.is_error,
+                _ => continue,
+            };
+            *slot = Some(value);
+        }
+        read
+    }
+
+    fn content_items(&self) -> Result<&'v Vec<Value>, AdapterRefusal> {
+        self.content
+            .and_then(Value::as_array)
+            .ok_or(AdapterRefusal::UnsupportedShape("content"))
+    }
 }
 
 /// The receipt outcome of publishing one unit.
@@ -395,7 +503,7 @@ pub struct Published {
     /// The kernel answered from a stored receipt: the same unit was published before.
     pub replayed: bool,
     /// The admission classes the unit was recorded under.
-    pub provenance: (SourceClass, TaintClass),
+    pub admission: (SourceClass, TaintClass),
 }
 
 /// Evidence retained before publication failed. Only permanent descriptor refusals attempt compensation.
@@ -421,7 +529,7 @@ pub enum PublishError {
     /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
     #[error("the native revision {revision} leads the observation at {observed_at}")]
     RevisionAhead { revision: i64, observed_at: i64 },
-    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, or a mismatched domain after the evidence was retained.
+    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, a mismatched domain, or a repository document's lineage head that differs from the head the proposal expected. A stale revision refuses the same unit on every attempt, so the producer reads the head and proposes a new unit. A proposal past the head plus one preserves its evidence on `HeadMismatch`, so the same unit can be offered again when the lineage reaches its expected head.
     #[error("the descriptor was refused: {refusal}")]
     Descriptor {
         refusal: SourceDescriptorError,
@@ -436,7 +544,7 @@ pub enum PublishError {
 }
 
 impl PublishError {
-    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, and revision-lead refusals depend on state that can change and report `false`.
+    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, revision-lead, and head-mismatch refusals depend on state that can change and report `false`.
     pub fn is_permanent(&self) -> bool {
         match self {
             Self::Artifact(kind) => matches!(
@@ -452,7 +560,8 @@ impl PublishError {
                     | ArtifactErrorKind::UnsupportedShape
                     | ArtifactErrorKind::DigestCollision
             ),
-            Self::IdentityReused | Self::Descriptor { .. } => true,
+            Self::IdentityReused => true,
+            Self::Descriptor { refusal, .. } => *refusal != SourceDescriptorError::HeadMismatch,
             Self::UnadmittedSource { .. } | Self::RevisionAhead { .. } | Self::Kernel { .. } => {
                 false
             }
@@ -467,6 +576,10 @@ const REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
 
 /// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
 pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
+
+/// How long captured harness evidence is owned after its observation: the capture replay retention, 30 days.
+pub const HARNESS_CAPTURE_RETENTION_MS: i64 =
+    memory_store::memory_capture::CAPTURE_REPLAY_RETENTION_MS;
 
 /// The largest unit text capture retains: the memory store's source bound.
 pub const MAX_SOURCE_UNIT_BYTES: usize = memory_store::memory_capture::MAX_CAPTURE_SOURCE_BYTES;
@@ -522,7 +635,7 @@ impl SourcePublisher<'_> {
         let evidence_object_id = unit.evidence_object_id();
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.descriptor_intent(&unit);
-        let (_, (stored, provenance)) = self
+        let (_, (stored, admission)) = self
             .kernel
             .preview(preview_deadline(budget), |preview| {
                 self.check_scope(&unit, preview)?;
@@ -548,7 +661,7 @@ impl SourcePublisher<'_> {
                 evidence_object_id,
                 replaced_object_id: None,
                 replayed: true,
-                provenance,
+                admission,
             });
         }
         let handle = self
@@ -572,7 +685,7 @@ impl SourcePublisher<'_> {
         let mut refusal = None;
         let mut outcome = None;
         let operation = |envelope: &mut kernel::Envelope<'_>| {
-            let (published, provenance) = self.apply(
+            let (published, admission) = self.apply(
                 envelope,
                 &unit,
                 &handle,
@@ -581,7 +694,7 @@ impl SourcePublisher<'_> {
                 &mut refusal,
             )?;
             let result = published.object_id.clone();
-            outcome = Some((published, provenance));
+            outcome = Some((published, admission));
             Ok(result)
         };
         let receipt = match budget {
@@ -591,13 +704,13 @@ impl SourcePublisher<'_> {
             None => self.kernel.commit(descriptor_intent, operation),
         };
         match (receipt, outcome) {
-            (Ok(receipt), Some((published, committed_provenance))) => Ok(Published {
+            (Ok(receipt), Some((published, committed_admission))) => Ok(Published {
                 object_id: published.object_id,
                 occurrence_id: published.occurrence_id,
                 evidence_object_id,
                 replaced_object_id: published.replaced_object_id,
                 replayed: receipt.replayed,
-                provenance: committed_provenance,
+                admission: committed_admission,
             }),
             // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned.
             (Ok(receipt), None) => Ok(Published {
@@ -606,7 +719,7 @@ impl SourcePublisher<'_> {
                 evidence_object_id,
                 replaced_object_id: None,
                 replayed: true,
-                provenance,
+                admission,
             }),
             (Err(error), _) => {
                 let error = match refusal {
@@ -620,11 +733,15 @@ impl SourcePublisher<'_> {
                         });
                     }
                     Some(Err(refusal)) => {
-                        let evidence = Some(self.retire_evidence(
-                            &unit.key,
-                            &unit.request_digest,
-                            &unit.origin,
-                        ));
+                        // A `HeadMismatch` can resolve as the lineage advances, so its evidence is preserved for the retry. Every other descriptor refusal is permanent and attempts to retire the retained evidence.
+                        let evidence = Some(if refusal == SourceDescriptorError::HeadMismatch {
+                            RetainedEvidence {
+                                object_id: evidence_object_id,
+                                retired: None,
+                            }
+                        } else {
+                            self.retire_evidence(&unit.key, &unit.request_digest, &unit.origin)
+                        });
                         return Err(PublishError::Descriptor { refusal, evidence });
                     }
                     _ => error,
@@ -662,9 +779,10 @@ impl SourcePublisher<'_> {
             refusal: SourceDescriptorError::from(refusal),
             evidence: None,
         })?;
-        let rule = provenance(unit);
-        // A native timestamp may not lead the observation; a canonical revision is the kernel's own counter and is not judged against the clock.
+        let rule = admission_rule(unit);
+        // A native timestamp may not lead the observation; a canonical revision and a repository document's observation count are counters, not judged against the clock.
         if !rule.is_inherited()
+            && unit.class != OccurrenceClass::RepositoryDocuments
             && encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
         {
             return Err(PublishError::RevisionAhead {
@@ -672,14 +790,10 @@ impl SourcePublisher<'_> {
                 observed_at,
             });
         }
-        let key = identity_digest(
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                encoded.occurrence_id,
-                encoded.revision,
-                unit.representation.as_str()
-            )
-            .as_bytes(),
+        let key = receipt_key(
+            &encoded.occurrence_id,
+            encoded.revision,
+            unit.representation,
         );
         // Reject project-bound units without a scope before retention: no project route serves unscoped rows.
         let project = match (unit.identity_value("project_id"), self.scope_id) {
@@ -708,7 +822,13 @@ impl SourcePublisher<'_> {
             request_digest: self.request_digest(unit),
             origin: unit.origin().to_owned(),
             project,
+            observed_at,
         })
+    }
+
+    /// The unit's receipt key and request digest, the pair a stored receipt answers for, or `None` when its identity does not encode. Changed bytes or publishing context under one key give another digest.
+    pub fn receipt_identity(&self, unit: &SourceUnit) -> Option<(String, String)> {
+        Some((receipt_key_of(unit)?, self.request_digest(unit)))
     }
 
     fn check_scope(
@@ -775,6 +895,7 @@ impl SourcePublisher<'_> {
                 buffer: &unit.unit.text,
                 sensitivity,
                 observed_at,
+                expected_head: unit.expected_head(),
             })
             .map_err(|error| {
                 *refusal = Some(Err(error));
@@ -805,7 +926,18 @@ impl SourcePublisher<'_> {
         )
     }
 
+    /// The evidence ingest for `unit`. Captured message text and tool results are `harness_capture` evidence owned for [`HARNESS_CAPTURE_RETENTION_MS`] from `observed_at`; every other class is `canonical` and never ages out. The deadline is set only when the evidence row is first created: the evidence receipt is keyed by the unit's identity and revision and its request digest excludes the clock, so a later attempt of the same unit replays the first row and its deadline.
     fn evidence_request(&self, unit: &Prepared<'_>) -> ArtifactIngestRequest {
+        let (retention_class, retain_until) = match unit.unit.class {
+            OccurrenceClass::Messages | OccurrenceClass::RawToolSpans => (
+                kernel::HARNESS_CAPTURE_RETENTION_CLASS,
+                Some(
+                    unit.observed_at
+                        .saturating_add(HARNESS_CAPTURE_RETENTION_MS),
+                ),
+            ),
+            _ => ("canonical", None),
+        };
         ArtifactIngestRequest {
             intent: self.evidence_intent(unit),
             payload: unit.unit.text.as_bytes().to_vec(),
@@ -817,11 +949,12 @@ impl SourcePublisher<'_> {
             source_id: format!("{}:{}", unit.origin, unit.key),
             source_revision: unit.revision,
             media_type: "text/plain".to_owned(),
-            retention_class: "canonical".to_owned(),
-            retain_until: None,
+            retention_class: retention_class.to_owned(),
+            retain_until,
             asserted_sensitivity: self.sensitivity,
             provider_egress: self.egress,
-            provenance: unit.unit.repository_provenance(),
+            // Only the git publisher's commit provenance is retained; this publisher constructs none.
+            provenance: crate::git_sources::commit_provenance(unit.unit),
         }
     }
 
@@ -888,8 +1021,10 @@ impl SourcePublisher<'_> {
     }
 
     /// The request digest binds text, domain, scope, role, sensitivity, and provider-egress policy. Changing any of these under the same receipt key conflicts rather than replaying.
-    fn request_digest(&self, unit: &SourceUnit) -> String {
-        let mut bytes = Vec::new();
+    ///
+    /// The parts are hashed in place, each after its big-endian `u64` length, so the unit's text is read once and never copied.
+    pub(crate) fn request_digest(&self, unit: &SourceUnit) -> String {
+        let mut hasher = Sha256::new();
         for part in [
             REQUEST_DIGEST_FORMAT,
             unit.text.as_str(),
@@ -898,16 +1033,47 @@ impl SourcePublisher<'_> {
             unit.role.as_str(),
             self.sensitivity.as_str(),
         ] {
-            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(part.as_bytes());
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part.as_bytes());
         }
-        bytes.push(u8::from(self.scope_id.is_some()));
-        bytes.push(match self.egress {
-            ProviderEgress::RemoteAllowed => 0,
-            ProviderEgress::LocalOnly => 1,
-        });
-        identity_digest(&bytes)
+        hasher.update([
+            u8::from(self.scope_id.is_some()),
+            match self.egress {
+                ProviderEgress::RemoteAllowed => 0,
+                ProviderEgress::LocalOnly => 1,
+            },
+        ]);
+        lower_hex(&hasher.finalize())
     }
+}
+
+/// Both receipts of `unit` share this key, or `None` when its identity does not encode.
+pub(crate) fn receipt_key_of(unit: &SourceUnit) -> Option<String> {
+    let identity: Vec<(&str, &str)> = unit
+        .identity
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let (occurrence_id, revision) = occurrence_id_preserving_span(&Occurrence {
+        class: unit.class.code(),
+        identity: &identity,
+        revision: &unit.revision,
+        representation: unit.representation.as_str(),
+        span: None,
+    })
+    .ok()?;
+    Some(receipt_key(&occurrence_id, revision, unit.representation))
+}
+
+/// Both receipts of a unit are keyed by its occurrence, revision, and representation: the digest of `occurrence_id`, the decimal revision, and the representation, joined by U+001F.
+fn receipt_key(occurrence_id: &str, revision: i64, representation: Representation) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(occurrence_id.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(revision.to_string());
+    hasher.update([0x1f]);
+    hasher.update(representation.as_str());
+    lower_hex(&hasher.finalize())
 }
 
 /// Writes inside a commit and returns the result recorded under the write's key.
@@ -922,7 +1088,7 @@ pub struct KeyedWrite<'a> {
 
 /// Commits `writes` in order and then publishes every unit of `units` under its publisher, all in one kernel commit, and returns each unit's outcome in order.
 ///
-/// A write or unit whose receipt is already recorded is skipped, and a skipped unit reports a replayed publication. The commit records every other write's and unit's own receipt, and every retained text's evidence receipt, so a later commit of any one of them alone replays. Units of one publisher with equal text cite one evidence object, and a unit whose evidence an earlier publication retained cites that evidence. A unit's descriptor carries the class the store recorded for its evidence, and its admission classes are read in the commit.
+/// A write or unit whose receipt is already recorded is skipped, and a skipped unit reports a replayed publication. The commit records every other write's and unit's own receipt, and every retained text's evidence receipt, so a later commit of any one of them alone replays. Units of one publisher with equal class and text cite one evidence object, and a unit whose evidence an earlier publication retained cites that evidence. A unit's descriptor carries the class the store recorded for its evidence, and its admission classes are read in the commit.
 ///
 /// # Errors
 ///
@@ -994,8 +1160,7 @@ pub fn publish_batch(
     let mut outcomes: Vec<Option<Published>> = Vec::with_capacity(units.len());
     let mut pending = Vec::new();
     let mut retained = std::collections::HashMap::new();
-    for (index, (unit, (stored, provenance, evidence))) in
-        prepared.iter().zip(previewed).enumerate()
+    for (index, (unit, (stored, admission, evidence))) in prepared.iter().zip(previewed).enumerate()
     {
         // Evidence an earlier attempt retained without publishing its descriptor is cited again: exact retention stores the unit's bytes under their own digest.
         if let Some(evidence) = evidence {
@@ -1014,7 +1179,7 @@ pub fn publish_batch(
                 evidence_object_id: unit.evidence_object_id(),
                 replaced_object_id: None,
                 replayed: true,
-                provenance,
+                admission,
             })),
             None => {
                 outcomes.push(None);
@@ -1032,7 +1197,6 @@ pub fn publish_batch(
                 .collect());
         }
     };
-    // A unit cites the evidence of the first pending unit of its publisher with its text.
     let owners: Vec<usize> = pending
         .iter()
         .map(|&index| {
@@ -1040,6 +1204,7 @@ pub fn publish_batch(
                 .iter()
                 .find(|&&owner| {
                     std::ptr::eq(units[owner].0, units[index].0)
+                        && units[owner].1.class == units[index].1.class
                         && units[owner].1.text == units[index].1.text
                 })
                 .expect("a unit owns its own text")
@@ -1085,7 +1250,7 @@ pub fn publish_batch(
                         .map_err(|error| (error, false))?
                         .object
                         .sensitivity;
-                    let (descriptor, provenance) = publisher
+                    let (descriptor, admission) = publisher
                         .apply(
                             envelope,
                             unit,
@@ -1103,10 +1268,10 @@ pub fn publish_batch(
                             )
                             .map_err(|error| (error, true))?;
                     }
-                    Ok((descriptor, provenance))
+                    Ok((descriptor, admission))
                 };
                 // A conflict on the unit's own receipt is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
-                let (descriptor, provenance) = step().map_err(|(error, receipt)| {
+                let (descriptor, admission) = step().map_err(|(error, receipt)| {
                     if !(receipt && error == KernelError::Conflict) {
                         culprit = Some((
                             index,
@@ -1126,7 +1291,7 @@ pub fn publish_batch(
                     evidence_object_id,
                     replaced_object_id: descriptor.replaced_object_id,
                     replayed: false,
-                    provenance,
+                    admission,
                 });
             }
             Ok(main_result.expect("the batch commits a write or a unit"))
@@ -1187,7 +1352,7 @@ pub enum UnitDisposition {
 
 /// Screens `units` for one capture batch of `publisher`, then publishes the admitted units in one kernel commit and returns one disposition per unit, in order.
 ///
-/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit that replays a stored receipt counts toward the bounds like any other, so the caller offers deferred and pending units ahead of published ones. A later unit of an admitted unit's lineage is [`UnitDisposition::Deferred`], except a changed request under the admitted unit's key, which is [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`]. When the commit refuses an admitted unit's descriptor, that unit is [`UnitDisposition::Refused`] with [`PublishError::Descriptor`], and the remaining admitted units are committed in another attempt. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
+/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit within the bounds whose text exact retention refuses, such as text holding a recognized secret, is [`UnitDisposition::Refused`] with that [`PublishError::Artifact`] kind and takes no admission slot. A unit that replays a stored receipt counts toward the batch bounds. A later unit of an admitted unit's lineage is [`UnitDisposition::Deferred`], except a changed request under the admitted unit's key, which is [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`]. When the commit refuses an admitted unit's descriptor, that unit is [`UnitDisposition::Refused`] with [`PublishError::Descriptor`], and the remaining admitted units are committed in another attempt. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
 ///
 /// # Errors
 ///
@@ -1262,6 +1427,10 @@ pub fn publish_screened(
             dispositions.push(Some(UnitDisposition::Deferred));
             continue;
         }
+        if let Some(kind) = kernel::exact_text_refusal(&unit.text) {
+            dispositions.push(Some(UnitDisposition::Refused(PublishError::Artifact(kind))));
+            continue;
+        }
         admitted_lineages.insert(prepared.lineage_id, (prepared.key, prepared.request_digest));
         admitted.push(index);
         admitted_bytes += len;
@@ -1315,11 +1484,18 @@ struct Prepared<'u> {
     request_digest: String,
     origin: String,
     project: Option<ProjectScope>,
+    observed_at: i64,
 }
 
 impl Prepared<'_> {
     fn evidence_object_id(&self) -> String {
         format!("srcev-object:{}", self.key)
+    }
+
+    /// The head a `repository_documents` publication expects. Its producer reads the lineage's historical head ([`kernel::KernelStore::source_lineage_head`]) and proposes exactly the head plus one, 1 for an empty lineage, so the expected head is the revision before the proposal and any gap refuses as a moved head. Every other class names no head.
+    fn expected_head(&self) -> Option<i64> {
+        (self.unit.class == OccurrenceClass::RepositoryDocuments && self.revision > 1)
+            .then(|| self.revision - 1)
     }
 }
 
@@ -1359,8 +1535,8 @@ impl ProvenanceRule {
     }
 }
 
-/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, a commit message is untrusted repository text, user text is explicit, and other text is model inference. The caller has encoded the unit, so the class's identity field is present.
-fn provenance(unit: &SourceUnit) -> ProvenanceRule {
+/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, a commit message or repository document is untrusted repository text, user text is explicit, and other text is model inference. Only a commit carries repository provenance, so working-tree document bytes store `Sensitive`. The caller has encoded the unit, so the class's identity field is present.
+fn admission_rule(unit: &SourceUnit) -> ProvenanceRule {
     match (unit.class, unit.role.as_str()) {
         (OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory, _) => {
             ProvenanceRule::Inherited {
@@ -1374,10 +1550,12 @@ fn provenance(unit: &SourceUnit) -> ProvenanceRule {
             SourceClass::TrustedToolResult,
             TaintClass::ToolUntrustedOutput,
         ),
-        (OccurrenceClass::GitCommits, _) => ProvenanceRule::Fixed(
-            SourceClass::UntrustedRepoText,
-            TaintClass::RepoUntrustedText,
-        ),
+        (OccurrenceClass::GitCommits | OccurrenceClass::RepositoryDocuments, _) => {
+            ProvenanceRule::Fixed(
+                SourceClass::UntrustedRepoText,
+                TaintClass::RepoUntrustedText,
+            )
+        }
         (_, "user") => ProvenanceRule::Fixed(SourceClass::ExplicitUser, TaintClass::UserExplicit),
         _ => ProvenanceRule::Fixed(SourceClass::ModelInference, TaintClass::AssistantInference),
     }

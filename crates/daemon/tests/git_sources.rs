@@ -256,7 +256,7 @@ impl Corpus {
                         schema_version: retrieval::SCHEMA_VERSION,
                         kernel_incarnation_id: kernel_incarnation_id.clone(),
                         projection_policy_version: POLICY.to_string(),
-                        identity_contract_version: "search-projection-identity-v3".to_string(),
+                        identity_contract_version: "search-projection-identity-v4".to_string(),
                         limit_manifest_protocol_version: "limits.v1".to_string(),
                         embedding_model: MODEL.to_string(),
                         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -441,7 +441,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
         let published = publisher.publish(unit, NOW).unwrap();
         assert!(!published.replayed);
         assert_eq!(
-            published.provenance,
+            published.admission,
             (
                 SourceClass::UntrustedRepoText,
                 TaintClass::RepoUntrustedText

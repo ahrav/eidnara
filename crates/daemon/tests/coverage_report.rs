@@ -63,7 +63,7 @@ fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v3".to_string(),
+        identity_contract_version: "search-projection-identity-v4".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -116,6 +116,21 @@ fn message(id: &str, revision: i64, text: &str) -> SourceUnit {
         representation: Representation::Text,
         text: text.to_string(),
         role: "user".to_string(),
+    }
+}
+
+fn document(path: &str, text: &str) -> SourceUnit {
+    SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", PROJECT.to_string()),
+            ("repository_id", PROJECT.to_string()),
+            ("relative_path", path.to_string()),
+        ],
+        revision: "1".to_string(),
+        representation: Representation::Text,
+        text: text.to_string(),
+        role: "document".to_string(),
     }
 }
 
@@ -477,9 +492,9 @@ fn dense_oracle(
     }
 }
 
-fn lexical_only_oracle(live: usize, tombstoned: usize) -> ClassCoverage {
+fn lexical_only_oracle(class: OccurrenceClass, live: usize, tombstoned: usize) -> ClassCoverage {
     ClassCoverage {
-        class: OccurrenceClass::RawToolSpans,
+        class,
         dense: DenseDisposition::LexicalOnly,
         lexical: live,
         dense_required: 0,
@@ -511,6 +526,7 @@ fn per_class_sets_match_independent_oracles() {
     let (t_one, t_one_object) = corpus.publish(&tool("call_1", "tool output"));
     let (_, t_two_object) = corpus.publish(&tool("call_2", "tool error"));
     let (g_one, _) = corpus.publish(&commit("0123456789abcdef0123456789abcdef01234567", "Fix\n"));
+    let (d_one, _) = corpus.publish(&document("ARCHITECTURE.md", "# Architecture\n"));
     corpus.decide("rule", "Keep the contract.", "Relied on.");
     let hold = corpus.capture();
     let projection = corpus.bootstrap(dir.path(), &hold);
@@ -631,11 +647,19 @@ fn per_class_sets_match_independent_oracles() {
     );
     assert_eq!(
         coverage.class(OccurrenceClass::RawToolSpans),
-        &lexical_only_oracle(1, 1)
+        &lexical_only_oracle(OccurrenceClass::RawToolSpans, 1, 1)
     );
     assert_eq!(
         live(dir.path(), OccurrenceClass::RawToolSpans),
         [t_one].into_iter().collect()
+    );
+    assert_eq!(
+        coverage.class(OccurrenceClass::RepositoryDocuments),
+        &lexical_only_oracle(OccurrenceClass::RepositoryDocuments, 1, 0)
+    );
+    assert_eq!(
+        live(dir.path(), OccurrenceClass::RepositoryDocuments),
+        [d_one].into_iter().collect()
     );
     assert!(
         coverage
@@ -671,7 +695,7 @@ fn per_class_sets_match_independent_oracles() {
     );
     assert_eq!(
         excluded.class(OccurrenceClass::RawToolSpans),
-        &lexical_only_oracle(1, 1)
+        &lexical_only_oracle(OccurrenceClass::RawToolSpans, 1, 1)
     );
     for exclusion in &excluded.exclusions {
         let class = excluded.class(exclusion.class);

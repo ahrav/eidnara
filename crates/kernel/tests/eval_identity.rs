@@ -55,13 +55,18 @@ fn the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder() {
         eval_core::OBJECT_FORMATS,
         kernel::source_identity::OBJECT_FORMATS
     );
+    assert_eq!(
+        eval_core::OccurrenceClass::ALL.map(|class| class.code()),
+        OccurrenceClass::ALL.map(|class| class.code()),
+        "both mirrors hold one class set in one order"
+    );
     for class in OccurrenceClass::ALL {
         let core = eval_core::OccurrenceClass::from_code(class.code()).unwrap();
         assert_eq!(core.identity_fields(), class.identity_fields());
         assert_eq!(core.representations(), class.representations());
     }
     let records = fixture["records"].as_array().unwrap();
-    assert_eq!(records.len(), 23);
+    assert_eq!(records.len(), 24);
     for record in records {
         let id = record["id"].as_str().unwrap();
         let identity = identity_of(record);

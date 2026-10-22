@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild. The schema version is 7.
+rebuild. The schema version is 8.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -77,7 +77,7 @@ One row per occurrence: the CC4 tuple bytes beside their identifier, the lineage
 | `occurrence_id` | TEXT | yes | yes |  |
 | `tuple` | BLOB | yes | no |  |
 | `lineage_id` | TEXT | yes | no |  |
-| `class` | TEXT | yes | no | `CHECK(class IN ('messages','canonical_claims','promoted_memory','git_commits','raw_tool_spans'))` |
+| `class` | TEXT | yes | no | `CHECK(class IN ('messages','canonical_claims','promoted_memory','git_commits','raw_tool_spans','repository_documents'))` |
 | `revision` | INTEGER | yes | no | `CHECK(revision>=0)` |
 | `representation` | TEXT | yes | no |  |
 | `span_start` | INTEGER | no | no |  |

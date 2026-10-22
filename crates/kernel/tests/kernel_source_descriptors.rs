@@ -485,6 +485,7 @@ fn request<'a>(
         buffer,
         sensitivity: Sensitivity::Normal,
         observed_at: 1,
+        expected_head: None,
     }
 }
 
@@ -1982,4 +1983,355 @@ fn retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence() {
         KernelError::NotFound
     );
     assert_eq!(fixture.store.tip().unwrap(), tip + 1);
+}
+
+const DOC: &[(&str, &str)] = &[
+    ("project_id", "proj-a"),
+    ("repository_id", "repo-0"),
+    ("relative_path", "ARCHITECTURE.md"),
+];
+
+fn document(revision: &str) -> Occurrence<'_> {
+    Occurrence {
+        class: "repository_documents",
+        identity: DOC,
+        revision,
+        representation: "text",
+        span: None,
+    }
+}
+
+/// A `repository_documents` revision must exceed every revision its lineage ever held, retired rows included, and commits only while the lineage's historical head equals the caller's expected head (F10). The head is per lineage and readable through `source_lineage_head`; messages keep the live-predecessor rule and name no head. Coverage witness `retired_lineage_republished`: the lineage is retired at head 3, then republished at 4.
+#[test]
+fn repository_document_revisions_exceed_the_historical_head_including_retired_rows() {
+    let fixture = Fixture::open();
+    let texts = ["# v1\n", "# v2\n", "# v3\n", "# v4\n"];
+    let evidence: Vec<(String, String)> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| fixture.retain(&format!("doc-{index}"), text))
+        .collect();
+    let publish = |key: &str, revision: &'static str, expected_head, index: usize| {
+        fixture.publish(
+            key,
+            &SourceDescriptorRequest {
+                expected_head,
+                ..request(document(revision), &evidence[index], texts[index])
+            },
+        )
+    };
+
+    assert_eq!(
+        publish("doc-first-claims-a-head", "1", Some(0), 0).err(),
+        Some(SourceDescriptorError::HeadMismatch),
+        "an empty lineage has no head"
+    );
+    let (first, _, _) = publish("doc-1", "1", None, 0).unwrap();
+    let (second, _, _) = publish("doc-2", "2", Some(1), 1).unwrap();
+    assert_eq!(
+        second.replaced_object_id.as_deref(),
+        Some(first.object_id.as_str())
+    );
+    let (third, _, _) = publish("doc-3", "3", Some(2), 2).unwrap();
+    fixture
+        .store
+        .commit(intent("doc-retire-3"), |envelope| {
+            envelope.retire_observation(&third.object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // The lineage is retired with a historical head of 3.
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    assert_eq!(fixture.live(&third.object_id), Some(false));
+    let tip = fixture.store.tip().unwrap();
+
+    assert_eq!(
+        publish("doc-2-after-retire", "2", Some(3), 1).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced),
+        "a revision below the retired head is refused"
+    );
+    assert_eq!(
+        publish("doc-2-stale-head", "2", Some(1), 1).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced),
+        "a stale revision is refused as stale whatever head it names"
+    );
+    assert_eq!(
+        publish("doc-3-at-head", "3", Some(3), 2).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced),
+        "a revision equal to the retired head is refused"
+    );
+    assert_eq!(
+        publish("doc-0", "0", Some(3), 0).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+    assert_eq!(
+        publish("doc-4-stale-head", "4", Some(2), 3).err(),
+        Some(SourceDescriptorError::HeadMismatch),
+        "a stale observation refuses even an advancing revision"
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "every refusal committed nothing"
+    );
+
+    // The lineage's own domain decides before its head: another domain is refused as such.
+    fixture
+        .store
+        .commit(intent("doc-other-domain"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: "other-domain".to_string(),
+                object_id: "other-domain-object".to_string(),
+                name: "other".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "other-domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .publish(
+                "doc-2-foreign",
+                &SourceDescriptorRequest {
+                    domain_id: "other-domain",
+                    expected_head: Some(2),
+                    ..request(document("2"), &evidence[1], texts[1])
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::DomainMismatch)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+
+    // A fresh observation of the head publishes above it.
+    let lineage = encode(&document("4"), texts[3]).unwrap().lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(3)
+    );
+    let (fourth, _, _) = publish("doc-4", "4", Some(3), 3).unwrap();
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(4)
+    );
+    assert!(fourth.replaced_object_id.is_none());
+    assert_eq!(fixture.live(&fourth.object_id), Some(true));
+    assert_eq!(
+        fixture.descriptor_object_ids_at_tip(),
+        vec![fourth.object_id]
+    );
+
+    // Another path is its own lineage with its own head.
+    const OTHER_DOC: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("repository_id", "repo-0"),
+        ("relative_path", "STRUCTURE.md"),
+    ];
+    let other = |revision| Occurrence {
+        identity: OTHER_DOC,
+        ..document(revision)
+    };
+    assert_eq!(
+        fixture
+            .publish(
+                "structure-claims-a-head",
+                &SourceDescriptorRequest {
+                    expected_head: Some(4),
+                    ..request(other("1"), &evidence[0], texts[0])
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
+    fixture
+        .publish("structure-1", &request(other("1"), &evidence[0], texts[0]))
+        .unwrap();
+
+    // Two producers read head 1 and both propose 2: the second is refused as stale, and a fresh read of the head publishes 3.
+    let structure = encode(&other("2"), texts[1]).unwrap().lineage_id;
+    let observed = fixture.store.source_lineage_head(&structure).unwrap();
+    assert_eq!(observed, Some(1));
+    fixture
+        .publish(
+            "structure-2-first",
+            &SourceDescriptorRequest {
+                expected_head: observed,
+                ..request(other("2"), &evidence[1], texts[1])
+            },
+        )
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .publish(
+                "structure-2-second",
+                &SourceDescriptorRequest {
+                    expected_head: observed,
+                    ..request(other("2"), &evidence[2], texts[2])
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    let fresh = fixture.store.source_lineage_head(&structure).unwrap();
+    assert_eq!(fresh, Some(2));
+    fixture
+        .publish(
+            "structure-3",
+            &SourceDescriptorRequest {
+                expected_head: fresh,
+                ..request(other("3"), &evidence[2], texts[2])
+            },
+        )
+        .unwrap();
+
+    // An empty lineage starts at 1: revision 0 is refused there too.
+    const NEW_DOC: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("repository_id", "repo-0"),
+        ("relative_path", "docs/NEW.md"),
+    ];
+    let fresh_path = |revision| Occurrence {
+        identity: NEW_DOC,
+        ..document(revision)
+    };
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .publish("new-0", &request(fresh_path("0"), &evidence[0], texts[0]))
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    fixture
+        .publish("new-1", &request(fresh_path("1"), &evidence[0], texts[0]))
+        .unwrap();
+
+    // Other classes name no head.
+    let message_evidence = fixture.retain("msg-head", "message text");
+    assert_eq!(
+        fixture
+            .publish(
+                "message-with-head",
+                &SourceDescriptorRequest {
+                    expected_head: Some(1),
+                    ..request(message(MSG_A, "1"), &message_evidence, "message text")
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::Kernel(KernelError::InvalidInput))
+    );
+}
+
+/// The historical head and the retired-lineage fallback compare revisions as integers: `srcdesc:<lineage>:10` sorts before `srcdesc:<lineage>:9` as text, so a head read in object id order would report 9. A lineage retired at 10 refuses 9 and 10 and republishes at 11, and the head reader serves every class's lineage.
+#[test]
+fn lineage_heads_compare_revisions_as_integers_across_digit_boundaries() {
+    let fixture = Fixture::open();
+    let text = "# v\n";
+    let evidence = fixture.retain("doc-digits", text);
+    let revisions: Vec<String> = (1..=12).map(|revision| revision.to_string()).collect();
+    let publish = |key: &str, revision: usize, expected_head: Option<i64>| {
+        fixture.publish(
+            key,
+            &SourceDescriptorRequest {
+                expected_head,
+                ..request(document(&revisions[revision - 1]), &evidence, text)
+            },
+        )
+    };
+
+    let mut tenth = None;
+    for revision in 1..=10 {
+        let head = (revision > 1).then(|| i64::try_from(revision - 1).unwrap());
+        let (outcome, _, _) = publish(&format!("doc-digits-{revision}"), revision, head).unwrap();
+        tenth = Some(outcome.object_id);
+    }
+    let tenth = tenth.unwrap();
+    let lineage = encode(&document("1"), text).unwrap().lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(10)
+    );
+
+    fixture
+        .store
+        .commit(intent("doc-digits-retire-10"), |envelope| {
+            envelope.retire_observation(&tenth)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(fixture.live(&tenth), Some(false));
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(10)
+    );
+    let tip = fixture.store.tip().unwrap();
+    for revision in [9, 10] {
+        assert_eq!(
+            publish(&format!("doc-digits-stale-{revision}"), revision, Some(10)).err(),
+            Some(SourceDescriptorError::RevisionNotAdvanced),
+            "revision {revision} is at or below the retired head"
+        );
+    }
+    assert_eq!(
+        publish("doc-digits-11-stale-head", 11, Some(9)).err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "every refusal committed nothing"
+    );
+
+    let (eleventh, _, _) = publish("doc-digits-11", 11, Some(10)).unwrap();
+    assert!(eleventh.replaced_object_id.is_none());
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(11)
+    );
+    let (twelfth, _, _) = publish("doc-digits-12", 12, Some(11)).unwrap();
+    assert_eq!(
+        twelfth.replaced_object_id.as_deref(),
+        Some(eleventh.object_id.as_str())
+    );
+
+    // A message lineage reports its own head; a message keeps the live-predecessor rule.
+    let message_evidence = fixture.retain("msg-digits", "message text");
+    for revision in [9, 10] {
+        fixture
+            .publish(
+                &format!("msg-digits-{revision}"),
+                &request(
+                    message(MSG_A, &revisions[revision - 1]),
+                    &message_evidence,
+                    "message text",
+                ),
+            )
+            .unwrap();
+    }
+    let message_lineage = encode(&message(MSG_A, "1"), "message text")
+        .unwrap()
+        .lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&message_lineage).unwrap(),
+        Some(10)
+    );
+    assert_eq!(
+        fixture
+            .publish(
+                "msg-digits-9-again",
+                &request(
+                    message(MSG_A, &revisions[8]),
+                    &message_evidence,
+                    "message text"
+                ),
+            )
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
 }

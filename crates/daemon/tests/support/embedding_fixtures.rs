@@ -226,7 +226,7 @@ pub fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v3".to_string(),
+        identity_contract_version: "search-projection-identity-v4".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -452,6 +452,7 @@ impl Corpus {
                         buffer: text,
                         sensitivity,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
                 if admitted {

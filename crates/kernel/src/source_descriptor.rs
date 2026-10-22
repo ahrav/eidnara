@@ -79,6 +79,8 @@ pub struct SourceDescriptorRequest<'a> {
     pub buffer: &'a str,
     pub sensitivity: Sensitivity,
     pub observed_at: i64,
+    /// The highest revision the caller observed in this lineage, retired rows included; `None` when it observed no revision. A `repository_documents` publication commits only while the lineage's historical head still equals it, and its revision starts at 1 and exceeds that head. The producer keeps revisions contiguous by proposing the head plus one. Every other class passes `None`; a value is invalid input.
+    pub expected_head: Option<i64>,
 }
 
 /// Descriptor rows store versioned metadata and encoded identity tuples, not payload text.
@@ -129,6 +131,9 @@ pub enum SourceDescriptorError {
     ContentRefused,
     #[error("descriptor revision does not advance its lineage")]
     RevisionNotAdvanced,
+    /// The lineage's historical head differs from the head the caller expected. The caller reads the head again ([`KernelStore::source_lineage_head`]) before proposing another revision.
+    #[error("descriptor lineage head differs from the expected head")]
+    HeadMismatch,
     #[error("descriptor lineage is owned by another domain")]
     DomainMismatch,
     #[error("descriptor lineage id names a different stored tuple")]
@@ -379,11 +384,28 @@ impl Envelope<'_> {
             return Err(SourceDescriptorError::OccurrenceCollision);
         }
         let object_id = descriptor_object_id(&encoded.lineage_id, request.occurrence.revision);
-        let predecessor = self.live_lineage(request.domain_id, &detail)?;
-        if let Some((_, live_revision)) = &predecessor
-            && encoded.revision <= *live_revision
+        let guarded = encoded.class == OccurrenceClass::RepositoryDocuments;
+        if !guarded && request.expected_head.is_some() {
+            return Err(KernelError::InvalidInput.into());
+        }
+        let lineage = self.live_lineage(request.domain_id, &detail)?;
+        if let LineageState::Live { revision, .. } = &lineage
+            && encoded.revision <= *revision
         {
             return Err(SourceDescriptorError::RevisionNotAdvanced);
+        }
+        // A repository document's revision counts the observations of its path from 1, so it must exceed every revision the lineage ever held, retired rows included, and the caller's view of that head must still hold.
+        if guarded {
+            let head = match &lineage {
+                LineageState::Live { .. } => historical_head(self.tx, &encoded.lineage_id)?,
+                LineageState::Dormant { head } => *head,
+            };
+            if encoded.revision < 1 || head.is_some_and(|head| encoded.revision <= head) {
+                return Err(SourceDescriptorError::RevisionNotAdvanced);
+            }
+            if head != request.expected_head {
+                return Err(SourceDescriptorError::HeadMismatch);
+            }
         }
         let spec = ObservationSpec {
             observation_id,
@@ -406,20 +428,25 @@ impl Envelope<'_> {
             source_revision: encoded.revision,
             sensitivity: request.sensitivity,
         };
-        match &predecessor {
-            None => {
+        let replaced_object_id = match lineage {
+            LineageState::Dormant { .. } => {
                 self.insert_observation_inner(spec)?;
+                None
             }
-            Some((replaced, _)) => {
-                self.correct_observation_inner(replaced, spec)?;
+            LineageState::Live {
+                object_id: replaced,
+                ..
+            } => {
+                self.correct_observation_inner(&replaced, spec)?;
+                Some(replaced)
             }
-        }
+        };
         Ok(SourceDescriptorOutcome {
             object_id,
             occurrence_id: encoded.occurrence_id,
             lineage_id: encoded.lineage_id,
             payload_id,
-            replaced_object_id: predecessor.map(|(object_id, _)| object_id),
+            replaced_object_id,
         })
     }
 
@@ -435,16 +462,16 @@ impl Envelope<'_> {
         }
     }
 
-    /// The live descriptor of this lineage and its revision, if any. More
-    /// than one live row for one lineage is corruption; a row in another
-    /// domain refuses the publication; and stored fields that differ from the
-    /// fresh ones are a digest collision, refused rather than folded into the
-    /// chain.
+    /// The live descriptor of this lineage and its revision, or the newest
+    /// retired revision when none is live. More than one live row for one
+    /// lineage is corruption; a row in another domain refuses the
+    /// publication; and stored fields that differ from the fresh fields
+    /// indicate a digest collision and refuse the publication.
     fn live_lineage(
         &self,
         domain_id: &str,
         fresh: &SourceDescriptorDetail,
-    ) -> Result<Option<(String, i64)>, SourceDescriptorError> {
+    ) -> Result<LineageState, SourceDescriptorError> {
         let lineage_low = descriptor_object_id(&fresh.lineage_id, "");
         let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
         let mut statement = self
@@ -459,7 +486,7 @@ impl Envelope<'_> {
                  LIMIT 2",
             )
             .map_err(map_sqlite)?;
-        let live: Vec<(String, String, i64, Vec<u8>)> = statement
+        let live: Vec<DescriptorRow> = statement
             .query_map(
                 [
                     fresh.lineage_id.as_str(),
@@ -475,34 +502,14 @@ impl Envelope<'_> {
         if live.len() > 1 {
             return Err(KernelError::CorruptCanonicalRow.into());
         }
-        let predecessor = live
-            .first()
-            .map(|(id, _, revision, _)| (id.clone(), *revision));
-        let stored = match live.into_iter().next() {
-            Some(row) => Some(row),
-            None => self
-                .tx
-                .query_row_cached(
-                    "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
-                     FROM object_registry o
-                     JOIN observations b ON b.object_id=o.object_id
-                     WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id>=?2 AND o.object_id<?4
-                       AND b.observation_kind=?3
-                     ORDER BY o.source_revision DESC LIMIT 1",
-                    [
-                        fresh.lineage_id.as_str(),
-                        lineage_low.as_str(),
-                        SOURCE_DESCRIPTOR_KIND,
-                        lineage_high.as_str(),
-                    ],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()
-                .map_err(map_sqlite)?,
+        let (row, is_live) = match live.into_iter().next() {
+            Some(row) => (row, true),
+            None => match newest_descriptor(self.tx, &fresh.lineage_id)? {
+                Some(row) => (row, false),
+                None => return Ok(LineageState::Dormant { head: None }),
+            },
         };
-        let Some((_, domain, _, payload)) = stored else {
-            return Ok(None);
-        };
+        let (object_id, domain, revision, payload) = row;
         let stored = stored_detail(&payload)?;
         if !same_lineage(&stored, fresh) {
             return Err(SourceDescriptorError::LineageCollision);
@@ -510,7 +517,88 @@ impl Envelope<'_> {
         if domain != domain_id {
             return Err(SourceDescriptorError::DomainMismatch);
         }
-        Ok(predecessor)
+        Ok(if is_live {
+            LineageState::Live {
+                object_id,
+                revision,
+            }
+        } else {
+            LineageState::Dormant {
+                head: Some(revision),
+            }
+        })
+    }
+}
+
+/// [`Envelope::live_lineage`] validates lineage identity and domain before returning this state when a stored descriptor exists.
+enum LineageState {
+    Live {
+        object_id: String,
+        revision: i64,
+    },
+    /// `head` contains the newest stored descriptor revision; an empty descriptor history yields `None`.
+    Dormant {
+        head: Option<i64>,
+    },
+}
+
+/// `DescriptorRow` contains the object id, domain id, revision, and observation payload, in that order.
+type DescriptorRow = (String, String, i64, Vec<u8>);
+
+/// Publication stores each descriptor's class code as `source_kind` and lineage id as `source_id`, so each per-class read seeks `idx_objects_source` on that pair.
+fn newest_descriptor(
+    tx: &rusqlite::Transaction<'_>,
+    lineage_id: &str,
+) -> Result<Option<DescriptorRow>, KernelError> {
+    let lineage_low = descriptor_object_id(lineage_id, "");
+    let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
+    let mut newest: Option<DescriptorRow> = None;
+    for class in OccurrenceClass::ALL {
+        let found: Option<DescriptorRow> = tx
+            .query_row_cached(
+                "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
+                 FROM object_registry o INDEXED BY idx_objects_source
+                 CROSS JOIN observations b ON b.object_id=o.object_id
+                 WHERE o.source_kind=?5 AND o.source_id=?1 AND o.object_kind='observation'
+                   AND o.object_id>=?2 AND o.object_id<?4 AND b.observation_kind=?3
+                 ORDER BY o.source_revision DESC LIMIT 1",
+                [
+                    lineage_id,
+                    lineage_low.as_str(),
+                    SOURCE_DESCRIPTOR_KIND,
+                    lineage_high.as_str(),
+                    class.code(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if let Some(found) = found
+            && newest.as_ref().is_none_or(|newest| found.2 > newest.2)
+        {
+            newest = Some(found);
+        }
+    }
+    Ok(newest)
+}
+
+/// The highest revision any descriptor of `lineage_id` was published at, live or retired.
+fn historical_head(
+    tx: &rusqlite::Transaction<'_>,
+    lineage_id: &str,
+) -> Result<Option<i64>, KernelError> {
+    Ok(newest_descriptor(tx, lineage_id)?.map(|(_, _, revision, _)| revision))
+}
+
+impl KernelStore {
+    /// The historical head of `lineage_id`: the highest revision any of its descriptors was published at, retired rows included, or `None` for a lineage with no descriptor. A `repository_documents` publisher proposes the head plus one and names this head as the expected one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store failure from the read.
+    pub fn source_lineage_head(&self, lineage_id: &str) -> Result<Option<i64>, KernelError> {
+        self.read_snapshot(0, |tx, _| historical_head(tx, lineage_id))
+            .map(|(_, head)| head)
     }
 }
 

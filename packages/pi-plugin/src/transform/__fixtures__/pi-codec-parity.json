@@ -1,5 +1,5 @@
 {
-  "description": "Pi AgentMessage rows and the CK the daemon decodes them to (crates/daemon/src/codec/pi.rs decode_pi_rows), without the daemon's block identity stamps and ordinals. The Pi plugin's CK encoder must produce the same values.",
+  "description": "Pi AgentMessage rows and the CK the daemon decodes them to (crates/daemon/src/codec/pi.rs decode_pi_rows), without the daemon's block identity stamps and ordinals. The Pi plugin's CK encoder must produce the same values. Each row carries its session entry's type and parentId as the Pi plugin sends them; the CK encoding reads neither.",
   "expected": [
     {
       "ck": {
@@ -637,6 +637,8 @@
   "rows": [
     {
       "id": "b9fef88f",
+      "type": "message",
+      "parentId": null,
       "message": {
         "api": "openai-codex-responses",
         "content": [
@@ -670,6 +672,8 @@
     },
     {
       "id": "54dd70c3",
+      "type": "message",
+      "parentId": "b9fef88f",
       "message": {
         "api": "openai-codex-responses",
         "content": [
@@ -719,6 +723,8 @@
     },
     {
       "id": "ecd5585e",
+      "type": "message",
+      "parentId": "54dd70c3",
       "message": {
         "content": [
           {
@@ -737,6 +743,8 @@
     },
     {
       "id": "08243e28",
+      "type": "message",
+      "parentId": "ecd5585e",
       "message": {
         "api": "google-generative-ai",
         "content": [
@@ -779,6 +787,8 @@
     },
     {
       "id": "a9a4bb08",
+      "type": "message",
+      "parentId": "08243e28",
       "message": {
         "content": [
           {
@@ -795,6 +805,8 @@
     },
     {
       "id": "6d6c5203",
+      "type": "message",
+      "parentId": "a9a4bb08",
       "message": {
         "content": [
           {
@@ -817,6 +829,8 @@
     },
     {
       "id": "eidnara:custom:c280850c",
+      "type": "custom_message",
+      "parentId": "6d6c5203",
       "message": {
         "content": "[redacted:content][redacted:content][redacted:content][redacted:content][redacted:content][redacted:content][redacted:content][redac",
         "customType": "eidnara-status",
@@ -837,6 +851,8 @@
     },
     {
       "id": "eidnara:compactionSummary:b0077e58",
+      "type": "compaction",
+      "parentId": "c280850c",
       "message": {
         "role": "compactionSummary",
         "summary": "[redacted:summary][redacted:summary][redacted:summary][redacted:summary][redacted:summary][redacted",
@@ -846,6 +862,8 @@
     },
     {
       "id": "eidnara:branchSummary:d4e5f607",
+      "type": "branch_summary",
+      "parentId": "b0077e58",
       "message": {
         "fromId": "781a4cd4",
         "role": "branchSummary",
@@ -855,6 +873,8 @@
     },
     {
       "id": "c3d4e5f6",
+      "type": "message",
+      "parentId": "d4e5f607",
       "message": {
         "cancelled": false,
         "command": "git status",
@@ -867,6 +887,8 @@
     },
     {
       "id": "1a7225f0",
+      "type": "message",
+      "parentId": "c3d4e5f6",
       "message": {
         "api": "openai-codex-responses",
         "content": [],
@@ -894,6 +916,8 @@
     },
     {
       "id": "a0000001",
+      "type": "message",
+      "parentId": "1a7225f0",
       "message": {
         "content": "plain text prompt",
         "role": "user",
@@ -902,6 +926,8 @@
     },
     {
       "id": "a0000002",
+      "type": "message",
+      "parentId": "a0000001",
       "message": {
         "api": "openai-responses",
         "content": [
@@ -941,6 +967,8 @@
     },
     {
       "id": "a0000003",
+      "type": "message",
+      "parentId": "a0000002",
       "message": {
         "content": [
           {
@@ -957,6 +985,8 @@
     },
     {
       "id": "a0000004",
+      "type": "message",
+      "parentId": "a0000003",
       "message": {
         "content": [
           {
@@ -982,6 +1012,8 @@
     },
     {
       "id": "a0000005",
+      "type": "message",
+      "parentId": "a0000004",
       "message": {
         "api": "anthropic-messages",
         "content": [
@@ -1001,6 +1033,8 @@
     },
     {
       "id": "a0000006",
+      "type": "message",
+      "parentId": "a0000005",
       "message": {
         "cancelled": true,
         "command": "ls",
@@ -1013,6 +1047,8 @@
     },
     {
       "id": "a0000007",
+      "type": "message",
+      "parentId": "a0000006",
       "message": {
         "cancelled": false,
         "command": "secret",
@@ -1026,6 +1062,8 @@
     },
     {
       "id": "eidnara:custom:a0000008",
+      "type": "custom_message",
+      "parentId": "a0000007",
       "message": {
         "content": [
           {
@@ -1046,6 +1084,8 @@
     },
     {
       "id": "a0000009",
+      "type": "message",
+      "parentId": "a0000008",
       "message": {
         "content": [
           {
@@ -1068,6 +1108,8 @@
     },
     {
       "id": "a0000010",
+      "type": "message",
+      "parentId": "a0000009",
       "message": {
         "cancelled": false,
         "command": "exit 1e19",
@@ -1080,6 +1122,8 @@
     },
     {
       "id": "a0000011",
+      "type": "message",
+      "parentId": "a0000010",
       "message": {
         "cancelled": false,
         "command": "exit 1e21",

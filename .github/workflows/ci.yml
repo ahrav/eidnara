@@ -298,27 +298,34 @@ jobs:
         run: scripts/forbid-comment-markers.sh
 
       - name: Invented provenance
-        # Review-staging and MemoryReviewer paths carry no caller provenance, so
-        # no source or fixture under them may construct `RepositoryProvenance`
-        # or populate a `provenance` field by any means: a literal `Some`, a
-        # forwarded value, a call, or field-init shorthand. The only permitted
-        # population is `provenance: None`. The bracketed character keeps the
-        # pattern from matching this workflow file.
+        # Review-staging, MemoryReviewer, harness-source publication, and
+        # source-capture paths carry no caller provenance, so no source or
+        # fixture under them may construct `RepositoryProvenance` or populate a
+        # `provenance` field by any means: a literal `Some`, a forwarded value,
+        # a call, or field-init shorthand. The only permitted population is
+        # `provenance: None`, plus the one harness-source publisher line that
+        # forwards the git publisher's commit provenance, which `git_sources.rs`
+        # constructs. Field assignment counts as population. The bracketed
+        # character keeps the pattern from matching this workflow file.
         run: |
           set -euo pipefail
           status=0
           git grep -n -I -E \
             \( -e 'Repositor[y]Provenance' \
             -e '(^[[:space:]]*|[{,][[:space:]]*)provenanc[e][[:space:]]*[,:}]' \
+            -e '\.provenanc[e][[:space:]]*=' \
             \) \
             --and --not -e 'provenanc[e]:[[:space:]]*None' \
+            --and --not -e 'provenanc[e]: crate::git_sources::commit_provenanc[e]\(unit\.unit\),' \
             -- ':(glob)crates/kernel/src/review_staging.rs' \
                ':(glob)crates/kernel/tests/kernel_review_staging.rs' \
                ':(glob)crates/**/memory_reviewer*' \
-               ':(glob)crates/**/memory_reviewer/**' || status=$?
+               ':(glob)crates/**/memory_reviewer/**' \
+               ':(glob)crates/daemon/src/harness_sources.rs' \
+               ':(glob)crates/daemon/src/source_capture*' || status=$?
           if [ "$status" -eq 0 ]; then
-            echo "invented provenance in a MemoryReviewer" \
-              "or review-staging path"
+            echo "invented provenance in a MemoryReviewer, review-staging," \
+              "harness-source, or source-capture path"
             exit 1
           fi
           if [ "$status" -ne 1 ]; then

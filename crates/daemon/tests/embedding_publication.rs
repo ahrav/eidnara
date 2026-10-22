@@ -210,7 +210,7 @@ fn identity(dimension: u32, kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v3".to_string(),
+        identity_contract_version: "search-projection-identity-v4".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),
@@ -358,6 +358,7 @@ impl Corpus {
                         buffer: text,
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
                 envelope.record_admission(AdmissionRequest {
@@ -761,6 +762,7 @@ fn canonical_mutations_wait_behind_the_guard_and_stale_inputs_become_obsolete() 
                             buffer: "first message, revised",
                             sensitivity: Sensitivity::Normal,
                             observed_at: 1,
+                            expected_head: None,
                         })
                         .unwrap();
                     Ok(outcome.replaced_object_id.unwrap_or_default())

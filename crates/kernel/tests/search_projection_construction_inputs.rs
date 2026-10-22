@@ -26,12 +26,13 @@ const ACCEPTANCE_CRITERIA: [&str; 12] = [
 const SEAMS: [&str; 9] = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"];
 const HARNESSES: [&str; 2] = ["opencode", "pi"];
 const ENTRY_POINTS: [&str; 4] = ["startup", "reload", "dispatch", "explicit"];
-const SOURCE_CLASSES: [(&str, bool); 5] = [
+const SOURCE_CLASSES: [(&str, bool); 6] = [
     ("messages", true),
     ("canonical_claims", true),
     ("promoted_memory", true),
     ("git_commits", true),
     ("raw_tool_spans", false),
+    ("repository_documents", false),
 ];
 const HOOKS: [&str; 12] = [
     "search_projection.message_cleanup",
@@ -711,11 +712,11 @@ fn traceability_map_restates_matrix_coverage_per_property() {
 }
 
 #[test]
-fn contracts_freeze_the_five_classes() {
+fn contracts_freeze_the_six_classes() {
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
         contracts["identity_contract_version"],
-        "search-projection-identity-v3"
+        "search-projection-identity-v4"
     );
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(

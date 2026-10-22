@@ -83,6 +83,7 @@ pub mod search_writer;
 pub mod selection;
 pub mod served_json;
 pub mod session_resolver;
+pub(crate) mod source_capture;
 mod staged_body;
 mod tail_hygiene;
 pub mod terse_text_compression;
@@ -2566,6 +2567,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
     + memory_capture::RETAINED_BYTES_BOUND
+    + source_capture::RETAINED_BYTES_BOUND
     + config::MERGED_CONFIG_RETAINED_BYTES_BOUND;
 
 const NATIVE_OUTPUT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
@@ -2762,6 +2764,7 @@ pub struct HandlerCore {
     native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
     capture_commit_gate: Arc<Mutex<()>>,
     capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
+    source_capture: Arc<source_capture::SourceCapture>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
@@ -3764,6 +3767,7 @@ impl Handler {
             producer_factory,
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
+            source_capture: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -3907,6 +3911,7 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
         let memory_reviewer_status = Arc::clone(&self.memory_reviewer_status);
+        let source_capture = Arc::clone(&self.source_capture);
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
         let memory_reviewer_host = self
             .memory_reviewer_host
@@ -3946,6 +3951,7 @@ impl HandlerCore {
                         Arc::clone(&memory_reviewer_status),
                         store,
                         Arc::clone(&kernel),
+                        Arc::clone(&source_capture),
                         cancel.clone(),
                     ));
                 }
@@ -4290,6 +4296,7 @@ impl Handler {
             producer_factory: factory,
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
+            source_capture: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -6825,6 +6832,8 @@ impl HandlerCore {
                     .lock()
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
+                // A source capture handed off before this delete rechecks its ticket under the same gate and publishes nothing.
+                core.source_capture.invalidate_sessions();
                 deleted
             };
             core.cancel_history_summarizer_work(&session_id);
@@ -8968,6 +8977,17 @@ impl HandlerCore {
         ) {
             self.spawn_tracked_task(checkpoint.run());
         }
+        // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.
+        let capture =
+            source_capture::consents(&binding.config, parsed.is_subagent, serializer_profile).then(
+                || source_capture::Offer {
+                    profile: serializer_profile,
+                    session_id: parsed.session_id.clone(),
+                    project: binding.kernel_project.clone(),
+                    window: parsed.native_messages.clone().unwrap_or_default(),
+                    epoch: self.source_capture.epoch(),
+                },
+            );
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the
         // pass then serves that binding detached.
@@ -9014,14 +9034,35 @@ impl HandlerCore {
                 core.first_unit(intake, &signal, permit)
             }))
             .await;
-        let carry = match outcome {
-            Ok(UnitOutcome::Terminal(outcome)) => return outcome.holding(charges),
-            Ok(UnitOutcome::Continue(carry)) => *carry,
+        let outcome = match outcome {
+            Ok(UnitOutcome::Terminal(outcome)) => outcome.holding(charges),
+            Ok(UnitOutcome::Continue(carry)) => self
+                .finish_emergency_pass(entry, *carry)
+                .await
+                .holding(charges),
             Err(failed) => return unit_failed_error(failed),
         };
-        self.finish_emergency_pass(entry, carry)
-            .await
-            .holding(charges)
+        outcome.after_response(capture.and_then(|offer| self.capture_after_response(offer)))
+    }
+
+    /// Charges the built pass's window for source capture and returns the work that starts its tracked job once the response settles: the job takes the publication slot then, and a closed admission or a busy slot refuses it. A response that never settles drops it unrun.
+    fn capture_after_response(
+        &self,
+        offer: source_capture::Offer,
+    ) -> Option<dispatch::AfterResponse> {
+        let handoff = self.source_capture.offer(offer)?;
+        let admission = self.admission();
+        let kernel = Arc::clone(&self.kernel);
+        let gate = Arc::clone(&self.capture_commit_gate);
+        let cancel = self.cancel.clone();
+        Some(dispatch::AfterResponse::new(move || {
+            let capture = handoff.supervisor();
+            if let Some(job) = handoff.into_job(kernel, gate, cancel)
+                && admission.spawn(job.run()).is_none()
+            {
+                capture.refuse(source_capture::Count::RefusedShuttingDown);
+            }
+        }))
     }
 
     /// Waits for a unit permit on the async side, where the wait is abortable; the permit
@@ -13143,14 +13184,20 @@ impl CompositeComponent for Handler {
                 admitted_at: Instant::now(),
             },
         };
-        let (_, outcome) = self.dispatch_body(&entry, body).await;
+        let (_, mut outcome) = self.dispatch_body(&entry, body).await;
+        let after_response = outcome.take_after_response();
         let charges = meter.take_charges();
         let outcome = if charges.is_empty() {
             outcome
         } else {
             outcome.holding(charges.into())
         };
-        settle_prepared(&ctx, outcome).await
+        let settled = settle_prepared(&ctx, outcome).await;
+        // The response bytes are encoded and about to be handed to the wire writer; work that waits for that point starts now and never delays them.
+        if let (RequestOutcome::Response { .. }, Some(after)) = (&settled, after_response) {
+            after.run();
+        }
+        settled
     }
 
     async fn route_gone(&self, route: RouteHandle) {
@@ -13215,6 +13262,11 @@ impl CompositeComponent for Handler {
             });
         }
         metrics.insert("kernel".to_owned(), kernel.to_json());
+        metrics.insert(
+            "source_capture".to_owned(),
+            self.source_capture
+                .report(self.cancel.is_cancelled(), now_ms()),
+        );
         metrics.insert(
             "memory_reviewer".to_owned(),
             self.memory_reviewer_status.reported().to_json(),
@@ -18673,6 +18725,8 @@ mod tests {
     mod recorded_goldens;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
+    #[path = "source_capture_tests.rs"]
+    mod source_capture_tests;
     #[path = "source_recovery_tests.rs"]
     mod source_recovery_tests;
     #[path = "transform/window_admission.rs"]

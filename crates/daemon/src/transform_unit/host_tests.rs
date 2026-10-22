@@ -119,8 +119,26 @@ struct DaemonHost {
 
 impl DaemonHost {
     async fn start(hook: Box<dyn FnOnce() + Send>) -> Self {
+        Self::start_with(hook, default_test_config(), false).await
+    }
+
+    async fn start_with(
+        hook: Box<dyn FnOnce() + Send>,
+        config: DaemonConfig,
+        kernel: bool,
+    ) -> Self {
         let (handler, store, dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            handler_with_store(Arc::new(ProducerState::default()), config);
+        if kernel {
+            handler
+                .kernel
+                .open(
+                    dir.path().join("kernel"),
+                    StoreOpenPolicy::default(),
+                    handler.cancel.clone(),
+                )
+                .await;
+        }
         handler.unbind_route(test_route(7));
         assert!(handler.bindings.lock().unwrap().by_route.is_empty());
         *handler.after_transform_commit.lock().unwrap() = Some(hook);
@@ -505,5 +523,55 @@ async fn transform_panic_child() {
     );
     assert_eq!(ingress_available(), ingress_baseline);
     assert!(host.core.bindings.lock().unwrap().by_route.is_empty());
+    host.stop().await;
+}
+
+/// The transport's own `handle` starts source capture after it settles the response: a capture-enabled native pass publishes its user text, and the slot and charge return.
+#[tokio::test(flavor = "current_thread")]
+async fn the_host_starts_source_capture_after_the_response_settles() {
+    let mut config = default_test_config();
+    config.model_chain.clear();
+    config.source_capture_enabled = true;
+    let host = DaemonHost::start_with(Box::new(|| {}), config, true).await;
+    let native = [json!({
+        "info": { "id": "msg_u1", "sessionID": "ses", "role": "user", "time": { "created": 1_700_000_000_000u64 } },
+        "parts": [{ "type": "text", "text": "captured through the host" }],
+    })];
+    let messages = codec::decode_opencode(&native).messages;
+    let mut request = request_with_usage(messages, 1_000, 200_000);
+    request["serializer_profile"] = json!("opencode-aisdk");
+    request["native_messages"] = json!(native);
+    request["base_revision"] = json!("base-1");
+    // A native profile sends its native window alone, as the plugins do.
+    request.as_object_mut().unwrap().remove("messages");
+    let response = watchdog(host.client.request(
+        host.route,
+        serde_json::to_vec(&request).unwrap(),
+        RequestOptions::default(),
+    ))
+    .await
+    .unwrap();
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["status"], "ok", "{body}");
+    watchdog(async {
+        while host.core.source_capture.report(false, now_ms())["completed"] != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let report = host.core.source_capture.report(false, now_ms());
+    assert_eq!(report["admitted"], 1);
+    assert_eq!(report["retained_bytes"], 0);
+    let store = host.core.kernel.kernel_store().unwrap();
+    let live = store
+        .live_source_descriptors(
+            kernel::source_identity::OccurrenceClass::Messages,
+            store.tip().unwrap(),
+            None,
+            std::num::NonZeroUsize::new(8).unwrap(),
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(live.rows.len(), 1);
     host.stop().await;
 }

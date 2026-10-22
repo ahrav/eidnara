@@ -15,16 +15,32 @@ pub struct PreparedOutput {
     /// The output retains shared ownership of resident charges for request bytes held by
     /// `source`.
     held: Vec<Arc<[ByteCharge]>>,
+    /// Work the request owner runs once these bytes are encoded and handed to the wire writer.
+    after_response: Option<AfterResponse>,
     #[cfg(test)]
     encoded_for_test: Arc<std::sync::OnceLock<Vec<u8>>>,
 }
 
-/// Request charges stay with the original response when a clone shares its source.
+/// Work deferred until a response's bytes are encoded and handed to the wire writer. Dropping it unrun is the outcome for a response that never settled, so its owned state releases with it.
+pub struct AfterResponse(Box<dyn FnOnce() + Send + Sync>);
+
+impl AfterResponse {
+    pub fn new(work: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self(Box::new(work))
+    }
+
+    pub fn run(self) {
+        (self.0)();
+    }
+}
+
+/// Request charges and after-response work stay with the original response when a clone shares its source.
 impl Clone for PreparedOutput {
     fn clone(&self) -> Self {
         Self {
             source: self.source.clone(),
             held: Vec::new(),
+            after_response: None,
             #[cfg(test)]
             encoded_for_test: Arc::clone(&self.encoded_for_test),
         }
@@ -224,6 +240,7 @@ impl PreparedOutput {
         Self {
             source,
             held: Vec::new(),
+            after_response: None,
             #[cfg(test)]
             encoded_for_test: Arc::new(std::sync::OnceLock::new()),
         }
@@ -421,6 +438,25 @@ impl PreparedOutcome {
                 Self::Response(output)
             }
             other => other,
+        }
+    }
+
+    /// Attaches `after` to a response; any other outcome drops it unrun.
+    pub fn after_response(self, after: Option<AfterResponse>) -> Self {
+        match (self, after) {
+            (Self::Response(mut output), Some(after)) => {
+                output.after_response = Some(after);
+                Self::Response(output)
+            }
+            (other, _) => other,
+        }
+    }
+
+    /// Detaches the after-response work, which the request owner runs once the response settles.
+    pub fn take_after_response(&mut self) -> Option<AfterResponse> {
+        match self {
+            Self::Response(output) => output.after_response.take(),
+            _ => None,
         }
     }
 }

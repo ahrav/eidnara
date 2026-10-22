@@ -13,7 +13,7 @@ The machine-readable form is
 checked by the kernel test `search_projection_construction_inputs` together with the
 [independent identity fixtures](../../../crates/kernel/tests/fixtures/search-projection/source-identity-fixtures.json)
 and the [witness matrix](witness-matrix.md). The test pins the fixture's
-enumerations: the five classes and their dense defaults, the tuple field order
+enumerations: the six classes and their dense defaults, the tuple field order
 and version byte, the admission dimensions, every capability disposition on
 both harnesses, the hook set with its shared gate defaults, and the complete
 named-limit set with no value. The tables in this document restate the fixture
@@ -25,12 +25,12 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`search-projection-identity-v3`), which is one of the invalidation identities every hook
+(`search-projection-identity-v4`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
 
-RP2.1 projects exactly five source classes. Their codes are constant ASCII and
+RP2.1 projects exactly six source classes. Their codes are constant ASCII and
 appear first in every occurrence tuple:
 
 | Class code | Source | Dense by default |
@@ -40,6 +40,7 @@ appear first in every occurrence tuple:
 | `promoted_memory` | Positive stable-memory-domain decisions | yes |
 | `git_commits` | Retained commit evidence | yes |
 | `raw_tool_spans` | Selected spans of exact native tool output | no |
+| `repository_documents` | Raw working-tree bytes of a configured repository document | no |
 
 Identity uses stable identifiers only. Domain names, display names, titles, and
 any other in-place mutable field are neither identity nor text input (CC7).
@@ -59,6 +60,7 @@ is refused before any identity is minted.
 | `promoted_memory` | `decision_object_id` | `summary` |
 | `git_commits` | `repository_id`, `object_format`, `oid` | `commit_message` |
 | `raw_tool_spans` | `project_id`, `harness`, `session_id`, `parent_message_id`, `tool_call_id`, `result_revision`, `block_index` | `tool_output`, `tool_error` |
+| `repository_documents` | `project_id`, `repository_id`, `relative_path` | `text` |
 
 Field semantics:
 
@@ -67,6 +69,13 @@ Field semantics:
   native message identity, and `block_index` the ordered position of the text
   block. Text blocks exclude tool blocks; tool blocks belong to
   `raw_tool_spans` under their parent message.
+- A `repository_documents` lineage is one configured document path in one
+  project. `repository_id` is the bound project's repository identity, or the
+  Kernel project digest where no repository binding exists; the Kernel treats
+  it as opaque. Its revision counts the lineage's observations: a proposed
+  revision exceeds every revision the lineage ever held, retired rows
+  included, and commits only while the lineage's historical head equals the
+  head the publisher expected.
 - Claims and promoted memory carry the canonical object identity and the
   canonical revision. Decision summary and rationale are separate
   representations and therefore separate occurrences. A claim that is also a

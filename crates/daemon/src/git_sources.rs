@@ -12,6 +12,17 @@ use kernel::source_identity::OccurrenceClass;
 use crate::harness_sources::{Representation, SourceUnit};
 use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 
+/// A commit's bytes name the repository and object they were read from. The store treats that as affirmative provenance: an asserted `Normal` class is kept instead of folded to `Sensitive`, so the publisher's `sensitivity` decides whether repository text may leave the host. `None` for a unit that is not a commit or lacks either field; the encoder has already refused the latter.
+pub(crate) fn commit_provenance(unit: &SourceUnit) -> Option<kernel::RepositoryProvenance> {
+    if unit.class != OccurrenceClass::GitCommits {
+        return None;
+    }
+    Some(kernel::RepositoryProvenance {
+        repository_id: unit.identity_value("repository_id")?.to_owned(),
+        revision: unit.identity_value("oid")?.to_owned(),
+    })
+}
+
 /// The occurrence revision of every commit: a commit object never changes under its id, so its only revision is the first.
 pub const GIT_COMMIT_REVISION: &str = "1";
 

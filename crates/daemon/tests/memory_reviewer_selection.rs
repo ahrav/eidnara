@@ -245,6 +245,7 @@ impl Fixture {
                         buffer: &format!("claim {key}"),
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
+                        expected_head: None,
                     })
                     .unwrap();
                 // Eligibility judges the descriptor through the reads that

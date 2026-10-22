@@ -662,6 +662,32 @@ so `metadata_headroom_bytes` reaching zero means new review work is refused
 until a new incarnation; it is a safety ceiling, not a measured service
 lifetime.
 
+The `context` component MAY also carry a sanitized `metrics.source_capture`
+object describing source capture (Section 7.9), the background publication of
+consented message text and tool results as Kernel source descriptors. The
+counters are process-local and start at zero when the daemon starts. The block
+is sanitized field by field: any object survives, a non-object drops the block
+whole, and every field is kept or dropped on its own. Every field is
+content-free: a count, a byte total, or milliseconds. No field carries unit
+text, an identity, a path, a digest, or a project.
+
+| field | type | rule |
+| --- | --- | --- |
+| `admitted` | unsigned integer | capture jobs that started |
+| `refused_queue_full`, `refused_resident_short`, `refused_window_too_large`, `refused_shutting_down` | unsigned integer | windows refused before or at handoff, by reason; `refused_resident_short` also counts jobs whose unit copies the capture budget refused |
+| `completed`, `discarded`, `session_invalidated`, `kernel_unavailable`, `deadline`, `kernel_error`, `worker_panicked` | unsigned integer | job ends by reason |
+| `adapter_refused` | unsigned integer | native records the adapters refused |
+| `units_published`, `units_replayed`, `units_memo_skipped`, `units_deferred`, `units_unit_too_large`, `units_identity_conflict`, `units_refused_terminal`, `units_refused_retryable` | unsigned integer | unit dispositions |
+| `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
+| `retained_bytes` | unsigned integer | bytes the capture budget holds now |
+| `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
+
+The same integer rules as `kernel` apply: every integer MUST be no greater
+than 2^53; a larger, negative, non-integer, or `null` value is dropped to
+absent, except `oldest_deferred_age_ms`, where `null` is a declared value;
+unknown fields are dropped; fields are additive.
+
 The `model_execution` component MAY also carry a sanitized
 `metrics.aws_credentials` object: the host's cached observation of the
 selected AWS credential source, read from a shared cell with no credential
@@ -921,10 +947,10 @@ It, `memory.enabled`, and `memory.auto_promote` must all
 permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
 it from the project tier before merging. It consents to a different capture:
-the daemon retaining the exact bytes of user message text, tool outputs, and
-tool errors as Kernel source descriptors. That capture is reserved: the
-current daemon accepts and merges the key and retains no source bytes. A
-daemon that performs source capture runs it only when
+the daemon retaining the exact bytes of user and completed assistant message
+text, tool outputs, and tool errors as Kernel source descriptors, published by
+a background supervisor after the transform response settles and reported
+through `metrics.source_capture`. Source capture runs only when
 `source_capture.enabled` and `memory.enabled` both permit it, and a session
 marked `is_subagent` never captures. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
@@ -968,7 +994,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `previous_output_revision` | optional | the revision of the consumer's retained, applied output, when it offers one |
 | `serializer_profile` | required | `owned-llmrunner`, `pi`, `opencode-aisdk`, or `claude-code-anthropic` |
 | `render_config` | required | string; a change is a render-configuration change |
-| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "message": AgentMessage}` |
+| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read is `{"id", "message"}` alone. The daemon reads `type` and `parentId` for source capture only: a row without `type` or whose `type` is not `"message"` contributes no source and is counted as an adapter refusal, and neither field changes the transform or its response |
 | `messages` | the window of `owned-llmrunner` and `claude-code-anthropic`, empty when absent; absent for `pi` and `opencode-aisdk` | the window in CK form, in canonical order: `[{"mid": string, "ck": CK message}]` |
 | `usage` | optional | `{"current_total_input_tokens", "context_limit_tokens", "final_wire_input_tokens", "final_wire_trusted"}` |
 | `geometry` | optional | `{"usable_soft": integer, "usable_hard": integer, "derivation": string}` |
@@ -1014,7 +1040,7 @@ Errors, each an application `Error` (Section 10.2) with a stable `code` and a hu
 
 | Code | Cause |
 | --- | --- |
-| `invalid_params` | `boundary` absent; an integer `boundary.sequence` outside the safe-integer range; a window whose first message is not `boundary.mid`; a declared segment whose end message is not `boundary.mid`; a declared segment newer than the rendered boundary; a repeated `mid` in the window; a `mid` over 128 bytes; a request identity string over 256 bytes; a blank prompt-surface tool description; a `pi` native row that is not `{id, message}`, whose `message.role` is outside Pi's `AgentMessage` role set (`user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `branchSummary`, `compactionSummary`), or whose `id` is outside its id space (a `custom`, `branchSummary`, or `compactionSummary` row must carry an id beginning `eidnara:`, and every other row must not); a `pi` or `opencode-aisdk` body whose `messages` holds any message, or a body of another profile carrying `native_messages`; a consumer treats each of these refusals as a declined pass |
+| `invalid_params` | `boundary` absent; an integer `boundary.sequence` outside the safe-integer range; a window whose first message is not `boundary.mid`; a declared segment whose end message is not `boundary.mid`; a declared segment newer than the rendered boundary; a repeated `mid` in the window; a `mid` over 128 bytes; a request identity string over 256 bytes; a blank prompt-surface tool description; a `pi` native row that is not an object with a non-empty string `id` and an object `message` whose `role` is a string, whose `message.role` is outside Pi's `AgentMessage` role set (`user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `branchSummary`, `compactionSummary`), or whose `id` is outside its id space (a `custom`, `branchSummary`, or `compactionSummary` row must carry an id beginning `eidnara:`, and every other row must not); a `pi` or `opencode-aisdk` body whose `messages` holds any message, or a body of another profile carrying `native_messages`; a consumer treats each of these refusals as a declined pass |
 | `bad_request` | a body that does not decode as a transform request, including a `boundary` that is neither `null` nor an object with a string `mid` and an integer `sequence` (a missing member, `5`, a `sequence` of `1.5` or `"2"`, or one outside the signed 64-bit range); an OpenCode message whose numeric creation time (`info.time.created`, `info.time_created`, or `info.timeCreated`) is not a signed 64-bit integer, answered with the message the same value in a CK message's `meta.created_at_ms` would draw |
 | `unknown_serializer_profile` | a missing or unknown profile |
 | `transform_base_revision_missing` | no `base_revision` |
@@ -1047,7 +1073,7 @@ The `ok` response of a pass the daemon transformed carries `history_summarizer` 
 
 The `timings` diagnostics of the `ok` response of a pass the daemon transformed include `ledger`, the daemon's additive stage ledger of the pass in whole microseconds: `admit_us`, `lane_gate_and_decode_us`, `derivation_us` (the native window's CK derivation; `null` for a profile whose window is CK), `transform_core_us`, `native_attach_us`, and `residual_us`, which sum to `total_us`, measured from the handler taking the body to just before the response encode, plus `window_messages` and `window_blocks`, the CK messages and blocks the pass served. A `session_busy`, `boundary_unknown`, or error answer, and the raw `ok` answer of a pass the daemon serves untransformed, carry no ledger. A consumer reads it as a measurement only.
 
-The recipe is an ordered array of operations whose results, concatenated, are the output array: `{"op": "keep", "source": "input" | "previous", "start": integer, "count": integer}` copies `count` whole values starting at `start`, and `{"op": "insert", "values": [value, ...]}` inserts complete values. Omission deletes. For `pi`, every output value is an `{id, message}` row; a row the daemon builds or re-renders may carry an `eidnara:` id on any role, so a consumer submits only rows it built from its host as `native_messages`. The `input` source is the request's `native_messages` for `pi` and `opencode-aisdk`, otherwise the CK values of `messages` (the daemon keeps only from `previous` for CK); the `previous` source is the output the consumer applied under `previous_output_revision`. Every `keep(source: input)` is in the coordinates of the submitted window: position `i` is the `i`-th submitted message, whatever the daemon sliced before processing. A consumer applies the recipe to its captured window, the host index of window position `i` being the window's start plus `i`, validates it whole against both sources and the reconstructed-size cap before building anything, and publishes the result as the whole new array.
+The recipe is an ordered array of operations whose results, concatenated, are the output array: `{"op": "keep", "source": "input" | "previous", "start": integer, "count": integer}` copies `count` whole values starting at `start`, and `{"op": "insert", "values": [value, ...]}` inserts complete values. Omission deletes. For `pi`, every output value is an `{id, message}` row; a kept input row is the row as submitted, and a row the daemon inserts carries no `type` or `parentId`; a row the daemon builds or re-renders may carry an `eidnara:` id on any role, so a consumer submits only rows it built from its host as `native_messages`. The `input` source is the request's `native_messages` for `pi` and `opencode-aisdk`, otherwise the CK values of `messages` (the daemon keeps only from `previous` for CK); the `previous` source is the output the consumer applied under `previous_output_revision`. Every `keep(source: input)` is in the coordinates of the submitted window: position `i` is the `i`-th submitted message, whatever the daemon sliced before processing. A consumer applies the recipe to its captured window, the host index of window position `i` being the window's start plus `i`, validates it whole against both sources and the reconstructed-size cap before building anything, and publishes the result as the whole new array.
 
 ## 8. Host and handler lifecycle
 

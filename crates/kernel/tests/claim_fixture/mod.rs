@@ -232,6 +232,7 @@ impl Fixture {
                             buffer: text,
                             sensitivity: Sensitivity::Normal,
                             observed_at: 1,
+                            expected_head: None,
                         })
                         .unwrap();
                     published = Some(outcome);

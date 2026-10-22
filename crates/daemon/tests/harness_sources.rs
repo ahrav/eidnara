@@ -19,7 +19,9 @@ use host_runtime::local_embeddings::{
     EmbedTokens, EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
 };
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::OccurrenceClass;
+use kernel::source_identity::{
+    Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
+};
 use kernel::{
     ArtifactDestination, ArtifactErrorKind, CommitIntent, Dimension, DomainSpec,
     EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress, ScopeSpec,
@@ -134,7 +136,7 @@ fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v3".to_string(),
+        identity_contract_version: "search-projection-identity-v4".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -574,9 +576,40 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         ),
         (1, "0", "user")
     );
+    // AC10 and OQ10: a row names its entry type, and only a message entry holds sources. Coverage witness `pi_wire_row_without_type`: the `{id, message}` row a pre-U3 plugin sent.
+    for (row, refusal) in [
+        (
+            json!({ "id": "pi-u1", "message": { "role": "user", "content": "x", "timestamp": 1 } }),
+            AdapterRefusal::MissingIdentity("type"),
+        ),
+        (
+            json!({ "type": "compaction", "id": "x", "parentId": "pi-u1" }),
+            AdapterRefusal::UnsupportedShape("type"),
+        ),
+        (
+            json!({ "type": "session", "id": "x" }),
+            AdapterRefusal::UnsupportedShape("type"),
+        ),
+        (
+            json!({ "type": 7, "id": "x" }),
+            AdapterRefusal::UnsupportedShape("type"),
+        ),
+        (
+            json!({ "type": null, "id": "x" }),
+            AdapterRefusal::MissingIdentity("type"),
+        ),
+        (
+            json!({ "type": "", "id": "x" }),
+            AdapterRefusal::MissingIdentity("type"),
+        ),
+    ] {
+        assert_eq!(pi_units(&pi_session(), &row), Err(refusal), "{row}");
+    }
+    let mut orphan = pi_tool_result("pi-t9", "pi-a1", false, 6000);
+    orphan.as_object_mut().unwrap().remove("parentId");
     assert_eq!(
-        pi_units(&pi_session(), &json!({ "type": "session", "id": "x" })).unwrap(),
-        vec![]
+        pi_units(&pi_session(), &orphan),
+        Err(AdapterRefusal::MissingIdentity("parentId"))
     );
     // The captured Pi shape: a content array with an image beside the text; the image is not a text source.
     let units = pi_units(&pi_session(), &pi_user_with_image("pi-u2", 5600)).unwrap();
@@ -961,6 +994,132 @@ fn publication_receipt_digest_layout_is_pinned() {
     assert_eq!(
         digest,
         "9ff69ac08200498a7b8827c97faabbcdfaf323061593dccce0e6ea31668f3723"
+    );
+}
+
+/// A unit's receipt identity is the key and request digest publication records: the key digests the occurrence id, revision, and representation joined by U+001F, and the request digest frames the format tag, text, domain, scope, role, and sensitivity, each after its big-endian `u64` length, then the scope and egress flags. The texts span lengths from empty to past several SHA-256 blocks, a publication stores exactly that key and digest, and a revision outside its canonical spelling has no receipt identity.
+#[test]
+fn receipt_identity_keys_the_occurrence_and_frames_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    let mut units: Vec<SourceUnit> = [0, 1, 7, 8, 55, 56, 63, 64, 65, 119, 120, 1000]
+        .into_iter()
+        .map(|len| pi_text_unit("pi-u1", &("é".repeat(len / 2) + &"a".repeat(len % 2))))
+        .collect();
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", true, 300)).unwrap());
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t2", "pi-a1", false, 301)).unwrap());
+    units.extend(opencode_units(&opencode_session(), &opencode_assistant("msg_a", 5000)).unwrap());
+    for scope_id in [None, Some(SCOPE)] {
+        for egress in [ProviderEgress::LocalOnly, ProviderEgress::RemoteAllowed] {
+            let publisher = SourcePublisher {
+                scope_id,
+                egress,
+                ..corpus.publisher()
+            };
+            for unit in &units {
+                let encoded = encode_preserving_span(&Occurrence {
+                    class: unit.class.code(),
+                    identity: &identity_of(unit),
+                    revision: &unit.revision,
+                    representation: unit.representation.as_str(),
+                    span: None,
+                })
+                .unwrap();
+                let key = format!(
+                    "{}\u{1f}{}\u{1f}{}",
+                    encoded.occurrence_id,
+                    encoded.revision,
+                    unit.representation.as_str()
+                );
+                let mut request = Vec::new();
+                for part in [
+                    "source-request.v1",
+                    unit.text.as_str(),
+                    publisher.domain_id,
+                    scope_id.unwrap_or_default(),
+                    unit.role.as_str(),
+                    publisher.sensitivity.as_str(),
+                ] {
+                    request.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                    request.extend_from_slice(part.as_bytes());
+                }
+                request.push(u8::from(scope_id.is_some()));
+                request.push(match egress {
+                    ProviderEgress::RemoteAllowed => 0,
+                    ProviderEgress::LocalOnly => 1,
+                });
+                assert_eq!(
+                    publisher.receipt_identity(unit),
+                    Some((identity_digest(key.as_bytes()), identity_digest(&request))),
+                    "{unit:?}"
+                );
+            }
+        }
+    }
+    corpus.seed();
+    let (key, digest) = corpus.publisher().receipt_identity(&units[2]).unwrap();
+    corpus.publisher().publish(&units[2], NOW).unwrap();
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let stored: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT operation_key, request_digest FROM operation_receipts
+             WHERE producer='eidnara-daemon/harness-sources'
+               AND operation_key LIKE 'source-descriptor:%'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, [(format!("source-descriptor:{key}"), digest)]);
+    for revision in ["01", "+5", "9223372036854775808"] {
+        let unit = SourceUnit {
+            revision: revision.to_owned(),
+            ..units[2].clone()
+        };
+        assert_eq!(
+            corpus.publisher().receipt_identity(&unit),
+            None,
+            "{revision}"
+        );
+        let refused = corpus.publisher().publish(&unit, NOW);
+        assert!(
+            matches!(
+                refused,
+                Err(PublishError::Descriptor { evidence: None, .. })
+            ),
+            "{revision}: {refused:?}"
+        );
+    }
+}
+
+/// With several fields wrong at once, the Pi adapter names the first one it checks: the role before the timestamp, and the call before the error flag.
+#[test]
+fn pi_refusals_name_the_first_failing_field() {
+    let mut user = pi_user("pi-u1", "hello", 100);
+    let message = user["message"].as_object_mut().unwrap();
+    message.remove("role");
+    message.remove("timestamp");
+    assert_eq!(
+        pi_units(&pi_session(), &user),
+        Err(AdapterRefusal::MissingIdentity("role"))
+    );
+    let mut result = pi_tool_result("pi-t1", "pi-a1", false, 300);
+    let message = result["message"].as_object_mut().unwrap();
+    message.remove("toolCallId");
+    message.insert("isError".to_owned(), json!("false"));
+    message.insert("content".to_owned(), json!("not an array"));
+    assert_eq!(
+        pi_units(&pi_session(), &result),
+        Err(AdapterRefusal::MissingIdentity("toolCallId"))
+    );
+    let mut result = pi_tool_result("pi-t1", "pi-a1", false, 300);
+    result.as_object_mut().unwrap().remove("parentId");
+    result["message"]["timestamp"] = json!(-1);
+    assert_eq!(
+        pi_units(&pi_session(), &result),
+        Err(AdapterRefusal::MalformedRevision("timestamp"))
     );
 }
 
@@ -1569,7 +1728,7 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
         assert_eq!(units.len(), expected.len(), "{units:?}");
         for (unit, expected_provenance) in units.iter().zip(expected) {
             let published = publisher.publish(unit, NOW).unwrap();
-            assert_eq!(published.provenance, *expected_provenance, "{unit:?}");
+            assert_eq!(published.admission, *expected_provenance, "{unit:?}");
             let admissions: Vec<(String, String, String)> = kernel_db
                 .prepare(
                     "SELECT a.source_class,a.taint_class,e.object_id
@@ -2388,6 +2547,37 @@ fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {
     );
 }
 
+#[test]
+fn capture_batch_refuses_a_secret_unit_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let units = [
+        pi_text_unit("pi-secret", &format!("token {SECRET}")),
+        pi_text_unit("pi-clean", "a clean sibling"),
+    ];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    match &dispositions[0] {
+        UnitDisposition::Refused(refusal @ PublishError::Artifact(_)) => {
+            assert!(refusal.is_permanent(), "{refusal:?}");
+        }
+        other => panic!("expected an artifact refusal, got {other:?}"),
+    }
+    assert!(!published(&dispositions[1]).replayed);
+    assert_eq!(evidence_rows(&corpus).0, 1, "only the sibling is retained");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged + 1,
+        "only the sibling is staged"
+    );
+    assert!(
+        !inventory(&corpus)
+            .iter()
+            .any(|(_, text, _)| text.contains(SECRET))
+    );
+}
+
 /// One window naming a unit twice: an equal repeat waits for a later pass, and a changed repeat under the same identity and revision is refused on its own while the first publishes.
 #[test]
 fn capture_batch_screens_a_repeated_identity_per_unit() {
@@ -2552,4 +2742,603 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
     );
 
     assert_eq!(corpus.tip(), tip, "no refused attempt committed");
+}
+
+/// A configured repository document at `revision`.
+fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
+    SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", PROJECT.to_string()),
+            ("repository_id", PROJECT.to_string()),
+            ("relative_path", path.to_string()),
+        ],
+        revision: revision.to_string(),
+        representation: Representation::Text,
+        text: text.to_string(),
+        role: "document".to_string(),
+    }
+}
+
+/// A proposal more than one revision past the lineage head is refused as a head mismatch. The refusal depends on the head: once the lineage reaches the revision before the proposal, the same unit publishes.
+#[test]
+fn repository_documents_gap_refusal_is_retryable_once_the_gap_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    publisher
+        .publish(&document_unit("README.md", "1", "# one\n"), NOW)
+        .unwrap();
+    publisher
+        .publish(&document_unit("README.md", "2", "# two\n"), NOW)
+        .unwrap();
+    let gap = document_unit("README.md", "4", "# four\n");
+    let refused = publisher.publish(&gap, NOW);
+    assert!(
+        matches!(
+            &refused,
+            Err(PublishError::Descriptor {
+                refusal: SourceDescriptorError::HeadMismatch,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(!refused.unwrap_err().is_permanent());
+    publisher
+        .publish(&document_unit("README.md", "3", "# three\n"), NOW)
+        .unwrap();
+    let landed = publisher.publish(&gap, NOW).unwrap();
+    assert!(!landed.replayed, "{landed:?}");
+    let rows = corpus.export();
+    let live: Vec<&SourceRow> = rows
+        .iter()
+        .filter(|row| {
+            row.detail.class == "repository_documents" && row.invalidated_commit_seq.is_none()
+        })
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].object_id, landed.object_id);
+    assert_eq!(live[0].text.as_deref(), Some("# four\n"));
+}
+
+/// A repository document retains its own `Sensitive` evidence even when its text equals a commit message in the same screened batch.
+#[test]
+fn repository_documents_keep_their_own_evidence_beside_an_equal_commit_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let text = "Release notes\n";
+    let commit = SourceUnit {
+        class: OccurrenceClass::GitCommits,
+        identity: vec![
+            ("repository_id", PROJECT.to_string()),
+            ("object_format", "sha1".to_string()),
+            ("oid", "b".repeat(40)),
+        ],
+        revision: "1".to_string(),
+        representation: Representation::CommitMessage,
+        text: text.to_string(),
+        role: "commit".to_string(),
+    };
+    let units = [commit, document_unit("NOTES.md", "1", text)];
+
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let commit = published(&dispositions[0]);
+    let document = published(&dispositions[1]);
+    assert_ne!(commit.evidence_object_id, document.evidence_object_id);
+    assert_eq!(
+        document.admission,
+        (
+            SourceClass::UntrustedRepoText,
+            TaintClass::RepoUntrustedText
+        )
+    );
+    let rows = corpus.export();
+    let row = rows
+        .iter()
+        .find(|row| row.object_id == document.object_id)
+        .unwrap();
+    assert_eq!(row.sensitivity, Sensitivity::Sensitive);
+}
+
+/// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below the retired head or past the head plus one is refused while the head plus one republishes; and a projection builds from a store holding the class.
+#[test]
+fn repository_documents_publish_untrusted_supersede_and_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    let first = publisher
+        .publish(
+            &document_unit("ARCHITECTURE.md", "1", "# Architecture\n"),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        first.admission,
+        (
+            SourceClass::UntrustedRepoText,
+            TaintClass::RepoUntrustedText
+        )
+    );
+    let second = publisher
+        .publish(
+            &document_unit("ARCHITECTURE.md", "2", "# Architecture \n"),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        second.replaced_object_id.as_deref(),
+        Some(first.object_id.as_str())
+    );
+    let rows = corpus.export();
+    let live: Vec<&SourceRow> = rows
+        .iter()
+        .filter(|row| {
+            row.detail.class == "repository_documents" && row.invalidated_commit_seq.is_none()
+        })
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].object_id, second.object_id);
+    assert_eq!(live[0].sensitivity, Sensitivity::Sensitive);
+    assert_eq!(live[0].text.as_deref(), Some("# Architecture \n"));
+
+    corpus
+        .kernel
+        .commit(intent("retire-document"), |envelope| {
+            envelope.retire_observation(&second.object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // Revisions 1 and 2 hold receipts; revision 0 is below the retired head, and 5 skips the head plus one.
+    for (revision, refusal) in [
+        ("0", SourceDescriptorError::RevisionNotAdvanced),
+        ("5", SourceDescriptorError::HeadMismatch),
+        // A counter is never judged against the clock: a far revision is a head mismatch, never a revision lead.
+        ("99999999999999", SourceDescriptorError::HeadMismatch),
+    ] {
+        let refused = publisher.publish(
+            &document_unit("ARCHITECTURE.md", revision, "# again\n"),
+            NOW,
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(PublishError::Descriptor { refusal: actual, .. }) if *actual == refusal
+            ),
+            "{revision}: {refused:?}"
+        );
+    }
+    let republished = publisher
+        .publish(&document_unit("ARCHITECTURE.md", "3", "# again\n"), NOW)
+        .unwrap();
+    assert!(republished.replaced_object_id.is_none());
+
+    let data_home = dir.path().join("data");
+    let (projection, rows) = corpus.bootstrap(&data_home);
+    drop(projection);
+    assert!(
+        rows.iter()
+            .any(|row| row.detail.class == "repository_documents")
+    );
+    let conn = Connection::open_with_flags(
+        data_home.join("search").join("search.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let projected: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM occurrences WHERE class='repository_documents'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projected, 1, "the projection holds the live document");
+    let dense: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs j JOIN occurrences o USING(occurrence_id)
+             WHERE o.class='repository_documents'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dense, 0, "repository documents stay lexical-only");
+}
+
+/// The shared Pi codec fixture is the producer's row shape: every message entry row reaches the adapter's sources, and every other entry type is refused by its type alone.
+#[test]
+fn the_shared_pi_fixture_rows_carry_the_entry_identity_the_adapter_reads() {
+    let fixture: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    let mut messages = 0;
+    for row in rows {
+        let adapted = pi_units(&pi_session(), row);
+        if row["type"] == "message" {
+            messages += 1;
+            assert!(
+                !matches!(
+                    adapted,
+                    Err(AdapterRefusal::MissingIdentity("type")
+                        | AdapterRefusal::UnsupportedShape("type"))
+                ),
+                "{}: {adapted:?}",
+                row["id"]
+            );
+        } else {
+            assert_eq!(
+                adapted,
+                Err(AdapterRefusal::UnsupportedShape("type")),
+                "{}",
+                row["id"]
+            );
+            // A reserved row names the entry it came from, and its type is that entry's.
+            let role = row["id"].as_str().unwrap().split(':').nth(1).unwrap();
+            let expected = match role {
+                "custom" => "custom_message",
+                "compactionSummary" => "compaction",
+                "branchSummary" => "branch_summary",
+                other => panic!("unexpected reserved role {other}"),
+            };
+            assert_eq!(row["type"], expected, "{}", row["id"]);
+        }
+    }
+    assert!(messages > 0 && messages < rows.len());
+}
+
+/// `(retention_class, retain_until, invalidated_commit_seq)` of an evidence row, read straight from the store.
+fn evidence_retention(corpus: &Corpus, object_id: &str) -> (String, Option<i64>, Option<i64>) {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT retention_class,retain_until,invalidated_commit_seq FROM evidence_meta
+             WHERE object_id=?1",
+            [object_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+/// `(invalidated_commit_seq, superseded_by)` of a descriptor's observation row; an invalidation with no successor is what the projection tombstones as `Retired`.
+fn descriptor_retirement(corpus: &Corpus, object_id: &str) -> (Option<i64>, Option<String>) {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT invalidated_commit_seq,superseded_by FROM observations WHERE object_id=?1",
+            [object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// The change kinds one commit recorded, in commit order.
+fn change_kinds(corpus: &Corpus, commit_seq: i64) -> Vec<String> {
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut statement = conn
+        .prepare("SELECT change_kind FROM change_event WHERE commit_seq=?1 ORDER BY ordinal")
+        .unwrap();
+    statement
+        .query_map([commit_seq], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// An observation outside the capture that cites `evidence_id`: independent support expiry must keep.
+fn cite(corpus: &Corpus, evidence_id: &str) {
+    corpus
+        .kernel
+        .commit(intent(&format!("cite:{evidence_id}")), |envelope| {
+            envelope.insert_observation(kernel::ObservationSpec {
+                observation_id: format!("citer:{evidence_id}"),
+                object_id: format!("citer-object:{evidence_id}"),
+                domain_id: "domain".to_string(),
+                proposition_id: None,
+                scope_id: None,
+                anchor_id: None,
+                evidence_id: Some(evidence_id.to_string()),
+                observation_kind: "note".to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "independent support".to_string(),
+                    classification: "note".to_string(),
+                    detail: None,
+                },
+                observed_at: NOW,
+                dependencies: Vec::new(),
+                source_kind: "test".to_string(),
+                source_id: format!("citer:{evidence_id}"),
+                source_revision: 1,
+                sensitivity: Sensitivity::Sensitive,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// The evidence id behind a published unit's evidence object.
+fn evidence_id_of(corpus: &Corpus, evidence_object_id: &str) -> String {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT evidence_id FROM evidence_meta WHERE object_id=?1",
+            [evidence_object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// AC11 and F11: captured message and tool evidence is `harness_capture` owned for 30 days from observation; a replay, even one observed after the deadline, leaves the deadline where the first publication set it; at `retain_until - 1` the capture survives and at `retain_until` its descriptor is retired without a successor and then its evidence, in one commit; a `canonical` row in the same store never ages out.
+#[test]
+fn harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let message =
+        &opencode_units(&opencode_session(), &opencode_user("msg_1", "keep me", 100)).unwrap()[0];
+    let tools = pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200)).unwrap();
+    let tool = tools
+        .iter()
+        .find(|unit| unit.class == OccurrenceClass::RawToolSpans)
+        .unwrap();
+    let published = publisher.publish(message, NOW).unwrap();
+    let tool_published = publisher.publish(tool, NOW + 5).unwrap();
+    let deadline = NOW + 30 * DAY_MS;
+    assert_eq!(
+        daemon::harness_sources::HARNESS_CAPTURE_RETENTION_MS,
+        30 * DAY_MS
+    );
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id),
+        (
+            kernel::HARNESS_CAPTURE_RETENTION_CLASS.to_owned(),
+            Some(deadline),
+            None
+        )
+    );
+    assert_eq!(
+        evidence_retention(&corpus, &tool_published.evidence_object_id).1,
+        Some(deadline + 5),
+        "tool evidence carries its own observation's deadline"
+    );
+    // A canonical row beside the captures carries no deadline.
+    corpus
+        .kernel
+        .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+            intent: intent("canonical"),
+            payload: b"a canonical claim's bytes".to_vec(),
+            evidence_id: "canonical".to_string(),
+            object_id: "canonical-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "git_commit".to_string(),
+            source_id: "canonical".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap();
+
+    // A repository document published beside the captures is canonical evidence.
+    let document = publisher
+        .publish(&document_unit("README.md", "1", "# Readme\n"), NOW)
+        .unwrap();
+    assert_eq!(
+        evidence_retention(&corpus, &document.evidence_object_id),
+        ("canonical".to_owned(), None, None)
+    );
+
+    // The same unit observed again after its deadline replays the first rows: the deadline is the first owner's.
+    let again = publisher.publish(message, deadline + DAY_MS).unwrap();
+    assert!(again.replayed);
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id).1,
+        Some(deadline),
+        "a replay never renews the deadline"
+    );
+
+    let tip = corpus.tip();
+    assert_eq!(
+        corpus.kernel.expire_harness_captures(deadline - 1).unwrap(),
+        kernel::CaptureExpiry::default(),
+        "one millisecond before the deadline nothing expires"
+    );
+    assert_eq!(corpus.tip(), tip, "an empty sweep commits nothing");
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id).2,
+        None
+    );
+    let swept = corpus.kernel.expire_harness_captures(deadline).unwrap();
+    assert_eq!(
+        (swept.retired, swept.retained),
+        (1, 0),
+        "only the message is due"
+    );
+    let (retired_at, successor) = descriptor_retirement(&corpus, &published.object_id);
+    assert_eq!(successor, None, "retired, not superseded");
+    let retired_at = retired_at.expect("the descriptor is retired");
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id).2,
+        Some(retired_at),
+        "the evidence goes in the descriptor's commit"
+    );
+    assert_eq!(
+        change_kinds(&corpus, retired_at),
+        ["observation_retire", "evidence_retire"],
+        "descriptor first, evidence second"
+    );
+
+    // Publishing the unit once more after its capture expired still answers from the receipts: nothing is re-retained and the deadline stays.
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let after = publisher.publish(message, deadline + 2 * DAY_MS);
+    assert!(
+        after.as_ref().is_ok_and(|published| published.replayed),
+        "{after:?}"
+    );
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+    assert_eq!(
+        evidence_retention(&corpus, &published.evidence_object_id),
+        (
+            kernel::HARNESS_CAPTURE_RETENTION_CLASS.to_owned(),
+            Some(deadline),
+            Some(retired_at)
+        )
+    );
+
+    // Far past every deadline, the tool capture goes and the canonical row stays.
+    let late = corpus
+        .kernel
+        .expire_harness_captures(NOW + 32 * DAY_MS)
+        .unwrap();
+    assert_eq!((late.retired, late.retained), (1, 0));
+    for object in ["canonical-object", document.evidence_object_id.as_str()] {
+        assert_eq!(
+            evidence_retention(&corpus, object),
+            ("canonical".to_owned(), None, None),
+            "canonical evidence never ages out"
+        );
+    }
+    assert_eq!(
+        corpus
+            .kernel
+            .expire_harness_captures(NOW + 32 * DAY_MS)
+            .unwrap(),
+        kernel::CaptureExpiry::default()
+    );
+}
+
+/// F12, F13, F14: a live hold keeps an expired capture until the hold lapses; a capture another row cites loses its descriptor and keeps its evidence, and leaves the sweep; 65 expired captures with one cited drain in two calls, the cited row blocking nothing behind it in its page.
+#[test]
+fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let published: Vec<_> = (0..65)
+        .map(|index| {
+            let unit = &opencode_units(
+                &opencode_session(),
+                &opencode_user(&format!("msg_{index:02}"), &format!("text {index}"), 100),
+            )
+            .unwrap()[0];
+            publisher.publish(unit, NOW).unwrap()
+        })
+        .collect();
+    let deadline = NOW + 30 * DAY_MS;
+    // The first capture in page order is cited by an independent row.
+    let mut by_evidence: Vec<_> = published
+        .iter()
+        .map(|published| {
+            (
+                evidence_id_of(&corpus, &published.evidence_object_id),
+                published,
+            )
+        })
+        .collect();
+    by_evidence.sort_by(|a, b| a.0.cmp(&b.0));
+    let (cited_evidence, cited) = by_evidence[0].clone();
+    cite(&corpus, &cited_evidence);
+
+    // A live hold pins every capture: the sweep retires none until the hold lapses.
+    let hold = corpus
+        .kernel
+        .capture_source_hold(
+            &corpus.binding(),
+            SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
+                admission: SourceHoldAdmission {
+                    max_references: NonZeroUsize::new(128).unwrap(),
+                    max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                },
+                expiry_ms: NonZeroU64::new(DAY_MS as u64).unwrap(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        corpus.kernel.expire_harness_captures(deadline).unwrap(),
+        kernel::CaptureExpiry::default(),
+        "held captures are skipped"
+    );
+    assert!(published.iter().all(|published| {
+        evidence_retention(&corpus, &published.evidence_object_id)
+            .2
+            .is_none()
+    }));
+    drop(hold);
+
+    // Past the hold's own expiry the captures are due again: 64 in the first call, the cited one among them kept.
+    let after_hold = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 2 * DAY_MS;
+    let first = corpus.kernel.expire_harness_captures(after_hold).unwrap();
+    assert_eq!((first.retired, first.retained), (63, 1));
+    assert!(
+        descriptor_retirement(&corpus, &cited.object_id).0.is_some(),
+        "the cited capture's descriptor is retired"
+    );
+    assert_eq!(
+        evidence_retention(&corpus, &cited.evidence_object_id).2,
+        None,
+        "evidence another row cites is kept"
+    );
+    let second = corpus.kernel.expire_harness_captures(after_hold).unwrap();
+    assert_eq!(
+        (second.retired, second.retained),
+        (1, 0),
+        "ceil(65 / 64) calls drain the backlog"
+    );
+    assert!(
+        published
+            .iter()
+            .filter(|published| published.object_id != cited.object_id)
+            .all(
+                |published| evidence_retention(&corpus, &published.evidence_object_id)
+                    .2
+                    .is_some()
+            )
+    );
+    assert_eq!(
+        corpus.kernel.expire_harness_captures(after_hold).unwrap(),
+        kernel::CaptureExpiry::default(),
+        "a retained capture leaves the sweep while it is cited"
+    );
+    // Once the citation goes, the kept evidence is due again and retires. Expiry receipts are keyed by the cutoff, so a sweep at the same cutoff replays the earlier `retained` receipt; the next pass runs at a later clock.
+    corpus
+        .kernel
+        .commit(intent("uncite"), |envelope| {
+            envelope.retire_observation(&format!("citer-object:{cited_evidence}"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let last = corpus
+        .kernel
+        .expire_harness_captures(after_hold + 1)
+        .unwrap();
+    assert_eq!((last.retired, last.retained), (1, 0));
+    assert!(
+        evidence_retention(&corpus, &cited.evidence_object_id)
+            .2
+            .is_some()
+    );
 }

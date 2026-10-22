@@ -704,6 +704,71 @@ fn sanitize_memory_reviewer_block(raw: &serde_json::Value) -> Option<serde_json:
     Some(serde_json::Value::Object(block))
 }
 
+pub(crate) const SOURCE_CAPTURE_KEY: &str = "source_capture";
+/// `SOURCE_CAPTURE_COUNTERS` defines the counter allowlist for `metrics.source_capture` in `docs/host-wire-protocol.md`.
+const SOURCE_CAPTURE_COUNTERS: [&str; 26] = [
+    "admitted",
+    "refused_queue_full",
+    "refused_resident_short",
+    "refused_window_too_large",
+    "refused_shutting_down",
+    "completed",
+    "discarded",
+    "session_invalidated",
+    "kernel_unavailable",
+    "deadline",
+    "kernel_error",
+    "worker_panicked",
+    "adapter_refused",
+    "units_published",
+    "units_replayed",
+    "units_memo_skipped",
+    "units_deferred",
+    "units_unit_too_large",
+    "units_identity_conflict",
+    "units_refused_terminal",
+    "units_refused_retryable",
+    "active",
+    "draining",
+    "retained_bytes",
+    "publish_ms_last",
+    "publish_ms_max",
+];
+const SOURCE_CAPTURE_OLDEST_DEFERRED_KEY: &str = "oldest_deferred_age_ms";
+
+fn sanitize_source_capture_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
+    const MAX_COUNTER: u64 = 1 << 53;
+    let raw = raw.as_object()?;
+    let mut block = serde_json::Map::new();
+    for name in SOURCE_CAPTURE_COUNTERS {
+        if let Some(value) = raw
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .filter(|value| *value <= MAX_COUNTER)
+        {
+            block.insert(name.to_owned(), serde_json::Value::from(value));
+        }
+    }
+    match raw.get(SOURCE_CAPTURE_OLDEST_DEFERRED_KEY) {
+        Some(serde_json::Value::Null) => {
+            block.insert(
+                SOURCE_CAPTURE_OLDEST_DEFERRED_KEY.to_owned(),
+                serde_json::Value::Null,
+            );
+        }
+        Some(value) => {
+            if let Some(value) = value.as_u64().filter(|value| *value <= MAX_COUNTER) {
+                block.insert(
+                    SOURCE_CAPTURE_OLDEST_DEFERRED_KEY.to_owned(),
+                    serde_json::Value::from(value),
+                );
+            }
+        }
+        None => {}
+    }
+    Some(serde_json::Value::Object(block))
+}
+
 /// The epoch set is all-or-nothing: an unexpected key or an out-of-range value drops the whole `epochs` object so a consumer never compares a partial epoch vector.
 fn sanitize_context_metrics(
     metrics: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -751,6 +816,12 @@ fn sanitize_context_metrics(
         .and_then(sanitize_memory_reviewer_block)
     {
         sanitized_metrics.insert(MEMORY_REVIEWER_KEY.to_owned(), memory_reviewer);
+    }
+    if let Some(source_capture) = metrics
+        .and_then(|metrics| metrics.get(SOURCE_CAPTURE_KEY))
+        .and_then(sanitize_source_capture_block)
+    {
+        sanitized_metrics.insert(SOURCE_CAPTURE_KEY.to_owned(), source_capture);
     }
 }
 
@@ -1798,5 +1869,101 @@ mod memory_reviewer_block_tests {
             )),
             Some(serde_json::json!({ "memory_reviewer_state": "unavailable" }))
         );
+    }
+}
+
+#[cfg(test)]
+mod source_capture_block_tests {
+    use super::*;
+
+    fn source_capture_of(block: serde_json::Value) -> Option<serde_json::Value> {
+        let report = crate::handler::HealthReport {
+            status: crate::handler::HealthStatus::Ok,
+            detail: None,
+            metrics: Some(serde_json::json!({
+                "components": {
+                    "context": {
+                        "status": "ok",
+                        "metrics": { "storage_state": "ready", "source_capture": block }
+                    }
+                }
+            })),
+        };
+        let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+            &report,
+            serde_json::json!({"state": "healthy"}),
+        ))
+        .expect("status JSON");
+        response["metrics"]["components"]["context"]["metrics"]
+            .as_object()
+            .expect("context metrics object")
+            .get(SOURCE_CAPTURE_KEY)
+            .cloned()
+    }
+
+    #[test]
+    fn source_capture_block_is_sanitized_field_by_field() {
+        let mut full = serde_json::Map::new();
+        for (index, name) in SOURCE_CAPTURE_COUNTERS.iter().enumerate() {
+            full.insert((*name).to_owned(), (index as u64).into());
+        }
+        full.insert(SOURCE_CAPTURE_OLDEST_DEFERRED_KEY.into(), 7_u64.into());
+        full.insert("session_ids".into(), serde_json::json!(["a"]));
+        let kept = source_capture_of(serde_json::Value::Object(full)).expect("kept");
+        let kept = kept.as_object().unwrap();
+        assert_eq!(kept.len(), SOURCE_CAPTURE_COUNTERS.len() + 1);
+        assert!(
+            kept.get("session_ids").is_none(),
+            "unknown fields are dropped"
+        );
+        for (index, name) in SOURCE_CAPTURE_COUNTERS.iter().enumerate() {
+            assert_eq!(kept[*name], serde_json::Value::from(index as u64), "{name}");
+        }
+        assert_eq!(kept[SOURCE_CAPTURE_OLDEST_DEFERRED_KEY], 7);
+
+        assert_eq!(
+            source_capture_of(serde_json::json!({
+                "admitted": -1,
+                "completed": "many",
+                "kernel_error": null,
+                "units_published": 1_u64 << 60,
+                "retained_bytes": 1_u64 << 53,
+                "oldest_deferred_age_ms": null,
+            })),
+            Some(serde_json::json!({
+                "retained_bytes": 1_u64 << 53,
+                "oldest_deferred_age_ms": null,
+            }))
+        );
+        assert!(source_capture_of(serde_json::json!("ready")).is_none());
+    }
+
+    #[test]
+    fn the_wire_document_names_exactly_the_forwarded_fields() {
+        let doc = include_str!("../../../docs/host-wire-protocol.md");
+        let lines: Vec<&str> = doc.lines().collect();
+        let first = lines
+            .iter()
+            .position(|line| line.starts_with("| `admitted` |"))
+            .expect("the source_capture table");
+        let mut documented = std::collections::BTreeSet::new();
+        for line in lines[first..]
+            .iter()
+            .take_while(|line| line.starts_with('|'))
+        {
+            let name_cell = line.split(" | ").next().unwrap_or_default();
+            for (position, part) in name_cell.split('`').enumerate() {
+                if position % 2 == 1 {
+                    documented.insert(part.to_owned());
+                }
+            }
+        }
+        let forwarded: std::collections::BTreeSet<String> = SOURCE_CAPTURE_COUNTERS
+            .iter()
+            .copied()
+            .chain([SOURCE_CAPTURE_OLDEST_DEFERRED_KEY])
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(documented, forwarded);
     }
 }

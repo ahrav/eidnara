@@ -61,6 +61,18 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
     }
 }
 
+/**
+ * The row for `message` at host id `id`, carrying the `type` and `parentId` of the session entry
+ * the row was built from, so the daemon reads native entry identity from the wire. A row whose
+ * entry cannot be read keeps its id and message alone.
+ */
+export function entryRow(id: string, message: Json, reader: PiBranchReader): PiRow {
+    const entryId = rowEntry(id)?.entryId;
+    const entry = entryId === undefined ? undefined : reader.getEntry(entryId);
+    if (!entry) return { id, message };
+    return { id, type: entry.type, parentId: entry.parentId ?? null, message };
+}
+
 function isToolResultEntry(entry: SessionEntry | undefined): boolean {
     return (
         entry?.type === "message" &&
@@ -245,7 +257,7 @@ export function createPiTransform(options: PiTransformOptions) {
                     const id = alignment.idAt(index);
                     const message = inputs.messages[index] as Json;
                     if (id === undefined || !isPiRole(message.role)) return undefined;
-                    row = { id, message };
+                    row = entryRow(id, message, inputs.reader);
                     slotRows.set(index, row);
                 }
                 window.push(row);

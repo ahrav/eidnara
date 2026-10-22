@@ -21,7 +21,7 @@ use std::path::Path;
 pub const POLICY: &str = "source-policy.v1";
 pub const MODEL: &str = "tiny-test-model";
 pub const FINGERPRINT: &str = "a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234";
-pub const CONTRACT: &str = "search-projection-identity-v3";
+pub const CONTRACT: &str = "search-projection-identity-v4";
 pub const LIMITS: &str = "limits.v1";
 
 pub fn identity(kernel_incarnation_id: &str, vector_dimension: u32) -> ProjectionIdentity {
