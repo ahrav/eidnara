@@ -3531,7 +3531,17 @@ fn receipts_written_before_the_outcome_record_replay_under_v2() {
 
 /// A Pi tool result of call `call` at native timestamp `stamp`, with the given text blocks.
 fn pi_rerun(call: &str, stamp: u64, is_error: bool, blocks: &[&str]) -> Vec<SourceUnit> {
-    let mut entry = pi_tool_result(&format!("pi-t-{stamp}"), "pi-a1", is_error, stamp);
+    pi_rerun_under("pi-a1", call, stamp, is_error, blocks)
+}
+
+fn pi_rerun_under(
+    parent: &str,
+    call: &str,
+    stamp: u64,
+    is_error: bool,
+    blocks: &[&str],
+) -> Vec<SourceUnit> {
+    let mut entry = pi_tool_result(&format!("pi-t-{stamp}"), parent, is_error, stamp);
     entry["message"]["toolCallId"] = json!(call);
     entry["message"]["content"] = json!(
         blocks
@@ -3702,6 +3712,32 @@ fn a_tool_rerun_leaves_exactly_one_live_generation() {
     assert_eq!(
         live_generation_of(&corpus, "call_d"),
         [("300".to_owned(), "0".to_owned())]
+    );
+
+    // One `tool_call_id` under another parent message is another call: a re-run under the first parent leaves it live.
+    let other_parent = pi_rerun_under("pi-a2", "call_a", 100, false, &["other\n"]);
+    publish_screened(&publisher, &other_parent, NOW, None).unwrap();
+    let third = pi_rerun("call_a", 300, false, &["third\n"]);
+    publish_screened(&publisher, &third, NOW, None).unwrap();
+    let mut live: Vec<(String, String)> = corpus
+        .export()
+        .into_iter()
+        .filter(|row| row.detail.class == "raw_tool_spans")
+        .filter(|row| row.detail.identity[4].1 == "call_a")
+        .map(|row| {
+            (
+                row.detail.identity[3].1.clone(),
+                row.detail.identity[5].1.clone(),
+            )
+        })
+        .collect();
+    live.sort();
+    assert_eq!(
+        live,
+        [
+            ("pi-a1".to_owned(), "300".to_owned()),
+            ("pi-a2".to_owned(), "100".to_owned()),
+        ]
     );
 }
 

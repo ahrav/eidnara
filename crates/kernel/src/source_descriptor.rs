@@ -798,7 +798,7 @@ fn descriptor_rows(
 }
 
 impl Envelope<'_> {
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Each stored payload is tested in place for one of the values' identity pairs before its row is copied or decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page examines at most `max_rows` live descriptors of the class, matching or not, so one call's work is bounded and a caller can stop between pages. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page examines at most `max_rows` live descriptors of the class, matching or not, so one call's work is bounded and a caller can stop between pages. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`. An empty `values` examines no descriptor: its page is empty and ends the inventory.
     ///
     /// # Errors
     ///
@@ -816,6 +816,12 @@ impl Envelope<'_> {
             .iter()
             .position(|name| *name == field)
             .ok_or(KernelError::InvalidInput)?;
+        if values.is_empty() {
+            return Ok(LiveDescriptorPage {
+                rows: Vec::new(),
+                next: None,
+            });
+        }
         Narrowing::new(position, field, values).page(
             self.tx,
             class,

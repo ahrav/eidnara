@@ -2736,6 +2736,15 @@ fn a_narrowed_page_examines_at_most_its_bound() {
             }
             assert_eq!(pages, 4, "one page per examined descriptor");
             assert_eq!(found, [matching.clone().unwrap()]);
+            let none = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                &[],
+                None,
+                one,
+            )?;
+            assert!(none.rows.is_empty());
+            assert_eq!(none.next, None, "an empty value set examines no descriptor");
             Ok(String::new())
         })
         .unwrap();
