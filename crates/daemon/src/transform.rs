@@ -553,6 +553,8 @@ pub struct ProducerContext<'a> {
     pub user_profile_budget_tokens: f64,
     pub memory_enabled: bool,
     pub inject_docs: bool,
+    /// Where the pass leaves the configured documents it reads, when source capture takes them.
+    pub document_reads: Option<&'a crate::project_docs::DocumentReads>,
     pub temporal_awareness: bool,
     pub now_ms: i64,
     pub execute_threshold_percentage: f64,
@@ -2812,6 +2814,7 @@ fn compose_additive_m0(
     } else {
         crate::project_docs::ProjectDocs::default()
     };
+    crate::project_docs::leave_reads(ctx.document_reads, &docs);
     let mut m0_bytes = render_m0(
         &M0Inputs {
             project_docs: &docs.rendered_block,
@@ -4498,6 +4501,7 @@ fn apply_once(
                         memory_enabled: ctx.memory_enabled,
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
+                        document_reads: ctx.document_reads,
                         temporal_awareness: ctx.temporal_awareness,
                         legacy_history_segment_seqs: meta.legacy_history_segment_seqs.as_deref(),
                     },
@@ -4590,6 +4594,7 @@ fn apply_once(
                                     memory_enabled: ctx.memory_enabled,
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
+                                    document_reads: ctx.document_reads,
                                     temporal_awareness: ctx.temporal_awareness,
                                     legacy_history_segment_seqs: meta
                                         .legacy_history_segment_seqs
@@ -4784,6 +4789,7 @@ fn apply_once(
                             memory_enabled: ctx.memory_enabled,
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
+                            document_reads: ctx.document_reads,
                             temporal_awareness: ctx.temporal_awareness,
                             legacy_history_segment_seqs: meta
                                 .legacy_history_segment_seqs
@@ -13800,6 +13806,7 @@ pub(crate) mod tests {
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
             inject_docs: true,
+            document_reads: None,
             temporal_awareness: true,
             now_ms,
             execute_threshold_percentage: 65.0,

@@ -101,6 +101,7 @@ counts! {
     DocumentsOversize => "documents_oversize",
     DocumentsNotUtf8 => "documents_not_utf8",
     DocumentsUnreadable => "documents_unreadable",
+    DocumentsRefused => "documents_refused",
     ExpiryRetired => "expiry_retired",
     ExpiryRetained => "expiry_retained",
 }
@@ -283,8 +284,8 @@ pub(crate) struct Offer {
     pub window: Vec<Arc<Value>>,
     /// [`SourceCapture::epoch`] before the pass ran.
     pub epoch: u64,
-    /// The project root whose configured repository documents the pass read for its prompt; `None` when the route injects no documents.
-    pub documents: Option<std::path::PathBuf>,
+    /// Where the pass leaves the configured repository documents it reads for its prompt; `None` when the route injects no documents. A pass that composes no prompt block leaves none.
+    pub documents: Option<Arc<crate::project_docs::DocumentReads>>,
 }
 
 /// A charged window waiting for its response to reach the wire writer. Dropping it releases the charge.
@@ -296,7 +297,7 @@ pub(crate) struct CaptureHandoff {
     epoch: u64,
     window_bytes: usize,
     retained: RetainedCharge,
-    documents: Option<std::path::PathBuf>,
+    documents: Vec<(&'static str, DocumentRead)>,
 }
 
 /// A charge against the supervisor's budget, mirrored in the `retained_bytes` gauge while it lives.
@@ -343,11 +344,23 @@ impl SourceCapture {
         if offer.window.is_empty() {
             return None;
         }
+        // The documents the pass read for its prompt are the ones captured, and their text is charged with the window.
+        let documents = offer
+            .documents
+            .and_then(|reads| reads.lock().expect("document reads mutex").take())
+            .unwrap_or_default();
         let window_bytes: usize = offer
             .window
             .iter()
             .map(|value| crate::retained_size::value_retained_bytes(value))
-            .sum();
+            .sum::<usize>()
+            + documents
+                .iter()
+                .map(|(_, read)| match read {
+                    DocumentRead::Text(text) => text.len(),
+                    _ => 0,
+                })
+                .sum::<usize>();
         // The adapters copy about the window's bytes once more; the job tops up for any excess.
         let bytes = window_bytes
             .saturating_mul(2)
@@ -372,7 +385,7 @@ impl SourceCapture {
             epoch: offer.epoch,
             window_bytes,
             retained,
-            documents: offer.documents,
+            documents,
         })
     }
 
@@ -506,7 +519,7 @@ pub(crate) struct CaptureJob {
     project: ProjectBinding,
     epoch: u64,
     window_bytes: usize,
-    documents: Option<std::path::PathBuf>,
+    documents: Vec<(&'static str, DocumentRead)>,
 }
 
 impl CaptureJob {
@@ -543,7 +556,7 @@ impl CaptureJob {
         end
     }
 
-    fn publish(self) -> Count {
+    fn publish(mut self) -> Count {
         if self.cancel.is_cancelled() {
             return self.end(Count::Discarded);
         }
@@ -574,12 +587,7 @@ impl CaptureJob {
         else {
             return self.end(Count::RefusedResidentShort);
         };
-        // The configured repository documents are read with the prompt's own reader, outside the commit gate.
-        let documents = self
-            .documents
-            .as_deref()
-            .map(crate::project_docs::read_project_documents)
-            .unwrap_or_default();
+        let documents = std::mem::take(&mut self.documents);
         if units.is_empty() && documents.is_empty() {
             return self.end(Count::Completed);
         }
@@ -667,8 +675,8 @@ impl CaptureJob {
         &self,
         store: &KernelStore,
         publisher: &SourcePublisher<'_>,
-        mut candidates: Vec<SourceUnit>,
-        mut keys: Vec<Option<(String, String)>>,
+        candidates: Vec<SourceUnit>,
+        keys: Vec<Option<(String, String)>>,
         documents: &[(&'static str, DocumentRead)],
     ) -> Count {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
@@ -680,29 +688,8 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
-        // Documents are judged against the store under the gate: a changed one joins the batch, a missing one retires its live revision.
-        let mut retirements = Vec::new();
-        for step in match self.plan_documents(store, documents) {
-            Ok(steps) => steps,
-            Err(error) => return self.end(kernel_end(error)),
-        } {
-            match step {
-                DocumentStep::Publish(unit) => {
-                    candidates.push(unit);
-                    keys.push(None);
-                }
-                DocumentStep::Retire(object_id) => retirements.push(object_id),
-                DocumentStep::Skip(count) => self.capture.counters.add(count, 1),
-            }
-        }
-        for object_id in retirements {
-            if let Err(error) = retire_document(store, &object_id) {
-                return self.end(kernel_end(error));
-            }
-            self.capture.counters.add(Count::DocumentsRetired, 1);
-        }
         if candidates.is_empty() {
-            return self.end(Count::Completed);
+            return self.capture_documents(store, publisher, documents);
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
@@ -726,7 +713,7 @@ impl CaptureJob {
                     }
                 }
                 drop(memo);
-                self.end(Count::Completed)
+                self.capture_documents(store, publisher, documents)
             }
             Err(refusal) => {
                 // A same-key conflict is terminal for its unit; every other unit stays pending for the next pass.
@@ -743,83 +730,163 @@ impl CaptureJob {
         }
     }
 
-    /// What capture does with each configured document of this pass: its identity is the project, the project standing in for its repository, and the path. Text whose bytes equal the live revision's artifact is unchanged; other text publishes at the lineage's historical head plus one, which the descriptor commit checks against the head ([`crate::harness_sources::SourcePublisher`]); a verified missing file retires its live revision; any other read is counted and retires nothing.
-    fn plan_documents(
+    /// Captures the configured documents the pass read for its prompt, in their own batch after the window's, under the commit gate; a document's refusal counts as `documents_refused` and leaves the window's publication as it was. Each document's identity is the project, the project standing in for its repository, and the path. Text whose bytes equal the live revision's artifact is unchanged. Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head, so a head that moved refuses and the next pass proposes from a fresh read. A verified missing file retires its live revision; every other read is counted and retires nothing. The bytes are the ones the pass read when it composed its prompt block. The store's one capture slot runs jobs in handoff order, and a later compose read that differs from the live revision republishes, so the live revision converges on the latest read.
+    fn capture_documents(
         &self,
         store: &KernelStore,
+        publisher: &SourcePublisher<'_>,
         documents: &[(&'static str, DocumentRead)],
-    ) -> Result<Vec<DocumentStep>, KernelError> {
-        let project_id = self.session.project_id.as_str();
-        let mut steps = Vec::with_capacity(documents.len());
+    ) -> Count {
+        let mut units = Vec::new();
         for (path, read) in documents {
-            let identity = [
-                ("project_id", project_id),
-                ("repository_id", project_id),
-                ("relative_path", *path),
-            ];
-            let (_, live) = store.preview(Instant::now() + DOCUMENT_PREVIEW_WAIT, |preview| {
-                let rows = preview.live_source_descriptors_with(
-                    OccurrenceClass::RepositoryDocuments,
-                    "relative_path",
-                    &[path],
-                    None,
-                    std::num::NonZeroUsize::new(8).expect("a nonzero page"),
-                )?;
-                Ok(rows.rows.into_iter().find(|row| {
-                    crate::git_reconcile::identity_field(row, "project_id") == Some(project_id)
-                        && crate::git_reconcile::identity_field(row, "repository_id")
-                            == Some(project_id)
-                }))
-            })?;
-            steps.push(match read {
-                DocumentRead::Text(text) if text.len() > MAX_SOURCE_UNIT_BYTES => {
-                    DocumentStep::Skip(Count::DocumentsOversize)
+            match self.plan_document(store, path, read) {
+                Ok(DocumentStep::Publish(unit)) => units.push(unit),
+                Ok(DocumentStep::Retire(object_id)) => {
+                    if let Err(error) = self.retire_document(store, &object_id) {
+                        return self.end(kernel_end(error));
+                    }
+                    self.capture.counters.add(Count::DocumentsRetired, 1);
                 }
-                DocumentRead::Text(text)
-                    if live.as_ref().is_some_and(|row| {
-                        row.detail.artifact_digest
-                            == kernel::source_identity::payload_id(text.as_bytes())
-                    }) =>
-                {
-                    DocumentStep::Skip(Count::DocumentsUnchanged)
-                }
-                DocumentRead::Text(text) => {
-                    let lineage = kernel::source_identity::encode_preserving_span(
-                        &kernel::source_identity::Occurrence {
-                            class: OccurrenceClass::RepositoryDocuments.code(),
-                            identity: &identity,
-                            revision: "1",
-                            representation: Representation::Text.as_str(),
-                            span: None,
-                        },
-                    )
-                    .map_err(|_| KernelError::InvalidInput)?
-                    .lineage_id;
-                    let head = store.source_lineage_head(&lineage)?.unwrap_or(0);
-                    DocumentStep::Publish(SourceUnit {
-                        class: OccurrenceClass::RepositoryDocuments,
-                        identity: identity
-                            .iter()
-                            .map(|(name, value)| (*name, (*value).to_owned()))
-                            .collect(),
-                        revision: (head + 1).to_string(),
-                        representation: Representation::Text,
-                        text: text.clone(),
-                        role: "document".to_owned(),
-                        outcome: None,
-                    })
-                }
-                DocumentRead::Missing => match live {
-                    Some(row) => DocumentStep::Retire(row.object_id),
-                    None => DocumentStep::Skip(Count::DocumentsMissing),
-                },
-                DocumentRead::NotRegular => DocumentStep::Skip(Count::DocumentsNotRegular),
-                DocumentRead::Oversize => DocumentStep::Skip(Count::DocumentsOversize),
-                DocumentRead::NotUtf8 => DocumentStep::Skip(Count::DocumentsNotUtf8),
-                DocumentRead::Unreadable => DocumentStep::Skip(Count::DocumentsUnreadable),
-            });
+                Ok(DocumentStep::Skip(count)) => self.capture.counters.add(count, 1),
+                Err(error) => return self.end(kernel_end(error)),
+            }
         }
-        Ok(steps)
+        if units.is_empty() {
+            return self.end(Count::Completed);
+        }
+        match publish_screened(publisher, &units, crate::now_ms(), Some(&self.budget)) {
+            Ok(dispositions) => {
+                for disposition in dispositions {
+                    let count = match disposition {
+                        UnitDisposition::Published(published) if published.replayed => {
+                            Count::UnitsReplayed
+                        }
+                        UnitDisposition::Published(_) => Count::UnitsPublished,
+                        _ => Count::DocumentsRefused,
+                    };
+                    self.capture.counters.add(count, 1);
+                }
+                self.end(Count::Completed)
+            }
+            Err(refusal) => {
+                self.capture
+                    .counters
+                    .add(Count::DocumentsRefused, units.len());
+                self.end(kernel_end(refusal.error))
+            }
+        }
+    }
+
+    /// What capture does with one configured document; a read that names no bytes is judged without the store.
+    fn plan_document(
+        &self,
+        store: &KernelStore,
+        path: &'static str,
+        read: &DocumentRead,
+    ) -> Result<DocumentStep, KernelError> {
+        let text = match read {
+            // Text within the read cap but past the unit cap counts with the reads past the read cap.
+            DocumentRead::Text(text) if text.len() > MAX_SOURCE_UNIT_BYTES => {
+                return Ok(DocumentStep::Skip(Count::DocumentsOversize));
+            }
+            DocumentRead::Text(text) => Some(text),
+            DocumentRead::Missing => None,
+            DocumentRead::NotRegular => return Ok(DocumentStep::Skip(Count::DocumentsNotRegular)),
+            DocumentRead::Oversize => return Ok(DocumentStep::Skip(Count::DocumentsOversize)),
+            DocumentRead::NotUtf8 => return Ok(DocumentStep::Skip(Count::DocumentsNotUtf8)),
+            DocumentRead::Unreadable => return Ok(DocumentStep::Skip(Count::DocumentsUnreadable)),
+        };
+        let project_id = self.session.project_id.as_str();
+        let live = self.live_document(store, path)?;
+        let Some(text) = text else {
+            return Ok(
+                live.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
+                    DocumentStep::Retire(row.object_id)
+                }),
+            );
+        };
+        if live.as_ref().is_some_and(|row| {
+            row.detail.artifact_digest == kernel::source_identity::payload_id(text.as_bytes())
+        }) {
+            return Ok(DocumentStep::Skip(Count::DocumentsUnchanged));
+        }
+        let identity = vec![
+            ("project_id", project_id.to_owned()),
+            ("repository_id", project_id.to_owned()),
+            ("relative_path", path.to_owned()),
+        ];
+        let head = store
+            .source_lineage_head(&document_lineage(&identity)?)?
+            .unwrap_or(0);
+        Ok(DocumentStep::Publish(SourceUnit {
+            class: OccurrenceClass::RepositoryDocuments,
+            identity,
+            revision: (head + 1).to_string(),
+            representation: Representation::Text,
+            text: text.clone(),
+            role: "document".to_owned(),
+            outcome: None,
+        }))
+    }
+
+    /// The live revision of this project's document at `path`: every live `repository_documents` descriptor of the project, paged to the end and matched by repository and path.
+    fn live_document(
+        &self,
+        store: &KernelStore,
+        path: &str,
+    ) -> Result<Option<kernel::LiveDescriptor>, KernelError> {
+        let project_id = self.session.project_id.as_str();
+        let (_, live) = store.preview(self.preview_deadline(), |preview| {
+            let mut after = None;
+            loop {
+                let page = preview.live_source_descriptors_with(
+                    OccurrenceClass::RepositoryDocuments,
+                    "project_id",
+                    &[project_id],
+                    after.as_deref(),
+                    std::num::NonZeroUsize::new(64).expect("a nonzero page"),
+                )?;
+                if let Some(row) = page.rows.into_iter().find(|row| {
+                    crate::git_reconcile::identity_field(row, "repository_id") == Some(project_id)
+                        && crate::git_reconcile::identity_field(row, "relative_path") == Some(path)
+                }) {
+                    return Ok(Some(row));
+                }
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => return Ok(None),
+                }
+            }
+        })?;
+        Ok(live)
+    }
+
+    /// Retires the live revision `object_id` of a document whose file a read found missing, within the job's budget; the receipt is keyed by the revision, so a retry replays it.
+    fn retire_document(&self, store: &KernelStore, object_id: &str) -> Result<(), KernelError> {
+        let digest = kernel::source_identity::identity_digest(object_id.as_bytes());
+        store
+            .commit_within_budget(
+                &self.budget,
+                CommitIntent {
+                    producer: PRODUCER.to_owned(),
+                    operation_key: format!("source-document-retire:{digest}"),
+                    request_digest: digest,
+                    actor: "repository".to_owned(),
+                    cause: "repository document removed".to_owned(),
+                },
+                |envelope| {
+                    crate::harness_sources::retire_descriptors(envelope, &[object_id.to_owned()])
+                },
+            )
+            .map(|_| ())
+    }
+
+    /// A preview's reader wait: the receipt wait, cut to the job's deadline.
+    fn preview_deadline(&self) -> Instant {
+        let wait = Instant::now() + DOCUMENT_PREVIEW_WAIT;
+        self.budget
+            .deadline()
+            .map_or(wait, |deadline| deadline.min(wait))
     }
 
     /// Every unit of the window, in record order; a record the adapter refuses contributes none and is counted.
@@ -1010,23 +1077,21 @@ enum DocumentStep {
     Skip(Count),
 }
 
-/// Retires the live revision `object_id` of a document whose file a read found missing; the receipt is keyed by the revision, so a retry replays it.
-fn retire_document(store: &KernelStore, object_id: &str) -> Result<(), KernelError> {
-    let digest = kernel::source_identity::identity_digest(object_id.as_bytes());
-    store
-        .commit(
-            CommitIntent {
-                producer: PRODUCER.to_owned(),
-                operation_key: format!("source-document-retire:{digest}"),
-                request_digest: digest,
-                actor: "repository".to_owned(),
-                cause: "repository document removed".to_owned(),
-            },
-            |envelope| {
-                crate::harness_sources::retire_descriptors(envelope, &[object_id.to_owned()])
-            },
-        )
-        .map(|_| ())
+/// The lineage of a document identity. A lineage names the identity, the class, and the representation, never the revision, so any revision encodes it.
+fn document_lineage(identity: &[(&'static str, String)]) -> Result<String, KernelError> {
+    let identity: Vec<(&str, &str)> = identity
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    kernel::source_identity::encode_preserving_span(&kernel::source_identity::Occurrence {
+        class: OccurrenceClass::RepositoryDocuments.code(),
+        identity: &identity,
+        revision: "1",
+        representation: Representation::Text.as_str(),
+        span: None,
+    })
+    .map(|encoded| encoded.lineage_id)
+    .map_err(|_| KernelError::InvalidInput)
 }
 
 fn kernel_end(error: KernelError) -> Count {
@@ -1046,8 +1111,9 @@ mod tests {
         for reason in Count::ALL {
             let line = log_line("handoff refused", reason, 1);
             assert!(
-                line.bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || b" :_()1".contains(&byte)),
+                line.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || b" :_()".contains(&byte)),
                 "{line}"
             );
         }

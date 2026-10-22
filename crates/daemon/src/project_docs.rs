@@ -16,7 +16,12 @@ const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
 pub struct ProjectDocs {
     pub rendered_block: String,
     pub canonical_hash: String,
+    /// Each configured document's read, in the fixed file order: the raw bytes the canonical block was built from, or why it holds none.
+    pub(crate) reads: Vec<(&'static str, DocumentRead)>,
 }
+
+/// Where a pass leaves the configured documents it read for its prompt, for source capture to take once the response is built.
+pub type DocumentReads = std::sync::Mutex<Option<Vec<(&'static str, DocumentRead)>>>;
 
 fn canonicalize_doc_content(raw: &str) -> String {
     let no_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
@@ -44,10 +49,10 @@ fn escape_xml_content(s: &str) -> String {
 
 /// What one read of a configured document found.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DocumentRead {
+pub enum DocumentRead {
     /// The raw UTF-8 text, exactly as read.
     Text(String),
-    /// The path does not exist.
+    /// The path does not exist in a directory that does.
     Missing,
     /// The path is a symlink or another non-regular file.
     NotRegular,
@@ -63,7 +68,17 @@ pub(crate) enum DocumentRead {
 pub(crate) fn read_document(path: &Path) -> DocumentRead {
     match crate::config::read_bounded_bytes(path, MAX_PROJECT_DOC_BYTES) {
         Ok(bytes) => String::from_utf8(bytes).map_or(DocumentRead::NotUtf8, DocumentRead::Text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DocumentRead::Missing,
+        // A file is verifiably missing only from a directory that exists; a vanished project root, such as an unmounted volume, is unreadable.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if path
+                .parent()
+                .is_some_and(|parent| std::fs::metadata(parent).is_ok_and(|meta| meta.is_dir()))
+            {
+                DocumentRead::Missing
+            } else {
+                DocumentRead::Unreadable
+            }
+        }
         Err(_) => match std::fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.file_type().is_file() => DocumentRead::NotRegular,
             Ok(metadata) if metadata.len() > MAX_PROJECT_DOC_BYTES => DocumentRead::Oversize,
@@ -72,24 +87,14 @@ pub(crate) fn read_document(path: &Path) -> DocumentRead {
     }
 }
 
-/// Every configured document of `project_directory` with its read, in the fixed file order.
-pub(crate) fn read_project_documents(
-    project_directory: &Path,
-) -> Vec<(&'static str, DocumentRead)> {
-    PROJECT_DOC_FILES
-        .into_iter()
-        .map(|filename| (filename, read_document(&project_directory.join(filename))))
-        .collect()
-}
-
-fn read_safe_canonical(path: &Path) -> Option<String> {
-    match read_document(path) {
-        DocumentRead::Text(raw) => Some(canonicalize_doc_content(&raw)),
-        _ => None,
+/// Leaves `docs`' reads in `sink`, replacing any earlier read of the pass, so capture sees the bytes the prompt was built from last.
+pub(crate) fn leave_reads(sink: Option<&DocumentReads>, docs: &ProjectDocs) {
+    if let Some(sink) = sink {
+        *sink.lock().expect("document reads mutex") = Some(docs.reads.clone());
     }
 }
 
-/// Reads configured project documents and returns their deterministic rendering.
+/// Reads configured project documents and returns their deterministic rendering, with each document's raw read.
 ///
 /// Missing, non-regular, unreadable, and non-UTF-8 files are skipped, as are
 /// files over 256 KiB; the cap holds on the bytes read from one no-follow
@@ -102,11 +107,15 @@ pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
     let mut hash_pieces: Vec<String> = Vec::new();
     let mut rendered_sections: Vec<String> = Vec::new();
 
-    for filename in PROJECT_DOC_FILES {
-        let path = dir.join(filename);
-        let Some(canonical) = read_safe_canonical(&path) else {
+    let reads: Vec<(&'static str, DocumentRead)> = PROJECT_DOC_FILES
+        .into_iter()
+        .map(|filename| (filename, read_document(&dir.join(filename))))
+        .collect();
+    for (filename, read) in &reads {
+        let DocumentRead::Text(raw) = read else {
             continue;
         };
+        let canonical = canonicalize_doc_content(raw);
         hash_pieces.push(format!("file:{filename}\n{canonical}"));
         rendered_sections.push(format!(
             "<file name=\"{}\">\n{}\n</file>",
@@ -134,6 +143,7 @@ pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
     ProjectDocs {
         rendered_block,
         canonical_hash,
+        reads,
     }
 }
 
@@ -180,7 +190,7 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(MAX_PROJECT_DOC_BYTES + 1).unwrap();
         drop(file);
-        assert!(read_safe_canonical(&path).is_none());
+        assert_eq!(read_document(&path), DocumentRead::Oversize);
 
         let fifo = dir.path().join("STRUCTURE.md");
         rustix::fs::mkfifoat(
@@ -189,9 +199,24 @@ mod tests {
             rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
         )
         .unwrap();
-        assert!(
-            read_safe_canonical(&fifo).is_none(),
+        assert_eq!(
+            read_document(&fifo),
+            DocumentRead::NotRegular,
             "a FIFO is refused without blocking on a writer"
+        );
+    }
+
+    #[test]
+    fn a_file_is_missing_only_from_a_directory_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_document(&dir.path().join("ARCHITECTURE.md")),
+            DocumentRead::Missing
+        );
+        assert_eq!(
+            read_document(&dir.path().join("gone").join("ARCHITECTURE.md")),
+            DocumentRead::Unreadable,
+            "a vanished root verifies no removal"
         );
     }
 

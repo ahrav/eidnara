@@ -1559,13 +1559,28 @@ fn live_document(store: &KernelStore, path: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// One pass over a fixed window, so each pass reads the configured documents afresh.
+/// One pass as the first of a new session of the project bound to route 7. A session's first pass composes its prompt block, which is where the pass reads the configured documents.
 async fn document_pass(handler: &Handler, base: &str) -> Value {
-    let response = pass(
-        handler,
-        transform_with(&[opencode_user("msg_u1", 1_700_000_000_000, "hello")], base),
-    )
-    .await;
+    let session = format!("ses-{base}");
+    let mut bound = handler
+        .bindings
+        .lock()
+        .expect("bindings mutex")
+        .get(&test_route(7))
+        .expect("route 7 is bound")
+        .clone();
+    bound.session = session.clone();
+    let routes = handler
+        .bindings
+        .lock()
+        .expect("bindings mutex")
+        .values()
+        .count();
+    let route = test_route(100 + u16::try_from(routes).expect("few routes"));
+    handler.bind_route(route, bound);
+    let mut request = transform_with(&[opencode_user("msg_u1", 1_700_000_000_000, "hello")], base);
+    request["session_id"] = json!(session);
+    let response = pass_on(handler, route, request).await;
     settle(handler).await;
     response
 }
@@ -1613,11 +1628,38 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
         .decisions
         .len();
 
+    // A pass that reuses its prompt block reads no documents, so an edit waits for the next compose read.
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hello")],
+            "base-s1",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    std::fs::write(&doc, "# Architecture\n\nUncomposed.\n").unwrap();
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hello")],
+            "base-s1",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(live_document(&store, "ARCHITECTURE.md"), first);
+    std::fs::write(&doc, "# Architecture\n\nOne daemon.\n").unwrap();
+
     // Unchanged: nothing commits.
     let tip = store.tip().unwrap();
     document_pass(&handler, "base-2").await;
     assert_eq!(store.tip().unwrap(), tip);
-    assert_eq!(report(&handler)["documents_unchanged"], 1);
+    assert_eq!(
+        report(&handler)["documents_unchanged"],
+        2,
+        "route 7's composing first pass and this pass each found the file unchanged"
+    );
 
     // An edit supersedes revision 1.
     std::fs::write(&doc, "# Architecture\n\nTwo daemons.\n").unwrap();
@@ -1630,6 +1672,34 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
         Some(second[0].1.as_str()),
         "a reference pinned to revision 1 reports its successor"
     );
+    let scope = handler
+        .bindings
+        .lock()
+        .expect("bindings mutex")
+        .get(&test_route(7))
+        .expect("route 7 is bound")
+        .kernel_project
+        .scope()
+        .clone();
+    let stale = store
+        .guard_current_input(
+            &kernel::CurrentInputExpectation {
+                object_id: row.object_id.clone(),
+                source_revision: 1,
+                occurrence_id: row.detail.occurrence_id.clone(),
+                payload_id: row.detail.payload_id.clone(),
+                artifact_digest: row.detail.artifact_digest.clone(),
+            },
+            kernel::EligibilityBinding {
+                project: &scope,
+                destination: kernel::ArtifactDestination::Local,
+            },
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap()
+        .expect_err("revision 1 is no longer current");
+    assert_eq!(stale.reason(), &kernel::StaleInput::Superseded);
+    drop(stale);
 
     // A whitespace-only edit: new raw bytes, same canonical prompt hash.
     let hash =
@@ -1641,6 +1711,12 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     );
     document_pass(&handler, "base-4").await;
     assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "3");
+    let third = live(&store, OccurrenceClass::RepositoryDocuments).remove(0);
+    assert_eq!(
+        bytes_of(&store, &third),
+        "# Architecture  \n\nTwo daemons.\n\n",
+        "the artifact holds the raw edited bytes"
+    );
 
     // Removal retires; recreation republishes above the historical head.
     std::fs::remove_file(&doc).unwrap();
@@ -1650,6 +1726,22 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     std::fs::write(&doc, "# Architecture\n\nBack.\n").unwrap();
     document_pass(&handler, "base-6").await;
     assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "4");
+    // A second removal retires revision 4 under its own receipt, and a missing file with no live revision commits nothing.
+    std::fs::remove_file(&doc).unwrap();
+    document_pass(&handler, "base-7").await;
+    assert!(live_document(&store, "ARCHITECTURE.md").is_empty());
+    assert_eq!(report(&handler)["documents_retired"], 2);
+    let tip = store.tip().unwrap();
+    let missing = report(&handler)["documents_missing"].as_u64().unwrap();
+    document_pass(&handler, "base-8").await;
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(
+        report(&handler)["documents_missing"].as_u64().unwrap(),
+        missing + 2
+    );
+    std::fs::write(&doc, "# Architecture\n\nBack.\n").unwrap();
+    document_pass(&handler, "base-9").await;
+    assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "5");
 
     let object_id = live_document(&store, "ARCHITECTURE.md")[0].1.clone();
     let admission: (String, String) = rusqlite::Connection::open_with_flags(
@@ -1683,6 +1775,45 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
         decisions,
         "document capture creates no decision"
     );
+}
+
+/// AC17: the kernel store serves every project of the home, so a project's document is found among many projects' live documents. An unchanged file publishes nothing and a removal retires its own revision.
+#[tokio::test]
+async fn a_document_is_judged_against_its_own_project_among_many() {
+    let (handler, dir, project) = capture_handler(capture_config(true), true).await;
+    for other in 0..10u16 {
+        let root = dir.path().join(format!("other-{other}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("ARCHITECTURE.md"), format!("# Other {other}\n")).unwrap();
+        let session = format!("ses-other-{other}");
+        let mut bound = binding_with_harness(root.to_str().unwrap(), "opencode", &session);
+        bound.config = capture_config(true);
+        handler.bind_route(test_route(200 + other), bound);
+        let mut request = transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hello")],
+            "base-o",
+        );
+        request["session_id"] = json!(session);
+        pass_on(&handler, test_route(200 + other), request).await;
+        settle(&handler).await;
+    }
+    let doc = project.join("ARCHITECTURE.md");
+    std::fs::write(&doc, "# Architecture\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    assert_eq!(live(&store, OccurrenceClass::RepositoryDocuments).len(), 11);
+    let tip = store.tip().unwrap();
+    document_pass(&handler, "base-2").await;
+    assert_eq!(
+        store.tip().unwrap(),
+        tip,
+        "an unchanged file publishes nothing"
+    );
+    assert_eq!(report(&handler)["documents_unchanged"], 1);
+    std::fs::remove_file(&doc).unwrap();
+    document_pass(&handler, "base-3").await;
+    assert_eq!(report(&handler)["documents_retired"], 1);
+    assert_eq!(live(&store, OccurrenceClass::RepositoryDocuments).len(), 10);
 }
 
 /// AC17 and F18 (`sc-repodoc-only-verified-missing-retires`): a symlink, a text past the 64 KiB unit cap, a file past the 256 KiB read cap, non-UTF-8 bytes, and a permission error are each counted and retire nothing; only a missing file retires.
@@ -1727,6 +1858,7 @@ async fn unreadable_documents_are_counted_and_retire_nothing() {
             }),
         ),
         (
+            // Root reads a file of mode 0o000, so a root runner sees the text unchanged and the count stays.
             "documents_unreadable",
             Box::new(|| {
                 std::fs::write(&doc, "# Structure\n").unwrap();
@@ -1734,7 +1866,11 @@ async fn unreadable_documents_are_counted_and_retire_nothing() {
             }),
         ),
     ];
+    let root = rustix::process::geteuid().is_root();
     for (round, (count, arrange)) in cases.iter().enumerate() {
+        if root && *count == "documents_unreadable" {
+            continue;
+        }
         arrange();
         let before = report(&handler)[*count].as_u64().unwrap();
         document_pass(&handler, &format!("base-x{round}")).await;

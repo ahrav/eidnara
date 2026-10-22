@@ -3421,6 +3421,8 @@ struct PassIntake {
     parsed: TransformRequest,
     binding: SessionBinding,
     fold_authority: BindingAuthority,
+    /// Where the pass leaves the configured documents it reads, when source capture takes them.
+    document_reads: Option<Arc<project_docs::DocumentReads>>,
     lineage_root: PathBuf,
     pass_load: Result<ModuleMeta, MemoryStoreError>,
     snapshot_generation: u64,
@@ -3436,6 +3438,7 @@ struct PassEnv {
     parsed: Arc<TransformRequest>,
     binding: SessionBinding,
     fold_authority: BindingAuthority,
+    document_reads: Option<Arc<project_docs::DocumentReads>>,
     route_project_root: String,
     project_path: String,
     note_project_path: String,
@@ -9050,22 +9053,22 @@ impl HandlerCore {
             self.spawn_tracked_task(checkpoint.run());
         }
         // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.
-        let capture = source_capture::consents(
+        let consents = source_capture::consents(
             &binding.config,
             parsed.is_subagent,
             serializer_profile,
             &binding.harness,
-        )
-        .then(|| source_capture::Offer {
+        );
+        // The pass leaves the configured documents it reads for its prompt here, and capture takes them once the response is built.
+        let document_reads = (consents && binding.config.inject_docs)
+            .then(|| Arc::new(project_docs::DocumentReads::default()));
+        let capture = consents.then(|| source_capture::Offer {
             profile: serializer_profile,
             session_id: parsed.session_id.clone(),
             project: binding.kernel_project.clone(),
             window: parsed.native_messages.clone().unwrap_or_default(),
             epoch: self.source_capture.epoch(),
-            documents: binding
-                .config
-                .inject_docs
-                .then(|| binding.project_root.clone()),
+            documents: document_reads.clone(),
         });
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the
@@ -9083,6 +9086,7 @@ impl HandlerCore {
             parsed,
             binding,
             fold_authority,
+            document_reads,
             lineage_root,
             pass_load,
             snapshot_generation: 0,
@@ -9432,6 +9436,7 @@ impl HandlerCore {
             mut parsed,
             binding,
             fold_authority,
+            document_reads,
             lineage_root,
             pass_load,
             snapshot_generation,
@@ -9470,6 +9475,7 @@ impl HandlerCore {
             parsed,
             binding,
             fold_authority,
+            document_reads,
             route_project_root,
             project_path,
             note_project_path,
@@ -9506,6 +9512,7 @@ impl HandlerCore {
             parsed,
             binding,
             fold_authority,
+            document_reads,
             route_project_root,
             project_path,
             note_project_path,
@@ -9535,6 +9542,7 @@ impl HandlerCore {
                 .unwrap_or(binding.history_budget_tokens),
             memory_enabled: binding.config.memory_enabled,
             inject_docs: binding.config.inject_docs,
+            document_reads: document_reads.as_deref(),
             temporal_awareness: binding.config.temporal_awareness,
             user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
             now_ms: *pass_now,
@@ -42547,6 +42555,7 @@ mod tests {
                 user_profile_budget_tokens: 4_000.0,
                 memory_enabled: true,
                 inject_docs: true,
+                document_reads: None,
                 temporal_awareness: true,
                 now_ms: now_ms(),
                 execute_threshold_percentage: 65.0,
