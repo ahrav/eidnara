@@ -2533,6 +2533,75 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
     assert_eq!(corpus.tip(), tip, "no refused attempt committed");
 }
 
+#[test]
+fn batch_judges_each_unit_against_its_own_publishers_scope() {
+    use daemon::harness_sources::publish_batch;
+    const OTHER_SCOPE: &str = "project:b";
+    let other_project = "b".repeat(64);
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus
+        .kernel
+        .commit(intent("other-scope"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: OTHER_SCOPE.to_owned(),
+                object_id: OTHER_SCOPE.to_owned(),
+                source_id: OTHER_SCOPE.to_owned(),
+                domain_id: "domain".to_owned(),
+                source_kind: "kernel_route".to_owned(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_owned(),
+                    operator: "exact".to_owned(),
+                    exact_value: Some(other_project.clone()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let publisher = corpus.publisher();
+    let other = SourcePublisher {
+        scope_id: Some(OTHER_SCOPE),
+        ..corpus.publisher()
+    };
+    let first = pi_text_unit("pi-first", "first scope");
+    let misplaced = pi_text_unit("pi-misplaced", "project a under project b's scope");
+    let mut second = pi_text_unit("pi-second", "second scope");
+    second.identity[0].1 = other_project;
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+
+    for (units, refused) in [
+        ([(&publisher, &first), (&other, &misplaced)], 1),
+        ([(&other, &misplaced), (&publisher, &first)], 0),
+    ] {
+        let refusal = publish_batch(&corpus.kernel, Vec::new(), &units, NOW, None).unwrap_err();
+        assert_eq!(refusal.error, kernel::KernelError::NotFound);
+        assert_eq!(refusal.unit, Some(refused));
+        assert_eq!(refusal.conflicting_unit(), None);
+    }
+    assert_eq!(corpus.tip(), tip, "no refused attempt committed");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "the receipt preview refuses before any byte is staged"
+    );
+
+    let published = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &first), (&other, &second)],
+        NOW,
+        None,
+    )
+    .unwrap();
+    assert!(published.iter().all(|published| !published.replayed));
+    assert!(corpus.tip() > tip);
+}
+
 /// A configured repository document at `revision`.
 fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
     SourceUnit {

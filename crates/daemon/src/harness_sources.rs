@@ -21,6 +21,7 @@ use kernel::{
     SourceDescriptorRequest, TaintClass, ToolOutcome,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -552,10 +553,10 @@ impl SourcePublisher<'_> {
                 self.check_scope(&unit, preview)?;
                 // Evidence an earlier publication retained replays under the digest that wrote it.
                 let evidence_digest =
-                    stored_receipt(preview, self.evidence_intent(&unit), &unit.legacy_digest)?
+                    stored_receipt(preview, self.evidence_intent(&unit), &unit, self)?
                         .map_or_else(|| unit.request_digest.clone(), |(_, digest)| digest);
                 Ok((
-                    stored_receipt(preview, descriptor_intent.clone(), &unit.legacy_digest)?
+                    stored_receipt(preview, descriptor_intent.clone(), &unit, self)?
                         .map(|(receipt, _)| receipt),
                     unit.rule.resolve(preview)?,
                     evidence_digest,
@@ -739,7 +740,7 @@ impl SourcePublisher<'_> {
             rule,
             key,
             request_digest: self.request_digest(unit),
-            legacy_digest: self.legacy_request_digest(unit),
+            legacy_digest: std::cell::OnceCell::new(),
             origin: unit.origin().to_owned(),
             project,
             observed_at,
@@ -772,10 +773,26 @@ impl SourcePublisher<'_> {
         unit: &Prepared<'_>,
         envelope: &kernel::Envelope<'_>,
     ) -> Result<(), KernelError> {
+        self.check_scope_once(unit, envelope, &mut Vec::new())
+    }
+
+    /// [`Self::check_scope`] that reads each scope's terms from `envelope` at most once, keeping them in `read` for later units of the same transaction.
+    fn check_scope_once<'s>(
+        &'s self,
+        unit: &Prepared<'_>,
+        envelope: &kernel::Envelope<'_>,
+        read: &mut Vec<(&'s str, Option<Vec<kernel::ScopeTermSpec>>)>,
+    ) -> Result<(), KernelError> {
         match (&unit.project, self.scope_id) {
             (Some(_), Some(scope_id)) => {
-                let terms = envelope.scope_terms(scope_id)?;
-                if Self::scope_admits(unit, terms.as_deref()) {
+                let position = match read.iter().position(|(id, _)| *id == scope_id) {
+                    Some(position) => position,
+                    None => {
+                        read.push((scope_id, envelope.scope_terms(scope_id)?));
+                        read.len() - 1
+                    }
+                };
+                if Self::scope_admits(unit, read[position].1.as_deref()) {
                     Ok(())
                 } else {
                     Err(KernelError::NotFound)
@@ -962,27 +979,31 @@ impl SourcePublisher<'_> {
 
     /// The request digest binds text, domain, scope, role, sensitivity, provider-egress policy, and the outcome record. Changing any of these under the same receipt key conflicts rather than replaying.
     fn request_digest(&self, unit: &SourceUnit) -> String {
-        let mut bytes = self.digest_inputs(unit, REQUEST_DIGEST_FORMAT);
+        let mut digest = self.digest_inputs(unit, REQUEST_DIGEST_FORMAT);
         match &unit.outcome {
             Some(outcome) => {
                 let encoded = outcome.encode();
-                bytes.push(1);
-                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
-                bytes.extend_from_slice(&encoded);
+                digest.update([1]);
+                digest.update((encoded.len() as u64).to_be_bytes());
+                digest.update(&encoded);
             }
-            None => bytes.push(0),
+            None => digest.update([0]),
         }
-        identity_digest(&bytes)
+        format!("{:x}", digest.finalize())
     }
 
     /// The `source-request.v1` digest of `unit`: the layout before the outcome record, frozen so receipts written under it still replay.
     fn legacy_request_digest(&self, unit: &SourceUnit) -> String {
-        identity_digest(&self.digest_inputs(unit, LEGACY_REQUEST_DIGEST_FORMAT))
+        format!(
+            "{:x}",
+            self.digest_inputs(unit, LEGACY_REQUEST_DIGEST_FORMAT)
+                .finalize()
+        )
     }
 
-    /// The inputs both digest layouts share, led by `format`. The `v1` layout is these bytes alone, so they are frozen: a change here moves the legacy digest too.
-    fn digest_inputs(&self, unit: &SourceUnit, format: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    /// The SHA-256 state over the inputs both digest layouts share, led by `format`, each streamed into the hash in place. The `v1` layout is these bytes alone, so they are frozen: a change here moves the legacy digest too.
+    fn digest_inputs(&self, unit: &SourceUnit, format: &str) -> Sha256 {
+        let mut digest = Sha256::new();
         for part in [
             format,
             unit.text.as_str(),
@@ -991,32 +1012,38 @@ impl SourcePublisher<'_> {
             unit.role.as_str(),
             self.sensitivity.as_str(),
         ] {
-            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(part.as_bytes());
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
         }
-        bytes.push(u8::from(self.scope_id.is_some()));
-        bytes.push(match self.egress {
-            ProviderEgress::RemoteAllowed => 0,
-            ProviderEgress::LocalOnly => 1,
-        });
-        bytes
+        digest.update([
+            u8::from(self.scope_id.is_some()),
+            match self.egress {
+                ProviderEgress::RemoteAllowed => 0,
+                ProviderEgress::LocalOnly => 1,
+            },
+        ]);
+        digest
     }
 }
 
-/// The receipt `preview` holds for `intent`'s key and the digest it was written under: `intent`'s digest, or else `legacy_digest`, the `source-request.v1` digest of the same unit. A receipt written before the outcome record replays as it was written, without enrichment. A key holding neither digest is [`KernelError::Conflict`].
+/// The receipt `preview` holds for `intent`'s key and the digest it was written under: `intent`'s digest, or else the `source-request.v1` digest of `unit` under `publisher`, which is computed only when the key holds a receipt under another digest. A receipt written before the outcome record replays as it was written, without enrichment. A key holding neither digest is [`KernelError::Conflict`].
 fn stored_receipt(
     preview: &kernel::Envelope<'_>,
     intent: CommitIntent,
-    legacy_digest: &str,
+    unit: &Prepared<'_>,
+    publisher: &SourcePublisher<'_>,
 ) -> Result<Option<(kernel::CommitReceipt, String)>, KernelError> {
     match preview.stored_receipt(intent.clone()) {
-        Err(KernelError::Conflict) => preview
-            .stored_receipt(CommitIntent {
-                request_digest: legacy_digest.to_owned(),
-                ..intent
-            })?
-            .map(|receipt| Some((receipt, legacy_digest.to_owned())))
-            .ok_or(KernelError::Conflict),
+        Err(KernelError::Conflict) => {
+            let legacy_digest = unit.legacy_digest(publisher);
+            preview
+                .stored_receipt(CommitIntent {
+                    request_digest: legacy_digest.to_owned(),
+                    ..intent
+                })?
+                .map(|receipt| Some((receipt, legacy_digest.to_owned())))
+                .ok_or(KernelError::Conflict)
+        }
         other => Ok(other?.map(|receipt| (receipt, intent.request_digest))),
     }
 }
@@ -1072,6 +1099,18 @@ pub fn publish_batch(
                 })?,
         );
     }
+    publish_prepared(kernel, writes, units, prepared, observed_at, budget)
+}
+
+/// [`publish_batch`] of `units` whose publishers already prepared them, in order, as `prepared`.
+fn publish_prepared(
+    kernel: &KernelStore,
+    writes: Vec<KeyedWrite<'_>>,
+    units: &[(&SourcePublisher<'_>, &SourceUnit)],
+    prepared: Vec<Prepared<'_>>,
+    observed_at: i64,
+    budget: Option<&kernel::applicability::EvalBudget>,
+) -> Result<Vec<Published>, BatchRefusal> {
     // Two units under one key with different requests would claim one receipt twice in this commit; the later one is the conflict.
     let mut digests = std::collections::HashMap::with_capacity(prepared.len());
     for (index, unit) in prepared.iter().enumerate() {
@@ -1093,23 +1132,21 @@ pub fn publish_batch(
                 .map(|write| Ok(preview.stored_receipt(write.intent.clone())?.is_some()))
                 .collect::<Result<Vec<bool>, KernelError>>()?;
             let mut previewed = Vec::with_capacity(units.len());
+            let mut scopes = Vec::new();
             for (index, ((publisher, _), unit)) in units.iter().zip(&prepared).enumerate() {
-                let step = || {
-                    publisher.check_scope(unit, preview)?;
+                let mut step = || {
+                    publisher.check_scope_once(unit, preview, &mut scopes)?;
                     Ok((
                         stored_receipt(
                             preview,
                             publisher.descriptor_intent(unit),
-                            &unit.legacy_digest,
+                            unit,
+                            publisher,
                         )?
                         .map(|(receipt, _)| receipt),
                         unit.rule.resolve(preview)?,
-                        stored_receipt(
-                            preview,
-                            publisher.evidence_intent(unit),
-                            &unit.legacy_digest,
-                        )?
-                        .map(|(receipt, _)| receipt),
+                        stored_receipt(preview, publisher.evidence_intent(unit), unit, publisher)?
+                            .map(|(receipt, _)| receipt),
                     ))
                 };
                 previewed.push(step().inspect_err(|_| culprit = Some(index))?);
@@ -1131,7 +1168,7 @@ pub fn publish_batch(
     for (index, (unit, (stored, admission, evidence))) in prepared.iter().zip(previewed).enumerate()
     {
         // Evidence an earlier attempt retained without publishing its descriptor is cited again: exact retention stores the unit's bytes under their own digest.
-        if let Some(evidence) = evidence {
+        if let Some(evidence) = evidence.filter(|_| stored.is_none()) {
             retained.insert(
                 index,
                 ArtifactHandle {
@@ -1390,9 +1427,15 @@ pub fn publish_screened(
     let (reconciled, reruns) = plan_reruns(publisher, &admitted_prepared, budget)
         .map_err(|error| BatchRefusal { error, unit: None })?;
     let mut kept = Vec::with_capacity(admitted.len());
-    for (index, reconciled) in admitted.into_iter().zip(reconciled) {
+    let mut kept_prepared = Vec::with_capacity(admitted_prepared.len());
+    for ((index, prepared), reconciled) in
+        admitted.into_iter().zip(admitted_prepared).zip(reconciled)
+    {
         match reconciled {
-            Reconciled::Kept => kept.push(index),
+            Reconciled::Kept => {
+                kept.push(index);
+                kept_prepared.push(prepared);
+            }
             Reconciled::Superseded => dispositions[index] = Some(UnitDisposition::Superseded),
             Reconciled::Conflicting => {
                 dispositions[index] = Some(UnitDisposition::Refused(PublishError::IdentityReused));
@@ -1414,11 +1457,18 @@ pub fn publish_screened(
             .iter()
             .map(|&index| (publisher, &units[index]))
             .collect();
-        let published = publish_batch(publisher.kernel, writes, &batch, observed_at, budget)
-            .map_err(|refusal| BatchRefusal {
-                unit: refusal.unit.map(|position| admitted[position]),
-                ..refusal
-            })?;
+        let published = publish_prepared(
+            publisher.kernel,
+            writes,
+            &batch,
+            kept_prepared,
+            observed_at,
+            budget,
+        )
+        .map_err(|refusal| BatchRefusal {
+            unit: refusal.unit.map(|position| admitted[position]),
+            ..refusal
+        })?;
         for (index, published) in admitted.into_iter().zip(published) {
             dispositions[index] = Some(UnitDisposition::Published(published));
         }
@@ -1672,7 +1722,8 @@ fn plan_reruns(
                         match stored_receipt(
                             preview,
                             publisher.descriptor_intent(unit),
-                            &unit.legacy_digest,
+                            unit,
+                            publisher,
                         ) {
                             Ok(Some(_)) => Reconciled::Kept,
                             Ok(None) => Reconciled::Superseded,
@@ -1730,13 +1781,20 @@ struct Prepared<'u> {
     rule: ProvenanceRule,
     key: String,
     request_digest: String,
-    legacy_digest: String,
+    /// The unit's `source-request.v1` digest, computed on the first receipt probe that needs it ([`Self::legacy_digest`]).
+    legacy_digest: std::cell::OnceCell<String>,
     origin: String,
     project: Option<ProjectScope>,
     observed_at: i64,
 }
 
 impl Prepared<'_> {
+    /// The unit's `source-request.v1` digest under `publisher`, computed once.
+    fn legacy_digest(&self, publisher: &SourcePublisher<'_>) -> &str {
+        self.legacy_digest
+            .get_or_init(|| publisher.legacy_request_digest(self.unit))
+    }
+
     fn evidence_object_id(&self) -> String {
         format!("srcev-object:{}", self.key)
     }
