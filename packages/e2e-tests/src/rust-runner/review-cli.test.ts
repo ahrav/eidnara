@@ -1,11 +1,22 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    realpathSync,
+    rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostClient, isHostCallError } from "@eidnara/opencode/shared/host-client";
+import { managedSubtreePath } from "@eidnara/opencode/shared/host-lifecycle/paths";
 import { type ReviewCommandDependencies, runReviewCommand } from "../../../cli/src/commands/review";
 import { raiseMemoriesAuthority } from "../bedrock-peer/classify";
 import { waitFor } from "../harness-primitives";
+import { waitForChildExit } from "../process-exit";
 import { buildDirectHostFixture, detectRustModePrereqs, HermeticHostStack } from "./hermetic-host";
 
 const fixturePrereqs = detectRustModePrereqs();
@@ -38,6 +49,37 @@ function commandDependencies(dataDir: string): {
         stderr: (line) => err.push(line),
     };
     return { deps, out, err, clients };
+}
+
+function kernelLeasePath(dataDir: string): string | undefined {
+    const leases = join(managedSubtreePath(dataDir), "context", "kernel", "leases");
+    if (!existsSync(leases)) return undefined;
+    const files = readdirSync(leases).filter((name) => name.endsWith(".lease"));
+    return files.length === 1 ? join(leases, files[0]) : undefined;
+}
+
+/** The returned promise resolves after the child confirms acquisition of the shared lock; `release` closes the child's stdin to end the lock holder. */
+async function holdSharedFlock(path: string): Promise<{ release(): Promise<void> }> {
+    const child = spawn(
+        "flock",
+        ["--shared", "--nonblock", path, "--command", "echo held; exec cat"],
+        {
+            stdio: ["pipe", "pipe", "inherit"],
+        },
+    );
+    await new Promise<void>((resolveHeld, rejectHeld) => {
+        child.once("error", rejectHeld);
+        child.once("exit", (code) =>
+            rejectHeld(new Error(`flock exited ${code} before holding ${path}`)),
+        );
+        child.stdout?.once("data", () => resolveHeld());
+    });
+    return {
+        async release() {
+            child.stdin?.end();
+            if (!(await waitForChildExit(child, 5_000))) child.kill("SIGKILL");
+        },
+    };
 }
 
 describe("review command against the direct host", () => {
@@ -112,7 +154,7 @@ describe("review command against the direct host", () => {
             mkdirSync(project);
             const projectRoot = realpathSync.native(project);
             const stack = await HermeticHostStack.start({ dataDir: root, fixtureBin });
-            /** One installed-command invocation that must exit `exit`, write nothing to stderr, and close its one connection. */
+            let kernelLease: { release(): Promise<void> } | undefined;
             const review = async (args: string[], exit: number): Promise<string> => {
                 const command = commandDependencies(root);
                 expect(await runReviewCommand(args, command.deps)).toBe(exit);
@@ -122,6 +164,22 @@ describe("review command against the direct host", () => {
                 return command.out.join("\n");
             };
             try {
+                // The shared flock blocks the restarted Kernel from acquiring its store lease.
+                const leasePath = await waitFor(
+                    "the Kernel lease file",
+                    () => kernelLeasePath(root),
+                    30_000,
+                    () => stack.hostLog(),
+                );
+                await stack.crashHost();
+                kernelLease = await holdSharedFlock(leasePath);
+                await stack.restartHost();
+                await waitFor(
+                    "the restarted Kernel waiting on its lease",
+                    () => (stack.hostLog().includes("kernel store lease held") ? true : undefined),
+                    30_000,
+                    () => stack.hostLog(),
+                );
                 // The host opens its Memory Store after it publishes its connection file; only that refusal is retried.
                 await waitFor(
                     "the memories authority reaching MODULE",
@@ -139,9 +197,21 @@ describe("review command against the direct host", () => {
                     30_000,
                     () => stack.hostLog(),
                 );
-                const witness = await stack.reviewWitness(projectRoot).catch((error: unknown) => {
-                    throw new Error(`${String(error)}\n${stack.hostLog()}`);
-                });
+                const heldLease = kernelLease;
+                const leaseReleased = Bun.sleep(250).then(() => heldLease.release());
+                const witness = await waitFor(
+                    "the review witness over an open Kernel",
+                    () =>
+                        stack.reviewWitness(projectRoot).catch((error: unknown) => {
+                            if (String(error).endsWith("rejected: kernel_unavailable")) {
+                                return undefined;
+                            }
+                            throw new Error(`${String(error)}\n${stack.hostLog()}`);
+                        }),
+                    30_000,
+                    () => stack.hostLog(),
+                );
+                await leaseReleased;
                 // One provider exchange per fixture job; the production jobs abstain before any attempt or connection.
                 expect(witness.fixture).toHaveLength(2);
                 expect(witness.production).toHaveLength(3);
@@ -234,6 +304,7 @@ describe("review command against the direct host", () => {
                     ).toEqual({ kind: "terminal", terminal: "not_selected" });
                 }
             } finally {
+                await kernelLease?.release();
                 await stack.stop();
             }
         },
