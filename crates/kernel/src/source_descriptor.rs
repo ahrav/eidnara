@@ -658,7 +658,7 @@ impl KernelStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveDescriptorPage {
     pub rows: Vec<LiveDescriptor>,
-    /// The object id to continue after, or `None` when this page ends the inventory.
+    /// The object id to continue after, or `None` when this page ends the inventory. A narrowed page ([`Envelope::live_source_descriptors_with`]) can hold fewer rows than its bound, none included, while this names a later page.
     pub next: Option<String>,
 }
 
@@ -706,82 +706,51 @@ impl KernelStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
-        Self::live_descriptor_page(&tx, class, requested, None, after, max_rows)
-    }
-
-    /// One page of the descriptors of `class` live at `requested` on `tx`, limited to the rows `narrowing` holds when one is given.
-    fn live_descriptor_page(
-        tx: &rusqlite::Transaction<'_>,
-        class: OccurrenceClass,
-        requested: i64,
-        narrowing: Option<&Narrowing<'_>>,
-        after: Option<&str>,
-        max_rows: std::num::NonZeroUsize,
-    ) -> Result<LiveDescriptorPage, KernelError> {
         let bound = max_rows.get();
-        let (raw, next) = match narrowing {
-            None => {
-                let raw = descriptor_rows(
-                    tx,
-                    class,
-                    requested,
-                    "o.object_id>?3",
-                    after.unwrap_or(""),
-                    bound.saturating_add(1),
-                )?;
-                let next = (raw.len() > bound).then(|| raw[bound - 1].object_id.clone());
-                (raw, next)
-            }
-            Some(narrowing) => {
-                let candidates =
-                    narrowing.candidates(tx, class, requested, after, bound.saturating_add(1))?;
-                let next = (candidates.len() > bound).then(|| candidates[bound - 1].clone());
-                let page = &candidates[..candidates.len().min(bound)];
-                let ids = serde_json::to_string(page).map_err(|_| KernelError::InvalidInput)?;
-                let raw = descriptor_rows(
-                    tx,
-                    class,
-                    requested,
-                    "o.object_id IN (SELECT value FROM json_each(?3))",
-                    &ids,
-                    bound,
-                )?;
-                (raw, next)
-            }
-        };
-        let mut rows = Vec::with_capacity(raw.len().min(bound));
-        for raw in raw.into_iter().take(bound) {
-            let detail = stored_detail(&raw.payload)?;
-            // The registry row and the stored detail must agree, as `source_export::preflight` requires.
-            if raw.created_commit_seq != raw.observation_created
-                || raw.invalidated_commit_seq != raw.observation_invalidated
-                || raw.sensitivity != raw.registry_sensitivity
-                || detail.lineage_id != raw.source_id
-                || detail.evidence_id != raw.evidence_id
-                || detail.artifact_digest != raw.artifact_digest
-                || detail.class != class.code()
-                || detail.revision != raw.revision.to_string()
-                || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
-                || reencoded_identity(&detail).is_none()
-            {
-                return Err(KernelError::CorruptCanonicalRow);
-            }
-            if narrowing.is_some_and(|narrowing| !narrowing.holds(&detail)) {
-                continue;
-            }
-            rows.push(LiveDescriptor {
-                object_id: raw.object_id,
-                domain_id: raw.domain_id,
-                sensitivity: Sensitivity::from_stored(&raw.sensitivity),
-                created_commit_seq: raw.created_commit_seq,
-                detail,
-            });
-        }
+        let mut raw = descriptor_rows(
+            &tx,
+            class,
+            requested,
+            "o.object_id>?3",
+            after.unwrap_or(""),
+            bound.saturating_add(1),
+        )?;
+        let next = (raw.len() > bound).then(|| raw[bound - 1].object_id.clone());
+        raw.truncate(bound);
+        let rows = raw
+            .into_iter()
+            .map(|raw| checked(raw, class))
+            .collect::<Result<_, _>>()?;
         Ok(LiveDescriptorPage { rows, next })
     }
 }
 
-/// Up to `limit` stored descriptor rows of `class` live at `requested` whose object id satisfies `key` over `?3` bound to `value`, in object id order. `key` is one of [`KernelStore::live_descriptor_page`]'s fixed fragments.
+/// `raw` as a live descriptor of `class`. A row whose registry row and stored detail disagree, as `source_export::preflight` requires them to agree, or whose stored identity does not re-encode to itself is [`KernelError::CorruptCanonicalRow`].
+fn checked(raw: LiveDescriptorRaw, class: OccurrenceClass) -> Result<LiveDescriptor, KernelError> {
+    let detail = stored_detail(&raw.payload)?;
+    if raw.created_commit_seq != raw.observation_created
+        || raw.invalidated_commit_seq != raw.observation_invalidated
+        || raw.sensitivity != raw.registry_sensitivity
+        || detail.lineage_id != raw.source_id
+        || detail.evidence_id != raw.evidence_id
+        || detail.artifact_digest != raw.artifact_digest
+        || detail.class != class.code()
+        || detail.revision != raw.revision.to_string()
+        || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
+        || reencoded_identity(&detail).is_none()
+    {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    Ok(LiveDescriptor {
+        object_id: raw.object_id,
+        domain_id: raw.domain_id,
+        sensitivity: Sensitivity::from_stored(&raw.sensitivity),
+        created_commit_seq: raw.created_commit_seq,
+        detail,
+    })
+}
+
+/// Up to `limit` stored descriptor rows of `class` live at `requested` whose object id satisfies `key` over `?3` bound to `value`, in object id order. `key` is `o.object_id>?3` for an inventory page or `o.object_id IN (SELECT value FROM json_each(?3))` for a narrowed page's candidates.
 fn descriptor_rows(
     tx: &rusqlite::Transaction<'_>,
     class: OccurrenceClass,
@@ -829,7 +798,7 @@ fn descriptor_rows(
 }
 
 impl Envelope<'_> {
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Each stored payload is tested in place for one of the values' identity pairs before its row is copied or decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Each stored payload is tested in place for one of the values' identity pairs before its row is copied or decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`.
     ///
     /// # Errors
     ///
@@ -847,11 +816,10 @@ impl Envelope<'_> {
             .iter()
             .position(|name| *name == field)
             .ok_or(KernelError::InvalidInput)?;
-        KernelStore::live_descriptor_page(
+        Narrowing::new(position, field, values).page(
             self.tx,
             class,
             self.commit_seq,
-            Some(&Narrowing::new(position, field, values)?),
             after,
             max_rows,
         )
@@ -865,36 +833,67 @@ struct Narrowing<'v> {
     position: usize,
     field: &'v str,
     values: &'v [&'v str],
-    /// The bytes every pair starts with: the twice-escaped `["field",`.
-    lead: Vec<u8>,
+    /// Finds the bytes every pair starts with: the twice-escaped `["field",`.
+    lead: memchr::memmem::Finder<'static>,
     /// Each value's twice-escaped `["field","value"]`.
     pairs: Vec<Vec<u8>>,
 }
 
 impl<'v> Narrowing<'v> {
-    fn new(position: usize, field: &'v str, values: &'v [&'v str]) -> Result<Self, KernelError> {
+    fn new(position: usize, field: &'v str, values: &'v [&'v str]) -> Self {
         // The bytes `text` takes inside a stored JSON string: its JSON string form without the quotes.
-        let stored = |text: &str| -> Result<Vec<u8>, KernelError> {
-            let quoted = serde_json::to_string(text).map_err(|_| KernelError::InvalidInput)?;
-            Ok(quoted.as_bytes()[1..quoted.len() - 1].to_vec())
+        let stored = |text: &str| {
+            let quoted = serde_json::to_string(text).expect("a string serializes");
+            quoted.as_bytes()[1..quoted.len() - 1].to_vec()
         };
-        let encoded_field = serde_json::to_string(field).map_err(|_| KernelError::InvalidInput)?;
+        let encoded_field = serde_json::to_string(field).expect("a string serializes");
         let pairs = values
             .iter()
             .map(|value| {
                 stored(
-                    &serde_json::to_string(&(field, value))
-                        .map_err(|_| KernelError::InvalidInput)?,
+                    &serde_json::to_string(&(field, value)).expect("a pair of strings serializes"),
                 )
             })
-            .collect::<Result<_, _>>()?;
-        Ok(Self {
+            .collect();
+        Self {
             position,
             field,
             values,
-            lead: stored(&format!("[{encoded_field},"))?,
+            lead: memchr::memmem::Finder::new(&stored(&format!("[{encoded_field},"))).into_owned(),
             pairs,
-        })
+        }
+    }
+
+    /// One page of the descriptors of `class` live at `requested` on `tx` whose identity holds one of the values. The candidate scan reads each registry row and its payload; the page then reads the candidates' full rows, with their evidence.
+    fn page(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        class: OccurrenceClass,
+        requested: i64,
+        after: Option<&str>,
+        max_rows: std::num::NonZeroUsize,
+    ) -> Result<LiveDescriptorPage, KernelError> {
+        let bound = max_rows.get();
+        let mut candidates =
+            self.candidates(tx, class, requested, after, bound.saturating_add(1))?;
+        let next = (candidates.len() > bound).then(|| candidates[bound - 1].clone());
+        candidates.truncate(bound);
+        let ids = serde_json::to_string(&candidates).expect("strings serialize");
+        let mut rows = Vec::with_capacity(candidates.len());
+        for raw in descriptor_rows(
+            tx,
+            class,
+            requested,
+            "o.object_id IN (SELECT value FROM json_each(?3))",
+            &ids,
+            bound,
+        )? {
+            let row = checked(raw, class)?;
+            if self.holds(&row.detail) {
+                rows.push(row);
+            }
+        }
+        Ok(LiveDescriptorPage { rows, next })
     }
 
     fn candidates(
@@ -944,15 +943,11 @@ impl<'v> Narrowing<'v> {
 
     /// Whether `payload` may hold one of the values: it contains one of the pairs. True for every payload whose identity holds one.
     fn may_hold(&self, payload: &[u8]) -> bool {
-        let mut from = 0;
-        while let Some(at) = find(&payload[from..], &self.lead) {
-            let tail = &payload[from + at..];
-            if self.pairs.iter().any(|pair| tail.starts_with(pair)) {
-                return true;
-            }
-            from += at + 1;
-        }
-        false
+        self.lead.find_iter(payload).any(|at| {
+            self.pairs
+                .iter()
+                .any(|pair| payload[at..].starts_with(pair))
+        })
     }
 
     /// Whether the decoded identity holds one of the values in the field's position.
@@ -966,56 +961,68 @@ impl<'v> Narrowing<'v> {
     }
 }
 
-/// Subtraction borrows can also flag bytes whose XOR value is 1, so `matches_at` verifies `first` before checking `rest`.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    const LOW: u64 = 0x0101_0101_0101_0101;
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    let (&first, rest) = needle.split_first()?;
-    let matches_at =
-        |start: usize| haystack[start] == first && haystack[start + 1..].starts_with(rest);
-    let repeated = u64::from_le_bytes([first; 8]);
-    let (words, remainder) = haystack.as_chunks::<8>();
-    for (index, word) in words.iter().enumerate() {
-        let word = u64::from_le_bytes(*word) ^ repeated;
-        let mut flagged = word.wrapping_sub(LOW) & !word & HIGH;
-        while flagged != 0 {
-            let start = index * 8 + (flagged.trailing_zeros() / 8) as usize;
-            if matches_at(start) {
-                return Some(start);
-            }
-            flagged &= flagged - 1;
+#[cfg(test)]
+mod narrowing_tests {
+    use super::*;
+
+    fn detail(identity: &[(&str, &str)]) -> SourceDescriptorDetail {
+        SourceDescriptorDetail {
+            descriptor_version: SOURCE_DESCRIPTOR_DETAIL_VERSION,
+            source_policy: SourceDescriptorPolicy::Native,
+            class: OccurrenceClass::RawToolSpans.code().to_owned(),
+            identity: identity
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            revision: "1".to_owned(),
+            representation: "tool_output".to_owned(),
+            span: None,
+            occurrence_id: String::new(),
+            occurrence_tuple: Vec::new(),
+            lineage_id: String::new(),
+            payload_id: String::new(),
+            artifact_digest: String::new(),
+            evidence_id: String::new(),
+            outcome: None,
         }
     }
-    let tail = haystack.len() - remainder.len();
-    (tail..haystack.len()).find(|&start| matches_at(start))
-}
 
-#[cfg(test)]
-mod find_tests {
-    use super::find;
-    use proptest::prelude::*;
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 2048,
-            rng_algorithm: prop::test_runner::RngAlgorithm::ChaCha,
-            rng_seed: prop::test_runner::RngSeed::Fixed(0x5EED_F1ED),
-            ..ProptestConfig::default()
-        })]
-
-        /// `find` agrees with a byte-by-byte search. The alphabet holds the needle's first byte, the bytes one above and one below it, and the bytes 0x00, 0x80, and 0xFF, so words carry the borrow patterns of the zero-byte test at every offset and in the tail.
-        #[test]
-        fn find_agrees_with_a_bytewise_search(
-            first in prop::sample::select(vec![0x00u8, 0x01, 0x5A, 0x5B, 0x5C, 0x80, 0xFF]),
-            haystack in prop::collection::vec(0usize..6, 0..80),
-            rest in prop::collection::vec(0usize..6, 0..4),
-        ) {
-            let alphabet = [first, first.wrapping_add(1), first.wrapping_sub(1), 0x00, 0x80, 0xFF];
-            let haystack: Vec<u8> = haystack.into_iter().map(|index| alphabet[index]).collect();
-            let mut needle = vec![first];
-            needle.extend(rest.into_iter().map(|index| alphabet[index]));
-            let expected = haystack.windows(needle.len()).position(|window| window == needle.as_slice());
-            prop_assert_eq!(find(&haystack, &needle), expected);
-        }
+    /// `may_hold` admits a payload that spells a wanted pair outside its identity, and `holds` decides each admitted row from the decoded identity, by the field's name and position.
+    #[test]
+    fn holds_decides_each_row_may_hold_admits() {
+        let values = ["call-b"];
+        let narrowing = Narrowing::new(4, "tool_call_id", &values);
+        let pair = serde_json::to_string(&("tool_call_id", "call-b")).unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({ "summary": pair })).unwrap();
+        assert!(narrowing.may_hold(&payload));
+        assert!(!narrowing.may_hold(br#"{"summary":"call-b"}"#));
+        let head = [("project_id", "p"), ("harness", "pi"), ("session_id", "s")];
+        let identity = |rest: [(&'static str, &'static str); 2]| {
+            let mut fields = head.to_vec();
+            fields.extend(rest);
+            detail(&fields)
+        };
+        assert!(narrowing.holds(&identity([
+            ("parent_message_id", "m"),
+            ("tool_call_id", "call-b")
+        ])));
+        assert!(!narrowing.holds(&identity([
+            ("parent_message_id", "m"),
+            ("tool_call_id", "call-other")
+        ])));
+        assert!(
+            !narrowing.holds(&identity([
+                ("tool_call_id", "call-b"),
+                ("parent_message_id", "m")
+            ])),
+            "the value in another position"
+        );
+        assert!(
+            !narrowing.holds(&identity([
+                ("tool_call_id", "m"),
+                ("parent_message_id", "call-b")
+            ])),
+            "the value under another field"
+        );
     }
 }

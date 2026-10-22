@@ -2595,3 +2595,81 @@ fn a_narrowed_read_finds_every_escaped_value_in_its_own_field() {
         })
         .unwrap();
 }
+
+/// A candidate whose cited evidence is invalidated stays out of its narrowed page, and paging past it reaches the later matches: the first page holds no row while `next` names a later page.
+#[test]
+fn a_narrowed_read_applies_evidence_liveness_to_its_candidates() {
+    let fixture = Fixture::open();
+    let calls = ["call-a", "call-b", "call-c"];
+    let mut published = Vec::new();
+    for call in calls {
+        let text = format!("output of {call}");
+        let evidence = fixture.retain(call, &text);
+        let identity: Vec<(&str, &str)> = TOOL
+            .iter()
+            .map(|&(name, value)| (name, if name == "tool_call_id" { call } else { value }))
+            .collect();
+        let (outcome, _, _) = fixture
+            .publish(
+                call,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    &text,
+                ),
+            )
+            .unwrap();
+        published.push((outcome.object_id, evidence.0));
+    }
+    published.sort();
+    rusqlite::Connection::open_with_flags(
+        fixture.root.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap()
+    .execute(
+        "UPDATE evidence_meta SET invalidated_commit_seq=(SELECT MAX(commit_seq) FROM commit_log)
+         WHERE evidence_id=?1",
+        [&published[0].1],
+    )
+    .unwrap();
+    let one = std::num::NonZeroUsize::new(1).unwrap();
+    fixture
+        .store
+        .commit(intent("read-evidence"), |envelope| {
+            let first = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                &calls,
+                None,
+                one,
+            )?;
+            assert!(
+                first.rows.is_empty(),
+                "the dead evidence's descriptor stays out"
+            );
+            assert_eq!(first.next.as_deref(), Some(published[0].0.as_str()));
+            let mut found = Vec::new();
+            let mut after = first.next;
+            while let Some(cursor) = after {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    &calls,
+                    Some(&cursor),
+                    one,
+                )?;
+                found.extend(page.rows.into_iter().map(|row| row.object_id));
+                after = page.next;
+            }
+            assert_eq!(found, [published[1].0.clone(), published[2].0.clone()]);
+            Ok(String::new())
+        })
+        .unwrap();
+}

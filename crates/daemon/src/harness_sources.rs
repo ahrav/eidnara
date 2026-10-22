@@ -1400,10 +1400,12 @@ pub fn publish_screened(
         }
     }
     let admitted = kept;
-    let writes: Vec<KeyedWrite<'_>> = (!reruns.reruns.is_empty())
-        .then(|| KeyedWrite {
+    let writes: Vec<KeyedWrite<'_>> = reruns
+        .map(|reruns| KeyedWrite {
             intent: reruns.intent(),
-            write: Box::new(move |envelope: &mut kernel::Envelope<'_>| reruns.apply(envelope)),
+            write: Box::new(move |envelope: &mut kernel::Envelope<'_>| {
+                reruns.apply(publisher.kernel, envelope)
+            }),
         })
         .into_iter()
         .collect();
@@ -1541,9 +1543,10 @@ struct Rerun {
     retired: Vec<String>,
 }
 
-/// `Reruns` groups a batch's retirements into one keyed write and records the snapshot tip used to plan them.
+/// `Reruns` groups a batch's retirements into one keyed write and records the snapshot tip used to plan them, with the store incarnation read before that snapshot.
 struct Reruns {
     snapshot: i64,
+    incarnation: kernel::CommitReadIncarnation,
     reruns: Vec<Rerun>,
 }
 
@@ -1577,9 +1580,16 @@ impl Reruns {
         }
     }
 
-    /// Retires the planned predecessors. When the commit's sequence differs from `snapshot + 1`, it first reads every call's live generations again in one pass and requires each call's generations to be at most its successor with a predecessor set equal to `retired`; a mismatch returns [`KernelError::Conflict`] before any retirement, and the batch commits nothing.
-    fn apply(&self, envelope: &mut kernel::Envelope<'_>) -> Result<String, KernelError> {
-        if envelope.commit_seq() != self.snapshot + 1 {
+    /// Retires the planned predecessors. When the commit's sequence differs from `snapshot + 1`, or a restore changed `kernel`'s incarnation since the plan, it first reads every call's live generations again in one pass and requires each call's generations to be at most its successor with a predecessor set equal to `retired`; a mismatch returns [`KernelError::Conflict`] before any retirement, and the batch commits nothing.
+    fn apply(
+        &self,
+        kernel: &KernelStore,
+        envelope: &mut kernel::Envelope<'_>,
+    ) -> Result<String, KernelError> {
+        // The commit holds the writer guard, so no restore lands between this check and the retirements.
+        let planned_store = envelope.commit_seq() == self.snapshot + 1
+            && kernel.require_incarnation(self.incarnation).is_ok();
+        if !planned_store {
             let calls: HashSet<ToolCall> =
                 self.reruns.iter().map(|rerun| rerun.call.clone()).collect();
             let live = live_generations(envelope, &calls)?;
@@ -1608,12 +1618,12 @@ enum Reconciled {
     Conflicting,
 }
 
-/// Reconciles the tool generations of a screened batch with the store in one preview. Each call's head is its newest generation in the batch or live in the store. A unit of an older generation is superseded unless it replays a stored receipt; a call whose head is in the batch retires its live predecessors in the batch's commit. Returns each unit's disposition and the retirements to commit as [`Reruns`].
+/// Reconciles the tool generations of a screened batch with the store in one preview. Each call's head is its newest generation in the batch or live in the store. A unit of an older generation is superseded unless it replays a stored receipt; a call whose head is in the batch retires its live predecessors in the batch's commit. Returns each unit's disposition and the retirements to commit as [`Reruns`], `None` when no call retires.
 fn plan_reruns(
     publisher: &SourcePublisher<'_>,
     prepared: &[Prepared<'_>],
     budget: Option<&kernel::applicability::EvalBudget>,
-) -> Result<(Vec<Reconciled>, Reruns), KernelError> {
+) -> Result<(Vec<Reconciled>, Option<Reruns>), KernelError> {
     let generations: Vec<Option<(ToolCall, i64)>> = prepared
         .iter()
         .map(|unit| {
@@ -1628,15 +1638,17 @@ fn plan_reruns(
         *entry = (*entry).max(*generation);
     }
     if newest.is_empty() {
-        return Ok((
-            vec![Reconciled::Kept; prepared.len()],
-            Reruns {
-                snapshot: 0,
-                reruns: Vec::new(),
-            },
-        ));
+        return Ok((vec![Reconciled::Kept; prepared.len()], None));
     }
     let calls: HashSet<ToolCall> = newest.keys().cloned().collect();
+    // Read before the preview, so a restore at any later point changes the incarnation the commit compares.
+    let incarnation = match budget {
+        Some(budget) => publisher
+            .kernel
+            .capture_commit_read_target_within_budget(budget)?,
+        None => publisher.kernel.capture_commit_read_target()?,
+    }
+    .incarnation;
     let (snapshot, (live, reconciled)) =
         publisher
             .kernel
@@ -1666,7 +1678,7 @@ fn plan_reruns(
                 }
                 Ok((live, reconciled))
             })?;
-    let reruns = newest
+    let reruns: Vec<Rerun> = newest
         .into_iter()
         .filter_map(|(call, successor)| {
             let generations = live.get(&call).map(Vec::as_slice).unwrap_or_default();
@@ -1678,7 +1690,14 @@ fn plan_reruns(
             })
         })
         .collect();
-    Ok((reconciled, Reruns { snapshot, reruns }))
+    Ok((
+        reconciled,
+        (!reruns.is_empty()).then_some(Reruns {
+            snapshot,
+            incarnation,
+            reruns,
+        }),
+    ))
 }
 
 /// Retires each of `ids` that names a live descriptor.
@@ -1884,8 +1903,10 @@ mod rerun_tests {
             retired: retired.iter().map(|id| (*id).clone()).collect(),
         };
         // A plan read at snapshot 0 precedes every commit here, so each commit below reads the call again.
+        let incarnation = kernel.capture_commit_read_target().unwrap().incarnation;
         let from_snapshot = |snapshot, rerun| Reruns {
             snapshot,
+            incarnation,
             reruns: vec![rerun],
         };
         for (label, stale) in [
@@ -1894,14 +1915,16 @@ mod rerun_tests {
         ] {
             let stale = from_snapshot(0, stale);
             assert_eq!(
-                kernel.commit(stale.intent(), |envelope| stale.apply(envelope)),
+                kernel.commit(stale.intent(), |envelope| stale.apply(&kernel, envelope)),
                 Err(KernelError::Conflict),
                 "{label}"
             );
         }
         let planned = from_snapshot(0, rerun(200, &[&published[0].object_id]));
         kernel
-            .commit(planned.intent(), |envelope| planned.apply(envelope))
+            .commit(planned.intent(), |envelope| {
+                planned.apply(&kernel, envelope)
+            })
             .unwrap();
         let (_, states) = kernel
             .object_states(&[
@@ -1941,34 +1964,112 @@ mod rerun_tests {
         .map(|reruns| reruns.intent().operation_key)
         .collect();
         assert_eq!(keys.len(), 4);
+        assert_eq!(
+            from_snapshot(0, rerun(200, &[&published[0].object_id]))
+                .intent()
+                .request_digest,
+            from_snapshot(9, rerun(200, &[&published[0].object_id]))
+                .intent()
+                .request_digest,
+            "a batch planned at another tip replays under one digest"
+        );
 
         // A plan whose commit follows another commit reads the call again: generation 300 lands between the plan of 400 and its commit.
         let fourth = generation(400);
         let prepared = publisher.prepare(&fourth, 1_000).unwrap();
-        let (_, plan) = plan_reruns(&publisher, std::slice::from_ref(&prepared), None).unwrap();
+        let plan = plan_reruns(&publisher, std::slice::from_ref(&prepared), None)
+            .unwrap()
+            .1
+            .unwrap();
         assert_eq!(plan.reruns[0].retired, [published[1].object_id.clone()]);
         let third = generation(300);
         let between = publish_batch(&kernel, Vec::new(), &[(&publisher, &third)], 1_000, None)
             .unwrap()
             .remove(0);
+        let tip = kernel.tip().unwrap();
         assert_eq!(
-            kernel.commit(plan.intent(), |envelope| plan.apply(envelope)),
+            kernel.commit(plan.intent(), |envelope| plan.apply(&kernel, envelope)),
             Err(KernelError::Conflict),
             "a generation published after the plan's snapshot"
         );
-        // When the store remains at the replanned snapshot, the commit retires both predecessors.
-        let (_, plan) = plan_reruns(&publisher, std::slice::from_ref(&prepared), None).unwrap();
         let mut both = vec![published[1].object_id.clone(), between.object_id.clone()];
         both.sort();
+        let (_, states) = kernel.object_states(&both).unwrap();
+        assert_eq!(
+            kernel.tip().unwrap(),
+            tip,
+            "the refused commit writes nothing"
+        );
+        assert!(states.iter().all(|state| {
+            state
+                .as_ref()
+                .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
+        }));
+        // When the store remains at the replanned snapshot, the commit retires both predecessors.
+        let plan = plan_reruns(&publisher, std::slice::from_ref(&prepared), None)
+            .unwrap()
+            .1
+            .unwrap();
         assert_eq!(plan.reruns[0].retired, both);
         kernel
-            .commit(plan.intent(), |envelope| plan.apply(envelope))
+            .commit(plan.intent(), |envelope| plan.apply(&kernel, envelope))
             .unwrap();
         let (_, states) = kernel.object_states(&both).unwrap();
         assert!(states.iter().all(|state| {
             state
                 .as_ref()
                 .is_some_and(|state| state.object.invalidated_commit_seq.is_some())
+        }));
+
+        // A restore between a plan and its commit installs another history, whose tip can return to the plan's snapshot: the commit reads the call again.
+        let fifth = generation(500);
+        let held = publish_batch(&kernel, Vec::new(), &[(&publisher, &fifth)], 1_000, None)
+            .unwrap()
+            .remove(0);
+        let backups = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            backups.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let backup = kernel
+            .backup(kernel::BackupRequest {
+                destination_directory: backups.path().to_path_buf(),
+                deadline: Instant::now() + Duration::from_secs(30),
+                capture_pin_expires_at: None,
+            })
+            .unwrap();
+        kernel
+            .commit(intent("after-backup"), |_| Ok(String::new()))
+            .unwrap();
+        let sixth = generation(600);
+        let prepared = publisher.prepare(&sixth, 1_000).unwrap();
+        let plan = plan_reruns(&publisher, std::slice::from_ref(&prepared), None)
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(
+            plan.reruns[0].retired,
+            std::slice::from_ref(&held.object_id)
+        );
+        kernel.restore(&backup.destination_path).unwrap();
+        let restored = generation(550);
+        let other = publish_batch(&kernel, Vec::new(), &[(&publisher, &restored)], 1_000, None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(kernel.tip().unwrap(), plan.snapshot, "the tip returned");
+        assert_eq!(
+            kernel.commit(plan.intent(), |envelope| plan.apply(&kernel, envelope)),
+            Err(KernelError::Conflict),
+            "a generation the restored history holds outside the plan"
+        );
+        let (_, states) = kernel
+            .object_states(&[held.object_id, other.object_id])
+            .unwrap();
+        assert!(states.iter().all(|state| {
+            state
+                .as_ref()
+                .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
         }));
     }
 }
