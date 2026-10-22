@@ -19,7 +19,9 @@ use host_runtime::local_embeddings::{
     EmbedTokens, EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
 };
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::OccurrenceClass;
+use kernel::source_identity::{
+    Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
+};
 use kernel::{
     ArtifactDestination, ArtifactErrorKind, CommitIntent, Dimension, DomainSpec,
     EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress, ScopeSpec,
@@ -992,6 +994,132 @@ fn publication_receipt_digest_layout_is_pinned() {
     assert_eq!(
         digest,
         "9ff69ac08200498a7b8827c97faabbcdfaf323061593dccce0e6ea31668f3723"
+    );
+}
+
+/// A unit's receipt identity is the key and request digest publication records: the key digests the occurrence id, revision, and representation joined by U+001F, and the request digest frames the format tag, text, domain, scope, role, and sensitivity, each after its big-endian `u64` length, then the scope and egress flags. The texts span lengths from empty to past several SHA-256 blocks, a publication stores exactly that key and digest, and a revision outside its canonical spelling has no receipt identity.
+#[test]
+fn receipt_identity_keys_the_occurrence_and_frames_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    let mut units: Vec<SourceUnit> = [0, 1, 7, 8, 55, 56, 63, 64, 65, 119, 120, 1000]
+        .into_iter()
+        .map(|len| pi_text_unit("pi-u1", &("é".repeat(len / 2) + &"a".repeat(len % 2))))
+        .collect();
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", true, 300)).unwrap());
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t2", "pi-a1", false, 301)).unwrap());
+    units.extend(opencode_units(&opencode_session(), &opencode_assistant("msg_a", 5000)).unwrap());
+    for scope_id in [None, Some(SCOPE)] {
+        for egress in [ProviderEgress::LocalOnly, ProviderEgress::RemoteAllowed] {
+            let publisher = SourcePublisher {
+                scope_id,
+                egress,
+                ..corpus.publisher()
+            };
+            for unit in &units {
+                let encoded = encode_preserving_span(&Occurrence {
+                    class: unit.class.code(),
+                    identity: &identity_of(unit),
+                    revision: &unit.revision,
+                    representation: unit.representation.as_str(),
+                    span: None,
+                })
+                .unwrap();
+                let key = format!(
+                    "{}\u{1f}{}\u{1f}{}",
+                    encoded.occurrence_id,
+                    encoded.revision,
+                    unit.representation.as_str()
+                );
+                let mut request = Vec::new();
+                for part in [
+                    "source-request.v1",
+                    unit.text.as_str(),
+                    publisher.domain_id,
+                    scope_id.unwrap_or_default(),
+                    unit.role.as_str(),
+                    publisher.sensitivity.as_str(),
+                ] {
+                    request.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                    request.extend_from_slice(part.as_bytes());
+                }
+                request.push(u8::from(scope_id.is_some()));
+                request.push(match egress {
+                    ProviderEgress::RemoteAllowed => 0,
+                    ProviderEgress::LocalOnly => 1,
+                });
+                assert_eq!(
+                    publisher.receipt_identity(unit),
+                    Some((identity_digest(key.as_bytes()), identity_digest(&request))),
+                    "{unit:?}"
+                );
+            }
+        }
+    }
+    corpus.seed();
+    let (key, digest) = corpus.publisher().receipt_identity(&units[2]).unwrap();
+    corpus.publisher().publish(&units[2], NOW).unwrap();
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let stored: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT operation_key, request_digest FROM operation_receipts
+             WHERE producer='eidnara-daemon/harness-sources'
+               AND operation_key LIKE 'source-descriptor:%'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, [(format!("source-descriptor:{key}"), digest)]);
+    for revision in ["01", "+5", "9223372036854775808"] {
+        let unit = SourceUnit {
+            revision: revision.to_owned(),
+            ..units[2].clone()
+        };
+        assert_eq!(
+            corpus.publisher().receipt_identity(&unit),
+            None,
+            "{revision}"
+        );
+        let refused = corpus.publisher().publish(&unit, NOW);
+        assert!(
+            matches!(
+                refused,
+                Err(PublishError::Descriptor { evidence: None, .. })
+            ),
+            "{revision}: {refused:?}"
+        );
+    }
+}
+
+/// With several fields wrong at once, the Pi adapter names the first one it checks: the role before the timestamp, and the call before the error flag.
+#[test]
+fn pi_refusals_name_the_first_failing_field() {
+    let mut user = pi_user("pi-u1", "hello", 100);
+    let message = user["message"].as_object_mut().unwrap();
+    message.remove("role");
+    message.remove("timestamp");
+    assert_eq!(
+        pi_units(&pi_session(), &user),
+        Err(AdapterRefusal::MissingIdentity("role"))
+    );
+    let mut result = pi_tool_result("pi-t1", "pi-a1", false, 300);
+    let message = result["message"].as_object_mut().unwrap();
+    message.remove("toolCallId");
+    message.insert("isError".to_owned(), json!("false"));
+    message.insert("content".to_owned(), json!("not an array"));
+    assert_eq!(
+        pi_units(&pi_session(), &result),
+        Err(AdapterRefusal::MissingIdentity("toolCallId"))
+    );
+    let mut result = pi_tool_result("pi-t1", "pi-a1", false, 300);
+    result.as_object_mut().unwrap().remove("parentId");
+    result["message"]["timestamp"] = json!(-1);
+    assert_eq!(
+        pi_units(&pi_session(), &result),
+        Err(AdapterRefusal::MalformedRevision("timestamp"))
     );
 }
 

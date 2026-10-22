@@ -7,7 +7,7 @@
 //! Capture publication ([`publish_screened`]) bounds what one batch retains. A unit whose text exceeds [`MAX_SOURCE_UNIT_BYTES`] is refused whole, because a spliced prefix is not an exact source. A batch admits at most [`MAX_SOURCE_BATCH_UNITS`] units and [`MAX_SOURCE_BATCH_BYTES`] of text, and defers the rest to a later pass. Size, identity, revision, and scope refusals are decided per unit before the kernel transaction, so they leave every sibling admissible; the transaction stays all-or-nothing over the admitted units.
 
 use kernel::source_identity::{
-    HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
+    HARNESSES, Occurrence, OccurrenceClass, lower_hex, occurrence_id_preserving_span,
 };
 
 const _: () = assert!(
@@ -21,6 +21,7 @@ use kernel::{
     SourceDescriptorRequest, TaintClass,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,8 +146,12 @@ pub enum AdapterRefusal {
 }
 
 fn field<'v>(value: &'v Value, name: &'static str) -> Result<&'v str, AdapterRefusal> {
+    nonempty(value.get(name), name)
+}
+
+/// The non-empty string `value` holds, or the refusal naming the missing `name`.
+fn nonempty<'v>(value: Option<&'v Value>, name: &'static str) -> Result<&'v str, AdapterRefusal> {
     value
-        .get(name)
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .ok_or(AdapterRefusal::MissingIdentity(name))
@@ -322,27 +327,29 @@ pub fn pi_units(
         Some(_) => return Err(AdapterRefusal::UnsupportedShape("type")),
     }
     let entry_id = field(entry, "id")?;
-    let message = entry
-        .get("message")
-        .filter(|message| message.is_object())
-        .ok_or(AdapterRefusal::MissingIdentity("message"))?;
-    let role = field(message, "role")?;
+    let message = PiMessage::read(
+        entry
+            .get("message")
+            .and_then(Value::as_object)
+            .ok_or(AdapterRefusal::MissingIdentity("message"))?,
+    );
+    let role = nonempty(message.role, "role")?;
     if !matches!(role, "user" | "assistant" | "toolResult") {
         return Err(AdapterRefusal::UnsupportedShape("message.role"));
     }
-    let stamp = revision(message.get("timestamp"), "timestamp")?;
+    let stamp = revision(message.timestamp, "timestamp")?;
     let mut units = Vec::new();
     if role == "toolResult" {
         let tool = ToolBlock {
             parent_message_id: field(entry, "parentId")?,
-            tool_call_id: field(message, "toolCallId")?,
+            tool_call_id: nonempty(message.tool_call_id, "toolCallId")?,
             result_revision: stamp,
             is_error: message
-                .get("isError")
+                .is_error
                 .and_then(Value::as_bool)
                 .ok_or(AdapterRefusal::UnsupportedShape("message.isError"))?,
         };
-        for (index, item) in content_items(message)?.iter().enumerate() {
+        for (index, item) in message.content_items()?.iter().enumerate() {
             let text = item
                 .get("text")
                 .and_then(Value::as_str)
@@ -352,12 +359,12 @@ pub fn pi_units(
         }
         return Ok(units);
     }
-    match message.get("content") {
+    match message.content {
         Some(Value::String(text)) => {
             units.push(session.message_unit(entry_id, 0, &stamp, role, text))
         }
         _ => {
-            for (index, item) in content_items(message)?.iter().enumerate() {
+            for (index, item) in message.content_items()?.iter().enumerate() {
                 if item.get("type").and_then(Value::as_str) == Some("text") {
                     let text = item
                         .get("text")
@@ -371,11 +378,38 @@ pub fn pi_units(
     Ok(units)
 }
 
-fn content_items(message: &Value) -> Result<&Vec<Value>, AdapterRefusal> {
-    message
-        .get("content")
-        .and_then(Value::as_array)
-        .ok_or(AdapterRefusal::UnsupportedShape("content"))
+/// The members of a Pi message the adapter reads, collected in one pass over the message object.
+#[derive(Default)]
+struct PiMessage<'v> {
+    role: Option<&'v Value>,
+    timestamp: Option<&'v Value>,
+    content: Option<&'v Value>,
+    tool_call_id: Option<&'v Value>,
+    is_error: Option<&'v Value>,
+}
+
+impl<'v> PiMessage<'v> {
+    fn read(message: &'v serde_json::Map<String, Value>) -> Self {
+        let mut read = Self::default();
+        for (key, value) in message {
+            let slot = match key.as_str() {
+                "role" => &mut read.role,
+                "timestamp" => &mut read.timestamp,
+                "content" => &mut read.content,
+                "toolCallId" => &mut read.tool_call_id,
+                "isError" => &mut read.is_error,
+                _ => continue,
+            };
+            *slot = Some(value);
+        }
+        read
+    }
+
+    fn content_items(&self) -> Result<&'v Vec<Value>, AdapterRefusal> {
+        self.content
+            .and_then(Value::as_array)
+            .ok_or(AdapterRefusal::UnsupportedShape("content"))
+    }
 }
 
 /// The receipt outcome of publishing one unit.
@@ -646,7 +680,7 @@ impl SourcePublisher<'_> {
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
-        let encoded = encode_preserving_span(&Occurrence {
+        let (occurrence_id, revision) = occurrence_id_preserving_span(&Occurrence {
             class: unit.class.code(),
             identity: &identity,
             revision: &unit.revision,
@@ -661,14 +695,14 @@ impl SourcePublisher<'_> {
         // A native timestamp may not lead the observation; a canonical revision and a repository document's observation count are counters, not judged against the clock.
         if !rule.is_inherited()
             && unit.class != OccurrenceClass::RepositoryDocuments
-            && encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
+            && revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
         {
             return Err(PublishError::RevisionAhead {
-                revision: encoded.revision,
+                revision,
                 observed_at,
             });
         }
-        let key = receipt_key(&encoded, unit.representation);
+        let key = receipt_key(&occurrence_id, revision, unit.representation);
         // Reject project-bound units without a scope before retention: no project route serves unscoped rows.
         let project = match (unit.identity_value("project_id"), self.scope_id) {
             (Some(project_id), Some(_)) => Some(ProjectScope::new(project_id).map_err(
@@ -688,8 +722,8 @@ impl SourcePublisher<'_> {
         Ok(Prepared {
             unit,
             identity,
-            occurrence_id: encoded.occurrence_id,
-            revision: encoded.revision,
+            occurrence_id,
+            revision,
             rule,
             key,
             request_digest: self.request_digest(unit),
@@ -705,7 +739,7 @@ impl SourcePublisher<'_> {
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
-        let encoded = encode_preserving_span(&Occurrence {
+        let (occurrence_id, revision) = occurrence_id_preserving_span(&Occurrence {
             class: unit.class.code(),
             identity: &identity,
             revision: &unit.revision,
@@ -714,7 +748,7 @@ impl SourcePublisher<'_> {
         })
         .ok()?;
         Some((
-            receipt_key(&encoded, unit.representation),
+            receipt_key(&occurrence_id, revision, unit.representation),
             self.request_digest(unit),
         ))
     }
@@ -898,8 +932,10 @@ impl SourcePublisher<'_> {
     }
 
     /// The request digest binds text, domain, scope, role, sensitivity, and provider-egress policy. Changing any of these under the same receipt key conflicts rather than replaying.
+    ///
+    /// The parts are hashed in place, each after its big-endian `u64` length, so the unit's text is read once and never copied.
     fn request_digest(&self, unit: &SourceUnit) -> String {
-        let mut bytes = Vec::new();
+        let mut hasher = Sha256::new();
         for part in [
             REQUEST_DIGEST_FORMAT,
             unit.text.as_str(),
@@ -908,32 +944,29 @@ impl SourcePublisher<'_> {
             unit.role.as_str(),
             self.sensitivity.as_str(),
         ] {
-            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(part.as_bytes());
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part.as_bytes());
         }
-        bytes.push(u8::from(self.scope_id.is_some()));
-        bytes.push(match self.egress {
-            ProviderEgress::RemoteAllowed => 0,
-            ProviderEgress::LocalOnly => 1,
-        });
-        identity_digest(&bytes)
+        hasher.update([
+            u8::from(self.scope_id.is_some()),
+            match self.egress {
+                ProviderEgress::RemoteAllowed => 0,
+                ProviderEgress::LocalOnly => 1,
+            },
+        ]);
+        lower_hex(&hasher.finalize())
     }
 }
 
-/// Both receipts of a unit are keyed by its occurrence, revision, and representation.
-fn receipt_key(
-    encoded: &kernel::source_identity::EncodedOccurrence,
-    representation: Representation,
-) -> String {
-    identity_digest(
-        format!(
-            "{}\u{1f}{}\u{1f}{}",
-            encoded.occurrence_id,
-            encoded.revision,
-            representation.as_str()
-        )
-        .as_bytes(),
-    )
+/// Both receipts of a unit are keyed by its occurrence, revision, and representation: the digest of `occurrence_id`, the decimal revision, and the representation, joined by U+001F.
+fn receipt_key(occurrence_id: &str, revision: i64, representation: Representation) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(occurrence_id.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(revision.to_string());
+    hasher.update([0x1f]);
+    hasher.update(representation.as_str());
+    lower_hex(&hasher.finalize())
 }
 
 /// Writes inside a commit and returns the result recorded under the write's key.
