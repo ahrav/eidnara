@@ -86,7 +86,7 @@ static NON_DENSE_CLASSES: LazyLock<String> = LazyLock::new(|| {
 
 /// The live population's rows in rowid order for a ranked walk: the rowid, the identifier, and the two identity fields the walk validates.
 /// Rowid order reads each table page once, where identifier order reaches every row through the primary-key index.
-/// The schema's class check admits only the classes of [`OccurrenceClass::ALL`], so comparing each row against the vector-free classes selects the dense-required rows, and the one-code list compiles to a single comparison.
+/// The schema's class check admits only the classes of [`OccurrenceClass::ALL`], so comparing each row against the short list of vector-free classes selects the dense-required rows.
 pub(super) static LIVE_ROWID_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT o.rowid,o.occurrence_id,o.source_object_id,o.source_artifact_digest

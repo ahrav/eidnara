@@ -2495,7 +2495,7 @@ fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
     }
 }
 
-/// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below a retired head is refused while the head plus one republishes; and a projection builds from a store holding the class.
+/// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below the retired head or past the head plus one is refused while the head plus one republishes; and a projection builds from a store holding the class.
 #[test]
 fn repository_documents_publish_untrusted_supersede_and_project() {
     let dir = tempfile::tempdir().unwrap();
@@ -2545,18 +2545,23 @@ fn repository_documents_publish_untrusted_supersede_and_project() {
             Ok(String::new())
         })
         .unwrap();
-    // Revisions 1 and 2 hold receipts; revision 0 is a fresh proposal below the retired head.
-    let stale = publisher.publish(&document_unit("ARCHITECTURE.md", "0", "# again\n"), NOW);
-    assert!(
-        matches!(
-            stale,
-            Err(PublishError::Descriptor {
-                refusal: SourceDescriptorError::HeadMismatch,
-                ..
-            })
-        ),
-        "{stale:?}"
-    );
+    // Revisions 1 and 2 hold receipts; revision 0 is below the retired head, and 5 skips the head plus one.
+    for (revision, refusal) in [
+        ("0", SourceDescriptorError::RevisionNotAdvanced),
+        ("5", SourceDescriptorError::HeadMismatch),
+    ] {
+        let refused = publisher.publish(
+            &document_unit("ARCHITECTURE.md", revision, "# again\n"),
+            NOW,
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(PublishError::Descriptor { refusal: actual, .. }) if *actual == refusal
+            ),
+            "{revision}: {refused:?}"
+        );
+    }
     let republished = publisher
         .publish(&document_unit("ARCHITECTURE.md", "3", "# again\n"), NOW)
         .unwrap();

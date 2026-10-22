@@ -55,6 +55,11 @@ fn the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder() {
         eval_core::OBJECT_FORMATS,
         kernel::source_identity::OBJECT_FORMATS
     );
+    assert_eq!(
+        eval_core::OccurrenceClass::ALL.map(|class| class.code()),
+        OccurrenceClass::ALL.map(|class| class.code()),
+        "both mirrors hold one class set in one order"
+    );
     for class in OccurrenceClass::ALL {
         let core = eval_core::OccurrenceClass::from_code(class.code()).unwrap();
         assert_eq!(core.identity_fields(), class.identity_fields());

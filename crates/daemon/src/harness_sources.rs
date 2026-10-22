@@ -421,7 +421,7 @@ pub enum PublishError {
     /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
     #[error("the native revision {revision} leads the observation at {observed_at}")]
     RevisionAhead { revision: i64, observed_at: i64 },
-    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, or a mismatched domain after the evidence was retained.
+    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, a mismatched domain, or a repository document's lineage head that moved after the evidence was retained. A moved head refuses the same unit again; the producer reads the head and proposes a new unit.
     #[error("the descriptor was refused: {refusal}")]
     Descriptor {
         refusal: SourceDescriptorError,
@@ -663,8 +663,9 @@ impl SourcePublisher<'_> {
             evidence: None,
         })?;
         let rule = provenance(unit);
-        // A native timestamp may not lead the observation; a canonical revision is the kernel's own counter and is not judged against the clock.
+        // A native timestamp may not lead the observation; a canonical revision and a repository document's observation count are counters, not judged against the clock.
         if !rule.is_inherited()
+            && unit.class != OccurrenceClass::RepositoryDocuments
             && encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
         {
             return Err(PublishError::RevisionAhead {
@@ -1278,7 +1279,7 @@ impl Prepared<'_> {
         format!("srcev-object:{}", self.key)
     }
 
-    /// A `repository_documents` revision is its lineage's historical head plus one, so the head the publication expects is the revision before it; revision 1 starts an empty lineage. Every other class has no head guard.
+    /// The head a `repository_documents` publication expects. Its producer reads the lineage's historical head ([`kernel::KernelStore::source_lineage_head`]) and proposes exactly the head plus one, 1 for an empty lineage, so the expected head is the revision before the proposal and any gap refuses as a moved head. Every other class names no head.
     fn expected_head(&self) -> Option<i64> {
         (self.unit.class == OccurrenceClass::RepositoryDocuments && self.revision > 1)
             .then(|| self.revision - 1)

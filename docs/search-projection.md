@@ -16,7 +16,10 @@ exactly `OccurrenceClass::ALL`, and the per-class identity contract is in
 `repository_documents` joined the set at schema version 8, keyed by
 `(project_id, repository_id, relative_path)` with representation `text`. A
 projection built at an earlier schema version fails `SchemaMismatch` and
-rebuilds from the Kernel; it is never migrated.
+rebuilds from the Kernel; it is never migrated. A binary built before schema
+version 8 cannot re-encode a `repository_documents` descriptor and fails its
+export, so the producer of the class activates only after every older binary
+is retired, and a store holding such rows does not roll back below version 8.
 
 ## Records
 

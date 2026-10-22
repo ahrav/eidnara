@@ -2001,7 +2001,7 @@ fn document(revision: &str) -> Occurrence<'_> {
     }
 }
 
-/// A `repository_documents` revision must exceed every revision its lineage ever held, retired rows included, and commits only while the lineage's historical head equals the caller's expected head (F10). Messages keep the live-predecessor rule.
+/// A `repository_documents` revision must exceed every revision its lineage ever held, retired rows included, and commits only while the lineage's historical head equals the caller's expected head (F10). The head is per lineage and readable through `source_lineage_head`; messages keep the live-predecessor rule and name no head. Coverage witness `retired_lineage_republished`: the lineage is retired at head 3, then republished at 4.
 #[test]
 fn repository_document_revisions_exceed_the_historical_head_including_retired_rows() {
     let fixture = Fixture::open();
@@ -2052,7 +2052,17 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
     );
     assert_eq!(
         publish("doc-2-stale-head", "2", Some(1), 1).err(),
-        Some(SourceDescriptorError::HeadMismatch)
+        Some(SourceDescriptorError::RevisionNotAdvanced),
+        "a stale revision is refused as stale whatever head it names"
+    );
+    assert_eq!(
+        publish("doc-3-at-head", "3", Some(3), 2).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced),
+        "a revision equal to the retired head is refused"
+    );
+    assert_eq!(
+        publish("doc-0", "0", Some(3), 0).err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
     );
     assert_eq!(
         publish("doc-4-stale-head", "4", Some(2), 3).err(),
@@ -2065,14 +2075,81 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
         "every refusal committed nothing"
     );
 
+    // The lineage's own domain decides before its head: another domain is refused as such.
+    fixture
+        .store
+        .commit(intent("doc-other-domain"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: "other-domain".to_string(),
+                object_id: "other-domain-object".to_string(),
+                name: "other".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "other-domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .publish(
+                "doc-4-foreign",
+                &SourceDescriptorRequest {
+                    domain_id: "other-domain",
+                    expected_head: Some(3),
+                    ..request(document("4"), &evidence[3], texts[3])
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::DomainMismatch)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+
     // A fresh observation of the head publishes above it.
+    let lineage = encode(&document("4"), texts[3]).unwrap().lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(3)
+    );
     let (fourth, _, _) = publish("doc-4", "4", Some(3), 3).unwrap();
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(4)
+    );
     assert!(fourth.replaced_object_id.is_none());
     assert_eq!(fixture.live(&fourth.object_id), Some(true));
     assert_eq!(
         fixture.descriptor_object_ids_at_tip(),
         vec![fourth.object_id]
     );
+
+    // Another path is its own lineage with its own head.
+    const OTHER_DOC: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("repository_id", "repo-0"),
+        ("relative_path", "STRUCTURE.md"),
+    ];
+    let other = |revision| Occurrence {
+        identity: OTHER_DOC,
+        ..document(revision)
+    };
+    assert_eq!(
+        fixture
+            .publish(
+                "structure-claims-a-head",
+                &SourceDescriptorRequest {
+                    expected_head: Some(4),
+                    ..request(other("1"), &evidence[0], texts[0])
+                },
+            )
+            .err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
+    fixture
+        .publish("structure-1", &request(other("1"), &evidence[0], texts[0]))
+        .unwrap();
 
     // Other classes name no head.
     let message_evidence = fixture.retain("msg-head", "message text");
@@ -2086,6 +2163,6 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
                 },
             )
             .err(),
-        Some(SourceDescriptorError::HeadMismatch)
+        Some(SourceDescriptorError::Kernel(KernelError::InvalidInput))
     );
 }
