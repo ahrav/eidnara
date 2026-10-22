@@ -1932,6 +1932,10 @@ pub(crate) fn transform_with_projection_cached(
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
     let result = apply_once_with_estimator(store, req, ctx, crate::token_cache::ExactTokens);
+    if result.is_err() {
+        // A failed pass sends no composed block, so it leaves no documents for capture.
+        crate::project_docs::clear_reads(ctx.document_reads);
+    }
     record_stable_pass_trace(store, req, &result);
     result
 }

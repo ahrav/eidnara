@@ -2119,6 +2119,14 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
         fixture.store.source_lineage_head(&lineage).unwrap(),
         Some(4)
     );
+    let (_, previewed) = fixture
+        .store
+        .preview(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            |preview| preview.source_lineage_head(&lineage),
+        )
+        .unwrap();
+    assert_eq!(previewed, Some(4), "a preview reads the same head");
     assert!(fourth.replaced_object_id.is_none());
     assert_eq!(fixture.live(&fourth.object_id), Some(true));
     assert_eq!(

@@ -361,7 +361,7 @@ impl SourceCapture {
                 _ => 0,
             })
             .sum();
-        // The adapters copy about the window's bytes once more, and the job tops up for any excess; a document's text is held once as read and once as its unit's.
+        // The adapters copy about the window's bytes once more, and the job tops up for any excess. A document's text is charged twice as well: its unit holds it, and the second share covers the copy publication makes.
         let bytes = window_bytes
             .saturating_add(document_bytes)
             .saturating_mul(2)
@@ -757,6 +757,7 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return Count::Deadline;
         }
+        let count = documents.len();
         // The live rows and the lineage heads are read under one reader wait cut to the job's deadline.
         let steps = store.preview(self.preview_deadline(), |preview| {
             let live = self.live_documents(preview)?;
@@ -767,7 +768,10 @@ impl CaptureJob {
         });
         let steps = match steps {
             Ok((_, steps)) => steps,
-            Err(error) => return kernel_end(error),
+            Err(error) => {
+                self.capture.counters.add(Count::DocumentsRefused, count);
+                return kernel_end(error);
+            }
         };
         let mut units = Vec::new();
         for step in steps {
@@ -775,6 +779,7 @@ impl CaptureJob {
                 DocumentStep::Publish(unit) => units.push(unit),
                 DocumentStep::Retire(object_id) => {
                     if let Err(error) = self.retire_document(store, &object_id) {
+                        self.capture.counters.add(Count::DocumentsRefused, 1);
                         return kernel_end(error);
                     }
                     self.capture.counters.add(Count::DocumentsRetired, 1);
@@ -793,6 +798,7 @@ impl CaptureJob {
                             Count::UnitsReplayed
                         }
                         UnitDisposition::Published(_) => Count::UnitsPublished,
+                        // Every other disposition of a document counts here: a refused identity or revision, an oversize or deferred unit.
                         _ => Count::DocumentsRefused,
                     };
                     self.capture.counters.add(count, 1);
@@ -911,7 +917,7 @@ impl CaptureJob {
 
     /// A preview's reader wait: the receipt wait, cut to the job's deadline.
     fn preview_deadline(&self) -> Instant {
-        let wait = Instant::now() + DOCUMENT_PREVIEW_WAIT;
+        let wait = Instant::now() + PREVIEW_WAIT;
         self.budget
             .deadline()
             .map_or(wait, |deadline| deadline.min(wait))
@@ -991,8 +997,8 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
 
 /// Live descriptors one session-retirement page retires.
 pub(crate) const SESSION_RETIREMENT_PAGE: usize = 256;
-/// How long a session-retirement preview waits for a pooled reader.
-const SESSION_RETIREMENT_WAIT: Duration = Duration::from_secs(5);
+/// How long a session-retirement or document preview waits for a pooled reader.
+const PREVIEW_WAIT: Duration = Duration::from_secs(5);
 /// Leads the bytes a session-retirement page's receipt key binds.
 const SESSION_RETIREMENT_FORMAT: &str = "source-session-retire.v1";
 
@@ -1016,7 +1022,7 @@ pub(crate) fn retire_session_pages(
     pages: usize,
 ) -> Result<bool, KernelError> {
     for _ in 0..pages {
-        let (_, page) = store.preview(Instant::now() + SESSION_RETIREMENT_WAIT, |preview| {
+        let (_, page) = store.preview(Instant::now() + PREVIEW_WAIT, |preview| {
             session_page(preview, session, page_rows)
         })?;
         if page.is_empty() {
@@ -1094,9 +1100,6 @@ fn session_page(
     page.sort();
     Ok(page)
 }
-
-/// How long a document preview waits for a pooled reader.
-const DOCUMENT_PREVIEW_WAIT: Duration = Duration::from_secs(5);
 
 /// What capture does with one configured document.
 enum DocumentStep {
