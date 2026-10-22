@@ -441,7 +441,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
         let published = publisher.publish(unit, NOW).unwrap();
         assert!(!published.replayed);
         assert_eq!(
-            published.provenance,
+            published.admission,
             (
                 SourceClass::UntrustedRepoText,
                 TaintClass::RepoUntrustedText

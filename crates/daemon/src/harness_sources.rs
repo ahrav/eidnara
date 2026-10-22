@@ -16,9 +16,9 @@ const _: () = assert!(
 );
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactErrorKind, ArtifactHandle, ArtifactIngestRequest,
-    CommitIntent, EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceClass, SourceDescriptorError, SourceDescriptorOutcome,
-    SourceDescriptorPolicy, SourceDescriptorRequest, TaintClass,
+    CommitIntent, EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, Sensitivity,
+    SourceClass, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
+    SourceDescriptorRequest, TaintClass,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -128,15 +128,8 @@ impl SourceUnit {
         }
     }
 
-    /// A commit's bytes name the repository and object they were read from. The store treats that as affirmative provenance: an asserted `Normal` class is kept instead of folded to `Sensitive`, so the publisher's `sensitivity` decides whether repository text may leave the host. `None` for a unit that is not a commit or lacks either field; the encoder has already refused the latter.
-    fn repository_provenance(&self) -> Option<RepositoryProvenance> {
-        if self.class != OccurrenceClass::GitCommits {
-            return None;
-        }
-        Some(RepositoryProvenance {
-            repository_id: self.identity_value("repository_id")?.to_owned(),
-            revision: self.identity_value("oid")?.to_owned(),
-        })
+    pub(crate) fn identity_value_of(&self, name: &str) -> Option<&str> {
+        self.identity_value(name)
     }
 }
 
@@ -395,7 +388,7 @@ pub struct Published {
     /// The kernel answered from a stored receipt: the same unit was published before.
     pub replayed: bool,
     /// The admission classes the unit was recorded under.
-    pub provenance: (SourceClass, TaintClass),
+    pub admission: (SourceClass, TaintClass),
 }
 
 /// Evidence retained before publication failed. Only permanent descriptor refusals attempt compensation.
@@ -522,7 +515,7 @@ impl SourcePublisher<'_> {
         let evidence_object_id = unit.evidence_object_id();
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.descriptor_intent(&unit);
-        let (_, (stored, provenance)) = self
+        let (_, (stored, admission)) = self
             .kernel
             .preview(preview_deadline(budget), |preview| {
                 self.check_scope(&unit, preview)?;
@@ -548,7 +541,7 @@ impl SourcePublisher<'_> {
                 evidence_object_id,
                 replaced_object_id: None,
                 replayed: true,
-                provenance,
+                admission,
             });
         }
         let handle = self
@@ -572,7 +565,7 @@ impl SourcePublisher<'_> {
         let mut refusal = None;
         let mut outcome = None;
         let operation = |envelope: &mut kernel::Envelope<'_>| {
-            let (published, provenance) = self.apply(
+            let (published, admission) = self.apply(
                 envelope,
                 &unit,
                 &handle,
@@ -581,7 +574,7 @@ impl SourcePublisher<'_> {
                 &mut refusal,
             )?;
             let result = published.object_id.clone();
-            outcome = Some((published, provenance));
+            outcome = Some((published, admission));
             Ok(result)
         };
         let receipt = match budget {
@@ -591,13 +584,13 @@ impl SourcePublisher<'_> {
             None => self.kernel.commit(descriptor_intent, operation),
         };
         match (receipt, outcome) {
-            (Ok(receipt), Some((published, committed_provenance))) => Ok(Published {
+            (Ok(receipt), Some((published, committed_admission))) => Ok(Published {
                 object_id: published.object_id,
                 occurrence_id: published.occurrence_id,
                 evidence_object_id,
                 replaced_object_id: published.replaced_object_id,
                 replayed: receipt.replayed,
-                provenance: committed_provenance,
+                admission: committed_admission,
             }),
             // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned.
             (Ok(receipt), None) => Ok(Published {
@@ -606,7 +599,7 @@ impl SourcePublisher<'_> {
                 evidence_object_id,
                 replaced_object_id: None,
                 replayed: true,
-                provenance,
+                admission,
             }),
             (Err(error), _) => {
                 let error = match refusal {
@@ -662,7 +655,7 @@ impl SourcePublisher<'_> {
             refusal: SourceDescriptorError::from(refusal),
             evidence: None,
         })?;
-        let rule = provenance(unit);
+        let rule = admission_rule(unit);
         // A native timestamp may not lead the observation; a canonical revision and a repository document's observation count are counters, not judged against the clock.
         if !rule.is_inherited()
             && unit.class != OccurrenceClass::RepositoryDocuments
@@ -673,15 +666,7 @@ impl SourcePublisher<'_> {
                 observed_at,
             });
         }
-        let key = identity_digest(
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                encoded.occurrence_id,
-                encoded.revision,
-                unit.representation.as_str()
-            )
-            .as_bytes(),
-        );
+        let key = receipt_key(&encoded, unit.representation);
         // Reject project-bound units without a scope before retention: no project route serves unscoped rows.
         let project = match (unit.identity_value("project_id"), self.scope_id) {
             (Some(project_id), Some(_)) => Some(ProjectScope::new(project_id).map_err(
@@ -709,6 +694,27 @@ impl SourcePublisher<'_> {
             origin: unit.origin().to_owned(),
             project,
         })
+    }
+
+    /// The unit's receipt key and request digest, the pair a stored receipt answers for, or `None` when its identity does not encode. Changed bytes or publishing context under one key give another digest.
+    pub fn receipt_identity(&self, unit: &SourceUnit) -> Option<(String, String)> {
+        let identity: Vec<(&str, &str)> = unit
+            .identity
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        let encoded = encode_preserving_span(&Occurrence {
+            class: unit.class.code(),
+            identity: &identity,
+            revision: &unit.revision,
+            representation: unit.representation.as_str(),
+            span: None,
+        })
+        .ok()?;
+        Some((
+            receipt_key(&encoded, unit.representation),
+            self.request_digest(unit),
+        ))
     }
 
     fn check_scope(
@@ -807,7 +813,7 @@ impl SourcePublisher<'_> {
     }
 
     fn evidence_request(&self, unit: &Prepared<'_>) -> ArtifactIngestRequest {
-        ArtifactIngestRequest {
+        let mut request = ArtifactIngestRequest {
             intent: self.evidence_intent(unit),
             payload: unit.unit.text.as_bytes().to_vec(),
             evidence_id: format!("srcev:{}", unit.key),
@@ -822,8 +828,11 @@ impl SourcePublisher<'_> {
             retain_until: None,
             asserted_sensitivity: self.sensitivity,
             provider_egress: self.egress,
-            provenance: unit.unit.repository_provenance(),
-        }
+            provenance: None,
+        };
+        // Only the git publisher's commit provenance is ever retained; this publisher constructs none.
+        request.provenance = crate::git_sources::commit_provenance(unit.unit);
+        request
     }
 
     /// The class the store recorded for the evidence object at ingest.
@@ -911,6 +920,22 @@ impl SourcePublisher<'_> {
     }
 }
 
+/// Both receipts of a unit are keyed by its occurrence, revision, and representation.
+fn receipt_key(
+    encoded: &kernel::source_identity::EncodedOccurrence,
+    representation: Representation,
+) -> String {
+    identity_digest(
+        format!(
+            "{}\u{1f}{}\u{1f}{}",
+            encoded.occurrence_id,
+            encoded.revision,
+            representation.as_str()
+        )
+        .as_bytes(),
+    )
+}
+
 /// Writes inside a commit and returns the result recorded under the write's key.
 pub type EnvelopeWrite<'a> =
     Box<dyn FnOnce(&mut kernel::Envelope<'_>) -> Result<String, KernelError> + 'a>;
@@ -992,8 +1017,7 @@ pub fn publish_batch(
     let mut outcomes: Vec<Option<Published>> = Vec::with_capacity(units.len());
     let mut pending = Vec::new();
     let mut retained = std::collections::HashMap::new();
-    for (index, (unit, (stored, provenance, evidence))) in
-        prepared.iter().zip(previewed).enumerate()
+    for (index, (unit, (stored, admission, evidence))) in prepared.iter().zip(previewed).enumerate()
     {
         // Evidence an earlier attempt retained without publishing its descriptor is cited again: exact retention stores the unit's bytes under their own digest.
         if let Some(evidence) = evidence {
@@ -1012,7 +1036,7 @@ pub fn publish_batch(
                 evidence_object_id: unit.evidence_object_id(),
                 replaced_object_id: None,
                 replayed: true,
-                provenance,
+                admission,
             })),
             None => {
                 outcomes.push(None);
@@ -1082,7 +1106,7 @@ pub fn publish_batch(
                         .map_err(|error| (error, false))?
                         .object
                         .sensitivity;
-                    let (descriptor, provenance) = publisher
+                    let (descriptor, admission) = publisher
                         .apply(envelope, unit, handle, sensitivity, observed_at, &mut None)
                         .map_err(|error| (error, false))?;
                     if records_receipt {
@@ -1093,10 +1117,10 @@ pub fn publish_batch(
                             )
                             .map_err(|error| (error, true))?;
                     }
-                    Ok((descriptor, provenance))
+                    Ok((descriptor, admission))
                 };
                 // A conflict on the unit's own receipt is another writer's commit since the preview, possibly of these very bytes; the next attempt's preview tells a replay from a conflict.
-                let (descriptor, provenance) = step().map_err(|(error, receipt)| {
+                let (descriptor, admission) = step().map_err(|(error, receipt)| {
                     if !(receipt && error == KernelError::Conflict) {
                         culprit = Some(index);
                     }
@@ -1111,7 +1135,7 @@ pub fn publish_batch(
                     evidence_object_id,
                     replaced_object_id: descriptor.replaced_object_id,
                     replayed: false,
-                    provenance,
+                    admission,
                 });
             }
             Ok(main_result.expect("the batch commits a write or a unit"))
@@ -1323,7 +1347,7 @@ impl ProvenanceRule {
 }
 
 /// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, a commit message or repository document is untrusted repository text, user text is explicit, and other text is model inference. Only a commit carries repository provenance, so working-tree document bytes store `Sensitive`. The caller has encoded the unit, so the class's identity field is present.
-fn provenance(unit: &SourceUnit) -> ProvenanceRule {
+fn admission_rule(unit: &SourceUnit) -> ProvenanceRule {
     match (unit.class, unit.role.as_str()) {
         (OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory, _) => {
             ProvenanceRule::Inherited {

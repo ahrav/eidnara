@@ -1569,7 +1569,7 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
         assert_eq!(units.len(), expected.len(), "{units:?}");
         for (unit, expected_provenance) in units.iter().zip(expected) {
             let published = publisher.publish(unit, NOW).unwrap();
-            assert_eq!(published.provenance, *expected_provenance, "{unit:?}");
+            assert_eq!(published.admission, *expected_provenance, "{unit:?}");
             let admissions: Vec<(String, String, String)> = kernel_db
                 .prepare(
                     "SELECT a.source_class,a.taint_class,e.object_id
@@ -2510,7 +2510,7 @@ fn repository_documents_publish_untrusted_supersede_and_project() {
         )
         .unwrap();
     assert_eq!(
-        first.provenance,
+        first.admission,
         (
             SourceClass::UntrustedRepoText,
             TaintClass::RepoUntrustedText
