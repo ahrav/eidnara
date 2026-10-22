@@ -8,7 +8,7 @@ Existing-behavior record KD-E04 of #1060's Property Catalog section A
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - Registration: `setEidnaraReduceRegisteredGlobally(!compactionOff)`
@@ -16,16 +16,16 @@ All references are verified at `a15da13a4`, the head of #1071, which holds
   `eidnara_reduce` when `compactionOff`
   (`packages/pi-plugin/src/tools/index.ts:96`).
 - Pass fields: `reduceRegistered: !compactionOff` and
-  `todowriteRegistered: todowriteEnabled` (`index.ts:595-596`), mapped to
+  `todowriteRegistered: todowriteEnabled` (`index.ts:597-598`), mapped to
   `tool_present` and `todo_tool_present` by `piPassFields`
   (`packages/pi-plugin/src/transform/pi-pass-inputs.ts`).
 - At baseline the field was hardcoded `true`.
 - Witnesses: the capability matrix
   (`packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100`) over all
   four pairs; the integrated compaction-off passes
-  (`packages/pi-plugin/src/transform/pi-delivery.test.ts:182`) with
+  (`packages/pi-plugin/src/transform/pi-delivery.test.ts:184`) with
   `tool_present: false` and `todo_tool_present: true`; the cross-binding
-  comparison (`:213`) with `[true, true]` in a compaction-on process and
+  comparison (`:236`) with `[true, true]` in a compaction-on process and
   `[false, true]` in a compaction-off one; the registration set
   (`packages/pi-plugin/src/tools/index.test.ts:19`).
 
@@ -47,7 +47,7 @@ off-mode pass after registration.
 
 ### Q: Is the field derived from registration rather than configuration?
 
-- Sources examined: `index.ts:382-384`, `:595`.
+- Sources examined: `index.ts:382-384`, `:597`.
 - Findings: Yes. A withdrawn routed project inside a compaction-on process
   still reports `true`, because the process registered the tool.
 - Missing evidence: None.

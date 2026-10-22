@@ -109,7 +109,8 @@ transport (preserved; application revision 3 is a separate version), codec
 unification and CK removal (revision 4), oversized unmanaged cold import
 (non-goal; refusal belongs to window admission; since #1060 the half-cap cold
 import applies only while the consumer's configuration lets Eidnara fold, and
-a native consumer with no pin from a folding run submits its whole array),
+a consumer whose configuration withdraws fold authority submits its whole
+array),
 host loading of all N
 messages (outside plugin and daemon ownership), and distributed consensus (no
 such mechanism on this surface).
@@ -745,21 +746,28 @@ gates.
 Guarantee: A non-null boundary names the first message of the complete host
 suffix submitted in both representations, while null submits the whole host
 array, or, while the consumer's configuration lets Eidnara fold and that
-array exceeds half the window cap, its cold lead slots followed by its
-newest half-cap suffix; a consumer whose configuration withdraws fold
-authority, in a session that holds no pin from a folding run, submits its
-whole array.
+array exceeds half the window cap, its newest half-cap suffix, headed by the
+same pinned message on every pass until the first anchor exists; a consumer
+whose configuration withdraws fold authority submits its whole array, and a
+consumer whose half-cap suffix is answered under native authority declines
+that pass and submits its whole array on each later null pass while its
+latest transformed response names native authority
+(`docs/host-wire-protocol.md:955`, `:982`).
 Check: `always` - At capture and send, native membership is exactly
 `host[boundaryIndex..capturedLength)`, CK represents that same ordered suffix,
 and the first mid equals the declared mid; ids inside the window are unique;
-sequence is a JavaScript safe integer. With a null boundary under native
-authority and no pin from a folding run, membership is the whole host array;
-while Eidnara folds it is the whole array or `host[:lead] + host[head:]`,
-the cold lead slots (`coldLead`, one for a leading Pi compaction summary)
-followed by the pinned suffix. Input admissibility must hold on every
+sequence is a JavaScript safe integer. With a null boundary and no sizing
+hook, or with the latest transformed response naming native authority,
+membership is the whole host array; while Eidnara folds and the hook is
+supplied it is the whole array or the wire's newest half-cap suffix. The
+implementation's folding cold window is `host[:lead] + host[head:]`, the
+cold lead slots (`coldLead`, one for a leading Pi compaction summary)
+followed by the pinned suffix, which is not a contiguous suffix when `lead`
+is non-zero; that is the contract-versus-code disagreement in Open
+questions, not part of the guarantee. Input admissibility must hold on every
 request. Falsifier: capture the first and last tail messages but omit a
-middle one; under native authority with no pin from a folding run, submit a
-half-cap suffix.
+middle one; without the sizing hook, submit a half-cap suffix; publish a
+cold suffix the daemon answered under native authority.
 Fault/timing angle: Interior omission, duplicate id, or oversized input is
 mistaken for a smaller valid window.
 Required faults and enabling state: Covered prefix, multiple tail messages,
@@ -772,30 +780,37 @@ the admission cap is indirect: #884's "serves the last applied output plus the
 appended messages on a capture_bytes decline"
 (`rust-mode-transform.test.ts:3653`) declines an oversized capture rather than
 sending a smaller window. The trusted-producer assumption is contract C7.
-Authority qualifier, verified at `a15da13a4` (#1060): the record said "null
+Authority qualifier, verified at `07ea883b5` (#1060): the record said "null
 submits the whole host array" while the wire document and `coldHead` narrowed
 a null window above half the cap to its newest suffix; the record is
 corrected. The wire now states the authority-conditional rule
 (`docs/host-wire-protocol.md:955`, `:982`, `:996`); Pi supplies the sizing
 hook only while the session's project lets Eidnara fold
-(`packages/pi-plugin/src/index.ts:584`,
+(`packages/pi-plugin/src/index.ts:571`, `:586`,
 `packages/pi-plugin/src/transform/pi-transform.ts:268-275`; #1069) and
 OpenCode only when `compactionOff` is not `true`
 (`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`;
-#1070); without it and with no pinned head `coldHead` submits the whole
-array
-(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851-860`).
-Two qualifiers come from the code, not the wire text. First, `coldHead`
-returns a pinned head that is still in the host before it reads `measure`
-(`transform-session-client.ts:854-858`), so a pin left by a folding run
-still narrows a native window; that history is deferred under OQ-3
-(KD-P06). Second, the folding cold window is not a contiguous suffix when
-lead slots exist: Pi sets `coldLead: 1` for a leading compaction summary
+#1070); without it `coldHead` clears any head an earlier folding pass
+pinned and submits the whole array
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860-873`;
+`packages/pi-plugin/src/transform/pi-transform.test.ts:505`,
+`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894`).
+A session whose stored authority is still native under a folding
+configuration dispatches one cold suffix; the client reads
+`history_summarizer.no_fire: "native_authority"` from the response, declines
+that pass with its pin cleared (`transform-session-client.ts:1669-1680`),
+and sends the whole array on each later null pass while that state holds
+(`:1361`; `rust-mode-window.test.ts:1342`, `:1389`;
+`pi-delivery.test.ts:390`). One qualifier comes from the code, not the wire
+text: the folding cold window is not a contiguous suffix when lead slots
+exist. Pi sets `coldLead: 1` for a leading compaction summary
 (`packages/pi-plugin/src/transform/pi-transform.ts:280`), and `coldSource`
-serves `host[:lead]` then `host[head:]` (`transform-session-client.ts:893-900`),
+serves `host[:lead]` then `host[head:]` (`transform-session-client.ts:906-913`),
 while the wire text says "its newest half-cap suffix"
-(`docs/host-wire-protocol.md:955`, `:982`). The knowledge-delivery records
-are in `docs/properties/fold-authority/` (KD-E03, KD-P06, KD-P08).
+(`docs/host-wire-protocol.md:955`, `:982`). The guarantee states the wire
+rule; the lead-slot behavior is the open disagreement below. The
+knowledge-delivery records are in `docs/properties/fold-authority/` (KD-E03,
+KD-P06, KD-P08).
 Existing check: `crates/daemon/src/window_coverage/tests.rs:217`
 `impossible_declarations_are_invalid_params` (#875);
 `crates/daemon/src/transform/window_admission.rs:183`
@@ -807,21 +822,25 @@ renamed by #989);
 the declared window in both representations and publishes the recipe at
 boundaryIndex + i", `:228` "rejects a duplicate id inside the window and ignores
 one outside it", and `:845` "declines when the host moves the discovered anchor
-before the window is copied" (#883); authority qualifier, at `a15da13a4`:
-`packages/pi-plugin/src/transform/pi-delivery.test.ts:318` (#1069),
-`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336`
-and `:1358` (#1070).
+before the window is copied" (#883); authority qualifier, at `07ea883b5`:
+`packages/pi-plugin/src/transform/pi-delivery.test.ts:341`, `:390`,
+`packages/pi-plugin/src/transform/pi-transform.test.ts:505` (#1069),
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1342`,
+`:1389`, `:1417`, and `:1444`,
+`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894`
+(#1070).
 Impact: High. An omitted tail message becomes silent context loss.
 Open questions:
 - C7 states the trusted-producer assumption; the daemon does not prove host
   completeness.
-- A pin left by a folding run and carried into native authority across a
-  Pi project switch narrows the null window; OQ-3 defers that history with
-  owner approval on 2026-10-21 (KD-P06).
-- The wire text omits the cold lead slots from the folding null window
-  (`docs/host-wire-protocol.md:955`, `:982`) while the code serves them
-  ahead of the suffix. Unresolved, needs the wire document owner to state
-  the lead slots.
+- The wire text names the folding null window as the newest half-cap
+  suffix (`docs/host-wire-protocol.md:955`, `:982`) while the code serves
+  the cold lead slots ahead of that suffix
+  (`transform-session-client.ts:906-913`), so a folding Pi cold import that
+  starts with a compaction summary is not wire-conformant at `07ea883b5`.
+  Unresolved, needs the wire document owner to either state the lead slots
+  in the wire and every peer in one change or have the consumers drop them
+  (needs human input).
 
 ### wp-p02-anchor-resolution-uses-authoritative-snapshot
 
@@ -1963,19 +1982,21 @@ re-evidence is in the dated sections of their evidence files.
 Dated note, 2026-10-21, #1060 (tickets #1062, #1063, #1065): the cold-import
 rule is authority-conditional. While the consumer's configuration lets Eidnara
 fold, a null window above half the window cap (400 CK blocks or 16 MiB) is its
-cold lead slots followed by its newest half-cap suffix, pinned until the first
-anchor exists; a consumer whose configuration withdraws fold authority, in a
-session that holds no pin from a folding run, submits its whole array, so an
-applied additive pass carries every host message after the daemon's inserted
-messages. A pin from a folding run carried into native authority still
-narrows the window; OQ-3 defers that history. The cold-import half cap is a
+newest half-cap suffix by the wire, pinned until the first anchor exists, and
+the code serves the cold lead slots ahead of it (WP-P01's open disagreement);
+a consumer whose configuration withdraws fold authority submits its whole
+array, so an applied additive pass carries every host message after the
+daemon's inserted messages. A pin from a folding run is cleared when the hook
+is withdrawn or a response names native authority, so it does not narrow a
+native window, and a cold suffix answered under native authority is declined
+before the next null pass sends the whole array. The cold-import half cap is a
 fold trigger and is inert under native authority. An oversized native pass
 declines through the resident reservation (`invalid_params` or `queue_full`),
 the invocation budget, or the 64 MiB reconstructed-output cap, which the
 daemon answers with `transform_output_too_large`
-(`crates/daemon/src/lib.rs:15679-15685`, `:15641-15643`) and the client
+(`crates/daemon/src/lib.rs:15681-15687`, `:15643-15645`) and the client
 enforces as `output_too_large`
 (`packages/opencode-plugin/src/hooks/context/edit-recipe.ts:429-434`).
 WP-P15 bounds work at a fixed window and gives no constant-cost claim for
 whole-array native submission. WP-P01 carries the qualifier; line anchors in
-its qualifier are at `a15da13a4`.
+its qualifier are at `07ea883b5`.

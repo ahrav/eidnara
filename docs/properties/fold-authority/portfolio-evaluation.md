@@ -145,7 +145,7 @@ Dispositions after #1068 to #1071:
 | Pi pre-client admission decline (KD-P07) | Resolved by #1069. |
 | Routed unresolved project in a compaction-on Pi process (OQ-1) | Resolved by #1069's whole-array arm and the per-project gate. |
 | Resumed session with applied `eidnara` authority in a now-unresolved project | Deferred under OQ-3 (owner approval 2026-10-21). |
-| Pi project switch mid-session carrying pin and authority | Deferred under OQ-3. |
+| Pi project switch mid-session carrying pin and authority | The pin arm is witnessed at `07ea883b5` (`pi-transform.test.ts:505`, `transform-session-client.test.ts:894`; KD-E03, KD-P06); the authority history stays deferred under OQ-3. |
 | A compaction-off process whose routed project resolves folding sends `eidnaraFolds: true` while Pi keeps its compaction | Recorded in #1069; consistent with OQ-1; joins the OQ-3 split-ownership histories. |
 | Refusal text naming only `compaction.enabled` (FA-E02, OQ-4) | Open, needs human input. |
 

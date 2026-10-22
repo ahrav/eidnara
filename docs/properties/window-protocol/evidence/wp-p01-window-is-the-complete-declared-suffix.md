@@ -145,7 +145,7 @@ beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
 
-## Update for #1060 at `a15da13a4`
+## Update for #1060 at `07ea883b5`
 
 Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
 (head `dbdac1150`).
@@ -159,47 +159,58 @@ Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
   suffix applies while the consumer's configuration lets Eidnara fold and
   that a consumer whose configuration withdraws fold authority submits its
   whole array.
-- Code: `coldHead` returns a pinned head that is still in the host before
-  it reads `source.measure?.()`
-  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:854-860`),
-  so a pin left by a folding run narrows a later native window.
+- Code: `coldHead` clears a pinned head and returns `undefined` when the
+  source has no `measure`, before any lookup
+  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:863-866`),
+  so a pin left by a folding run does not narrow a later native-configured
+  window (`packages/pi-plugin/src/transform/pi-transform.test.ts:505`;
+  `transform-session-client.test.ts:894`). A response naming native
+  authority clears the pin too and declines a cold-narrowed pass
+  (`:1669-1680`); later null passes send the whole array while
+  `state.nativeAuthority` holds (`:1361`).
   Pi spreads `measure` only under `inputs.eidnaraFolds`
   (`packages/pi-plugin/src/transform/pi-transform.ts:268-275`), set per run
   from the session's project configuration
-  (`packages/pi-plugin/src/index.ts:584`). OpenCode spreads it only when
+  (`packages/pi-plugin/src/index.ts:571`, `:586`). OpenCode spreads it only when
   `compactionOff` is not `true`
   (`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`).
 - Lead slots: Pi sets `coldLead: 1` when the first message is a compaction
   summary (`pi-transform.ts:280`), and `coldSource` serves `host[:lead]`
-  followed by `host[head:]` (`transform-session-client.ts:893-900`). The
+  followed by `host[head:]` (`transform-session-client.ts:906-913`). The
   folding cold window is therefore the lead slots plus the pinned suffix,
   not a contiguous suffix; the wire text at `:955` and `:982` names only
   the suffix.
-- Witnesses: `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` (401
+- Witnesses: `packages/pi-plugin/src/transform/pi-delivery.test.ts:341` (401
   rows whole under native authority; the 400-block suffix and its pin while
-  folding); `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336`
-  (whole array and publication by identity) and `:1358` (suffix and pin).
+  folding) and `:390` (the whole array after a cold suffix is answered under
+  native authority);
+  `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1417`
+  (whole array and publication by identity), `:1444` (suffix and pin),
+  `:1342` (decline, then the whole array), and `:1389` (the pinned suffix
+  returns once a response reports another authority).
 
 ### Q: Does the null-window clause hold under native authority?
 
 - Sources examined: the files above.
-- Findings: Yes, for a session that holds no pin from a folding run. Both
-  consumers submit the whole host array with a null boundary under native
-  authority, and the folding arms keep the half-cap suffix and its pin.
-- Missing evidence: A pin from a folding run carried into native authority
-  across a project switch is not constructed; #1060 OQ-3 defers it, and the
-  code narrows that window because the pin is read first.
-- Conclusion: resolved with answer; the record carries the qualifier and
-  the pin exception.
+- Findings: Yes. Both consumers submit the whole host array with a null
+  boundary when the configuration withdraws fold authority, whether or not
+  an earlier folding pass pinned a head; a cold suffix answered under native
+  authority is declined and the next null passes send the whole array; the
+  folding arms keep the half-cap suffix and its pin.
+- Missing evidence: None at `07ea883b5`.
+- Conclusion: resolved with answer; the record carries the authority
+  qualifier.
 
 ### Q: Is the folding null window a contiguous suffix?
 
 - Sources examined: `pi-transform.ts:280`;
-  `transform-session-client.ts:851-900`; `docs/host-wire-protocol.md:955`,
+  `transform-session-client.ts:860-913`; `docs/host-wire-protocol.md:955`,
   `:982`.
 - Findings: No when lead slots exist. A leading Pi compaction summary is one
   lead slot, served ahead of the pinned suffix. The wire text describes only
   the suffix.
 - Missing evidence: A wire statement of the lead slots.
 - Conclusion: unresolved, needs the wire document owner to state the lead
-  slots; the record states the code's membership.
+  slots in the wire and every peer in one change, or the consumers to drop
+  them; the record's guarantee states the wire rule and reports the code's
+  lead-slot membership as the disagreement (needs human input).

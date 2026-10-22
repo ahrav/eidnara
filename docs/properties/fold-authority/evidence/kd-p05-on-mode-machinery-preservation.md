@@ -7,7 +7,7 @@ a regression obligation. Ticket #1062; PR #1069. Surface: Pi.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - #1069 edits no case of `packages/pi-plugin/src/transform/pi-eviction.test.ts`
@@ -16,8 +16,8 @@ All references are verified at `a15da13a4`, the head of #1071, which holds
 - The `bun run check:repo` run at `6d527babf` passed every case of both
   files (pi-plugin 421 passed).
 - On-mode guards: the eviction scheduler's `due()` and refusal backoff
-  (`packages/pi-plugin/src/index.ts:875-918`), the compaction answer and
-  `handBack` (`:946-976`).
+  (`packages/pi-plugin/src/index.ts:877-920`), the compaction answer and
+  `handBack` (`:948-978`).
 - Precedence: `handlePiSessionBeforeCompact` returns an available eviction
   before it reads `handBack` (`index.ts:158-162`, `:163-166`), so an
   overflow with an acknowledged boundary on the branch gets the fold, and

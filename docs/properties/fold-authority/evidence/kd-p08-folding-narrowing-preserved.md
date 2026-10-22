@@ -7,17 +7,17 @@ Tickets #1062 and #1063; PRs #1069 and #1070. Surface: plugin and Pi.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - While Eidnara folds, both adapters keep the hook; `coldHead` selects the
   suffix and pins its head
-  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:851-883`).
+  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860-896`).
 - Pi witness: the folding arm of
-  `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` sends
+  `packages/pi-plugin/src/transform/pi-delivery.test.ts:341` sends
   `HALF_CAP_BLOCKS` rows, and the repeat keeps the same head.
 - OpenCode witness:
-  `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1358`
+  `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1444`
   sends `host.slice(1)`, and the repeat keeps `host[1]` with
   `HALF_CAP_BLOCKS + 2` rows.
 - Existing Pi cold-import cases

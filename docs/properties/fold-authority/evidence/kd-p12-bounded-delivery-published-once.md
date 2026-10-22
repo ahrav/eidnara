@@ -8,7 +8,7 @@ plugin, Pi, and daemon.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`: per turn, m0 is
@@ -21,7 +21,7 @@ All references are verified at `a15da13a4`, the head of #1071, which holds
   per request over three turns; the guidance in the system prompt names the
   tag, so the tag count runs over the messages and the line count over the
   whole body.
-- Budget clause: `git diff 08de9051a..a15da13a4` adds no budget constant and
+- Budget clause: `git diff 08de9051a..07ea883b5` adds no budget constant and
   raises none.
 
 ## Failure scenario

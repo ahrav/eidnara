@@ -13,7 +13,7 @@ retains none.").
 Exercised status: yes - the replacement state (no identity under native
 authority) is witnessed by #903's handler test, green again in #859 PR A's run at
 `fd0b52aa5`. The surviving output clause had no named witness at
-`0ff62b29a`; #1068 supplies it (see "Update for #1060 at `a15da13a4`").
+`0ff62b29a`; #1068 supplies it (see "Update for #1060 at `07ea883b5`").
 
 ## Evidence trail
 
@@ -87,7 +87,7 @@ messages in order, and that no identity row exists.
   and native state. None asserts the served list's shape.
 - Missing evidence: An output-shape assertion on a native pass.
 - Conclusion: unresolved at `0ff62b29a`, needs that assertion; superseded
-  by the resolved entry under "Update for #1060 at `a15da13a4`".
+  by the resolved entry under "Update for #1060 at `07ea883b5`".
 
 ### Q: Which record replaces the identity clause?
 
@@ -97,11 +97,11 @@ messages in order, and that no identity row exists.
 - Missing evidence: None.
 - Conclusion: resolved with answer: FA-N06, landed by #855 (PR #903).
 
-## Update for #1060 at `a15da13a4`
+## Update for #1060 at `07ea883b5`
 
 Ticket #1061; PR #1068 (head `f04c54e4d`, `cargo +1.98 nextest run
 --profile ci -p daemon --lib`, 1,871 passed). References are verified at
-`a15da13a4`.
+`07ea883b5`.
 
 - The additive branch is selected from applied authority
   (`crates/daemon/src/transform.rs:3341-3342`). The extra guard covers only a

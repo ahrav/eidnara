@@ -7,7 +7,7 @@ Ticket #1064; PR #1071. Surface: plugin, Pi, and daemon.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`: each turn adds

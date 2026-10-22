@@ -7,17 +7,17 @@ with the off-mode clauses of FA-E02. Ticket #1062; PR #1069. Surface: Pi.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - Eviction scheduling returns on the latch before `due()` and its branch
-  sync (`packages/pi-plugin/src/index.ts:877-880`).
-- The compaction answer is `undefined` when the latch is on (`:953-956`),
-  and `handBack` keeps its off-mode value `false` (`:961`).
-- The tag strip runs only when the latch is off (`:985-986`).
-- Witnesses in `packages/pi-plugin/src/transform/pi-delivery.test.ts`: `:257`
-  (compaction-on control), `:267` (compaction-off: no eviction, unchanged
-  tags, `eidnara_reduce` absent, Pi's own compaction), `:301` (a
+  sync (`packages/pi-plugin/src/index.ts:879-882`).
+- The compaction answer is `undefined` when the latch is on (`:955-958`),
+  and `handBack` keeps its off-mode value `false` (`:963`).
+- The tag strip runs only when the latch is off (`:987-988`).
+- Witnesses in `packages/pi-plugin/src/transform/pi-delivery.test.ts`: `:280`
+  (compaction-on control), `:290` (compaction-off: no eviction, unchanged
+  tags, `eidnara_reduce` absent, Pi's own compaction), `:324` (a
   compaction-off process whose session runs in a folding project; fails
   without the latch return). Fold-command refusals:
   `packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`;
@@ -43,7 +43,7 @@ latch that disagrees with the session's project.
 
 ### Q: Is the latch return in `scheduleEviction` load-bearing?
 
-- Sources examined: `index.ts:875-880`; `pi-delivery.test.ts:301`.
+- Sources examined: `index.ts:877-882`; `pi-delivery.test.ts:324`.
 - Findings: Yes, when the boot latch is on (`compactionOff === true`,
   `index.ts:382-383`, because the boot project is unresolved) while the
   session's project folds. In every other off-mode history `due()` is

@@ -231,8 +231,8 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 
 - FA-N05's emergency rerun caller has no native witness: it follows only a
   completed `Busy` wait in `finish_emergency_pass`
-  (`crates/daemon/src/lib.rs:9154` at `a15da13a4`), which native preparation
-  never returns (`:9658-9662`), so the shared gate covers it structurally.
+  (`crates/daemon/src/lib.rs:9156` at `07ea883b5`), which native preparation
+  never returns (`:9660-9664`), so the shared gate covers it structurally.
   #1068's 96 percent arm covers the first-unit caller.
 - The FA-E04 mixed-range witness is a proptest that does not count the
   mixed ranges it generates; the fixed budget-edge fixtures are synthetic
@@ -246,7 +246,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 
 ## Knowledge delivery (#1060)
 
-Rows located with `git grep` at `a15da13a4`, the head of #1071. Each row ran
+Rows located with `git grep` at `07ea883b5`, the head of #1071. Each row ran
 green in the recorded run of the PR it names (see `catalog.md`, "Update for
 #1060").
 
@@ -256,22 +256,28 @@ green in the recorded run of the PR it names (see `catalog.md`, "Update for
 | `the_same_pi_windows_differ_by_binding_alone` | `crates/daemon/src/pi_native_serving_tests.rs:710` | FA-E01, FA-N05 (Eidnara control) | #1068 (#1061) | unaudited |
 | `a_repeated_native_pi_window_reconstructs_identical_rows` | `crates/daemon/src/pi_native_serving_tests.rs:778` | KD-E01, FA-N06 | #1068 (#1061) | unaudited |
 | `a_canonical_memory_write_rerenders_native_pi_m0_as_hard` | `crates/daemon/src/pi_native_serving_tests.rs:843` | KD-E02, FA-N06 | #1068 (#1061) | unaudited |
-| "serves m0, m1, then every Pi message on each context event under %s" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:182` | KD-P01, KD-P03, KD-E04, KD-P10 | #1069 (#1062) | unaudited |
-| "carries the same pass fields for sessions the daemon binds differently" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:213` | KD-P02, KD-P03, KD-E04 | #1069 (#1062) | unaudited |
-| "evicts and strips assistant tags in a compaction-on process" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:257` | KD-P04 (control), FA-E02 | #1069 (#1062) | unaudited |
-| "leaves compaction, eviction, and assistant tags to Pi after additive passes" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:267` | KD-P04, KD-P10, FA-E02 | #1069 (#1062) | unaudited |
-| "schedules no eviction in a compaction-off process whose session runs in a folding project" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:301` | KD-P04, FA-E02 | #1069 (#1062) | unaudited |
-| "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` | KD-P06, KD-P08, KD-P09, KD-E03 | #1069 (#1062) | unaudited |
-| "submits passes when the boot project's configuration is unresolved" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:367` | KD-P01, KD-P09 | #1069 (#1062) | unaudited |
-| "leaves Pi's array unchanged when %s declines the pass" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:394` | KD-P07 | #1069 (#1062) | unaudited |
-| "leaves Pi's array unchanged when the capture admission refuses a pass" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:427` | KD-P07 | #1069 (#1062) | unaudited |
+| "serves m0, m1, then every Pi message on each context event under %s" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:184` | KD-P01, KD-P03, KD-E04, KD-P10 | #1069 (#1062) | unaudited |
+| "carries the same pass fields for sessions the daemon binds differently" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:236` | KD-P02, KD-P03, KD-E04 | #1069 (#1062) | unaudited |
+| "evicts and strips assistant tags in a compaction-on process" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:280` | KD-P04 (control), FA-E02 | #1069 (#1062) | unaudited |
+| "leaves compaction, eviction, and assistant tags to Pi after additive passes" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:290` | KD-P04, KD-P10, FA-E02 | #1069 (#1062) | unaudited |
+| "schedules no eviction in a compaction-off process whose session runs in a folding project" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:324` | KD-P04, FA-E02 | #1069 (#1062) | unaudited |
+| "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:341` | KD-P06, KD-P08, KD-P09, KD-E03 | #1069 (#1062) | unaudited |
+| "submits the whole array after the daemon serves a cold suffix under native authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:390` | KD-P06 (stored authority still native under a folding configuration) | #1069 (#1062) | unaudited |
+| "submits passes when the boot project's configuration is unresolved" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:422` | KD-P01, KD-P09 | #1069 (#1062) | unaudited |
+| "submits no pass for a home-directory session without allow_home_project under %s" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:217` | KD-P01 (the identity return) | #1069 (#1062) | unaudited |
+| "submits and publishes the whole array once the project withdraws fold authority after a pinned cold pass" | `packages/pi-plugin/src/transform/pi-transform.test.ts:505` | KD-E03, KD-P06 (the pin arm) | #1069 (#1062) | unaudited |
+| "leaves Pi's array unchanged when %s declines the pass" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:449` | KD-P07 | #1069 (#1062) | unaudited |
+| "leaves Pi's array unchanged when the capture admission refuses a pass" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:482` | KD-P07 | #1069 (#1062) | unaudited |
 | "Pi pass capability fields" | `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100` | KD-E04, KD-P03 | #1069 (#1062) | unaudited |
 | "submits passes and leaves compaction to Pi in a project whose configuration is unresolved" | `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247` | KD-P09, KD-P01 | #1069 (#1062) | unaudited |
-| "submits and publishes the whole array past half the cap under native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336` | KD-P06, KD-E03 | #1070 (#1063) | unaudited |
-| "sends the half-cap suffix and keeps its head pinned while Eidnara folds" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1358` | KD-P08 | #1070 (#1063) | unaudited |
-| "declines a candidate over the invocation budget and leaves the host array unchanged" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1375` | KD-P07 | #1070 (#1063) | unaudited |
-| "publishes the retained output and the new tail when a later native pass declines" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1410` | KD-P07 (OQ-2 option a) | #1070 (#1063) | unaudited |
-| "sends the same pass fields under either authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1438` | KD-P02 | #1070 (#1063) | unaudited |
+| "declines a cold suffix the daemon serves under native authority and submits the whole array next" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1342` | KD-P06 (stored authority still native under a folding configuration) | #1070 (#1063) | unaudited |
+| "returns to the pinned suffix once the daemon no longer reports native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1389` | KD-P06, KD-P08 | #1070 (#1063) | unaudited |
+| "submits and publishes the whole array past half the cap under native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1417` | KD-P06, KD-E03 | #1070 (#1063) | unaudited |
+| "sends the whole array and drops a pinned head for a source without a cold import" | `packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894` | KD-E03, KD-P06 (the pin arm) | #1070 (#1063) | unaudited |
+| "sends the half-cap suffix and keeps its head pinned while Eidnara folds" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1444` | KD-P08 | #1070 (#1063) | unaudited |
+| "declines a candidate over the invocation budget and leaves the host array unchanged" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1461` | KD-P07 | #1070 (#1063) | unaudited |
+| "publishes the retained output and the new tail when a later native pass declines" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1496` | KD-P07 (OQ-2 option a) | #1070 (#1063) | unaudited |
+| "sends the same pass fields under either authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1524` | KD-P02 | #1070 (#1063) | unaudited |
 | "serves stored project memory once per request across turns and a Pi compaction" | `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109` | KD-P11, KD-P12, KD-P10, KD-E02 | #1071 (#1064) | unaudited |
 | "serves stored project memory once per request over three turns" | `packages/e2e-tests/tests/rust-native-delivery.test.ts:13` | KD-P11, KD-P12 | #1071 (#1064) | unaudited |
 | "loads the built extension, completes one mock turn, and leaves no storage file" | `packages/e2e-tests/tests/pi-smoke.test.ts:58` | KD-P11 | #1071 (#1064) | unaudited |

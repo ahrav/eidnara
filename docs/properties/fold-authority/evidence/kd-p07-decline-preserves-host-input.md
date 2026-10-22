@@ -8,7 +8,7 @@ and #1070. Surface: plugin and Pi.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - Pi sets `failOpen: false`
@@ -16,14 +16,14 @@ All references are verified at `a15da13a4`, the head of #1071, which holds
   returns no replacement and Pi keeps its own array. A held admission lease
   declines before the client (`:234`).
 - OpenCode falls back only over a retained basis
-  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1168-1170`);
-  the invocation refusal declines at `:1707`.
-- Pi witnesses: `packages/pi-plugin/src/transform/pi-delivery.test.ts:394`
+  (`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1181-1183`);
+  the invocation refusal declines at `:1734`.
+- Pi witnesses: `packages/pi-plugin/src/transform/pi-delivery.test.ts:449`
   (`invalid_params`, `queue_full`, an invocation refusal; first pass and
-  after a success) and `:427` (admission refusal; first pass and repeat).
+  after a success) and `:482` (admission refusal; first pass and repeat).
 - OpenCode witnesses:
-  `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1375`
-  (invocation refusal leaves every host value in place) and `:1410` (after a
+  `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1461`
+  (invocation refusal leaves every host value in place) and `:1496` (after a
   prior success, `queue_full` publishes `[m0, m1, ...grown]`).
 
 ## Failure scenario
@@ -44,7 +44,7 @@ admission lease.
 
 ### Q: Does the OpenCode fallback omit a host message?
 
-- Sources examined: `rust-mode-window.test.ts:1410-1436`.
+- Sources examined: `rust-mode-window.test.ts:1496-1522`.
 - Findings: No. The publication is the retained m0 and m1 followed by every
   host message of the grown array.
 - Missing evidence: None.

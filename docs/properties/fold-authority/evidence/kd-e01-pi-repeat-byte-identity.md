@@ -12,14 +12,14 @@ assigned to U1.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - Every response allocates a fresh output revision
   (`crates/daemon/src/edit_recipe.rs:102`).
 - A native pass keeps the retained output as a `previous` source only when
   the caller offers that revision and the revert epoch matches
-  (`crates/daemon/src/lib.rs:2582-2589`, read at `:9738-9745`).
+  (`crates/daemon/src/lib.rs:2582-2589`, read at `:9740-9747`).
 - `a_repeated_native_pi_window_reconstructs_identical_rows`
   (`crates/daemon/src/pi_native_serving_tests.rs:778`) binds native with a
   live chain and repeats the closed-role window (`:312`). Its arm table

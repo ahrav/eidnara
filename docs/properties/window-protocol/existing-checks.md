@@ -268,12 +268,17 @@ recorded head.
 
 ## Dated note (2026-10-21, #1060)
 
-Rows located at `a15da13a4`. They ran green in the recorded runs of #1069
+Rows located at `07ea883b5`. They ran green in the recorded runs of #1069
 (head `6d527babf`) and #1070 (head `dbdac1150`).
 
 | Check | Location | Records | Recorded run | Status |
 | --- | --- | --- | --- | --- |
-| "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:318` | WP-P01 (authority qualifier) | #1069 | unaudited |
-| "submits and publishes the whole array past half the cap under native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1336` | WP-P01 (authority qualifier), WP-E06 | #1070 | unaudited |
-| "sends the half-cap suffix and keeps its head pinned while Eidnara folds" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1358` | WP-P01 (folding clause) | #1070 | unaudited |
-| "publishes the retained output and the new tail when a later native pass declines" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1410` | WP-P11 (native fail-open) | #1070 | unaudited |
+| "submits the whole array past half the cap%s while the project withdraws fold authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:341` | WP-P01 (authority qualifier) | #1069 | unaudited |
+| "submits the whole array after the daemon serves a cold suffix under native authority" | `packages/pi-plugin/src/transform/pi-delivery.test.ts:390` | WP-P01 (native-authority response) | #1069 | unaudited |
+| "submits and publishes the whole array once the project withdraws fold authority after a pinned cold pass" | `packages/pi-plugin/src/transform/pi-transform.test.ts:505` | WP-P01 (pin cleared with the hook) | #1069 | unaudited |
+| "declines a cold suffix the daemon serves under native authority and submits the whole array next" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1342` | WP-P01 (native-authority response) | #1070 | unaudited |
+| "returns to the pinned suffix once the daemon no longer reports native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1389` | WP-P01 (folding clause) | #1070 | unaudited |
+| "sends the whole array and drops a pinned head for a source without a cold import" | `packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894` | WP-P01 (pin cleared with the hook) | #1070 | unaudited |
+| "submits and publishes the whole array past half the cap under native authority" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1417` | WP-P01 (authority qualifier), WP-E06 | #1070 | unaudited |
+| "sends the half-cap suffix and keeps its head pinned while Eidnara folds" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1444` | WP-P01 (folding clause) | #1070 | unaudited |
+| "publishes the retained output and the new tail when a later native pass declines" | `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1496` | WP-P11 (native fail-open) | #1070 | unaudited |

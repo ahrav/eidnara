@@ -4,7 +4,7 @@
 
 Existing-behavior record KD-E02 of #1060's Property Catalog section A
 (`kd-e-native-memory-epoch-hard`). Ticket #1061; PR #1068 (head
-`f04c54e4d`). End-to-end delivery: #1064; PR #1071 (head `a15da13a4`).
+`f04c54e4d`). End-to-end delivery: #1064; PR #1071 (head `07ea883b5`).
 Surface: daemon and store.
 
 Exercised status: yes - a real canonical write in a Pi-under-native
@@ -12,7 +12,7 @@ sequence, the witness the specification assigned to U1.
 
 ## Evidence trail
 
-All references are verified at `a15da13a4`, the head of #1071, which holds
+All references are verified at `07ea883b5`, the head of #1071, which holds
 #1068 to #1071.
 
 - The additive path reads the rendered-row revision
