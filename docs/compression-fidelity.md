@@ -184,8 +184,8 @@ and `digest` render the rest:
 - `status` is `completed` or `error`. An error output variant or a denied
   execution is `error`.
 - `exit=N` appears when the record carries an exit code. The summarizer reads
-  wire blocks, whose records hold status and text only, so its digests show
-  `status` and `bytes`.
+  wire blocks, which carry a status and text, so its digests show `status`
+  and `bytes`.
 - `bytes` is the byte length of the result's text: a text variant as is, a
   JSON value serialized, content blocks' text joined by newlines, or a
   denial's reason.
