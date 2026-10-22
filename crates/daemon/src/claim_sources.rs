@@ -109,6 +109,7 @@ fn unit(
         representation,
         text: text.to_owned(),
         role: CANONICAL_ROLE.to_owned(),
+        outcome: None,
     }
 }
 

@@ -453,6 +453,7 @@ impl Corpus {
                         sensitivity,
                         observed_at: 1,
                         expected_head: None,
+                        outcome: None,
                     })
                     .unwrap();
                 if admitted {

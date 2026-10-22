@@ -1347,6 +1347,7 @@ fn one_complete_commit_can_span_multiple_source_pages() {
                                     sensitivity: kernel::Sensitivity::Normal,
                                     observed_at: now(),
                                     expected_head: None,
+                                    outcome: None,
                                 })
                                 .unwrap();
                             ledger.insert(

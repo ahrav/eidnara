@@ -427,6 +427,7 @@ fn git_units_keep_revision_one_and_take_valid_time_from_the_projection_scenario(
             representation,
             text,
             role,
+            outcome,
         } = unit;
         assert_eq!(class.code(), "git_commits");
         let names: Vec<&str> = identity.iter().map(|(name, _)| *name).collect();
@@ -435,6 +436,7 @@ fn git_units_keep_revision_one_and_take_valid_time_from_the_projection_scenario(
         assert_eq!(revision, "1");
         assert_eq!(representation.as_str(), "commit_message");
         assert_eq!(role, "commit");
+        assert_eq!(*outcome, None, "a commit carries no tool outcome");
         assert!(!text.is_empty());
         let expected = git_identity(&render_config(), oid).unwrap();
         // The projection is the only time source, so it must agree with what

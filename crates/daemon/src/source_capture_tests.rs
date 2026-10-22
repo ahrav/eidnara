@@ -171,7 +171,7 @@ fn identity_of(row: &LiveDescriptor) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// AC1, AC2 (bytes), AC3: a user text block, a failed `bash` tool, and a completed `read` tool publish with their native identity and exact bytes; the read output admits as an untrusted tool result and stores `Sensitive`; a second pass publishes nothing new, and after the memo is lost the kernel answers from its receipts.
+/// AC1, AC2 (bytes and outcome), AC3 (with the outcome's tool name): a user text block, a failed `bash` tool, and a completed `read` tool publish with their native identity and exact bytes; the read output admits as an untrusted tool result and stores `Sensitive`; a second pass publishes nothing new, and after the memo is lost the kernel answers from its receipts.
 #[tokio::test]
 async fn an_opencode_window_publishes_its_native_sources_once_and_replays_after_memo_loss() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
@@ -211,11 +211,31 @@ async fn an_opencode_window_publishes_its_native_sources_once_and_replays_after_
         .expect("the failed bash call publishes its error");
     assert_eq!(identity_of(error)[4], ("tool_call_id", "call_bash"));
     assert_eq!(bytes_of(&store, error), "exit 2: cargo not found\n");
+    // AC2: the failed call's record says so; the fixture's error part reports no exit code.
+    let record = error
+        .detail
+        .outcome
+        .as_ref()
+        .expect("a tool descriptor stores its record");
+    assert_eq!(
+        (record.status, record.tool_name.as_str(), record.exit_code),
+        (kernel::ToolStatus::Error, "bash", None)
+    );
     let output = tools
         .iter()
         .find(|row| row.detail.representation == "tool_output")
         .expect("the read call publishes its output");
     assert_eq!(identity_of(output)[4], ("tool_call_id", "call_read"));
+    // AC3: the read call's record names its tool and its byte length.
+    let record = output
+        .detail
+        .outcome
+        .as_ref()
+        .expect("a tool descriptor stores its record");
+    assert_eq!(
+        (record.status, record.tool_name.as_str(), record.byte_length),
+        (kernel::ToolStatus::Completed, "read", 13)
+    );
     assert_eq!(output.sensitivity, kernel::Sensitivity::Sensitive);
     let admission: (String, String) = rusqlite::Connection::open_with_flags(
         project

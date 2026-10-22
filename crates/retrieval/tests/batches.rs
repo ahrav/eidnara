@@ -1700,6 +1700,7 @@ fn exported_row(
             artifact_digest: "0000000000000000000000000000000000000000000000000000000000000000"
                 .to_string(),
             evidence_id: format!("evidence-{key}"),
+            outcome: None,
         },
         domain_id: "domain".to_string(),
         sensitivity: Sensitivity::Normal,

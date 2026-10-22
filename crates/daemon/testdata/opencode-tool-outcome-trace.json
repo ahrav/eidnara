@@ -1,0 +1,70 @@
+{
+  "source": "OpenCode 1.19.0 session store (part.data and message.data rows). Field names, nesting, and value types are verbatim; ids, commands, output text, and paths are replaced.",
+  "cases": [
+    {
+      "name": "bash completed with exit 1",
+      "info": { "id": "msg_trace_a1", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1790543288817, "completed": 1790543296151 }, "finish": "tool-calls" },
+      "part": { "type": "tool", "tool": "bash", "callID": "tooluse_trace_exit1",
+                "state": { "status": "completed", "input": { "command": "cat notes.md" },
+                           "output": "cat: notes.md: No such file or directory\n",
+                           "metadata": { "output": "cat: notes.md: No such file or directory\n", "exit": 1, "truncated": false },
+                           "title": "cat notes.md", "time": { "start": 1790543295995, "end": 1790543296116 } } },
+      "outcome": { "version": 1, "status": "completed", "tool_name": "bash", "byte_length": 41, "truncated": false, "exit_code": 1 }
+    },
+    {
+      "name": "bash completed with exit 0 and truncated output",
+      "info": { "id": "msg_trace_a2", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1790546817720, "completed": 1790546939640 }, "finish": "tool-calls" },
+      "part": { "type": "tool", "tool": "bash", "callID": "tooluse_trace_truncated",
+                "state": { "status": "completed", "input": { "command": "cargo test", "timeout": 2400000 },
+                           "output": "...output truncated...\n\nFull output saved to: tool-output/tool_trace\n",
+                           "metadata": { "output": "test result: ok\n", "exit": 0, "truncated": true, "outputPath": "tool-output/tool_trace" },
+                           "title": "cargo test", "time": { "start": 1790546897614, "end": 1790546939604 } } },
+      "outcome": { "version": 1, "status": "completed", "tool_name": "bash", "byte_length": 69, "truncated": true, "exit_code": 0 }
+    },
+    {
+      "name": "bash completed with a null exit",
+      "info": { "id": "msg_trace_a3", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1790543288817, "completed": 1790543296151 }, "finish": "tool-calls" },
+      "part": { "type": "tool", "tool": "bash", "callID": "tooluse_trace_null_exit",
+                "state": { "status": "completed", "input": { "command": "sleep 1000" },
+                           "output": "",
+                           "metadata": { "output": "", "exit": null, "truncated": false },
+                           "title": "sleep 1000", "time": { "start": 1790543295995, "end": 1790543296116 } } },
+      "outcome": { "version": 1, "status": "completed", "tool_name": "bash", "byte_length": 0, "truncated": false }
+    },
+    {
+      "name": "bash error without metadata",
+      "info": { "id": "msg_trace_a4", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1790541642824, "completed": 1790541648814 }, "finish": "tool-calls" },
+      "part": { "type": "tool", "tool": "bash", "callID": "tooluse_trace_denied",
+                "state": { "status": "error", "input": { "command": "git status" },
+                           "error": "The user has specified a rule which prevents you from using this command\n",
+                           "time": { "start": 1790541646063, "end": 1790541646083 } } },
+      "outcome": { "version": 1, "status": "error", "tool_name": "bash", "byte_length": 73 }
+    },
+    {
+      "name": "bash interrupted by an aborted turn",
+      "info": { "id": "msg_trace_a5", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1791298653458, "completed": 1791301391742 },
+                "error": { "name": "MessageAbortedError", "data": { "message": "Aborted" } } },
+      "part": { "type": "tool", "tool": "bash", "callID": "call_trace_aborted",
+                "state": { "status": "error", "input": {}, "raw": "", "error": "Tool execution aborted",
+                           "metadata": { "interrupted": true },
+                           "time": { "start": 1791301391740, "end": 1791301391740 } } },
+      "outcome": { "version": 1, "status": "error", "tool_name": "bash", "byte_length": 22, "exception_ref": "MessageAbortedError" }
+    },
+    {
+      "name": "read completed",
+      "info": { "id": "msg_trace_a6", "sessionID": "ses_trace", "role": "assistant",
+                "time": { "created": 1790543288817, "completed": 1790543296151 }, "finish": "tool-calls" },
+      "part": { "type": "tool", "tool": "read", "callID": "tooluse_trace_read",
+                "state": { "status": "completed", "input": { "filePath": "src/main.rs" },
+                           "output": "fn main() {}\n",
+                           "metadata": { "preview": "fn main() {}", "truncated": false },
+                           "title": "src/main.rs", "time": { "start": 1790543295995, "end": 1790543296116 } } },
+      "outcome": { "version": 1, "status": "completed", "tool_name": "read", "byte_length": 13, "truncated": false }
+    }
+  ]
+}

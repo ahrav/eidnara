@@ -160,7 +160,7 @@ pub use source_descriptor::{
     LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,
     SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, SourceDescriptorDetail,
     SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
-    SourceDescriptorRequest, descriptor_object_id,
+    SourceDescriptorRequest, TOOL_OUTCOME_VERSION, ToolOutcome, ToolStatus, descriptor_object_id,
 };
 pub use source_export::{
     ExportWindow, PageBound, SourceCursor, SourceExportError, SourcePage, SourcePageBounds,

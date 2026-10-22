@@ -489,6 +489,7 @@ impl Corpus {
                             sensitivity: Sensitivity::Normal,
                             observed_at: 1,
                             expected_head: None,
+                            outcome: None,
                         })
                         .unwrap();
                     outcomes.push(((*text).to_string(), outcome));

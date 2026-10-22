@@ -968,30 +968,41 @@ fn unfinished_assistant_text_is_deferred_but_settled_tools_publish() {
     publisher.publish(&user[0], 6000).unwrap();
 }
 
-/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned value fails this test whenever the layout moves.
+/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned `source-request.v2` values fail this test whenever the layout moves: a message unit, whose record is absent, and a tool unit, whose record bytes the digest binds. The frozen v1 value is pinned in `receipts_written_before_the_outcome_record_replay_under_v2`.
 #[test]
 fn publication_receipt_digest_layout_is_pinned() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
-    let unit = pi_units(&pi_session(), &pi_user("pi-u1", "hello", 100))
+    let publisher = corpus.publisher();
+    let message = pi_units(&pi_session(), &pi_user("pi-u1", "hello", 100))
         .unwrap()
         .remove(0);
-    corpus.publisher().publish(&unit, NOW).unwrap();
-    let digest: String =
-        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap()
+    let tool = pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200))
+        .unwrap()
+        .remove(0);
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut digests = Vec::new();
+    for unit in [&message, &tool] {
+        publisher.publish(unit, NOW).unwrap();
+        let (key, _) = publisher.receipt_identity(unit).unwrap();
+        let digest: String = conn
             .query_row(
                 "SELECT request_digest FROM operation_receipts
-             WHERE producer='eidnara-daemon/harness-sources'
-               AND operation_key LIKE 'source-descriptor:%'",
-                [],
+                 WHERE producer='eidnara-daemon/harness-sources' AND operation_key=?1",
+                [format!("source-descriptor:{key}")],
                 |row| row.get(0),
             )
             .unwrap();
+        digests.push(digest);
+    }
     assert_eq!(
-        digest,
-        "9ff69ac08200498a7b8827c97faabbcdfaf323061593dccce0e6ea31668f3723"
+        digests,
+        [
+            "c7d32963a0dadfd9838219b46efd5f79e7f7abd6403242dddb0ff75372716c85",
+            "cfc4bcd532cd5d2151054bcb6dac960de1eeeae9b5236131a0730259b42062e9"
+        ]
     );
 }
 
@@ -1834,6 +1845,7 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
         .remove(1);
     smuggled.class = OccurrenceClass::Messages;
     smuggled.representation = Representation::Text;
+    smuggled.outcome = None;
     smuggled.identity = vec![
         ("project_id", PROJECT.to_string()),
         ("harness", "opencode".to_string()),
@@ -2523,6 +2535,7 @@ fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
         representation: Representation::Text,
         text: text.to_string(),
         role: "document".to_string(),
+        outcome: None,
     }
 }
 
@@ -3022,4 +3035,443 @@ fn harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages() {
             .2
             .is_some()
     );
+}
+
+/// An OpenCode assistant record in this test's session holding the one tool `part`, under `info`.
+fn opencode_record(info: &Value, part: &Value) -> Value {
+    let mut info = info.clone();
+    info["sessionID"] = json!(SESSION);
+    json!({ "info": info, "parts": [part] })
+}
+
+/// The outcome record of the one tool unit an OpenCode record yields.
+fn opencode_outcome(record: &Value) -> kernel::ToolOutcome {
+    let units = opencode_units(&opencode_session(), record).unwrap();
+    assert_eq!(units.len(), 1);
+    units[0]
+        .outcome
+        .clone()
+        .expect("a tool unit carries its outcome")
+}
+
+/// AC12 and OQ3: every case of the pinned OpenCode 1.19.0 trace yields exactly its recorded outcome. `exit` maps to `exit_code` only on a `bash` call and only as an integer; an absent, null, or malformed field stays unknown, never a zero; `exception_ref` names the aborting error only for a call the abort interrupted.
+#[test]
+fn opencode_tool_outcomes_follow_the_pinned_trace() {
+    let trace: Value =
+        serde_json::from_str(include_str!("../testdata/opencode-tool-outcome-trace.json")).unwrap();
+    for case in trace["cases"].as_array().unwrap() {
+        let expected: kernel::ToolOutcome =
+            serde_json::from_value(case["outcome"].clone()).unwrap();
+        assert_eq!(
+            opencode_outcome(&opencode_record(&case["info"], &case["part"])),
+            expected,
+            "{}",
+            case["name"]
+        );
+    }
+    let completed_exit_1 = &trace["cases"][0];
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut part = completed_exit_1["part"].clone();
+        edit(&mut part);
+        opencode_outcome(&opencode_record(&completed_exit_1["info"], &part))
+    };
+    // Malformed metadata is unknown, not a default.
+    let malformed = with(&|part| {
+        part["state"]["metadata"]["exit"] = json!("1");
+        part["state"]["metadata"]["truncated"] = json!("no");
+    });
+    assert_eq!((malformed.exit_code, malformed.truncated), (None, None));
+    // Absent metadata reports neither.
+    let absent = with(&|part| {
+        part["state"].as_object_mut().unwrap().remove("metadata");
+    });
+    assert_eq!((absent.exit_code, absent.truncated), (None, None));
+    // The trace proves `exit` for `bash` only; another tool's `exit` is not an exit code.
+    let other_tool = with(&|part| part["tool"] = json!("task"));
+    assert_eq!(other_tool.exit_code, None);
+    assert_eq!(other_tool.tool_name, "task");
+    // A part with no tool name has no outcome, and the adapter refuses it.
+    let mut nameless = completed_exit_1["part"].clone();
+    nameless.as_object_mut().unwrap().remove("tool");
+    assert!(matches!(
+        opencode_units(
+            &opencode_session(),
+            &opencode_record(&completed_exit_1["info"], &nameless)
+        ),
+        Err(AdapterRefusal::MissingIdentity("tool"))
+    ));
+
+    let aborted = &trace["cases"][4];
+    // An aborted turn names the exception only on the call it interrupted.
+    let mut settled = aborted["part"].clone();
+    settled["state"]["metadata"]["interrupted"] = json!(false);
+    assert_eq!(
+        opencode_outcome(&opencode_record(&aborted["info"], &settled)).exception_ref,
+        None
+    );
+    // A malformed error name is unknown.
+    let mut info = aborted["info"].clone();
+    info["error"]["name"] = json!("not a name!");
+    assert_eq!(
+        opencode_outcome(&opencode_record(&info, &aborted["part"])).exception_ref,
+        None
+    );
+    // The interrupted call before its turn records the error has no exception yet.
+    info.as_object_mut().unwrap().remove("error");
+    assert_eq!(
+        opencode_outcome(&opencode_record(&info, &aborted["part"])).exception_ref,
+        None
+    );
+}
+
+/// AC12 for Pi: a tool result's status follows `isError`, each text block carries its own byte length, truncation is read from the bash tool's `details.truncation`, and a Pi entry yields no exit code or exception name.
+#[test]
+fn pi_tool_outcomes_read_status_and_reported_truncation() {
+    let mut entry = pi_tool_result("pi-t1", "pi-a1", false, 200);
+    entry["message"]["toolName"] = json!("bash");
+    let units = pi_units(&pi_session(), &entry).unwrap();
+    let outcomes: Vec<_> = units
+        .iter()
+        .map(|unit| unit.outcome.clone().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes[0],
+        kernel::ToolOutcome {
+            version: kernel::TOOL_OUTCOME_VERSION,
+            status: kernel::ToolStatus::Completed,
+            tool_name: "bash".to_owned(),
+            byte_length: TOOL_BYTES.len() as u64,
+            truncated: None,
+            exit_code: None,
+            exception_ref: None,
+        }
+    );
+    assert_eq!(
+        outcomes[1].byte_length, 0,
+        "the empty block is its own record"
+    );
+
+    entry["message"]["isError"] = json!(true);
+    entry["message"]["details"] = json!({ "truncation": { "truncated": true, "truncatedBy": "lines" }, "fullOutputPath": "/tmp/out" });
+    let failed = pi_units(&pi_session(), &entry).unwrap()[0]
+        .outcome
+        .clone()
+        .unwrap();
+    assert_eq!(
+        (failed.status, failed.truncated, failed.exit_code),
+        (kernel::ToolStatus::Error, Some(true), None)
+    );
+
+    entry["message"].as_object_mut().unwrap().remove("toolName");
+    assert!(matches!(
+        pi_units(&pi_session(), &entry),
+        Err(AdapterRefusal::MissingIdentity("toolName"))
+    ));
+}
+
+/// D7 and AC12: the record binds to the occurrence, not the artifact. Two `bash` calls that returned the same bytes, one completed with exit 1 and one failed, are two descriptors citing one artifact, each with its own record.
+#[test]
+fn equal_tool_bytes_with_different_outcomes_are_two_descriptors_of_one_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let info = json!({ "id": "msg_same", "role": "assistant",
+                       "time": { "created": 100, "completed": 900 } });
+    let completed = json!({ "type": "tool", "tool": "bash", "callID": "call_a",
+        "state": { "status": "completed", "input": {}, "output": "boom\n",
+                   "metadata": { "exit": 1, "truncated": false }, "time": { "start": 1, "end": 500 } } });
+    let failed = json!({ "type": "tool", "tool": "bash", "callID": "call_b",
+        "state": { "status": "error", "input": {}, "error": "boom\n", "time": { "start": 1, "end": 600 } } });
+    for part in [&completed, &failed] {
+        for unit in opencode_units(&opencode_session(), &opencode_record(&info, part)).unwrap() {
+            publisher.publish(&unit, NOW).unwrap();
+        }
+    }
+    let rows = corpus.export();
+    assert_eq!(rows.len(), 2, "two occurrences, two descriptors");
+    assert_eq!(
+        rows[0].detail.artifact_digest,
+        rows[1].detail.artifact_digest
+    );
+    let mut outcomes: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            let outcome = row
+                .detail
+                .outcome
+                .clone()
+                .expect("each descriptor stores its record");
+            (outcome.status, outcome.exit_code)
+        })
+        .collect();
+    outcomes.sort_by_key(|(status, _)| status.as_str());
+    assert_eq!(
+        outcomes,
+        [
+            (kernel::ToolStatus::Completed, Some(1)),
+            (kernel::ToolStatus::Error, None)
+        ]
+    );
+}
+
+/// AC12: a record the kernel would refuse is refused before any byte is retained: one over 1 KiB, one whose byte length is not its unit's, and one on a class other than `raw_tool_spans`. The screened batch path refuses the same unit and keeps its siblings admissible.
+#[test]
+fn an_invalid_outcome_record_is_refused_before_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let tool = pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200))
+        .unwrap()
+        .remove(0);
+    let mut oversized = tool.clone();
+    oversized.outcome.as_mut().unwrap().exception_ref = Some("E".repeat(512));
+    oversized.outcome.as_mut().unwrap().tool_name = "t".repeat(512);
+    assert!(oversized.outcome.as_ref().unwrap().encode().len() > 1024);
+    let mut misdescribed = tool.clone();
+    misdescribed.outcome.as_mut().unwrap().byte_length += 1;
+    let mut message = pi_units(&pi_session(), &pi_user("pi-u1", "hello", 100))
+        .unwrap()
+        .remove(0);
+    message.outcome = tool.outcome.clone();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    for unit in [&oversized, &misdescribed, &message] {
+        assert!(
+            matches!(
+                publisher.publish(unit, NOW),
+                Err(PublishError::Descriptor {
+                    refusal: SourceDescriptorError::OutcomeRefused,
+                    evidence: None
+                })
+            ),
+            "{unit:?}"
+        );
+    }
+    assert_eq!(corpus.tip(), tip, "nothing commits");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "nothing is retained"
+    );
+    let dispositions = publish_screened(&publisher, &[oversized, tool], NOW, None).unwrap();
+    assert!(matches!(
+        dispositions[0],
+        UnitDisposition::Refused(PublishError::Descriptor {
+            refusal: SourceDescriptorError::OutcomeRefused,
+            ..
+        })
+    ));
+    assert!(matches!(dispositions[1], UnitDisposition::Published(_)));
+}
+
+/// The frozen `source-request.v1` layout: the v2 inputs before the outcome record, under the v1 tag.
+fn v1_digest(unit: &SourceUnit) -> String {
+    let mut bytes = Vec::new();
+    for part in [
+        "source-request.v1",
+        unit.text.as_str(),
+        "domain",
+        SCOPE,
+        unit.role.as_str(),
+        Sensitivity::Normal.as_str(),
+    ] {
+        bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    bytes.extend_from_slice(&[1, 1]);
+    kernel::source_identity::identity_digest(&bytes)
+}
+
+/// Rewrites the stored request digest of `unit`'s `kind` receipt (`source-descriptor` or `source-evidence`) to `digest`, as a store written before the outcome record holds it.
+fn store_receipt_as(
+    corpus: &Corpus,
+    publisher: &SourcePublisher<'_>,
+    unit: &SourceUnit,
+    kind: &str,
+    digest: &str,
+) {
+    let (key, _) = publisher.receipt_identity(unit).unwrap();
+    // The store guards receipt identity with a trigger; the rewrite lifts it for this one statement and reinstalls it unchanged.
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let guards: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT name,sql FROM sqlite_master
+             WHERE type='trigger' AND tbl_name='operation_receipts'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (name, _) in &guards {
+        conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+    }
+    let changed = conn
+        .execute(
+            "UPDATE operation_receipts SET request_digest=?1
+             WHERE producer='eidnara-daemon/harness-sources' AND operation_key=?2",
+            rusqlite::params![digest, format!("{kind}:{key}")],
+        )
+        .unwrap();
+    for (_, sql) in &guards {
+        conn.execute_batch(sql).unwrap();
+    }
+    assert_eq!(changed, 1, "{kind} receipt");
+}
+
+/// AC12 receipts (OQ9): a store with `source-request.v1` receipts under the v2 publisher. A unit whose receipts are v1 replays with `replayed: true` and keeps its stored descriptor without an outcome record; a changed payload or publishing context under that key is `IdentityReused`; a v1 evidence-only receipt completes with a descriptor under v2, on the single and the batch path; and a unit first published after the upgrade publishes and replays under v2.
+#[test]
+fn receipts_written_before_the_outcome_record_replay_under_v2() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let message = pi_units(&pi_session(), &pi_user("pi-u1", "hello", 100))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        v1_digest(&message),
+        "9ff69ac08200498a7b8827c97faabbcdfaf323061593dccce0e6ea31668f3723",
+        "the frozen v1 layout"
+    );
+
+    // A pre-upgrade tool descriptor carries no record; its receipts hold the v1 digest.
+    let tool = pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200))
+        .unwrap()
+        .remove(0);
+    let legacy_tool = SourceUnit {
+        outcome: None,
+        ..tool.clone()
+    };
+    for unit in [&message, &legacy_tool] {
+        publisher.publish(unit, NOW).unwrap();
+        for kind in ["source-descriptor", "source-evidence"] {
+            store_receipt_as(&corpus, &publisher, unit, kind, &v1_digest(unit));
+        }
+    }
+    let tip = corpus.tip();
+    for unit in [&message, &tool] {
+        assert!(publisher.publish(unit, NOW).unwrap().replayed);
+    }
+    let dispositions =
+        publish_screened(&publisher, &[message.clone(), tool.clone()], NOW, None).unwrap();
+    assert!(
+        dispositions
+            .iter()
+            .all(|disposition| matches!(disposition, UnitDisposition::Published(published) if published.replayed)),
+        "{dispositions:?}"
+    );
+    assert_eq!(corpus.tip(), tip, "a legacy replay commits nothing");
+    let stored_tool = corpus
+        .export()
+        .into_iter()
+        .find(|row| row.detail.class == "raw_tool_spans")
+        .unwrap();
+    assert_eq!(stored_tool.detail.outcome, None, "a replay does not enrich");
+
+    // Changed bytes or context under a legacy key match neither digest.
+    let mut changed = message.clone();
+    changed.text = "goodbye".to_owned();
+    assert!(matches!(
+        publisher.publish(&changed, NOW),
+        Err(PublishError::IdentityReused)
+    ));
+    let elsewhere = SourcePublisher {
+        egress: ProviderEgress::RemoteAllowed,
+        ..corpus.publisher()
+    };
+    assert!(matches!(
+        elsewhere.publish(&message, NOW),
+        Err(PublishError::IdentityReused)
+    ));
+
+    // A v1 evidence-only receipt: evidence retained, then its descriptor refused for a missing scope.
+    const LATE_SCOPE: &str = "project:late";
+    let late = SourcePublisher {
+        scope_id: Some(LATE_SCOPE),
+        ..corpus.publisher()
+    };
+    let singles = pi_units(&pi_session(), &pi_user("pi-u2", "single path", 300)).unwrap();
+    let batched = pi_units(&pi_session(), &pi_user("pi-u3", "batch path", 400)).unwrap();
+    for unit in [&singles[0], &batched[0]] {
+        assert!(matches!(
+            late.publish(unit, NOW),
+            Err(PublishError::Kernel {
+                error: kernel::KernelError::NotFound,
+                evidence: Some(_)
+            })
+        ));
+        let mut v1 = Vec::new();
+        for part in [
+            "source-request.v1",
+            unit.text.as_str(),
+            "domain",
+            LATE_SCOPE,
+            unit.role.as_str(),
+            Sensitivity::Normal.as_str(),
+        ] {
+            v1.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            v1.extend_from_slice(part.as_bytes());
+        }
+        v1.extend_from_slice(&[1, 1]);
+        store_receipt_as(
+            &corpus,
+            &late,
+            unit,
+            "source-evidence",
+            &kernel::source_identity::identity_digest(&v1),
+        );
+    }
+    corpus
+        .kernel
+        .commit(intent("late-scope"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: LATE_SCOPE.to_owned(),
+                object_id: LATE_SCOPE.to_owned(),
+                source_id: LATE_SCOPE.to_owned(),
+                domain_id: "domain".to_owned(),
+                source_kind: "kernel_route".to_owned(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_owned(),
+                    operator: "exact".to_owned(),
+                    exact_value: Some(PROJECT.to_owned()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let single = late.publish(&singles[0], NOW).unwrap();
+    assert!(!single.replayed, "the descriptor is new");
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let batch = publish_screened(&late, &batched, NOW, None).unwrap();
+    assert!(matches!(&batch[0], UnitDisposition::Published(published) if !published.replayed));
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "the batch cites the v1 evidence without offering its bytes again"
+    );
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    for unit in [&singles[0], &batched[0]] {
+        let (key, v2) = late.receipt_identity(unit).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT request_digest FROM operation_receipts WHERE operation_key=?1",
+                [format!("source-descriptor:{key}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, v2, "the completing descriptor is written under v2");
+        assert!(late.publish(unit, NOW).unwrap().replayed);
+    }
+
+    // A unit first published after the upgrade publishes and replays under v2.
+    let fresh = pi_units(&pi_session(), &pi_tool_result("pi-t9", "pi-a9", true, 900)).unwrap();
+    assert!(!publisher.publish(&fresh[0], NOW).unwrap().replayed);
+    assert!(publisher.publish(&fresh[0], NOW).unwrap().replayed);
 }

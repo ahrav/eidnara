@@ -91,6 +91,7 @@ fn message(id: &str, revision: i64, text: &str) -> SourceUnit {
         representation: Representation::Text,
         text: text.to_string(),
         role: "user".to_string(),
+        outcome: None,
     }
 }
 
@@ -421,6 +422,7 @@ impl Fixture {
             representation: Representation::ToolOutput,
             text: "tool words".to_string(),
             role: "toolResult".to_string(),
+            outcome: None,
         });
         let hold = corpus.capture();
         let projection = corpus.bootstrap(dir.path(), &hold);

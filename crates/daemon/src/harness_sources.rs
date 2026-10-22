@@ -18,7 +18,7 @@ use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactErrorKind, ArtifactHandle, ArtifactIngestRequest,
     CommitIntent, EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, Sensitivity,
     SourceClass, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
-    SourceDescriptorRequest, TaintClass,
+    SourceDescriptorRequest, TaintClass, ToolOutcome,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -87,6 +87,8 @@ pub struct SourceUnit {
     pub text: String,
     /// The native role of the message the unit came from (`user`, `assistant`, `toolResult`); provenance, never identity or text.
     pub role: String,
+    /// How the tool call behind a `raw_tool_spans` unit settled ([`crate::tool_outcome`]); every other class carries `None`.
+    pub outcome: Option<ToolOutcome>,
 }
 
 /// Debug names identities and sizes, never the text.
@@ -99,6 +101,10 @@ impl std::fmt::Debug for SourceUnit {
             .field("representation", &self.representation.as_str())
             .field("text_bytes", &self.text.len())
             .field("role", &self.role)
+            .field(
+                "outcome",
+                &self.outcome.as_ref().map(|outcome| outcome.status),
+            )
             .finish()
     }
 }
@@ -182,10 +188,17 @@ impl SessionIdentity {
             representation: Representation::Text,
             text: text.to_owned(),
             role: role.to_owned(),
+            outcome: None,
         }
     }
 
-    fn tool_unit(&self, tool: &ToolBlock<'_>, block_index: usize, text: &str) -> SourceUnit {
+    fn tool_unit(
+        &self,
+        tool: &ToolBlock<'_>,
+        block_index: usize,
+        text: &str,
+        outcome: ToolOutcome,
+    ) -> SourceUnit {
         SourceUnit {
             class: OccurrenceClass::RawToolSpans,
             identity: vec![
@@ -205,6 +218,7 @@ impl SessionIdentity {
             },
             text: text.to_owned(),
             role: "toolResult".to_owned(),
+            outcome: Some(outcome),
         }
     }
 }
@@ -288,8 +302,10 @@ pub fn opencode_units(
                     )?,
                     is_error,
                 };
+                let outcome = crate::tool_outcome::opencode(part, info.get("error"), output)
+                    .ok_or(AdapterRefusal::MissingIdentity("tool"))?;
                 // One settled tool part carries one output string: its only output block.
-                units.push(session.tool_unit(&tool, 0, output));
+                units.push(session.tool_unit(&tool, 0, output, outcome));
             }
             _ => {}
         }
@@ -348,7 +364,9 @@ pub fn pi_units(
                 .and_then(Value::as_str)
                 .filter(|_| item.get("type").and_then(Value::as_str) == Some("text"))
                 .ok_or(AdapterRefusal::UnsupportedShape("tool result item"))?;
-            units.push(session.tool_unit(&tool, index, text));
+            let outcome = crate::tool_outcome::pi(message, text)
+                .ok_or(AdapterRefusal::MissingIdentity("toolName"))?;
+            units.push(session.tool_unit(&tool, index, text, outcome));
         }
         return Ok(units);
     }
@@ -457,8 +475,10 @@ impl PublishError {
 
 const PRODUCER: &str = "eidnara-daemon/harness-sources";
 const CAUSE: &str = "source publication";
-/// Leads every request-digest input. The digest is persisted in the descriptor receipt under a key that does not change with it, so a layout change is a new tag, made deliberately, and never a silent reinterpretation of stored receipts.
-const REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
+/// Leads every request-digest input. The digest is persisted in the descriptor receipt under a key that does not change with it, so a layout change is a new tag, made deliberately, and never a silent reinterpretation of stored receipts. `v2` binds the unit's outcome record after the `v1` inputs.
+const REQUEST_DIGEST_FORMAT: &str = "source-request.v2";
+/// The frozen tag of the layout receipts were written under before the outcome record. A key that holds a receipt under this digest replays it ([`stored_receipt`]).
+const LEGACY_REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
 
 /// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
 pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
@@ -521,13 +541,26 @@ impl SourcePublisher<'_> {
         let evidence_object_id = unit.evidence_object_id();
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.descriptor_intent(&unit);
-        let (_, (stored, admission)) = self
+        let (_, (stored, admission, evidence_digest)) = self
             .kernel
             .preview(preview_deadline(budget), |preview| {
                 self.check_scope(&unit, preview)?;
+                // Evidence an earlier publication retained under the legacy digest replays under that digest.
+                let evidence_intent = self.evidence_intent(&unit);
+                let evidence_digest = match preview.stored_receipt(evidence_intent.clone()) {
+                    Err(KernelError::Conflict) => {
+                        stored_receipt(preview, evidence_intent, &unit.legacy_digest)?;
+                        unit.legacy_digest.clone()
+                    }
+                    other => {
+                        other?;
+                        unit.request_digest.clone()
+                    }
+                };
                 Ok((
-                    preview.stored_receipt(descriptor_intent.clone())?,
+                    stored_receipt(preview, descriptor_intent.clone(), &unit.legacy_digest)?,
                     unit.rule.resolve(preview)?,
+                    evidence_digest,
                 ))
             })
             .map_err(|error| match error {
@@ -552,7 +585,7 @@ impl SourcePublisher<'_> {
         }
         let handle = self
             .kernel
-            .ingest_exact_artifact(self.evidence_request(&unit))
+            .ingest_exact_artifact(self.evidence_request(&unit, &evidence_digest))
             .map_err(|error| match error.kind() {
                 ArtifactErrorKind::OperationKeyReused => PublishError::IdentityReused,
                 kind => PublishError::Artifact(kind),
@@ -661,6 +694,16 @@ impl SourcePublisher<'_> {
             refusal: SourceDescriptorError::from(refusal),
             evidence: None,
         })?;
+        // The outcome record is judged before any byte is retained: only a tool unit carries one, and it must describe the unit's bytes within the record bound.
+        match (&unit.outcome, unit.class) {
+            (Some(outcome), OccurrenceClass::RawToolSpans) => outcome.validate(unit.text.len()),
+            (Some(_), _) => Err(SourceDescriptorError::OutcomeRefused),
+            (None, _) => Ok(()),
+        }
+        .map_err(|refusal| PublishError::Descriptor {
+            refusal,
+            evidence: None,
+        })?;
         let rule = admission_rule(unit);
         // A native timestamp may not lead the observation; a canonical revision and a repository document's observation count are counters, not judged against the clock.
         if !rule.is_inherited()
@@ -697,6 +740,7 @@ impl SourcePublisher<'_> {
             rule,
             key,
             request_digest: self.request_digest(unit),
+            legacy_digest: self.legacy_request_digest(unit),
             origin: unit.origin().to_owned(),
             project,
             observed_at,
@@ -789,6 +833,7 @@ impl SourcePublisher<'_> {
                 sensitivity,
                 observed_at,
                 expected_head: unit.expected_head(),
+                outcome: unit.unit.outcome.as_ref(),
             })
             .map_err(|error| {
                 *refusal = Some(Err(error));
@@ -820,7 +865,7 @@ impl SourcePublisher<'_> {
     }
 
     /// The evidence ingest for `unit`. Captured message text and tool results are `harness_capture` evidence owned for [`HARNESS_CAPTURE_RETENTION_MS`] from `observed_at`; every other class is `canonical` and never ages out. The deadline is set only when the evidence row is first created: the evidence receipt is keyed by the unit's identity and revision and its request digest excludes the clock, so a later attempt of the same unit replays the first row and its deadline.
-    fn evidence_request(&self, unit: &Prepared<'_>) -> ArtifactIngestRequest {
+    fn evidence_request(&self, unit: &Prepared<'_>, request_digest: &str) -> ArtifactIngestRequest {
         let (retention_class, retain_until) = match unit.unit.class {
             OccurrenceClass::Messages | OccurrenceClass::RawToolSpans => (
                 kernel::HARNESS_CAPTURE_RETENTION_CLASS,
@@ -832,7 +877,10 @@ impl SourcePublisher<'_> {
             _ => ("canonical", None),
         };
         ArtifactIngestRequest {
-            intent: self.evidence_intent(unit),
+            intent: CommitIntent {
+                request_digest: request_digest.to_owned(),
+                ..self.evidence_intent(unit)
+            },
             payload: unit.unit.text.as_bytes().to_vec(),
             evidence_id: format!("srcev:{}", unit.key),
             object_id: unit.evidence_object_id(),
@@ -913,11 +961,31 @@ impl SourcePublisher<'_> {
         }
     }
 
-    /// The request digest binds text, domain, scope, role, sensitivity, and provider-egress policy. Changing any of these under the same receipt key conflicts rather than replaying.
+    /// The request digest binds text, domain, scope, role, sensitivity, provider-egress policy, and the outcome record. Changing any of these under the same receipt key conflicts rather than replaying.
     fn request_digest(&self, unit: &SourceUnit) -> String {
+        let mut bytes = self.digest_inputs(unit, REQUEST_DIGEST_FORMAT);
+        match &unit.outcome {
+            Some(outcome) => {
+                let encoded = outcome.encode();
+                bytes.push(1);
+                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&encoded);
+            }
+            None => bytes.push(0),
+        }
+        identity_digest(&bytes)
+    }
+
+    /// The `source-request.v1` digest of `unit`: the layout before the outcome record, frozen so receipts written under it still replay.
+    fn legacy_request_digest(&self, unit: &SourceUnit) -> String {
+        identity_digest(&self.digest_inputs(unit, LEGACY_REQUEST_DIGEST_FORMAT))
+    }
+
+    /// The inputs both digest layouts share, led by `format`.
+    fn digest_inputs(&self, unit: &SourceUnit, format: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         for part in [
-            REQUEST_DIGEST_FORMAT,
+            format,
             unit.text.as_str(),
             self.domain_id,
             self.scope_id.unwrap_or_default(),
@@ -932,7 +1000,25 @@ impl SourcePublisher<'_> {
             ProviderEgress::RemoteAllowed => 0,
             ProviderEgress::LocalOnly => 1,
         });
-        identity_digest(&bytes)
+        bytes
+    }
+}
+
+/// The receipt `preview` holds for `intent`'s key: under `intent`'s digest, or else under `legacy_digest`, the `source-request.v1` digest of the same unit. A receipt written before the outcome record replays as it was written, without enrichment. A key holding neither digest is [`KernelError::Conflict`].
+fn stored_receipt(
+    preview: &kernel::Envelope<'_>,
+    intent: CommitIntent,
+    legacy_digest: &str,
+) -> Result<Option<kernel::CommitReceipt>, KernelError> {
+    match preview.stored_receipt(intent.clone()) {
+        Err(KernelError::Conflict) => preview
+            .stored_receipt(CommitIntent {
+                request_digest: legacy_digest.to_owned(),
+                ..intent
+            })?
+            .map(Some)
+            .ok_or(KernelError::Conflict),
+        other => other,
     }
 }
 
@@ -1012,9 +1098,17 @@ pub fn publish_batch(
                 let step = || {
                     publisher.check_scope(unit, preview)?;
                     Ok((
-                        preview.stored_receipt(publisher.descriptor_intent(unit))?,
+                        stored_receipt(
+                            preview,
+                            publisher.descriptor_intent(unit),
+                            &unit.legacy_digest,
+                        )?,
                         unit.rule.resolve(preview)?,
-                        preview.stored_receipt(publisher.evidence_intent(unit))?,
+                        stored_receipt(
+                            preview,
+                            publisher.evidence_intent(unit),
+                            &unit.legacy_digest,
+                        )?,
                     ))
                 };
                 previewed.push(step().inspect_err(|_| culprit = Some(index))?);
@@ -1088,7 +1182,11 @@ pub fn publish_batch(
     for (&index, &owner) in pending.iter().zip(&owners) {
         if owner == index && !retained.contains_key(&index) {
             request_of.insert(index, requests.len());
-            requests.push(units[index].0.evidence_request(&prepared[index]));
+            requests.push(
+                units[index]
+                    .0
+                    .evidence_request(&prepared[index], &prepared[index].request_digest),
+            );
         }
     }
     let main_is_write = !writes.is_empty();
@@ -1310,6 +1408,7 @@ struct Prepared<'u> {
     rule: ProvenanceRule,
     key: String,
     request_digest: String,
+    legacy_digest: String,
     origin: String,
     project: Option<ProjectScope>,
     observed_at: i64,

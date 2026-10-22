@@ -351,6 +351,7 @@ mod tests {
                 payload_id: "payload".to_string(),
                 artifact_digest: "0d".repeat(32),
                 evidence_id,
+                outcome: None,
             },
         };
         let versions = std::collections::BTreeMap::new();
