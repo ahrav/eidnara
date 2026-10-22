@@ -20,11 +20,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
-    Harness, MAX_SOURCE_BATCH_BYTES, PublishError, SessionIdentity, SourcePublisher, SourceUnit,
-    UnitDisposition, opencode_units, pi_units, publish_screened,
+    Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_UNIT_BYTES, PublishError, Representation,
+    SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition, opencode_units, pi_units,
+    publish_screened,
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
+use crate::project_docs::DocumentRead;
 
 /// The cooperative budget of one publication, from handoff acceptance.
 pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
@@ -92,12 +94,24 @@ counts! {
     RetainedBytes => "retained_bytes",
     PublishMsLast => "publish_ms_last",
     PublishMsMax => "publish_ms_max",
+    DocumentsUnchanged => "documents_unchanged",
+    DocumentsRetired => "documents_retired",
+    DocumentsMissing => "documents_missing",
+    DocumentsNotRegular => "documents_not_regular",
+    DocumentsOversize => "documents_oversize",
+    DocumentsNotUtf8 => "documents_not_utf8",
+    DocumentsUnreadable => "documents_unreadable",
     ExpiryRetired => "expiry_retired",
     ExpiryRetained => "expiry_retained",
 }
 
-#[derive(Default)]
 struct Counters([AtomicU64; Count::ALL.len()]);
+
+impl Default for Counters {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| AtomicU64::new(0)))
+    }
+}
 
 impl Counters {
     fn at(&self, count: Count) -> &AtomicU64 {
@@ -269,6 +283,8 @@ pub(crate) struct Offer {
     pub window: Vec<Arc<Value>>,
     /// [`SourceCapture::epoch`] before the pass ran.
     pub epoch: u64,
+    /// The project root whose configured repository documents the pass read for its prompt; `None` when the route injects no documents.
+    pub documents: Option<std::path::PathBuf>,
 }
 
 /// A charged window waiting for its response to reach the wire writer. Dropping it releases the charge.
@@ -280,6 +296,7 @@ pub(crate) struct CaptureHandoff {
     epoch: u64,
     window_bytes: usize,
     retained: RetainedCharge,
+    documents: Option<std::path::PathBuf>,
 }
 
 /// A charge against the supervisor's budget, mirrored in the `retained_bytes` gauge while it lives.
@@ -355,6 +372,7 @@ impl SourceCapture {
             epoch: offer.epoch,
             window_bytes,
             retained,
+            documents: offer.documents,
         })
     }
 
@@ -468,6 +486,7 @@ impl CaptureHandoff {
             project: self.project,
             epoch: self.epoch,
             window_bytes: self.window_bytes,
+            documents: self.documents,
         })
     }
 }
@@ -487,6 +506,7 @@ pub(crate) struct CaptureJob {
     project: ProjectBinding,
     epoch: u64,
     window_bytes: usize,
+    documents: Option<std::path::PathBuf>,
 }
 
 impl CaptureJob {
@@ -554,7 +574,13 @@ impl CaptureJob {
         else {
             return self.end(Count::RefusedResidentShort);
         };
-        if units.is_empty() {
+        // The configured repository documents are read with the prompt's own reader, outside the commit gate.
+        let documents = self
+            .documents
+            .as_deref()
+            .map(crate::project_docs::read_project_documents)
+            .unwrap_or_default();
+        if units.is_empty() && documents.is_empty() {
             return self.end(Count::Completed);
         }
         let incarnation = match store.database_incarnation_id_within_budget(&self.budget) {
@@ -607,7 +633,7 @@ impl CaptureJob {
         }
         let (candidates, keys): (Vec<SourceUnit>, Vec<Option<(String, String)>>) =
             pending.into_iter().chain(unknown).unzip();
-        if candidates.is_empty() {
+        if candidates.is_empty() && documents.is_empty() {
             return self.end(Count::Completed);
         }
         #[cfg(test)]
@@ -627,7 +653,7 @@ impl CaptureJob {
         // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
         let gate = self.commit_gate.lock().expect("capture publication mutex");
         let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.publish_locked(&store, &publisher, &candidates, keys)
+            self.publish_locked(&store, &publisher, candidates, keys, &documents)
         }));
         drop(gate);
         match published {
@@ -641,8 +667,9 @@ impl CaptureJob {
         &self,
         store: &KernelStore,
         publisher: &SourcePublisher<'_>,
-        candidates: &[SourceUnit],
-        keys: Vec<Option<(String, String)>>,
+        mut candidates: Vec<SourceUnit>,
+        mut keys: Vec<Option<(String, String)>>,
+        documents: &[(&'static str, DocumentRead)],
     ) -> Count {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
             return self.end(Count::SessionInvalidated);
@@ -653,9 +680,33 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
+        // Documents are judged against the store under the gate: a changed one joins the batch, a missing one retires its live revision.
+        let mut retirements = Vec::new();
+        for step in match self.plan_documents(store, documents) {
+            Ok(steps) => steps,
+            Err(error) => return self.end(kernel_end(error)),
+        } {
+            match step {
+                DocumentStep::Publish(unit) => {
+                    candidates.push(unit);
+                    keys.push(None);
+                }
+                DocumentStep::Retire(object_id) => retirements.push(object_id),
+                DocumentStep::Skip(count) => self.capture.counters.add(count, 1),
+            }
+        }
+        for object_id in retirements {
+            if let Err(error) = retire_document(store, &object_id) {
+                return self.end(kernel_end(error));
+            }
+            self.capture.counters.add(Count::DocumentsRetired, 1);
+        }
+        if candidates.is_empty() {
+            return self.end(Count::Completed);
+        }
         let observed_at = crate::now_ms();
         let started = Instant::now();
-        let result = publish_screened(publisher, candidates, observed_at, Some(&self.budget));
+        let result = publish_screened(publisher, &candidates, observed_at, Some(&self.budget));
         let held = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let counters = &self.capture.counters;
         counters
@@ -690,6 +741,85 @@ impl CaptureJob {
                 self.end(kernel_end(refusal.error))
             }
         }
+    }
+
+    /// What capture does with each configured document of this pass: its identity is the project, the project standing in for its repository, and the path. Text whose bytes equal the live revision's artifact is unchanged; other text publishes at the lineage's historical head plus one, which the descriptor commit checks against the head ([`crate::harness_sources::SourcePublisher`]); a verified missing file retires its live revision; any other read is counted and retires nothing.
+    fn plan_documents(
+        &self,
+        store: &KernelStore,
+        documents: &[(&'static str, DocumentRead)],
+    ) -> Result<Vec<DocumentStep>, KernelError> {
+        let project_id = self.session.project_id.as_str();
+        let mut steps = Vec::with_capacity(documents.len());
+        for (path, read) in documents {
+            let identity = [
+                ("project_id", project_id),
+                ("repository_id", project_id),
+                ("relative_path", *path),
+            ];
+            let (_, live) = store.preview(Instant::now() + DOCUMENT_PREVIEW_WAIT, |preview| {
+                let rows = preview.live_source_descriptors_with(
+                    OccurrenceClass::RepositoryDocuments,
+                    "relative_path",
+                    &[path],
+                    None,
+                    std::num::NonZeroUsize::new(8).expect("a nonzero page"),
+                )?;
+                Ok(rows.rows.into_iter().find(|row| {
+                    crate::git_reconcile::identity_field(row, "project_id") == Some(project_id)
+                        && crate::git_reconcile::identity_field(row, "repository_id")
+                            == Some(project_id)
+                }))
+            })?;
+            steps.push(match read {
+                DocumentRead::Text(text) if text.len() > MAX_SOURCE_UNIT_BYTES => {
+                    DocumentStep::Skip(Count::DocumentsOversize)
+                }
+                DocumentRead::Text(text)
+                    if live.as_ref().is_some_and(|row| {
+                        row.detail.artifact_digest
+                            == kernel::source_identity::payload_id(text.as_bytes())
+                    }) =>
+                {
+                    DocumentStep::Skip(Count::DocumentsUnchanged)
+                }
+                DocumentRead::Text(text) => {
+                    let lineage = kernel::source_identity::encode_preserving_span(
+                        &kernel::source_identity::Occurrence {
+                            class: OccurrenceClass::RepositoryDocuments.code(),
+                            identity: &identity,
+                            revision: "1",
+                            representation: Representation::Text.as_str(),
+                            span: None,
+                        },
+                    )
+                    .map_err(|_| KernelError::InvalidInput)?
+                    .lineage_id;
+                    let head = store.source_lineage_head(&lineage)?.unwrap_or(0);
+                    DocumentStep::Publish(SourceUnit {
+                        class: OccurrenceClass::RepositoryDocuments,
+                        identity: identity
+                            .iter()
+                            .map(|(name, value)| (*name, (*value).to_owned()))
+                            .collect(),
+                        revision: (head + 1).to_string(),
+                        representation: Representation::Text,
+                        text: text.clone(),
+                        role: "document".to_owned(),
+                        outcome: None,
+                    })
+                }
+                DocumentRead::Missing => match live {
+                    Some(row) => DocumentStep::Retire(row.object_id),
+                    None => DocumentStep::Skip(Count::DocumentsMissing),
+                },
+                DocumentRead::NotRegular => DocumentStep::Skip(Count::DocumentsNotRegular),
+                DocumentRead::Oversize => DocumentStep::Skip(Count::DocumentsOversize),
+                DocumentRead::NotUtf8 => DocumentStep::Skip(Count::DocumentsNotUtf8),
+                DocumentRead::Unreadable => DocumentStep::Skip(Count::DocumentsUnreadable),
+            });
+        }
+        Ok(steps)
     }
 
     /// Every unit of the window, in record order; a record the adapter refuses contributes none and is counted.
@@ -868,6 +998,35 @@ fn session_page(
     }
     page.sort();
     Ok(page)
+}
+
+/// How long a document preview waits for a pooled reader.
+const DOCUMENT_PREVIEW_WAIT: Duration = Duration::from_secs(5);
+
+/// What capture does with one configured document.
+enum DocumentStep {
+    Publish(SourceUnit),
+    Retire(String),
+    Skip(Count),
+}
+
+/// Retires the live revision `object_id` of a document whose file a read found missing; the receipt is keyed by the revision, so a retry replays it.
+fn retire_document(store: &KernelStore, object_id: &str) -> Result<(), KernelError> {
+    let digest = kernel::source_identity::identity_digest(object_id.as_bytes());
+    store
+        .commit(
+            CommitIntent {
+                producer: PRODUCER.to_owned(),
+                operation_key: format!("source-document-retire:{digest}"),
+                request_digest: digest,
+                actor: "repository".to_owned(),
+                cause: "repository document removed".to_owned(),
+            },
+            |envelope| {
+                crate::harness_sources::retire_descriptors(envelope, &[object_id.to_owned()])
+            },
+        )
+        .map(|_| ())
 }
 
 fn kernel_end(error: KernelError) -> Count {

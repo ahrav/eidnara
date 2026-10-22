@@ -654,6 +654,7 @@ async fn the_capture_report_carries_no_unit_text() {
             project: binding.clone(),
             window: window.to_vec(),
             epoch: handler.source_capture.epoch(),
+            documents: None,
         })
     };
     let foreign = vec![Arc::new(json!({
@@ -1041,6 +1042,7 @@ async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
             project: binding.clone(),
             window: window.clone(),
             epoch: handler.source_capture.epoch(),
+            documents: None,
         })
     };
     let held = offer().expect("the first window fits");
@@ -1546,4 +1548,227 @@ async fn a_route_claiming_another_harness_captures_nothing() {
     settle(&handler).await;
     assert_eq!(report(&handler)["admitted"], 0);
     assert_eq!(store.tip().unwrap(), tip);
+}
+
+/// The live `repository_documents` descriptors of `path`, as `(revision, object id)`.
+fn live_document(store: &KernelStore, path: &str) -> Vec<(String, String)> {
+    live(store, OccurrenceClass::RepositoryDocuments)
+        .into_iter()
+        .filter(|row| identity_of(row)[2] == ("relative_path", path))
+        .map(|row| (row.detail.revision.clone(), row.object_id))
+        .collect()
+}
+
+/// One pass over a fixed window, so each pass reads the configured documents afresh.
+async fn document_pass(handler: &Handler, base: &str) -> Value {
+    let response = pass(
+        handler,
+        transform_with(&[opencode_user("msg_u1", 1_700_000_000_000, "hello")], base),
+    )
+    .await;
+    settle(handler).await;
+    response
+}
+
+/// `(invalidated_commit_seq, superseded_by)` of a descriptor row.
+fn descriptor_state(project: &Path, object_id: &str) -> (Option<i64>, Option<String>) {
+    rusqlite::Connection::open_with_flags(
+        project
+            .parent()
+            .unwrap()
+            .join("kernel")
+            .join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT invalidated_commit_seq,superseded_by FROM observations WHERE object_id=?1",
+        [object_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// AC4 and AC17 (`sc-repodoc-one-live-revision-above-historical-head`, `sc-repodoc-raw-bytes-separate-from-prompt-hash`): a configured document read for the prompt is captured as one lineage keyed by path. Its first revision is 1. An unchanged file publishes nothing. An edit supersedes, and the earlier revision names its successor. A whitespace-only edit publishes a new revision of the raw bytes while the prompt's canonical hash stays. A verified removal retires the lineage, and a recreated file republishes above the historical head. The descriptors admit as untrusted repository text, store `Sensitive`, and create no decision.
+#[tokio::test]
+async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let doc = project.join("ARCHITECTURE.md");
+    std::fs::write(&doc, "# Architecture\n\nOne daemon.\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let first = live_document(&store, "ARCHITECTURE.md");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].0, "1");
+    let row = live(&store, OccurrenceClass::RepositoryDocuments).remove(0);
+    assert_eq!(
+        bytes_of(&store, &row),
+        "# Architecture\n\nOne daemon.\n",
+        "raw bytes"
+    );
+    assert_eq!(row.sensitivity, kernel::Sensitivity::Sensitive);
+    let decisions = store
+        .slice_as_of(store.tip().unwrap())
+        .unwrap()
+        .decisions
+        .len();
+
+    // Unchanged: nothing commits.
+    let tip = store.tip().unwrap();
+    document_pass(&handler, "base-2").await;
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(report(&handler)["documents_unchanged"], 1);
+
+    // An edit supersedes revision 1.
+    std::fs::write(&doc, "# Architecture\n\nTwo daemons.\n").unwrap();
+    document_pass(&handler, "base-3").await;
+    let second = live_document(&store, "ARCHITECTURE.md");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].0, "2");
+    assert_eq!(
+        descriptor_state(&project, &first[0].1).1.as_deref(),
+        Some(second[0].1.as_str()),
+        "a reference pinned to revision 1 reports its successor"
+    );
+
+    // A whitespace-only edit: new raw bytes, same canonical prompt hash.
+    let hash =
+        crate::project_docs::read_project_docs_canonical(project.to_str().unwrap()).canonical_hash;
+    std::fs::write(&doc, "# Architecture  \n\nTwo daemons.\n\n").unwrap();
+    assert_eq!(
+        crate::project_docs::read_project_docs_canonical(project.to_str().unwrap()).canonical_hash,
+        hash
+    );
+    document_pass(&handler, "base-4").await;
+    assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "3");
+
+    // Removal retires; recreation republishes above the historical head.
+    std::fs::remove_file(&doc).unwrap();
+    document_pass(&handler, "base-5").await;
+    assert!(live_document(&store, "ARCHITECTURE.md").is_empty());
+    assert_eq!(report(&handler)["documents_retired"], 1);
+    std::fs::write(&doc, "# Architecture\n\nBack.\n").unwrap();
+    document_pass(&handler, "base-6").await;
+    assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "4");
+
+    let object_id = live_document(&store, "ARCHITECTURE.md")[0].1.clone();
+    let admission: (String, String) = rusqlite::Connection::open_with_flags(
+        project
+            .parent()
+            .unwrap()
+            .join("kernel")
+            .join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT source_class,taint_class FROM admission_decisions WHERE subject_object_id=?1",
+        [&object_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap();
+    assert_eq!(
+        admission,
+        (
+            SourceClass::UntrustedRepoText.as_str().to_owned(),
+            TaintClass::RepoUntrustedText.as_str().to_owned()
+        )
+    );
+    assert_eq!(
+        store
+            .slice_as_of(store.tip().unwrap())
+            .unwrap()
+            .decisions
+            .len(),
+        decisions,
+        "document capture creates no decision"
+    );
+}
+
+/// AC17 and F18 (`sc-repodoc-only-verified-missing-retires`): a symlink, a text past the 64 KiB unit cap, a file past the 256 KiB read cap, non-UTF-8 bytes, and a permission error are each counted and retire nothing; only a missing file retires.
+#[tokio::test]
+async fn unreadable_documents_are_counted_and_retire_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let (handler, dir, project) = capture_handler(capture_config(true), true).await;
+    let doc = project.join("STRUCTURE.md");
+    std::fs::write(&doc, "# Structure\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let live_before = live_document(&store, "STRUCTURE.md");
+    assert_eq!(live_before.len(), 1);
+    let elsewhere = dir.path().join("elsewhere.md");
+    std::fs::write(&elsewhere, "linked").unwrap();
+    type Arrange<'a> = Box<dyn Fn() + 'a>;
+    let cases: Vec<(&str, Arrange<'_>)> = vec![
+        (
+            "documents_not_regular",
+            Box::new(|| {
+                std::fs::remove_file(&doc).unwrap();
+                std::os::unix::fs::symlink(&elsewhere, &doc).unwrap();
+            }),
+        ),
+        (
+            "documents_oversize",
+            Box::new(|| {
+                std::fs::remove_file(&doc).unwrap();
+                std::fs::write(&doc, "x".repeat(70 * 1024)).unwrap();
+            }),
+        ),
+        (
+            "documents_oversize",
+            Box::new(|| {
+                std::fs::write(&doc, "x".repeat(300 * 1024)).unwrap();
+            }),
+        ),
+        (
+            "documents_not_utf8",
+            Box::new(|| {
+                std::fs::write(&doc, [0xff, 0xfe, 0x00]).unwrap();
+            }),
+        ),
+        (
+            "documents_unreadable",
+            Box::new(|| {
+                std::fs::write(&doc, "# Structure\n").unwrap();
+                std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o000)).unwrap();
+            }),
+        ),
+    ];
+    for (round, (count, arrange)) in cases.iter().enumerate() {
+        arrange();
+        let before = report(&handler)[*count].as_u64().unwrap();
+        document_pass(&handler, &format!("base-x{round}")).await;
+        assert_eq!(
+            report(&handler)[*count].as_u64().unwrap(),
+            before + 1,
+            "{count}"
+        );
+        assert_eq!(
+            live_document(&store, "STRUCTURE.md"),
+            live_before,
+            "{count} retires nothing"
+        );
+    }
+    std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(report(&handler)["documents_retired"], 0);
+}
+
+/// The response bytes are the same with capture on and off while a configured document is read for the prompt; a route that injects no documents captures none.
+#[tokio::test]
+async fn document_capture_leaves_the_response_and_respects_inject_docs() {
+    let response = |enabled: bool, inject_docs: bool| async move {
+        let mut config = capture_config(enabled);
+        config.inject_docs = inject_docs;
+        let (handler, dir, project) = capture_handler(config, true).await;
+        std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+        let response = document_pass(&handler, "base-1").await;
+        let captured = live_document(&kernel_store(&handler), "ARCHITECTURE.md").len();
+        (response, captured, dir)
+    };
+    let (on, captured_on, _on_dir) = response(true, true).await;
+    let (off, captured_off, _off_dir) = response(false, true).await;
+    assert_eq!(on, off);
+    assert_eq!((captured_on, captured_off), (1, 0));
+    let (_, captured_without_docs, _dir) = response(true, false).await;
+    assert_eq!(captured_without_docs, 0);
 }

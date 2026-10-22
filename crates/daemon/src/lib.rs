@@ -9062,6 +9062,10 @@ impl HandlerCore {
             project: binding.kernel_project.clone(),
             window: parsed.native_messages.clone().unwrap_or_default(),
             epoch: self.source_capture.epoch(),
+            documents: binding
+                .config
+                .inject_docs
+                .then(|| binding.project_root.clone()),
         });
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the

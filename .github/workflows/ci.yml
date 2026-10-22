@@ -298,10 +298,11 @@ jobs:
         run: scripts/forbid-comment-markers.sh
 
       - name: Invented provenance
-        # Review-staging, MemoryReviewer, harness-source publication, and
-        # source-capture paths carry no caller provenance, so no source or
-        # fixture under them may construct `RepositoryProvenance` or populate a
-        # `provenance` field by any means: a literal `Some`, a forwarded value,
+        # Review-staging, MemoryReviewer, harness-source publication,
+        # source-capture, and repository-document read paths carry no caller
+        # provenance, so no source or fixture under them may construct
+        # `RepositoryProvenance` or populate a `provenance` field by any
+        # means: a literal `Some`, a forwarded value,
         # a call, or field-init shorthand. The only permitted population is
         # `provenance: None`, plus the one harness-source publisher line that
         # forwards the git publisher's commit provenance, which `git_sources.rs`
@@ -322,10 +323,11 @@ jobs:
                ':(glob)crates/**/memory_reviewer*' \
                ':(glob)crates/**/memory_reviewer/**' \
                ':(glob)crates/daemon/src/harness_sources.rs' \
-               ':(glob)crates/daemon/src/source_capture*' || status=$?
+               ':(glob)crates/daemon/src/source_capture*' \
+               ':(glob)crates/daemon/src/project_docs.rs' || status=$?
           if [ "$status" -eq 0 ]; then
             echo "invented provenance in a MemoryReviewer, review-staging," \
-              "harness-source, or source-capture path"
+              "harness-source, source-capture, or repository-document path"
             exit 1
           fi
           if [ "$status" -ne 1 ]; then

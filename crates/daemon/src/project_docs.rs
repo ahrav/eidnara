@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-const PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
+pub(crate) const PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
 const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
 const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
 
@@ -42,14 +42,51 @@ fn escape_xml_content(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Returns `None` unless the path opens, without following a symlink, as a
-/// regular file whose bytes fit `MAX_PROJECT_DOC_BYTES` and decode as UTF-8.
-/// The descriptor is validated and the cap enforced on bytes read, so a swap
-/// or growth after the open cannot change what is read.
+/// What one read of a configured document found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DocumentRead {
+    /// The raw UTF-8 text, exactly as read.
+    Text(String),
+    /// The path does not exist.
+    Missing,
+    /// The path is a symlink or another non-regular file.
+    NotRegular,
+    /// The file holds more than `MAX_PROJECT_DOC_BYTES`.
+    Oversize,
+    /// The bytes are not UTF-8.
+    NotUtf8,
+    /// The read failed for another reason, such as a permission error.
+    Unreadable,
+}
+
+/// Reads `path`, without following a symlink, as a regular file whose bytes fit `MAX_PROJECT_DOC_BYTES` and decode as UTF-8. The descriptor is validated and the cap enforced on bytes read, so a swap or growth after the open cannot change what is read; a failed read is classified from the path's own metadata.
+pub(crate) fn read_document(path: &Path) -> DocumentRead {
+    match crate::config::read_bounded_bytes(path, MAX_PROJECT_DOC_BYTES) {
+        Ok(bytes) => String::from_utf8(bytes).map_or(DocumentRead::NotUtf8, DocumentRead::Text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DocumentRead::Missing,
+        Err(_) => match std::fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_file() => DocumentRead::NotRegular,
+            Ok(metadata) if metadata.len() > MAX_PROJECT_DOC_BYTES => DocumentRead::Oversize,
+            _ => DocumentRead::Unreadable,
+        },
+    }
+}
+
+/// Every configured document of `project_directory` with its read, in the fixed file order.
+pub(crate) fn read_project_documents(
+    project_directory: &Path,
+) -> Vec<(&'static str, DocumentRead)> {
+    PROJECT_DOC_FILES
+        .into_iter()
+        .map(|filename| (filename, read_document(&project_directory.join(filename))))
+        .collect()
+}
+
 fn read_safe_canonical(path: &Path) -> Option<String> {
-    let bytes = crate::config::read_bounded_bytes(path, MAX_PROJECT_DOC_BYTES).ok()?;
-    let raw = String::from_utf8(bytes).ok()?;
-    Some(canonicalize_doc_content(&raw))
+    match read_document(path) {
+        DocumentRead::Text(raw) => Some(canonicalize_doc_content(&raw)),
+        _ => None,
+    }
 }
 
 /// Reads configured project documents and returns their deterministic rendering.
