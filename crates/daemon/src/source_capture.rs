@@ -766,6 +766,8 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
 
 /// Live descriptors one session-retirement page retires.
 pub(crate) const SESSION_RETIREMENT_PAGE: usize = 256;
+/// Pages one session-retirement inventory snapshot lists. The snapshot is one read transaction, so its pages commit while it reads on, and at most this many listed pages wait for their commit.
+const SESSION_INVENTORY_PAGES: usize = 16;
 /// How long a session-retirement preview waits for a pooled reader.
 const SESSION_RETIREMENT_WAIT: Duration = Duration::from_secs(5);
 /// Leads the bytes a session-retirement page's receipt key binds.
@@ -779,30 +781,119 @@ pub(crate) struct CapturedSession<'a> {
     pub(crate) session_id: &'a str,
 }
 
-/// Retires every live `messages` and `raw_tool_spans` descriptor of `session`, at most `pages` pages of at most `page_rows` descriptors, and returns whether none remains live. Each page is one commit that retires the rows its inventory listed, so a retry inventories again and finds only what is still live. A page's receipt is keyed by the session and the page's sorted object ids, never the clock ([`session_page_intent`]); a page that replays means the inventory listed rows a committed page retired, which is [`KernelError::Conflict`]. The caller holds the capture commit gate, so no capture publication interleaves; the maintenance expiry sweep can retire listed rows first, and the page then retires the rest.
+/// Retires the live `messages` and `raw_tool_spans` descriptors of `session` in at most `pages` pages of at most `page_rows` descriptors. Returns `true` once the inventory has passed both classes and `false` when the page bound ends first. The inventory makes one keyset pass over each class; each snapshot lists up to [`SESSION_INVENTORY_PAGES`] pages and the next snapshot resumes where it stopped. A scoped thread lists while this thread commits: full pages leave as soon as they are listed, each class's descriptors in creation order, so commits of one class overlap the listing of the next. Creation order keeps one page's writes on neighbouring registry and observation rows. The caller holds the capture commit gate, which serializes capture publication with retirement, so the one pass lists every descriptor the session holds. Each page is one commit. A retry starts a fresh pass. The session and the page's sorted object ids determine the page's receipt key ([`session_page_intent`]); a replayed receipt means the inventory listed rows a committed page retired, which is [`KernelError::Conflict`]. The maintenance expiry sweep can retire listed rows first, and the page then retires the remaining rows.
 ///
 /// # Errors
 ///
-/// Returns the first inventory or commit error; pages committed before it stay retired.
+/// Returns the first commit error, or else the first inventory error; pages committed before it stay retired.
 pub(crate) fn retire_session_pages(
     store: &KernelStore,
     session: CapturedSession<'_>,
     page_rows: std::num::NonZeroUsize,
     pages: usize,
 ) -> Result<bool, KernelError> {
-    for _ in 0..pages {
-        let (_, page) = store.preview(Instant::now() + SESSION_RETIREMENT_WAIT, |preview| {
-            session_page(preview, session, page_rows)
+    std::thread::scope(|scope| {
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Vec<String>>(SESSION_INVENTORY_PAGES);
+        let lister =
+            scope.spawn(move || list_session_pages(store, session, page_rows, pages, &sender));
+        for created in receiver {
+            let mut page = created.clone();
+            page.sort_unstable();
+            let receipt = store.commit(session_page_intent(session, &page), |envelope| {
+                crate::harness_sources::retire_descriptors(envelope, &created)
+            })?;
+            if receipt.replayed {
+                return Err(KernelError::Conflict);
+            }
+        }
+        lister
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// Lists `session`'s pages for [`retire_session_pages`] into `out`, at most `pages` of them, and returns whether the inventory passed both classes. Stops once the committing side has gone.
+fn list_session_pages(
+    store: &KernelStore,
+    session: CapturedSession<'_>,
+    page_rows: std::num::NonZeroUsize,
+    pages: usize,
+    out: &std::sync::mpsc::SyncSender<Vec<String>>,
+) -> Result<bool, KernelError> {
+    let mut cursor = InventoryCursor::default();
+    let mut remaining = pages;
+    while remaining > 0 {
+        let snapshot_pages = remaining.min(SESSION_INVENTORY_PAGES);
+        let (_, listed) = store.preview(Instant::now() + SESSION_RETIREMENT_WAIT, |preview| {
+            let mut cursor = cursor.clone();
+            let mut left = snapshot_pages;
+            let mut pending: Vec<(i64, String)> = Vec::new();
+            let send = |chunk: &[(i64, String)]| {
+                out.send(chunk.iter().map(|(_, id)| id.clone()).collect())
+                    .is_ok()
+            };
+            while let (Some(&class), Some(room)) = (
+                SESSION_CLASSES.get(cursor.class),
+                std::num::NonZeroUsize::new(
+                    left.saturating_mul(page_rows.get())
+                        .saturating_sub(pending.len()),
+                ),
+            ) {
+                let found = preview.live_source_descriptors_with(
+                    class,
+                    "session_id",
+                    &[session.session_id],
+                    cursor.after.as_deref(),
+                    room,
+                )?;
+                let mut batch: Vec<(i64, String)> = found
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        crate::git_reconcile::identity_field(row, "project_id")
+                            == Some(session.project_id)
+                            && crate::git_reconcile::identity_field(row, "harness")
+                                == Some(session.harness)
+                    })
+                    .map(|row| (row.created_commit_seq, row.object_id.clone()))
+                    .collect();
+                batch.sort_unstable();
+                pending.extend(batch);
+                while pending.len() >= page_rows.get() {
+                    if !send(&pending[..page_rows.get()]) {
+                        return Ok(None);
+                    }
+                    pending.drain(..page_rows.get());
+                    left -= 1;
+                }
+                cursor = match found.next {
+                    Some(next) => InventoryCursor {
+                        class: cursor.class,
+                        after: Some(next),
+                    },
+                    None => InventoryCursor {
+                        class: cursor.class + 1,
+                        after: None,
+                    },
+                };
+            }
+            if !pending.is_empty() {
+                if !send(&pending) {
+                    return Ok(None);
+                }
+                left -= 1;
+            }
+            Ok(Some((cursor, snapshot_pages - left)))
         })?;
-        if page.is_empty() {
+        let Some((next, listed_pages)) = listed else {
+            return Ok(false);
+        };
+        if next.class == SESSION_CLASSES.len() {
             return Ok(true);
         }
-        let receipt = store.commit(session_page_intent(session, &page), |envelope| {
-            crate::harness_sources::retire_descriptors(envelope, &page)
-        })?;
-        if receipt.replayed {
-            return Err(KernelError::Conflict);
-        }
+        remaining -= listed_pages;
+        cursor = next;
     }
     Ok(false)
 }
@@ -832,42 +923,14 @@ pub(crate) fn session_page_intent(session: CapturedSession<'_>, page: &[String])
     }
 }
 
-/// Up to `page_rows` live captured descriptors of `session`, sorted by object id.
-fn session_page(
-    preview: &kernel::Envelope<'_>,
-    session: CapturedSession<'_>,
-    page_rows: std::num::NonZeroUsize,
-) -> Result<Vec<String>, KernelError> {
-    let mut page = Vec::new();
-    for class in [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans] {
-        let mut after = None;
-        while let Some(room) = std::num::NonZeroUsize::new(page_rows.get() - page.len()) {
-            let rows = preview.live_source_descriptors_with(
-                class,
-                "session_id",
-                &[session.session_id],
-                after.as_deref(),
-                room,
-            )?;
-            page.extend(
-                rows.rows
-                    .iter()
-                    .filter(|row| {
-                        crate::git_reconcile::identity_field(row, "project_id")
-                            == Some(session.project_id)
-                            && crate::git_reconcile::identity_field(row, "harness")
-                                == Some(session.harness)
-                    })
-                    .map(|row| row.object_id.clone()),
-            );
-            match rows.next {
-                Some(next) => after = Some(next),
-                None => break,
-            }
-        }
-    }
-    page.sort();
-    Ok(page)
+const SESSION_CLASSES: [OccurrenceClass; 2] =
+    [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans];
+
+/// Where a session's inventory resumes: in `SESSION_CLASSES[class]` past the object id `after`. A `class` past the last one marks the inventory complete.
+#[derive(Debug, Clone, Default)]
+struct InventoryCursor {
+    class: usize,
+    after: Option<String>,
 }
 
 fn kernel_end(error: KernelError) -> Count {

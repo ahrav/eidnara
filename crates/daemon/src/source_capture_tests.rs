@@ -1547,3 +1547,51 @@ async fn a_route_claiming_another_harness_captures_nothing() {
     assert_eq!(report(&handler)["admitted"], 0);
     assert_eq!(store.tip().unwrap(), tip);
 }
+
+/// Retirement past one inventory snapshot: with one row per page, 24 captured descriptors take more pages than one snapshot lists. A bound of five pages retires exactly five rows and reports the inventory unfinished; the next call resumes from a fresh pass, crosses the snapshot boundary, and leaves nothing of the session live; a retry commits nothing.
+#[tokio::test]
+async fn session_retirement_crosses_inventory_snapshots_and_stops_at_its_page_bound() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window: Vec<Value> = (0..6u64)
+        .flat_map(|index| {
+            let mut assistant = opencode_assistant_with_tools(
+                &format!("msg_a{index}"),
+                1_700_000_001_000 + index * 2_000,
+            );
+            for part in assistant["parts"].as_array_mut().unwrap() {
+                if let Some(call) = part["callID"].as_str().map(str::to_owned) {
+                    part["callID"] = json!(format!("{call}_{index}"));
+                }
+            }
+            [
+                opencode_user(
+                    &format!("msg_u{index}"),
+                    1_700_000_000_000 + index * 2_000,
+                    "please run the tests",
+                ),
+                assistant,
+            ]
+        })
+        .collect();
+    pass(&handler, transform_with(&window, "base-1")).await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    let captured = live_for_session(&store, SESSION).len();
+    assert_eq!(captured, 24);
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let session = source_capture::CapturedSession {
+        project_id: &digest,
+        harness: "opencode",
+        session_id: SESSION,
+    };
+    let one = NonZeroUsize::new(1).unwrap();
+    assert!(!source_capture::retire_session_pages(&store, session, one, 5).unwrap());
+    assert_eq!(live_for_session(&store, SESSION).len(), captured - 5);
+    assert!(source_capture::retire_session_pages(&store, session, one, usize::MAX).unwrap());
+    assert!(live_for_session(&store, SESSION).is_empty());
+    let tip = store.tip().unwrap();
+    assert!(source_capture::retire_session_pages(&store, session, one, usize::MAX).unwrap());
+    assert_eq!(store.tip().unwrap(), tip, "a retry commits nothing");
+}
