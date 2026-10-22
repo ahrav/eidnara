@@ -155,6 +155,26 @@ pub fn check_outcome(
     }
 }
 
+pub(crate) fn stored_outcome_ok(
+    detail: &SourceDescriptorDetail,
+    class: OccurrenceClass,
+    byte_length: u64,
+) -> bool {
+    let selected = match detail.span {
+        None => byte_length,
+        Some((start, end)) => end.saturating_sub(start),
+    };
+    usize::try_from(selected).is_ok_and(|selected| {
+        check_outcome(
+            detail.outcome.as_ref(),
+            class,
+            &detail.representation,
+            selected,
+        )
+        .is_ok()
+    })
+}
+
 /// Descriptor rows store versioned metadata and encoded identity tuples, not payload text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceDescriptorDetail {
@@ -685,6 +705,7 @@ struct LiveDescriptorRaw {
     observation_invalidated: Option<i64>,
     evidence_id: String,
     artifact_digest: String,
+    byte_length: i64,
 }
 
 impl KernelStore {
@@ -712,7 +733,7 @@ impl KernelStore {
         // A literal bound keeps the cached statement valid across calls; SQLite expires a statement whose `LIMIT` parameter is rebound.
         let sql = format!(
             "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
-                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
+                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest,e.byte_length
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
@@ -741,6 +762,7 @@ impl KernelStore {
                         observation_invalidated: row.get(10)?,
                         evidence_id: row.get(11)?,
                         artifact_digest: row.get(12)?,
+                        byte_length: row.get(13)?,
                     })
                 },
             )
@@ -753,6 +775,8 @@ impl KernelStore {
             .take(max_rows.get())
             .map(|raw| {
                 let detail = stored_detail(&raw.payload)?;
+                let byte_length =
+                    u64::try_from(raw.byte_length).map_err(|_| KernelError::CorruptCanonicalRow)?;
                 // The registry row and the stored detail must agree, as `source_export::preflight` requires.
                 if raw.created_commit_seq != raw.observation_created
                     || raw.invalidated_commit_seq != raw.observation_invalidated
@@ -764,6 +788,7 @@ impl KernelStore {
                     || detail.revision != raw.revision.to_string()
                     || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
                     || reencoded_identity(&detail).is_none()
+                    || !stored_outcome_ok(&detail, class, byte_length)
                 {
                     return Err(KernelError::CorruptCanonicalRow);
                 }

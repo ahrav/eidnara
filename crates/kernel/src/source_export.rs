@@ -21,7 +21,7 @@ use super::open::AcquireLimit;
 use super::slice::ObservationPayload;
 use super::source_descriptor::{
     SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescriptorDetail, descriptor_object_id,
-    reencoded_identity,
+    reencoded_identity, stored_outcome_ok,
 };
 use super::source_hold::{
     Descriptors, HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, check_coverage,
@@ -569,6 +569,9 @@ fn preflight(
         .source_policy
         .validate_for(encoded.class)
         .map_err(|_| malformed(&object_id))?;
+    if !stored_outcome_ok(&detail, encoded.class, byte_length) {
+        return Err(malformed(&object_id));
+    }
     let (exports_text, end) = match window {
         ExportWindow::Snapshot => (true, snapshot),
         ExportWindow::CatchUp { through } => (raw.created > snapshot, through),
