@@ -421,7 +421,7 @@ pub enum PublishError {
     /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
     #[error("the native revision {revision} leads the observation at {observed_at}")]
     RevisionAhead { revision: i64, observed_at: i64 },
-    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, a mismatched domain, or a repository document's lineage head that moved after the evidence was retained. A head another writer advanced refuses this unit as a stale revision, and a proposal past the head plus one as a head mismatch; either refuses the same unit again, so the producer reads the head and proposes a new unit.
+    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, a mismatched domain, or a repository document's lineage head that differs from the head the proposal expected. A stale revision refuses the same unit on every attempt, so the producer reads the head and proposes a new unit. A proposal past the head plus one preserves its evidence on `HeadMismatch`, so the same unit can be offered again when the lineage reaches its expected head.
     #[error("the descriptor was refused: {refusal}")]
     Descriptor {
         refusal: SourceDescriptorError,
@@ -436,7 +436,7 @@ pub enum PublishError {
 }
 
 impl PublishError {
-    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, and revision-lead refusals depend on state that can change and report `false`.
+    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, revision-lead, and head-mismatch refusals depend on state that can change and report `false`.
     pub fn is_permanent(&self) -> bool {
         match self {
             Self::Artifact(kind) => matches!(
@@ -452,7 +452,8 @@ impl PublishError {
                     | ArtifactErrorKind::UnsupportedShape
                     | ArtifactErrorKind::DigestCollision
             ),
-            Self::IdentityReused | Self::Descriptor { .. } => true,
+            Self::IdentityReused => true,
+            Self::Descriptor { refusal, .. } => *refusal != SourceDescriptorError::HeadMismatch,
             Self::UnadmittedSource { .. } | Self::RevisionAhead { .. } | Self::Kernel { .. } => {
                 false
             }
@@ -620,11 +621,15 @@ impl SourcePublisher<'_> {
                         });
                     }
                     Some(Err(refusal)) => {
-                        let evidence = Some(self.retire_evidence(
-                            &unit.key,
-                            &unit.request_digest,
-                            &unit.origin,
-                        ));
+                        // A `HeadMismatch` can resolve as the lineage advances, so its evidence is preserved for the retry. Every other descriptor refusal is permanent and attempts to retire the retained evidence.
+                        let evidence = Some(if refusal == SourceDescriptorError::HeadMismatch {
+                            RetainedEvidence {
+                                object_id: evidence_object_id,
+                                retired: None,
+                            }
+                        } else {
+                            self.retire_evidence(&unit.key, &unit.request_digest, &unit.origin)
+                        });
                         return Err(PublishError::Descriptor { refusal, evidence });
                     }
                     _ => error,

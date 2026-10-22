@@ -25,12 +25,12 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`search-projection-identity-v3`), which is one of the invalidation identities every hook
+(`search-projection-identity-v4`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
 
-RP2.1 projects exactly five source classes. Their codes are constant ASCII and
+RP2.1 projects exactly six source classes. Their codes are constant ASCII and
 appear first in every occurrence tuple:
 
 | Class code | Source | Dense by default |

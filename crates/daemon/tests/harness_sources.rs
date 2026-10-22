@@ -134,7 +134,7 @@ fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v3".to_string(),
+        identity_contract_version: "search-projection-identity-v4".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -2568,6 +2568,50 @@ fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
         text: text.to_string(),
         role: "document".to_string(),
     }
+}
+
+/// A proposal more than one revision past the lineage head is refused as a head mismatch. The refusal depends on the head: once the lineage reaches the revision before the proposal, the same unit publishes.
+#[test]
+fn repository_documents_gap_refusal_is_retryable_once_the_gap_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    publisher
+        .publish(&document_unit("README.md", "1", "# one\n"), NOW)
+        .unwrap();
+    publisher
+        .publish(&document_unit("README.md", "2", "# two\n"), NOW)
+        .unwrap();
+    let gap = document_unit("README.md", "4", "# four\n");
+    let refused = publisher.publish(&gap, NOW);
+    assert!(
+        matches!(
+            &refused,
+            Err(PublishError::Descriptor {
+                refusal: SourceDescriptorError::HeadMismatch,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(!refused.unwrap_err().is_permanent());
+    publisher
+        .publish(&document_unit("README.md", "3", "# three\n"), NOW)
+        .unwrap();
+    let landed = publisher.publish(&gap, NOW).unwrap();
+    assert!(!landed.replayed, "{landed:?}");
+    let rows = corpus.export();
+    let live: Vec<&SourceRow> = rows
+        .iter()
+        .filter(|row| {
+            row.detail.class == "repository_documents" && row.invalidated_commit_seq.is_none()
+        })
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].object_id, landed.object_id);
+    assert_eq!(live[0].text.as_deref(), Some("# four\n"));
 }
 
 /// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below the retired head or past the head plus one is refused while the head plus one republishes; and a projection builds from a store holding the class.
