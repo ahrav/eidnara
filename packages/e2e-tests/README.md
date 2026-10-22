@@ -120,6 +120,13 @@ verified project memory into an existing decision's scope,
 ranking trace. The pass line's `admission`, `invocation_bytes`,
 `invocation_charged`, and `history_budget` fields feed both.
 
+`review-cli.test.ts` drives the fixture's `review-witness` control for a root
+whose memories authority is MODULE. It runs one production MemoryReviewer
+worker pass over the host's stores against a scripted local TLS peer: two
+fixture-class forms of one decision reach selected proposals, and three
+production-class forms abstain `owner_sensitive` before any request. It returns
+each selected read and the decision's tokens for the review command to match.
+
 `compression-fidelity-forwarding` runs one OpenCode turn through the
 forwarding mock to an in-process provider double: the double calls `read`, the
 tool-result turn is forwarded and captured, the final answer reaches the

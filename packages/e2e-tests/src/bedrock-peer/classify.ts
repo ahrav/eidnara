@@ -3,7 +3,7 @@ import type { BindIdentity } from "@eidnara/opencode/shared/host-client";
 import type { HermeticHostStack } from "../rust-runner/hermetic-host";
 
 /** `memory_classifier.run_task` runs only on a root whose memories authority is MODULE. */
-async function raiseMemoriesAuthority(
+export async function raiseMemoriesAuthority(
     host: HermeticHostStack,
     identity: BindIdentity,
 ): Promise<number> {
