@@ -22,10 +22,10 @@ pub const LOCAL_FILE_SOURCE_KIND: &str = "local_file";
 pub const LOCAL_FILE_DETAIL_VERSION: u32 = 1;
 const OBSERVATION_ID_PREFIX: &str = "localfile:";
 const OBJECT_ID_PREFIX: &str = "localfileobj:";
-/// Expiries retired per maintenance call.
+/// Captures one class sweep retires per call; the maintenance slice runs one sweep per expiring class.
 pub const MAX_EXPIRED_CAPTURES_PER_CALL: usize = 64;
 
-/// What one expiry sweep did. `retired` captures lost their observation and evidence; `retained` captures lost only their observation because another live row still cites the evidence. A sweep with both at zero found no work in the page.
+/// What one expiry sweep did. `retired` captures lost their owning observations and evidence; `retained` captures lost only their owning observations because another live row still cites the evidence. A sweep with both at zero found no work in the page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CaptureExpiry {
     pub retired: usize,
@@ -35,6 +35,7 @@ pub struct CaptureExpiry {
 struct ExpiringClass {
     retention_class: &'static str,
     owner_kind: &'static str,
+    /// The reserved producer suffix, also the expiry commit's actor.
     producer: &'static str,
     cause: &'static str,
 }
@@ -441,7 +442,7 @@ fn is_relative_path(path: &str) -> bool {
             .all(|component| !matches!(component, "" | "." | ".."))
 }
 
-/// SQL predicate over an `evidence_meta` row aliased `e`: a live MemoryReviewer capture (`?1` the retention class) whose acquisition reference has passed at `?2` and that no live hold pins at `?2`. A live hold is unreleased, not purge-degraded, and unexpired, the same three conditions a hold must meet to be used. The candidate query and the per-capture recheck evaluate this same text.
+/// SQL predicate over an `evidence_meta` row aliased `e`: a live row of an expiring class (`?1` its retention class) whose `retain_until` has passed at `?2` and that no live hold pins at `?2`. A live hold is unreleased, not purge-degraded, and unexpired, the same three conditions a hold must meet to be used. The candidate query and the per-capture recheck evaluate this same text.
 const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
            AND e.retain_until IS NOT NULL AND e.retain_until<=?2
            AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
@@ -451,7 +452,7 @@ const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commi
                               AND p.purge_degraded_at IS NULL
                               AND (p.expires_at IS NULL OR p.expires_at>?2))";
 
-/// Live MemoryReviewer captures whose acquisition reference has passed, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
+/// Live rows of `class` whose `retain_until` has passed at `now`, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose owning observations are already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate. The query reads such retained rows, and rows a live hold pins, on every call before it fills its page, so a call's read work grows with the retained and held rows ahead of the page while its writes stay bounded by the page.
 fn expired_captures(
     connection: &rusqlite::Connection,
     class: &ExpiringClass,
@@ -493,7 +494,7 @@ fn expired_captures_sql() -> String {
     )
 }
 
-/// The object ids of the live capture observations citing `evidence_id`. The capture writer creates one per evidence row; every live one is retired so that `retire_evidence` sees only foreign citations.
+/// The object ids of the live observations of `owner_kind` citing `evidence_id`: the MemoryReviewer capture observation, or every source descriptor that cites a harness capture. Every live one is retired so that `retire_evidence` sees only foreign citations.
 fn live_capture_observations(
     envelope: &Envelope<'_>,
     owner_kind: &str,
@@ -747,6 +748,30 @@ mod tests {
                 provenance: None,
             })
             .unwrap();
+        // A harness capture must carry a deadline; one without is refused before anything commits.
+        let tip = store.tip().unwrap();
+        let undated = store.ingest_exact_artifact(ArtifactIngestRequest {
+            intent: intent("undated"),
+            payload: b"undated tool output".to_vec(),
+            evidence_id: "undated".to_string(),
+            object_id: "undated-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "raw_tool_spans".to_string(),
+            source_id: "undated".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: HARNESS_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Sensitive,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        });
+        assert_eq!(
+            undated.map_err(|error| error.kind()),
+            Err(crate::ArtifactErrorKind::InvalidInput)
+        );
+        assert_eq!(store.tip().unwrap(), tip);
         let selected = {
             let reader = store.lock_reader().unwrap();
             super::expired_captures(&reader, &HARNESS_CAPTURES, NOW).unwrap()
