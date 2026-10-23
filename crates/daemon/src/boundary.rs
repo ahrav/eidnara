@@ -1753,19 +1753,27 @@ enum ChunkMessagePart {
     },
 }
 
-/// Each key identifies the arc opened by a tool call. The last output-bearing result for that arc supplies the call's output. A result whose block carries no output has no entry, and its call renders as one without a result.
+/// Within each `arc_id`, results pair with preceding calls in block order across `messages`. A paired result with an outcome produces one entry keyed by its call's block id.
 fn tool_results<'m>(messages: &[&'m BoundaryMsg<'_>]) -> ToolResults<'m> {
+    use std::collections::{HashMap, VecDeque};
+    let mut unpaired: HashMap<&'m str, VecDeque<&'m str>> = HashMap::new();
     let mut results = ToolResults::new();
     for block in messages.iter().flat_map(|message| &message.blocks) {
-        if let (
-            SelKind::ToolResult {
-                outcome: Some(outcome),
-                ..
-            },
-            Some(arc_id),
-        ) = (&block.kind, &block.arc_id)
-        {
-            results.insert(arc_id.as_str(), outcome);
+        let Some(arc_id) = block.arc_id.as_deref() else {
+            continue;
+        };
+        match &block.kind {
+            SelKind::ToolCall { .. } => unpaired
+                .entry(arc_id)
+                .or_default()
+                .push_back(block.id.as_ref()),
+            SelKind::ToolResult { outcome, .. } => {
+                let call = unpaired.get_mut(arc_id).and_then(VecDeque::pop_front);
+                if let (Some(call), Some(outcome)) = (call, outcome) {
+                    results.insert(call, outcome.as_ref());
+                }
+            }
+            _ => {}
         }
     }
     results
@@ -1847,7 +1855,7 @@ fn text_parts(message: &BoundaryMsg) -> Vec<String> {
         .collect()
 }
 
-/// The summaries of the calls in `blocks`, each with whether it is a digest: a call whose result is in `results` renders its digest ([`crate::tool_outcome::digest`]) under its summary ([`crate::history_summarizer_chunk::format_tool_summary`]); with `bare_calls`, every other call renders its summary alone.
+/// Each returned summary carries a flag marking whether it includes a digest. Calls in `blocks` with entries in `results` render their digest ([`crate::tool_outcome::digest`]) under their summary ([`crate::history_summarizer_chunk::format_tool_summary`]); with `bare_calls`, the remaining calls render their summaries alone.
 fn tool_call_parts(
     blocks: &[BoundaryBlock],
     results: &ToolResults,
@@ -1858,10 +1866,7 @@ fn tool_call_parts(
         let SelKind::ToolCall { name, input } = &block.kind else {
             continue;
         };
-        let outcome = block
-            .arc_id
-            .as_deref()
-            .and_then(|arc_id| results.get(arc_id));
+        let outcome = results.get(block.id.as_ref());
         if outcome.is_none() && !bare_calls {
             continue;
         }
@@ -3199,5 +3204,55 @@ mod digest_tests {
         assert!(chunk.contains("TC: read(c.rs)"), "{chunk}");
         assert!(!chunk.contains("SENTINEL-7f3a"));
         assert!(!chunk.contains("SENTINEL-7f3a"));
+    }
+
+    /// Within a message, results with the same call ID pair with calls in block order.
+    #[test]
+    fn repeated_call_ids_pair_each_call_with_its_own_result() {
+        let read = |path: &str| BlockKind::ToolCall {
+            id: "c1".to_owned(),
+            name: "read".to_owned(),
+            input: json!({ "filePath": path }),
+            provider_executed: false,
+        };
+        let read_result = |text: &str| BlockKind::ToolResult {
+            id: "c1".to_owned(),
+            tool_name: "read".to_owned(),
+            output: ToolOutput::bare(OutputKind::Text {
+                text: text.to_owned(),
+            }),
+            provider_executed: false,
+        };
+        let messages = vec![
+            msg(
+                "u1",
+                1,
+                "user",
+                vec![BlockKind::Text {
+                    text: "go".to_owned(),
+                }],
+            ),
+            msg(
+                "a2",
+                2,
+                "assistant",
+                vec![
+                    read("one.rs"),
+                    read_result("first"),
+                    read("two.rs"),
+                    read_result("second"),
+                    BlockKind::Text {
+                        text: "Read both.".to_owned(),
+                    },
+                ],
+            ),
+        ];
+        let chunk = boundary_chunk(&messages).join("\n");
+        assert!(
+            chunk.contains(
+                "Read both. / TC: read(one.rs); completed; bytes=5; head=\"first\" / TC: read(two.rs); completed; bytes=6; head=\"second\""
+            ),
+            "{chunk}"
+        );
     }
 }

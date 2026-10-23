@@ -177,7 +177,10 @@ The summarizer sees each tool result as one digest:
 
 `<call>` is the call's `TC:` summary: `TC: <description>`, `TC: <name>(<key
 arg>)`, or `TC: <name>`, and `TC: <tool name>` for a result whose call is
-not in the chunk. `crates/daemon/src/tool_outcome.rs` reads the result's
+not in the chunk. The summary's whitespace runs collapse to single spaces,
+as normalized message text does, so a description or argument holding a
+newline stays on the summary's transcript line.
+`crates/daemon/src/tool_outcome.rs` reads the result's
 status and text from its wire block with `from_output`, and `outcome_digest`
 and `digest` render the rest:
 
@@ -206,9 +209,10 @@ message that holds both the call and the result, as an OpenCode assistant
 message does. A result in such a message pairs with the earliest unpaired
 call of its id, as the projector pairs arcs, so a call id repeated within
 one message keeps each call's own arguments. The boundary chunk shows it for
-a call whose result is in its message set; on a message without narrative, a
-call whose result is not in the set shows its bare `TC:` line, and a message
-with narrative shows only its answered calls' digests.
+a call whose result is in its message set, pairing each result with the
+earliest unpaired call of its arc in block order; on a message without
+narrative, a call whose result is not in the set shows its bare `TC:` line,
+and a message with narrative shows only its answered calls' digests.
 
 The boundary computes a result's outcome half once per block content. The
 boundary token cache stores it beside the block's token count, keyed by the
