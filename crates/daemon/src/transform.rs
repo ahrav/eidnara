@@ -6880,11 +6880,9 @@ fn sel_item_from_flat<'a>(
             name: name.clone(),
             input: Cow::Borrowed(input),
         },
-        wire::BlockKind::ToolResult {
-            tool_name, output, ..
-        } => SelKind::ToolResult {
+        wire::BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
             tool_name: tool_name.clone(),
-            output: Some(output),
+            outcome: None,
         },
         wire::BlockKind::Reasoning { .. } => SelKind::Reasoning,
         wire::BlockKind::Text { .. } => SelKind::Text,
@@ -26474,7 +26472,7 @@ pub(crate) mod tests {
             );
             let item = sel_item_from_flat(flat, &HashMap::new());
             let cloned = item.clone();
-            let boundary = crate::sel_kind_for_flat(flat);
+            let boundary = crate::sel_kind_for_flat(flat, None);
             for kind in [&item.kind, &cloned.kind, &boundary] {
                 let SelKind::ToolCall { input, .. } = kind else {
                     panic!("selection tool call")

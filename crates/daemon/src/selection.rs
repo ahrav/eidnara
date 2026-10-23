@@ -117,8 +117,8 @@ pub enum SelKind<'a> {
     },
     ToolResult {
         tool_name: String,
-        /// The result's output, when the caller holds its wire block; the summarizer's boundary chunk renders its digest from it.
-        output: Option<&'a memory_store::ToolOutput>,
+        /// The outcome half of the result's summarizer digest (`tool_outcome::outcome_digest`).
+        outcome: Option<std::sync::Arc<str>>,
     },
     Reasoning,
     Text,
@@ -1357,7 +1357,7 @@ mod tests {
             message_role: SelMessageRole::NonAssistant,
             kind: SelKind::ToolResult {
                 tool_name: name.to_string(),
-                output: None,
+                outcome: None,
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1441,7 +1441,7 @@ mod tests {
             message_role: SelMessageRole::NonAssistant,
             kind: SelKind::ToolResult {
                 tool_name: name.to_string(),
-                output: None,
+                outcome: None,
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1618,7 +1618,7 @@ mod tests {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    output: None,
+                    outcome: None,
                 };
             }
         }

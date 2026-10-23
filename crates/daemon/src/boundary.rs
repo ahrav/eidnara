@@ -1759,20 +1759,19 @@ fn tool_results<'m>(messages: &[&'m BoundaryMsg<'_>]) -> ToolResults<'m> {
     for block in messages.iter().flat_map(|message| &message.blocks) {
         if let (
             SelKind::ToolResult {
-                output: Some(output),
+                outcome: Some(outcome),
                 ..
             },
             Some(arc_id),
         ) = (&block.kind, &block.arc_id)
         {
-            results.insert(arc_id.as_str(), *output);
+            results.insert(arc_id.as_str(), outcome);
         }
     }
     results
 }
 
-/// Tool-result outputs by call arc.
-type ToolResults<'m> = std::collections::HashMap<&'m str, &'m memory_store::ToolOutput>;
+type ToolResults<'m> = std::collections::HashMap<&'m str, &'m str>;
 
 fn chunk_message_part(message: &BoundaryMsg, results: &ToolResults) -> ChunkMessagePart {
     if message.role == Role::User && !has_meaningful_user_text(&message.blocks) {
@@ -1859,19 +1858,17 @@ fn tool_call_parts(
         let SelKind::ToolCall { name, input } = &block.kind else {
             continue;
         };
-        let output = block
+        let outcome = block
             .arc_id
             .as_deref()
             .and_then(|arc_id| results.get(arc_id));
-        if output.is_none() && !bare_calls {
+        if outcome.is_none() && !bare_calls {
             continue;
         }
         let summary = crate::history_summarizer_chunk::format_tool_summary(name, input);
-        match output {
-            Some(output) => {
-                let (status, text) = crate::tool_outcome::from_output(output);
-                let outcome = crate::tool_outcome::outcome_digest(status, None, &text);
-                summaries.push((crate::tool_outcome::digest(&summary, &outcome), true));
+        match outcome {
+            Some(outcome) => {
+                summaries.push((crate::tool_outcome::digest(&summary, outcome), true));
             }
             None => summaries.push((summary, false)),
         }
@@ -2028,7 +2025,7 @@ mod tests {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string(),
-                    output: None,
+                    outcome: None,
                 };
             }
         }
@@ -2349,7 +2346,7 @@ mod tests {
                 ordinal: ord,
                 kind: SelKind::ToolResult {
                     tool_name: "bash".to_string(),
-                    output: None,
+                    outcome: None,
                 },
                 provider_executed: false,
                 byte_size: text.len(),
@@ -2755,7 +2752,7 @@ mod tests {
                     ordinal: 3,
                     kind: SelKind::ToolResult {
                         tool_name: "bash".to_string(),
-                        output: None,
+                        outcome: None,
                     },
                     provider_executed: false,
                     byte_size: 21_000,
@@ -3112,7 +3109,9 @@ mod digest_tests {
                                 tool_name, output, ..
                             } => SelKind::ToolResult {
                                 tool_name: tool_name.clone(),
-                                output: Some(output),
+                                outcome: Some(Arc::from(crate::tool_outcome::output_outcome(
+                                    output,
+                                ))),
                             },
                             _ => SelKind::Text,
                         },

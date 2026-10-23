@@ -1246,45 +1246,47 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
         .any(|text| !text.is_empty() && !is_system_directive(text))
 }
 
-/// The tool parts of `message` in block order, each with whether it is a result digest. A tool result renders its digest ([`crate::tool_outcome::digest`]) under its call's summary: the call in this message, else the call `lookup` names by arc, else the bare tool name. With `bare_calls`, a call whose result this message does not hold renders its summary alone.
+/// `tool_parts` returns summaries and result digests in block order; each tuple's boolean marks a result digest ([`crate::tool_outcome::digest`]). Results pair with the earliest unpaired call with the same `id` in `message`, preserving that call's arguments when IDs repeat. Unmatched calls contribute summaries when `bare_calls` is true.
 fn tool_parts(
     message: &FlatMessage<'_>,
     lookup: &HashMap<String, String>,
     bare_calls: bool,
 ) -> Vec<(String, bool)> {
-    let mut calls: HashMap<&str, (&str, &Value)> = HashMap::new();
-    let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for block in &message.blocks {
-        match block.wire.kind() {
-            BlockKind::ToolCall {
-                id, name, input, ..
-            } => {
-                calls.insert(id.as_str(), (name.as_str(), input));
-            }
-            BlockKind::ToolResult { id, .. } => {
-                answered.insert(id.as_str());
-            }
-            _ => {}
+    let mut unpaired: Vec<(&str, usize)> = message
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block.wire.kind() {
+            BlockKind::ToolCall { id, .. } => Some((id.as_str(), index)),
+            _ => None,
+        })
+        .collect();
+    let mut call_of_result = vec![None; message.blocks.len()];
+    let mut answered = vec![false; message.blocks.len()];
+    for (index, block) in message.blocks.iter().enumerate() {
+        if let BlockKind::ToolResult { id, .. } = block.wire.kind()
+            && let Some(position) = unpaired.iter().position(|(call, _)| *call == id)
+        {
+            let (_, call) = unpaired.remove(position);
+            call_of_result[index] = Some(call);
+            answered[call] = true;
         }
     }
-    let summary = |id: &str| {
-        calls
-            .get(id)
-            .map(|(name, input)| format_tool_summary(name, input))
+    let summary = |index: usize| match message.blocks[index].wire.kind() {
+        BlockKind::ToolCall { name, input, .. } => Some(format_tool_summary(name, input)),
+        _ => None,
     };
     let mut parts = Vec::new();
-    for block in &message.blocks {
+    for (index, block) in message.blocks.iter().enumerate() {
         match block.wire.kind() {
-            BlockKind::ToolCall { id, .. } if bare_calls && !answered.contains(id.as_str()) => {
-                parts.extend(summary(id).map(|summary| (summary, false)));
+            BlockKind::ToolCall { .. } if bare_calls && !answered[index] => {
+                parts.extend(summary(index).map(|summary| (summary, false)));
             }
             BlockKind::ToolResult {
-                id,
-                tool_name,
-                output,
-                ..
+                tool_name, output, ..
             } => {
-                let call = summary(id)
+                let call = call_of_result[index]
+                    .and_then(summary)
                     .map(Cow::Owned)
                     .or_else(|| {
                         block
@@ -1294,8 +1296,7 @@ fn tool_parts(
                             .map(|summary| Cow::Borrowed(summary.as_str()))
                     })
                     .unwrap_or_else(|| Cow::Owned(format!("TC: {tool_name}")));
-                let (status, text) = crate::tool_outcome::from_output(output);
-                let outcome = crate::tool_outcome::outcome_digest(status, None, &text);
+                let outcome = crate::tool_outcome::output_outcome(output);
                 parts.push((crate::tool_outcome::digest(&call, &outcome), true));
             }
             _ => {}
@@ -3266,6 +3267,66 @@ mod digest_chunk_tests {
             built.text
         );
         assert!(!built.text.contains("SENTINEL-7f3a"));
+    }
+
+    #[test]
+    fn repeated_call_ids_render_each_call_with_its_own_arguments() {
+        let read = |path: &str| BlockKind::ToolCall {
+            id: "c1".to_owned(),
+            name: "read".to_owned(),
+            input: json!({ "filePath": path }),
+            provider_executed: false,
+        };
+        let read_result = |text: &str| BlockKind::ToolResult {
+            id: "c1".to_owned(),
+            tool_name: "read".to_owned(),
+            output: ToolOutput::bare(OutputKind::Text {
+                text: text.to_owned(),
+            }),
+            provider_executed: false,
+        };
+        let go = || BlockKind::Text {
+            text: "go".to_owned(),
+        };
+        let bare = build(
+            &[
+                msg("u1", 1, "user", vec![go()]),
+                msg("a2", 2, "assistant", vec![read("one.rs"), read("two.rs")]),
+            ],
+            10_000,
+        );
+        assert!(
+            bare.text.contains("TC: read(one.rs) / TC: read(two.rs)"),
+            "{}",
+            bare.text
+        );
+        let answered = build(
+            &[
+                msg("u1", 1, "user", vec![go()]),
+                msg(
+                    "a2",
+                    2,
+                    "assistant",
+                    vec![
+                        read("one.rs"),
+                        read_result("first"),
+                        read("two.rs"),
+                        read_result("second"),
+                        BlockKind::Text {
+                            text: "Read both.".to_owned(),
+                        },
+                    ],
+                ),
+            ],
+            10_000,
+        );
+        assert!(
+            answered.text.contains(
+                "Read both. / TC: read(one.rs); completed; bytes=5; head=\"first\" / TC: read(two.rs); completed; bytes=6; head=\"second\""
+            ),
+            "{}",
+            answered.text
+        );
     }
 
     /// F16: a budget cut inside a digest withdraws its alias, so no citation names bytes the model never saw whole.

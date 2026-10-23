@@ -238,10 +238,9 @@ fn tool_digest(part: &Part) -> Option<String> {
         ToolStatus::Error => memory_store::OutputKind::ErrorText { text },
     };
     let output = memory_store::ToolOutput::bare(kind);
-    let (status, text) = crate::tool_outcome::from_output(&output);
     Some(crate::tool_outcome::digest(
         &crate::history_summarizer_chunk::format_tool_summary(tool, &state.input),
-        &crate::tool_outcome::outcome_digest(status, None, &text),
+        &crate::tool_outcome::output_outcome(&output),
     ))
 }
 
