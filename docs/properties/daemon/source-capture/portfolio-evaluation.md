@@ -46,7 +46,8 @@ or function name the catalog files cite exists in `crates/`.
 The fresh verification of `docs/source-capture.md` found that a
 secret-bearing unit, a pending unlink, and a purge tombstone each reject the
 whole capture batch during batch ingest, with no named unit, so the memo
-records nothing and the unit is offered again on every pass. The authoring
+records every keyed unit of the batch as pending and the unit is offered
+again on every pass. The authoring
 group for `sc-unprovenanced-text-stores-sensitive-or-refuses-secrets` found
 the same by reading `ingest_exact_artifacts_with`. The document and
 `sc-readmission-blocked-after-purge-tombstone` state this behavior; a test
