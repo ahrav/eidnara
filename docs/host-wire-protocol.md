@@ -664,7 +664,8 @@ lifetime.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of
-consented message text and tool results as Kernel source descriptors. The
+consented message text, tool results, and configured repository documents as
+Kernel source descriptors. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -950,7 +951,8 @@ permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
 it from the project tier before merging. It consents to a different capture:
 the daemon retaining the exact bytes of user and completed assistant message
-text, tool outputs, and tool errors as Kernel source descriptors, published by
+text, tool outputs, tool errors, and the configured repository documents a
+pass reads for its prompt block, as Kernel source descriptors, published by
 a background supervisor after the transform response settles and reported
 through `metrics.source_capture`. Source capture runs only when
 `source_capture.enabled` and `memory.enabled` both permit it, and a session

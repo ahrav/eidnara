@@ -567,7 +567,7 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(false)
                     .describe(
-                        "User-only: retain the exact bytes of user message text, tool outputs, and tool errors as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
+                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
                     ),
             })
             .default({ enabled: false })
