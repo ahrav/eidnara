@@ -4,6 +4,7 @@ use crate::chunk_text::{
     clean_user_text, compact_role, compact_text_for_summary, extract_key_arg, format_block_line,
     is_system_directive, merge_commit_hashes, normalize_text,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Local, TimeZone};
@@ -94,6 +95,17 @@ struct ChunkBlock {
     is_tool_only: bool,
 }
 
+enum MessagePart {
+    Noise,
+    ToolOnly(FrozenAlias),
+    Text {
+        role: String,
+        part: FrozenAlias,
+        commit_hashes: Vec<String>,
+        has_narrative: bool,
+    },
+}
+
 pub const SELECTED_IDENTITY_BUDGET_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
@@ -165,17 +177,11 @@ struct Builder<'a> {
     last_message_id: String,
     commit_cluster_count: usize,
     last_flushed_role: String,
-    tool_call_summaries: HashMap<String, String>,
     aliases: FrozenAliasTable,
 }
 
 impl<'a> Builder<'a> {
-    fn new(
-        budget: usize,
-        start_ordinal: u64,
-        tool_call_summaries: HashMap<String, String>,
-        identities: Option<IdentitySelection<'a>>,
-    ) -> Self {
+    fn new(budget: usize, start_ordinal: u64, identities: Option<IdentitySelection<'a>>) -> Self {
         Self {
             identities,
             budget,
@@ -189,15 +195,18 @@ impl<'a> Builder<'a> {
             last_message_id: String::new(),
             commit_cluster_count: 0,
             last_flushed_role: String::new(),
-            tool_call_summaries,
             aliases: FrozenAliasTable::default(),
         }
     }
 
     /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
     fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
-        let escaped = text.replace([ALIAS_OPEN, ALIAS_CLOSE], ALIAS_ESCAPE);
-        let transformed = transformed || escaped != text;
+        let escaped = text
+            .as_bytes()
+            .contains(&ALIAS_LEAD_BYTE)
+            .then(|| text.replace([ALIAS_OPEN, ALIAS_CLOSE], ALIAS_ESCAPE))
+            .filter(|escaped| *escaped != text);
+        let transformed = transformed || escaped.is_some();
         FrozenAlias {
             alias: String::new(),
             message_id: message
@@ -216,85 +225,36 @@ impl<'a> Builder<'a> {
                 .iter()
                 .map(|block| fingerprint_digest(&block.content_hash))
                 .collect(),
-            presented: escaped,
+            presented: escaped.unwrap_or(text),
             transformed,
         }
     }
 
-    fn push_message(&mut self, message: &FlatMessage<'_>) -> bool {
-        let last_block_id = last_block_id(message);
-        let meta = MessageMeta {
-            ordinal: message.ordinal,
-            mid: message.mid.to_string(),
-            message_id: last_block_id.clone().unwrap_or_default(),
-            anchorable: last_block_id.is_some(),
+    fn push_message(&mut self, meta: MessageMeta, part: MessagePart) -> bool {
+        let (role, part, commit_hashes, msg_has_narrative) = match part {
+            MessagePart::Noise => {
+                self.pending_noise_meta.push(meta);
+                return true;
+            }
+            MessagePart::ToolOnly(part) => return self.absorb_tool_only(meta, part),
+            MessagePart::Text {
+                role,
+                part,
+                commit_hashes,
+                has_narrative,
+            } => (role, part, commit_hashes, has_narrative),
         };
-
-        if message.role == "system" {
-            self.pending_noise_meta.push(meta);
-            return true;
-        }
-
-        if message.role == "tool" && !has_text_parts(message) {
-            let summaries = tool_parts(message, &self.tool_call_summaries, true)
-                .into_iter()
-                .map(|(part, _)| part)
-                .collect::<Vec<_>>();
-            if summaries.is_empty() {
-                self.pending_noise_meta.push(meta);
-                return true;
-            }
-            return self.absorb_tool_only(meta, message, summaries);
-        }
-
-        if message.role == "user" && !has_meaningful_user_text(message) {
-            let tc_summaries = tool_parts(message, &self.tool_call_summaries, true)
-                .into_iter()
-                .map(|(part, _)| part)
-                .collect::<Vec<_>>();
-            if tc_summaries.is_empty() {
-                self.pending_noise_meta.push(meta);
-                return true;
-            }
-            return self.absorb_tool_only(meta, message, tc_summaries);
-        }
-
-        let role = compact_role(message.role);
-        let text_parts = text_parts(message);
-        // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
-        let (calls, digests): (Vec<_>, Vec<_>) =
-            tool_parts(message, &self.tool_call_summaries, text_parts.is_empty())
-                .into_iter()
-                .partition(|(_, digest)| !digest);
-        let mut all_parts = text_parts.clone();
-        all_parts.extend(calls.into_iter().map(|(part, _)| part));
-        let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
-        crate::tool_outcome::append_digests(
-            &mut compacted.text,
-            digests.into_iter().map(|(digest, _)| digest),
-        );
-        if compacted.text.is_empty() {
-            self.pending_noise_meta.push(meta);
-            return true;
-        }
-        // Verbatim means the presented bytes are the native bytes: a trimmed leading space already shifts every presented offset off the native block.
-        let verbatim = message.blocks.len() == 1
-            && text_parts.len() == 1
-            && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if *text == compacted.text);
-        let part = Self::part(message, compacted.text, !verbatim);
-
-        let msg_has_narrative = !text_parts.is_empty();
+        let ordinal = meta.ordinal;
         if let Some(current) = self
             .current_block
             .as_mut()
             .filter(|block| block.role == role)
         {
-            current.end_ordinal = message.ordinal;
+            current.end_ordinal = ordinal;
             current.parts.push(part);
             current.meta.append(&mut self.pending_noise_meta);
             current.meta.push(meta);
-            current.commit_hashes =
-                merge_commit_hashes(&current.commit_hashes, &compacted.commit_hashes);
+            current.commit_hashes = merge_commit_hashes(&current.commit_hashes, &commit_hashes);
             if msg_has_narrative {
                 current.is_tool_only = false;
             }
@@ -308,42 +268,30 @@ impl<'a> Builder<'a> {
             .pending_noise_meta
             .first()
             .map(|meta| meta.ordinal)
-            .unwrap_or(message.ordinal);
+            .unwrap_or(ordinal);
         let mut meta_list = std::mem::take(&mut self.pending_noise_meta);
         meta_list.push(meta);
         self.current_block = Some(ChunkBlock {
             role,
             start_ordinal: start,
-            end_ordinal: message.ordinal,
+            end_ordinal: ordinal,
             parts: vec![part],
             meta: meta_list,
-            commit_hashes: compacted.commit_hashes,
+            commit_hashes,
             is_tool_only: !msg_has_narrative,
         });
         true
     }
 
-    fn absorb_tool_only(
-        &mut self,
-        meta: MessageMeta,
-        message: &FlatMessage<'_>,
-        summaries: Vec<String>,
-    ) -> bool {
-        let ordinal = message.ordinal;
-        let tc_text = if summaries.is_empty() {
-            String::new()
-        } else {
-            summaries.join(" / ")
-        };
+    fn absorb_tool_only(&mut self, meta: MessageMeta, part: FrozenAlias) -> bool {
+        let ordinal = meta.ordinal;
         if let Some(current) = self
             .current_block
             .as_mut()
             .filter(|block| block.role == "A")
         {
             current.end_ordinal = ordinal;
-            if !tc_text.is_empty() {
-                current.parts.push(Self::part(message, tc_text, true));
-            }
+            current.parts.push(part);
             current.meta.append(&mut self.pending_noise_meta);
             current.meta.push(meta);
             return true;
@@ -358,16 +306,11 @@ impl<'a> Builder<'a> {
             .unwrap_or(ordinal);
         let mut meta_list = std::mem::take(&mut self.pending_noise_meta);
         meta_list.push(meta);
-        if tc_text.is_empty() {
-            self.pending_noise_meta = meta_list;
-            return true;
-        }
-        let parts = vec![Self::part(message, tc_text, true)];
         self.current_block = Some(ChunkBlock {
             role: "A".to_string(),
             start_ordinal: start,
             end_ordinal: ordinal,
-            parts,
+            parts: vec![part],
             meta: meta_list,
             commit_hashes: Vec::new(),
             is_tool_only: true,
@@ -538,40 +481,49 @@ fn build_chunk<'a>(
         .min()
         .unwrap_or(start_ordinal);
     let tool_call_summaries = build_tool_call_summary_lookup(blocks);
-    let mut builder = Builder::new(token_budget, start, tool_call_summaries, identities);
+    let mut builder = Builder::new(token_budget, start, identities);
     let blocks_by_mid = grouped_blocks_by_mid(blocks);
     let mut highest_scanned_ordinal = end_placeholder(start);
-    for message in messages.iter().filter(|message| !message.ck.meta.synthetic) {
-        if message.ordinal >= eligible_end_ordinal {
-            continue;
-        }
-        let role = message.ck.role.as_str();
-        if message.ordinal < start {
-            continue;
-        }
-        // Builder records system-role messages as pending metadata without rendering them.
-        let flat_message = FlatMessage {
+    // Builder records system-role messages as pending metadata without rendering them.
+    let eligible = messages
+        .iter()
+        .filter(|message| {
+            !message.ck.meta.synthetic && (start..eligible_end_ordinal).contains(&message.ordinal)
+        })
+        .map(|message| FlatMessage {
             ordinal: message.ordinal,
             mid: &message.mid,
-            role,
+            role: message.ck.role.as_str(),
             blocks: blocks_by_mid
                 .get(message.mid.as_str())
                 .cloned()
                 .unwrap_or_default(),
-        };
-        if !builder.push_message(&flat_message) {
-            break;
-        }
-        if builder.current_block.is_none() {
-            highest_scanned_ordinal = highest_scanned_ordinal.max(
-                builder
-                    .pending_noise_meta
-                    .last()
-                    .map(|meta| meta.ordinal)
-                    .unwrap_or(highest_scanned_ordinal),
-            );
-        }
-    }
+        })
+        .collect::<Vec<_>>();
+    crate::parallel_map::map_until(
+        eligible,
+        |(), message| {
+            (
+                message_meta(&message),
+                message_part(&message, &tool_call_summaries),
+            )
+        },
+        |(meta, part)| {
+            if !builder.push_message(meta, part) {
+                return false;
+            }
+            if builder.current_block.is_none() {
+                highest_scanned_ordinal = highest_scanned_ordinal.max(
+                    builder
+                        .pending_noise_meta
+                        .last()
+                        .map(|meta| meta.ordinal)
+                        .unwrap_or(highest_scanned_ordinal),
+                );
+            }
+            true
+        },
+    );
     let _ = builder.flush_current_block();
     let identities = builder.identities.take();
     let tool_only_ranges = merge_tool_only_ranges(&builder.tool_only_ranges);
@@ -1190,6 +1142,62 @@ fn grouped_blocks_by_mid(blocks: &[FlatBlock]) -> BTreeMap<&str, Vec<&FlatBlock>
     grouped
 }
 
+fn message_meta(message: &FlatMessage<'_>) -> MessageMeta {
+    let last_block_id = last_block_id(message);
+    MessageMeta {
+        ordinal: message.ordinal,
+        mid: message.mid.to_string(),
+        message_id: last_block_id.clone().unwrap_or_default(),
+        anchorable: last_block_id.is_some(),
+    }
+}
+
+fn message_part(message: &FlatMessage<'_>, lookup: &HashMap<String, String>) -> MessagePart {
+    if message.role == "system" {
+        return MessagePart::Noise;
+    }
+    if (message.role == "tool" && !has_text_parts(message))
+        || (message.role == "user" && !has_meaningful_user_text(message))
+    {
+        let summaries = tool_parts(message, lookup, true)
+            .into_iter()
+            .map(|(part, _)| part)
+            .collect::<Vec<_>>();
+        if summaries.is_empty() {
+            return MessagePart::Noise;
+        }
+        return MessagePart::ToolOnly(Builder::part(message, summaries.join(" / "), true));
+    }
+
+    let role = compact_role(message.role);
+    let text_parts = text_parts(message);
+    let narrative_parts = text_parts.len();
+    // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
+    let (calls, digests): (Vec<_>, Vec<_>) = tool_parts(message, lookup, narrative_parts == 0)
+        .into_iter()
+        .partition(|(_, digest)| !digest);
+    let mut all_parts = text_parts;
+    all_parts.extend(calls.into_iter().map(|(part, _)| part));
+    let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
+    crate::tool_outcome::append_digests(
+        &mut compacted.text,
+        digests.into_iter().map(|(digest, _)| digest),
+    );
+    if compacted.text.is_empty() {
+        return MessagePart::Noise;
+    }
+    // Verbatim means the presented bytes are the native bytes: a trimmed leading space already shifts every presented offset off the native block.
+    let verbatim = message.blocks.len() == 1
+        && narrative_parts == 1
+        && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if *text == compacted.text);
+    MessagePart::Text {
+        role,
+        part: Builder::part(message, compacted.text, !verbatim),
+        commit_hashes: compacted.commit_hashes,
+        has_narrative: narrative_parts > 0,
+    }
+}
+
 fn last_block_id(message: &FlatMessage<'_>) -> Option<String> {
     message.blocks.last().map(|block| block.id.clone())
 }
@@ -1244,14 +1252,14 @@ fn tool_parts(
     lookup: &HashMap<String, String>,
     bare_calls: bool,
 ) -> Vec<(String, bool)> {
-    let mut calls: HashMap<&str, String> = HashMap::new();
+    let mut calls: HashMap<&str, (&str, &Value)> = HashMap::new();
     let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for block in &message.blocks {
         match block.wire.kind() {
             BlockKind::ToolCall {
                 id, name, input, ..
             } => {
-                calls.insert(id.as_str(), format_tool_summary(name, input));
+                calls.insert(id.as_str(), (name.as_str(), input));
             }
             BlockKind::ToolResult { id, .. } => {
                 answered.insert(id.as_str());
@@ -1259,11 +1267,16 @@ fn tool_parts(
             _ => {}
         }
     }
+    let summary = |id: &str| {
+        calls
+            .get(id)
+            .map(|(name, input)| format_tool_summary(name, input))
+    };
     let mut parts = Vec::new();
     for block in &message.blocks {
         match block.wire.kind() {
             BlockKind::ToolCall { id, .. } if bare_calls && !answered.contains(id.as_str()) => {
-                parts.push((calls[id.as_str()].clone(), false));
+                parts.extend(summary(id).map(|summary| (summary, false)));
             }
             BlockKind::ToolResult {
                 id,
@@ -1271,17 +1284,16 @@ fn tool_parts(
                 output,
                 ..
             } => {
-                let call = calls
-                    .get(id.as_str())
-                    .cloned()
+                let call = summary(id)
+                    .map(Cow::Owned)
                     .or_else(|| {
                         block
                             .arc_id
                             .as_deref()
                             .and_then(|arc_id| lookup.get(arc_id))
-                            .cloned()
+                            .map(|summary| Cow::Borrowed(summary.as_str()))
                     })
-                    .unwrap_or_else(|| format!("TC: {tool_name}"));
+                    .unwrap_or_else(|| Cow::Owned(format!("TC: {tool_name}")));
                 let (status, text) = crate::tool_outcome::from_output(output);
                 let outcome = crate::tool_outcome::outcome_digest(status, None, &text);
                 parts.push((crate::tool_outcome::digest(&call, &outcome), true));
