@@ -200,11 +200,7 @@ impl<'a> Builder<'a> {
 
     /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
     fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
-        let escaped = text
-            .as_bytes()
-            .contains(&ALIAS_LEAD_BYTE)
-            .then(|| text.replace([ALIAS_OPEN, ALIAS_CLOSE], ALIAS_ESCAPE))
-            .filter(|escaped| *escaped != text);
+        let escaped = escape_markers(&text);
         let transformed = transformed || escaped.is_some();
         FrozenAlias {
             alias: String::new(),
@@ -1369,6 +1365,13 @@ pub(crate) const ALIAS_LEAD_BYTE: u8 = ALIAS_OPEN.encode_utf8(&mut [0; 4]).as_by
 const _: () = assert!(ALIAS_CLOSE.encode_utf8(&mut [0; 4]).as_bytes()[0] == ALIAS_LEAD_BYTE);
 /// What a native marker bracket becomes in presented text: a plain double quote, which cannot open a marker.
 const ALIAS_ESCAPE: &str = "\"";
+
+pub(crate) fn escape_markers(text: &str) -> Option<String> {
+    text.as_bytes()
+        .contains(&ALIAS_LEAD_BYTE)
+        .then(|| text.replace([ALIAS_OPEN, ALIAS_CLOSE], ALIAS_ESCAPE))
+        .filter(|escaped| *escaped != text)
+}
 
 /// The marker that precedes an aliased part in the rendered input: `«sN»`. The brackets are reserved for markers; the builder escapes them out of native text.
 pub fn alias_marker(alias: &str) -> String {

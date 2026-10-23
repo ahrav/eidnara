@@ -217,12 +217,14 @@ in block order, every call of a message enters its arc's queue before that
 message's results pair, and a queue persists across later messages, so a
 call id repeated within one message keeps each call's own arguments whether
 its results arrive in the same message or a later one. The chunk builder
-pairs over the whole projection; the boundary pairs over the eligible
-messages and otherwise renders the same text: each result's digest sits on
+pairs over the whole projection; the boundary pairs over every message it
+receives, so a call before the eligible start still supplies its summary,
+and otherwise renders the same text: each result's digest sits on
 the result's message; on a message without narrative, a call whose result is
 in a later message or outside the set shows its bare `TC:` line, and a
 message with narrative shows only its digests. A tool-only user or tool
-message joins the `A` block at both sites.
+message joins the `A` block at both sites, and both sites replace a native
+marker bracket in a presented part with a plain quote.
 
 The boundary computes a result's outcome half once per block content. The
 boundary token cache stores it beside the block's token count, keyed by the

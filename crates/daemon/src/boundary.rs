@@ -724,12 +724,12 @@ fn chunked_message_estimate_with_estimator(
         .max()
         .unwrap_or(ordered.len() as u64);
     let mut builder = ChunkBuilder::new(budget_stop, token_estimator);
+    let pairs = tool_pairs(&ordered);
     let eligible = ordered
         .into_iter()
         .take_while(|message| eligible_end_ordinal.is_none_or(|end| message.message_ordinal < end))
         .filter(|message| message.message_ordinal >= start_ordinal)
         .collect::<Vec<_>>();
-    let pairs = tool_pairs(&eligible);
     crate::parallel_map::map_until(
         eligible,
         |(), message| (message.message_ordinal, chunk_message_part(message, &pairs)),
@@ -1636,6 +1636,7 @@ impl<'a> ChunkBuilder<'a> {
                 has_narrative,
             } => (role, compacted.text, compacted.commit_hashes, has_narrative),
         };
+        let text = crate::history_summarizer_chunk::escape_markers(&text).unwrap_or(text);
         if let Some(current) = self
             .current_block
             .as_mut()
@@ -3079,6 +3080,10 @@ mod digest_tests {
 
     /// The boundary chunk of `messages` as the transform builds it from their projection: each block keeps its canonical original bytes.
     fn boundary_chunk(messages: &[Arc<IngressMessage>]) -> Vec<String> {
+        boundary_chunk_from(messages, 1)
+    }
+
+    fn boundary_chunk_from(messages: &[Arc<IngressMessage>], start_ordinal: u64) -> Vec<String> {
         let projection = project_messages(messages).unwrap();
         let boundary: Vec<BoundaryMsg<'_>> = messages
             .iter()
@@ -3123,7 +3128,7 @@ mod digest_tests {
                     .collect(),
             })
             .collect();
-        chunked_message_estimate(&boundary, 1, None, 1e9).formatted_blocks
+        chunked_message_estimate(&boundary, start_ordinal, None, 1e9).formatted_blocks
     }
 
     /// OQ17: the boundary site renders the same digest for a call whose result is in the message set, the bare line for one whose result is not, and no output byte outside the two excerpts (`tool_output_contains_sentinel`), on a message without narrative, one with narrative, and a user message without meaningful text.
@@ -3212,9 +3217,10 @@ mod digest_tests {
         let text = |text: &str| BlockKind::Text {
             text: text.to_owned(),
         };
-        let shapes: Vec<(&str, Vec<Arc<IngressMessage>>)> = vec![
+        let shapes: Vec<(&str, u64, Vec<Arc<IngressMessage>>)> = vec![
             (
                 "calls answered in a later tool message",
+                1,
                 vec![
                     msg("u1", 1, "user", vec![text("go")]),
                     msg(
@@ -3229,6 +3235,7 @@ mod digest_tests {
             ),
             (
                 "calls answered in a later user message",
+                1,
                 vec![
                     msg("u1", 1, "user", vec![text("go")]),
                     msg("a2", 2, "assistant", vec![call("c1", "a.rs")]),
@@ -3238,6 +3245,7 @@ mod digest_tests {
             ),
             (
                 "calls answered in their own message without narrative",
+                1,
                 vec![
                     msg("u1", 1, "user", vec![text("go")]),
                     msg(
@@ -3254,6 +3262,7 @@ mod digest_tests {
             ),
             (
                 "calls answered in their own message with narrative",
+                1,
                 vec![
                     msg("u1", 1, "user", vec![text("go")]),
                     msg(
@@ -3271,6 +3280,7 @@ mod digest_tests {
             ),
             (
                 "repeated call ids answered in a later tool message",
+                1,
                 vec![
                     msg("u1", 1, "user", vec![text("go")]),
                     msg(
@@ -3287,13 +3297,45 @@ mod digest_tests {
                     ),
                 ],
             ),
+            (
+                "marker brackets in narrative and in a call description",
+                1,
+                vec![
+                    msg("u1", 1, "user", vec![text("say «hi»")]),
+                    msg(
+                        "a2",
+                        2,
+                        "assistant",
+                        vec![
+                            text("Quoting «them»."),
+                            BlockKind::ToolCall {
+                                id: "c1".to_owned(),
+                                name: "bash".to_owned(),
+                                input: json!({ "description": "run «marked» step" }),
+                                provider_executed: false,
+                            },
+                        ],
+                    ),
+                    msg("t3", 3, "tool", vec![result("c1", "«ok»")]),
+                ],
+            ),
+            (
+                "a call before the chunk's start answered inside it",
+                3,
+                vec![
+                    msg("u1", 1, "user", vec![text("go")]),
+                    msg("a2", 2, "assistant", vec![call("c1", "a.rs")]),
+                    msg("t3", 3, "tool", vec![result("c1", "first")]),
+                    msg("a4", 4, "assistant", vec![text("Read a.")]),
+                ],
+            ),
         ];
-        for (label, messages) in shapes {
+        for (label, start, messages) in shapes {
             let projection = project_messages(&messages).unwrap();
             let built = crate::history_summarizer_chunk::build_history_summarizer_chunk(
                 &messages,
                 &projection.blocks,
-                1,
+                start,
                 1_000_000,
                 100,
             );
@@ -3311,7 +3353,7 @@ mod digest_tests {
                     }
                 })
                 .collect();
-            let boundary = boundary_chunk(&messages).join("\n");
+            let boundary = boundary_chunk_from(&messages, start).join("\n");
             assert_eq!(boundary, production, "{label}");
         }
     }
