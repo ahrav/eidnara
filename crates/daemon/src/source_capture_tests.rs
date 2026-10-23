@@ -1509,12 +1509,8 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
 
     handler.source_capture.forget_memo_for_test();
     let tip = store.tip().unwrap();
-    // Preconditions of `reversed_generation_delivery`: generation 2 is live and the next window shows generation 1.
+    let replayed_before = report(&handler)["units_replayed"].as_u64().unwrap();
     assert_eq!(live_generations(&store), ["1700000002000"]);
-    coverage.record("reversed_generation_delivery").unwrap();
-    coverage
-        .complete("crates/daemon/src/source_capture_tests.rs::a_rerun_keeps_one_live_generation_across_a_restart")
-        .unwrap();
     pass(
         &handler,
         transform_with(
@@ -1524,6 +1520,16 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
     )
     .await;
     settle(&handler).await;
+    // Preconditions of `reversed_generation_delivery`: generation 2 was live, and the capture path then replayed the two-unit window showing generation 1.
+    assert_eq!(
+        report(&handler)["units_replayed"],
+        replayed_before + 2,
+        "the redelivered window reached the publisher"
+    );
+    coverage.record("reversed_generation_delivery").unwrap();
+    coverage
+        .complete("crates/daemon/src/source_capture_tests.rs::a_rerun_keeps_one_live_generation_across_a_restart")
+        .unwrap();
     assert_eq!(
         store.tip().unwrap(),
         tip,

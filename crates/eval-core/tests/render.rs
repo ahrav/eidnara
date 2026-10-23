@@ -774,13 +774,27 @@ fn source_capture_markers_each_name_a_test_that_records_them() {
         let (file, path) = marker.test.split_once("::").unwrap();
         let function = path.rsplit("::").next().unwrap();
         let source = std::fs::read_to_string(root.join(file)).unwrap();
+        let body = function_body(&source, function)
+            .unwrap_or_else(|| panic!("{name}: {file} defines {function}"));
         assert!(
-            source.contains(&format!("fn {function}(")),
-            "{name}: {file} defines {function}"
+            body.contains(&format!("record(\"{name}\")")),
+            "{name}: {function} in {file} records it"
         );
-        assert!(
-            source.contains(&format!("record(\"{name}\")")),
-            "{name}: {file} records it"
-        );
+    }
+}
+
+/// `function_body` relies on rustfmt placing the closing brace alone at the signature's indentation.
+fn function_body<'a>(source: &'a str, function: &str) -> Option<&'a str> {
+    let signature = source.find(&format!("fn {function}("))?;
+    let start = source[..signature].rfind('\n').map_or(0, |i| i + 1);
+    let indent: String = source[start..].chars().take_while(|c| *c == ' ').collect();
+    let closing = format!("\n{indent}}}");
+    let mut from = signature;
+    loop {
+        let end = from + source[from..].find(&closing)? + closing.len();
+        if source[end..].is_empty() || source[end..].starts_with('\n') {
+            return Some(&source[start..end]);
+        }
+        from = end;
     }
 }

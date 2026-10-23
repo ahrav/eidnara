@@ -14,7 +14,7 @@ Guarantee: Every `messages` and `raw_tool_spans` evidence ingest carries `retent
 Check: `always` - over every capture evidence row, `retention_class == "harness_capture"` and `retain_until == observed_at + HARNESS_CAPTURE_RETENTION_MS` of the attempt that created the row, and over every replay the stored `retain_until` is unchanged; asserted on every evaluation because a single renewing replay breaks the retention bound
 Fault/timing angle: a later attempt (restart, retry of a pending unit, or a pass after expiry) answers from the descriptor or evidence receipt, whose request digest excludes the clock, so it keeps the first row and deadline
 Required faults and enabling state: F11 - two publications of one unit with the second after the first deadline; a sweep at `deadline - 1` and at `deadline`; a `canonical` row in the same store
-Confidence: high - [evidence](evidence/sc-harness-capture-deadline-replay-never-renews.md). Read `evidence_request`, `publish_within`, `publish_batch` owner mapping and `retained` map, `request_digest` and `digest_inputs`, the `cas/ingest.rs` deadline checks, `HARNESS_CAPTURE_RETENTION_MS`, and the landed test body
+Confidence: high - [evidence](../evidence/sc-harness-capture-deadline-replay-never-renews.md). Read `evidence_request`, `publish_within`, `publish_batch` owner mapping and `retained` map, `request_digest` and `digest_inputs`, the `cas/ingest.rs` deadline checks, `HARNESS_CAPTURE_RETENTION_MS`, and the landed test body
 Existing check: `crates/daemon/tests/harness_sources.rs::harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it` (unaudited); `crates/kernel/src/local_file.rs::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept` undated-ingest refusal (unaudited); `crates/daemon/src/memory_reviewer/lifecycle.rs::the_maintenance_slice_expires_harness_captures_and_reports_progress` (unaudited)
 Impact: Captured text is retained without bound, or every pass renews its deadline
 Open questions:
@@ -32,7 +32,7 @@ Guarantee: Expiry retires every live descriptor of a capture before or in the co
 Check: `always` - for every evidence row the harness sweep retired, its commit found no live citer (`EVIDENCE_CITED_SQL`) and no live pin (`EXPIRED_UNPINNED_SQL`), and every source descriptor citing it was invalidated in that commit or an earlier one; evaluated per commit because the writer recheck is the only point that decides
 Fault/timing angle: a hold or citation that lands between `expired_captures` under the reader lock and the per-capture writer commit; the recheck in `retire_expired_capture` shares the retirement's transaction
 Required faults and enabling state: F12 - a pin acquired between selection and commit; F13 - expired capture evidence cited by an independent row; canonical and git evidence in the same store
-Confidence: high - [evidence](evidence/sc-expiry-descriptor-first-cited-survives.md). Read `expire_captures`, `retire_expired_capture`, `EXPIRED_UNPINNED_SQL`, `expired_captures_sql`, `live_capture_observations`, `cited_elsewhere`, `retire_evidence_inner`, `retire_capture_observation`, and the three landed tests
+Confidence: high - [evidence](../evidence/sc-expiry-descriptor-first-cited-survives.md). Read `expire_captures`, `retire_expired_capture`, `EXPIRED_UNPINNED_SQL`, `expired_captures_sql`, `live_capture_observations`, `cited_elsewhere`, `retire_evidence_inner`, `retire_capture_observation`, and the three landed tests
 Existing check: `crates/daemon/tests/harness_sources.rs::harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it` (unaudited); `crates/daemon/tests/harness_sources.rs::harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` (unaudited); `crates/kernel/src/local_file.rs::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept` (unaudited); `Envelope::retire_evidence` conflict guard (unaudited)
 Impact: Cited evidence vanishes under a decision, or a live descriptor outlives its bytes
 Open questions: None.
@@ -47,7 +47,7 @@ Guarantee: Each sweep call commits at most 64 captures, oldest `retain_until` fi
 Check: `always` - per call `retired + retained <= MAX_EXPIRED_CAPTURES_PER_CALL`; after `ceil(N / 64)` calls with no new expiries, zero live expired, unpinned, uncited `harness_capture` evidence remains; the bound is in calls because the page bounds rows, not time
 Fault/timing angle: a cited or refused row inside a page; cited rows leave the candidate set once their descriptors retire, and refused rows are skipped within the call
 Required faults and enabling state: F14 - more than 64 expired captures with one cited row among them; F12 - a live hold that blocks every capture until it lapses
-Confidence: high - [evidence](evidence/sc-expiry-drains-within-page-bound.md). Read `MAX_EXPIRED_CAPTURES_PER_CALL`, `expired_captures_sql` ordering and filters, the `expire_captures` error arm, `kernel_slice`, `SourceCapture::record_expiry`, and the landed tests
+Confidence: high - [evidence](../evidence/sc-expiry-drains-within-page-bound.md). Read `MAX_EXPIRED_CAPTURES_PER_CALL`, `expired_captures_sql` ordering and filters, the `expire_captures` error arm, `kernel_slice`, `SourceCapture::record_expiry`, and the landed tests
 Existing check: `crates/daemon/tests/harness_sources.rs::harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` (unaudited); `crates/daemon/src/memory_reviewer/lifecycle.rs::the_maintenance_slice_expires_harness_captures_and_reports_progress` (unaudited)
 Impact: The store never drains, or a cited row starves the page
 Open questions:
@@ -64,7 +64,7 @@ Guarantee: A tool descriptor's outcome record is at most 1 KiB serialized and va
 Check: `always` - over every published descriptor, `outcome` is `None` or passes `check_outcome` (class `raw_tool_spans`, version 1, status agreeing with the representation, `byte_length` equal to the selected bytes, encoded length at most 1024), no `exit_code` exists without the fixture-proven key, and `occurrence_tuple` equals the encoding without the record; the identity goldens hold
 Fault/timing angle: none
 Required faults and enabling state: F33 - completed with exit 1, error without exit, absent metadata, malformed metadata; F34 - a record the Kernel refuses (over 1 KiB, wrong byte length, wrong class, wrong version, secret or empty tool name)
-Confidence: high - [evidence](evidence/sc-outcome-observed-bounded-occurrence-bound.md). Read `ToolOutcome`, `validate`, `check_outcome`, `SourceDescriptorDetail`, `SourcePublisher::prepare`, `tool_outcome::opencode` and `pi`, the trace fixture, and the landed tests; confirmed no U5 change to `eval_identity.rs`
+Confidence: high - [evidence](../evidence/sc-outcome-observed-bounded-occurrence-bound.md). Read `ToolOutcome`, `validate`, `check_outcome`, `SourceDescriptorDetail`, `SourcePublisher::prepare`, `tool_outcome::opencode` and `pi`, the trace fixture, and the landed tests; confirmed no U5 change to `eval_identity.rs`
 Existing check: the five daemon tests and the Kernel test named in `Exercised` (unaudited); `crates/kernel/tests/eval_identity.rs::the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder` (unaudited)
 Impact: A fabricated `exit=0` reports a failed call as a success, or the outcome moves occurrence ids
 Open questions:
@@ -80,7 +80,7 @@ Guarantee: A unit whose receipts were stored under `source-request.v1` replays w
 Check: `always` - over every publication whose key holds a v1 receipt, a match on the v1 digest of the current inputs replays and commits nothing new for that receipt, and a match on neither digest refuses `IdentityReused`; evaluated on every replay because one unprobed path fails a whole batch
 Fault/timing angle: a v1 evidence-only receipt left by a partially completed single-unit publication; under v2 its descriptor receipt then records v2
 Required faults and enabling state: F4 on the digest tag - v1 receipts in a store under the v2 publisher, plus changed text and changed egress under a legacy key
-Confidence: high - [evidence](evidence/sc-v1-receipt-replays-legacy.md). Read `REQUEST_DIGEST_FORMAT`, `LEGACY_REQUEST_DIGEST_FORMAT`, `digest_inputs`, `request_digest`, `legacy_request_digest`, `stored_receipt`, its two call sites in `publish_within` and `publish_batch`, and the landed test
+Confidence: high - [evidence](../evidence/sc-v1-receipt-replays-legacy.md). Read `REQUEST_DIGEST_FORMAT`, `LEGACY_REQUEST_DIGEST_FORMAT`, `digest_inputs`, `request_digest`, `legacy_request_digest`, `stored_receipt`, its two call sites in `publish_within` and `publish_batch`, and the landed test
 Existing check: `crates/daemon/tests/harness_sources.rs::receipts_written_before_the_outcome_record_replay_under_v2` (unaudited)
 Impact: Every pre-upgrade capture counts as a permanent conflict and blocks its batch
 Open questions:
@@ -96,7 +96,7 @@ Guarantee: Each tool-result digest is at most 1 KiB; each excerpt is at most 128
 Check: `always` - over every digest built, `len <= MAX_DIGEST_BYTES`, each excerpt `len <= CLAIM_VALUE_MAX_BYTES` and equals `clip` of its escaped outer line, the digest is a function of its inputs, and a sentinel on a middle line is absent; asserted per digest because one oversize or split digest reaches the prompt
 Fault/timing angle: none
 Required faults and enabling state: F35 - CRLF, multibyte, single-line, empty, and over-bound outputs, and an over-bound call summary
-Confidence: medium - [evidence](evidence/sc-digest-bounded-deterministic-char-boundary.md). Read `outcome_digest`, `digest`, `clip`, `from_output`, both call sites, and the landed tests; behavior is high confidence, the reachability label is medium
+Confidence: medium - [evidence](../evidence/sc-digest-bounded-deterministic-char-boundary.md). Read `outcome_digest`, `digest`, `clip`, `from_output`, both call sites, and the landed tests; behavior is high confidence, the reachability label is medium
 Existing check: the tests named in `Exercised` (unaudited)
 Impact: A split code point in the prompt, or the full log reaching the summarizer
 Open questions:
@@ -112,7 +112,7 @@ Guarantee: A digest is frozen `transformed = true` under the part's existing `sN
 Check: `always(!X)` - X is a citation accepted against bytes the model did not see whole as presented; the state has no detection point of its own, so assert on every built chunk that each digest-bearing alias is `transformed`, every marker in the text names an issued alias, and after `presented_input` each remaining alias's marker and whole `presented` bytes occur in order in the kept prefix
 Fault/timing angle: the budget cut in `presented_input`, which runs after the full chunk with every digest is built
 Required faults and enabling state: F16 - a budget that cuts inside a digest; F17 - a marker literal in tool output
-Confidence: medium - [evidence](evidence/sc-digest-citations-never-reach-artifact.md). Read `push_message`, `absorb_tool_only`, `Builder::part`, `presented_input`, citation validation against `presented`, and the landed tests; confirmed no production reader of `FrozenAlias.transformed`; the reachability label is medium
+Confidence: medium - [evidence](../evidence/sc-digest-citations-never-reach-artifact.md). Read `push_message`, `absorb_tool_only`, `Builder::part`, `presented_input`, citation validation against `presented`, and the landed tests; confirmed no production reader of `FrozenAlias.transformed`; the reachability label is medium
 Existing check: the tests named in `Exercised` (unaudited); `history_summarizer_citations_golden.rs::a_forged_marker_in_native_text_cannot_keep_a_withdrawn_alias` and `truncation_withdraws_aliases_the_model_did_not_see_whole` (unaudited)
 Impact: A citation claims bytes the model never saw whole
 Open questions: None.

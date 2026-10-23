@@ -35,7 +35,7 @@ that admitted it.
 Required faults and enabling state: F28 (key off, `memory_enabled` off,
 `is_subagent` true, route harness mismatch); F29 (consent changed between
 pass and job) for the timing angle.
-Confidence: high - [evidence](evidence/sc-consent-gate-admits-capture.md).
+Confidence: high - [evidence](../evidence/sc-consent-gate-admits-capture.md).
 I read `consents`, the `Offer` construction in the transform pass,
 `SourceCapture::offer`, and `CaptureJob::units`, which is the only capture
 caller of the adapters. I also read both tests.
@@ -83,7 +83,7 @@ handoff. It holds only a synchronous budget charge. The slot is taken with
 `settle_prepared`.
 Required faults and enabling state: F6 (Kernel Starting, `Deadline`), F22
 (slot full), F30 (writer held by a foreground commit).
-Confidence: high - [evidence](evidence/sc-response-independent-of-publication.md).
+Confidence: high - [evidence](../evidence/sc-response-independent-of-publication.md).
 I read `capture_after_response`, the transport handler's after-response
 ordering, `CaptureHandoff::into_job`, `CaptureJob::run`, and the tests.
 Existing check: the five tests named in `Exercised` (`unaudited`).
@@ -125,7 +125,7 @@ response construction and the slot at settlement. The permit lives in the
 `spawn_blocking` closure and drops only when the closure returns or unwinds.
 Required faults and enabling state: F22 (a second pass while the first batch
 is held inside publication).
-Confidence: high - [evidence](evidence/sc-one-outstanding-batch-refuse-newest.md).
+Confidence: high - [evidence](../evidence/sc-one-outstanding-batch-refuse-newest.md).
 I read `SourceCapture::default`, `offer`, `into_job`, `CaptureJob::run`,
 `RetainedCharge`, `ActiveSlot`, and `publish_screened`'s bounds, plus the
 tests.
@@ -166,7 +166,7 @@ at most 65536 bytes. This is a property of every stored object.
 Fault/timing angle: none.
 Required faults and enabling state: F31 (unit text above 64 KiB beside
 sibling units).
-Confidence: high - [evidence](evidence/sc-unit-cap-refuses-whole-never-prefix.md).
+Confidence: high - [evidence](../evidence/sc-unit-cap-refuses-whole-never-prefix.md).
 I read the length screen in `publish_screened`, which runs before `prepare`,
 `evidence_request`'s whole-text payload, the adapters (no truncation),
 `classify`, `plan_document`, and the tests.
@@ -207,7 +207,7 @@ the unit again, the Kernel answers `Conflict` from its receipt before any
 commit, and the siblings in that batch wait one pass.
 Required faults and enabling state: F4 (an OpenCode user message edited in
 place keeping `time.created`); F3 (memo loss) for the re-probe.
-Confidence: high - [evidence](evidence/sc-terminal-disposition-never-retried.md).
+Confidence: high - [evidence](../evidence/sc-terminal-disposition-never-retried.md).
 I read `is_permanent`, `BatchRefusal::conflicting_unit`, the error arm of
 `publish_locked`, `classify`, candidate selection in `CaptureJob::publish`,
 `Memo`, and the tests.
@@ -250,7 +250,7 @@ Fault/timing angle: Kernel Starting on pass N and Ready on pass N+1. A
 refused or invalidated job records nothing, so its units stay candidates.
 Required faults and enabling state: F6 (`kernel_store()` returns Starting on
 one pass); F25 (a retryable revision lead); F22 (a refused window).
-Confidence: high - [evidence](evidence/sc-pending-unit-publishes-next-ready-pass.md).
+Confidence: high - [evidence](../evidence/sc-pending-unit-publishes-next-ready-pass.md).
 I read the early `kernel_unavailable` end in `CaptureJob::publish`, the
 pending-first candidate order, `classify`, the error arm of
 `publish_locked`, `Memo::record`, and the tests.
@@ -291,7 +291,7 @@ detection point.
 Fault/timing angle: none; a Kernel reopen is the state that must preserve it.
 Required faults and enabling state: a published unit; a Kernel reopen (F3);
 a `RepositoryDocuments` unit.
-Confidence: high - [evidence](evidence/sc-capture-creates-no-decision.md).
+Confidence: high - [evidence](../evidence/sc-capture-creates-no-decision.md).
 I read `SourcePublisher::apply` (`EventKind::Other`, no candidate),
 `evidence_request`, `git_sources::commit_provenance` (`None` off
 `GitCommits`), the capture publisher's `Sensitive`, the CI step, and the tests.
@@ -328,7 +328,7 @@ Fault/timing angle: error paths that would format the offending value.
 Required faults and enabling state: each refusal and Kernel error path: F4
 (identity conflict), F1 (adapter refusal), F32 (window above the supervisor
 budget), F6 (Kernel unavailable or `Deadline`).
-Confidence: high - [evidence](evidence/sc-capture-logs-carry-no-text.md). I
+Confidence: high - [evidence](../evidence/sc-capture-logs-carry-no-text.md). I
 read the `counts!` vocabulary, `log_line` (the module's only `eprintln!`),
 `report`, `kernel_end`, and a grep of the capture-path modules for other
 logging, plus both tests.
