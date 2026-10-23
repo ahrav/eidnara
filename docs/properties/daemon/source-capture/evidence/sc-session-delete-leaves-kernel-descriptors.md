@@ -99,7 +99,7 @@ Carried by `sc-delete-retires-before-memory-store-delete`,
 
 ### Q: Do the baseline citations still hold?
 
-- Findings: baseline `lib.rs:6787-6848` is now the handler at `:6856`, with
+- Findings: baseline `lib.rs:6787-6848` is now the handler at `:6871`, with
   `retire_captured_sources` above it. Baseline "gate tests from `:24641`"
   pointed inside `a_source_swept_during_preparation_leaves_the_rest_of_the_batch_issued`;
   the session-delete gate tests at HEAD are

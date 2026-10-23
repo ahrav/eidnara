@@ -84,9 +84,9 @@ is visible.
 - Sources examined: `lib.rs` at HEAD and at `08de9051a`.
 - Findings: baseline `lib.rs:23483` was the start of
   `ready_snapshot_shares_messages_and_charges_at_least_their_bytes`, now at
-  `:23630`. The `debug_assert!` moved from `:2135` to `:2137`. `ready_snapshot`
+  `:23773`. The `debug_assert!` moved from `:2135` to `:2137`. `ready_snapshot`
   is at `:1828`. The handler call site moved from baseline `:9825-9835` to the
-  `Arc::new(parsed.ready_snapshot())` line near `:9957`.
+  `Arc::new(parsed.ready_snapshot())` line at `:9974`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

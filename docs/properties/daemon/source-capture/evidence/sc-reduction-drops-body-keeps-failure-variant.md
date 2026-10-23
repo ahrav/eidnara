@@ -85,7 +85,7 @@ block. Assert per decision, per reduced block, and by body-byte absence.
   transform tests moved: baseline `:17077`, `:22357`, `:24934`, `:25748` are
   now inside the four test functions named above. The baseline
   `selection.rs:529` is now `DROPPED_PLACEHOLDER` at `:531` and the
-  `expand_arc` range is `:661-694`. `codec/opencode.rs:513-522` still points at
+  `expand_arc` range is `:661-692`. `codec/opencode.rs:513-522` still points at
   the tool-output decode.
 - Missing evidence: none.
 - Conclusion: resolved with answer; citations are now by name.
