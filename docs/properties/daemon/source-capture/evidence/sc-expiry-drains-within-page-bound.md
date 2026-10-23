@@ -20,11 +20,12 @@ object fail the registry `EXISTS`, and a retained row (no live owner
 descriptor and cited elsewhere) fails the last disjunct. None of them takes a
 page slot.
 
-`expire_captures` counts `retired` and `retained` from each commit's receipt
-result, skips a replayed receipt without counting it, and skips
-`NotFound`, `Conflict`, and `InvalidInput` from one capture's commit so the
-rest of the page proceeds. Any other error returns and leaves earlier
-retirements committed.
+`expire_captures` commits a harness page in one transaction and counts
+`retired` and `retained` from every capture's result inside it, skips a
+replayed receipt without counting it, and on `NotFound`, `Conflict`, or
+`InvalidInput` from one capture rolls the page back and commits it again
+without that capture, so the rest of the page proceeds. Any other error
+returns and leaves earlier commits in place.
 
 `crates/daemon/src/memory_reviewer/lifecycle.rs` - `kernel_slice` calls
 `expire_local_file_captures`, then `expire_harness_captures`, stores the
@@ -57,8 +58,9 @@ retention bound.
 
 The bound is in calls, not time: after `ceil(N / 64)` calls with no new
 expiries, N expired, unpinned, uncited captures are retired. The bound
-assumes each candidate's commit either retires, retains, or fails with a
-transient refusal. A row whose commit refused persistently while it still
+assumes each candidate either retires, retains, or fails with a transient
+refusal inside its page's commit. A row whose step refused persistently
+while it still
 passed the candidate query would hold a page slot on every call; the
 candidate predicate excludes the registry cases the code comment names, and
 no test constructs a persistent refusal. Read work per call grows with the

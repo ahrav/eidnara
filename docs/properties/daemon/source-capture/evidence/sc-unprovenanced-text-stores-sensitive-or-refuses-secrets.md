@@ -70,9 +70,10 @@ publishes and what the memo records on the next pass.
   `publish_batch`, `ingest_exact_artifacts_with`, `CaptureJob::publish_locked`.
 - Findings: `PreparedArtifact::new` fails before the commit closure, so
   `BatchRefusal.unit` is `None` and the error is `InvalidInput`.
-  `publish_locked` records memo entries only for a conflicting unit, counts
-  `kernel_error`, and every sibling stays unknown for the next pass, where the
-  same unit fails the batch again. Read, not executed. Nothing is retained, so
+  `publish_locked` records every keyed unit of the batch as pending, counts
+  `kernel_error`, and the next pass offers the pending siblings ahead of
+  unknown units, where the same unit fails the batch again. Read, not
+  executed. Nothing is retained, so
   the safety half holds; sibling liveness is the concern.
 - Missing evidence: a test.
 - Conclusion: unresolved, needs a capture-path test with a secret-bearing tool

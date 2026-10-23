@@ -20,11 +20,16 @@ Verified at HEAD `5a842d998`.
   `HARNESS_CAPTURES` (`harness_capture`, `source_descriptor` owners,
   producer `harness-capture-expiry`).
 - `KernelStore::expire_captures`: reads candidates under the reader lock,
-  then for each runs one `commit_with_writer` keyed by `expiry_intent`
-  (reserved producer, `"{now}:{evidence_id}"`). `"retired"` and
-  `"retained"` results are counted; a replayed receipt is not counted;
-  `NotFound`, `Conflict`, and `InvalidInput` skip the row; any other error
-  returns, keeping earlier retirements.
+  then commits them in `commit_with_writer` transactions of at most
+  `captures_per_commit` captures: 1 for `MEMORY_REVIEWER_CAPTURES`, 64
+  (`MAX_EXPIRED_CAPTURES_PER_CALL`) for `HARNESS_CAPTURES`. The transaction
+  is keyed by its first capture's `expiry_intent` (reserved producer,
+  `"{now}:{evidence_id}"`), and every later capture in it records its own
+  receipt under the same key form. `"retired"` and `"retained"` results
+  are counted; a replayed receipt is not counted; `NotFound`, `Conflict`,
+  and `InvalidInput` roll the transaction back and the rest is committed
+  again without the refused capture; any other error returns, keeping
+  earlier retirements.
 - `retire_expired_capture`: rechecks `EXPIRED_UNPINNED_SQL` under the
   writer and returns `Conflict` when the row is no longer due or is pinned;
   retires the class's own observations through `retire_capture_observation`;
@@ -67,8 +72,10 @@ touches a `canonical` or `harness_capture` row while sweeping
 ## Timing windows and dependencies
 
 A pin acquired between the reader query and the writer commit is caught by
-the recheck (F12). Each capture is its own commit, so a crash mid-page leaves
-earlier captures retired and later ones candidates.
+the recheck (F12). A `curator_capture` page commits one capture at a time,
+so a crash mid-page leaves earlier captures retired and later ones
+candidates. A `harness_capture` page is one transaction, so a crash
+mid-page leaves the whole page as candidates.
 
 ## What a test must construct
 

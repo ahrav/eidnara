@@ -136,15 +136,18 @@ the admitted units.
 
 When the whole batch is refused, the unit `BatchRefusal::conflicting_unit`
 names (a receipt under another request digest) becomes terminal and counts
-in `units_identity_conflict`. The refusal adds no memo entry for any other
-unit, so each is offered again by the next pass that carries it. The job then ends
-`deadline` or `kernel_error`.
+in `units_identity_conflict`. Every other keyed unit is recorded `pending`,
+keeping the time it first waited, so the memo offers it ahead of unknown
+units on the next pass that carries it and it ages
+`oldest_deferred_age_ms` until it publishes or the memo evicts it. The job
+then ends `deadline` or `kernel_error`.
 
 `PublishError::is_permanent` reports artifact refusals for size, purge or
 pending-unlink re-admission blocks, secrets, scan limits, rewritten bytes,
 unsupported shape, text fields over their cap, invalid input, and digest
-collision, plus `IdentityReused` and every descriptor refusal, as permanent.
-Capacity, storage, Kernel, missing admission, and revision-lead refusals are
+collision, plus `IdentityReused` and every descriptor refusal except
+`HeadMismatch`, as permanent. Capacity, storage, Kernel, missing admission,
+revision-lead, and head-mismatch refusals are
 retryable. In capture, per-unit `Refused` dispositions come from identity,
 revision, scope, and key screening. Artifact refusals arise during batch
 ingest and reject the whole batch, as the paragraph above describes.
@@ -258,8 +261,8 @@ preview, a failed retirement, or a refused publication inside the document
 batch counts every remaining read in `documents_refused`. A job that ends
 before the document batch (`discarded`, `kernel_unavailable`, `deadline`,
 `refused_resident_short`, `session_invalidated`, an incarnation-read
-failure, or a scope failure) drops
-its reads uncounted. Document evidence is `canonical` and
+failure, or a scope failure) drops its reads, and the drop counts each of
+them in `documents_refused` as well. Document evidence is `canonical` and
 carries no retention deadline. `session.delete` leaves document lineages in
 place.
 
@@ -316,13 +319,15 @@ a pass that advanced or failed. Each call:
 
 - selects at most 64 expired captures (`MAX_EXPIRED_CAPTURES_PER_CALL`),
   oldest `retain_until` first, excluding evidence a live capture pin holds;
-- commits one capture at a time under the reserved
-  `harness-capture-expiry` producer, rechecking the deadline and pins under
-  the writer;
+- commits the page in one transaction under the reserved
+  `harness-capture-expiry` producer; the commit's receipt is the first
+  capture's, and every later capture in the page records its own receipt
+  inside it, each rechecking the deadline and pins under the writer;
 - retires the capture's live source descriptors first, then its evidence;
 - keeps evidence another live row still cites (`retained`), and drops that
   capture from later pages until the citation is gone;
-- skips a refused row and continues its page.
+- rolls the page back when the store refuses a capture, then commits the
+  page again without it.
 
 The daemon adds each pass's counts to `expiry_retired` and
 `expiry_retained`. Canonical, git, document, and every other retention class
@@ -345,8 +350,8 @@ history until then.
 - Exact ingest refuses bytes in which the redactor detects a secret
   (`ExactBytesRewritten`) and retains nothing. In a capture batch, this
   refusal rejects the whole batch and names no unit. The job ends
-  `kernel_error`, the memo records nothing, and the next pass that carries
-  the unit offers the same batch again.
+  `kernel_error`, the memo records every keyed unit of the batch as pending,
+  and the next pass that carries the unit offers the same batch again.
 - `Sensitive` evidence is hidden from the `AutoInject` and `AutoSearch`
   surfaces, and the `Remote` destination receives the `ProviderSensitive`
   eligibility verdict (`denies_destination`).

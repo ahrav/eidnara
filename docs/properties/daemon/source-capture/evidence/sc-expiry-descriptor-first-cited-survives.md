@@ -15,9 +15,12 @@ calls `expire_captures(&HARNESS_CAPTURES, now)`. `HARNESS_CAPTURES` is an
 `ExpiringClass` with `retention_class = HARNESS_CAPTURE_RETENTION_CLASS`,
 `owner_kind = SOURCE_DESCRIPTOR_KIND` (`"source_descriptor"`), and the
 reserved producer `harness-capture-expiry`. `expire_captures` reads candidates
-under `lock_reader` through `expired_captures`, then commits each one in its
-own `commit_with_writer` transaction keyed by `expiry_intent` (`{now}:{id}`
-under `CommitIntent::RESERVED_PRODUCER_PREFIX`).
+under `lock_reader` through `expired_captures`, then commits the page in one
+`commit_with_writer` transaction keyed by the first capture's `expiry_intent`
+(`{now}:{id}` under `CommitIntent::RESERVED_PRODUCER_PREFIX`); every later
+capture in the page records its own receipt inside that transaction, and a
+capture the store refuses rolls the page back, after which the page commits
+again without it.
 
 `retire_expired_capture` runs inside that transaction. It first re-evaluates
 `EXPIRED_UNPINNED_SQL` for the one evidence id and returns `Conflict` when the
@@ -70,7 +73,7 @@ decision still cites.
 ## Timing windows and dependencies
 
 The window is between `expired_captures` under the reader lock and the
-per-capture writer commit. A hold or citation landing in that window is seen
+page's writer commit. A hold or citation landing in that window is seen
 by the writer recheck, because the recheck and the retirement share one
 transaction. A pin taken after the commit has no effect on a row already
 retired. A hold's own expiry (`p.expires_at > now`) is part of the predicate,
