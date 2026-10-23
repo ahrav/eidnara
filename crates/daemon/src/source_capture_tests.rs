@@ -2132,6 +2132,71 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     );
 }
 
+/// A `repository_documents` lineage another domain owns is left alone: a missing local file at its path retires nothing and counts as missing, as the text path refuses to supersede a row the capture does not own.
+#[tokio::test]
+async fn a_missing_document_retires_only_the_captures_own_lineage() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    document_pass(&handler, "base-0").await;
+    let store = kernel_store(&handler);
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    store
+        .commit(
+            kernel::CommitIntent {
+                producer: "source-capture-test".to_owned(),
+                operation_key: "other-producer-domain".to_owned(),
+                request_digest: "1".repeat(64),
+                actor: "test".to_owned(),
+                cause: "another producer's domain".to_owned(),
+            },
+            |envelope| {
+                crate::kernel_routes::commit::ensure_domain(
+                    envelope,
+                    "other-producer",
+                    &mut HashSet::new(),
+                )?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    let digest = binding.digest().to_owned();
+    let unit = crate::harness_sources::SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", digest.clone()),
+            ("repository_id", digest),
+            ("relative_path", "ARCHITECTURE.md".to_owned()),
+        ],
+        revision: "1".to_owned(),
+        representation: crate::harness_sources::Representation::Text,
+        text: "# Foreign\n".to_owned(),
+        role: "document".to_owned(),
+        outcome: None,
+    };
+    crate::harness_sources::SourcePublisher {
+        kernel: &store,
+        domain_id: "other-producer",
+        scope_id: Some(&binding.scope_id()),
+        egress: kernel::ProviderEgress::LocalOnly,
+        sensitivity: kernel::Sensitivity::Sensitive,
+    }
+    .publish(&unit, now_ms())
+    .unwrap();
+    let foreign = live_document(&store, "ARCHITECTURE.md");
+    assert_eq!(foreign.len(), 1);
+    let missing = report(&handler)["documents_missing"].as_u64().unwrap();
+    document_pass(&handler, "base-1").await;
+    assert_eq!(
+        live_document(&store, "ARCHITECTURE.md"),
+        foreign,
+        "another domain's lineage stays live"
+    );
+    assert_eq!(report(&handler)["documents_retired"], 0);
+    assert_eq!(
+        report(&handler)["documents_missing"].as_u64().unwrap(),
+        missing + 2
+    );
+}
+
 /// A rename is a retirement at the old path and a publication at the new one, in one pass.
 #[tokio::test]
 async fn a_renamed_document_retires_the_old_path_and_publishes_the_new() {

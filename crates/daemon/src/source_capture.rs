@@ -838,7 +838,7 @@ impl CaptureJob {
     /// - Text whose bytes equal the live revision's artifact is unchanged.
     /// - Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head; a head that moved refuses as `documents_refused`.
     /// - `documents_refused` also counts every read the pass's capture drops before this batch handles it: a refused or dropped handoff, a job that ends before the batch, a deadline, a failed preview, or a failed retirement.
-    /// - A verified missing file retires its live revision; every other read is counted and retires nothing.
+    /// - A verified missing file retires its live revision when this capture's domain owns it; every other read is counted and retires nothing.
     ///
     /// A refused document leaves the window's publication as it was, and a refused window leaves the documents to this batch. A read this job drops, through a refusal, a busy slot, or a deadline, waits for the next pass that composes the block; that compose reads afresh and republishes what differs from the live revision, so the lineage converges on the latest compose read.
     fn capture_documents(
@@ -945,9 +945,10 @@ impl CaptureJob {
             ("relative_path", path.to_owned()),
         ];
         let lineage = document_lineage(&identity)?;
-        // The live revision is read with every row check: a retirement names it, and a changed document publishes through the descriptor commit, which checks the predecessor it supersedes.
+        // The live revision is read with every row check: a retirement names it, and a changed document publishes through the descriptor commit, which checks the predecessor it supersedes. A row another domain owns is not this capture's revision: a missing file retires nothing, and a publication is refused as a mismatched domain.
         let live = preview
-            .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &lineage)?;
+            .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &lineage)?
+            .filter(|row| row.domain_id == CAPTURE_DOMAIN_ID);
         let Some(text) = text else {
             return Ok(
                 live.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
