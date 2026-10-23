@@ -2306,6 +2306,7 @@ struct BoundaryTokenCacheEntry {
     byte_size: usize,
     content_hash: [u8; 32],
     token_count: usize,
+    outcome: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2320,7 +2321,14 @@ struct BoundaryTokenCacheSnapshot {
 }
 
 impl BoundaryTokenCacheSnapshot {
-    fn token_count(&mut self, block_id: &str, bytes: &str, content_hash: &[u8; 32]) -> usize {
+    /// The result of `outcome` must remain valid while the block ID, byte length, and content hash match.
+    fn block_entry(
+        &mut self,
+        block_id: &str,
+        bytes: &str,
+        content_hash: &[u8; 32],
+        outcome: impl FnOnce() -> Option<Arc<str>>,
+    ) -> (usize, Option<Arc<str>>) {
         // Block IDs survive replay, and same-length content edits are valid for live-tail blocks.
         // Length alone cannot prove that a cached token count describes edited block bytes.
         // The projection computes and retains the digest on each block to avoid rehashing a valid token-cache payload.
@@ -2333,9 +2341,10 @@ impl BoundaryTokenCacheSnapshot {
             && entry.content_hash == *content_hash
         {
             self.hits = self.hits.saturating_add(1);
-            return entry.token_count;
+            return (entry.token_count, entry.outcome.clone());
         }
         let token_count = tokenizer::estimate_tokens(bytes);
+        let outcome = outcome();
         self.misses = self.misses.saturating_add(1);
         self.entry_updates.insert(
             block_id.to_string(),
@@ -2343,9 +2352,10 @@ impl BoundaryTokenCacheSnapshot {
                 byte_size: bytes.len(),
                 content_hash: *content_hash,
                 token_count,
+                outcome: outcome.clone(),
             },
         );
-        token_count
+        (token_count, outcome)
     }
 
     fn formatted_token_count(&mut self, bytes: &str) -> usize {
@@ -2420,7 +2430,12 @@ fn boundary_token_maps_retained_bytes<'a>(
 ) -> usize {
     let source_bytes = entries
         // Each estimate includes a conservative per-entry allowance for the HashMap bucket and owned key.
-        .map(|(block_id, _)| block_id.len() + std::mem::size_of::<BoundaryTokenCacheEntry>() + 64)
+        .map(|(block_id, entry)| {
+            block_id.len()
+                + std::mem::size_of::<BoundaryTokenCacheEntry>()
+                + entry.outcome.as_ref().map_or(0, |outcome| outcome.len())
+                + 64
+        })
         .sum::<usize>();
     source_bytes
         + formatted_token_count
@@ -6792,6 +6807,64 @@ impl HandlerCore {
         }
     }
 
+    /// Step 1 of `session.delete`: retires the bound session's captured sources in the Kernel. The caller holds the capture commit gate. A deployment without a kernel holds no captured sources. A Kernel that is starting or unavailable, or a transient inventory or commit failure, is the retryable `kernel_unavailable`; a corrupt row or a page that replays is `source_retirement_failed`, which a retry meets again.
+    fn retire_captured_sources(
+        &self,
+        binding: &SessionBinding,
+        session_id: &str,
+    ) -> Result<(), PreparedOutcome> {
+        if !self.kernel.expected() {
+            return Ok(());
+        }
+        let kernel = self
+            .kernel
+            .kernel_store()
+            .map_err(|state| PreparedOutcome::Error {
+                code: "kernel_unavailable".to_string(),
+                message: state.state_key(),
+            })?;
+        let session = source_capture::CapturedSession {
+            project_id: binding.kernel_project.digest(),
+            harness: &binding.harness,
+            session_id,
+        };
+        let page_rows = std::num::NonZeroUsize::new(source_capture::SESSION_RETIREMENT_PAGE)
+            .expect("a nonzero page");
+        let retired = source_capture::retire_session_pages(&kernel, session, page_rows, usize::MAX)
+            .map_err(|error| PreparedOutcome::Error {
+                code: match error {
+                    kernel::KernelError::Conflict
+                    | kernel::KernelError::CorruptCanonicalRow
+                    | kernel::KernelError::InvalidInput => "source_retirement_failed",
+                    _ => "kernel_unavailable",
+                }
+                .to_string(),
+                message: format!("captured sources not retired: {error}"),
+            })?;
+        // Every page ran, so the session holds no live captured source; the memory delete may follow.
+        if retired {
+            Ok(())
+        } else {
+            Err(PreparedOutcome::Error {
+                code: "kernel_unavailable".to_string(),
+                message: "captured sources not retired: the page bound ran out".to_string(),
+            })
+        }
+    }
+
+    /// `session.delete` removes the bound session in two stores, in order, under the capture commit gate:
+    ///
+    /// 1. The Kernel retires every live `messages` and `raw_tool_spans` descriptor the bound project, harness, and session own, in receipt-keyed pages. The retired rows stay readable as history.
+    /// 2. The memory store deletes the session's rows, and the capture memo and generation ticket drop the session's pending work.
+    ///
+    /// Outcomes, each safe to retry with the same session:
+    /// - `{ok: true, deleted_rows}` once both steps completed. A repeat answers `ok` again.
+    /// - `kernel_unavailable` when the Kernel is starting or unavailable, or its inventory or a page commit fails transiently. The memory store is untouched, and a retry continues from what is still live.
+    /// - `source_retirement_failed` when the inventory reads a corrupt row or a page replays. The memory store is untouched, and a retry meets the same fault until the Kernel is repaired.
+    /// - `store_write_failed` when the memory-store delete fails after step 1 committed. The captured sources are already retired, and a retry completes step 2.
+    /// - `store_unavailable` when no store is open, before either step, or when the blocking work did not report back, after which either step may have committed. A retry converges.
+    ///
+    /// A deployment without a kernel skips step 1. Recovery from a failed outcome is the caller's next `session.delete` of the session. A harness session that keeps running after the delete republishes its sources on its next pass: stored receipts answer for its earlier units, and new messages publish fresh descriptors.
     async fn handle_session_delete_value(
         self: &Arc<Self>,
         channel: RouteHandle,
@@ -6823,6 +6896,19 @@ impl HandlerCore {
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
+                // Captured sources retire before the memory rows go, so no deleted session keeps a live descriptor.
+                core.retire_captured_sources(&binding, &session_id)?;
+                #[cfg(test)]
+                if core
+                    .source_capture
+                    .stop_after_retirement
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    return Err(PreparedOutcome::Error {
+                        code: "injected_stop".to_string(),
+                        message: "stopped between the Kernel and memory-store commits".to_string(),
+                    });
+                }
                 let deleted = store
                     .delete_session(&session_id, &note_project_path)
                     .map_err(|error| PreparedOutcome::Error {
@@ -8979,16 +9065,19 @@ impl HandlerCore {
             self.spawn_tracked_task(checkpoint.run());
         }
         // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.
-        let capture =
-            source_capture::consents(&binding.config, parsed.is_subagent, serializer_profile).then(
-                || source_capture::Offer {
-                    profile: serializer_profile,
-                    session_id: parsed.session_id.clone(),
-                    project: binding.kernel_project.clone(),
-                    window: parsed.native_messages.clone().unwrap_or_default(),
-                    epoch: self.source_capture.epoch(),
-                },
-            );
+        let capture = source_capture::consents(
+            &binding.config,
+            parsed.is_subagent,
+            serializer_profile,
+            &binding.harness,
+        )
+        .then(|| source_capture::Offer {
+            profile: serializer_profile,
+            session_id: parsed.session_id.clone(),
+            project: binding.kernel_project.clone(),
+            window: parsed.native_messages.clone().unwrap_or_default(),
+            epoch: self.source_capture.epoch(),
+        });
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the
         // pass then serves that binding detached.
@@ -17921,21 +18010,30 @@ fn cached_boundary_messages<'a>(
                 .into_iter()
                 .flat_map(|range| projection.blocks[range.clone()].iter())
                 .filter(|block| block.mid == message.mid && !block.synthetic)
-                .map(|block| BoundaryBlock {
-                    id: std::borrow::Cow::Borrowed(&block.id),
-                    ordinal: block.ordinal,
-                    kind: sel_kind_for_flat(block),
-                    provider_executed: block.provider_executed,
-                    byte_size: block.bytes.len(),
-                    arc_id: block.arc_id.clone(),
-                    original_token_count: cache_snapshot.token_count(
+                .map(|block| {
+                    let (original_token_count, outcome) = cache_snapshot.block_entry(
                         &block.id,
                         &block.bytes,
                         &block.content_hash,
-                    ),
-                    original: Arc::clone(&block.bytes),
-                    rendered: None,
-                    ignored: false,
+                        || match block.wire.kind() {
+                            crate::wire::BlockKind::ToolResult { output, .. } => {
+                                Some(Arc::from(crate::tool_outcome::output_outcome(output)))
+                            }
+                            _ => None,
+                        },
+                    );
+                    BoundaryBlock {
+                        id: std::borrow::Cow::Borrowed(&block.id),
+                        ordinal: block.ordinal,
+                        kind: sel_kind_for_flat(block, outcome),
+                        provider_executed: block.provider_executed,
+                        byte_size: block.bytes.len(),
+                        arc_id: block.arc_id.clone(),
+                        original_token_count,
+                        original: Arc::clone(&block.bytes),
+                        rendered: None,
+                        ignored: false,
+                    }
                 })
                 .collect(),
         })
@@ -17951,7 +18049,7 @@ fn cached_boundary_messages<'a>(
     }
 }
 
-fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
+fn sel_kind_for_flat(block: &crate::wire::FlatBlock, outcome: Option<Arc<str>>) -> SelKind<'_> {
     match block.kind_tag.as_str() {
         "tool_call" => SelKind::ToolCall {
             name: block.name.clone().unwrap_or_default(),
@@ -17961,7 +18059,11 @@ fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
             }),
         },
         "tool_result" => SelKind::ToolResult {
-            tool_name: block.name.clone().unwrap_or_default(),
+            tool_name: match block.wire.kind() {
+                crate::wire::BlockKind::ToolResult { tool_name, .. } => tool_name.clone(),
+                _ => String::new(),
+            },
+            outcome,
         },
         "reasoning" => SelKind::Reasoning,
         "redacted_reasoning" => SelKind::RedactedReasoning,
@@ -18770,6 +18872,7 @@ mod tests {
                 byte_size: 1,
                 content_hash: [0u8; 32],
                 token_count: 1,
+                outcome: None,
             },
         );
         BoundaryTokenCacheSnapshot {
@@ -19439,14 +19542,16 @@ mod tests {
         let mut cold = cache.snapshot("ses-a");
         let cold_bytes = "aaaaaaaa";
         let cold_hash: [u8; 32] = Sha256::digest(cold_bytes.as_bytes()).into();
-        let cold_tokens = cold.token_count("m-1#0", cold_bytes, &cold_hash);
+        let cold_tokens = cold.block_entry("m-1#0", cold_bytes, &cold_hash, || None).0;
         assert_eq!((cold.hits, cold.misses), (0, 1));
         cache.replace("ses-a", cold);
 
         let mut edited = cache.snapshot("ses-a");
         let edited_bytes = "a b c d ";
         let edited_hash: [u8; 32] = Sha256::digest(edited_bytes.as_bytes()).into();
-        let edited_tokens = edited.token_count("m-1#0", edited_bytes, &edited_hash);
+        let edited_tokens = edited
+            .block_entry("m-1#0", edited_bytes, &edited_hash, || None)
+            .0;
         assert_ne!(
             cold_tokens, edited_tokens,
             "fixture must change token count"
@@ -19460,7 +19565,7 @@ mod tests {
         cache.replace("ses-a", edited);
 
         let mut warm = cache.snapshot("ses-a");
-        warm.token_count("m-1#0", edited_bytes, &edited_hash);
+        warm.block_entry("m-1#0", edited_bytes, &edited_hash, || None);
         assert_eq!((warm.hits, warm.misses), (1, 0));
         let one_session_bytes = warm.retained_bytes();
         let formatted = "[1] U:  a b c d";
@@ -19476,12 +19581,12 @@ mod tests {
         let mut first = bounded.snapshot("first");
         let first_bytes = "first";
         let first_hash: [u8; 32] = Sha256::digest(first_bytes.as_bytes()).into();
-        first.token_count("m-1#0", first_bytes, &first_hash);
+        first.block_entry("m-1#0", first_bytes, &first_hash, || None);
         bounded.replace("first", first);
         let mut second = bounded.snapshot("second");
         let second_bytes = "other";
         let second_hash: [u8; 32] = Sha256::digest(second_bytes.as_bytes()).into();
-        second.token_count("m-2#0", second_bytes, &second_hash);
+        second.block_entry("m-2#0", second_bytes, &second_hash, || None);
         bounded.replace("second", second);
         assert!(!bounded.sessions.contains_key("first"));
         assert!(bounded.sessions.contains_key("second"));
@@ -19560,7 +19665,15 @@ mod tests {
                             .map(|block| BoundaryBlock {
                                 id: block.id.clone().into(),
                                 ordinal: block.ordinal,
-                                kind: sel_kind_for_flat(block),
+                                kind: sel_kind_for_flat(
+                                    block,
+                                    match block.wire.kind() {
+                                        crate::wire::BlockKind::ToolResult { output, .. } => Some(
+                                            Arc::from(crate::tool_outcome::output_outcome(output)),
+                                        ),
+                                        _ => None,
+                                    },
+                                ),
                                 provider_executed: block.provider_executed,
                                 byte_size: block.bytes.len(),
                                 arc_id: block.arc_id.clone(),
@@ -19766,13 +19879,13 @@ mod tests {
                 let (expected_text, expected_end) = match budget {
                     1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash"
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\""
                             .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\"\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -19804,8 +19917,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "cc8e4171645e669d0e79005cfff6da6e5dfbdf9bf3a45673d0e91200d3759e2a",
-                    128 => "b55fe9c5d4a9fa9e9761af05ae28c8c02067ee78e4aa2780a45f64e0a1091b7e",
-                    _ => "32dc03a8e8ebfe0bb388c8f1b1ed760fb562e195b555e731a81bd06374880054",
+                    128 => "74d1738475d92a8383985a5733703b35109322ad062ab909693192dfc03f9322",
+                    _ => "8e0816dfc8297ff468c8fd662e3982bf78d8866d0a4af825210a43f8a4a2edd1",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -19813,6 +19926,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_warm_boundary_pass_reuses_each_tool_results_outcome_digest() {
+        let tool_message = |mid: &str, ordinal: u64, blocks: Vec<BlockKind>| IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                if blocks
+                    .iter()
+                    .any(|block| matches!(block, BlockKind::ToolCall { .. }))
+                {
+                    "assistant"
+                } else {
+                    "tool"
+                },
+                blocks.into_iter().map(WireBlock::bare).collect(),
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let output = ToolOutput::bare(OutputKind::Json {
+            value: serde_json::json!({ "rows": vec!["row"; 2_000] }),
+        });
+        let messages = |extra: bool| {
+            let mut messages = vec![
+                wire_with_role("u1", 1, "user", "query it"),
+                tool_message(
+                    "a2",
+                    2,
+                    vec![BlockKind::ToolCall {
+                        id: "c1".to_owned(),
+                        name: "query".to_owned(),
+                        input: serde_json::json!({ "query": "rows" }),
+                        provider_executed: false,
+                    }],
+                ),
+                tool_message(
+                    "t3",
+                    3,
+                    vec![BlockKind::ToolResult {
+                        id: "c1".to_owned(),
+                        tool_name: "query".to_owned(),
+                        output: output.clone(),
+                        provider_executed: false,
+                    }],
+                ),
+            ];
+            if extra {
+                messages.push(wire_with_role("u4", 4, "user", "thanks"));
+            }
+            messages
+        };
+        let outcome = |messages: &[BoundaryMsg<'_>]| {
+            messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .find_map(|block| match &block.kind {
+                    SelKind::ToolResult { outcome, .. } => outcome.clone(),
+                    _ => None,
+                })
+                .expect("the tool result carries its outcome digest")
+        };
+        let cold_request = transform_request(messages(false), 1_000, 200_000);
+        let cold_projection = crate::wire::project_messages(&cold_request.messages).unwrap();
+        let warm_request = transform_request(messages(true), 1_000, 200_000);
+        let warm_projection = crate::wire::project_messages(&warm_request.messages).unwrap();
+        let token_cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
+        let cold = boundary_messages(&cold_request, &cold_projection, &token_cache);
+        let cold_outcome = outcome(&cold.messages);
+        let (status, text) = crate::tool_outcome::from_output(&output);
+        assert_eq!(
+            &*cold_outcome,
+            crate::tool_outcome::outcome_digest(status, &text)
+        );
+        token_cache
+            .lock()
+            .unwrap()
+            .replace(&cold_request.session_id, cold.token_cache_snapshot);
+        let warm = boundary_messages(&warm_request, &warm_projection, &token_cache);
+        assert_eq!(warm.tokenized_blocks, 1, "only the appended block is new");
+        assert!(
+            Arc::ptr_eq(&cold_outcome, &outcome(&warm.messages)),
+            "a warm pass serves the cached digest without reading the output"
+        );
     }
 
     #[test]
@@ -24145,6 +24347,8 @@ mod tests {
             Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
         let handler = Handler::with_producer_factory_config_resolver(factory, config, resolver);
         handler.install_store_for_test(Arc::clone(&store));
+        // A handler opens no kernel until a test asks for one, as a deployment without a kernel does.
+        handler.kernel.set_expected(false);
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
         handler.bind_route(
@@ -24160,6 +24364,7 @@ mod tests {
     ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         let (handler, store, dir, project) = handler_with_store(state, config);
         let root = dir.path().join("kernel");
+        handler.kernel.set_expected(true);
         handler
             .kernel
             .open(root, StoreOpenPolicy::default(), handler.cancel.clone())

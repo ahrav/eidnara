@@ -86,9 +86,13 @@ fn transform_with(native: &[Value], base: &str) -> Value {
 
 /// Runs one pass as the transport does: the response settles, then its after-response work starts. Returns the response without its timings and its output revisions, which name the daemon incarnation that served them.
 async fn pass(handler: &Handler, request: Value) -> Value {
+    pass_on(handler, test_route(7), request).await
+}
+
+async fn pass_on(handler: &Handler, route: RouteHandle, request: Value) -> Value {
     let request = handler.test_client_prepare_request(request);
     let mut outcome = handler
-        .handle_transform_for_test(test_route(7), request.clone())
+        .handle_transform_for_test(route, request.clone())
         .await;
     let after = outcome.take_after_response();
     let applied = handler.test_client_apply(&request, outcome);
@@ -1477,4 +1481,389 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
         "a superseded unit is terminal"
     );
     assert_eq!(live_generations(&store), ["1700000002000"]);
+}
+
+async fn delete_session(handler: &Handler, session_id: &str) -> Value {
+    delete_on(&handler.core, session_id).await
+}
+
+async fn delete_on(core: &Arc<HandlerCore>, session_id: &str) -> Value {
+    let outcome = core
+        .handle_session_delete_value(
+            test_route(7),
+            &json!({ "method": "session.delete", "session_id": session_id }),
+        )
+        .await;
+    match outcome {
+        PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        PreparedOutcome::Error { code, message } => json!({ "error": code, "message": message }),
+        other => panic!("unexpected outcome {other:?}"),
+    }
+}
+
+/// The live captured descriptors naming `session_id`, across both classes.
+fn live_for_session(store: &KernelStore, session_id: &str) -> Vec<LiveDescriptor> {
+    [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans]
+        .into_iter()
+        .flat_map(|class| live(store, class))
+        .filter(|row| identity_of(row)[2] == ("session_id", session_id))
+        .collect()
+}
+
+/// AC5 and AC15 (`sc-delete-retires-before-memory-store-delete`, `sc-delete-retry-recovers-crash-between-stores`): `session.delete` retires every live `messages` and `raw_tool_spans` descriptor the session owns before the memory-store delete. The retired rows stay readable as history, and another session of the project keeps its descriptors. An application-fault cut between the Kernel commit and the memory-store delete (F23) leaves the memory rows; one retry answers `ok`, commits nothing new, and completes the delete. The cut runs in one process; process restart and power loss are not exercised.
+#[tokio::test]
+async fn session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [
+        opencode_user("msg_u1", 1_700_000_000_000, "please run the tests"),
+        opencode_assistant_with_tools("msg_a1", 1_700_000_001_000),
+    ];
+    pass(&handler, transform_with(&window, "base-1")).await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    // Another session of the same project, captured through its own route.
+    let mut other = binding_with_harness(project.to_str().unwrap(), "opencode", "ses_other");
+    other.config = capture_config(true);
+    handler.bind_route(test_route(8), other);
+    let other_window: Vec<Value> = window
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            message["info"]["sessionID"] = json!("ses_other");
+            message
+        })
+        .collect();
+    let mut request = transform_with(&other_window, "base-o");
+    request["session_id"] = json!("ses_other");
+    pass_on(&handler, test_route(8), request).await;
+    settle(&handler).await;
+    let captured = live_for_session(&store, SESSION);
+    assert!(captured.len() >= 4, "{}", captured.len());
+    let others = live_for_session(&store, "ses_other").len();
+    assert!(others >= 4, "{others}");
+
+    // F23, an application-fault cut: the Kernel retirement commits, then the delete returns before the memory store.
+    handler
+        .source_capture
+        .stop_after_retirement
+        .store(true, std::sync::atomic::Ordering::Release);
+    let stopped = delete_session(&handler, SESSION).await;
+    assert_eq!(stopped["error"], "injected_stop", "{stopped}");
+    assert!(
+        live_for_session(&store, SESSION).is_empty(),
+        "the Kernel step committed"
+    );
+    let tip = store.tip().unwrap();
+
+    let retried = delete_session(&handler, SESSION).await;
+    assert_eq!(retried["ok"], true, "{retried}");
+    assert!(
+        retried["deleted_rows"].as_u64().unwrap() > 0,
+        "the memory rows were still there"
+    );
+    assert_eq!(store.tip().unwrap(), tip, "the retry retires nothing new");
+    assert_eq!(
+        live_for_session(&store, "ses_other").len(),
+        others,
+        "another session is untouched"
+    );
+    for row in &captured {
+        let (_, states) = store
+            .object_states(std::slice::from_ref(&row.object_id))
+            .unwrap();
+        let state = states[0].as_ref().expect("a retired row stays as history");
+        assert!(state.object.invalidated_commit_seq.is_some());
+        assert_eq!(
+            bytes_of(&store, row).is_empty(),
+            row.detail.artifact_digest == kernel::source_identity::payload_id(b"")
+        );
+    }
+}
+
+/// OQ12 (fail closed): a Kernel still starting answers a retryable `kernel_unavailable`, and the memory store keeps the session; once the Kernel is ready, the retry completes.
+#[tokio::test]
+async fn session_delete_with_the_kernel_starting_deletes_nothing() {
+    let (handler, dir, _project) = capture_handler(capture_config(true), false).await;
+    handler.kernel.set_expected(true);
+    assert_eq!(handler.kernel.state(), kernel_routes::KernelState::Starting);
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hi")],
+            "base-1",
+        ),
+    )
+    .await;
+    let refused = delete_session(&handler, SESSION).await;
+    assert_eq!(refused["error"], "kernel_unavailable", "{refused}");
+    // Once the Kernel is ready, the retry completes.
+    handler
+        .kernel
+        .open(
+            dir.path().join("kernel"),
+            StoreOpenPolicy::default(),
+            handler.cancel.clone(),
+        )
+        .await;
+    assert_eq!(handler.kernel.state(), kernel_routes::KernelState::Ready);
+    let deleted = delete_session(&handler, SESSION).await;
+    assert_eq!(deleted["ok"], true, "{deleted}");
+    assert!(
+        deleted["deleted_rows"].as_u64().unwrap() > 0,
+        "the refused delete left the session's rows: {deleted}"
+    );
+}
+
+/// AC15 second clause (`sc-deleted-session-not-resurrected-by-queued-capture`): a delete that completes while a capture job is parked before its first publication drops the pending units. Released afterwards, the job rechecks its ticket under the gate, counts the session invalidated, and commits nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_before_the_first_publication_drops_the_pending_capture() {
+    let (handler, _dir, _project) = capture_handler(capture_config(true), true).await;
+    let (entered, wait_entered) = mpsc::channel::<()>();
+    let (release, wait_release) = mpsc::channel::<()>();
+    let wait_release = Arc::new(Mutex::new(wait_release));
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        entered.send(()).unwrap();
+        wait_release.lock().unwrap().recv().unwrap();
+    }));
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "secret plan")],
+            "base-1",
+        ),
+    )
+    .await;
+    tokio::task::spawn_blocking(move || wait_entered.recv().unwrap())
+        .await
+        .unwrap();
+    // The job is parked before it takes the gate; the delete runs to completion first.
+    assert_eq!(delete_session(&handler, SESSION).await["ok"], true);
+    let store = kernel_store(&handler);
+    let tip = store.tip().unwrap();
+    release.send(()).unwrap();
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["session_invalidated"], 1);
+    assert_eq!(
+        store.tip().unwrap(),
+        tip,
+        "the released job commits nothing"
+    );
+    assert!(live_for_session(&store, SESSION).is_empty());
+}
+
+/// D11 scope and the cut between pages: the delete retires exactly the bound project, harness, and session; the same session id under another project or another harness keeps its descriptors. A retirement stopped after its first page leaves the rest live, and one `session.delete` then answers `ok` with nothing of the session live; pages of one row walk another project's messages and tool results to the end.
+#[tokio::test]
+async fn session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages() {
+    let (handler, dir, project) = capture_handler(capture_config(true), true).await;
+    let window = [
+        opencode_user("msg_u1", 1_700_000_000_000, "please run the tests"),
+        opencode_assistant_with_tools("msg_a1", 1_700_000_001_000),
+    ];
+    pass(&handler, transform_with(&window, "base-1")).await;
+    settle(&handler).await;
+    // The same session id in another project.
+    let elsewhere = dir.path().join("project-b");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let mut bound = binding_with_harness(elsewhere.to_str().unwrap(), "opencode", SESSION);
+    bound.config = capture_config(true);
+    handler.bind_route(test_route(8), bound);
+    pass_on(&handler, test_route(8), transform_with(&window, "base-b")).await;
+    settle(&handler).await;
+    // The same session id under the Pi harness of the same project.
+    let mut bound = binding_with_harness(project.to_str().unwrap(), "pi", SESSION);
+    bound.config = capture_config(true);
+    handler.bind_route(test_route(9), bound);
+    let rows = vec![pi_row(
+        "pi-u1",
+        None,
+        json!({ "role": "user", "content": "pi words", "timestamp": 1_700_000_000_000u64 }),
+    )];
+    pass_on(&handler, test_route(9), pi_request(&rows, "base-p")).await;
+    settle(&handler).await;
+
+    let store = kernel_store(&handler);
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let owned = |row: &LiveDescriptor| {
+        identity_of(row)[0] == ("project_id", digest.as_str())
+            && identity_of(row)[1] == ("harness", "opencode")
+    };
+    let all = live_for_session(&store, SESSION);
+    let mine = all.iter().filter(|row| owned(row)).count();
+    let others = all.len() - mine;
+    assert!(mine >= 4 && others >= 2, "{mine} {others}");
+
+    // A retirement that stops after one page of two rows.
+    let session = source_capture::CapturedSession {
+        project_id: &digest,
+        harness: "opencode",
+        session_id: SESSION,
+    };
+    let done =
+        source_capture::retire_session_pages(&store, session, NonZeroUsize::new(2).unwrap(), 1)
+            .unwrap();
+    assert!(!done);
+    let remaining = live_for_session(&store, SESSION);
+    assert_eq!(remaining.iter().filter(|row| owned(row)).count(), mine - 2);
+
+    let deleted = delete_session(&handler, SESSION).await;
+    assert_eq!(deleted["ok"], true, "{deleted}");
+    assert!(
+        deleted["deleted_rows"].as_u64().unwrap() > 0,
+        "the memory rows waited for the retry"
+    );
+    let after = live_for_session(&store, SESSION);
+    assert!(after.iter().all(|row| !owned(row)));
+    assert_eq!(
+        after.len(),
+        others,
+        "another project or harness keeps its captures"
+    );
+
+    // Pages of one row walk the other project's messages and tool results to the end and leave the Pi rows.
+    let digest_b = kernel_routes::ProjectBinding::new(&elsewhere)
+        .digest()
+        .to_owned();
+    let project_b = source_capture::CapturedSession {
+        project_id: &digest_b,
+        harness: "opencode",
+        session_id: SESSION,
+    };
+    assert!(
+        source_capture::retire_session_pages(
+            &store,
+            project_b,
+            NonZeroUsize::new(1).unwrap(),
+            usize::MAX,
+        )
+        .unwrap()
+    );
+    let left = live_for_session(&store, SESSION);
+    assert!(!left.is_empty());
+    assert!(
+        left.iter()
+            .all(|row| identity_of(row)[1] == ("harness", "pi"))
+    );
+}
+
+/// C8-style page receipts: a page's key and digest depend on the session's identity fields and the page's ids only, so equal inputs give one key and any change gives another; committing the same page again replays.
+#[tokio::test]
+async fn session_retirement_pages_are_keyed_by_session_and_ids() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let session = |project_id, harness, session_id| source_capture::CapturedSession {
+        project_id,
+        harness,
+        session_id,
+    };
+    let page = vec!["srcdesc:a:1".to_owned(), "srcdesc:b:1".to_owned()];
+    let key =
+        |session, page: &[String]| source_capture::session_page_intent(session, page).operation_key;
+    let base = key(session(&digest, "opencode", SESSION), &page);
+    assert_eq!(base, key(session(&digest, "opencode", SESSION), &page));
+    for other in [
+        key(session("other", "opencode", SESSION), &page),
+        key(session(&digest, "pi", SESSION), &page),
+        key(session(&digest, "opencode", "ses_2"), &page),
+        key(session(&digest, "opencode", SESSION), &page[..1]),
+    ] {
+        assert_ne!(other, base);
+    }
+
+    // A page committed again replays.
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hello")],
+            "base-1",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    let ids: Vec<String> = live_for_session(&store, SESSION)
+        .into_iter()
+        .map(|row| row.object_id)
+        .collect();
+    let session = session(&digest, "opencode", SESSION);
+    let intent = source_capture::session_page_intent(session, &ids);
+    let retire = |envelope: &mut kernel::Envelope<'_>| {
+        crate::harness_sources::retire_descriptors(envelope, &ids)
+    };
+    assert!(!store.commit(intent.clone(), retire).unwrap().replayed);
+    assert!(store.commit(intent, retire).unwrap().replayed);
+}
+
+/// The harness capture stamps on a descriptor is the one `session.delete` retires by: a route whose claimed harness differs from its serializer profile's captures nothing.
+#[tokio::test]
+async fn a_route_claiming_another_harness_captures_nothing() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let mut bound = binding_with_harness(project.to_str().unwrap(), "pi", SESSION);
+    bound.config = capture_config(true);
+    handler.bind_route(test_route(7), bound);
+    let store = kernel_store(&handler);
+    let tip = store.tip().unwrap();
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user("msg_u1", 1_700_000_000_000, "hello")],
+            "base-1",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["admitted"], 0);
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+/// Retirement past one inventory snapshot: with one row per page, 24 captured descriptors take more pages than one snapshot lists. A bound of five pages retires exactly five rows and reports the inventory unfinished; the next call resumes from a fresh pass, crosses the snapshot boundary, and leaves nothing of the session live; a retry commits nothing.
+#[tokio::test]
+async fn session_retirement_crosses_inventory_snapshots_and_stops_at_its_page_bound() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let window: Vec<Value> = (0..6u64)
+        .flat_map(|index| {
+            let mut assistant = opencode_assistant_with_tools(
+                &format!("msg_a{index}"),
+                1_700_000_001_000 + index * 2_000,
+            );
+            for part in assistant["parts"].as_array_mut().unwrap() {
+                if let Some(call) = part["callID"].as_str().map(str::to_owned) {
+                    part["callID"] = json!(format!("{call}_{index}"));
+                }
+            }
+            [
+                opencode_user(
+                    &format!("msg_u{index}"),
+                    1_700_000_000_000 + index * 2_000,
+                    "please run the tests",
+                ),
+                assistant,
+            ]
+        })
+        .collect();
+    pass(&handler, transform_with(&window, "base-1")).await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    let captured = live_for_session(&store, SESSION).len();
+    assert_eq!(captured, 24);
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let session = source_capture::CapturedSession {
+        project_id: &digest,
+        harness: "opencode",
+        session_id: SESSION,
+    };
+    let one = NonZeroUsize::new(1).unwrap();
+    assert!(!source_capture::retire_session_pages(&store, session, one, 5).unwrap());
+    assert_eq!(live_for_session(&store, SESSION).len(), captured - 5);
+    assert!(source_capture::retire_session_pages(&store, session, one, usize::MAX).unwrap());
+    assert!(live_for_session(&store, SESSION).is_empty());
+    let tip = store.tip().unwrap();
+    assert!(source_capture::retire_session_pages(&store, session, one, usize::MAX).unwrap());
+    assert_eq!(store.tip().unwrap(), tip, "a retry commits nothing");
 }

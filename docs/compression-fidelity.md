@@ -167,6 +167,82 @@ default run asserts in memory and writes nothing. The wrapped slice's 105%
 retry is recorded as unobserved; the history body and the wrapped slice are
 measured separately under one named estimator.
 
+### Tool outcome digest
+
+The summarizer sees each tool result as one digest:
+
+```text
+<call>; <status>; bytes=N[; head="…"][; tail="…"]
+```
+
+`<call>` is the call's `TC:` summary: `TC: <description>`, `TC: <name>(<key
+arg>)`, or `TC: <name>`, and `TC: <tool name>` for a result whose call is
+not in the chunk. The summary's whitespace runs collapse to single spaces,
+as normalized message text does, so a description or argument holding a
+newline stays on the summary's transcript line.
+`crates/daemon/src/tool_outcome.rs` reads the result's
+status and text from its wire block with `from_output`, and `outcome_digest`
+and `digest` render the rest:
+
+- `status` is `completed` or `error`. An error output variant or a denied
+  execution is `error`.
+- `bytes` is the byte length of the result's text: a text variant as is, a
+  JSON value serialized, content blocks' text joined by newlines, or a
+  denial's reason.
+- `head` and `tail` are the first and last nonblank lines with trailing
+  whitespace trimmed; one nonblank line is `head` alone. A double quote or a
+  citation-marker bracket in a line becomes a single quote, and any other
+  whitespace character, such as a carriage return or a Unicode line
+  separator, becomes a space. Each excerpt therefore stays one quoted field
+  on the digest's transcript line, as normalized message text does. Each
+  excerpt is then clipped to 128 bytes (the claim-value bound) on a
+  character boundary with a `…` clip marker.
+- The whole digest is at most 1 KiB; a longer call summary is clipped the
+  same way. Output bytes reach the summarizer only through the two excerpts.
+  The excerpts travel in the summarizer request as the chunk's transcript
+  text does, to the owner's selected provider through the harness adapter
+  that already carried the full tool output; secret redaction applies where
+  the kernel writes durable text and where evaluator cassettes record a
+  frame.
+- The summarizer's system prompt documents these fields in its `TC:`
+  notation, and a test pins them to the claim-value bound.
+
+Both `TC:` sites render the digest through this one formatter and the one
+call-summary formatter. The chunk builder shows it for each result: under
+its call's summary on a result-only message, and after the narrative of a
+message that holds both the call and the result, as an OpenCode assistant
+message does. One pairing routine (`tool_outcome::pair_tool_blocks`) serves
+both sites: within each arc, a result pairs with the earliest unpaired call
+in block order, every call of a message enters its arc's queue before that
+message's results pair, and a queue persists across later messages, so a
+call id repeated within one message keeps each call's own arguments whether
+its results arrive in the same message or a later one. The chunk builder
+pairs over the whole projection; the boundary pairs over every message it
+receives, so a call before the eligible start still supplies its summary,
+and otherwise renders the same text: each result's digest sits on
+the result's message; on a message without narrative, a call whose result is
+in a later message or outside the set shows its bare `TC:` line, and a
+message with narrative shows only its digests. A tool-only user or tool
+message joins the `A` block at both sites, and both sites replace a native
+marker bracket in a presented part with a plain quote.
+
+The boundary computes a result's outcome half once per block content. The
+boundary token cache stores it beside the block's token count, keyed by the
+block id and validated by the block's byte length and content hash, so a warm
+trigger check reads no tool output and serializes no JSON. A cold block's
+digest reads its first and last nonblank lines in full and serializes a JSON
+output once, alongside the token count the same pass computes.
+
+In the chunk builder, a digest joins its message's presented part, frozen
+`transformed` under that part's `sN` alias, so a citation through it
+addresses digest bytes, and an alias a budget cut reaches is withdrawn.
+
+C5's bash result is the witness: the tool `completed`, and its `tail`
+carries the `connection refused` line the inference rests on. The replay
+exposure model appends the same digests after the text of each record that
+carries text, so a span annotated on a tool block stays `absent` while the
+excerpts reach the producer.
+
 ### Fixture qualification
 
 The direct-host fixture example (`crates/daemon/examples/direct_host_fixture.rs`

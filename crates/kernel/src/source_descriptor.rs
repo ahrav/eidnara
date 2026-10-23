@@ -96,6 +96,16 @@ pub enum ToolStatus {
     Error,
 }
 
+impl ToolStatus {
+    /// The status as the record and the summarizer's digest spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// The execution-outcome record of one tool occurrence: what the harness reported about the call, never inferred. `truncated`, `exit_code`, and `exception_ref` are present only when the harness reported them; an absent value is unknown, never a default. The stored JSON is at most [`MAX_TEXT_FIELD_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1041,7 +1051,14 @@ impl<'v> Narrowing<'v> {
 
 #[cfg(test)]
 mod narrowing_tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use rusqlite::{Connection, params};
+
     use super::*;
+    use crate::schema::apply_kernel_schema;
 
     fn detail(identity: &[(&str, &str)]) -> SourceDescriptorDetail {
         SourceDescriptorDetail {
@@ -1102,5 +1119,109 @@ mod narrowing_tests {
             ])),
             "the value under another field"
         );
+    }
+
+    /// A single-value page reads only the requested class's index range: the work of a lookup that matches nothing stays flat while the store gains rows of another descriptor class and observations of another kind, both of which carry the looked-up text.
+    #[test]
+    fn a_single_value_page_does_not_scan_unrelated_history() {
+        const SESSION: &str = "ses_wanted";
+        let position = OccurrenceClass::Messages
+            .identity_fields()
+            .iter()
+            .position(|name| *name == "session_id")
+            .unwrap();
+        let mut baseline = None;
+        for unrelated in [32, 2_048] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "INSERT INTO commit_log VALUES (1,'needle-scan',1,'test','seed','digest',0,'test','test');
+                 INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain','domain','domain',1,1,'normal'),
+                        ('evidence','evidence','domain','artifact','evidence',1,1,'normal');
+                 INSERT INTO domains(domain_id,object_id,name,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain',1,'normal');
+                 INSERT INTO evidence_meta(evidence_id,object_id,artifact_reference,artifact_digest,
+                     byte_length,media_type,retention_class,provider_egress_class,redaction_metadata,
+                     created_commit_seq,sensitivity_class)
+                 VALUES ('evidence','evidence','object','digest',1,'text/plain','canonical',
+                         'local_only',x'5b5d',1,'normal');",
+            )
+            .unwrap();
+            let insert = |id: &str, class: &str, kind: &str, payload: &str| {
+                tx.execute(
+                    "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,
+                         source_id,source_revision,created_commit_seq,sensitivity_class)
+                     VALUES (?1,'observation','domain',?2,?1,1,1,'normal')",
+                    params![id, class],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO observations(observation_id,object_id,evidence_id,
+                         observation_kind,observation_payload,observed_at,created_commit_seq,
+                         sensitivity_class)
+                     VALUES (?1,?1,'evidence',?2,?3,0,1,'normal')",
+                    params![id, kind, payload.as_bytes()],
+                )
+                .unwrap();
+            };
+            // A fixed handful of rows in the looked-up class, none holding the value.
+            for index in 0..8 {
+                insert(
+                    &format!("srcdesc:msg{index:06}:1"),
+                    "messages",
+                    "source_descriptor",
+                    "{}",
+                );
+            }
+            // Unrelated history that does hold the value's text.
+            let carrying = format!("{{\"detail\":\"{SESSION}\"}}");
+            for index in 0..unrelated {
+                insert(
+                    &format!("srcdesc:doc{index:06}:1"),
+                    "repository_documents",
+                    "source_descriptor",
+                    &carrying,
+                );
+                insert(
+                    &format!("other:{index:06}:1"),
+                    "messages",
+                    "other",
+                    &carrying,
+                );
+            }
+            let steps = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&steps);
+            tx.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+            let values = [SESSION];
+            let page = Narrowing::new(position, "session_id", &values)
+                .page(
+                    &tx,
+                    OccurrenceClass::Messages,
+                    1,
+                    None,
+                    NonZeroUsize::new(16).unwrap(),
+                )
+                .unwrap();
+            tx.progress_handler(0, None::<fn() -> bool>).unwrap();
+            assert!(page.rows.is_empty() && page.next.is_none());
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!("single-value page: unrelated={unrelated}, steps={steps}");
+            let baseline = *baseline.get_or_insert(steps);
+            assert!(
+                steps <= baseline * 2,
+                "page work grew from {baseline} to {steps} steps with unrelated history"
+            );
+        }
     }
 }

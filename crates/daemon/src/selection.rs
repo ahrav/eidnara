@@ -117,6 +117,8 @@ pub enum SelKind<'a> {
     },
     ToolResult {
         tool_name: String,
+        /// The outcome half of the result's summarizer digest (`tool_outcome::outcome_digest`).
+        outcome: Option<std::sync::Arc<str>>,
     },
     Reasoning,
     Text,
@@ -330,7 +332,7 @@ fn group_arcs<'a>(items: &'a [SelItem], frozen: &HashSet<String>) -> Vec<ToolArc
                 entry.call_bytes += item.byte_size;
                 entry.provider_executed = item.provider_executed;
             }
-            SelKind::ToolResult { tool_name } => {
+            SelKind::ToolResult { tool_name, .. } => {
                 if entry.name.is_empty() {
                     entry.name = normalize_tool_name(tool_name);
                     entry.dedup_name = tool_name.as_str();
@@ -1355,6 +1357,7 @@ mod tests {
             message_role: SelMessageRole::NonAssistant,
             kind: SelKind::ToolResult {
                 tool_name: name.to_string(),
+                outcome: None,
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1438,6 +1441,7 @@ mod tests {
             message_role: SelMessageRole::NonAssistant,
             kind: SelKind::ToolResult {
                 tool_name: name.to_string(),
+                outcome: None,
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1614,6 +1618,7 @@ mod tests {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string(),
+                    outcome: None,
                 };
             }
         }

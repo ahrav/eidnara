@@ -119,13 +119,15 @@ struct DaemonHost {
 
 impl DaemonHost {
     async fn start(hook: Box<dyn FnOnce() + Send>) -> Self {
-        Self::start_with(hook, default_test_config(), false).await
+        Self::start_with(hook, default_test_config(), false, "daemon-test").await
     }
 
+    /// A host whose route claims `harness`; capture runs only for the harness a pass's serializer profile carries.
     async fn start_with(
         hook: Box<dyn FnOnce() + Send>,
         config: DaemonConfig,
         kernel: bool,
+        harness: &str,
     ) -> Self {
         let (handler, store, dir, project) =
             handler_with_store(Arc::new(ProducerState::default()), config);
@@ -205,7 +207,7 @@ impl DaemonHost {
             },
             RouteIdentity {
                 project_root: project,
-                harness: "daemon-test".to_owned(),
+                harness: harness.to_owned(),
                 session: "ses".to_owned(),
                 consumer_module_id: None,
                 consumer_launch_nonce: None,
@@ -532,7 +534,7 @@ async fn the_host_starts_source_capture_after_the_response_settles() {
     let mut config = default_test_config();
     config.model_chain.clear();
     config.source_capture_enabled = true;
-    let host = DaemonHost::start_with(Box::new(|| {}), config, true).await;
+    let host = DaemonHost::start_with(Box::new(|| {}), config, true, "opencode").await;
     let native = [json!({
         "info": { "id": "msg_u1", "sessionID": "ses", "role": "user", "time": { "created": 1_700_000_000_000u64 } },
         "parts": [{ "type": "text", "text": "captured through the host" }],

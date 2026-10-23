@@ -198,7 +198,8 @@ fn record_of<'s>(source: &'s Source, span: &Span) -> (usize, &'s NativeMessage) 
 }
 
 /// The text blocks the presenter renders for `record`, by block index, as the presenter rewrites
-/// them: tool blocks and empty text are left out.
+/// them: tool blocks and empty text are left out; a message with text shows each tool result's
+/// digest after them ([`rendered_record`]).
 fn rendered_blocks(record: &NativeMessage) -> Vec<(usize, String)> {
     record
         .parts
@@ -216,11 +217,31 @@ fn rendered_blocks(record: &NativeMessage) -> Vec<(usize, String)> {
 const PART_SEPARATOR: &str = " / ";
 
 fn rendered_record(record: &NativeMessage) -> String {
-    rendered_blocks(record)
+    let mut parts: Vec<String> = rendered_blocks(record)
         .into_iter()
         .map(|(_, text)| text)
-        .collect::<Vec<_>>()
-        .join(PART_SEPARATOR)
+        .collect();
+    if !parts.is_empty() {
+        parts.extend(record.parts.iter().filter_map(tool_digest));
+    }
+    parts.join(PART_SEPARATOR)
+}
+
+/// The summarizer's digest of a settled tool part, as the chunk builder renders it.
+fn tool_digest(part: &Part) -> Option<String> {
+    let Part::Tool { tool, state, .. } = part else {
+        return None;
+    };
+    let text = block_text(part).unwrap_or_default().to_owned();
+    let kind = match state.status {
+        ToolStatus::Completed => memory_store::OutputKind::Text { text },
+        ToolStatus::Error => memory_store::OutputKind::ErrorText { text },
+    };
+    let output = memory_store::ToolOutput::bare(kind);
+    Some(crate::tool_outcome::digest(
+        &crate::history_summarizer_chunk::format_tool_summary(tool, &state.input),
+        &crate::tool_outcome::output_outcome(&output),
+    ))
 }
 
 /// The byte range of block `block_index` inside the record's rendered part; `None` for a block
@@ -2930,7 +2951,15 @@ fn exposure_is_credited_only_within_the_annotated_block() {
     // msg_cf_c6_03 pastes msg_cf_c6_02's block verbatim. When the prompt omits msg_cf_c6_02, its
     // annotated spans are Absent while msg_cf_c6_03 still carries the copy.
     let annotated_dropped = new_messages_prompt(&[(1, "U", &r1), (3, "U", &r3), (4, "A", &r4)]);
-    assert!(r3.contains(&r2), "the control depends on the C6 duplicate");
+    let r2_text = rendered_blocks(m2)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join(PART_SEPARATOR);
+    assert!(
+        r3.contains(&r2_text),
+        "the control depends on the C6 duplicate"
+    );
     assert_eq!(
         seen(&annotated_dropped),
         [
@@ -2940,8 +2969,8 @@ fn exposure_is_credited_only_within_the_annotated_block() {
     );
 
     // msg_cf_c6_02's tool output repeats the summary line its text block quotes. The presenter
-    // omits tool output, so a span annotated on the tool block is Absent although the text
-    // block beside it carries the same bytes.
+    // shows tool output only as the digest's two excerpts, so a span annotated on the tool block is
+    // Absent although the text block beside it carries the same bytes.
     let text_span = &case.obligations[0].evidence[0];
     assert_eq!(text_span.message_id, m2.info.id);
     assert_eq!(text_span.block_index, 1);

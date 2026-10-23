@@ -137,7 +137,7 @@
           }
         }
       ],
-      "expectedText": "[1-2] A: «s1»I will read it / «s2»TC: read(src/lib.rs)\n[3] U: «s3»first part / second part",
+      "expectedText": "[1-2] A: «s1»I will read it / «s2»TC: read(src/lib.rs); completed; bytes=9; head=\"file body\"\n[3] U: «s3»first part / second part",
       "expectedAliases": [
         {
           "alias": "s1",
@@ -157,7 +157,7 @@
           "blockIds": [
             "t2#0"
           ],
-          "presented": "TC: read(src/lib.rs)",
+          "presented": "TC: read(src/lib.rs); completed; bytes=9; head=\"file body\"",
           "transformed": true
         },
         {

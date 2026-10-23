@@ -6882,6 +6882,7 @@ fn sel_item_from_flat<'a>(
         },
         wire::BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
             tool_name: tool_name.clone(),
+            outcome: None,
         },
         wire::BlockKind::Reasoning { .. } => SelKind::Reasoning,
         wire::BlockKind::Text { .. } => SelKind::Text,
@@ -26471,7 +26472,7 @@ pub(crate) mod tests {
             );
             let item = sel_item_from_flat(flat, &HashMap::new());
             let cloned = item.clone();
-            let boundary = crate::sel_kind_for_flat(flat);
+            let boundary = crate::sel_kind_for_flat(flat, None);
             for kind in [&item.kind, &cloned.kind, &boundary] {
                 let SelKind::ToolCall { input, .. } = kind else {
                     panic!("selection tool call")
@@ -26489,6 +26490,24 @@ pub(crate) mod tests {
             "every tool call in the frozen corpus is checked"
         );
     }
+    #[test]
+    fn boundary_result_kind_carries_the_wire_tool_name() {
+        let messages = vec![
+            Arc::new(assistant_tool_call("a1", 1, "c1")),
+            Arc::new(tool_result("t2", 2, "c1", "one")),
+        ];
+        let projection = project_messages(&messages).unwrap();
+        let result = projection
+            .blocks
+            .iter()
+            .find(|block| block.kind_tag == "tool_result")
+            .unwrap();
+        let SelKind::ToolResult { tool_name, .. } = crate::sel_kind_for_flat(result, None) else {
+            panic!("tool result")
+        };
+        assert_eq!(tool_name, "read");
+    }
+
     fn profile_req(
         profile: SerializerProfile,
         session: &str,
