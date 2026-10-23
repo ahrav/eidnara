@@ -9645,9 +9645,11 @@ impl HandlerCore {
             .lock()
             .expect("transform snapshots mutex")
             .lease_derived(&env.parsed.session_id);
+        let first_run_reads = project_docs::take_reads(env.document_reads.as_deref());
         pass.result = self
             .run_transform(env, PassState::Reload, derived.as_ref())
             .map_err(|error| Self::reject_transform(env, error))?;
+        project_docs::restore_reads(env.document_reads.as_deref(), first_run_reads);
         pass.native_attached = false;
         drop(derived);
         // The first run decided this pass's hint for its tail and persisted

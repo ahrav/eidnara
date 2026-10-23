@@ -350,10 +350,8 @@ impl SourceCapture {
     pub(crate) fn offer(self: &Arc<Self>, offer: Offer) -> Option<CaptureHandoff> {
         let harness = profile_harness(offer.profile)?;
         // The documents the pass read when it composed its prompt block are the ones captured.
-        let documents = offer
-            .documents
-            .and_then(|reads| reads.lock().expect("document reads mutex").take())
-            .unwrap_or_default();
+        let documents =
+            crate::project_docs::take_reads(offer.documents.as_deref()).unwrap_or_default();
         if offer.window.is_empty() && documents.is_empty() {
             return None;
         }

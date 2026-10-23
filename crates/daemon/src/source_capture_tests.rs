@@ -1987,3 +1987,49 @@ async fn document_capture_leaves_the_response_and_respects_inject_docs() {
     let (_, captured_without_docs, _dir) = response(true, false).await;
     assert_eq!(captured_without_docs, 0);
 }
+
+#[tokio::test]
+async fn an_emergency_rerun_captures_the_documents_its_served_block_carries() {
+    let mut config = default_test_config();
+    config.source_capture_enabled = true;
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(Arc::clone(&producer), config.clone()).await;
+    rebind(&handler, &project, config);
+    let doc = project.join("ARCHITECTURE.md");
+    std::fs::write(&doc, "# Architecture\n").unwrap();
+    let native: Vec<Value> = (1..=80u64)
+        .map(|ordinal| {
+            opencode_user(
+                &format!("msg_{ordinal:03}"),
+                1_700_000_000_000 + ordinal,
+                &format!("message {ordinal} {}", "word ".repeat(800)),
+            )
+        })
+        .collect();
+    pass(&handler, transform_with(&native, "base-1")).await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    assert_eq!(live_document(&store, "ARCHITECTURE.md")[0].0, "1");
+
+    std::fs::write(&doc, "# Architecture\n\nEdited.\n").unwrap();
+    let mut request = transform_with(&native, "base-2");
+    request["usage"] = json!(ModuleUsage {
+        current_total_input_tokens: 48_000,
+        context_limit_tokens: 50_000,
+        ..ModuleUsage::default()
+    });
+    let response = pass(&handler, request).await;
+    settle(&handler).await;
+    assert_eq!(response["history_summarizer"]["fired"], true);
+    assert_eq!(response["action"], "SOFT");
+    assert!(response.to_string().contains("Edited."));
+    let current = live_document(&store, "ARCHITECTURE.md");
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "2", "{}", report(&handler));
+    let row = live(&store, OccurrenceClass::RepositoryDocuments)
+        .into_iter()
+        .find(|row| row.object_id == current[0].1)
+        .expect("a live descriptor");
+    assert_eq!(bytes_of(&store, &row), "# Architecture\n\nEdited.\n");
+}

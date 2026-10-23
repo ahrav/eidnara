@@ -146,6 +146,23 @@ pub(crate) fn clear_reads(sink: Option<&DocumentReads>) {
     }
 }
 
+pub(crate) fn take_reads(
+    sink: Option<&DocumentReads>,
+) -> Option<Vec<(&'static str, DocumentRead)>> {
+    sink.and_then(|sink| sink.lock().expect("document reads mutex").take())
+}
+
+pub(crate) fn restore_reads(
+    sink: Option<&DocumentReads>,
+    reads: Option<Vec<(&'static str, DocumentRead)>>,
+) {
+    if let (Some(sink), Some(reads)) = (sink, reads) {
+        sink.lock()
+            .expect("document reads mutex")
+            .get_or_insert(reads);
+    }
+}
+
 /// Reads configured project documents and returns their deterministic rendering, with each document's raw read.
 ///
 /// Missing, non-regular, unreadable, and non-UTF-8 files are skipped, as are
