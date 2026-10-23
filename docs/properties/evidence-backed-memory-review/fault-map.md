@@ -45,7 +45,7 @@
 | `uncited-owner-lineage-remains-read-authority` | uncited member retired after selection; fabricated canonical member | yes |
 | `status-sanitizer-preserves-inclusive-integer-domain` | tokens at 2^53±1, the u64 and i64 extrema, `-0`, a width past 64 bits, a withheld lexeme, 2^53+1 inside a default-mode recipe value | yes |
 | `completed-outcome-pages-have-live-keyset-semantics` | a full page then an empty follow-up | yes |
-| `shared-path-fixture-reaches-selected-readable-proposal` | none; a positive read against the real host is not constructed | partially |
+| `shared-path-fixture-reaches-selected-readable-proposal` | production forms enqueued past the selector; a policy-dependency field the command withholds | yes |
 | `reference-only-cli-outcomes-preserve-meaning` | every terminal and reason; a reason on a complete item | yes |
 | `review-cli-owns-one-replay-free-connection` | thrown request, aborted request, refused route, incompatible catalog | yes |
 | `review-cli-validates-byte-exact-inert-payloads` | oversize text and identifiers, inverted span, escape sequences, unsafe integers | yes |

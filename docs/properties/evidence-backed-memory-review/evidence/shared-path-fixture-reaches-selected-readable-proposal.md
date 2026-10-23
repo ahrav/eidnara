@@ -47,7 +47,29 @@ proposal with nonempty spans, and the command reading it in one process.
   reaches the selected read over the real handler, and the command's decoder
   is exercised on the same shape in unit tests. The joint is the wire
   document, which both sides cite.
-- Missing evidence: a TypeScript-driven positive read in one process.
-- Conclusion: needs human input; the direct-host fixture would need a control
-  that publishes a proposal, or the e2e lane would need the Rust fixture's
-  store writes.
+- Missing evidence: none; the fixture's `review-witness` control supplies the
+  publish path, and the next question records the read it drives.
+- Conclusion: resolved with answer: yes, through the `review-witness` control;
+  see the next question.
+
+### Q: Does the command render a real host's selected proposal field for field?
+
+- Sources examined: `crates/daemon/examples/direct_host_fixture/review_witness.rs`;
+  `crates/daemon/tests/support/memory_reviewer_forms.rs`;
+  `packages/e2e-tests/src/rust-runner/review-cli.test.ts`.
+- Findings: the test raises the root to MODULE through `authority.prepare`
+  begin, complete, and ack over a route. The fixture's `review-witness` control
+  runs, over the host's own Kernel and Memory Store, the production selector
+  over `MEMORY_CLASSES`, the selection slot's enqueue, and a production
+  `Worker` pass against a scripted local TLS peer whose activation record lives
+  in a private home. Two fixture forms of one decision, over evidence whose
+  repository provenance the control supplies, reach completed receipts and
+  selected `retain` proposals that target the decision and cite nonempty spans.
+  Three production forms the materializer publishes `Sensitive` are not
+  selected; enqueued anyway, they abstain `owner_sensitive` with no attempt and
+  no connection. `review list --json` lists all five with their outcomes, and
+  `review show --json` equals the Kernel's read of each fixture proposal with
+  `policy_dependencies` withheld, which the command does not render.
+- Missing evidence: none for the decoder and transport. The fixture
+  provenance is test-supplied, so this is not production eligibility.
+- Conclusion: resolved with answer.

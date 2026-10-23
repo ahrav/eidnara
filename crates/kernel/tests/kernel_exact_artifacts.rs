@@ -200,6 +200,11 @@ fn a_secret_is_refused_before_persistence_with_a_reason_that_names_no_content() 
             .ingest_exact_artifact(request(&format!("canary-{index}"), canary.clone()))
             .unwrap_err();
         assert_eq!(error.kind(), ArtifactErrorKind::ExactBytesRewritten);
+        assert_eq!(
+            kernel::exact_text_refusal(std::str::from_utf8(canary).unwrap()),
+            Some(error.kind()),
+            "screening agrees with ingestion"
+        );
         // The message is a fixed sentence; nothing from the payload reaches it.
         assert_eq!(
             format!("{error}"),
@@ -210,6 +215,11 @@ fn a_secret_is_refused_before_persistence_with_a_reason_that_names_no_content() 
     // Scan failures on the exact lane keep their existing non-content kinds
     // and are refused at the same point.
     let flood = "key=a ".repeat(5000).into_bytes();
+    assert_eq!(
+        kernel::exact_text_refusal(std::str::from_utf8(&flood).unwrap()),
+        Some(ArtifactErrorKind::DetectionLimit)
+    );
+    assert_eq!(kernel::exact_text_refusal("clean text"), None);
     let error = store
         .ingest_exact_artifact(request("flood", flood))
         .unwrap_err();

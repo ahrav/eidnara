@@ -712,11 +712,11 @@ fn traceability_map_restates_matrix_coverage_per_property() {
 }
 
 #[test]
-fn contracts_freeze_the_five_classes() {
+fn contracts_freeze_the_six_classes() {
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
         contracts["identity_contract_version"],
-        "search-projection-identity-v3"
+        "search-projection-identity-v4"
     );
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(
