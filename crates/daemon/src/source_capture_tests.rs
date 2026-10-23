@@ -386,7 +386,7 @@ async fn the_response_is_identical_whatever_capture_and_the_kernel_are_doing() {
     holder.join().unwrap();
     settle(&busy).await;
 
-    // Slot full: the first batch is held inside publication; a second pass is refused and answers the same bytes.
+    // Slot full: the first batch is held inside publication; a second pass is refused and answers the same bytes. Coverage witness `handoff_refused_slot_busy`: the first job holds the slot inside publication when the second pass hands off.
     let (full, _full_dir, _) = capture_handler(capture_config(true), true).await;
     let (entered_tx, entered_rx) = mpsc::channel::<()>();
     let (go_tx, go_rx) = mpsc::channel::<()>();
@@ -404,6 +404,13 @@ async fn the_response_is_identical_whatever_capture_and_the_kernel_are_doing() {
         .await
         .unwrap();
     let retained = report(&full)["retained_bytes"].as_u64().unwrap();
+    // Preconditions of `handoff_refused_slot_busy`: the first job holds the slot inside publication.
+    assert_eq!(report(&full)["active"], 1);
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("handoff_refused_slot_busy").unwrap();
+    coverage
+        .complete("crates/daemon/src/source_capture_tests.rs::the_response_is_identical_whatever_capture_and_the_kernel_are_doing")
+        .unwrap();
     assert_eq!(
         pass(&full, transform_with(&window, "base-2")).await,
         second_baseline
@@ -861,7 +868,7 @@ fn pi_row(id: &str, parent: Option<&str>, message: Value) -> Value {
     json!({ "type": "message", "id": id, "parentId": parent, "message": message })
 }
 
-/// A Pi window whose rows carry the native entry type and parent publishes its user text and each tool result text item.
+/// A Pi window whose rows carry the native entry type and parent publishes its user text and each tool result text item, a failed tool's as `tool_error`.
 #[tokio::test]
 async fn a_pi_window_publishes_user_text_and_tool_results() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
@@ -880,7 +887,8 @@ async fn a_pi_window_publishes_user_text_and_tool_results() {
             json!({ "role": "assistant", "timestamp": 1_700_000_000_100u64, "stopReason": "toolUse",
                     "usage": {}, "content": [
                         { "type": "text", "text": "Listing." },
-                        { "type": "toolCall", "id": "call_ls", "name": "bash", "arguments": { "command": "ls" } }
+                        { "type": "toolCall", "id": "call_ls", "name": "bash", "arguments": { "command": "ls" } },
+                        { "type": "toolCall", "id": "call_cat", "name": "bash", "arguments": { "command": "cat missing" } }
                     ] }),
         ),
         pi_row(
@@ -889,6 +897,13 @@ async fn a_pi_window_publishes_user_text_and_tool_results() {
             json!({ "role": "toolResult", "toolCallId": "call_ls", "toolName": "bash", "isError": false,
                     "timestamp": 1_700_000_000_200u64,
                     "content": [ { "type": "text", "text": "Cargo.toml\nsrc\n" } ] }),
+        ),
+        pi_row(
+            "pi-t2",
+            Some("pi-a1"),
+            json!({ "role": "toolResult", "toolCallId": "call_cat", "toolName": "bash", "isError": true,
+                    "timestamp": 1_700_000_000_300u64,
+                    "content": [ { "type": "text", "text": "cat: missing: No such file\n" } ] }),
         ),
     ];
     let decoded =
@@ -908,9 +923,18 @@ async fn a_pi_window_publishes_user_text_and_tool_results() {
             .any(|row| bytes_of(&store, row) == "list the files")
     );
     let tools = live(&store, OccurrenceClass::RawToolSpans);
-    assert_eq!(tools.len(), 1);
-    assert_eq!(bytes_of(&store, &tools[0]), "Cargo.toml\nsrc\n");
-    assert_eq!(identity_of(&tools[0])[3], ("parent_message_id", "pi-a1"));
+    assert_eq!(tools.len(), 2);
+    let output = tools
+        .iter()
+        .find(|row| row.detail.representation == "tool_output")
+        .unwrap();
+    assert_eq!(bytes_of(&store, output), "Cargo.toml\nsrc\n");
+    assert_eq!(identity_of(output)[3], ("parent_message_id", "pi-a1"));
+    let error = tools
+        .iter()
+        .find(|row| row.detail.representation == "tool_error")
+        .unwrap();
+    assert_eq!(bytes_of(&store, error), "cat: missing: No such file\n");
 }
 
 fn pi_request(rows: &[Value], base: &str) -> Value {
@@ -1467,6 +1491,11 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
     assert_eq!(live_generations(&store), ["1700000001000"]);
 
     handler.source_capture.forget_memo_for_test();
+    // Preconditions of `replay_after_memo_loss`: a published generation and an emptied memo before the next pass.
+    assert_eq!(live_generations(&store), ["1700000001000"]);
+    assert!(handler.source_capture.memo_is_empty_for_test());
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("replay_after_memo_loss").unwrap();
     pass(
         &handler,
         transform_with(
@@ -1480,6 +1509,8 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
 
     handler.source_capture.forget_memo_for_test();
     let tip = store.tip().unwrap();
+    let replayed_before = report(&handler)["units_replayed"].as_u64().unwrap();
+    assert_eq!(live_generations(&store), ["1700000002000"]);
     pass(
         &handler,
         transform_with(
@@ -1489,6 +1520,16 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
     )
     .await;
     settle(&handler).await;
+    // Preconditions of `reversed_generation_delivery`: generation 2 was live, and the capture path then replayed the two-unit window showing generation 1.
+    assert_eq!(
+        report(&handler)["units_replayed"],
+        replayed_before + 2,
+        "the redelivered window reached the publisher"
+    );
+    coverage.record("reversed_generation_delivery").unwrap();
+    coverage
+        .complete("crates/daemon/src/source_capture_tests.rs::a_rerun_keeps_one_live_generation_across_a_restart")
+        .unwrap();
     assert_eq!(
         store.tip().unwrap(),
         tip,

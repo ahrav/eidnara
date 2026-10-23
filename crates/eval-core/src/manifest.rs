@@ -127,14 +127,15 @@ pub enum ExecutionMode {
     PrefixThenGenerate,
 }
 
-/// How the world's units reached the store. No ingestion adapter has a
-/// production caller, so adapter ingestion is labelled as such and never as
-/// validated real ingestion; the direct-database path serves only non-aged
-/// fixtures; the transform route is the harness's own path, one turn at a
-/// time through one store incarnation, the honest label for an arm the
-/// daemon built itself.
+/// How the world's units reached the store. The evaluator drives its
+/// ingestion adapters outside their production callers, so adapter ingestion
+/// is labelled as such and never as validated real ingestion; the
+/// direct-database path serves only non-aged fixtures; the transform route
+/// is the harness's own path, one turn at a time through one store
+/// incarnation, the honest label for an arm the daemon built itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ingestion {
+    /// The world reached the store through an adapter the evaluator drove, with no production caller on the path; the wire name keeps its original wording.
     #[serde(rename = "adapter-ingested, production caller: none")]
     AdapterIngestedNoProductionCaller,
     #[serde(rename = "direct-database, non-aged")]

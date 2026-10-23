@@ -786,7 +786,7 @@ mod tests {
         assert!(store.local_file_capture("cap").unwrap().is_none());
     }
 
-    /// F12 for the harness class: a pin taken on an expired `harness_capture` row after the sweep selected it is seen by the writer recheck, so the row is kept; without the pin the same commit retires it.
+    /// F12 for the harness class: a pin taken on an expired `harness_capture` row after the sweep selected it is seen by the writer recheck, so the row is kept; without the pin the same commit retires it. Coverage witness `expired_capture_pinned_mid_sweep`: the reader selects the expired row, then a pin lands before the writer commit.
     #[test]
     fn a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept() {
         let root = tempfile::tempdir().unwrap();
@@ -843,6 +843,7 @@ mod tests {
             [("harness".to_string(), "harness-object".to_string())],
             "only the harness row is a harness candidate"
         );
+        let mut coverage = eval_core::Coverage::default();
         let outcome = store.commit(intent("pinned"), |envelope| {
             // A hold lands between the reader's selection and this writer commit.
             envelope
@@ -855,8 +856,22 @@ mod tests {
                      VALUES ('pin','harness',NULL);",
                 )
                 .unwrap();
+            // Preconditions of `expired_capture_pinned_mid_sweep`: the reader selected the expired row above, and the pin now names it inside the writer transaction.
+            let pinned: i64 = envelope
+                .tx
+                .query_row(
+                    "SELECT COUNT(*) FROM capture_pin_refs WHERE evidence_id='harness'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(pinned, 1);
+            coverage.record("expired_capture_pinned_mid_sweep").unwrap();
             retire_expired_capture(envelope, &HARNESS_CAPTURES, NOW, "harness", "harness-object")
         });
+        coverage
+            .complete("crates/kernel/src/local_file.rs::tests::a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept")
+            .unwrap();
         assert_eq!(
             outcome,
             Err(KernelError::Conflict),

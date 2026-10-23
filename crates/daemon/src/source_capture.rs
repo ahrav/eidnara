@@ -462,6 +462,12 @@ impl SourceCapture {
         self.ensured_scopes().clear();
     }
 
+    /// Whether the memo holds no entry.
+    #[cfg(test)]
+    pub(crate) fn memo_is_empty_for_test(&self) -> bool {
+        self.memo().entries.is_empty()
+    }
+
     pub(crate) fn refuse(&self, refusal: Count) {
         self.counters.add(refusal, 1);
         log("handoff refused", refusal, 1);
@@ -1297,6 +1303,33 @@ fn kernel_end(error: KernelError) -> Count {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The capture path keeps durable state in the Kernel alone: its production source opens no file for writing, no SQLite connection, and no memory-store handle, and the memo stays in process.
+    #[test]
+    fn capture_state_has_one_durable_store() {
+        let forbidden = [
+            ["rusqlite", "::"].concat(),
+            ["Open", "Options"].concat(),
+            ["fs::", "write"].concat(),
+            ["File::", "create"].concat(),
+            ["create_", "dir"].concat(),
+            ["MemoryStore", "::open"].concat(),
+            ["KernelStore", "::open"].concat(),
+        ];
+        for (file, source) in [
+            ("source_capture.rs", include_str!("source_capture.rs")),
+            ("harness_sources.rs", include_str!("harness_sources.rs")),
+            ("tool_outcome.rs", include_str!("tool_outcome.rs")),
+            ("project_docs.rs", include_str!("project_docs.rs")),
+        ] {
+            let production = source
+                .split_once("\n#[cfg(test)]\nmod ")
+                .map_or(source, |(production, _)| production);
+            for token in &forbidden {
+                assert!(!production.contains(token.as_str()), "{file} uses {token}");
+            }
+        }
+    }
 
     /// Every log line is built from a fixed stage, a closed reason, and a count, so no input byte can reach it.
     #[test]

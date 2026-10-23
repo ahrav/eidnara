@@ -2304,11 +2304,15 @@ and `rid-tokenizer-accounting-profile-bound-per-run` are in
   build record differs by the `eval-runner` feature, so their run identities
   are not expected to agree.
 
-- Every ingestion entry point lacks a production caller. No world is labelled
-  "validated real ingestion" until one exists; every manifest carries
-  `adapter-ingested, production caller: none` (a required field), and the
-  ingestion suite drives the adapters from tests only
-  (`ing-adapter-ingested-no-production-caller` in `catalog.md`). The Pi
+- No evaluator world reaches an ingestion entry point through its production
+  caller. The claim adapter runs in production through `ClaimMaterializer`,
+  and the harness adapters run in production through source capture when a
+  user enables `source_capture.enabled`, but the ingestion suite drives the
+  adapters from tests and the `eval_runner` example. No world is labelled
+  "validated real ingestion" until the evaluator drives a production caller;
+  every manifest carries `adapter-ingested, production caller: none` (a
+  required field) (`ing-adapter-ingested-no-production-caller` in
+  `catalog.md`). The Pi
   adapter (`pi_units`) has no evaluator arm at all
   (`ing-pi-adapter-unexercised-by-evaluator`).
 - No Cargo, Tokio, or Django upstream task has been prepared: the anchor
