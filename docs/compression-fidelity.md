@@ -208,11 +208,13 @@ its call's summary on a result-only message, and after the narrative of a
 message that holds both the call and the result, as an OpenCode assistant
 message does. A result in such a message pairs with the earliest unpaired
 call of its id, as the projector pairs arcs, so a call id repeated within
-one message keeps each call's own arguments. The boundary chunk shows it for
-a call whose result is in its message set, pairing each result with the
-earliest unpaired call of its arc in block order; on a message without
-narrative, a call whose result is not in the set shows its bare `TC:` line,
-and a message with narrative shows only its answered calls' digests.
+one message keeps each call's own arguments. The boundary chunk renders the
+same text: each result's digest sits on the result's message, pairing with
+the earliest unpaired call of its arc in block order across the eligible
+messages; on a message without narrative, a call whose result is in a later
+message or outside the set shows its bare `TC:` line, and a message with
+narrative shows only its digests. A tool-only user or tool message joins the
+`A` block at both sites.
 
 The boundary computes a result's outcome half once per block content. The
 boundary token cache stores it beside the block's token count, keyed by the

@@ -729,15 +729,10 @@ fn chunked_message_estimate_with_estimator(
         .take_while(|message| eligible_end_ordinal.is_none_or(|end| message.message_ordinal < end))
         .filter(|message| message.message_ordinal >= start_ordinal)
         .collect::<Vec<_>>();
-    let results = tool_results(&eligible);
+    let pairs = tool_pairs(&eligible);
     crate::parallel_map::map_until(
         eligible,
-        |(), message| {
-            (
-                message.message_ordinal,
-                chunk_message_part(message, &results),
-            )
-        },
+        |(), message| (message.message_ordinal, chunk_message_part(message, &pairs)),
         |(ordinal, part)| builder.push_message(ordinal, part),
     );
     builder.finish(total_message_count, eligible_end_ordinal)
@@ -1634,7 +1629,7 @@ impl<'a> ChunkBuilder<'a> {
                 self.pending_noise_meta.push(meta);
                 return true;
             }
-            ChunkMessagePart::ToolCalls(tc_text) => ("A".to_string(), tc_text, Vec::new(), false),
+            ChunkMessagePart::ToolOnly(tc_text) => ("A".to_string(), tc_text, Vec::new(), false),
             ChunkMessagePart::Text {
                 role,
                 compacted,
@@ -1743,8 +1738,8 @@ impl<'a> ChunkBuilder<'a> {
 enum ChunkMessagePart {
     /// No text: the ordinal joins the meta of the next block that takes text.
     Noise,
-    /// A user message without meaningful text, summarized by its tool calls under role `A`.
-    ToolCalls(String),
+    /// Tool calls and result digests supply the message summary under role `A`.
+    ToolOnly(String),
     /// The message's compacted text under its compact role.
     Text {
         role: String,
@@ -1754,52 +1749,71 @@ enum ChunkMessagePart {
 }
 
 /// Within each `arc_id`, results pair with preceding calls in block order across `messages`. A paired result with an outcome produces one entry keyed by its call's block id.
-fn tool_results<'m>(messages: &[&'m BoundaryMsg<'_>]) -> ToolResults<'m> {
+/// Within each `arc_id`, results pair with preceding calls in block order across `messages`.
+fn tool_pairs<'m, 'a>(messages: &[&'m BoundaryMsg<'a>]) -> ToolPairs<'m> {
     use std::collections::{HashMap, VecDeque};
-    let mut unpaired: HashMap<&'m str, VecDeque<&'m str>> = HashMap::new();
-    let mut results = ToolResults::new();
-    for block in messages.iter().flat_map(|message| &message.blocks) {
-        let Some(arc_id) = block.arc_id.as_deref() else {
-            continue;
-        };
-        match &block.kind {
-            SelKind::ToolCall { .. } => unpaired
-                .entry(arc_id)
-                .or_default()
-                .push_back(block.id.as_ref()),
-            SelKind::ToolResult { outcome, .. } => {
-                let call = unpaired.get_mut(arc_id).and_then(VecDeque::pop_front);
-                if let (Some(call), Some(outcome)) = (call, outcome) {
-                    results.insert(call, outcome.as_ref());
+    let mut unpaired: HashMap<&'m str, VecDeque<(u64, &'m BoundaryBlock<'a>)>> = HashMap::new();
+    let mut pairs = ToolPairs::default();
+    for message in messages {
+        for block in &message.blocks {
+            let Some(arc_id) = block.arc_id.as_deref() else {
+                continue;
+            };
+            match &block.kind {
+                SelKind::ToolCall { .. } => unpaired
+                    .entry(arc_id)
+                    .or_default()
+                    .push_back((message.message_ordinal, block)),
+                SelKind::ToolResult { .. } => {
+                    if let Some((ordinal, call)) =
+                        unpaired.get_mut(arc_id).and_then(VecDeque::pop_front)
+                        && let SelKind::ToolCall { name, input } = &call.kind
+                    {
+                        let summary =
+                            crate::history_summarizer_chunk::format_tool_summary(name, input);
+                        if ordinal == message.message_ordinal {
+                            pairs.answered_in_message.insert(call.id.as_ref());
+                        }
+                        pairs.call_summaries.insert(block.id.as_ref(), summary);
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
-    results
+    pairs
 }
 
-type ToolResults<'m> = std::collections::HashMap<&'m str, &'m str>;
+#[derive(Default)]
+struct ToolPairs<'m> {
+    /// The paired call's summary, keyed by the result block's id.
+    call_summaries: std::collections::HashMap<&'m str, String>,
+    /// Ids of call blocks paired with a result in the call's own message.
+    answered_in_message: std::collections::HashSet<&'m str>,
+}
 
-fn chunk_message_part(message: &BoundaryMsg, results: &ToolResults) -> ChunkMessagePart {
-    if message.role == Role::User && !has_meaningful_user_text(&message.blocks) {
-        let tc_summaries: Vec<String> = tool_call_parts(&message.blocks, results, true)
+fn chunk_message_part(message: &BoundaryMsg, pairs: &ToolPairs) -> ChunkMessagePart {
+    let tool_only = match &message.role {
+        Role::User => !has_meaningful_user_text(&message.blocks),
+        Role::Other(role) => role == "tool" && text_parts(message).is_empty(),
+        Role::Assistant | Role::System => false,
+    };
+    if tool_only {
+        let tc_summaries: Vec<String> = tool_call_parts(&message.blocks, pairs, true)
             .into_iter()
             .map(|(part, _)| part)
             .collect();
         if tc_summaries.is_empty() {
             return ChunkMessagePart::Noise;
         }
-        return ChunkMessagePart::ToolCalls(tc_summaries.join(" / "));
+        return ChunkMessagePart::ToolOnly(tc_summaries.join(" / "));
     }
     let role = compact_role(message.role.as_str());
     let text_parts = text_parts(message);
     let has_narrative = !text_parts.is_empty();
-    // A message with narrative shows the digests of its calls whose results are in the set; one without also shows its other calls bare. Digests follow the compacted narrative and bare calls.
-    let (bare, digests): (Vec<_>, Vec<_>) =
-        tool_call_parts(&message.blocks, results, !has_narrative)
-            .into_iter()
-            .partition(|(_, digest)| !digest);
+    let (bare, digests): (Vec<_>, Vec<_>) = tool_call_parts(&message.blocks, pairs, !has_narrative)
+        .into_iter()
+        .partition(|(_, digest)| !digest);
     let mut all_parts = text_parts;
     all_parts.extend(bare.into_iter().map(|(part, _)| part));
     let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role.as_str());
@@ -1855,27 +1869,38 @@ fn text_parts(message: &BoundaryMsg) -> Vec<String> {
         .collect()
 }
 
-/// Each returned summary carries a flag marking whether it includes a digest. Calls in `blocks` with entries in `results` render their digest ([`crate::tool_outcome::digest`]) under their summary ([`crate::history_summarizer_chunk::format_tool_summary`]); with `bare_calls`, the remaining calls render their summaries alone.
+/// Each returned flag identifies a digest. A result with an outcome renders its digest ([`crate::tool_outcome::digest`]) under its paired call's summary ([`crate::history_summarizer_chunk::format_tool_summary`]); with `bare_calls`, a call paired with no result in its own message renders its summary alone.
 fn tool_call_parts(
     blocks: &[BoundaryBlock],
-    results: &ToolResults,
+    pairs: &ToolPairs,
     bare_calls: bool,
 ) -> Vec<(String, bool)> {
     let mut summaries = Vec::new();
     for block in blocks {
-        let SelKind::ToolCall { name, input } = &block.kind else {
-            continue;
-        };
-        let outcome = results.get(block.id.as_ref());
-        if outcome.is_none() && !bare_calls {
-            continue;
-        }
-        let summary = crate::history_summarizer_chunk::format_tool_summary(name, input);
-        match outcome {
-            Some(outcome) => {
-                summaries.push((crate::tool_outcome::digest(&summary, outcome), true));
+        match &block.kind {
+            SelKind::ToolCall { name, input }
+                if bare_calls && !pairs.answered_in_message.contains(block.id.as_ref()) =>
+            {
+                let summary = crate::history_summarizer_chunk::format_tool_summary(name, input);
+                summaries.push((summary, false));
             }
-            None => summaries.push((summary, false)),
+            SelKind::ToolResult {
+                tool_name,
+                outcome: Some(outcome),
+            } => {
+                let call = pairs
+                    .call_summaries
+                    .get(block.id.as_ref())
+                    .map(Cow::Borrowed)
+                    .unwrap_or_else(|| {
+                        Cow::Owned(crate::history_summarizer_chunk::format_tool_summary(
+                            tool_name,
+                            &serde_json::Value::Null,
+                        ))
+                    });
+                summaries.push((crate::tool_outcome::digest(&call, outcome), true));
+            }
+            _ => {}
         }
     }
     summaries
@@ -3015,12 +3040,9 @@ mod tests {
         let total = ordered.last().map_or(0, |message| message.message_ordinal);
         let mut token_estimator = estimate_tokens;
         let mut builder = ChunkBuilder::new(budget_stop, &mut token_estimator);
-        let results = tool_results(&ordered);
+        let pairs = tool_pairs(&ordered);
         for message in ordered {
-            if !builder.push_message(
-                message.message_ordinal,
-                chunk_message_part(message, &results),
-            ) {
+            if !builder.push_message(message.message_ordinal, chunk_message_part(message, &pairs)) {
                 break;
             }
         }
@@ -3178,7 +3200,6 @@ mod digest_tests {
             "{chunk}"
         );
 
-        // A message with narrative shows the digest of its answered call after the narrative and drops the unanswered one; a user message with no meaningful text shows its calls.
         let narrated = vec![
             msg(
                 "a1",
@@ -3204,6 +3225,111 @@ mod digest_tests {
         assert!(chunk.contains("TC: read(c.rs)"), "{chunk}");
         assert!(!chunk.contains("SENTINEL-7f3a"));
         assert!(!chunk.contains("SENTINEL-7f3a"));
+    }
+
+    #[test]
+    fn the_boundary_chunk_matches_the_chunk_builder_for_tool_blocks() {
+        let call = |id: &str, path: &str| BlockKind::ToolCall {
+            id: id.to_owned(),
+            name: "read".to_owned(),
+            input: json!({ "filePath": path, "description": format!("inspect {path} closely") }),
+            provider_executed: false,
+        };
+        let result = |id: &str, text: &str| BlockKind::ToolResult {
+            id: id.to_owned(),
+            tool_name: "read".to_owned(),
+            output: ToolOutput::bare(OutputKind::Text {
+                text: text.to_owned(),
+            }),
+            provider_executed: false,
+        };
+        let text = |text: &str| BlockKind::Text {
+            text: text.to_owned(),
+        };
+        let shapes: Vec<(&str, Vec<Arc<IngressMessage>>)> = vec![
+            (
+                "calls answered in a later tool message",
+                vec![
+                    msg("u1", 1, "user", vec![text("go")]),
+                    msg(
+                        "a2",
+                        2,
+                        "assistant",
+                        vec![call("c1", "a.rs"), call("c2", "b.rs")],
+                    ),
+                    msg("t3", 3, "tool", vec![result("c1", "fn a() {}\nmid\n}\n")]),
+                    msg("a4", 4, "assistant", vec![text("Read a.")]),
+                ],
+            ),
+            (
+                "calls answered in a later user message",
+                vec![
+                    msg("u1", 1, "user", vec![text("go")]),
+                    msg("a2", 2, "assistant", vec![call("c1", "a.rs")]),
+                    msg("u3", 3, "user", vec![result("c1", "one\ntwo")]),
+                    msg("a4", 4, "assistant", vec![text("Read a.")]),
+                ],
+            ),
+            (
+                "calls answered in their own message without narrative",
+                vec![
+                    msg("u1", 1, "user", vec![text("go")]),
+                    msg(
+                        "a2",
+                        2,
+                        "assistant",
+                        vec![
+                            call("c1", "a.rs"),
+                            result("c1", "first"),
+                            call("c2", "b.rs"),
+                        ],
+                    ),
+                ],
+            ),
+            (
+                "calls answered in their own message with narrative",
+                vec![
+                    msg("u1", 1, "user", vec![text("go")]),
+                    msg(
+                        "a2",
+                        2,
+                        "assistant",
+                        vec![
+                            text("Reading."),
+                            call("c1", "a.rs"),
+                            result("c1", "first"),
+                            call("c2", "b.rs"),
+                        ],
+                    ),
+                ],
+            ),
+        ];
+        for (label, messages) in shapes {
+            let projection = project_messages(&messages).unwrap();
+            let built = crate::history_summarizer_chunk::build_history_summarizer_chunk(
+                &messages,
+                &projection.blocks,
+                1,
+                1_000_000,
+                100,
+            );
+            let production: String = built
+                .text
+                .split(crate::history_summarizer_chunk::ALIAS_OPEN)
+                .enumerate()
+                .map(|(index, piece)| {
+                    if index == 0 {
+                        piece
+                    } else {
+                        piece
+                            .split_once(crate::history_summarizer_chunk::ALIAS_CLOSE)
+                            .map_or(piece, |(_, rest)| rest)
+                    }
+                })
+                .collect();
+            let boundary = boundary_chunk(&messages).join("\n");
+            assert_eq!(boundary, production, "{label}");
+        }
     }
 
     /// Within a message, results with the same call ID pair with calls in block order.
