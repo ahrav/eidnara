@@ -2119,6 +2119,14 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
         fixture.store.source_lineage_head(&lineage).unwrap(),
         Some(4)
     );
+    let (_, previewed) = fixture
+        .store
+        .preview(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            |preview| preview.source_lineage_head(&lineage),
+        )
+        .unwrap();
+    assert_eq!(previewed, Some(4), "a preview reads the same head");
     assert!(fourth.replaced_object_id.is_none());
     assert_eq!(fixture.live(&fourth.object_id), Some(true));
     assert_eq!(
@@ -2950,4 +2958,130 @@ fn a_writer_reads_one_identity_value_past_its_decoys() {
             Ok(String::new())
         })
         .unwrap();
+}
+
+/// The lineage read: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor.
+#[test]
+fn a_writer_reads_the_live_revision_of_one_lineage() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let call = |tool_call_id: &'static str| -> Vec<(&'static str, &'static str)> {
+        TOOL.iter()
+            .map(|&(name, value)| {
+                (
+                    name,
+                    if name == "tool_call_id" {
+                        tool_call_id
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect()
+    };
+    let mut published = BTreeMap::new();
+    for tool_call_id in ["call-a", "call-b", "call-c"] {
+        let identity = call(tool_call_id);
+        let (descriptor, _, _) = fixture
+            .publish(
+                tool_call_id,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                ),
+            )
+            .unwrap();
+        published.insert(tool_call_id, descriptor);
+    }
+    let lineage = |tool_call_id: &str| published[tool_call_id].lineage_id.clone();
+    let unknown = "0".repeat(64);
+    fixture
+        .store
+        .commit(intent("read lineage"), |envelope| {
+            for tool_call_id in ["call-a", "call-b", "call-c"] {
+                let row = envelope
+                    .live_source_descriptor_of_lineage(
+                        OccurrenceClass::RawToolSpans,
+                        &lineage(tool_call_id),
+                    )?
+                    .expect("a live revision");
+                assert_eq!(row.object_id, published[tool_call_id].object_id);
+                assert_eq!(row.detail.lineage_id, lineage(tool_call_id));
+            }
+            assert_eq!(
+                envelope
+                    .live_source_descriptor_of_lineage(OccurrenceClass::RawToolSpans, &unknown)?,
+                None
+            );
+            assert_eq!(
+                envelope.live_source_descriptor_of_lineage(
+                    OccurrenceClass::RepositoryDocuments,
+                    &lineage("call-b")
+                )?,
+                None,
+                "the read is per class"
+            );
+            envelope.retire_observation(&published["call-b"].object_id)?;
+            assert_eq!(
+                envelope.live_source_descriptor_of_lineage(
+                    OccurrenceClass::RawToolSpans,
+                    &lineage("call-b")
+                )?,
+                None,
+                "the commit's own retirement is seen"
+            );
+            assert!(
+                envelope
+                    .live_source_descriptor_of_lineage(
+                        OccurrenceClass::RawToolSpans,
+                        &lineage("call-c")
+                    )?
+                    .is_some(),
+                "a neighbor's retirement leaves the lineage live"
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+    let identity = call("call-a");
+    let (second, _, _) = fixture
+        .publish(
+            "call-a-2",
+            &request(
+                Occurrence {
+                    class: "raw_tool_spans",
+                    identity: &identity,
+                    revision: "2",
+                    representation: "tool_output",
+                    span: None,
+                },
+                &evidence,
+                text,
+            ),
+        )
+        .unwrap();
+    let (_, row) = fixture
+        .store
+        .preview(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            |preview| {
+                preview.live_source_descriptor_of_lineage(
+                    OccurrenceClass::RawToolSpans,
+                    &lineage("call-a"),
+                )
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row.map(|row| row.object_id),
+        Some(second.object_id),
+        "a superseding revision is the live one"
+    );
 }

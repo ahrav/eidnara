@@ -776,7 +776,7 @@ impl KernelStore {
             class,
             requested,
             "o.object_id>?3",
-            after.unwrap_or(""),
+            &[after.unwrap_or("")],
             bound.saturating_add(1),
         )?;
         let next = (raw.len() > bound).then(|| raw[bound - 1].object_id.clone());
@@ -817,13 +817,13 @@ fn checked(raw: LiveDescriptorRaw, class: OccurrenceClass) -> Result<LiveDescrip
     })
 }
 
-/// Up to `limit` stored descriptor rows of `class` live at `requested` whose object id satisfies `key` over `?3` bound to `value`, in object id order. `key` is `o.object_id>?3` for an inventory page or `o.object_id IN (SELECT value FROM json_each(?3))` for a narrowed page's candidates.
+/// Up to `limit` stored descriptor rows of `class` live at `requested` whose object id satisfies `key` over `?3` onward bound to `values` in order, in object id order. `key` is `o.object_id>?3` for an inventory page, `o.object_id IN (SELECT value FROM json_each(?3))` for a narrowed page's candidates, or `o.object_id>=?3 AND o.object_id<?4` for one lineage's range.
 fn descriptor_rows(
     tx: &rusqlite::Transaction<'_>,
     class: OccurrenceClass,
     requested: i64,
     key: &str,
-    value: &str,
+    values: &[&str],
     limit: usize,
 ) -> Result<Vec<LiveDescriptorRaw>, KernelError> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -841,8 +841,11 @@ fn descriptor_rows(
         live = Descriptors::LiveAtEnd.predicate("?2", "0"),
     );
     let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
+    let code = class.code();
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&code, &requested];
+    params.extend(values.iter().map(|value| value as &dyn rusqlite::ToSql));
     statement
-        .query_map(rusqlite::params![class.code(), requested, value], |row| {
+        .query_map(params.as_slice(), |row| {
             Ok(LiveDescriptorRaw {
                 object_id: row.get(0)?,
                 domain_id: row.get(1)?,
@@ -866,6 +869,48 @@ fn descriptor_rows(
 }
 
 impl Envelope<'_> {
+    /// [`KernelStore::source_lineage_head`] in this envelope's view, so a preview reads the head and the live rows under one reader wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store failure from the read.
+    pub fn source_lineage_head(&self, lineage_id: &str) -> Result<Option<i64>, KernelError> {
+        historical_head(self.tx, lineage_id)
+    }
+
+    /// The live descriptor of `class` in lineage `lineage_id` in this envelope's view, or `None` when the lineage has no live revision. The read restricts descriptor scanning to the lineage's `srcdesc:{lineage_id}:` object id range and applies [`KernelStore::live_source_descriptors`]' liveness predicate and row checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] when the range holds more than one live descriptor of `class` or a row's lineage differs from `lineage_id`, and the page read's errors.
+    pub fn live_source_descriptor_of_lineage(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
+        let low = descriptor_object_id(lineage_id, "");
+        let high = super::envelope::prefix_upper_bound(&low);
+        let mut raw = descriptor_rows(
+            self.tx,
+            class,
+            self.commit_seq,
+            "o.object_id>=?3 AND o.object_id<?4",
+            &[&low, &high],
+            2,
+        )?;
+        if raw.len() > 1 {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        let Some(raw) = raw.pop() else {
+            return Ok(None);
+        };
+        let row = checked(raw, class)?;
+        if row.detail.lineage_id != lineage_id {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        Ok(Some(row))
+    }
+
     /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page examines at most `max_rows` live descriptors of the class, matching or not, so one call's work is bounded and a caller can stop between pages. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`. An empty `values` examines no descriptor: its page is empty and ends the inventory.
     ///
     /// # Errors
@@ -962,7 +1007,7 @@ impl<'v> Narrowing<'v> {
             class,
             requested,
             "o.object_id IN (SELECT value FROM json_each(?3))",
-            &ids,
+            &[&ids],
             bound,
         )? {
             let row = checked(raw, class)?;

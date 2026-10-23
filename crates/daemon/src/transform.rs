@@ -553,6 +553,8 @@ pub struct ProducerContext<'a> {
     pub user_profile_budget_tokens: f64,
     pub memory_enabled: bool,
     pub inject_docs: bool,
+    /// Where the pass leaves the configured documents it reads, when source capture takes them.
+    pub(crate) document_reads: Option<&'a crate::project_docs::DocumentReads>,
     pub temporal_awareness: bool,
     pub now_ms: i64,
     pub execute_threshold_percentage: f64,
@@ -1930,6 +1932,10 @@ pub(crate) fn transform_with_projection_cached(
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
     let result = apply_once_with_estimator(store, req, ctx, crate::token_cache::ExactTokens);
+    if result.is_err() {
+        // A failed pass sends no composed block, so it leaves no documents for any response that could carry a capture.
+        crate::project_docs::clear_reads(ctx.document_reads);
+    }
     record_stable_pass_trace(store, req, &result);
     result
 }
@@ -2107,6 +2113,8 @@ fn apply_once_with_estimator(
     let mut attempt = 0;
     let mut reset_row_version = None;
     loop {
+        // An attempt the loop retries discards its composition, and with it the documents that composition read.
+        crate::project_docs::clear_reads(ctx.document_reads);
         let record = store.load_fold_authority(&req.session_id)?;
         let mut authority = fold_authority::plan(record, ctx.fold_authority);
         #[cfg(test)]
@@ -2807,11 +2815,12 @@ fn compose_additive_m0(
         ctx.user_profile_budget_tokens,
         crate::decay_render::counting(estimate_tokens),
     );
-    let docs = if ctx.inject_docs {
+    let mut docs = if ctx.inject_docs {
         read_project_docs_canonical(ctx.project_directory)
     } else {
         crate::project_docs::ProjectDocs::default()
     };
+    crate::project_docs::leave_reads(ctx.document_reads, &mut docs);
     let mut m0_bytes = render_m0(
         &M0Inputs {
             project_docs: &docs.rendered_block,
@@ -4498,6 +4507,7 @@ fn apply_once(
                         memory_enabled: ctx.memory_enabled,
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
+                        document_reads: ctx.document_reads,
                         temporal_awareness: ctx.temporal_awareness,
                         legacy_history_segment_seqs: meta.legacy_history_segment_seqs.as_deref(),
                     },
@@ -4590,6 +4600,7 @@ fn apply_once(
                                     memory_enabled: ctx.memory_enabled,
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
+                                    document_reads: ctx.document_reads,
                                     temporal_awareness: ctx.temporal_awareness,
                                     legacy_history_segment_seqs: meta
                                         .legacy_history_segment_seqs
@@ -4784,6 +4795,7 @@ fn apply_once(
                             memory_enabled: ctx.memory_enabled,
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
+                            document_reads: ctx.document_reads,
                             temporal_awareness: ctx.temporal_awareness,
                             legacy_history_segment_seqs: meta
                                 .legacy_history_segment_seqs
@@ -13798,6 +13810,7 @@ pub(crate) mod tests {
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
             inject_docs: true,
+            document_reads: None,
             temporal_awareness: true,
             now_ms,
             execute_threshold_percentage: 65.0,

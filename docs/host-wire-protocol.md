@@ -664,7 +664,8 @@ lifetime.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of
-consented message text and tool results as Kernel source descriptors. The
+consented message text, tool results, and configured repository documents as
+Kernel source descriptors. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -681,6 +682,7 @@ text, an identity, a path, a digest, or a project.
 | `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
 | `retained_bytes` | unsigned integer | bytes the capture budget holds now |
 | `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `documents_unchanged`, `documents_retired`, `documents_missing`, `documents_not_regular`, `documents_oversize`, `documents_not_utf8`, `documents_unreadable`, `documents_refused` | unsigned integer | configured repository documents a pass read for its prompt block, by outcome: unchanged against the live revision; retired after a verified removal; missing with no live revision; skipped as not a regular file, past a size cap, not UTF-8, or unreadable; and reads a refusal, a deadline, or a failed commit dropped |
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
@@ -949,7 +951,8 @@ permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
 it from the project tier before merging. It consents to a different capture:
 the daemon retaining the exact bytes of user and completed assistant message
-text, tool outputs, and tool errors as Kernel source descriptors, published by
+text, tool outputs, tool errors, and the configured repository documents a
+pass reads for its prompt block, as Kernel source descriptors, published by
 a background supervisor after the transform response settles and reported
 through `metrics.source_capture`. Source capture runs only when
 `source_capture.enabled` and `memory.enabled` both permit it, and a session

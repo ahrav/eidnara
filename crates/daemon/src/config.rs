@@ -717,7 +717,12 @@ fn read_bounded_file(path: &Path, limit: u64) -> io::Result<(Vec<u8>, FileStamp)
             "not a regular file",
         ));
     }
-    let mut raw = Vec::new();
+    // Sized from the opened file's length, so a file that holds still is read in one call plus the call that sees its end.
+    let mut raw = Vec::with_capacity(
+        usize::try_from(metadata.len().min(limit))
+            .unwrap_or(0)
+            .saturating_add(1),
+    );
     file.take(limit + 1).read_to_end(&mut raw)?;
     if raw.len() as u64 > limit {
         return Err(io::Error::new(

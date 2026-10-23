@@ -20,11 +20,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
-    Harness, MAX_SOURCE_BATCH_BYTES, PublishError, SessionIdentity, SourcePublisher, SourceUnit,
-    UnitDisposition, opencode_units_within, pi_units_within, publish_screened, receipt_key_of,
+    Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_UNIT_BYTES, PublishError, Representation,
+    SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition, opencode_units_within,
+    pi_units_within, publish_screened, receipt_key_of,
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
+use crate::project_docs::DocumentRead;
 
 /// The cooperative budget of one publication, from handoff acceptance.
 pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
@@ -32,6 +34,8 @@ pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
 const MAX_RETAINED_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 /// Artifact preparation copies an admitted batch a bounded number of times.
 const ARTIFACT_PREPARATION_BYTES: usize = 4 * MAX_SOURCE_BATCH_BYTES;
+/// Capture scopes recorded as ensured before the record starts over; a cleared record costs one replayed scope commit per project.
+const MAX_RECORDED_PROJECTS: usize = 1024;
 /// The memo's byte budget, counting each entry's two key copies, digest, and bookkeeping.
 const MEMO_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 /// Bookkeeping bytes charged per memo entry beside its key copies and digest, including its table slot.
@@ -92,12 +96,25 @@ counts! {
     RetainedBytes => "retained_bytes",
     PublishMsLast => "publish_ms_last",
     PublishMsMax => "publish_ms_max",
+    DocumentsUnchanged => "documents_unchanged",
+    DocumentsRetired => "documents_retired",
+    DocumentsMissing => "documents_missing",
+    DocumentsNotRegular => "documents_not_regular",
+    DocumentsOversize => "documents_oversize",
+    DocumentsNotUtf8 => "documents_not_utf8",
+    DocumentsUnreadable => "documents_unreadable",
+    DocumentsRefused => "documents_refused",
     ExpiryRetired => "expiry_retired",
     ExpiryRetained => "expiry_retained",
 }
 
-#[derive(Default)]
 struct Counters([AtomicU64; Count::ALL.len()]);
+
+impl Default for Counters {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| AtomicU64::new(0)))
+    }
+}
 
 impl Counters {
     fn at(&self, count: Count) -> &AtomicU64 {
@@ -212,6 +229,8 @@ pub(crate) struct SourceCapture {
     slot: Arc<Semaphore>,
     budget: ByteBudget,
     memo: Mutex<Memo>,
+    /// The database incarnation and project of each capture scope a commit has ensured. The scope commit's receipt replays without rerunning the commit, so a recorded pair needs no second commit; a new database incarnation keys a new pair.
+    ensured_scopes: Mutex<HashSet<String>>,
     /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
     delete_epoch: AtomicU64,
     counters: Counters,
@@ -228,6 +247,7 @@ impl Default for SourceCapture {
             slot: Arc::new(Semaphore::new(1)),
             budget: ByteBudget::new(MAX_RETAINED_WINDOW_BYTES as u64),
             memo: Mutex::default(),
+            ensured_scopes: Mutex::default(),
             delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
             #[cfg(test)]
@@ -269,6 +289,8 @@ pub(crate) struct Offer {
     pub window: Vec<Arc<Value>>,
     /// [`SourceCapture::epoch`] before the pass ran.
     pub epoch: u64,
+    /// Where the pass leaves the configured repository documents it reads for its prompt; `None` when the route injects no documents. A pass that composes no prompt block leaves none.
+    pub documents: Option<Arc<crate::project_docs::DocumentReads>>,
 }
 
 /// A charged window waiting for its response to reach the wire writer. Dropping it releases the charge.
@@ -280,6 +302,29 @@ pub(crate) struct CaptureHandoff {
     epoch: u64,
     window_bytes: usize,
     retained: RetainedCharge,
+    documents: PendingDocuments,
+}
+
+/// The document reads a capture holds until its documents batch takes them. A handoff or job dropped with reads still held dropped them before the batch, so the drop counts them as `documents_refused`; the reads wait for the next pass that composes the block.
+struct PendingDocuments {
+    capture: Arc<SourceCapture>,
+    reads: Vec<(&'static str, DocumentRead)>,
+}
+
+impl PendingDocuments {
+    fn take(mut self) -> Vec<(&'static str, DocumentRead)> {
+        std::mem::take(&mut self.reads)
+    }
+}
+
+impl Drop for PendingDocuments {
+    fn drop(&mut self) {
+        if !self.reads.is_empty() {
+            self.capture
+                .counters
+                .add(Count::DocumentsRefused, self.reads.len());
+        }
+    }
 }
 
 /// A charge against the supervisor's budget, mirrored in the `retained_bytes` gauge while it lives.
@@ -351,10 +396,15 @@ impl Drop for ActiveSlot {
 }
 
 impl SourceCapture {
-    /// Charges a consented pass's native window for capture. `None` for an empty window, and when the window bound or the budget refuses it; a refusal is counted and retains nothing.
+    /// Charges a consented pass's native window and the documents it read for capture. `None` when the pass leaves neither, and when the window bound or the budget refuses it; a refusal is counted and retains nothing.
     pub(crate) fn offer(self: &Arc<Self>, offer: Offer) -> Option<CaptureHandoff> {
         let harness = profile_harness(offer.profile)?;
-        if offer.window.is_empty() {
+        // The documents the pass read when it composed its prompt block are the ones captured; a refusal below drops them counted.
+        let documents = PendingDocuments {
+            capture: Arc::clone(self),
+            reads: crate::project_docs::take_reads(offer.documents.as_deref()).unwrap_or_default(),
+        };
+        if offer.window.is_empty() && documents.reads.is_empty() {
             return None;
         }
         let window_bytes: usize = offer
@@ -362,8 +412,17 @@ impl SourceCapture {
             .iter()
             .map(|value| crate::retained_size::value_retained_bytes(value))
             .sum();
-        // The adapters copy about the window's bytes once more; the job tops up for any excess.
+        let document_bytes: usize = documents
+            .reads
+            .iter()
+            .map(|(_, read)| match read {
+                DocumentRead::Text(text) => text.len(),
+                _ => 0,
+            })
+            .sum();
+        // The adapters copy about the window's bytes once more, and the job tops up for any excess. A document's text is charged twice as well: its unit holds it, and the second share covers the copy publication makes.
         let bytes = window_bytes
+            .saturating_add(document_bytes)
             .saturating_mul(2)
             .saturating_add(ARTIFACT_PREPARATION_BYTES);
         if bytes > MAX_RETAINED_WINDOW_BYTES {
@@ -386,6 +445,7 @@ impl SourceCapture {
             epoch: offer.epoch,
             window_bytes,
             retained,
+            documents,
         })
     }
 
@@ -395,10 +455,11 @@ impl SourceCapture {
         self.slot.available_permits() == 1
     }
 
-    /// Empties the memo, as a restart does.
+    /// Empties the memo and the ensured-scope record, as a restart does.
     #[cfg(test)]
     pub(crate) fn forget_memo_for_test(&self) {
         *self.memo() = Memo::default();
+        self.ensured_scopes().clear();
     }
 
     pub(crate) fn refuse(&self, refusal: Count) {
@@ -413,6 +474,16 @@ impl SourceCapture {
             let mut memo = poisoned.into_inner();
             *memo = Memo::default();
             memo
+        })
+    }
+
+    /// A poisoned record is an empty one: the next job of each project replays its scope commit.
+    fn ensured_scopes(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.ensured_scopes.lock().unwrap_or_else(|poisoned| {
+            self.ensured_scopes.clear_poison();
+            let mut scopes = poisoned.into_inner();
+            scopes.clear();
+            scopes
         })
     }
 
@@ -499,6 +570,7 @@ impl CaptureHandoff {
             project: self.project,
             epoch: self.epoch,
             window_bytes: self.window_bytes,
+            documents: self.documents,
         })
     }
 }
@@ -518,6 +590,7 @@ pub(crate) struct CaptureJob {
     project: ProjectBinding,
     epoch: u64,
     window_bytes: usize,
+    documents: PendingDocuments,
 }
 
 impl CaptureJob {
@@ -554,7 +627,7 @@ impl CaptureJob {
         end
     }
 
-    fn publish(self) -> Count {
+    fn publish(mut self) -> Count {
         if self.cancel.is_cancelled() {
             return self.end(Count::Discarded);
         }
@@ -564,10 +637,14 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
+        let documents = PendingDocuments {
+            capture: Arc::clone(&self.capture),
+            reads: std::mem::take(&mut self.documents.reads),
+        };
         let Some((units, mut copies)) = self.units() else {
             return self.end(Count::RefusedResidentShort);
         };
-        if units.is_empty() {
+        if units.is_empty() && documents.reads.is_empty() {
             return self.end(Count::Completed);
         }
         let incarnation = match store.database_incarnation_id_within_budget(&self.budget) {
@@ -641,7 +718,7 @@ impl CaptureJob {
         }
         let (candidates, keys): (Vec<SourceUnit>, Vec<Option<(String, String)>>) =
             pending.into_iter().chain(unknown).unzip();
-        if candidates.is_empty() {
+        if candidates.is_empty() && documents.reads.is_empty() {
             return self.end(Count::Completed);
         }
         #[cfg(test)]
@@ -661,7 +738,14 @@ impl CaptureJob {
         // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
         let gate = self.commit_gate.lock().expect("capture publication mutex");
         let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.publish_locked(&store, &publisher, &candidates, keys)
+            self.publish_locked(
+                &store,
+                &publisher,
+                &incarnation,
+                candidates,
+                keys,
+                documents,
+            )
         }));
         drop(gate);
         match published {
@@ -675,21 +759,27 @@ impl CaptureJob {
         &self,
         store: &KernelStore,
         publisher: &SourcePublisher<'_>,
-        candidates: &[SourceUnit],
+        incarnation: &str,
+        candidates: Vec<SourceUnit>,
         keys: Vec<Option<(String, String)>>,
+        documents: PendingDocuments,
     ) -> Count {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
             return self.end(Count::SessionInvalidated);
         }
-        if let Err(error) = self.ensure_scope(store) {
+        if let Err(error) = self.ensure_scope(store, incarnation) {
             return self.end(kernel_end(error));
         }
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
+        if candidates.is_empty() {
+            let end = self.capture_documents(store, publisher, documents);
+            return self.end(end);
+        }
         let observed_at = crate::now_ms();
         let started = Instant::now();
-        let result = publish_screened(publisher, candidates, observed_at, Some(&self.budget));
+        let result = publish_screened(publisher, &candidates, observed_at, Some(&self.budget));
         let held = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let counters = &self.capture.counters;
         counters
@@ -709,7 +799,8 @@ impl CaptureJob {
                     }
                 }
                 drop(memo);
-                self.end(Count::Completed)
+                let end = self.capture_documents(store, publisher, documents);
+                self.end(end)
             }
             Err(refusal) => {
                 let culprit = refusal.conflicting_unit();
@@ -732,9 +823,182 @@ impl CaptureJob {
                     }
                 }
                 drop(memo);
+                let documents = self.capture_documents(store, publisher, documents);
+                if documents != Count::Completed {
+                    log("documents ended", documents, 1);
+                }
                 self.end(kernel_end(refusal.error))
             }
         }
+    }
+
+    /// Captures the configured documents the pass read when it composed its prompt block, in their own batch after the window's, under the commit gate, and returns how the batch ended.
+    ///
+    /// - Identity: the project, the project standing in for its repository, and the path.
+    /// - Text whose bytes equal the live revision's artifact is unchanged.
+    /// - Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head; a head that moved refuses as `documents_refused`.
+    /// - `documents_refused` also counts every read the pass's capture drops before this batch handles it: a refused or dropped handoff, a job that ends before the batch, a deadline, a failed preview, or a failed retirement.
+    /// - A verified missing file retires its live revision when this capture's domain owns it; every other read is counted and retires nothing.
+    ///
+    /// A refused document leaves the window's publication as it was, and a refused window leaves the documents to this batch. A read this job drops, through a refusal, a busy slot, or a deadline, waits for the next pass that composes the block; that compose reads afresh and republishes what differs from the live revision, so the lineage converges on the latest compose read.
+    fn capture_documents(
+        &self,
+        store: &KernelStore,
+        publisher: &SourcePublisher<'_>,
+        documents: PendingDocuments,
+    ) -> Count {
+        let documents = documents.take();
+        let count = documents.len();
+        if count == 0 {
+            return Count::Completed;
+        }
+        if self.budget.is_exhausted() {
+            self.capture.counters.add(Count::DocumentsRefused, count);
+            return Count::Deadline;
+        }
+        // The live rows and the lineage heads are read under one reader wait cut to the job's deadline.
+        let steps = store.preview(self.preview_deadline(), |preview| {
+            documents
+                .into_iter()
+                .map(|(path, read)| self.plan_document(preview, path, read))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let steps = match steps {
+            Ok((_, steps)) => steps,
+            Err(error) => {
+                self.capture.counters.add(Count::DocumentsRefused, count);
+                return kernel_end(error);
+            }
+        };
+        let mut units = Vec::new();
+        // Reads settled so far; a failed retirement counts every other read as refused.
+        let mut settled = 0;
+        for step in steps {
+            match step {
+                DocumentStep::Publish(unit) => units.push(unit),
+                DocumentStep::Retire(object_id) => {
+                    if let Err(error) = self.retire_document(store, &object_id) {
+                        self.capture
+                            .counters
+                            .add(Count::DocumentsRefused, count - settled);
+                        return kernel_end(error);
+                    }
+                    self.capture.counters.add(Count::DocumentsRetired, 1);
+                    settled += 1;
+                }
+                DocumentStep::Skip(skip) => {
+                    self.capture.counters.add(skip, 1);
+                    settled += 1;
+                }
+            }
+        }
+        if units.is_empty() {
+            return Count::Completed;
+        }
+        match publish_screened(publisher, &units, crate::now_ms(), Some(&self.budget)) {
+            Ok(dispositions) => {
+                for disposition in dispositions {
+                    let count = match disposition {
+                        UnitDisposition::Published(published) if published.replayed => {
+                            Count::UnitsReplayed
+                        }
+                        UnitDisposition::Published(_) => Count::UnitsPublished,
+                        // Every other disposition of a document counts here: a refused identity or revision, an oversize or deferred unit.
+                        _ => Count::DocumentsRefused,
+                    };
+                    self.capture.counters.add(count, 1);
+                }
+                Count::Completed
+            }
+            Err(refusal) => {
+                self.capture
+                    .counters
+                    .add(Count::DocumentsRefused, units.len());
+                kernel_end(refusal.error)
+            }
+        }
+    }
+
+    /// What capture does with one configured document, given its lineage's live revision.
+    fn plan_document(
+        &self,
+        preview: &kernel::Preview<'_>,
+        path: &'static str,
+        read: DocumentRead,
+    ) -> Result<DocumentStep, KernelError> {
+        let text = match read {
+            // Text within the read cap but past the unit cap counts with the reads past the read cap.
+            DocumentRead::Text(text) if text.len() > MAX_SOURCE_UNIT_BYTES => {
+                return Ok(DocumentStep::Skip(Count::DocumentsOversize));
+            }
+            DocumentRead::Text(text) => Some(text),
+            DocumentRead::Missing => None,
+            DocumentRead::NotRegular => return Ok(DocumentStep::Skip(Count::DocumentsNotRegular)),
+            DocumentRead::Oversize => return Ok(DocumentStep::Skip(Count::DocumentsOversize)),
+            DocumentRead::NotUtf8 => return Ok(DocumentStep::Skip(Count::DocumentsNotUtf8)),
+            DocumentRead::Unreadable => return Ok(DocumentStep::Skip(Count::DocumentsUnreadable)),
+        };
+        let project_id = self.session.project_id.as_str();
+        let identity = vec![
+            ("project_id", project_id.to_owned()),
+            ("repository_id", project_id.to_owned()),
+            ("relative_path", path.to_owned()),
+        ];
+        let lineage = document_lineage(&identity)?;
+        // The live revision is read with every row check: a retirement names it, and a changed document publishes through the descriptor commit, which checks the predecessor it supersedes. A row another domain owns is not this capture's revision: a missing file retires nothing, and a publication is refused as a mismatched domain.
+        let live = preview
+            .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &lineage)?
+            .filter(|row| row.domain_id == CAPTURE_DOMAIN_ID);
+        let Some(text) = text else {
+            return Ok(
+                live.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
+                    DocumentStep::Retire(row.object_id)
+                }),
+            );
+        };
+        if live.is_some_and(|row| {
+            row.detail.artifact_digest == crate::project_docs::sha256_hex(text.as_bytes())
+        }) {
+            return Ok(DocumentStep::Skip(Count::DocumentsUnchanged));
+        }
+        let head = preview.source_lineage_head(&lineage)?.unwrap_or(0);
+        Ok(DocumentStep::Publish(SourceUnit {
+            class: OccurrenceClass::RepositoryDocuments,
+            identity,
+            revision: (head + 1).to_string(),
+            representation: Representation::Text,
+            text,
+            role: "document".to_owned(),
+            outcome: None,
+        }))
+    }
+
+    /// Retires the live revision `object_id` of a document whose file a read found missing, within the job's budget; the receipt is keyed by the revision, so a retry replays it.
+    fn retire_document(&self, store: &KernelStore, object_id: &str) -> Result<(), KernelError> {
+        let digest = kernel::source_identity::identity_digest(object_id.as_bytes());
+        store
+            .commit_within_budget(
+                &self.budget,
+                CommitIntent {
+                    producer: PRODUCER.to_owned(),
+                    operation_key: format!("source-document-retire:{digest}"),
+                    request_digest: digest,
+                    actor: "repository".to_owned(),
+                    cause: "repository document removed".to_owned(),
+                },
+                |envelope| {
+                    crate::harness_sources::retire_descriptors(envelope, &[object_id.to_owned()])
+                },
+            )
+            .map(|_| ())
+    }
+
+    /// A preview's reader wait: the receipt wait, cut to the job's deadline.
+    fn preview_deadline(&self) -> Instant {
+        let wait = Instant::now() + PREVIEW_WAIT;
+        self.budget
+            .deadline()
+            .map_or(wait, |deadline| deadline.min(wait))
     }
 
     /// Every unit of the window, in record order, with the charges for copies beyond the window share the offer charged; a record the adapter refuses contributes none and is counted. `None` once the budget refuses a unit's copy, which the adapter drops before building the next one.
@@ -771,7 +1035,11 @@ impl CaptureJob {
     }
 
     /// Materializes the capture domain and the project's scope; the receipt makes every later attempt a replay.
-    fn ensure_scope(&self, store: &KernelStore) -> Result<(), KernelError> {
+    fn ensure_scope(&self, store: &KernelStore, incarnation: &str) -> Result<(), KernelError> {
+        let ensured = format!("{incarnation}\u{1f}{}", self.project.digest());
+        if self.capture.ensured_scopes().contains(&ensured) {
+            return Ok(());
+        }
         let operation_key = format!("{}:source-capture:scope", self.project.digest());
         let intent = CommitIntent {
             producer: PRODUCER.to_owned(),
@@ -794,6 +1062,11 @@ impl CaptureJob {
             )?;
             Ok(String::new())
         })?;
+        let mut scopes = self.capture.ensured_scopes();
+        if scopes.len() >= MAX_RECORDED_PROJECTS {
+            scopes.clear();
+        }
+        scopes.insert(ensured);
         Ok(())
     }
 }
@@ -825,8 +1098,8 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
 pub(crate) const SESSION_RETIREMENT_PAGE: usize = 256;
 /// Pages one session-retirement inventory snapshot lists. The snapshot is one read transaction, so its pages commit while it reads on, and at most this many listed pages wait for their commit.
 const SESSION_INVENTORY_PAGES: usize = 16;
-/// How long a session-retirement preview waits for a pooled reader.
-const SESSION_RETIREMENT_WAIT: Duration = Duration::from_secs(5);
+/// How long a session-retirement or document preview waits for a pooled reader.
+const PREVIEW_WAIT: Duration = Duration::from_secs(5);
 /// Leads the bytes a session-retirement page's receipt key binds.
 const SESSION_RETIREMENT_FORMAT: &str = "source-session-retire.v1";
 
@@ -882,7 +1155,7 @@ fn list_session_pages(
     let mut remaining = pages;
     while remaining > 0 {
         let snapshot_pages = remaining.min(SESSION_INVENTORY_PAGES);
-        let (_, listed) = store.preview(Instant::now() + SESSION_RETIREMENT_WAIT, |preview| {
+        let (_, listed) = store.preview(Instant::now() + PREVIEW_WAIT, |preview| {
             let mut cursor = cursor.clone();
             let mut left = snapshot_pages;
             let mut pending: Vec<(i64, String)> = Vec::new();
@@ -990,6 +1263,30 @@ struct InventoryCursor {
     after: Option<String>,
 }
 
+/// What capture does with one configured document.
+enum DocumentStep {
+    Publish(SourceUnit),
+    Retire(String),
+    Skip(Count),
+}
+
+/// The lineage of a document identity. A lineage names the identity, the class, and the representation, never the revision, so any revision encodes it.
+fn document_lineage(identity: &[(&'static str, String)]) -> Result<String, KernelError> {
+    let identity: Vec<(&str, &str)> = identity
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    kernel::source_identity::encode_preserving_span(&kernel::source_identity::Occurrence {
+        class: OccurrenceClass::RepositoryDocuments.code(),
+        identity: &identity,
+        revision: "1",
+        representation: Representation::Text.as_str(),
+        span: None,
+    })
+    .map(|encoded| encoded.lineage_id)
+    .map_err(|_| KernelError::InvalidInput)
+}
+
 fn kernel_end(error: KernelError) -> Count {
     match error {
         KernelError::Deadline => Count::Deadline,
@@ -1007,11 +1304,23 @@ mod tests {
         for reason in Count::ALL {
             let line = log_line("handoff refused", reason, 1);
             assert!(
-                line.bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || b" :_()1".contains(&byte)),
+                line.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || b" :_()".contains(&byte)),
                 "{line}"
             );
         }
+    }
+
+    /// The restart simulation forgets every per-process record, so the next job of a project replays its scope commit as a restarted daemon would.
+    #[test]
+    fn forgetting_the_memo_for_a_test_forgets_the_scope_record_too() {
+        let capture = SourceCapture::default();
+        capture
+            .ensured_scopes()
+            .insert("incarnation\u{1f}project".to_owned());
+        capture.forget_memo_for_test();
+        assert!(capture.ensured_scopes().is_empty());
     }
 
     #[test]
