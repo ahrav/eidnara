@@ -2363,29 +2363,145 @@ fn a_tool_descriptor_stores_a_validated_outcome_record() {
     );
 }
 
-/// The narrowed in-commit inventory: `live_source_descriptors_with` returns exactly the live descriptors whose identity field holds one of the values, including a value that JSON escapes, pages across a small page bound, and sees the commit's own retirement. A field outside the class's identity is invalid input.
+/// The historical head and the retired-lineage fallback compare revisions as integers: `srcdesc:<lineage>:10` sorts before `srcdesc:<lineage>:9` as text, so a head read in object id order would report 9. A lineage retired at 10 refuses 9 and 10 and republishes at 11, and the head reader serves every class's lineage.
+#[test]
+fn lineage_heads_compare_revisions_as_integers_across_digit_boundaries() {
+    let fixture = Fixture::open();
+    let text = "# v\n";
+    let evidence = fixture.retain("doc-digits", text);
+    let revisions: Vec<String> = (1..=12).map(|revision| revision.to_string()).collect();
+    let publish = |key: &str, revision: usize, expected_head: Option<i64>| {
+        fixture.publish(
+            key,
+            &SourceDescriptorRequest {
+                expected_head,
+                ..request(document(&revisions[revision - 1]), &evidence, text)
+            },
+        )
+    };
+
+    let mut tenth = None;
+    for revision in 1..=10 {
+        let head = (revision > 1).then(|| i64::try_from(revision - 1).unwrap());
+        let (outcome, _, _) = publish(&format!("doc-digits-{revision}"), revision, head).unwrap();
+        tenth = Some(outcome.object_id);
+    }
+    let tenth = tenth.unwrap();
+    let lineage = encode(&document("1"), text).unwrap().lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(10)
+    );
+
+    fixture
+        .store
+        .commit(intent("doc-digits-retire-10"), |envelope| {
+            envelope.retire_observation(&tenth)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(fixture.live(&tenth), Some(false));
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(10)
+    );
+    let tip = fixture.store.tip().unwrap();
+    for revision in [9, 10] {
+        assert_eq!(
+            publish(&format!("doc-digits-stale-{revision}"), revision, Some(10)).err(),
+            Some(SourceDescriptorError::RevisionNotAdvanced),
+            "revision {revision} is at or below the retired head"
+        );
+    }
+    assert_eq!(
+        publish("doc-digits-11-stale-head", 11, Some(9)).err(),
+        Some(SourceDescriptorError::HeadMismatch)
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "every refusal committed nothing"
+    );
+
+    let (eleventh, _, _) = publish("doc-digits-11", 11, Some(10)).unwrap();
+    assert!(eleventh.replaced_object_id.is_none());
+    assert_eq!(
+        fixture.store.source_lineage_head(&lineage).unwrap(),
+        Some(11)
+    );
+    let (twelfth, _, _) = publish("doc-digits-12", 12, Some(11)).unwrap();
+    assert_eq!(
+        twelfth.replaced_object_id.as_deref(),
+        Some(eleventh.object_id.as_str())
+    );
+
+    // A message lineage reports its own head; a message keeps the live-predecessor rule.
+    let message_evidence = fixture.retain("msg-digits", "message text");
+    for revision in [9, 10] {
+        fixture
+            .publish(
+                &format!("msg-digits-{revision}"),
+                &request(
+                    message(MSG_A, &revisions[revision - 1]),
+                    &message_evidence,
+                    "message text",
+                ),
+            )
+            .unwrap();
+    }
+    let message_lineage = encode(&message(MSG_A, "1"), "message text")
+        .unwrap()
+        .lineage_id;
+    assert_eq!(
+        fixture.store.source_lineage_head(&message_lineage).unwrap(),
+        Some(10)
+    );
+    assert_eq!(
+        fixture
+            .publish(
+                "msg-digits-9-again",
+                &request(
+                    message(MSG_A, &revisions[8]),
+                    &message_evidence,
+                    "message text"
+                ),
+            )
+            .err(),
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
+}
+
+/// The `call-other` fixture embeds a wanted `tool_call_id` pair in `parent_message_id` to exercise field-specific identity matching.
 #[test]
 fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
     let fixture = Fixture::open();
     let text = "output";
     let evidence = fixture.retain("tool", text);
-    let call = |tool_call_id: &'static str| -> Vec<(&'static str, &'static str)> {
-        TOOL.iter()
-            .map(|&(name, value)| {
-                (
-                    name,
-                    if name == "tool_call_id" {
-                        tool_call_id
-                    } else {
-                        value
-                    },
-                )
-            })
-            .collect()
-    };
+    let call =
+        |tool_call_id: &'static str, parent: &'static str| -> Vec<(&'static str, &'static str)> {
+            TOOL.iter()
+                .map(|&(name, value)| {
+                    (
+                        name,
+                        match name {
+                            "tool_call_id" => tool_call_id,
+                            "parent_message_id" => parent,
+                            _ => value,
+                        },
+                    )
+                })
+                .collect()
+        };
     let mut wanted = Vec::new();
-    for tool_call_id in ["call \"q\\ 9", "call-b", "call-c", "call-other"] {
-        let identity = call(tool_call_id);
+    for (tool_call_id, parent) in [
+        ("call \"q\\ 9", "msg-002"),
+        ("call-b", "msg-002"),
+        ("call-c", "msg-002"),
+        ("call \"]\\", "msg-002"),
+        ("\u{547c}\u{3073}\u{51fa}\u{3057}-\u{e9}", "msg-002"),
+        ("call-other", "[\"tool_call_id\",\"call-b\"]"),
+    ] {
+        let identity = call(tool_call_id, parent);
         let (published, _, _) = fixture
             .publish(
                 tool_call_id,
@@ -2407,7 +2523,13 @@ fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
         }
     }
     wanted.sort();
-    let values = ["call \"q\\ 9", "call-b", "call-c"];
+    let values = [
+        "call \"q\\ 9",
+        "call-b",
+        "call-c",
+        "call \"]\\",
+        "\u{547c}\u{3073}\u{51fa}\u{3057}-\u{e9}",
+    ];
     let one = std::num::NonZeroUsize::new(1).unwrap();
     fixture
         .store
@@ -2458,9 +2580,287 @@ fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
         .unwrap();
 }
 
-/// One escape-free value reads its descriptors through the payload search: a row whose payload holds the value's text in another identity field, or inside a longer value, is not a match, and the result equals the JSON narrowing a two-value set takes. Paging by one row walks the matches in object id order, the commit's own retirement is seen, and a value no payload holds answers an empty last page.
+/// Every one- and two-character value over JSON's structural and escaped characters, plus longer values built from them, is found by the narrowed read, and only in its own field. Each value has two decoys: one whose `parent_message_id` spells the value's `["tool_call_id", value]` pair, and one whose `session_id` holds the value itself.
 #[test]
-fn a_writer_reads_one_escape_free_identity_value_through_the_payload_search() {
+fn a_narrowed_read_finds_every_escaped_value_in_its_own_field() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let alphabet = ["\"", "\\", "[", "]", ",", "a", "\u{e9}"];
+    let mut values: Vec<String> = alphabet.iter().map(|one| (*one).to_owned()).collect();
+    for first in alphabet {
+        for second in alphabet {
+            values.push(format!("{first}{second}"));
+        }
+    }
+    values.extend(
+        [
+            "\"]",
+            "\\\"]",
+            "\\\\\"]",
+            "\",\"",
+            "[\"tool_call_id\",\"x\"]",
+            "\\u0022",
+            "\u{2028}\u{2029}",
+        ]
+        .map(str::to_owned),
+    );
+    let mut seen = std::collections::HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+    let identity = |tool_call_id: &str, session: &str, parent: &str| -> Vec<(String, String)> {
+        TOOL.iter()
+            .map(|&(name, value)| {
+                let value = match name {
+                    "tool_call_id" => tool_call_id,
+                    "session_id" => session,
+                    "parent_message_id" => parent,
+                    _ => value,
+                };
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+    };
+    let mut wanted = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        let pair = serde_json::to_string(&("tool_call_id", value)).unwrap();
+        for (key, fields, keep) in [
+            (
+                format!("value-{index}"),
+                identity(value, "sess-01", "msg-002"),
+                true,
+            ),
+            (
+                format!("pair-{index}"),
+                identity(&format!("decoy-pair-{index}"), "sess-01", &pair),
+                false,
+            ),
+            (
+                format!("field-{index}"),
+                identity(&format!("decoy-field-{index}"), value, "msg-002"),
+                false,
+            ),
+        ] {
+            let fields: Vec<(&str, &str)> = fields
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            let (published, _, _) = fixture
+                .publish(
+                    &key,
+                    &request(
+                        Occurrence {
+                            class: "raw_tool_spans",
+                            identity: &fields,
+                            revision: "1",
+                            representation: "tool_output",
+                            span: None,
+                        },
+                        &evidence,
+                        text,
+                    ),
+                )
+                .unwrap();
+            if keep {
+                wanted.push(published.object_id);
+            }
+        }
+    }
+    wanted.sort();
+    let wanted_values: Vec<&str> = values.iter().map(String::as_str).collect();
+    let seven = std::num::NonZeroUsize::new(7).unwrap();
+    fixture
+        .store
+        .commit(intent("read-escaped"), |envelope| {
+            let read = |values: &[&str]| -> Result<Vec<kernel::LiveDescriptor>, KernelError> {
+                let mut found = Vec::new();
+                let mut after = None;
+                loop {
+                    let page = envelope.live_source_descriptors_with(
+                        OccurrenceClass::RawToolSpans,
+                        "tool_call_id",
+                        values,
+                        after.as_deref(),
+                        seven,
+                    )?;
+                    found.extend(page.rows);
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => return Ok(found),
+                    }
+                }
+            };
+            let found: Vec<String> = read(&wanted_values)?
+                .into_iter()
+                .map(|row| row.object_id)
+                .collect();
+            assert_eq!(found, wanted, "every value, and no decoy");
+            for value in &values {
+                let rows = read(&[value.as_str()])?;
+                assert_eq!(rows.len(), 1, "{value:?} alone");
+                assert_eq!(rows[0].detail.identity[4].1, *value);
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// A candidate whose cited evidence is invalidated stays out of its narrowed page, and paging past it reaches the later matches: the first page holds no row while `next` names a later page.
+#[test]
+fn a_narrowed_read_applies_evidence_liveness_to_its_candidates() {
+    let fixture = Fixture::open();
+    let calls = ["call-a", "call-b", "call-c"];
+    let mut published = Vec::new();
+    for call in calls {
+        let text = format!("output of {call}");
+        let evidence = fixture.retain(call, &text);
+        let identity: Vec<(&str, &str)> = TOOL
+            .iter()
+            .map(|&(name, value)| (name, if name == "tool_call_id" { call } else { value }))
+            .collect();
+        let (outcome, _, _) = fixture
+            .publish(
+                call,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    &text,
+                ),
+            )
+            .unwrap();
+        published.push((outcome.object_id, evidence.0));
+    }
+    published.sort();
+    rusqlite::Connection::open_with_flags(
+        fixture.root.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap()
+    .execute(
+        "UPDATE evidence_meta SET invalidated_commit_seq=(SELECT MAX(commit_seq) FROM commit_log)
+         WHERE evidence_id=?1",
+        [&published[0].1],
+    )
+    .unwrap();
+    let one = std::num::NonZeroUsize::new(1).unwrap();
+    fixture
+        .store
+        .commit(intent("read-evidence"), |envelope| {
+            let first = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                &calls,
+                None,
+                one,
+            )?;
+            assert!(
+                first.rows.is_empty(),
+                "the dead evidence's descriptor stays out"
+            );
+            assert_eq!(first.next.as_deref(), Some(published[0].0.as_str()));
+            let mut found = Vec::new();
+            let mut after = first.next;
+            while let Some(cursor) = after {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    &calls,
+                    Some(&cursor),
+                    one,
+                )?;
+                found.extend(page.rows.into_iter().map(|row| row.object_id));
+                after = page.next;
+            }
+            assert_eq!(found, [published[1].0.clone(), published[2].0.clone()]);
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// The page bound counts examined live descriptors, including those filtered out, so callers can pause between bounded scans.
+#[test]
+fn a_narrowed_page_examines_at_most_its_bound() {
+    let fixture = Fixture::open();
+    let text = "output";
+    let evidence = fixture.retain("tool", text);
+    let mut matching = None;
+    for call in [
+        "call-other-1",
+        "call-other-2",
+        "call-other-3",
+        "call-wanted",
+    ] {
+        let identity: Vec<(&str, &str)> = TOOL
+            .iter()
+            .map(|&(name, value)| (name, if name == "tool_call_id" { call } else { value }))
+            .collect();
+        let (published, _, _) = fixture
+            .publish(
+                call,
+                &request(
+                    Occurrence {
+                        class: "raw_tool_spans",
+                        identity: &identity,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                ),
+            )
+            .unwrap();
+        if call == "call-wanted" {
+            matching = Some(published.object_id);
+        }
+    }
+    let one = std::num::NonZeroUsize::new(1).unwrap();
+    fixture
+        .store
+        .commit(intent("read-bounded"), |envelope| {
+            let mut pages = 0;
+            let mut found = Vec::new();
+            let mut after: Option<String> = None;
+            loop {
+                let page = envelope.live_source_descriptors_with(
+                    OccurrenceClass::RawToolSpans,
+                    "tool_call_id",
+                    &["call-wanted"],
+                    after.as_deref(),
+                    one,
+                )?;
+                pages += 1;
+                assert!(page.rows.len() <= 1);
+                found.extend(page.rows.into_iter().map(|row| row.object_id));
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(pages, 4, "one page per examined descriptor");
+            assert_eq!(found, [matching.clone().unwrap()]);
+            let none = envelope.live_source_descriptors_with(
+                OccurrenceClass::RawToolSpans,
+                "tool_call_id",
+                &[],
+                None,
+                one,
+            )?;
+            assert!(none.rows.is_empty());
+            assert_eq!(none.next, None, "an empty value set examines no descriptor");
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// One value reads exactly its descriptors: a row whose identity holds the value's text in another field, or inside a longer value, is not a match, and the result equals the read a two-value set takes. Paging by one row walks the matches in object id order, the commit's own retirement is seen, and a value no descriptor holds reads no rows.
+#[test]
+fn a_writer_reads_one_identity_value_past_its_decoys() {
     let fixture = Fixture::open();
     let text = "output";
     let evidence = fixture.retain("tool", text);
@@ -2535,7 +2935,7 @@ fn a_writer_reads_one_escape_free_identity_value_through_the_payload_search() {
             assert_eq!(
                 read(envelope, &["call-b", "call-none"])?,
                 wanted,
-                "the JSON narrowing agrees"
+                "a two-value set agrees"
             );
             envelope.retire_observation(&wanted[0])?;
             assert_eq!(
@@ -2543,14 +2943,10 @@ fn a_writer_reads_one_escape_free_identity_value_through_the_payload_search() {
                 wanted[1..],
                 "the commit's own retirement is seen"
             );
-            let page = envelope.live_source_descriptors_with(
-                OccurrenceClass::RawToolSpans,
-                "tool_call_id",
-                &["call-none"],
-                None,
-                one,
-            )?;
-            assert!(page.rows.is_empty() && page.next.is_none());
+            assert!(
+                read(envelope, &["call-none"])?.is_empty(),
+                "a value no descriptor holds reads no rows"
+            );
             Ok(String::new())
         })
         .unwrap();

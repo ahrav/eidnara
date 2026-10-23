@@ -50,7 +50,11 @@ pub fn opencode(part: &Value, message_error: Option<&Value>, output: &str) -> Op
 
 /// Whether an OpenCode tool `state` records that the turn's abort interrupted the call (`metadata.interrupted` is `true`).
 pub fn opencode_interrupted(state: &Value) -> bool {
-    state.pointer("/metadata/interrupted") == Some(&Value::Bool(true))
+    state
+        .get("metadata")
+        .and_then(|metadata| metadata.get("interrupted"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// The outcome of one text block, `output`, of a Pi `toolResult` message. `None` when the message names no tool or carries no boolean `isError`.
@@ -67,7 +71,9 @@ pub fn pi(message: &Value, output: &str) -> Option<ToolOutcome> {
         tool_name: tool_name.to_owned(),
         byte_length: output.len() as u64,
         truncated: message
-            .pointer("/details/truncation/truncated")
+            .get("details")
+            .and_then(|details| details.get("truncation"))
+            .and_then(|truncation| truncation.get("truncated"))
             .and_then(Value::as_bool),
         exit_code: None,
         exception_ref: None,

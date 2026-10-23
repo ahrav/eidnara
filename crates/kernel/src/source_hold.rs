@@ -221,6 +221,15 @@ pub(crate) enum Descriptors {
 impl Descriptors {
     /// `end` and `start` are inserted verbatim into the SQL predicate.
     pub(crate) fn predicate(self, end: &str, start: &str) -> String {
+        format!(
+            "{}
+             AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>{end})",
+            self.registry_predicate(end, start)
+        )
+    }
+
+    /// The terms of [`Self::predicate`] over the descriptor's registry row `o`, which a scan can test before it reads the cited evidence.
+    pub(crate) fn registry_predicate(self, end: &str, start: &str) -> String {
         // Registry timestamps keep corrupt observation timestamps from hiding source rows.
         let descriptor_liveness = match self {
             Self::LiveAtEnd => {
@@ -230,8 +239,7 @@ impl Descriptors {
         };
         format!(
             "o.created_commit_seq>{start} AND o.created_commit_seq<={end}
-             {descriptor_liveness}
-             AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>{end})"
+             {descriptor_liveness}"
         )
     }
 

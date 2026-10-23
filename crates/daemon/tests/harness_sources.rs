@@ -19,7 +19,9 @@ use host_runtime::local_embeddings::{
     EmbedTokens, EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
 };
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::OccurrenceClass;
+use kernel::source_identity::{
+    Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
+};
 use kernel::{
     ArtifactDestination, ArtifactErrorKind, CommitIntent, Dimension, DomainSpec,
     EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress, ScopeSpec,
@@ -134,7 +136,7 @@ fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v3".to_string(),
+        identity_contract_version: "search-projection-identity-v4".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -1014,6 +1016,141 @@ fn publication_receipt_digest_layout_is_pinned() {
             "cfc4bcd532cd5d2151054bcb6dac960de1eeeae9b5236131a0730259b42062e9",
             "bd80d105aa3b57d56c98af10dfb3a8b930f8e59c336d2505311ebcda2982a190"
         ]
+    );
+}
+
+/// A unit's receipt identity is the key and request digest publication records: the key digests the occurrence id, revision, and representation joined by U+001F, and the request digest frames the format tag, text, domain, scope, role, and sensitivity, each after its big-endian `u64` length, then the scope and egress flags, then the outcome record's presence byte and, when present, its length-prefixed encoding. The texts span lengths from empty to past several SHA-256 blocks, a publication stores exactly that key and digest, and a revision outside its canonical spelling has no receipt identity.
+#[test]
+fn receipt_identity_keys_the_occurrence_and_frames_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    let mut units: Vec<SourceUnit> = [0, 1, 7, 8, 55, 56, 63, 64, 65, 119, 120, 1000]
+        .into_iter()
+        .map(|len| pi_text_unit("pi-u1", &("é".repeat(len / 2) + &"a".repeat(len % 2))))
+        .collect();
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", true, 300)).unwrap());
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t2", "pi-a1", false, 301)).unwrap());
+    units.extend(opencode_units(&opencode_session(), &opencode_assistant("msg_a", 5000)).unwrap());
+    for scope_id in [None, Some(SCOPE)] {
+        for egress in [ProviderEgress::LocalOnly, ProviderEgress::RemoteAllowed] {
+            let publisher = SourcePublisher {
+                scope_id,
+                egress,
+                ..corpus.publisher()
+            };
+            for unit in &units {
+                let encoded = encode_preserving_span(&Occurrence {
+                    class: unit.class.code(),
+                    identity: &identity_of(unit),
+                    revision: &unit.revision,
+                    representation: unit.representation.as_str(),
+                    span: None,
+                })
+                .unwrap();
+                let key = format!(
+                    "{}\u{1f}{}\u{1f}{}",
+                    encoded.occurrence_id,
+                    encoded.revision,
+                    unit.representation.as_str()
+                );
+                let mut request = Vec::new();
+                for part in [
+                    "source-request.v2",
+                    unit.text.as_str(),
+                    publisher.domain_id,
+                    scope_id.unwrap_or_default(),
+                    unit.role.as_str(),
+                    publisher.sensitivity.as_str(),
+                ] {
+                    request.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                    request.extend_from_slice(part.as_bytes());
+                }
+                request.push(u8::from(scope_id.is_some()));
+                request.push(match egress {
+                    ProviderEgress::RemoteAllowed => 0,
+                    ProviderEgress::LocalOnly => 1,
+                });
+                match &unit.outcome {
+                    Some(outcome) => {
+                        let encoded = outcome.encode();
+                        request.push(1);
+                        request.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                        request.extend_from_slice(&encoded);
+                    }
+                    None => request.push(0),
+                }
+                assert_eq!(
+                    publisher.receipt_identity(unit),
+                    Some((identity_digest(key.as_bytes()), identity_digest(&request))),
+                    "{unit:?}"
+                );
+            }
+        }
+    }
+    corpus.seed();
+    let (key, digest) = corpus.publisher().receipt_identity(&units[2]).unwrap();
+    corpus.publisher().publish(&units[2], NOW).unwrap();
+    let conn =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let stored: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT operation_key, request_digest FROM operation_receipts
+             WHERE producer='eidnara-daemon/harness-sources'
+               AND operation_key LIKE 'source-descriptor:%'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, [(format!("source-descriptor:{key}"), digest)]);
+    for revision in ["01", "+5", "9223372036854775808"] {
+        let unit = SourceUnit {
+            revision: revision.to_owned(),
+            ..units[2].clone()
+        };
+        assert_eq!(
+            corpus.publisher().receipt_identity(&unit),
+            None,
+            "{revision}"
+        );
+        let refused = corpus.publisher().publish(&unit, NOW);
+        assert!(
+            matches!(
+                refused,
+                Err(PublishError::Descriptor { evidence: None, .. })
+            ),
+            "{revision}: {refused:?}"
+        );
+    }
+}
+
+/// With several fields wrong at once, the Pi adapter names the first one it checks: the role before the timestamp, and the call before the error flag.
+#[test]
+fn pi_refusals_name_the_first_failing_field() {
+    let mut user = pi_user("pi-u1", "hello", 100);
+    let message = user["message"].as_object_mut().unwrap();
+    message.remove("role");
+    message.remove("timestamp");
+    assert_eq!(
+        pi_units(&pi_session(), &user),
+        Err(AdapterRefusal::MissingIdentity("role"))
+    );
+    let mut result = pi_tool_result("pi-t1", "pi-a1", false, 300);
+    let message = result["message"].as_object_mut().unwrap();
+    message.remove("toolCallId");
+    message.insert("isError".to_owned(), json!("false"));
+    message.insert("content".to_owned(), json!("not an array"));
+    assert_eq!(
+        pi_units(&pi_session(), &result),
+        Err(AdapterRefusal::MissingIdentity("toolCallId"))
+    );
+    let mut result = pi_tool_result("pi-t1", "pi-a1", false, 300);
+    result.as_object_mut().unwrap().remove("parentId");
+    result["message"]["timestamp"] = json!(-1);
+    assert_eq!(
+        pi_units(&pi_session(), &result),
+        Err(AdapterRefusal::MalformedRevision("timestamp"))
     );
 }
 
@@ -2171,7 +2308,11 @@ fn c6_original_revision_bytes_read_exactly_after_succession_and_reopen() {
 
 /// One Pi user text unit `id` whose text is `text`.
 fn pi_text_unit(id: &str, text: &str) -> SourceUnit {
-    pi_units(&pi_session(), &pi_user(id, text, 100))
+    pi_text_unit_at(id, text, 100)
+}
+
+fn pi_text_unit_at(id: &str, text: &str, stamp: u64) -> SourceUnit {
+    pi_units(&pi_session(), &pi_user(id, text, stamp))
         .unwrap()
         .remove(0)
 }
@@ -2438,6 +2579,37 @@ fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {
     );
 }
 
+#[test]
+fn capture_batch_refuses_a_secret_unit_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let units = [
+        pi_text_unit("pi-secret", &format!("token {SECRET}")),
+        pi_text_unit("pi-clean", "a clean sibling"),
+    ];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    match &dispositions[0] {
+        UnitDisposition::Refused(refusal @ PublishError::Artifact(_)) => {
+            assert!(refusal.is_permanent(), "{refusal:?}");
+        }
+        other => panic!("expected an artifact refusal, got {other:?}"),
+    }
+    assert!(!published(&dispositions[1]).replayed);
+    assert_eq!(evidence_rows(&corpus).0, 1, "only the sibling is retained");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged + 1,
+        "only the sibling is staged"
+    );
+    assert!(
+        !inventory(&corpus)
+            .iter()
+            .any(|(_, text, _)| text.contains(SECRET))
+    );
+}
+
 /// One window naming a unit twice: an equal repeat waits for a later pass, and a changed repeat under the same identity and revision is refused on its own while the first publishes.
 #[test]
 fn capture_batch_screens_a_repeated_identity_per_unit() {
@@ -2460,6 +2632,72 @@ fn capture_batch_screens_a_repeated_identity_per_unit() {
 
     let again = publish_screened(&corpus.publisher(), &units[1..2], NOW, None).unwrap();
     assert!(published(&again[0]).replayed);
+}
+
+#[test]
+fn capture_batch_refuses_a_stale_revision_without_failing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    publisher
+        .publish(&pi_text_unit_at("pi-stale", "newer", 200), NOW)
+        .unwrap();
+    let receipts = publisher_receipts(&corpus);
+    let units = [
+        pi_text_unit("pi-fresh", "fresh sibling"),
+        pi_text_unit_at("pi-stale", "older", 100),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    assert!(!published(&dispositions[0]).replayed);
+    assert!(
+        matches!(
+            &dispositions[1],
+            UnitDisposition::Refused(PublishError::Descriptor {
+                refusal: SourceDescriptorError::RevisionNotAdvanced,
+                evidence: None,
+            })
+        ),
+        "{:?}",
+        dispositions[1]
+    );
+    assert_eq!(
+        evidence_rows(&corpus).0,
+        2,
+        "the stale unit retained no evidence"
+    );
+    assert_eq!(
+        publisher_receipts(&corpus).difference(&receipts).count(),
+        2,
+        "receipts for the sibling only"
+    );
+}
+
+#[test]
+fn capture_batch_defers_a_second_revision_of_an_admitted_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let units = [
+        pi_text_unit_at("pi-edited", "first revision", 100),
+        pi_text_unit("pi-sibling", "sibling"),
+        pi_text_unit_at("pi-edited", "second revision", 200),
+    ];
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let first = published(&dispositions[0]);
+    assert!(!first.replayed);
+    assert!(!published(&dispositions[1]).replayed);
+    assert!(
+        matches!(dispositions[2], UnitDisposition::Deferred),
+        "{:?}",
+        dispositions[2]
+    );
+
+    let again = publish_screened(&publisher, &units[2..], NOW, None).unwrap();
+    let second = published(&again[0]);
+    assert!(!second.replayed);
+    assert_eq!(second.replaced_object_id.as_ref(), Some(&first.object_id));
 }
 
 /// `publish_batch` names the unit whose step refused the attempt and commits nothing; only a receipt conflict is a terminal conflict.
@@ -2508,6 +2746,7 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
     assert_eq!(refusal.error, kernel::KernelError::NotFound);
     assert_eq!(refusal.unit, Some(0));
     assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(refusal.refusal, None);
     assert_eq!(
         corpus.kernel.staged_artifacts_for_test(),
         staged,
@@ -2529,8 +2768,81 @@ fn batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal() {
     assert_eq!(refusal.error, kernel::KernelError::InvalidInput);
     assert_eq!(refusal.unit, Some(1));
     assert_eq!(refusal.conflicting_unit(), None);
+    assert_eq!(
+        refusal.refusal,
+        Some(SourceDescriptorError::RevisionNotAdvanced)
+    );
 
     assert_eq!(corpus.tip(), tip, "no refused attempt committed");
+}
+
+#[test]
+fn batch_judges_each_unit_against_its_own_publishers_scope() {
+    use daemon::harness_sources::publish_batch;
+    const OTHER_SCOPE: &str = "project:b";
+    let other_project = "b".repeat(64);
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus
+        .kernel
+        .commit(intent("other-scope"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: OTHER_SCOPE.to_owned(),
+                object_id: OTHER_SCOPE.to_owned(),
+                source_id: OTHER_SCOPE.to_owned(),
+                domain_id: "domain".to_owned(),
+                source_kind: "kernel_route".to_owned(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_owned(),
+                    operator: "exact".to_owned(),
+                    exact_value: Some(other_project.clone()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let publisher = corpus.publisher();
+    let other = SourcePublisher {
+        scope_id: Some(OTHER_SCOPE),
+        ..corpus.publisher()
+    };
+    let first = pi_text_unit("pi-first", "first scope");
+    let misplaced = pi_text_unit("pi-misplaced", "project a under project b's scope");
+    let mut second = pi_text_unit("pi-second", "second scope");
+    second.identity[0].1 = other_project;
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+
+    for (units, refused) in [
+        ([(&publisher, &first), (&other, &misplaced)], 1),
+        ([(&other, &misplaced), (&publisher, &first)], 0),
+    ] {
+        let refusal = publish_batch(&corpus.kernel, Vec::new(), &units, NOW, None).unwrap_err();
+        assert_eq!(refusal.error, kernel::KernelError::NotFound);
+        assert_eq!(refusal.unit, Some(refused));
+        assert_eq!(refusal.conflicting_unit(), None);
+    }
+    assert_eq!(corpus.tip(), tip, "no refused attempt committed");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "the receipt preview refuses before any byte is staged"
+    );
+
+    let published = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &first), (&other, &second)],
+        NOW,
+        None,
+    )
+    .unwrap();
+    assert!(published.iter().all(|published| !published.replayed));
+    assert!(corpus.tip() > tip);
 }
 
 /// A configured repository document at `revision`.
@@ -2548,6 +2860,92 @@ fn document_unit(path: &str, revision: &str, text: &str) -> SourceUnit {
         role: "document".to_string(),
         outcome: None,
     }
+}
+
+/// A proposal more than one revision past the lineage head is refused as a head mismatch. The refusal depends on the head: once the lineage reaches the revision before the proposal, the same unit publishes.
+#[test]
+fn repository_documents_gap_refusal_is_retryable_once_the_gap_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+
+    publisher
+        .publish(&document_unit("README.md", "1", "# one\n"), NOW)
+        .unwrap();
+    publisher
+        .publish(&document_unit("README.md", "2", "# two\n"), NOW)
+        .unwrap();
+    let gap = document_unit("README.md", "4", "# four\n");
+    let refused = publisher.publish(&gap, NOW);
+    assert!(
+        matches!(
+            &refused,
+            Err(PublishError::Descriptor {
+                refusal: SourceDescriptorError::HeadMismatch,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(!refused.unwrap_err().is_permanent());
+    publisher
+        .publish(&document_unit("README.md", "3", "# three\n"), NOW)
+        .unwrap();
+    let landed = publisher.publish(&gap, NOW).unwrap();
+    assert!(!landed.replayed, "{landed:?}");
+    let rows = corpus.export();
+    let live: Vec<&SourceRow> = rows
+        .iter()
+        .filter(|row| {
+            row.detail.class == "repository_documents" && row.invalidated_commit_seq.is_none()
+        })
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].object_id, landed.object_id);
+    assert_eq!(live[0].text.as_deref(), Some("# four\n"));
+}
+
+/// A repository document retains its own `Sensitive` evidence even when its text equals a commit message in the same screened batch.
+#[test]
+fn repository_documents_keep_their_own_evidence_beside_an_equal_commit_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let text = "Release notes\n";
+    let commit = SourceUnit {
+        class: OccurrenceClass::GitCommits,
+        identity: vec![
+            ("repository_id", PROJECT.to_string()),
+            ("object_format", "sha1".to_string()),
+            ("oid", "b".repeat(40)),
+        ],
+        revision: "1".to_string(),
+        representation: Representation::CommitMessage,
+        text: text.to_string(),
+        role: "commit".to_string(),
+        outcome: None,
+    };
+    let units = [commit, document_unit("NOTES.md", "1", text)];
+
+    let dispositions = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let commit = published(&dispositions[0]);
+    let document = published(&dispositions[1]);
+    assert_ne!(commit.evidence_object_id, document.evidence_object_id);
+    assert_eq!(
+        document.admission,
+        (
+            SourceClass::UntrustedRepoText,
+            TaintClass::RepoUntrustedText
+        )
+    );
+    let rows = corpus.export();
+    let row = rows
+        .iter()
+        .find(|row| row.object_id == document.object_id)
+        .unwrap();
+    assert_eq!(row.sensitivity, Sensitivity::Sensitive);
 }
 
 /// AC16 and the U9 admission policy: a `repository_documents` unit admits as untrusted repository text with no repository provenance, so working-tree bytes store `Sensitive`; the next revision supersedes it; a proposal below the retired head or past the head plus one is refused while the head plus one republishes; and a projection builds from a store holding the class.
@@ -3531,7 +3929,17 @@ fn receipts_written_before_the_outcome_record_replay_under_v2() {
 
 /// A Pi tool result of call `call` at native timestamp `stamp`, with the given text blocks.
 fn pi_rerun(call: &str, stamp: u64, is_error: bool, blocks: &[&str]) -> Vec<SourceUnit> {
-    let mut entry = pi_tool_result(&format!("pi-t-{stamp}"), "pi-a1", is_error, stamp);
+    pi_rerun_under("pi-a1", call, stamp, is_error, blocks)
+}
+
+fn pi_rerun_under(
+    parent: &str,
+    call: &str,
+    stamp: u64,
+    is_error: bool,
+    blocks: &[&str],
+) -> Vec<SourceUnit> {
+    let mut entry = pi_tool_result(&format!("pi-t-{stamp}"), parent, is_error, stamp);
     entry["message"]["toolCallId"] = json!(call);
     entry["message"]["content"] = json!(
         blocks
@@ -3702,6 +4110,32 @@ fn a_tool_rerun_leaves_exactly_one_live_generation() {
     assert_eq!(
         live_generation_of(&corpus, "call_d"),
         [("300".to_owned(), "0".to_owned())]
+    );
+
+    // One `tool_call_id` under another parent message is another call: a re-run under the first parent leaves it live.
+    let other_parent = pi_rerun_under("pi-a2", "call_a", 100, false, &["other\n"]);
+    publish_screened(&publisher, &other_parent, NOW, None).unwrap();
+    let third = pi_rerun("call_a", 300, false, &["third\n"]);
+    publish_screened(&publisher, &third, NOW, None).unwrap();
+    let mut live: Vec<(String, String)> = corpus
+        .export()
+        .into_iter()
+        .filter(|row| row.detail.class == "raw_tool_spans")
+        .filter(|row| row.detail.identity[4].1 == "call_a")
+        .map(|row| {
+            (
+                row.detail.identity[3].1.clone(),
+                row.detail.identity[5].1.clone(),
+            )
+        })
+        .collect();
+    live.sort();
+    assert_eq!(
+        live,
+        [
+            ("pi-a1".to_owned(), "300".to_owned()),
+            ("pi-a2".to_owned(), "100".to_owned()),
+        ]
     );
 }
 
