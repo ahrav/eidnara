@@ -716,7 +716,7 @@ impl KernelStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
-        Self::live_descriptor_page(&tx, class, requested, None, after, max_rows)
+        Self::live_descriptor_page(&tx, class, requested, None, after, None, max_rows)
     }
 
     /// One page of the descriptors of `class` live at `requested` on `tx`.
@@ -726,6 +726,7 @@ impl KernelStore {
         requested: i64,
         narrowing: Option<&Narrowing>,
         after: Option<&str>,
+        before: Option<&str>,
         max_rows: std::num::NonZeroUsize,
     ) -> Result<LiveDescriptorPage, KernelError> {
         let limit = i64::try_from(max_rows.get())
@@ -738,7 +739,7 @@ impl KernelStore {
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
-               AND o.object_id>?3
+               AND o.object_id>?3 AND o.object_id<?6
                AND (?4 IS NULL OR json_extract(json_extract(b.observation_payload,'$.detail'),?4)
                                   IN (SELECT value FROM json_each(?5)))
              ORDER BY o.object_id
@@ -754,7 +755,11 @@ impl KernelStore {
                     requested,
                     after.unwrap_or(""),
                     narrowing.map(|narrowing| narrowing.path.as_str()),
-                    narrowing.map(|narrowing| narrowing.values.as_str())
+                    narrowing.map(|narrowing| narrowing.values.as_str()),
+                    before.map_or_else(
+                        || super::envelope::prefix_upper_bound(DESCRIPTOR_OBJECT_ID_PREFIX),
+                        str::to_owned
+                    )
                 ],
                 |row| {
                     Ok(LiveDescriptorRaw {
@@ -820,6 +825,38 @@ impl Envelope<'_> {
         historical_head(self.tx, lineage_id)
     }
 
+    /// The live descriptor of `class` in lineage `lineage_id` in this envelope's view, or `None` when the lineage has no live revision. The read restricts descriptor scanning to the lineage's `srcdesc:{lineage_id}:` object id range and applies [`KernelStore::live_source_descriptors`]' liveness predicate and row checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] when the range holds more than one live descriptor of `class` or a row's lineage differs from `lineage_id`, and the page read's errors.
+    pub fn live_source_descriptor_of_lineage(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
+        let low = descriptor_object_id(lineage_id, "");
+        let high = super::envelope::prefix_upper_bound(&low);
+        let mut page = KernelStore::live_descriptor_page(
+            self.tx,
+            class,
+            self.commit_seq,
+            None,
+            Some(&low),
+            Some(&high),
+            std::num::NonZeroUsize::MIN,
+        )?;
+        if page.next.is_some()
+            || page
+                .rows
+                .iter()
+                .any(|row| row.detail.lineage_id != lineage_id)
+        {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        Ok(page.rows.pop())
+    }
+
     /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
     ///
     /// # Errors
@@ -849,6 +886,7 @@ impl Envelope<'_> {
             self.commit_seq,
             Some(&narrowing),
             after,
+            None,
             max_rows,
         )
     }

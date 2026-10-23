@@ -762,10 +762,9 @@ impl CaptureJob {
         }
         // The live rows and the lineage heads are read under one reader wait cut to the job's deadline.
         let steps = store.preview(self.preview_deadline(), |preview| {
-            let live = self.live_documents(preview)?;
             documents
                 .into_iter()
-                .map(|(path, read)| self.plan_document(preview, &live, path, read))
+                .map(|(path, read)| self.plan_document(preview, path, read))
                 .collect::<Result<Vec<_>, _>>()
         });
         let steps = match steps {
@@ -824,11 +823,10 @@ impl CaptureJob {
         }
     }
 
-    /// What capture does with one configured document, given the project's live document rows.
+    /// What capture does with one configured document, given its lineage's live revision.
     fn plan_document(
         &self,
         preview: &kernel::Preview<'_>,
-        live: &[kernel::LiveDescriptor],
         path: &'static str,
         read: DocumentRead,
     ) -> Result<DocumentStep, KernelError> {
@@ -844,13 +842,19 @@ impl CaptureJob {
             DocumentRead::NotUtf8 => return Ok(DocumentStep::Skip(Count::DocumentsNotUtf8)),
             DocumentRead::Unreadable => return Ok(DocumentStep::Skip(Count::DocumentsUnreadable)),
         };
-        let current = live
-            .iter()
-            .find(|row| crate::git_reconcile::identity_field(row, "relative_path") == Some(path));
+        let project_id = self.session.project_id.as_str();
+        let identity = vec![
+            ("project_id", project_id.to_owned()),
+            ("repository_id", project_id.to_owned()),
+            ("relative_path", path.to_owned()),
+        ];
+        let lineage = document_lineage(&identity)?;
+        let current = preview
+            .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &lineage)?;
         let Some(text) = text else {
             return Ok(
                 current.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
-                    DocumentStep::Retire(row.object_id.clone())
+                    DocumentStep::Retire(row.object_id)
                 }),
             );
         };
@@ -859,15 +863,7 @@ impl CaptureJob {
         }) {
             return Ok(DocumentStep::Skip(Count::DocumentsUnchanged));
         }
-        let project_id = self.session.project_id.as_str();
-        let identity = vec![
-            ("project_id", project_id.to_owned()),
-            ("repository_id", project_id.to_owned()),
-            ("relative_path", path.to_owned()),
-        ];
-        let head = preview
-            .source_lineage_head(&document_lineage(&identity)?)?
-            .unwrap_or(0);
+        let head = preview.source_lineage_head(&lineage)?.unwrap_or(0);
         Ok(DocumentStep::Publish(SourceUnit {
             class: OccurrenceClass::RepositoryDocuments,
             identity,
@@ -877,32 +873,6 @@ impl CaptureJob {
             role: "document".to_owned(),
             outcome: None,
         }))
-    }
-
-    /// Every live `repository_documents` descriptor of this project's repository, paged to the end.
-    fn live_documents(
-        &self,
-        preview: &kernel::Preview<'_>,
-    ) -> Result<Vec<kernel::LiveDescriptor>, KernelError> {
-        let project_id = self.session.project_id.as_str();
-        let mut rows = Vec::new();
-        let mut after = None;
-        loop {
-            let page = preview.live_source_descriptors_with(
-                OccurrenceClass::RepositoryDocuments,
-                "project_id",
-                &[project_id],
-                after.as_deref(),
-                std::num::NonZeroUsize::new(64).expect("a nonzero page"),
-            )?;
-            rows.extend(page.rows.into_iter().filter(|row| {
-                crate::git_reconcile::identity_field(row, "repository_id") == Some(project_id)
-            }));
-            match page.next {
-                Some(next) => after = Some(next),
-                None => return Ok(rows),
-            }
-        }
     }
 
     /// Retires the live revision `object_id` of a document whose file a read found missing, within the job's budget; the receipt is keyed by the revision, so a retry replays it.
