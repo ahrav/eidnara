@@ -4,7 +4,6 @@
 //! order. Each file is limited to 256 KiB. Metadata checks reject symlinks and
 //! narrow, but do not eliminate, the path-swap window before reading.
 
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub(crate) const PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
@@ -45,6 +44,18 @@ fn escape_xml_content(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Lowercase hex SHA-256 of `bytes`. `ring` uses the CPU's SHA-256 instructions where the CPU has them.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let mut hex = String::with_capacity(2 * digest.as_ref().len());
+    for &byte in digest.as_ref() {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
 }
 
 /// What one read of a configured document found.
@@ -134,9 +145,7 @@ pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
     let canonical_hash = if hash_pieces.is_empty() {
         String::new()
     } else {
-        let mut hasher = Sha256::new();
-        hasher.update(hash_pieces.join(PROJECT_DOCS_DELIMITER).as_bytes());
-        format!("{:x}", hasher.finalize())
+        sha256_hex(hash_pieces.join(PROJECT_DOCS_DELIMITER).as_bytes())
     };
     let rendered_block = if rendered_sections.is_empty() {
         String::new()
@@ -211,6 +220,18 @@ mod tests {
             DocumentRead::NotRegular,
             "a FIFO is refused without blocking on a writer"
         );
+    }
+
+    /// The hash capture compares with a live artifact digest is the kernel's payload identifier of the same bytes.
+    #[test]
+    fn sha256_hex_is_the_kernel_payload_id() {
+        let long = "\u{e9}x\r\n".repeat(16 * 1024);
+        for text in ["", "a", "# Architecture\n\nOne daemon.\n", long.as_str()] {
+            assert_eq!(
+                sha256_hex(text.as_bytes()),
+                kernel::source_identity::payload_id(text.as_bytes())
+            );
+        }
     }
 
     #[test]

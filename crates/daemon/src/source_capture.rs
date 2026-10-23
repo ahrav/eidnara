@@ -859,7 +859,7 @@ impl CaptureJob {
             );
         };
         if current.is_some_and(|row| {
-            row.detail.artifact_digest == kernel::source_identity::payload_id(text.as_bytes())
+            row.detail.artifact_digest == crate::project_docs::sha256_hex(text.as_bytes())
         }) {
             return Ok(DocumentStep::Skip(Count::DocumentsUnchanged));
         }
