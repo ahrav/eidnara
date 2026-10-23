@@ -857,6 +857,55 @@ impl Envelope<'_> {
         Ok(page.rows.pop())
     }
 
+    /// The object id and artifact digest of the live descriptor of `class` in lineage `lineage_id` in this envelope's view, or `None` when the lineage has no live revision. The read takes both from the registry and evidence rows and leaves the stored detail undecoded; it checks that the registry and observation rows agree and that the object id names the lineage and revision. A caller that writes on the strength of the row reads it with [`Self::live_source_descriptor_of_lineage`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] when the range holds more than one live descriptor of `class` or the rows disagree, and storage errors.
+    pub fn live_source_artifact_of_lineage(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+    ) -> Result<Option<(String, String)>, KernelError> {
+        let low = descriptor_object_id(lineage_id, "");
+        let high = super::envelope::prefix_upper_bound(&low);
+        let sql = format!(
+            "SELECT o.object_id,o.source_id,o.source_revision,o.created_commit_seq,o.invalidated_commit_seq,
+                    b.created_commit_seq,b.invalidated_commit_seq,b.sensitivity_class,o.sensitivity_class,e.artifact_digest
+             {rows}
+               AND o.source_kind=?1 AND o.object_kind='observation'
+               AND {live}
+               AND o.object_id>?3 AND o.object_id<?4
+             ORDER BY o.object_id
+             LIMIT 2",
+            rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
+            live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+        );
+        let mut statement = self.tx.prepare_cached(&sql).map_err(map_sqlite)?;
+        let rows: Vec<(String, bool, String)> = statement
+            .query_map(
+                rusqlite::params![class.code(), self.commit_seq, low, high],
+                |row| {
+                    let object_id: String = row.get(0)?;
+                    let consistent = row.get::<_, String>(1)? == lineage_id
+                        && descriptor_object_id(lineage_id, &row.get::<_, i64>(2)?.to_string())
+                            == object_id
+                        && row.get::<_, i64>(3)? == row.get::<_, i64>(5)?
+                        && row.get::<_, Option<i64>>(4)? == row.get::<_, Option<i64>>(6)?
+                        && row.get::<_, String>(7)? == row.get::<_, String>(8)?;
+                    Ok((object_id, consistent, row.get(9)?))
+                },
+            )
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(map_sqlite)?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [(object_id, true, digest)] => Ok(Some((object_id.clone(), digest.clone()))),
+            _ => Err(KernelError::CorruptCanonicalRow),
+        }
+    }
+
     /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
     ///
     /// # Errors

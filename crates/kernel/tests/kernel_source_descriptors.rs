@@ -2466,7 +2466,7 @@ fn a_writer_reads_the_live_descriptors_of_some_identity_values() {
         .unwrap();
 }
 
-/// The lineage read: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor.
+/// The lineage reads: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor; `live_source_artifact_of_lineage` names the same revision and its artifact digest.
 #[test]
 fn a_writer_reads_the_live_revision_of_one_lineage() {
     let fixture = Fixture::open();
@@ -2521,7 +2521,20 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
                     .expect("a live revision");
                 assert_eq!(row.object_id, published[tool_call_id].object_id);
                 assert_eq!(row.detail.lineage_id, lineage(tool_call_id));
+                assert_eq!(
+                    envelope.live_source_artifact_of_lineage(
+                        OccurrenceClass::RawToolSpans,
+                        &lineage(tool_call_id)
+                    )?,
+                    Some((row.object_id, row.detail.artifact_digest)),
+                    "the registry read names the checked row and its digest"
+                );
             }
+            assert_eq!(
+                envelope
+                    .live_source_artifact_of_lineage(OccurrenceClass::RawToolSpans, &unknown)?,
+                None
+            );
             assert_eq!(
                 envelope
                     .live_source_descriptor_of_lineage(OccurrenceClass::RawToolSpans, &unknown)?,
@@ -2543,6 +2556,14 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
                 )?,
                 None,
                 "the commit's own retirement is seen"
+            );
+            assert_eq!(
+                envelope.live_source_artifact_of_lineage(
+                    OccurrenceClass::RawToolSpans,
+                    &lineage("call-b")
+                )?,
+                None,
+                "the registry read sees the retirement too"
             );
             assert!(
                 envelope

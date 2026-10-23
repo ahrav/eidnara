@@ -34,8 +34,8 @@ pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
 const MAX_RETAINED_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 /// Artifact preparation copies an admitted batch a bounded number of times.
 const ARTIFACT_PREPARATION_BYTES: usize = 4 * MAX_SOURCE_BATCH_BYTES;
-/// Capture scopes recorded as ensured before the record starts over; a cleared record costs one replayed scope commit per project.
-const MAX_ENSURED_SCOPES: usize = 1024;
+/// Capture scopes recorded as ensured, and document lineages recorded, before each record starts over; a cleared record costs one replayed scope commit, or one lineage encoding, per project.
+const MAX_RECORDED_PROJECTS: usize = 1024;
 /// The memo's byte budget, counting each entry's two key copies, digest, and bookkeeping.
 const MEMO_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 /// Bookkeeping bytes charged per memo entry beside its key copies and digest, including its table slot.
@@ -231,6 +231,8 @@ pub(crate) struct SourceCapture {
     memo: Mutex<Memo>,
     /// The database incarnation and project of each capture scope a commit has ensured. The scope commit's receipt replays without rerunning the commit, so a recorded pair needs no second commit; a new database incarnation keys a new pair.
     ensured_scopes: Mutex<HashSet<String>>,
+    /// Each configured document's lineage id by project and path. A lineage id is a function of the document's identity alone.
+    document_lineages: Mutex<HashMap<String, String>>,
     /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
     delete_epoch: AtomicU64,
     counters: Counters,
@@ -248,6 +250,7 @@ impl Default for SourceCapture {
             budget: ByteBudget::new(MAX_RETAINED_WINDOW_BYTES as u64),
             memo: Mutex::default(),
             ensured_scopes: Mutex::default(),
+            document_lineages: Mutex::default(),
             delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
             #[cfg(test)]
@@ -430,6 +433,35 @@ impl SourceCapture {
             scopes.clear();
             scopes
         })
+    }
+
+    /// The lineage id of a document identity, encoded once per project and path.
+    fn document_lineage(&self, identity: &[(&'static str, String)]) -> Result<String, KernelError> {
+        let key: String = identity
+            .iter()
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join("\u{1f}");
+        // A poisoned record holds only complete entries, each a function of its key.
+        let known = self
+            .document_lineages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(lineage) = known {
+            return Ok(lineage);
+        }
+        let lineage = document_lineage(identity)?;
+        let mut lineages = self
+            .document_lineages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if lineages.len() >= MAX_RECORDED_PROJECTS {
+            lineages.clear();
+        }
+        lineages.insert(key, lineage.clone());
+        Ok(lineage)
     }
 
     /// The delete epoch a pass samples before it runs.
@@ -871,19 +903,21 @@ impl CaptureJob {
             ("repository_id", project_id.to_owned()),
             ("relative_path", path.to_owned()),
         ];
-        let lineage = document_lineage(&identity)?;
-        let current = preview
-            .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &lineage)?;
+        let lineage = self.capture.document_lineage(&identity)?;
+        let class = OccurrenceClass::RepositoryDocuments;
         let Some(text) = text else {
-            return Ok(
-                current.map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
+            // A retirement writes, so it names a revision read with every row check.
+            return Ok(preview
+                .live_source_descriptor_of_lineage(class, &lineage)?
+                .map_or(DocumentStep::Skip(Count::DocumentsMissing), |row| {
                     DocumentStep::Retire(row.object_id)
-                }),
-            );
+                }));
         };
-        if current.is_some_and(|row| {
-            row.detail.artifact_digest == crate::project_docs::sha256_hex(text.as_bytes())
-        }) {
+        // An unchanged document writes nothing, so its live digest comes from the registry rows; a changed one publishes through the descriptor commit, which checks the predecessor it supersedes.
+        if preview
+            .live_source_artifact_of_lineage(class, &lineage)?
+            .is_some_and(|(_, digest)| digest == crate::project_docs::sha256_hex(text.as_bytes()))
+        {
             return Ok(DocumentStep::Skip(Count::DocumentsUnchanged));
         }
         let head = preview.source_lineage_head(&lineage)?.unwrap_or(0);
@@ -976,7 +1010,7 @@ impl CaptureJob {
             Ok(String::new())
         })?;
         let mut scopes = self.capture.ensured_scopes();
-        if scopes.len() >= MAX_ENSURED_SCOPES {
+        if scopes.len() >= MAX_RECORDED_PROJECTS {
             scopes.clear();
         }
         scopes.insert(ensured);
