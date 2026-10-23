@@ -1091,6 +1091,34 @@ async fn a_spent_budget_before_the_writer_commits_nothing() {
     assert_eq!(report(&handler)["retained_bytes"], 0);
 }
 
+/// A budget spent before the kernel writer is acquired drops the pass's document reads with its window: both configured reads, the text and the missing file, count as `documents_refused`, and nothing of the document reaches the kernel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spent_budget_counts_the_document_reads_it_drops() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(|| {
+        std::thread::sleep(source_capture::CAPTURE_BUDGET + Duration::from_millis(100))
+    }));
+    let store = kernel_store(&handler);
+    let tip = store.tip().unwrap();
+    document_pass(&handler, "base-1").await;
+    for _ in 0..1_000 {
+        if handler.source_capture.is_idle() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(report(&handler)["deadline"], 1);
+    assert_eq!(
+        report(&handler)["documents_refused"],
+        2,
+        "{}",
+        report(&handler)
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+    assert!(live_document(&store, "ARCHITECTURE.md").is_empty());
+}
+
 /// F5: another writer publishes a unit between the handoff and this batch. Equal bytes and context replay; another sensitivity conflicts, and that unit becomes terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_concurrent_publication_of_a_unit_replays_or_conflicts() {
