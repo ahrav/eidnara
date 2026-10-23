@@ -10,6 +10,7 @@
 
 use kernel::{TOOL_OUTCOME_VERSION, ToolOutcome, ToolStatus};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 /// The longest exception name the record keeps; a longer one is unknown.
@@ -204,6 +205,81 @@ pub(crate) fn append_digests(text: &mut String, digests: impl IntoIterator<Item 
         }
         text.push_str(&digest);
     }
+}
+
+pub(crate) enum ToolBlock<'a> {
+    Call { name: &'a str, input: &'a Value },
+    Result,
+    Other,
+}
+
+/// `ToolPairs` supplies call summaries for result digests across one chunk's messages.
+#[derive(Default)]
+pub(crate) struct ToolPairs<'a> {
+    /// The paired call's summary, keyed by the result block's id.
+    pub(crate) call_summaries: std::collections::HashMap<&'a str, String>,
+    /// Ids of call blocks paired with a result in the call's own message.
+    pub(crate) answered_in_message: std::collections::HashSet<&'a str>,
+}
+
+/// `pair_tool_blocks` pairs each result with the earliest unpaired call sharing its arc id. All calls in a message enter their arc queues before that message's results pair; queues persist across messages. `messages` must yield each message's blocks in block order as `(block id, arc id, part)`.
+pub(crate) fn pair_tool_blocks<'a, M, B>(messages: M) -> ToolPairs<'a>
+where
+    M: IntoIterator<Item = B>,
+    B: IntoIterator<Item = (&'a str, Option<&'a str>, ToolBlock<'a>)>,
+{
+    use std::collections::{HashMap, VecDeque};
+    let mut unpaired: HashMap<&'a str, VecDeque<(usize, &'a str, &'a str, &'a Value)>> =
+        HashMap::new();
+    let mut pairs = ToolPairs::default();
+    for (index, message) in messages.into_iter().enumerate() {
+        let mut results = Vec::new();
+        for (id, arc_id, block) in message {
+            let Some(arc_id) = arc_id else {
+                continue;
+            };
+            match block {
+                ToolBlock::Call { name, input } => unpaired
+                    .entry(arc_id)
+                    .or_default()
+                    .push_back((index, id, name, input)),
+                ToolBlock::Result => results.push((id, arc_id)),
+                ToolBlock::Other => {}
+            }
+        }
+        for (id, arc_id) in results {
+            if let Some((call_index, call_id, name, input)) =
+                unpaired.get_mut(arc_id).and_then(VecDeque::pop_front)
+            {
+                if call_index == index {
+                    pairs.answered_in_message.insert(call_id);
+                }
+                pairs.call_summaries.insert(
+                    id,
+                    crate::history_summarizer_chunk::format_tool_summary(name, input),
+                );
+            }
+        }
+    }
+    pairs
+}
+
+/// `call_summary` supplies the call half of a result digest, using the paired call's summary when available and formatting `tool_name` with `Value::Null` otherwise.
+pub(crate) fn call_summary<'p>(
+    pairs: &'p ToolPairs<'_>,
+    id: &str,
+    tool_name: &str,
+) -> Cow<'p, str> {
+    pairs
+        .call_summaries
+        .get(id)
+        .map(|summary| Cow::Borrowed(summary.as_str()))
+        .unwrap_or_else(|| {
+            Cow::Owned(crate::history_summarizer_chunk::format_tool_summary(
+                tool_name,
+                &Value::Null,
+            ))
+        })
 }
 
 fn push_clipped(out: &mut String, text: &str, max: usize) {

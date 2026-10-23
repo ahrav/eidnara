@@ -211,15 +211,18 @@ Both `TC:` sites render the digest through this one formatter and the one
 call-summary formatter. The chunk builder shows it for each result: under
 its call's summary on a result-only message, and after the narrative of a
 message that holds both the call and the result, as an OpenCode assistant
-message does. A result in such a message pairs with the earliest unpaired
-call of its id, as the projector pairs arcs, so a call id repeated within
-one message keeps each call's own arguments. The boundary chunk renders the
-same text: each result's digest sits on the result's message, pairing with
-the earliest unpaired call of its arc in block order across the eligible
-messages; on a message without narrative, a call whose result is in a later
-message or outside the set shows its bare `TC:` line, and a message with
-narrative shows only its digests. A tool-only user or tool message joins the
-`A` block at both sites.
+message does. One pairing routine (`tool_outcome::pair_tool_blocks`) serves
+both sites: within each arc, a result pairs with the earliest unpaired call
+in block order, every call of a message enters its arc's queue before that
+message's results pair, and a queue persists across later messages, so a
+call id repeated within one message keeps each call's own arguments whether
+its results arrive in the same message or a later one. The chunk builder
+pairs over the whole projection; the boundary pairs over the eligible
+messages and otherwise renders the same text: each result's digest sits on
+the result's message; on a message without narrative, a call whose result is
+in a later message or outside the set shows its bare `TC:` line, and a
+message with narrative shows only its digests. A tool-only user or tool
+message joins the `A` block at both sites.
 
 The boundary computes a result's outcome half once per block content. The
 boundary token cache stores it beside the block's token count, keyed by the

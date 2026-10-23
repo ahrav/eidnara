@@ -1748,49 +1748,24 @@ enum ChunkMessagePart {
     },
 }
 
-/// Within each `arc_id`, results pair with preceding calls in block order across `messages`. A paired result with an outcome produces one entry keyed by its call's block id.
-/// Within each `arc_id`, results pair with preceding calls in block order across `messages`.
-fn tool_pairs<'m, 'a>(messages: &[&'m BoundaryMsg<'a>]) -> ToolPairs<'m> {
-    use std::collections::{HashMap, VecDeque};
-    let mut unpaired: HashMap<&'m str, VecDeque<(u64, &'m BoundaryBlock<'a>)>> = HashMap::new();
-    let mut pairs = ToolPairs::default();
-    for message in messages {
-        for block in &message.blocks {
-            let Some(arc_id) = block.arc_id.as_deref() else {
-                continue;
+fn tool_pairs<'m>(messages: &[&'m BoundaryMsg<'_>]) -> ToolPairs<'m> {
+    use crate::tool_outcome::ToolBlock;
+    crate::tool_outcome::pair_tool_blocks(messages.iter().map(|message| {
+        message.blocks.iter().map(|block| {
+            let part = match &block.kind {
+                SelKind::ToolCall { name, input } => ToolBlock::Call {
+                    name,
+                    input: input.as_ref(),
+                },
+                SelKind::ToolResult { .. } => ToolBlock::Result,
+                _ => ToolBlock::Other,
             };
-            match &block.kind {
-                SelKind::ToolCall { .. } => unpaired
-                    .entry(arc_id)
-                    .or_default()
-                    .push_back((message.message_ordinal, block)),
-                SelKind::ToolResult { .. } => {
-                    if let Some((ordinal, call)) =
-                        unpaired.get_mut(arc_id).and_then(VecDeque::pop_front)
-                        && let SelKind::ToolCall { name, input } = &call.kind
-                    {
-                        let summary =
-                            crate::history_summarizer_chunk::format_tool_summary(name, input);
-                        if ordinal == message.message_ordinal {
-                            pairs.answered_in_message.insert(call.id.as_ref());
-                        }
-                        pairs.call_summaries.insert(block.id.as_ref(), summary);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    pairs
+            (block.id.as_ref(), block.arc_id.as_deref(), part)
+        })
+    }))
 }
 
-#[derive(Default)]
-struct ToolPairs<'m> {
-    /// The paired call's summary, keyed by the result block's id.
-    call_summaries: std::collections::HashMap<&'m str, String>,
-    /// Ids of call blocks paired with a result in the call's own message.
-    answered_in_message: std::collections::HashSet<&'m str>,
-}
+type ToolPairs<'m> = crate::tool_outcome::ToolPairs<'m>;
 
 fn chunk_message_part(message: &BoundaryMsg, pairs: &ToolPairs) -> ChunkMessagePart {
     let tool_only = match &message.role {
@@ -1888,16 +1863,7 @@ fn tool_call_parts(
                 tool_name,
                 outcome: Some(outcome),
             } => {
-                let call = pairs
-                    .call_summaries
-                    .get(block.id.as_ref())
-                    .map(Cow::Borrowed)
-                    .unwrap_or_else(|| {
-                        Cow::Owned(crate::history_summarizer_chunk::format_tool_summary(
-                            tool_name,
-                            &serde_json::Value::Null,
-                        ))
-                    });
+                let call = crate::tool_outcome::call_summary(pairs, &block.id, tool_name);
                 summaries.push((crate::tool_outcome::digest(&call, outcome), true));
             }
             _ => {}
@@ -3300,6 +3266,24 @@ mod digest_tests {
                             result("c1", "first"),
                             call("c2", "b.rs"),
                         ],
+                    ),
+                ],
+            ),
+            (
+                "repeated call ids answered in a later tool message",
+                vec![
+                    msg("u1", 1, "user", vec![text("go")]),
+                    msg(
+                        "a2",
+                        2,
+                        "assistant",
+                        vec![call("c1", "a.rs"), call("c1", "b.rs")],
+                    ),
+                    msg(
+                        "t3",
+                        3,
+                        "tool",
+                        vec![result("c1", "first"), result("c1", "second")],
                     ),
                 ],
             ),

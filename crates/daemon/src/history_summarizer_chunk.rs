@@ -4,8 +4,7 @@ use crate::chunk_text::{
     clean_user_text, compact_role, compact_text_for_summary, extract_key_arg, format_block_line,
     is_system_directive, merge_commit_hashes, normalize_text,
 };
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use chrono::{Local, TimeZone};
 use memory_store::{
@@ -480,7 +479,7 @@ fn build_chunk<'a>(
         .map(|message| message.ordinal)
         .min()
         .unwrap_or(start_ordinal);
-    let tool_call_summaries = build_tool_call_summary_lookup(blocks);
+    let tool_pairs = tool_pairs(blocks);
     let mut builder = Builder::new(token_budget, start, identities);
     let blocks_by_mid = grouped_blocks_by_mid(blocks);
     let mut highest_scanned_ordinal = end_placeholder(start);
@@ -502,12 +501,7 @@ fn build_chunk<'a>(
         .collect::<Vec<_>>();
     crate::parallel_map::map_until(
         eligible,
-        |(), message| {
-            (
-                message_meta(&message),
-                message_part(&message, &tool_call_summaries),
-            )
-        },
+        |(), message| (message_meta(&message), message_part(&message, &tool_pairs)),
         |(meta, part)| {
             if !builder.push_message(meta, part) {
                 return false;
@@ -1152,14 +1146,17 @@ fn message_meta(message: &FlatMessage<'_>) -> MessageMeta {
     }
 }
 
-fn message_part(message: &FlatMessage<'_>, lookup: &HashMap<String, String>) -> MessagePart {
+fn message_part(
+    message: &FlatMessage<'_>,
+    pairs: &crate::tool_outcome::ToolPairs<'_>,
+) -> MessagePart {
     if message.role == "system" {
         return MessagePart::Noise;
     }
     if (message.role == "tool" && !has_text_parts(message))
         || (message.role == "user" && !has_meaningful_user_text(message))
     {
-        let summaries = tool_parts(message, lookup, true)
+        let summaries = tool_parts(message, pairs, true)
             .into_iter()
             .map(|(part, _)| part)
             .collect::<Vec<_>>();
@@ -1173,7 +1170,7 @@ fn message_part(message: &FlatMessage<'_>, lookup: &HashMap<String, String>) -> 
     let text_parts = text_parts(message);
     let narrative_parts = text_parts.len();
     // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
-    let (calls, digests): (Vec<_>, Vec<_>) = tool_parts(message, lookup, narrative_parts == 0)
+    let (calls, digests): (Vec<_>, Vec<_>) = tool_parts(message, pairs, narrative_parts == 0)
         .into_iter()
         .partition(|(_, digest)| !digest);
     let mut all_parts = text_parts;
@@ -1246,56 +1243,24 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
         .any(|text| !text.is_empty() && !is_system_directive(text))
 }
 
-/// `tool_parts` returns summaries and result digests in block order; each tuple's boolean marks a result digest ([`crate::tool_outcome::digest`]). Results pair with the earliest unpaired call with the same `id` in `message`, preserving that call's arguments when IDs repeat. Unmatched calls contribute summaries when `bare_calls` is true.
+/// `tool_parts` returns summaries and result digests in block order; each tuple's boolean marks a result digest ([`crate::tool_outcome::digest`]). A result's call half comes from `pairs`. With `bare_calls`, a call paired with no result in its own message contributes its summary.
 fn tool_parts(
     message: &FlatMessage<'_>,
-    lookup: &HashMap<String, String>,
+    pairs: &crate::tool_outcome::ToolPairs<'_>,
     bare_calls: bool,
 ) -> Vec<(String, bool)> {
-    let mut unpaired: Vec<(&str, usize)> = message
-        .blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| match block.wire.kind() {
-            BlockKind::ToolCall { id, .. } => Some((id.as_str(), index)),
-            _ => None,
-        })
-        .collect();
-    let mut call_of_result = vec![None; message.blocks.len()];
-    let mut answered = vec![false; message.blocks.len()];
-    for (index, block) in message.blocks.iter().enumerate() {
-        if let BlockKind::ToolResult { id, .. } = block.wire.kind()
-            && let Some(position) = unpaired.iter().position(|(call, _)| *call == id)
-        {
-            let (_, call) = unpaired.remove(position);
-            call_of_result[index] = Some(call);
-            answered[call] = true;
-        }
-    }
-    let summary = |index: usize| match message.blocks[index].wire.kind() {
-        BlockKind::ToolCall { name, input, .. } => Some(format_tool_summary(name, input)),
-        _ => None,
-    };
     let mut parts = Vec::new();
-    for (index, block) in message.blocks.iter().enumerate() {
+    for block in &message.blocks {
         match block.wire.kind() {
-            BlockKind::ToolCall { .. } if bare_calls && !answered[index] => {
-                parts.extend(summary(index).map(|summary| (summary, false)));
+            BlockKind::ToolCall { name, input, .. }
+                if bare_calls && !pairs.answered_in_message.contains(block.id.as_str()) =>
+            {
+                parts.push((format_tool_summary(name, input), false));
             }
             BlockKind::ToolResult {
                 tool_name, output, ..
             } => {
-                let call = call_of_result[index]
-                    .and_then(summary)
-                    .map(Cow::Owned)
-                    .or_else(|| {
-                        block
-                            .arc_id
-                            .as_deref()
-                            .and_then(|arc_id| lookup.get(arc_id))
-                            .map(|summary| Cow::Borrowed(summary.as_str()))
-                    })
-                    .unwrap_or_else(|| Cow::Owned(format_tool_summary(tool_name, &Value::Null)));
+                let call = crate::tool_outcome::call_summary(pairs, &block.id, tool_name);
                 let outcome = crate::tool_outcome::output_outcome(output);
                 parts.push((crate::tool_outcome::digest(&call, &outcome), true));
             }
@@ -1305,15 +1270,24 @@ fn tool_parts(
     parts
 }
 
-fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for block in blocks.iter().filter(|block| !block.synthetic) {
-        let BlockKind::ToolCall { name, input, .. } = block.wire.kind() else {
-            continue;
-        };
-        out.insert(block.id.clone(), format_tool_summary(name, input));
-    }
-    out
+/// `tool_pairs` pairs results with calls across message boundaries in `blocks`.
+fn tool_pairs(blocks: &[FlatBlock]) -> crate::tool_outcome::ToolPairs<'_> {
+    use crate::tool_outcome::ToolBlock;
+    crate::tool_outcome::pair_tool_blocks(blocks.chunk_by(|left, right| left.mid == right.mid).map(
+        |message| {
+            message
+                .iter()
+                .filter(|block| !block.synthetic)
+                .map(|block| {
+                    let part = match block.wire.kind() {
+                        BlockKind::ToolCall { name, input, .. } => ToolBlock::Call { name, input },
+                        BlockKind::ToolResult { .. } => ToolBlock::Result,
+                        _ => ToolBlock::Other,
+                    };
+                    (block.id.as_str(), block.arc_id.as_deref(), part)
+                })
+        },
+    ))
 }
 
 /// [`normalize_text`] keeps the `TC:` summary on one transcript line.
