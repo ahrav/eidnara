@@ -34,6 +34,8 @@ pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
 const MAX_RETAINED_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 /// Artifact preparation copies an admitted batch a bounded number of times.
 const ARTIFACT_PREPARATION_BYTES: usize = 4 * MAX_SOURCE_BATCH_BYTES;
+/// Capture scopes recorded as ensured before the record starts over; a cleared record costs one replayed scope commit per project.
+const MAX_ENSURED_SCOPES: usize = 1024;
 /// The memo's byte budget, counting each entry's two key copies, digest, and bookkeeping.
 const MEMO_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 /// Bookkeeping bytes charged per memo entry beside its key copies and digest, including its table slot.
@@ -227,6 +229,8 @@ pub(crate) struct SourceCapture {
     slot: Arc<Semaphore>,
     budget: ByteBudget,
     memo: Mutex<Memo>,
+    /// The database incarnation and project of each capture scope a commit has ensured. The scope commit's receipt replays without rerunning the commit, so a recorded pair needs no second commit; a new database incarnation keys a new pair.
+    ensured_scopes: Mutex<HashSet<String>>,
     /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
     delete_epoch: AtomicU64,
     counters: Counters,
@@ -243,6 +247,7 @@ impl Default for SourceCapture {
             slot: Arc::new(Semaphore::new(1)),
             budget: ByteBudget::new(MAX_RETAINED_WINDOW_BYTES as u64),
             memo: Mutex::default(),
+            ensured_scopes: Mutex::default(),
             delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
             #[cfg(test)]
@@ -414,6 +419,16 @@ impl SourceCapture {
             let mut memo = poisoned.into_inner();
             *memo = Memo::default();
             memo
+        })
+    }
+
+    /// A poisoned record is an empty one: the next job of each project replays its scope commit.
+    fn ensured_scopes(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.ensured_scopes.lock().unwrap_or_else(|poisoned| {
+            self.ensured_scopes.clear_poison();
+            let mut scopes = poisoned.into_inner();
+            scopes.clear();
+            scopes
         })
     }
 
@@ -662,7 +677,14 @@ impl CaptureJob {
         // A panic while the shared gate is held would poison it for session deletion; it is caught here and resumed once the guard is released.
         let gate = self.commit_gate.lock().expect("capture publication mutex");
         let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.publish_locked(&store, &publisher, candidates, keys, documents)
+            self.publish_locked(
+                &store,
+                &publisher,
+                &incarnation,
+                candidates,
+                keys,
+                documents,
+            )
         }));
         drop(gate);
         match published {
@@ -676,6 +698,7 @@ impl CaptureJob {
         &self,
         store: &KernelStore,
         publisher: &SourcePublisher<'_>,
+        incarnation: &str,
         candidates: Vec<SourceUnit>,
         keys: Vec<Option<(String, String)>>,
         documents: Vec<(&'static str, DocumentRead)>,
@@ -683,7 +706,7 @@ impl CaptureJob {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
             return self.end(Count::SessionInvalidated);
         }
-        if let Err(error) = self.ensure_scope(store) {
+        if let Err(error) = self.ensure_scope(store, incarnation) {
             return self.end(kernel_end(error));
         }
         if self.budget.is_exhausted() {
@@ -925,7 +948,11 @@ impl CaptureJob {
     }
 
     /// Materializes the capture domain and the project's scope; the receipt makes every later attempt a replay.
-    fn ensure_scope(&self, store: &KernelStore) -> Result<(), KernelError> {
+    fn ensure_scope(&self, store: &KernelStore, incarnation: &str) -> Result<(), KernelError> {
+        let ensured = format!("{incarnation}\u{1f}{}", self.project.digest());
+        if self.capture.ensured_scopes().contains(&ensured) {
+            return Ok(());
+        }
         let operation_key = format!("{}:source-capture:scope", self.project.digest());
         let intent = CommitIntent {
             producer: PRODUCER.to_owned(),
@@ -948,6 +975,11 @@ impl CaptureJob {
             )?;
             Ok(String::new())
         })?;
+        let mut scopes = self.capture.ensured_scopes();
+        if scopes.len() >= MAX_ENSURED_SCOPES {
+            scopes.clear();
+        }
+        scopes.insert(ensured);
         Ok(())
     }
 }
