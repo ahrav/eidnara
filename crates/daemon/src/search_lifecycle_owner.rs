@@ -48,7 +48,7 @@ use crate::search_replacement::{BuildError, ReplacementSpec, RetirementBounds};
 use crate::search_seed::SeedBounds;
 
 /// The construction contract every occurrence tuple and lineage identifier follows; a revision rebuilds the projection.
-pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v3";
+pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v4";
 /// The source policy that selects classes, representations, and spans; a revision rebuilds the projection.
 pub const PROJECTION_POLICY_VERSION: &str = "source-policy.v1";
 /// How far before the record's deadline a slice bounded by it must end, so a later wall-clock read of that deadline cannot land before the bound.

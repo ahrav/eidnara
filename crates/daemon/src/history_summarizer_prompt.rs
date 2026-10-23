@@ -626,6 +626,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_summarizer_prompt_documents_the_tool_outcome_digest() {
+        let notation = HISTORY_SUMMARIZER_SYSTEM_PROMPT
+            .lines()
+            .find(|line| line.trim_start().starts_with("- `TC:`"))
+            .expect("the prompt documents the TC: notation");
+        let bound = format!(
+            "at most {} bytes",
+            crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES
+        );
+        for field in [
+            "`; completed`",
+            "`; error`",
+            "`; bytes=N`",
+            "`; head=\"…\"`",
+            "`; tail=\"…\"`",
+            bound.as_str(),
+        ] {
+            assert!(notation.contains(field), "{field}: {notation}");
+        }
+    }
+
     /// Evaluator cassettes refuse any frame the secret scanner flags, and every summarizer
     /// request carries both texts, so neither may hold secret-shaped text.
     #[test]

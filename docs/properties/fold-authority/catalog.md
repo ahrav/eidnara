@@ -6,7 +6,10 @@ milestones M1 (tickets #852 to #856) and M2 (tickets #857 to #859). It
 carries the 28 records of the specification: FA-E01 to FA-E14 (existing
 behavior at `265df096` that the milestones preserve or deliberately
 invalidate) from #834's first comment, and FA-N01 to FA-N14 (new
-obligations, each with a falsifier) from the specification body. The record
+obligations, each with a falsifier) from the specification body. It also
+carries the 16 knowledge-delivery records of
+[#1060](https://github.com/ahrav/eidnara/issues/1060), KD-E01 to KD-E04 and
+KD-P01 to KD-P12, under "Knowledge delivery records (#1060)". The record
 text follows the specification; `Reachability`, `Exercised`, `Confidence`,
 and `Existing check` are re-derived here against the landed code and the
 recorded PR runs.
@@ -74,6 +77,26 @@ commit it ran at, and its result counts:
 A test named green in PR A's run also ran green in PR B's and PR C's runs
 unless the record says otherwise.
 
+### Update for #1060 (tickets #1061 to #1065)
+
+FA-E01, FA-E02, FA-N05, FA-N06, and the KD records cite code and tests at
+`07ea883b5`, the head of #1071, which holds the four stacked code PRs of
+#1060; the records were first read at `a15da13a4` and every `file:line`
+was moved to `07ea883b5` by a line diff and re-read there. Every other
+record keeps the boundary above. The recorded runs are
+the verification blocks of these PR descriptions:
+
+| PR | Ticket | Branch | Head at read | Base | Recorded run |
+| --- | --- | --- | --- | --- | --- |
+| #1068 | #1061 | `delivery/1061-daemon-pi-native-witnesses` | `f04c54e4d` | `main` (`08de9051a`) | `cargo +1.98 nextest run --profile ci -p daemon --lib` 1,871 passed; workspace clippy, fmt, and rustdoc green; CI green |
+| #1069 | #1062 | `delivery/1062-pi-every-mode-delivery` | `6d527babf` | #1068 | `bun run check:repo` exit 0 (pi-plugin 421 passed) |
+| #1070 | #1063 | `delivery/1063-opencode-whole-array` | `dbdac1150` | #1069 | `bun run check:repo` exit 0 at `6c6368174`; opencode-plugin 3,786 passed and smoke green at `dbdac1150` |
+| #1071 | #1064 | `delivery/1064-e2e-delivery-witnesses` | `07ea883b5` | `main` | the three new end-to-end files green against the built fixture; `validate-mode-manifest` and `check:repo` green |
+
+#1068 to #1071 have merged to `main` (#1071 as `9312f69c5`, whose tree
+equals `07ea883b5`); a record that cites one of them cites the stack head
+above.
+
 ## Scope
 
 The records cover five surfaces: the configuration loaders (Rust
@@ -100,10 +123,10 @@ Each record states the evidence for its label.
 
 | ID | Record | Type | Check | Surface | Status | Exercised | Owner |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| FA-E01 | [`fa-e01-additive-retains-ingress-identities`](#fa-e01-additive-retains-ingress-identities) | safety | `always` | daemon | invalidated | partial | #903 (#855), #905 (#857); output-shape witness unowned |
-| FA-E02 | [`fa-e02-raw-mode-controls-host-surfaces`](#fa-e02-raw-mode-controls-host-surfaces) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856) last TypeScript gate; refusal text for an empty chain (needs human input) |
+| FA-E01 | [`fa-e01-additive-retains-ingress-identities`](#fa-e01-additive-retains-ingress-identities) | safety | `always` | daemon | invalidated | yes | #903 (#855), #905 (#857); #1068 (#1061) output-shape witness |
+| FA-E02 | [`fa-e02-raw-mode-controls-host-surfaces`](#fa-e02-raw-mode-controls-host-surfaces) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856); #1069 (#1062) off-mode Pi clauses; OQ-4 refusal text for an empty chain (needs human input) |
 | FA-E03 | [`fa-e03-whole-meta-refuses-oversize`](#fa-e03-whole-meta-refuses-oversize) | safety | `always` | store | active | partial | #905 (#857), #859 PR A, #859 PR C; first-commit refusal witness unowned (shared with WP-E10); covered-row refusal witness unowned |
-| FA-E04 | [`fa-e04-selected-identities-follow-the-whole-range`](#fa-e04-selected-identities-follow-the-whole-range) | safety | `always-or-unreached` | summarizer | invalidated | yes | #859 PR C, #859 PR A, #905 (#857) |
+| FA-E04 | [`fa-e04-selected-identities-follow-the-whole-range`](#fa-e04-selected-identities-follow-the-whole-range) | safety | `always-or-unreached` | summarizer | invalidated | partial | #859 PR C, #859 PR A, #905 (#857); mixed-range count unasserted |
 | FA-E05 | [`fa-e05-empty-chain-refusal-is-late-and-change-gated`](#fa-e05-empty-chain-refusal-is-late-and-change-gated) | safety | `always` | daemon | invalidated | partial | #903 (#855), #904 (#856); #859 PR A; ignored no-fire commit error unowned |
 | FA-E06 | [`fa-e06-route-snapshots-and-background-work-have-different-lifetimes`](#fa-e06-route-snapshots-and-background-work-have-different-lifetimes) | reachability | `sometimes` | daemon | active | partial | #903 (#855); #859 PR A; firing across route teardown unowned |
 | FA-E07 | [`fa-e07-empty-baseline-and-absent-baseline-have-permissive-helper-semantics`](#fa-e07-empty-baseline-and-absent-baseline-have-permissive-helper-semantics) | safety | `always` | daemon | active | yes | #906 |
@@ -112,14 +135,14 @@ Each record states the evidence for its label.
 | FA-E10 | [`fa-e10-rust-model-resolution-is-user-jsonc-only`](#fa-e10-rust-model-resolution-is-user-jsonc-only) | safety | `always` | daemon | invalidated | partial | #898 (#852); #859 PR A; final-component symlink witness unowned |
 | FA-E11 | [`fa-e11-typescript-expands-user-config-and-rejects-module-keys`](#fa-e11-typescript-expands-user-config-and-rejects-module-keys) | safety | `always` | plugin, pi | invalidated | yes | #898 (#852); #904 (#856) last TypeScript gate |
 | FA-E12 | [`fa-e12-cli-mode-resolution-does-not-use-the-plugin-loader`](#fa-e12-cli-mode-resolution-does-not-use-the-plugin-loader) | safety | `always` | cli | invalidated | yes | #898 (#852), #900 (#854); #904 (#856) last TypeScript gate |
-| FA-E13 | [`fa-e13-conflicts-disable-and-repair-toward-off`](#fa-e13-conflicts-disable-and-repair-toward-off) | safety | `always` | plugin, cli | invalidated | yes | #899 (#853), #900 (#854); #904 (#856) last TypeScript gate; TUI startup witness unowned |
+| FA-E13 | [`fa-e13-conflicts-disable-and-repair-toward-off`](#fa-e13-conflicts-disable-and-repair-toward-off) | safety | `always` | plugin, cli | invalidated | partial | #899 (#853), #900 (#854); #904 (#856) last TypeScript gate; TUI startup witness unowned |
 | FA-E14 | [`fa-e14-native-status-conflates-pruning-with-folding`](#fa-e14-native-status-conflates-pruning-with-folding) | safety | `always` | plugin | invalidated | yes | #899 (#853), #904 (#856) |
 | FA-N01 | [`fa-n01-config-derived-authority`](#fa-n01-config-derived-authority) | safety | `always` | daemon, plugin, pi, cli | active | yes | #898 (#852); #859 PR A; #904 (#856) last TypeScript gate; "never `false`" reading (needs human input) |
 | FA-N02 | [`fa-n02-first-commit-adopts-authority`](#fa-n02-first-commit-adopts-authority) | safety | `always` | daemon, store | active | yes | #903 (#855); #859 PR A; two-route concurrent adoption unowned (refinement) |
 | FA-N03 | [`fa-n03-authority-change-requires-quiescent-bind`](#fa-n03-authority-change-requires-quiescent-bind) | safety | `always-or-unreached` | daemon, store | active | yes | #903 (#855); #859 PR A; busy summarizer through a reopened handler unowned |
 | FA-N04 | [`fa-n04-quiescent-change-completes`](#fa-n04-quiescent-change-completes) | liveness | `always-or-unreached` | daemon, store | active | partial | #903 (#855); #859 PR A; post-kill obligation (b), a kill between the reset commit and the pass commit, unowned |
-| FA-N05 | [`fa-n05-native-authority-gates-fold-work`](#fa-n05-native-authority-gates-fold-work) | safety | `unreachable` | daemon | active | partial | #903 (#855); #859 PR A; native high-pressure first-unit witness unowned (the rerun caller has structural coverage only); wrapup snapshot and boundary counters (needs human input) |
-| FA-N06 | [`fa-n06-native-state-stays-additive`](#fa-n06-native-state-stays-additive) | safety | `always` | daemon, store | active | partial | #903 (#855), #905 (#857), #906 (#858); #859 PR A; "bootstrap" writer (needs human input) |
+| FA-N05 | [`fa-n05-native-authority-gates-fold-work`](#fa-n05-native-authority-gates-fold-work) | safety | `unreachable` | daemon | active | partial | #903 (#855); #859 PR A; #1068 (#1061) native 96 percent first-unit witness (the rerun caller has structural coverage only); wrapup ordering before snapshot and boundary work uncounted (needs human input) |
+| FA-N06 | [`fa-n06-native-state-stays-additive`](#fa-n06-native-state-stays-additive) | safety | `always` | daemon, store | active | partial | #903 (#855), #905 (#857), #906 (#858); #859 PR A; #1068 (#1061) Pi passes; "bootstrap" writer (needs human input) |
 | FA-N07 | [`fa-n07-conflict-disposition-is-authoritative`](#fa-n07-conflict-disposition-is-authoritative) | safety | `always` | plugin, cli | active | partial | #899 (#853), #904 (#856); TUI startup under `warn` unowned; TUI reading of a load failure (needs human input) |
 | FA-N08 | [`fa-n08-repair-uses-the-proposed-document`](#fa-n08-repair-uses-the-proposed-document) | safety | `always-or-unreached` | cli | active | yes | #900 (#854), #904 (#856); rollback-first failure report (needs human input) |
 | FA-N09 | [`fa-n09-only-accepted-results-publish-derived-state`](#fa-n09-only-accepted-results-publish-derived-state) | safety | `always-or-unreached` | daemon | active | yes | #906; reference model unowned |
@@ -128,26 +151,49 @@ Each record states the evidence for its label.
 | FA-N12 | [`fa-n12-identity-observations-survive-window-loss`](#fa-n12-identity-observations-survive-window-loss) | safety | `always-or-unreached` | daemon, store | active | yes | #905 |
 | FA-N13 | [`fa-n13-selected-identities-have-a-byte-budget`](#fa-n13-selected-identities-have-a-byte-budget) | safety | `always-or-unreached` | summarizer | active | yes | #859 PR C, #859 PR A |
 | FA-N14 | [`fa-n14-module-meta-is-message-independent`](#fa-n14-module-meta-is-message-independent) | safety | `always` | daemon, store | active | yes | #859 PR C, #859 PR B, #859 PR A, #905 (#857), #906 (#858), #903 (#855); covered lists stored in `meta` before #859 PR B (needs human input) |
+| KD-E01 | [`kd-e01-pi-repeat-byte-identity`](#kd-e01-pi-repeat-byte-identity) | safety | `always` | daemon | active | yes | #1068 (#1061) |
+| KD-E02 | [`kd-e02-native-memory-epoch-hard`](#kd-e02-native-memory-epoch-hard) | safety | `always` | daemon, store | active | yes | #1068 (#1061); #1071 (#1064) end to end |
+| KD-E03 | [`kd-e03-native-cold-import-prefix-omission`](#kd-e03-native-cold-import-prefix-omission) | safety | `always` | plugin, pi | invalidated | yes | #1069 (#1062), #1070 (#1063) |
+| KD-E04 | [`kd-e04-pi-tool-present-reflects-registration`](#kd-e04-pi-tool-present-reflects-registration) | safety | `always` | pi | active | yes | #1069 (#1062) |
+| KD-P01 | [`kd-p01-every-mode-submission`](#kd-p01-every-mode-submission) | safety | `always` | pi | active | yes | #1069 (#1062) |
+| KD-P02 | [`kd-p02-daemon-only-authority`](#kd-p02-daemon-only-authority) | safety | `always` | plugin, pi | active | yes | #1069 (#1062), #1070 (#1063) |
+| KD-P03 | [`kd-p03-truthful-capabilities`](#kd-p03-truthful-capabilities) | safety | `always` | pi | active | yes | #1069 (#1062) |
+| KD-P04 | [`kd-p04-off-mode-compaction-isolation`](#kd-p04-off-mode-compaction-isolation) | safety | `always` | pi | active | yes | #1069 (#1062) |
+| KD-P05 | [`kd-p05-on-mode-machinery-preservation`](#kd-p05-on-mode-machinery-preservation) | safety | `always-or-unreached` | pi | active | yes | #1069 (#1062) |
+| KD-P06 | [`kd-p06-whole-array-native-submission`](#kd-p06-whole-array-native-submission) | safety | `always` | plugin, pi | active | yes | #1069 (#1062), #1070 (#1063) |
+| KD-P07 | [`kd-p07-decline-preserves-host-input`](#kd-p07-decline-preserves-host-input) | safety | `always` | plugin, pi | active | yes | #1069 (#1062), #1070 (#1063); OQ-2 option (a) for OpenCode |
+| KD-P08 | [`kd-p08-folding-narrowing-preserved`](#kd-p08-folding-narrowing-preserved) | safety | `always-or-unreached` | plugin, pi | active | yes | #1069 (#1062), #1070 (#1063) |
+| KD-P09 | [`kd-p09-unresolved-configuration-requests-delivery`](#kd-p09-unresolved-configuration-requests-delivery) | safety | `always` | pi | active | yes | #1069 (#1062) |
+| KD-P10 | [`kd-p10-request-local-knowledge`](#kd-p10-request-local-knowledge) | safety | `always` | pi | active | yes | #1069 (#1062), #1071 (#1064) |
+| KD-P11 | [`kd-p11-model-free-delivery`](#kd-p11-model-free-delivery) | safety | `always` | plugin, pi, daemon | active | yes | #1071 (#1064), #1068 (#1061) |
+| KD-P12 | [`kd-p12-bounded-delivery-published-once`](#kd-p12-bounded-delivery-published-once) | safety | `always-or-unreached` | plugin, pi, daemon | active | yes | #1071 (#1064), #1068 (#1061) |
 
 Owner lists the PR whose recorded run supplies the status, then, after a
-semicolon, the evidence still unowned or the decision that needs human input.
-Semantics: 17 `always`, 9 `always-or-unreached`, 1 `sometimes`, 1
-`unreachable`, 0 `reachable`.
+semicolon, the evidence still unowned, a later PR whose run supplies a
+witness the earlier owner lacked, or the decision that needs human input.
+PRs that jointly supply a status are comma-separated.
+Semantics: 30 `always`, 12 `always-or-unreached`, 1 `sometimes`, 1
+`unreachable`, 0 `reachable` (the KD records add 13 `always` and 3
+`always-or-unreached`).
 
-Exercise distribution: 18 `yes`, 10 `partial` (FA-E01, FA-E03, FA-E05,
-FA-E06, FA-E09, FA-E10, FA-N04, FA-N05, FA-N06, FA-N07), 0 `not yet`.
-Status: 19 `active`, 9 `invalidated` (FA-E01, FA-E02, FA-E04, FA-E05, FA-E10,
-FA-E11, FA-E12, FA-E13, FA-E14).
+Exercise distribution: 33 `yes`, 11 `partial` (FA-E03, FA-E04, FA-E05,
+FA-E06, FA-E09, FA-E10, FA-E13, FA-N04, FA-N05, FA-N06, FA-N07), 0 `not
+yet`. The FA-E04 and FA-E13 index rows read `yes` before #1065 while their
+records read `partial`; the rows now follow the records, and FA-N05 stays
+`partial` for its uncounted wrapup ordering clause.
+Status: 34 `active`, 10 `invalidated` (FA-E01, FA-E02, FA-E04, FA-E05,
+FA-E10, FA-E11, FA-E12, FA-E13, FA-E14, KD-E03).
 
 ## Records
 
 ### fa-e01-additive-retains-ingress-identities
 
 Type: safety
-Reachability: default-production - the additive path now runs whenever the
-stored authority is native (`crates/daemon/src/transform.rs:3217-3218`), and
-an empty chain, the default, selects native; the replaced identity clause is
-unreachable at HEAD because the additive path writes no identity.
+Reachability: default-production - the additive path runs whenever the
+stored authority is native (`crates/daemon/src/transform.rs:3341-3342` at
+`07ea883b5`), and an empty chain, the default, selects native; the replaced
+identity clause is unreachable at HEAD because the additive path writes no
+identity.
 Status: invalidated
 Invalidated: #855 (PR #903, `8b1e04944`) moves identity insertion,
 provisional-tail removal, and tail and basis re-adoption onto the folding
@@ -155,10 +201,20 @@ path, so the additive path retains no identity; FA-N06 replaces the
 identity-retention clause. #857 (PR #905, `871ebfb08`) then removes the
 identity map from the record entirely. The output clause survives: an
 additive pass serves m0, m1, then the ingress messages unchanged.
-Exercised: partial - the replacement is witnessed: #903's
+Exercised: yes - the replacement is witnessed: #903's
 `native_authority_skips_every_fold_step_even_with_a_live_chain` asserts an
 empty identity table after native passes (also green in #859 PR A's run at
-`fd0b52aa5`). No named test asserts the surviving output clause.
+`fd0b52aa5`). The surviving output clause is witnessed by #1068 (#1061, head
+`f04c54e4d`): `a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer`
+serves a Pi window holding every closed role, a leading
+`eidnara:compactionSummary:` row, and a paired tool call under a native
+binding, and asserts two `eidnara:synthetic:` user rows, then exactly the
+submitted rows in order, a null `boundary`, and the recipe `insert(2)` then
+`keep(source: input, start: 0, count: n)`; the keep is the daemon's
+statement that the client serves the submitted values themselves, so
+retained `Arc` identity follows from the recipe and is checked at the codec
+seam (`crates/daemon/src/codec/pi.rs:2422`
+`untouched_golden_rows_replay_by_pointer_and_edits_re_encode`).
 Guarantee: Accepted compaction-off passes prepend m0/m1, preserve ingress
 messages, and retain non-provisional identities.
 Check: `always` - replaced clause (not checked at HEAD): identity keys become
@@ -169,25 +225,31 @@ Fault/timing angle: Repeated appends or a replaced native slice.
 Required faults and enabling state: Native authority; several passes with
 distinct mids; a native slice replacing the history.
 Confidence: high -
-[evidence](evidence/fa-e01-additive-retains-ingress-identities.md). The
-output construction (`transform.rs:3064-3074`), the scalar-only ingress
-update on the additive path (`:2904` calls `apply_ingress_scalars`,
-`:5593-5608`), and the folding-only `apply_ingress_identities` (`:5612`)
-were read at `0ff62b29a`. Correction: the spec's existing check
+[evidence](evidence/fa-e01-additive-retains-ingress-identities.md). At
+`07ea883b5` the output construction is `transform.rs:3187-3199`, the
+scalar-only ingress update on the additive path is `:3038` (calling
+`apply_ingress_scalars`, `:5740`), and the folding-only
+`apply_ingress_identities` (`:5759`) is called from the folding path
+(`:4303`); at `0ff62b29a` they were `:3054-3065`, `:2904`, `:5583-5598`, and
+`:5602` (corrected from `:3064-3074`, `:5593-5608`, and `:5612`, which ran
+past each construct). Correction: the spec's existing check
 `compaction_mode_projection_cache_reclassifies_synthetic_prefix` (D`lib.rs:42489`
 at `265df096`) was deleted on `main` by `252d9e179` and does not exist at
 HEAD.
-Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:46`
+Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:54`
 `native_authority_skips_every_fold_step_even_with_a_live_chain` (empty
-identity table via `assert_native_state`, `:19-29`); `:645`
-`native_metadata_does_not_grow_with_the_message_count`. None for the output
-clause.
+identity table via `assert_native_state`, `:19-29`); `:671`
+`native_metadata_does_not_grow_with_the_message_count` (lines at
+`07ea883b5`). Output clause: `crates/daemon/src/pi_native_serving_tests.rs:652`
+`a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer` and
+`:710` `the_same_pi_windows_differ_by_binding_alone` (#1068).
 Impact: High at `265df096`: compaction-off accumulated durable metadata. At
 HEAD the surviving clause matters for native serving: a changed ingress
 message would be served under the host's own compaction.
 Open questions:
-- Does a test assert the additive output is m0, m1, then ingress? None found
-  at HEAD. Unresolved, needs an output-shape assertion on a native pass.
+- Does a test assert the additive output is m0, m1, then ingress? Resolved:
+  #1068's `a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer`
+  asserts it under a native binding (#1060 KTD6 holds).
 
 ### fa-e02-raw-mode-controls-host-surfaces
 
@@ -207,7 +269,12 @@ Exercised: yes - the `bun run check:repo` gates of #898 through #904 ran the
 updated predicate test, the tool-registry tests (including an empty chain
 registering the compaction-off tool set), and the command refusal tests; the
 plugin source at HEAD is `d7b330113`'s, which differs from #904's head only
-in comments and generated TUI source, and #859 PR A's `check:repo` ran on it.
+in comments and generated TUI source, and #859 PR A's `check:repo` ran on it;
+this held before #1069 and #1070 changed plugin source. Pi's off-mode host
+surfaces (no eviction, no tag strip, `session_before_compact` answering
+`undefined`, `eidnara_reduce` absent) are KD-P04's guarantee and are
+witnessed there by #1069 (#1062, head `6d527babf`); this record's surviving
+clauses for Pi are the tool omission and the command refusals.
 Guarantee: At `265df096`, TypeScript compaction mode depended only on the raw
 `compaction.enabled` boolean, not model availability; off omitted
 `eidnara_reduce` and refused fold commands while keeping their definitions
@@ -215,30 +282,44 @@ registered.
 Check: `always` - the predicate equals `compaction?.enabled !== false` and a
 non-empty normalized chain; when it is false the registry omits exactly
 `eidnara_reduce`, the commands stay registered with the "Unavailable"
-description, and flush, recomp, and wrapup refuse without a daemon call.
-`always` because the mode is resolved once per startup on every
-configuration.
+description, and flush, recomp, and wrapup refuse without a daemon call; on
+Pi the registration set omits `eidnara_reduce` and the fold commands refuse
+without a daemon call. `always` because the boot latch is resolved once per
+startup on every configuration. Pi's off-mode eviction, tag-strip, and
+compaction-answer clauses are KD-P04's check.
 Fault/timing angle: An empty chain with an absent or true compaction
-setting.
+setting; a boot latch that disagrees with the session's project.
 Required faults and enabling state: An empty configuration, explicit
-`false`, a model with each compaction setting, a blank model.
+`false`, a model with each compaction setting, a blank model; for Pi, a
+compaction-off process issuing a fold command.
 Confidence: high -
 [evidence](evidence/fa-e02-raw-mode-controls-host-surfaces.md). Read at HEAD
 and at `265df096`. Corrections: `agent-disable.ts:19-23` is now `:21-29`,
-`tool-registry.ts:34-48` is `:38-48`, `hook.ts:223` is `:226`, Pi
-`index.ts:84,349-355` is `:13,349-356`, and
-`compaction-accessor-guard.test.ts:66` is `:67`.
+`tool-registry.ts:34-48` is `:38-48`, `hook.ts:223` is `:226`, and
+`compaction-accessor-guard.test.ts:66` is `:67`. Pi decides its mode in two
+places, verified at `07ea883b5`: the boot latch `compactionOff`
+(`packages/pi-plugin/src/index.ts:382-384`; at `0ff62b29a` `:349-356`) gates
+`eidnara_reduce` registration and `tool_present` (`:597`), and the
+`session_before_compact` answer also reads the session's project
+configuration (`:955-958`); the per-event consequences of the latch are
+KD-P04's record (#1060 OQ-1, owner approval 2026-10-21).
 Existing check: `packages/opencode-plugin/src/config/compaction-accessor-guard.test.ts:67`
 "isCompactionEnabled requires a summarizer chain and a compaction setting
 that is not false"; `packages/opencode-plugin/src/plugin/tool-registry.test.ts:127`
 and `:154` "an empty summarizer chain registers the compaction-off tool set";
 `packages/opencode-plugin/src/hooks/context/command-handler.test.ts:144`
-"refuses /${command} without a daemon call when compaction is off".
+"refuses /${command} without a daemon call when compaction is off"; Pi
+tool omission and command refusals `packages/pi-plugin/src/tools/index.test.ts:19`,
+`packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369`, and
+`packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131` (#1069), with
+`pi-delivery.test.ts:290` for the `eidnara_reduce` omission in a running
+session; the Pi eviction, tag-strip, and compaction-answer witnesses
+(`pi-delivery.test.ts:280`, `:290`, `:324`) are KD-P04's.
 Impact: High. Before #898, "enabled" did not establish folding capability.
 Open questions:
-- The refusal notification and the command descriptions say
-  `compaction.enabled: false` even when the cause is an empty chain
-  (`hooks/context/command-handler.ts:505-513`,
+- OQ-4 (#1060, catalog owner): the refusal notification and the command
+  descriptions say `compaction.enabled: false` even when the cause is an
+  empty chain (`hooks/context/command-handler.ts:505-513`,
   `features/builtin-commands/commands.ts:7-8`), and the test pins that text.
   Should the text name both causes? Needs human input.
 - The TUI comment at `packages/opencode-plugin/src/tui/index.tsx:1098` (at
@@ -1168,34 +1249,47 @@ Open questions:
 Type: safety
 Reachability: default-production - an empty chain is the default, so a fresh
 session adopts native (`DaemonConfig::eidnara_folds`,
-`crates/daemon/src/config.rs:181-185`) and every non-subagent pass reaches the
-gate (`crates/daemon/src/lib.rs:9428-9439`).
+`crates/daemon/src/config.rs:182-186` at `07ea883b5`) and every non-subagent
+pass reaches the gate (`crates/daemon/src/lib.rs:9653-9664`).
 Status: active
-Exercised: partial - PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5`:
+Exercised: partial - the preparation clause is covered from both callers
+and the wrapup refusal is witnessed; the wrapup ordering clause, "before
+snapshot or boundary work", has no counter and is the open question below.
+PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5`:
 `native_authority_skips_every_fold_step_even_with_a_live_chain` (first-unit
 caller, live chain non-empty, preparation full-load count unchanged, trigger
 timings zero, no producer start or connect, no `last_no_fire`, a repeat
-writes no row) and `wrapup_is_refused_under_native_authority`. That
-first-unit witness runs at 45,000 of 50,000 tokens, 90 percent
-(`crates/daemon/src/lib.rs:24445-24447`), below `Emergency95`; no handler
-test under native authority runs at or above 95 percent. The second caller
-(`lib.rs:9077`) is not a reachable native state: native preparation returns
-`Complete` (`:9463-9467`), which settles in the first unit whatever the
-pressure (`:9005-9029`), and the rerun follows only a completed `Busy` wait
-(`:9044-9061`), which native authority never produces. Both callers call
-the one gated function (`:9011`, `:9077`), so the second caller is covered
-structurally by the shared gate, not by a witness. Wrapup's snapshot and
-boundary work are not counted.
+writes no row) and `wrapup_is_refused_under_native_authority` (`ok: false`,
+`reason: native_authority`, zero producer starts); that witness
+runs at 45,000 of 50,000 tokens, 90 percent, below `Emergency95`. #1068
+(#1061, head `f04c54e4d`) adds the high-pressure first-unit witness:
+`a_native_pi_pass_serves_m0_m1_then_every_row_and_starts_no_summarizer`
+serves a long Pi window at 48,000 of 50,000 tokens, 96 percent, under a
+native binding that keeps a live chain (`compaction.enabled: false`); the
+pass settles with `no_fire` `native_authority`, zero trigger timings, and
+zero producer starts and connects, and `the_same_pi_windows_differ_by_binding_alone`
+shows the same window at the same pressure folds with one start under an
+Eidnara binding. At 96 percent the scheduler's hard-wall band is
+`Emergency95` (`crates/daemon/src/scheduler.rs:489-497`, `:716-718`), so the
+pass takes the emergency branch of the first unit (`lib.rs:9097-9098`,
+through `prepare_history_summarizer`, `:9640-9651`). The rerun caller
+(`lib.rs:9292`) is not a reachable native state: native preparation returns
+`Complete` (`:9660-9664`), which settles in the first unit (`:9135-9151`),
+and the rerun follows only a completed `Busy` wait in
+`finish_emergency_pass` (`:9156`), which native authority never produces.
+Every caller reaches the one gated function (`:9653`), so the rerun caller
+is covered structurally by the shared gate, not by a witness. Wrapup's
+snapshot and boundary work are not counted.
 Guarantee: Under native authority the shared preparation entry returns
 before its store load, trigger evaluation, or firing, from both callers, and
 `session.wrapup` refuses before snapshot or boundary work.
 Check: `unreachable` - under an applied native authority,
-`prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5299`) and
-`record_no_fire` (`:5895`) never execute from either caller (`:8924`,
-`:9082`), and the wrapup handler returns `reason = "native_authority"` before
-the transform snapshot read (`:7306`). `unreachable` because these are named
-code points that must not run. Falsifier: live configuration bypasses stored
-authority; any `record_no_fire` commit.
+`prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5463`) and
+`record_no_fire` (`:6074`) never execute from any caller (`:9098`, `:9120`,
+`:9292`), and the wrapup handler returns `reason = "native_authority"`
+(`:7460-7468`) before the transform snapshot read. `unreachable` because
+these are named code points that must not run. Falsifier: live
+configuration bypasses stored authority; any `record_no_fire` commit.
 Fault/timing angle: A configuration change after binding that makes the live
 chain non-empty; an Eidnara-intent sibling over a stored native session.
 Required faults and enabling state: A stored native authority with a
@@ -1205,22 +1299,24 @@ a `session.wrapup` call. The rerun caller has no native construction: it
 needs a completed `Busy` wait, which native preparation never returns.
 Confidence: high -
 [evidence](evidence/fa-n05-native-authority-gates-fold-work.md). The gate is
-the first statement of the shared entry and reads the pass's applied
-authority (`crates/daemon/src/transform.rs:2117-2122`), not the live
-configuration; both callers call it. The wrapup refusal follows an entry
-`store.load` (`lib.rs:7264`), which the record's "before snapshot or
-boundary work" allows.
-Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:46`
-`native_authority_skips_every_fold_step_even_with_a_live_chain`; `:107`
-`wrapup_is_refused_under_native_authority`; `:245` and `:778` (native
-diagnostics while a change is pending).
+the first statement of `prepare_history_summarizer_with` and reads the
+pass's applied authority (`summarizer.eidnara_folds`, set from
+`pass.result.fold_authority.eidnara_folds` at `lib.rs:9648` and `:9112`),
+not the live configuration. The wrapup refusal follows an entry
+`load_fold_authority` (`lib.rs:7450`), which the record's "before snapshot
+or boundary work" allows.
+Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:54`
+`native_authority_skips_every_fold_step_even_with_a_live_chain`; `:115`
+`wrapup_is_refused_under_native_authority`; `:271` and `:804` (native
+diagnostics while a change is pending); `crates/daemon/src/pi_native_serving_tests.rs:652`
+and `:710` (#1068, the 96 percent native arm and its Eidnara control).
 Impact: High. Unauthorized folding and hidden segment creation beside the
 harness's own compaction.
 Open questions:
 - Does a native pass at or above 95 percent settle in the first unit with
-  `native_authority`? Unresolved, needs that first-unit witness. The rerun
-  caller is not reachable under native authority, so its coverage is the
-  shared gate, not a witness.
+  `native_authority`? Resolved: #1068's 96 percent arm settles with
+  `native_authority` and starts no producer; the rerun caller is not
+  reachable under native authority, so its coverage is the shared gate.
 - Should wrapup's snapshot and boundary reads be counted? Needs human input:
   PR #903 lists the counters as follow-up coverage pending an owner decision.
 
@@ -1229,7 +1325,7 @@ Open questions:
 Type: safety
 Reachability: default-production - native is the default authority, and
 every native non-subagent pass takes the additive path
-(`crates/daemon/src/transform.rs:3217-3219`).
+(`crates/daemon/src/transform.rs:3341-3342` at `07ea883b5`).
 Status: active
 Exercised: partial - PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5`:
 `assert_native_state` (no identity rows, no `tail_hygiene_baseline`, no
@@ -1241,15 +1337,22 @@ session with identity rows), `a_resent_descent_after_a_change_to_native_is_ackno
 `native_metadata_does_not_grow_with_the_message_count`, and every native
 step of the bounded histories; the store test
 `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`
-covers state sync with seeds. The "bootstrap" writer the record names is not
-identified by any witness.
+covers state sync with seeds. #1068 (#1061, head `f04c54e4d`) adds Pi-profile
+passes: `assert_native_commit` runs `assert_native_state` after every native
+commit of three Pi witnesses (`pi_native_serving_tests.rs:652`, `:778`, and
+`:843`; the binding comparison at `:710` checks only the stored authority)
+and also asserts the ingress scalars
+(`newest_live_block_id`, `newest_live_ordinal`, and `last_usage` equal the
+pass's), with at least one committed pass in each history, including after
+a memory HARD and a state-sync epoch bump. The "bootstrap" writer the record
+names is not identified by any witness.
 Guarantee: Native-mode accepted metadata contains no fold coverage, identity
 map entries, served fingerprints, or tail baseline; shared ingress scalars
 and additive injections remain.
 Check: `always` - after every commit to a session whose stored authority is
 `Some(false)`: no `block_identities` rows, `coverage_ordinal` and
 `tail_hygiene_baseline` absent, `folded_history_segment_seq == 0`, and no
-derived state promoted (`derived: None`, `transform.rs:3162`), while
+derived state promoted (`derived: None`, `transform.rs:3296`), while
 `newest_live_block_id` and `last_usage` follow ingress. `always` because
 every native writer must hold it. Falsifier: identity adoption runs through
 shared ingress; seeding repopulates forbidden state.
@@ -1259,18 +1362,21 @@ Required faults and enabling state: A large prior folding state followed by
 a legal native transition; then additive passes, a seeded state sync, and a
 descent edge.
 Confidence: high - [evidence](evidence/fa-n06-native-state-stays-additive.md).
-The additive path calls only `apply_ingress_scalars` (`transform.rs:2904`,
-`:5593`); `apply_ingress_identities` (`:5612`) is called only on the folding
-path (`:4169`); native state sync empties the segment batch
-(`crates/memory-store/src/lib.rs:11521-11526`). Served fingerprints and
-baseline parts are not `ModuleMeta` fields after #905 and #906.
-Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:46`,
-`:219`, `:840`, `:555`, `:645`, `:1030` (through `assert_native_state`,
-`:19`); `crates/memory-store/src/lib.rs:25225`
+At `07ea883b5` the additive path calls only `apply_ingress_scalars`
+(`transform.rs:3038`, defined at `:5740`); `apply_ingress_identities`
+(`:5759`) is called only on the folding path (`:4303`); native state sync
+empties the segment batch (`crates/memory-store/src/lib.rs:12099-12104`).
+Served fingerprints and baseline parts are not `ModuleMeta` fields after
+#905 and #906.
+Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:54`,
+`:245`, `:866`, `:581`, `:671`, `:1056` (through `assert_native_state`,
+`:19`); `crates/daemon/src/pi_native_serving_tests.rs:621`
+`assert_native_commit`, used by `:652`, `:778`, and `:843` (#1068);
+`crates/memory-store/src/lib.rs:26941`
 `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`;
 `crates/daemon/src/transform_read_bound.rs:764`
 `native_pass_reads_are_bounded_independent_of_stored_rows`; folding-path
-counterpart `crates/daemon/src/transform.rs:14638`
+counterpart `crates/daemon/src/transform.rs:15569`
 `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`.
 Impact: High. Native sessions would keep message-proportional state that no
 reader uses.
@@ -2097,6 +2203,625 @@ Open questions:
   declared 12 KiB summarizer allowance with an enforced, inventoried bound.
   The bound table has no `Unbounded` or `Configured` entry.
 
+## Knowledge delivery records (#1060)
+
+Specification [#1060](https://github.com/ahrav/eidnara/issues/1060) decouples
+knowledge delivery from compaction. Its Property Catalog section A carries the
+existing-behavior records KD-E01 to KD-E04, and section B the obligations
+KD-P01 to KD-P12. Tickets #1061 to #1064 carry the code and the witnesses in
+the stacked PRs #1068, #1069, #1070, and #1071; this part records them. Every
+`file:line` in these records is verified at `07ea883b5`, the head of #1071,
+which holds all four PRs. Ticket decomposition settled three of the
+specification's open questions with the owner's approval on 2026-10-21:
+
+- OQ-1: Pi evaluates "Eidnara folds" for the window-sizing hook from the
+  session's resolved project configuration on every run (#1062).
+- OQ-2: option (a). For OpenCode, "no host message omitted" replaces "the
+  array stays as it was" after a prior successful native pass; the existing
+  fail-open path publishes the retained output and the new tail (#1063).
+- OQ-3: a Pi project switch mid-session, a project file breaking
+  mid-process, and a resumed session with applied `eidnara` authority in a
+  now-unresolved project join the deferred boundary beside the user-tier
+  configuration edit (#1062).
+
+### kd-e01-pi-repeat-byte-identity
+
+Type: safety
+Reachability: default-production - since #1069 a compaction-off Pi session
+submits a pass on every `context` event
+(`packages/pi-plugin/src/index.ts:565-611`), and an empty chain, the default,
+binds native authority; before #1069 the shipped Pi transform ran only with a
+configured chain.
+Status: active
+Exercised: yes - #1068 (head `f04c54e4d`, `cargo nextest run --profile ci -p
+daemon --lib`, 1,871 passed):
+`a_repeated_native_pi_window_reconstructs_identical_rows` repeats a
+closed-role Pi window under a native binding with a live chain; each repeat
+serializes identical rows, takes a fresh output revision, and is served by
+one whole `keep(source: previous)`; `committed` equals whether metadata or
+the row version changed, is `false` on the unchanged arms and `true` on a new
+usage reading; a repeat with no retained output falls back to
+`keep(source: input)`.
+Guarantee: Stable additive inputs and render state reconstruct identical Pi
+rows across repeats.
+Check: `always` - per repeat, the serialized reconstructed rows equal the
+first pass's, the output revision is fresh, the recipe keeps the retained
+output only when the offered revision and the revert epoch match
+(`crates/daemon/src/lib.rs:2582-2589`, `:9740-9747`), and `committed: false`
+holds only when metadata is unchanged. `always` because every repeat must
+reconstruct the same rows.
+Fault/timing angle: A repeat beside a render change or a lost retained
+output.
+Required faults and enabling state: Two accepted passes; stable clock,
+usage, notes, configuration, and memory; a retained output; a repeat whose
+usage changes; a repeat whose retained output is gone.
+Confidence: high - [evidence](evidence/kd-e01-pi-repeat-byte-identity.md).
+The retained-output selection and the per-response revision allocation
+(`crates/daemon/src/edit_recipe.rs:102`) were read at `07ea883b5`.
+Existing check: `crates/daemon/src/pi_native_serving_tests.rs:778`
+`a_repeated_native_pi_window_reconstructs_identical_rows` (#1068);
+`:241` `identical_pi_passes_re_encode_identical_rows` (folding binding).
+Impact: Medium. A changed repeat breaks the provider's prompt cache.
+Open questions: None.
+
+### kd-e02-native-memory-epoch-hard
+
+Type: safety
+Reachability: default-production - a native session takes the additive
+path (`crates/daemon/src/transform.rs:3341-3342`), and every project with a
+canonical memory row reaches the rendered-row revision read
+(`transform.rs:2898-2910`).
+Status: active
+Exercised: yes - #1068: `a_canonical_memory_write_rerenders_native_pi_m0_as_hard`
+makes a real kernel `commit_verified_memory` write between two Pi passes
+under a native binding; the next pass is HARD with `materialize_reason`
+`project_memory_epoch`, inserts one new m0 and keeps m1 and every submitted
+row from the retained output, holds one `<project-memory>` block, and
+carries the memory line once in the whole request; a state-sync epoch bump
+then sets `project_memory_epoch_pending` and the next pass clears it; the
+pass after that is a `SOFT+` whole keep with `committed: false`. #1071's
+`pi-rust-delivery` shows the same delivery end to end.
+Guarantee: The first accepted additive pass that observes changed
+injectable memory rebuilds m0 as HARD.
+Check: `always` - after a changed rendered-row digest or a pending epoch,
+the pass is HARD, m0 holds the new memory exactly once, ingress rows are
+unchanged, the pending flag is cleared (`transform.rs:3108`), and
+`materialize_reason` is `project_memory_epoch` absent a higher-priority
+cause (first render, legacy migration, epoch change, idle TTL;
+`transform.rs:3205-3218`). `always` because every such pass must rebuild.
+Fault/timing angle: A canonical commit before versus after the pass's pinned
+read; a commit after the read belongs to a later pass.
+Required faults and enabling state: An initialized native session; an
+admitted, verified, budget-fitting positive-category memory row; a changed
+rendered digest; a state-sync epoch bump.
+Confidence: high - [evidence](evidence/kd-e02-native-memory-epoch-hard.md).
+The pending flag is set only by state sync
+(`crates/memory-store/src/lib.rs:12330-12332`); a kernel write reaches the
+pass through the rendered-row revision, which the witness asserts changes.
+Existing check: `crates/daemon/src/pi_native_serving_tests.rs:843`
+`a_canonical_memory_write_rerenders_native_pi_m0_as_hard` (#1068);
+`packages/e2e-tests/tests/pi-rust-delivery.test.ts:109` (#1071); folding
+counterparts `crates/daemon/src/transform.rs:13958`
+`project_memory_revision_change_requests_a_hard_fold` and
+`crates/daemon/src/transform/must_not_wait.rs:280`
+`a_project_memory_revision_is_a_hard_member_too`.
+Impact: High. A stale m0 withholds a memory the user just created.
+Open questions: None.
+
+### kd-e03-native-cold-import-prefix-omission
+
+Type: safety
+Reachability: test-only - at `07ea883b5` the baseline shape needs a
+consumer that supplies the sizing hook under native authority and publishes
+the narrowed result; since #1069 (Pi) and #1070 (OpenCode) the adapters
+supply the hook only while the configuration lets Eidnara fold, and a cold
+suffix the daemon answers under native authority is declined before
+publication
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1673-1680`).
+The replacement oracle runs in default production: an empty chain binds
+native authority and every cold native pass reaches `coldHead`.
+Status: invalidated
+Invalidated: #1069 supplies Pi's `measure` only when the session's project
+lets Eidnara fold (`packages/pi-plugin/src/index.ts:571`, `:586`,
+`packages/pi-plugin/src/transform/pi-transform.ts:268-275`); #1070 supplies
+OpenCode's only when `compactionOff` is not `true`
+(`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`).
+Without the hook, `coldHead` clears any head an earlier folding pass pinned
+and returns `undefined`, so the client submits the whole array
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860-873`;
+#1070's "sends the whole array and drops a pinned head for a source without
+a cold import", `transform-session-client.test.ts:894`, and #1069's
+"submits and publishes the whole array once the project withdraws fold
+authority after a pinned cold pass", `pi-transform.test.ts:505`).
+Exercised: yes - the invalidation is witnessed at the adapter harnesses:
+#1069's "submits the whole array past half the cap while the project
+withdraws fold authority" (401 single-block rows, with and without a leading
+compaction summary) and #1070's "submits and publishes the whole array past
+half the cap under native authority", which checks `output.slice(2) == H` by
+object identity.
+Guarantee: At baseline a successful native cold publication contains m0,
+m1, the lead slots, and the suffix from the head, omitting the rows between
+lead and head.
+Check: `always` - baseline clause, not checked at HEAD: publication equals
+`[m0, m1, ...H[:lead], ...H[head:]]`. Replacement: for every accepted native
+pass whose consumer configuration withdraws fold authority, `output.slice(2)`
+equals the host array `H`, whether or not an earlier folding pass pinned a
+head.
+Fault/timing angle: A cold session crosses the half-cap threshold.
+Required faults and enabling state: No anchor; a host above 400 CK blocks
+or 16 MiB; an accepted additive response and publication; for the pin arm,
+a folding cold pass before the configuration withdraws fold authority.
+Confidence: high -
+[evidence](evidence/kd-e03-native-cold-import-prefix-omission.md). The
+reverted-adapter controls in #1069 and #1070 fail the replacement oracle.
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:341`;
+`packages/pi-plugin/src/transform/pi-transform.test.ts:505`;
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1417`;
+`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894`.
+Impact: High at baseline: an applied pass silently dropped host history.
+Open questions: None.
+
+### kd-e04-pi-tool-present-reflects-registration
+
+Type: safety
+Reachability: default-production - every Pi pass now carries the field, in
+compaction-off mode too (`packages/pi-plugin/src/index.ts:597`).
+Status: active
+Exercised: yes - #1069 (head `6d527babf`, `bun run check:repo`): the
+capability matrix in `pi-pass-inputs.test.ts` covers all four registration
+pairs, and "serves m0, m1, then every Pi message on each context event"
+asserts `tool_present: false` and `todo_tool_present: true` on integrated
+compaction-off passes after registration.
+Guarantee: Each main-runtime Pi pass reports the process's registered
+reduce and todowrite capabilities.
+Check: `always` - captured `tool_present` equals whether `eidnara_reduce` is
+registered in the process (`!compactionOff`, `index.ts:384`, `:597`) and
+`todo_tool_present` equals todowrite registration (`:598`), compared with the
+registration set, not with recomputed configuration. `always` because every
+pass carries both fields.
+Fault/timing angle: Registration and per-project configuration diverge.
+Required faults and enabling state: A compaction-on pass; an off-mode
+field-builder case; an integrated off-mode pass after registration.
+Confidence: high -
+[evidence](evidence/kd-e04-pi-tool-present-reflects-registration.md). Before
+#1069 the field was hardcoded `true`.
+Existing check: `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100`;
+`packages/pi-plugin/src/transform/pi-delivery.test.ts:184`, `:236`;
+`packages/pi-plugin/src/tools/index.test.ts:19` (the registration set).
+Impact: Medium. A `true` for an unregistered tool requests a tagging surface
+whose tags the off-mode strip leaves in place.
+Open questions: None.
+
+### kd-p01-every-mode-submission
+
+Type: safety
+Reachability: default-production - the handler is registered in every mode
+(`packages/pi-plugin/src/index.ts:565-566`).
+Status: active
+Exercised: yes - #1069: "serves m0, m1, then every Pi message on each
+context event" under an empty chain and under `compaction.enabled: false`
+(three passes for three events); "submits passes when the boot project's
+configuration is unresolved"; the unresolved-configuration case in
+`pi-context-handler.test.ts`; "submits no pass for a home-directory session
+without allow_home_project" under both compaction-off modes (zero
+transforms over two turns).
+Guarantee: Pi attempts a pass for every `context` event with a session id
+whose project identity is admitted or whose configuration lets Eidnara
+fold, in compaction-on, explicit compaction-off, and empty-chain modes; a
+compaction-off event for a session with no admitted project identity
+returns before the pipeline.
+Check: `always` - at context handling, an event with a session id enters the
+pass pipeline (`piTransform.run`, `index.ts:578`) unless
+`!eidnaraFolds && !deps.projectIdentity` (`index.ts:572`), the one return
+before it. Falsifier: an off-mode event with an admitted project identity
+returns before the pipeline. Legal witness: the pipeline runs and the
+budget declines; a home-directory session without `allow_home_project`
+submits no pass.
+Fault/timing angle: Admission refusal before the client; a session whose
+project identity is withheld.
+Required faults and enabling state: The full runtime in each mode; an
+admission refusal; a home-directory cwd without `allow_home_project`.
+Confidence: high - [evidence](evidence/kd-p01-every-mode-submission.md).
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:184`,
+`:217`, `:422`; `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247`;
+`packages/pi-plugin/src/index-env-guard.test.ts:54`.
+Impact: High. A skipped event withholds every delivered block.
+Open questions: None.
+
+### kd-p02-daemon-only-authority
+
+Type: safety
+Reachability: default-production - every pass from both plugins: Pi
+registers its handler in every mode (`packages/pi-plugin/src/index.ts:565-566`)
+and OpenCode resolves `compactionOff` once for its hook
+(`packages/opencode-plugin/src/hooks/context/hook.ts:227`).
+Status: active
+Exercised: yes - #1069's "carries the same pass fields for sessions the
+daemon binds differently" compares a folding project, a withdrawn project in
+the same compaction-on process, and a compaction-off process: equal field
+names and equal values once per-session and capability fields are excluded,
+with `tool_present` asserted `[true, true, false]` across the three
+(`packages/pi-plugin/src/transform/pi-delivery.test.ts:259-277`); #1070's "sends
+the same pass fields under either authority" does the same for OpenCode past
+half the cap.
+Guarantee: Neither plugin sends a per-request instruction that selects fold
+versus additive processing.
+Check: `always` - at dispatch, the request's field set is identical across
+differently bound sessions, and its values are identical once the
+per-session fields and the capability fields are excluded. The capability
+fields are excluded because they are not equal by design and carry no
+authority: Pi's `tool_present` follows the process's `eidnara_reduce`
+registration (KD-P03), and OpenCode's `tool_present` and
+`todo_tool_present` are per-session verdicts, `tool_present` from the
+session's frozen and callable reduce availability
+(`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:456-458`)
+and `todo_tool_present` from the active agent's todowrite permission and
+the tool's availability (`:459-471`), checked by their own tests
+(`packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts:554`,
+`:576`, `:832`;
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1593`,
+`:1608`, `:1662`). The daemon's stored authority alone selects the path
+(`crates/daemon/src/transform.rs:3341`).
+Falsifier: a `deliver_only` flag overrides stored authority.
+Fault/timing angle: None.
+Required faults and enabling state: Sessions bound folding and native in one
+process; both `compactionOff` values on OpenCode.
+Confidence: high - [evidence](evidence/kd-p02-daemon-only-authority.md).
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:236`;
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1524`.
+Impact: High. A plugin override would break FA-N01 parity.
+Open questions: None.
+
+### kd-p03-truthful-capabilities
+
+Type: safety
+Reachability: default-production - every Pi pass carries the field
+(`packages/pi-plugin/src/index.ts:597`).
+Status: active
+Exercised: yes - #1069, as KD-E04 records.
+Guarantee: Every Pi pass reports `tool_present` equal to whether
+`eidnara_reduce` is registered, with `todo_tool_present` semantics
+unchanged.
+Check: `always` - at dispatch, `tool_present == !compactionOff`
+(`packages/pi-plugin/src/index.ts:597`) and
+`todo_tool_present == todowriteEnabled` (`:598`); the four registration pairs
+are asserted at `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100`.
+Falsifier: an unregistered reduce tool reported `true`; `todo_tool_present`
+`true` with todowrite disabled. Legal witness: off mode sends `false` while
+`todo_tool_present` stays `true`.
+Fault/timing angle: None.
+Required faults and enabling state: Both modes; todowrite enabled and
+disabled.
+Confidence: high - [evidence](evidence/kd-p03-truthful-capabilities.md).
+Existing check: `packages/pi-plugin/src/transform/pi-pass-inputs.test.ts:100`;
+`packages/pi-plugin/src/transform/pi-delivery.test.ts:184`, `:236`.
+Impact: Medium. See KD-E04.
+Open questions: None.
+
+### kd-p04-off-mode-compaction-isolation
+
+Type: safety
+Reachability: default-production - an empty chain, the default, makes
+`isCompactionEnabled` false
+(`packages/opencode-plugin/src/config/agent-disable.ts:21-29`), which latches
+Pi's compaction-off mode (`packages/pi-plugin/src/index.ts:382-384`).
+Status: active
+Exercised: yes - #1069: "leaves compaction, eviction, and assistant tags to
+Pi after additive passes" (boundary-carrying replies, tagged assistant text
+unchanged, no eviction, `eidnara_reduce` absent, `session.compact()`
+resolves "compacted" with Pi's own compaction); "schedules no eviction in a
+compaction-off process whose session runs in a folding project", which fails
+when the latch return in `scheduleEviction` is removed; the compaction-on
+control "evicts and strips assistant tags in a compaction-on process".
+Guarantee: In compaction-off mode an additive success never schedules an
+eviction, strips an assistant tag, or cancels native compaction;
+`session_before_compact` returns `undefined`.
+Check: `always` - at each relevant event return: the eviction scheduler
+returns before any branch sync (`packages/pi-plugin/src/index.ts:879`), the
+compaction gate passes the latch (`:955-958`) to
+`handlePiSessionBeforeCompact`, which returns `undefined` (`:154-157`), and
+the tag strip is skipped (`:987`). Falsifier: an additive success schedules
+`ctx.compact`.
+Fault/timing angle: An `agent_end` after an additive success whose reply
+names a boundary.
+Required faults and enabling state: Every compaction reason, a tagged
+assistant, a fold command, a successful and a failed pass, and a boot latch
+that disagrees with the session's project.
+Confidence: high -
+[evidence](evidence/kd-p04-off-mode-compaction-isolation.md).
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:280`,
+`:290`, `:324`; fold-command refusals
+`packages/pi-plugin/src/commands/eidnara-commands.test.ts:109`, `:369` and
+`packages/pi-plugin/src/commands/eidnara-wrapup.test.ts:131`.
+Impact: High. A scheduled eviction in off mode starts a second compaction.
+Open questions: None.
+
+### kd-p05-on-mode-machinery-preservation
+
+Type: safety
+Reachability: explicit-config-only - compaction-on needs an admitted
+non-empty chain.
+Status: active
+Exercised: yes - #1069's `check:repo` ran every case of
+`packages/pi-plugin/src/transform/pi-eviction.test.ts` and every folding case
+of `pi-context-handler.test.ts` with no edit other than the
+unresolved-configuration case.
+Guarantee: Compaction-on decisions retain their guards, precedence, and
+outcomes.
+Check: `always-or-unreached` - per guarded event in a compaction-on
+process: a missing or evicted boundary schedules no eviction; an available
+eviction answers every compaction reason first, overflow included
+(`packages/pi-plugin/src/index.ts:158-162`); with no eviction available, an
+overflow or a declined pass over no Eidnara compaction hands compaction back
+to Pi (`:163-166`, `:962-968`), and any other reason cancels; and a refused
+eviction backs off. The unchanged suites assert each.
+`always-or-unreached` because a compaction-off process never reaches the
+guards. Falsifier: a missing boundary permits an eviction.
+Fault/timing angle: Overflow, decline, busy host, eviction refusal.
+Required faults and enabling state: The existing folding and eviction
+fixtures.
+Confidence: high -
+[evidence](evidence/kd-p05-on-mode-machinery-preservation.md).
+Existing check: `packages/pi-plugin/src/transform/pi-eviction.test.ts`;
+`packages/pi-plugin/src/transform/pi-context-handler.test.ts`.
+Impact: High. A changed guard changes folding bytes or evictions.
+Open questions: None.
+
+### kd-p06-whole-array-native-submission
+
+Type: safety
+Reachability: default-production - a native session past half the cap
+reaches `coldHead`
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860`)
+from either adapter.
+Status: active
+Exercised: yes - #1069 (Pi, 401 single-block rows on a first pass and a
+repeat, with and without a leading compaction summary, in compaction-off
+mode and for an unresolved project inside a compaction-on process); #1070
+(OpenCode, `HALF_CAP_BLOCKS + 1` messages and a grown repeat). Stored
+authority still native under a folding configuration: #1070's "declines a
+cold suffix the daemon serves under native authority and submits the whole
+array next" and "returns to the pinned suffix once the daemon no longer
+reports native authority"; #1069's "submits the whole array after the
+daemon serves a cold suffix under native authority".
+Guarantee: While the consumer's configuration withdraws fold authority both
+adapters omit the sizing hook and submit the entire host array in order;
+while the configuration lets Eidnara fold but the daemon's stored authority
+is still native, the one cold-narrowed dispatch is declined on
+`history_summarizer.no_fire: "native_authority"` with its output unpublished,
+and every later `null` pass submits the entire host array until a
+transformed response reports another authority.
+Check: `always` - at dispatch without the sizing hook, or with
+`state.nativeAuthority` set by the latest transformed response
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1361`),
+`native_messages.length` equals the host length and the rows are the host's
+in order; a cold-narrowed dispatch answered with `no_fire:
+"native_authority"` declines as `native_authority` (`:1669-1680`). Falsifier:
+401 single-block rows become a 400-row suffix; a declined cold suffix is
+published over the whole array.
+Fault/timing angle: A cold window crossing half the cap; a leading Pi
+compaction summary; a bind whose authority change is still pending when the
+cold pass dispatches.
+Required faults and enabling state: No anchor; a host above half the cap;
+native authority by mode and by an unresolved routed project; for the
+transition arm, a stored native authority under a configuration that lets
+Eidnara fold.
+Confidence: high -
+[evidence](evidence/kd-p06-whole-array-native-submission.md). A pin left by
+a folding run does not narrow a native-configured request at `07ea883b5`:
+`coldHead` clears it when the hook is absent
+(`transform-session-client.ts:863-866`; `pi-transform.test.ts:505`,
+`transform-session-client.test.ts:894`), and a native response clears it
+(`:1361`, `:1674`). The per-project gate follows OQ-1.
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:341`,
+`:390`;
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1342`,
+`:1389`, `:1417`.
+Impact: High. See KD-E03.
+Open questions: None.
+
+### kd-p07-decline-preserves-host-input
+
+Type: safety
+Reachability: default-production - a native pass the daemon or the budget
+cannot fund declines through the shared client
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1734`)
+or Pi's admission (`packages/pi-plugin/src/transform/pi-transform.ts:234`).
+Status: active
+Exercised: yes - #1069 (Pi): `invalid_params`, `queue_full`, and an
+invocation-budget refusal on a first pass and after a prior success, and a
+held capture-admission lease on a first pass and a repeat; Pi's array
+reaches the provider unchanged. #1070 (OpenCode): an invocation refusal
+leaves the host array unchanged by object identity; after a prior native
+success a `queue_full` publishes the retained m0, m1, and the grown array
+(OQ-2 option a).
+Guarantee: A native decline produces no plugin publication on Pi; on
+OpenCode no host message is omitted, and the invocation refusal leaves the
+array as it was.
+Check: `always` - at return, Pi's array equals its array at entry, because
+the Pi source sets `failOpen: false`
+(`packages/pi-plugin/src/transform/pi-transform.ts:300`); OpenCode's
+fallback publishes only over the retained basis
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1181-1183`).
+Falsifier: a refusal publishes retained m0 and m1 on Pi.
+Fault/timing angle: A decline after a prior success.
+Required faults and enabling state: Daemon errors, a known context limit
+with a growing candidate, a held admission lease.
+Confidence: high -
+[evidence](evidence/kd-p07-decline-preserves-host-input.md).
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:449`,
+`:482`; `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1461`,
+`:1496`.
+Impact: High. A partial publication would serve stale knowledge.
+Open questions: None.
+
+### kd-p08-folding-narrowing-preserved
+
+Type: safety
+Reachability: explicit-config-only - folding needs an admitted chain.
+Status: active
+Exercised: yes - #1069's folding arm of the whole-array test sends the
+400-block suffix and keeps its pinned head; #1070's "sends the half-cap
+suffix and keeps its head pinned while Eidnara folds".
+Guarantee: Compaction-on adapters retain cold-import measurement, the pinned
+head, the lead slots, and tool-pairing head adjustment.
+Check: `always-or-unreached` - at cold selection while the consumer's
+configuration lets Eidnara fold, the suffix and pin follow `coldHead`
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860-896`);
+unreached while the configuration withdraws fold authority. The first
+dispatch of a session whose stored authority is still native under a folding
+configuration runs this selection and is declined on the response (KD-P06).
+Falsifier: on mode also omits the hook.
+Fault/timing angle: A repeat after the pin.
+Required faults and enabling state: The same oversized input under a chain.
+Confidence: high -
+[evidence](evidence/kd-p08-folding-narrowing-preserved.md).
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:341`;
+`packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1444`;
+`packages/pi-plugin/src/transform/pi-transform.test.ts` "Pi cold import".
+Impact: High. A folding session would import its whole history cold.
+Open questions: None.
+
+### kd-p09-unresolved-configuration-requests-delivery
+
+Type: safety
+Reachability: default-production - a malformed project file withdraws fold
+authority in the Pi loader (`packages/pi-plugin/src/config/index.ts:480-482`).
+Status: active
+Exercised: yes - #1069: the unresolved case in `pi-context-handler.test.ts`
+asserts `transforms.length > 0` and `outcome === "compacted"`; "submits
+passes when the boot project's configuration is unresolved"; the routed
+unresolved arm of the whole-array test inside a compaction-on process.
+Guarantee: A project whose configuration is unresolved and whose project
+identity is admitted does not bypass the pass pipeline; an unresolved
+home-directory project without `allow_home_project` has no admitted
+identity and returns before the pipeline, as KD-P01 records.
+Check: `always` - at context handling, the unresolved project's events
+submit passes and Pi's compaction proceeds while `deps.projectIdentity` is
+non-empty; the one return before the pipeline is
+`!eidnaraFolds && !deps.projectIdentity` (`packages/pi-plugin/src/index.ts:572`),
+and an unresolved configuration makes `eidnaraFolds` false. Falsifier: an
+unresolved project with an admitted identity returns before the pipeline.
+Fault/timing angle: None.
+Required faults and enabling state: A malformed project file at the boot cwd
+and in a routed project, each with an admitted project identity.
+Confidence: high -
+[evidence](evidence/kd-p09-unresolved-configuration-requests-delivery.md).
+Existing check: `packages/pi-plugin/src/transform/pi-context-handler.test.ts:247`;
+`packages/pi-plugin/src/transform/pi-delivery.test.ts:341`, `:422`.
+Impact: Medium. A malformed file would silence delivery.
+Open questions:
+- A project file breaking mid-process, and a resumed session with applied
+  `eidnara` authority in a now-unresolved project, are deferred under OQ-3
+  (owner approval 2026-10-21).
+
+### kd-p10-request-local-knowledge
+
+Type: safety
+Reachability: default-production - every native Pi pass captures from the
+session-derived array (`packages/pi-plugin/src/index.ts:578-581`).
+Status: active
+Exercised: yes - #1069: no submitted row carries an `eidnara:synthetic:` id
+across three turns and across one Pi compaction, whose summary row leads the
+next pass; #1071: the delivered block appears once per request after a Pi
+compaction, and Pi's compaction requests carry no project-memory block or
+session-history shell.
+Guarantee: Successive passes start from the host's session-derived array; a
+served synthetic prefix is never re-ingested, and Pi's compaction requests
+carry no `<project-memory>` block and no `<session-history>` shell, so the
+host builds its summary without m0 or m1 text as input.
+Check: `always` - at capture, the next `native_messages` carries no id of
+the `eidnara:synthetic:` form the codec mints
+(`crates/daemon/src/codec/pi.rs:38`, `:1537`); the witness asserts it on
+every submitted body (`packages/pi-plugin/src/transform/pi-delivery.test.ts:184`).
+At every compaction request, the serialized request contains neither
+`<project-memory>` nor `<session-history>`
+(`packages/e2e-tests/tests/pi-rust-delivery.test.ts:197-201`). The summary's
+own text is the model's output and is not asserted; the input-side condition
+is the oracle. Falsifier: the second ingress contains the first pass's
+synthetic prefix; a compaction request carries either marker.
+Fault/timing angle: Repeated turns, host compaction.
+Required faults and enabling state: Three turns and one Pi compaction.
+Confidence: high - [evidence](evidence/kd-p10-request-local-knowledge.md).
+Existing check: `packages/pi-plugin/src/transform/pi-delivery.test.ts:184`,
+`:290`; `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`.
+Impact: High. A re-ingested prefix duplicates every block.
+Open questions: None.
+
+### kd-p11-model-free-delivery
+
+Type: safety
+Reachability: default-production - every native pass reaches the native
+gate (`crates/daemon/src/lib.rs:9653-9664`).
+Status: active
+Exercised: yes - #1071: `pi-rust-delivery` (one provider request per
+completed turn, two pinned compaction requests, fixture
+`historySummarizerLive() === false` and `backendCounters().started === 0`),
+`rust-native-delivery` (one main request per turn and at most one title
+request), and `pi-smoke` (zero summarizer starts); #1068's 96 percent native
+arm for the summarizer gate (FA-N05). The ContextResearcher clause rests on
+a static read of the callers.
+Guarantee: Delivery adds zero model calls; native delivery starts no
+summarizer; `/eidnara-aug` remains the only ContextResearcher entry.
+Check: `always` - per delivery invocation, each completed turn adds exactly
+one provider request, and every other request belongs to a class the host
+issues itself: Pi's own compaction requests (two per `session.compact()` in
+`packages/e2e-tests/tests/pi-rust-delivery.test.ts:160`, `:196`) and at
+most one OpenCode session-title request
+(`packages/e2e-tests/tests/rust-native-delivery.test.ts:61-67`); the
+fixture's summarizer start count stays zero; the only
+`runContextResearcher` caller is the `/eidnara-aug` command path
+(`packages/opencode-plugin/src/hooks/context/command-handler.ts:342`;
+Pi's `packages/pi-plugin/src/commands/eidnara-aug.ts`). Falsifier: the
+context hook invokes ContextResearcher.
+Fault/timing angle: None.
+Required faults and enabling state: A stored memory; several turns; one Pi
+compaction.
+Confidence: high - [evidence](evidence/kd-p11-model-free-delivery.md).
+Existing check: `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`;
+`packages/e2e-tests/tests/rust-native-delivery.test.ts:13`;
+`packages/e2e-tests/tests/pi-smoke.test.ts:58`.
+Impact: High. A per-turn model call adds cost and latency to every turn.
+Open questions: None.
+
+### kd-p12-bounded-delivery-published-once
+
+Type: safety
+Reachability: default-production - a project with a stored memory reaches
+the m1 revision read and the project-memory epoch check on every native pass
+(`crates/daemon/src/transform.rs:2898-2910`).
+Status: active
+Exercised: yes - #1071: the stored memory appears in m0 exactly once per
+request across turns and one Pi compaction on Pi and over three turns on
+OpenCode; a memory seeded mid-session appears once on the next pass; #1068
+for the daemon side (KD-E02). The budget clause rests on a static review of
+`git diff 08de9051a..07ea883b5`: no PR of #1068 to #1071 adds or raises a
+budget.
+Guarantee: Adapters publish accepted daemon knowledge once per request,
+including epoch-HARD updates.
+Check: `always-or-unreached` - at accepted publication, the
+`<project-memory>` block appears once in the request's messages and each
+memory line appears once inside that block; unreached for a pass with no
+stored memory. The witnesses count each line over the whole request
+(`packages/e2e-tests/tests/pi-rust-delivery.test.ts:167-169`), a tightening
+that holds because their prompts echo no memory text; a user message that
+quotes a memory line is not a second publication. Falsifier: reusing an old
+m0 instead of the accepted HARD payload; two blocks in one request.
+Fault/timing angle: A memory created between passes.
+Required faults and enabling state: An admitted verified memory; a second
+memory seeded between turns; a Pi compaction.
+Confidence: high -
+[evidence](evidence/kd-p12-bounded-delivery-published-once.md). The
+specification's "raise no existing budget" clause rests on the static review
+of `git diff 08de9051a..07ea883b5` above, which is evidence about #1068 to
+#1071 and is not a continuing oracle, so the guarantee does not carry it.
+Existing check: `packages/e2e-tests/tests/pi-rust-delivery.test.ts:109`;
+`packages/e2e-tests/tests/rust-native-delivery.test.ts:13`.
+Impact: High. A duplicated block doubles memory tokens per request.
+Open questions:
+- The budget clause has no oracle: a check needs the owner to name the
+  delivery budgets it bounds and their baseline values (needs human input).
+
 ## Relationship map
 
 - Invalidated baselines and successors: FA-E01 by FA-N06 (the output clause
@@ -2139,3 +2864,14 @@ Open questions:
   drops a selected mid, with identity rows kept
   (`docs/properties/window-protocol/catalog.md`). FA-N12 carries the
   identity-row retention that replaced the prune.
+- Knowledge delivery (#1060): KD-E03's baseline omission is the composition
+  of WP-P01's half-cap null window, FA-E01's output clause, and whole-array
+  publication; KD-P06 replaces it and WP-P01's null-window clause carries the
+  authority qualifier. FA-N05 and FA-N06 constrain fold work and native state
+  independently of output shape, and KD-P11 extends FA-N05's no-summarizer
+  clause end to end. KD-E01 (repeat identity) depends on revision-qualified
+  retention (`crates/daemon/src/lib.rs:2582-2589`), and KD-E02 (memory HARD)
+  ends byte-stable replay on purpose. KD-P01, KD-P03, KD-P04, and FA-E02
+  share Pi's boot latch; KD-P06 and KD-P09 read the per-project
+  configuration (OQ-1). KD-P07 shares the shared client's fail-open with
+  WP-P11 on OpenCode (OQ-2 option a).

@@ -517,6 +517,10 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
+    pub fn commit_seq(&self) -> i64 {
+        self.commit_seq
+    }
+
     /// Returns object IDs for the live observations `query` selects, ordered by creating commit and then object ID, so the order is stable across reads and does not depend on rowids; a following retirement acts on the rows this returned. The writer filter runs in the query, so the row count is bounded by what that writer wrote rather than by every row any producer attached to the dependency.
     pub fn live_dependent_observations(
         &self,

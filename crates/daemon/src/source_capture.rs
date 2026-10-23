@@ -2,7 +2,7 @@
 //!
 //! Capture runs when `source_capture.enabled` and `memory.enabled` both permit it in the route's consent snapshot and the session is not a subagent's; otherwise the adapters never run. Once the pass has built its response, the handler offers the pass's native records to [`SourceCapture::offer`], which charges the retained window to the supervisor's own byte budget. When the response is handed to the wire writer, [`CaptureHandoff::into_job`] takes the store's single publication slot; a refused offer or handoff (`refused_window_too_large`, `refused_resident_short`, `refused_queue_full`, `refused_shutting_down`) drops its reference and charge at once. The accepted job owns the slot permit, the charges, and its completion: it runs the adapters, charges their copies, skips units the memo already knows, and publishes at most one screened batch under a 5 s budget whose origin is the handoff's acceptance. The response bytes never wait on the kernel or the job.
 //!
-//! Kernel receipts are the durable record. The memo is a bounded, process-local cache keyed by the store's incarnation, the session, and each unit's receipt key; an entry holds the request digest, a disposition, and the time a pending unit first waited, never window bytes. A memo hit with an equal digest suppresses the kernel probe; after a restart the memo is empty and the kernel answers from its receipts. Pending units are offered ahead of units the memo does not know. A window refused at a full slot and never offered again is lost to capture; the next pass that carries it is captured.
+//! Kernel receipts are the durable record. The memo is a bounded, process-local cache keyed by the store's incarnation and each unit's native identity, revision, and representation; an entry holds the request digest, a disposition, and the time a pending unit first waited, never window bytes. A memo hit with an equal digest suppresses the kernel probe; after a restart the memo is empty and the kernel answers from its receipts. Pending units are offered ahead of units the memo does not know. A window refused at a full slot and never offered again is lost to capture; the next pass that carries it is captured.
 //!
 //! Logs and counters carry a closed vocabulary of stages and reasons with counts and byte totals, never unit text, paths, identities, or digests.
 
@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
     Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_UNIT_BYTES, PublishError, Representation,
-    SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition, opencode_units, pi_units,
-    publish_screened,
+    SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition, opencode_units_within,
+    pi_units_within, publish_screened, receipt_key_of,
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
@@ -333,6 +333,37 @@ impl Drop for RetainedCharge {
     }
 }
 
+/// The top-up target amortizes budget charges across copied units; admission falls back to the exact deficit when the target charge fails.
+const COPY_TOP_UP_BYTES: usize = 64 * 1024;
+
+struct CopyCharge<'a> {
+    capture: &'a Arc<SourceCapture>,
+    granted: usize,
+    used: usize,
+    top_ups: Vec<RetainedCharge>,
+}
+
+impl CopyCharge<'_> {
+    fn admit(&mut self, bytes: usize) -> bool {
+        self.used = self.used.saturating_add(bytes);
+        let Some(deficit) = self
+            .used
+            .checked_sub(self.granted)
+            .filter(|deficit| *deficit > 0)
+        else {
+            return true;
+        };
+        let Some(charge) = RetainedCharge::take(self.capture, deficit.max(COPY_TOP_UP_BYTES))
+            .or_else(|| RetainedCharge::take(self.capture, deficit))
+        else {
+            return false;
+        };
+        self.granted += charge.bytes;
+        self.top_ups.push(charge);
+        true
+    }
+}
+
 /// Counts the slot as active while the permit lives, so a panicking job releases both.
 struct ActiveSlot {
     capture: Arc<SourceCapture>,
@@ -612,28 +643,10 @@ impl CaptureJob {
         if self.budget.is_exhausted() {
             return self.end(Count::Deadline);
         }
-        let units = self.units();
-        // The adapters' copies beyond the window charge are charged as soon as they exist.
-        let copies: usize = units
-            .iter()
-            .map(|unit| {
-                size_of::<SourceUnit>()
-                    + unit.text.len()
-                    + unit.role.len()
-                    + unit.revision.len()
-                    + unit
-                        .identity
-                        .iter()
-                        .map(|(_, value)| 48 + value.len())
-                        .sum::<usize>()
-            })
-            .sum();
-        let Some(_copies) =
-            RetainedCharge::take(&self.capture, copies.saturating_sub(self.window_bytes))
-        else {
+        let documents = std::mem::take(&mut self.documents);
+        let Some((units, mut copies)) = self.units() else {
             return self.end(Count::RefusedResidentShort);
         };
-        let documents = std::mem::take(&mut self.documents);
         if units.is_empty() && documents.is_empty() {
             return self.end(Count::Completed);
         }
@@ -649,41 +662,62 @@ impl CaptureJob {
             egress: ProviderEgress::LocalOnly,
             sensitivity: Sensitivity::Sensitive,
         };
-        let prefix = format!(
-            "{incarnation}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
-            self.session.project_id,
-            self.session.harness.as_str(),
-            self.session.session_id
-        );
-        let identities: Vec<Option<(String, String)>> = units
-            .iter()
-            .map(|unit| {
-                let (key, digest) = publisher.receipt_identity(unit)?;
-                Some((format!("{prefix}{key}"), digest))
-            })
-            .collect();
-        // Pending units go first, then units the memo does not know; a known unit with an equal digest, and a repeat within the window, is skipped.
-        let (mut pending, mut unknown) = (Vec::new(), Vec::new());
-        {
-            let memo = self.capture.memo();
-            let mut seen = HashSet::new();
-            for (unit, identity) in units.into_iter().zip(identities) {
-                let entry = identity.as_ref().and_then(|(key, _)| memo.get(key));
-                let fresh = identity
-                    .as_ref()
-                    .is_none_or(|(key, _)| seen.insert(key.clone()));
-                match entry {
-                    _ if !fresh => {}
-                    Some(entry) if entry.digest == identity.as_ref().expect("keyed").1 => {
-                        if matches!(entry.disposition, Disposition::Pending { .. }) {
-                            pending.push((unit, identity));
-                        } else {
-                            self.capture.counters.add(Count::UnitsMemoSkipped, 1);
-                        }
-                    }
-                    _ => unknown.push((unit, identity)),
-                }
+        // A memo key names the unit's native identity in class field order with its revision and representation; `well_formed_value` rejects control characters, so U+001F separates encodable identity fields unambiguously.
+        let mut identities: Vec<(String, String)> = Vec::with_capacity(units.len());
+        for unit in &units {
+            let fields = unit.class.identity_fields().iter();
+            let key = [incarnation.as_str(), unit.class.code(), &unit.revision]
+                .into_iter()
+                .chain([unit.representation.as_str()])
+                .chain(fields.map(|field| unit.identity_value(field).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            let digest = publisher.request_digest(unit);
+            // `seen` holds a second copy of the key and digest.
+            if !copies.admit(2 * (key.len() + digest.len())) {
+                return self.end(Count::RefusedResidentShort);
             }
+            identities.push((key, digest));
+        }
+        let found: Vec<Option<bool>> = {
+            let memo = self.capture.memo();
+            let known = |(key, digest): &(String, String)| {
+                memo.get(key).filter(|entry| entry.digest == *digest)
+            };
+            identities
+                .iter()
+                .map(|identity| {
+                    known(identity)
+                        .map(|entry| matches!(entry.disposition, Disposition::Pending { .. }))
+                })
+                .collect()
+        };
+        let (mut pending, mut unknown) = (Vec::new(), Vec::new());
+        // Each `seen` entry records the first occurrence's digest and whether this pass offers that occurrence.
+        let mut seen: HashMap<String, (String, bool)> = HashMap::with_capacity(identities.len());
+        let mut conflicts = 0;
+        for ((unit, (key, digest)), found) in units.into_iter().zip(identities).zip(found) {
+            let keyed = found.is_some() || receipt_key_of(&unit).is_some();
+            if keyed {
+                if let Some((first, offered)) = seen.get(&key) {
+                    if *offered && *first != digest {
+                        conflicts += 1;
+                    }
+                    continue;
+                }
+                seen.insert(key.clone(), (digest.clone(), found != Some(false)));
+            }
+            match found {
+                Some(true) => pending.push((unit, Some((key, digest)))),
+                Some(false) => self.capture.counters.add(Count::UnitsMemoSkipped, 1),
+                None => unknown.push((unit, keyed.then_some((key, digest)))),
+            }
+        }
+        if conflicts > 0 {
+            self.capture
+                .counters
+                .add(Count::UnitsIdentityConflict, conflicts);
+            log("unit terminal", Count::UnitsIdentityConflict, conflicts);
         }
         let (candidates, keys): (Vec<SourceUnit>, Vec<Option<(String, String)>>) =
             pending.into_iter().chain(unknown).unzip();
@@ -772,13 +806,24 @@ impl CaptureJob {
                 self.end(end)
             }
             Err(refusal) => {
-                // A same-key conflict is terminal for its unit; every other unit stays pending for the next pass.
-                if let Some(index) = refusal.conflicting_unit()
-                    && let Some(Some((key, digest))) = keys.get(index)
-                {
-                    counters.add(Count::UnitsIdentityConflict, 1);
-                    memo.record(key.clone(), digest.clone(), Disposition::Terminal);
-                    log("unit terminal", Count::UnitsIdentityConflict, 1);
+                let culprit = refusal.conflicting_unit();
+                for (index, key) in keys.iter().enumerate() {
+                    let Some((key, digest)) = key else {
+                        continue;
+                    };
+                    if culprit == Some(index) {
+                        counters.add(Count::UnitsIdentityConflict, 1);
+                        memo.record(key.clone(), digest.clone(), Disposition::Terminal);
+                        log("unit terminal", Count::UnitsIdentityConflict, 1);
+                    } else {
+                        memo.record(
+                            key.clone(),
+                            digest.clone(),
+                            Disposition::Pending {
+                                since_ms: observed_at,
+                            },
+                        );
+                    }
                 }
                 drop(memo);
                 let documents = self.capture_documents(store, publisher, documents);
@@ -958,17 +1003,29 @@ impl CaptureJob {
             .map_or(wait, |deadline| deadline.min(wait))
     }
 
-    /// Every unit of the window, in record order; a record the adapter refuses contributes none and is counted.
-    fn units(&self) -> Vec<SourceUnit> {
+    /// Every unit of the window, in record order, with the charges for copies beyond the window share the offer charged; a record the adapter refuses contributes none and is counted. `None` once the budget refuses a unit's copy, which the adapter drops before building the next one.
+    fn units(&self) -> Option<(Vec<SourceUnit>, CopyCharge<'_>)> {
         let mut units = Vec::new();
         let mut refused = 0;
+        let mut copies = CopyCharge {
+            capture: &self.capture,
+            granted: self.window_bytes,
+            used: 0,
+            top_ups: Vec::new(),
+        };
+        let mut stopped = false;
         for record in &self.window {
+            let admit = &mut |bytes| copies.admit(bytes);
             let adapted = match self.session.harness {
-                Harness::OpenCode => opencode_units(&self.session, record),
-                Harness::Pi => pi_units(&self.session, record),
+                Harness::OpenCode => opencode_units_within(&self.session, record, admit),
+                Harness::Pi => pi_units_within(&self.session, record, admit),
             };
             match adapted {
-                Ok(adapted) => units.extend(adapted),
+                Ok(Some(adapted)) => units.extend(adapted),
+                Ok(None) => {
+                    stopped = true;
+                    break;
+                }
                 Err(_) => refused += 1,
             }
         }
@@ -976,7 +1033,7 @@ impl CaptureJob {
             self.capture.counters.add(Count::AdapterRefused, refused);
             log("adapter", Count::AdapterRefused, refused);
         }
-        units
+        (!stopped).then_some((units, copies))
     }
 
     /// Materializes the capture domain and the project's scope; the receipt makes every later attempt a replay.
@@ -1041,6 +1098,8 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
 
 /// Live descriptors one session-retirement page retires.
 pub(crate) const SESSION_RETIREMENT_PAGE: usize = 256;
+/// Pages one session-retirement inventory snapshot lists. The snapshot is one read transaction, so its pages commit while it reads on, and at most this many listed pages wait for their commit.
+const SESSION_INVENTORY_PAGES: usize = 16;
 /// How long a session-retirement or document preview waits for a pooled reader.
 const PREVIEW_WAIT: Duration = Duration::from_secs(5);
 /// Leads the bytes a session-retirement page's receipt key binds.
@@ -1054,30 +1113,119 @@ pub(crate) struct CapturedSession<'a> {
     pub(crate) session_id: &'a str,
 }
 
-/// Retires every live `messages` and `raw_tool_spans` descriptor of `session`, at most `pages` pages of at most `page_rows` descriptors, and returns whether none remains live. Each page is one commit that retires the rows its inventory listed, so a retry inventories again and finds only what is still live. A page's receipt is keyed by the session and the page's sorted object ids, never the clock ([`session_page_intent`]); a page that replays means the inventory listed rows a committed page retired, which is [`KernelError::Conflict`]. The caller holds the capture commit gate, so no capture publication interleaves; the maintenance expiry sweep can retire listed rows first, and the page then retires the rest.
+/// Retires the live `messages` and `raw_tool_spans` descriptors of `session` in at most `pages` pages of at most `page_rows` descriptors. Returns `true` once the inventory has passed both classes and `false` when the page bound ends first. The inventory makes one keyset pass over each class; each snapshot lists up to [`SESSION_INVENTORY_PAGES`] pages and the next snapshot resumes where it stopped. A scoped thread lists while this thread commits: full pages leave as soon as they are listed, each class's descriptors in creation order, so commits of one class overlap the listing of the next. Creation order keeps one page's writes on neighbouring registry and observation rows. The caller holds the capture commit gate, which serializes capture publication with retirement, so the one pass lists every descriptor the session holds. Each page is one commit. A retry starts a fresh pass. The session and the page's sorted object ids determine the page's receipt key ([`session_page_intent`]); a replayed receipt means the inventory listed rows a committed page retired, which is [`KernelError::Conflict`]. The maintenance expiry sweep can retire listed rows first, and the page then retires the remaining rows.
 ///
 /// # Errors
 ///
-/// Returns the first inventory or commit error; pages committed before it stay retired.
+/// Returns the first commit error, or else the first inventory error; pages committed before it stay retired.
 pub(crate) fn retire_session_pages(
     store: &KernelStore,
     session: CapturedSession<'_>,
     page_rows: std::num::NonZeroUsize,
     pages: usize,
 ) -> Result<bool, KernelError> {
-    for _ in 0..pages {
-        let (_, page) = store.preview(Instant::now() + PREVIEW_WAIT, |preview| {
-            session_page(preview, session, page_rows)
+    std::thread::scope(|scope| {
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Vec<String>>(SESSION_INVENTORY_PAGES);
+        let lister =
+            scope.spawn(move || list_session_pages(store, session, page_rows, pages, &sender));
+        for created in receiver {
+            let mut page = created.clone();
+            page.sort_unstable();
+            let receipt = store.commit(session_page_intent(session, &page), |envelope| {
+                crate::harness_sources::retire_descriptors(envelope, &created)
+            })?;
+            if receipt.replayed {
+                return Err(KernelError::Conflict);
+            }
+        }
+        lister
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// Lists `session`'s pages for [`retire_session_pages`] into `out`, at most `pages` of them, and returns whether the inventory passed both classes. Stops once the committing side has gone.
+fn list_session_pages(
+    store: &KernelStore,
+    session: CapturedSession<'_>,
+    page_rows: std::num::NonZeroUsize,
+    pages: usize,
+    out: &std::sync::mpsc::SyncSender<Vec<String>>,
+) -> Result<bool, KernelError> {
+    let mut cursor = InventoryCursor::default();
+    let mut remaining = pages;
+    while remaining > 0 {
+        let snapshot_pages = remaining.min(SESSION_INVENTORY_PAGES);
+        let (_, listed) = store.preview(Instant::now() + PREVIEW_WAIT, |preview| {
+            let mut cursor = cursor.clone();
+            let mut left = snapshot_pages;
+            let mut pending: Vec<(i64, String)> = Vec::new();
+            let send = |chunk: &[(i64, String)]| {
+                out.send(chunk.iter().map(|(_, id)| id.clone()).collect())
+                    .is_ok()
+            };
+            while let (Some(&class), Some(room)) = (
+                SESSION_CLASSES.get(cursor.class),
+                std::num::NonZeroUsize::new(
+                    left.saturating_mul(page_rows.get())
+                        .saturating_sub(pending.len()),
+                ),
+            ) {
+                let found = preview.live_source_descriptors_with(
+                    class,
+                    "session_id",
+                    &[session.session_id],
+                    cursor.after.as_deref(),
+                    room,
+                )?;
+                let mut batch: Vec<(i64, String)> = found
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        crate::git_reconcile::identity_field(row, "project_id")
+                            == Some(session.project_id)
+                            && crate::git_reconcile::identity_field(row, "harness")
+                                == Some(session.harness)
+                    })
+                    .map(|row| (row.created_commit_seq, row.object_id.clone()))
+                    .collect();
+                batch.sort_unstable();
+                pending.extend(batch);
+                while pending.len() >= page_rows.get() {
+                    if !send(&pending[..page_rows.get()]) {
+                        return Ok(None);
+                    }
+                    pending.drain(..page_rows.get());
+                    left -= 1;
+                }
+                cursor = match found.next {
+                    Some(next) => InventoryCursor {
+                        class: cursor.class,
+                        after: Some(next),
+                    },
+                    None => InventoryCursor {
+                        class: cursor.class + 1,
+                        after: None,
+                    },
+                };
+            }
+            if !pending.is_empty() {
+                if !send(&pending) {
+                    return Ok(None);
+                }
+                left -= 1;
+            }
+            Ok(Some((cursor, snapshot_pages - left)))
         })?;
-        if page.is_empty() {
+        let Some((next, listed_pages)) = listed else {
+            return Ok(false);
+        };
+        if next.class == SESSION_CLASSES.len() {
             return Ok(true);
         }
-        let receipt = store.commit(session_page_intent(session, &page), |envelope| {
-            crate::harness_sources::retire_descriptors(envelope, &page)
-        })?;
-        if receipt.replayed {
-            return Err(KernelError::Conflict);
-        }
+        remaining -= listed_pages;
+        cursor = next;
     }
     Ok(false)
 }
@@ -1107,42 +1255,14 @@ pub(crate) fn session_page_intent(session: CapturedSession<'_>, page: &[String])
     }
 }
 
-/// Up to `page_rows` live captured descriptors of `session`, sorted by object id.
-fn session_page(
-    preview: &kernel::Envelope<'_>,
-    session: CapturedSession<'_>,
-    page_rows: std::num::NonZeroUsize,
-) -> Result<Vec<String>, KernelError> {
-    let mut page = Vec::new();
-    for class in [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans] {
-        let mut after = None;
-        while let Some(room) = std::num::NonZeroUsize::new(page_rows.get() - page.len()) {
-            let rows = preview.live_source_descriptors_with(
-                class,
-                "session_id",
-                &[session.session_id],
-                after.as_deref(),
-                room,
-            )?;
-            page.extend(
-                rows.rows
-                    .iter()
-                    .filter(|row| {
-                        crate::git_reconcile::identity_field(row, "project_id")
-                            == Some(session.project_id)
-                            && crate::git_reconcile::identity_field(row, "harness")
-                                == Some(session.harness)
-                    })
-                    .map(|row| row.object_id.clone()),
-            );
-            match rows.next {
-                Some(next) => after = Some(next),
-                None => break,
-            }
-        }
-    }
-    page.sort();
-    Ok(page)
+const SESSION_CLASSES: [OccurrenceClass; 2] =
+    [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans];
+
+/// Where a session's inventory resumes: in `SESSION_CLASSES[class]` past the object id `after`. A `class` past the last one marks the inventory complete.
+#[derive(Debug, Clone, Default)]
+struct InventoryCursor {
+    class: usize,
+    after: Option<String>,
 }
 
 /// What capture does with one configured document.

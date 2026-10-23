@@ -165,6 +165,26 @@ pub fn check_outcome(
     }
 }
 
+pub(crate) fn stored_outcome_ok(
+    detail: &SourceDescriptorDetail,
+    class: OccurrenceClass,
+    byte_length: u64,
+) -> bool {
+    let selected = match detail.span {
+        None => byte_length,
+        Some((start, end)) => end.saturating_sub(start),
+    };
+    usize::try_from(selected).is_ok_and(|selected| {
+        check_outcome(
+            detail.outcome.as_ref(),
+            class,
+            &detail.representation,
+            selected,
+        )
+        .is_ok()
+    })
+}
+
 /// Descriptor rows store versioned metadata and encoded identity tuples, not payload text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceDescriptorDetail {
@@ -483,15 +503,18 @@ impl Envelope<'_> {
         if !guarded && request.expected_head.is_some() {
             return Err(KernelError::InvalidInput.into());
         }
-        let predecessor = self.live_lineage(request.domain_id, &detail)?;
-        if let Some((_, live_revision)) = &predecessor
-            && encoded.revision <= *live_revision
+        let lineage = self.live_lineage(request.domain_id, &detail)?;
+        if let LineageState::Live { revision, .. } = &lineage
+            && encoded.revision <= *revision
         {
             return Err(SourceDescriptorError::RevisionNotAdvanced);
         }
         // A repository document's revision counts the observations of its path from 1, so it must exceed every revision the lineage ever held, retired rows included, and the caller's view of that head must still hold.
         if guarded {
-            let head = historical_head(self.tx, &encoded.lineage_id)?;
+            let head = match &lineage {
+                LineageState::Live { .. } => historical_head(self.tx, &encoded.lineage_id)?,
+                LineageState::Dormant { head } => *head,
+            };
             if encoded.revision < 1 || head.is_some_and(|head| encoded.revision <= head) {
                 return Err(SourceDescriptorError::RevisionNotAdvanced);
             }
@@ -520,20 +543,25 @@ impl Envelope<'_> {
             source_revision: encoded.revision,
             sensitivity: request.sensitivity,
         };
-        match &predecessor {
-            None => {
+        let replaced_object_id = match lineage {
+            LineageState::Dormant { .. } => {
                 self.insert_observation_inner(spec)?;
+                None
             }
-            Some((replaced, _)) => {
-                self.correct_observation_inner(replaced, spec)?;
+            LineageState::Live {
+                object_id: replaced,
+                ..
+            } => {
+                self.correct_observation_inner(&replaced, spec)?;
+                Some(replaced)
             }
-        }
+        };
         Ok(SourceDescriptorOutcome {
             object_id,
             occurrence_id: encoded.occurrence_id,
             lineage_id: encoded.lineage_id,
             payload_id,
-            replaced_object_id: predecessor.map(|(object_id, _)| object_id),
+            replaced_object_id,
         })
     }
 
@@ -549,16 +577,16 @@ impl Envelope<'_> {
         }
     }
 
-    /// The live descriptor of this lineage and its revision, if any. More
-    /// than one live row for one lineage is corruption; a row in another
-    /// domain refuses the publication; and stored fields that differ from the
-    /// fresh ones are a digest collision, refused rather than folded into the
-    /// chain.
+    /// The live descriptor of this lineage and its revision, or the newest
+    /// retired revision when none is live. More than one live row for one
+    /// lineage is corruption; a row in another domain refuses the
+    /// publication; and stored fields that differ from the fresh fields
+    /// indicate a digest collision and refuse the publication.
     fn live_lineage(
         &self,
         domain_id: &str,
         fresh: &SourceDescriptorDetail,
-    ) -> Result<Option<(String, i64)>, SourceDescriptorError> {
+    ) -> Result<LineageState, SourceDescriptorError> {
         let lineage_low = descriptor_object_id(&fresh.lineage_id, "");
         let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
         let mut statement = self
@@ -573,7 +601,7 @@ impl Envelope<'_> {
                  LIMIT 2",
             )
             .map_err(map_sqlite)?;
-        let live: Vec<(String, String, i64, Vec<u8>)> = statement
+        let live: Vec<DescriptorRow> = statement
             .query_map(
                 [
                     fresh.lineage_id.as_str(),
@@ -589,34 +617,14 @@ impl Envelope<'_> {
         if live.len() > 1 {
             return Err(KernelError::CorruptCanonicalRow.into());
         }
-        let predecessor = live
-            .first()
-            .map(|(id, _, revision, _)| (id.clone(), *revision));
-        let stored = match live.into_iter().next() {
-            Some(row) => Some(row),
-            None => self
-                .tx
-                .query_row_cached(
-                    "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
-                     FROM object_registry o
-                     JOIN observations b ON b.object_id=o.object_id
-                     WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id>=?2 AND o.object_id<?4
-                       AND b.observation_kind=?3
-                     ORDER BY o.source_revision DESC LIMIT 1",
-                    [
-                        fresh.lineage_id.as_str(),
-                        lineage_low.as_str(),
-                        SOURCE_DESCRIPTOR_KIND,
-                        lineage_high.as_str(),
-                    ],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()
-                .map_err(map_sqlite)?,
+        let (row, is_live) = match live.into_iter().next() {
+            Some(row) => (row, true),
+            None => match newest_descriptor(self.tx, &fresh.lineage_id)? {
+                Some(row) => (row, false),
+                None => return Ok(LineageState::Dormant { head: None }),
+            },
         };
-        let Some((_, domain, _, payload)) = stored else {
-            return Ok(None);
-        };
+        let (object_id, domain, revision, payload) = row;
         let stored = stored_detail(&payload)?;
         if !same_lineage(&stored, fresh) {
             return Err(SourceDescriptorError::LineageCollision);
@@ -624,8 +632,69 @@ impl Envelope<'_> {
         if domain != domain_id {
             return Err(SourceDescriptorError::DomainMismatch);
         }
-        Ok(predecessor)
+        Ok(if is_live {
+            LineageState::Live {
+                object_id,
+                revision,
+            }
+        } else {
+            LineageState::Dormant {
+                head: Some(revision),
+            }
+        })
     }
+}
+
+/// [`Envelope::live_lineage`] validates lineage identity and domain before returning this state when a stored descriptor exists.
+enum LineageState {
+    Live {
+        object_id: String,
+        revision: i64,
+    },
+    /// `head` contains the newest stored descriptor revision; an empty descriptor history yields `None`.
+    Dormant {
+        head: Option<i64>,
+    },
+}
+
+/// `DescriptorRow` contains the object id, domain id, revision, and observation payload, in that order.
+type DescriptorRow = (String, String, i64, Vec<u8>);
+
+/// Publication stores each descriptor's class code as `source_kind` and lineage id as `source_id`, so each per-class read seeks `idx_objects_source` on that pair.
+fn newest_descriptor(
+    tx: &rusqlite::Transaction<'_>,
+    lineage_id: &str,
+) -> Result<Option<DescriptorRow>, KernelError> {
+    let lineage_low = descriptor_object_id(lineage_id, "");
+    let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
+    let mut newest: Option<DescriptorRow> = None;
+    for class in OccurrenceClass::ALL {
+        let found: Option<DescriptorRow> = tx
+            .query_row_cached(
+                "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
+                 FROM object_registry o INDEXED BY idx_objects_source
+                 CROSS JOIN observations b ON b.object_id=o.object_id
+                 WHERE o.source_kind=?5 AND o.source_id=?1 AND o.object_kind='observation'
+                   AND o.object_id>=?2 AND o.object_id<?4 AND b.observation_kind=?3
+                 ORDER BY o.source_revision DESC LIMIT 1",
+                [
+                    lineage_id,
+                    lineage_low.as_str(),
+                    SOURCE_DESCRIPTOR_KIND,
+                    lineage_high.as_str(),
+                    class.code(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if let Some(found) = found
+            && newest.as_ref().is_none_or(|newest| found.2 > newest.2)
+        {
+            newest = Some(found);
+        }
+    }
+    Ok(newest)
 }
 
 /// The highest revision any descriptor of `lineage_id` was published at, live or retired.
@@ -633,23 +702,7 @@ fn historical_head(
     tx: &rusqlite::Transaction<'_>,
     lineage_id: &str,
 ) -> Result<Option<i64>, KernelError> {
-    let lineage_low = descriptor_object_id(lineage_id, "");
-    let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
-    tx.query_row_cached(
-        "SELECT MAX(o.source_revision)
-         FROM object_registry o
-         JOIN observations b ON b.object_id=o.object_id
-         WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id>=?2 AND o.object_id<?4
-           AND b.observation_kind=?3",
-        [
-            lineage_id,
-            lineage_low.as_str(),
-            SOURCE_DESCRIPTOR_KIND,
-            lineage_high.as_str(),
-        ],
-        |row| row.get(0),
-    )
-    .map_err(map_sqlite)
+    Ok(newest_descriptor(tx, lineage_id)?.map(|(_, _, revision, _)| revision))
 }
 
 impl KernelStore {
@@ -668,7 +721,7 @@ impl KernelStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveDescriptorPage {
     pub rows: Vec<LiveDescriptor>,
-    /// The object id to continue after, or `None` when this page ends the inventory.
+    /// The object id to continue after, or `None` when this page ends the inventory. A narrowed page ([`Envelope::live_source_descriptors_with`]) can hold fewer rows than its bound, none included, while this names a later page.
     pub next: Option<String>,
 }
 
@@ -695,6 +748,7 @@ struct LiveDescriptorRaw {
     observation_invalidated: Option<i64>,
     evidence_id: String,
     artifact_digest: String,
+    byte_length: i64,
 }
 
 impl KernelStore {
@@ -716,103 +770,102 @@ impl KernelStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
-        Self::live_descriptor_page(&tx, class, requested, None, after, None, max_rows)
-    }
-
-    /// One page of the descriptors of `class` live at `requested` on `tx`.
-    fn live_descriptor_page(
-        tx: &rusqlite::Transaction<'_>,
-        class: OccurrenceClass,
-        requested: i64,
-        narrowing: Option<&Narrowing>,
-        after: Option<&str>,
-        before: Option<&str>,
-        max_rows: std::num::NonZeroUsize,
-    ) -> Result<LiveDescriptorPage, KernelError> {
-        let limit = i64::try_from(max_rows.get())
-            .unwrap_or(i64::MAX)
-            .saturating_add(1);
-        // A literal bound keeps the cached statement valid across calls; SQLite expires a statement whose `LIMIT` parameter is rebound.
-        let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
-                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
-             {rows}
-               AND o.source_kind=?1 AND o.object_kind='observation'
-               AND {live}
-               AND o.object_id>?3 AND o.object_id<?6
-               AND (?4 IS NULL OR json_extract(json_extract(b.observation_payload,'$.detail'),?4)
-                                  IN (SELECT value FROM json_each(?5)))
-             ORDER BY o.object_id
-             LIMIT {limit}",
-            rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
-            live = Descriptors::LiveAtEnd.predicate("?2", "0"),
-        );
-        let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
-        let raw: Vec<LiveDescriptorRaw> = statement
-            .query_map(
-                rusqlite::params![
-                    class.code(),
-                    requested,
-                    after.unwrap_or(""),
-                    narrowing.map(|narrowing| narrowing.path.as_str()),
-                    narrowing.map(|narrowing| narrowing.values.as_str()),
-                    before.map_or_else(
-                        || super::envelope::prefix_upper_bound(DESCRIPTOR_OBJECT_ID_PREFIX),
-                        str::to_owned
-                    )
-                ],
-                |row| {
-                    Ok(LiveDescriptorRaw {
-                        object_id: row.get(0)?,
-                        domain_id: row.get(1)?,
-                        sensitivity: row.get(2)?,
-                        registry_sensitivity: row.get(3)?,
-                        created_commit_seq: row.get(4)?,
-                        payload: row.get(5)?,
-                        revision: row.get(6)?,
-                        source_id: row.get(7)?,
-                        invalidated_commit_seq: row.get(8)?,
-                        observation_created: row.get(9)?,
-                        observation_invalidated: row.get(10)?,
-                        evidence_id: row.get(11)?,
-                        artifact_digest: row.get(12)?,
-                    })
-                },
-            )
-            .map_err(map_sqlite)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(map_sqlite)?;
-        let next = (raw.len() > max_rows.get()).then(|| raw[max_rows.get() - 1].object_id.clone());
+        let bound = max_rows.get();
+        let mut raw = descriptor_rows(
+            &tx,
+            class,
+            requested,
+            "o.object_id>?3",
+            &[after.unwrap_or("")],
+            bound.saturating_add(1),
+        )?;
+        let next = (raw.len() > bound).then(|| raw[bound - 1].object_id.clone());
+        raw.truncate(bound);
         let rows = raw
             .into_iter()
-            .take(max_rows.get())
-            .map(|raw| {
-                let detail = stored_detail(&raw.payload)?;
-                // The registry row and the stored detail must agree, as `source_export::preflight` requires.
-                if raw.created_commit_seq != raw.observation_created
-                    || raw.invalidated_commit_seq != raw.observation_invalidated
-                    || raw.sensitivity != raw.registry_sensitivity
-                    || detail.lineage_id != raw.source_id
-                    || detail.evidence_id != raw.evidence_id
-                    || detail.artifact_digest != raw.artifact_digest
-                    || detail.class != class.code()
-                    || detail.revision != raw.revision.to_string()
-                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
-                    || reencoded_identity(&detail).is_none()
-                {
-                    return Err(KernelError::CorruptCanonicalRow);
-                }
-                Ok(LiveDescriptor {
-                    object_id: raw.object_id,
-                    domain_id: raw.domain_id,
-                    sensitivity: Sensitivity::from_stored(&raw.sensitivity),
-                    created_commit_seq: raw.created_commit_seq,
-                    detail,
-                })
-            })
+            .map(|raw| checked(raw, class))
             .collect::<Result<_, _>>()?;
         Ok(LiveDescriptorPage { rows, next })
     }
+}
+
+/// `raw` as a live descriptor of `class`. A row whose registry row and stored detail disagree, as `source_export::preflight` requires them to agree, or whose stored identity does not re-encode to itself is [`KernelError::CorruptCanonicalRow`].
+fn checked(raw: LiveDescriptorRaw, class: OccurrenceClass) -> Result<LiveDescriptor, KernelError> {
+    let detail = stored_detail(&raw.payload)?;
+    let byte_length =
+        u64::try_from(raw.byte_length).map_err(|_| KernelError::CorruptCanonicalRow)?;
+    if raw.created_commit_seq != raw.observation_created
+        || raw.invalidated_commit_seq != raw.observation_invalidated
+        || raw.sensitivity != raw.registry_sensitivity
+        || detail.lineage_id != raw.source_id
+        || detail.evidence_id != raw.evidence_id
+        || detail.artifact_digest != raw.artifact_digest
+        || detail.class != class.code()
+        || detail.revision != raw.revision.to_string()
+        || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
+        || reencoded_identity(&detail).is_none()
+        || !stored_outcome_ok(&detail, class, byte_length)
+    {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    Ok(LiveDescriptor {
+        object_id: raw.object_id,
+        domain_id: raw.domain_id,
+        sensitivity: Sensitivity::from_stored(&raw.sensitivity),
+        created_commit_seq: raw.created_commit_seq,
+        detail,
+    })
+}
+
+/// Up to `limit` stored descriptor rows of `class` live at `requested` whose object id satisfies `key` over `?3` onward bound to `values` in order, in object id order. `key` is `o.object_id>?3` for an inventory page, `o.object_id IN (SELECT value FROM json_each(?3))` for a narrowed page's candidates, or `o.object_id>=?3 AND o.object_id<?4` for one lineage's range.
+fn descriptor_rows(
+    tx: &rusqlite::Transaction<'_>,
+    class: OccurrenceClass,
+    requested: i64,
+    key: &str,
+    values: &[&str],
+    limit: usize,
+) -> Result<Vec<LiveDescriptorRaw>, KernelError> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    // The bound is written into the statement text, so each bound has its own cached statement.
+    let sql = format!(
+        "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
+                o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest,e.byte_length
+         {rows}
+           AND o.source_kind=?1 AND o.object_kind='observation'
+           AND {live}
+           AND {key}
+         ORDER BY o.object_id
+         LIMIT {limit}",
+        rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
+        live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+    );
+    let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
+    let code = class.code();
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&code, &requested];
+    params.extend(values.iter().map(|value| value as &dyn rusqlite::ToSql));
+    statement
+        .query_map(params.as_slice(), |row| {
+            Ok(LiveDescriptorRaw {
+                object_id: row.get(0)?,
+                domain_id: row.get(1)?,
+                sensitivity: row.get(2)?,
+                registry_sensitivity: row.get(3)?,
+                created_commit_seq: row.get(4)?,
+                payload: row.get(5)?,
+                revision: row.get(6)?,
+                source_id: row.get(7)?,
+                invalidated_commit_seq: row.get(8)?,
+                observation_created: row.get(9)?,
+                observation_invalidated: row.get(10)?,
+                evidence_id: row.get(11)?,
+                artifact_digest: row.get(12)?,
+                byte_length: row.get(13)?,
+            })
+        })
+        .map_err(map_sqlite)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(map_sqlite)
 }
 
 impl Envelope<'_> {
@@ -837,24 +890,25 @@ impl Envelope<'_> {
     ) -> Result<Option<LiveDescriptor>, KernelError> {
         let low = descriptor_object_id(lineage_id, "");
         let high = super::envelope::prefix_upper_bound(&low);
-        let mut page = KernelStore::live_descriptor_page(
+        let mut raw = descriptor_rows(
             self.tx,
             class,
             self.commit_seq,
-            None,
-            Some(&low),
-            Some(&high),
-            std::num::NonZeroUsize::MIN,
+            "o.object_id>=?3 AND o.object_id<?4",
+            &[&low, &high],
+            2,
         )?;
-        if page.next.is_some()
-            || page
-                .rows
-                .iter()
-                .any(|row| row.detail.lineage_id != lineage_id)
-        {
+        if raw.len() > 1 {
             return Err(KernelError::CorruptCanonicalRow);
         }
-        Ok(page.rows.pop())
+        let Some(raw) = raw.pop() else {
+            return Ok(None);
+        };
+        let row = checked(raw, class)?;
+        if row.detail.lineage_id != lineage_id {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        Ok(Some(row))
     }
 
     /// The object id and artifact digest of the live descriptor of `class` in lineage `lineage_id` in this envelope's view, or `None` when the lineage has no live revision. The read takes both from the registry and evidence rows and leaves the stored detail undecoded; it checks that the registry and observation rows agree and that the object id names the lineage and revision. A caller that writes on the strength of the row reads it with [`Self::live_source_descriptor_of_lineage`].
@@ -906,7 +960,7 @@ impl Envelope<'_> {
         }
     }
 
-    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. The store reads `field` from each stored detail and matches the set before any row is decoded, so one pass over the class decodes only the matching rows; every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks. The match reads the value at the field's position in the stored identity, which the descriptor writer lays out in the class's field order.
+    /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page examines at most `max_rows` live descriptors of the class, matching or not, so one call's work is bounded and a caller can stop between pages. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`. An empty `values` examines no descriptor: its page is empty and ends the inventory.
     ///
     /// # Errors
     ///
@@ -924,25 +978,344 @@ impl Envelope<'_> {
             .iter()
             .position(|name| *name == field)
             .ok_or(KernelError::InvalidInput)?;
-        // The stored detail lists identity pairs in the class's field order.
-        let narrowing = Narrowing {
-            path: format!("$.identity[{position}][1]"),
-            values: serde_json::to_string(values).map_err(|_| KernelError::InvalidInput)?,
-        };
-        KernelStore::live_descriptor_page(
+        if values.is_empty() {
+            return Ok(LiveDescriptorPage {
+                rows: Vec::new(),
+                next: None,
+            });
+        }
+        Narrowing::new(position, field, values).page(
             self.tx,
             class,
             self.commit_seq,
-            Some(&narrowing),
             after,
-            None,
             max_rows,
         )
     }
 }
 
-/// An identity value set a page matches in each stored detail: the JSON path of the field's value and the values as a JSON array.
-struct Narrowing {
-    path: String,
-    values: String,
+/// An identity value set a page matches: an identity field's position and name, the values, and each value's `[field, value]` pair as a stored payload spells it.
+///
+/// The descriptor writer serializes the detail with `serde_json` and stores that text as a JSON string inside the payload, so a pair appears in the payload escaped twice. `serde_json` escapes each character on its own, so the twice-escaped pair is a substring of every payload whose identity holds the pair. [`Narrowing::may_hold`] therefore keeps every row that holds a value, and [`Narrowing::holds`] decides each kept row exactly from its decoded detail.
+struct Narrowing<'v> {
+    position: usize,
+    field: &'v str,
+    values: &'v [&'v str],
+    /// Finds the bytes every pair starts with: the twice-escaped `["field",`.
+    lead: memchr::memmem::Finder<'static>,
+    /// Each value's twice-escaped `["field","value"]`.
+    pairs: Vec<Vec<u8>>,
+}
+
+impl<'v> Narrowing<'v> {
+    fn new(position: usize, field: &'v str, values: &'v [&'v str]) -> Self {
+        // The bytes `text` takes inside a stored JSON string: its JSON string form without the quotes.
+        let stored = |text: &str| {
+            let quoted = serde_json::to_string(text).expect("a string serializes");
+            quoted.as_bytes()[1..quoted.len() - 1].to_vec()
+        };
+        let encoded_field = serde_json::to_string(field).expect("a string serializes");
+        let pairs = values
+            .iter()
+            .map(|value| {
+                stored(
+                    &serde_json::to_string(&(field, value)).expect("a pair of strings serializes"),
+                )
+            })
+            .collect();
+        Self {
+            position,
+            field,
+            values,
+            lead: memchr::memmem::Finder::new(&stored(&format!("[{encoded_field},"))).into_owned(),
+            pairs,
+        }
+    }
+
+    /// One page of the descriptors of `class` live at `requested` on `tx` whose identity holds one of the values. The candidate scan reads each registry row and its payload; the page then reads the candidates' full rows, with their evidence.
+    fn page(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        class: OccurrenceClass,
+        requested: i64,
+        after: Option<&str>,
+        max_rows: std::num::NonZeroUsize,
+    ) -> Result<LiveDescriptorPage, KernelError> {
+        let bound = max_rows.get();
+        let (candidates, next) = self.candidates(tx, class, requested, after, bound)?;
+        if candidates.is_empty() {
+            return Ok(LiveDescriptorPage {
+                rows: Vec::new(),
+                next,
+            });
+        }
+        let ids = serde_json::to_string(&candidates).expect("strings serialize");
+        let mut rows = Vec::with_capacity(candidates.len());
+        for raw in descriptor_rows(
+            tx,
+            class,
+            requested,
+            "o.object_id IN (SELECT value FROM json_each(?3))",
+            &[&ids],
+            bound,
+        )? {
+            let row = checked(raw, class)?;
+            if self.holds(&row.detail) {
+                rows.push(row);
+            }
+        }
+        Ok(LiveDescriptorPage { rows, next })
+    }
+
+    /// `candidates` returns object ids whose payloads may hold a value from the next `examine` live descriptors after `after`, plus the last examined object id if another live descriptor follows.
+    fn candidates(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        class: OccurrenceClass,
+        requested: i64,
+        after: Option<&str>,
+        examine: usize,
+    ) -> Result<(Vec<String>, Option<String>), KernelError> {
+        let sql = format!(
+            "SELECT o.object_id,b.observation_payload
+             FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
+             CROSS JOIN observations b ON b.object_id=o.object_id
+             WHERE o.object_id GLOB 'srcdesc:*'
+               AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+               AND o.source_kind=?1 AND o.object_kind='observation'
+               AND {live}
+               AND o.object_id>?3
+             ORDER BY o.object_id",
+            live = Descriptors::LiveAtEnd.registry_predicate("?2", "0"),
+        );
+        let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
+        let mut stored = statement
+            .query(rusqlite::params![
+                class.code(),
+                requested,
+                after.unwrap_or("")
+            ])
+            .map_err(map_sqlite)?;
+        let mut candidates = Vec::new();
+        let mut examined = 0;
+        let mut boundary = None;
+        while let Some(row) = stored.next().map_err(map_sqlite)? {
+            if boundary.is_some() {
+                return Ok((candidates, boundary));
+            }
+            examined += 1;
+            let payload = row
+                .get_ref(1)
+                .map_err(map_sqlite)?
+                .as_blob()
+                .map_err(|_| KernelError::CorruptCanonicalRow)?;
+            let held = self.may_hold(payload);
+            if held || examined == examine {
+                let object_id = row.get::<_, String>(0).map_err(map_sqlite)?;
+                if examined == examine {
+                    boundary = Some(object_id.clone());
+                }
+                if held {
+                    candidates.push(object_id);
+                }
+            }
+        }
+        Ok((candidates, None))
+    }
+
+    /// Whether `payload` may hold one of the values: it contains one of the pairs. True for every payload whose identity holds one.
+    fn may_hold(&self, payload: &[u8]) -> bool {
+        self.lead.find_iter(payload).any(|at| {
+            self.pairs
+                .iter()
+                .any(|pair| payload[at..].starts_with(pair))
+        })
+    }
+
+    /// Whether the decoded identity holds one of the values in the field's position.
+    fn holds(&self, detail: &SourceDescriptorDetail) -> bool {
+        detail
+            .identity
+            .get(self.position)
+            .is_some_and(|(name, value)| {
+                name == self.field && self.values.contains(&value.as_str())
+            })
+    }
+}
+
+#[cfg(test)]
+mod narrowing_tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use rusqlite::{Connection, params};
+
+    use super::*;
+    use crate::schema::apply_kernel_schema;
+
+    fn detail(identity: &[(&str, &str)]) -> SourceDescriptorDetail {
+        SourceDescriptorDetail {
+            descriptor_version: SOURCE_DESCRIPTOR_DETAIL_VERSION,
+            source_policy: SourceDescriptorPolicy::Native,
+            class: OccurrenceClass::RawToolSpans.code().to_owned(),
+            identity: identity
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            revision: "1".to_owned(),
+            representation: "tool_output".to_owned(),
+            span: None,
+            occurrence_id: String::new(),
+            occurrence_tuple: Vec::new(),
+            lineage_id: String::new(),
+            payload_id: String::new(),
+            artifact_digest: String::new(),
+            evidence_id: String::new(),
+            outcome: None,
+        }
+    }
+
+    /// `may_hold` admits a payload that spells a wanted pair outside its identity, and `holds` decides each admitted row from the decoded identity, by the field's name and position.
+    #[test]
+    fn holds_decides_each_row_may_hold_admits() {
+        let values = ["call-b"];
+        let narrowing = Narrowing::new(4, "tool_call_id", &values);
+        let pair = serde_json::to_string(&("tool_call_id", "call-b")).unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({ "summary": pair })).unwrap();
+        assert!(narrowing.may_hold(&payload));
+        assert!(!narrowing.may_hold(br#"{"summary":"call-b"}"#));
+        let head = [("project_id", "p"), ("harness", "pi"), ("session_id", "s")];
+        let identity = |rest: [(&'static str, &'static str); 2]| {
+            let mut fields = head.to_vec();
+            fields.extend(rest);
+            detail(&fields)
+        };
+        assert!(narrowing.holds(&identity([
+            ("parent_message_id", "m"),
+            ("tool_call_id", "call-b")
+        ])));
+        assert!(!narrowing.holds(&identity([
+            ("parent_message_id", "m"),
+            ("tool_call_id", "call-other")
+        ])));
+        assert!(
+            !narrowing.holds(&identity([
+                ("tool_call_id", "call-b"),
+                ("parent_message_id", "m")
+            ])),
+            "the value in another position"
+        );
+        assert!(
+            !narrowing.holds(&identity([
+                ("tool_call_id", "m"),
+                ("parent_message_id", "call-b")
+            ])),
+            "the value under another field"
+        );
+    }
+
+    /// A single-value page reads only the requested class's index range: the work of a lookup that matches nothing stays flat while the store gains rows of another descriptor class and observations of another kind, both of which carry the looked-up text.
+    #[test]
+    fn a_single_value_page_does_not_scan_unrelated_history() {
+        const SESSION: &str = "ses_wanted";
+        let position = OccurrenceClass::Messages
+            .identity_fields()
+            .iter()
+            .position(|name| *name == "session_id")
+            .unwrap();
+        let mut baseline = None;
+        for unrelated in [32, 2_048] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "INSERT INTO commit_log VALUES (1,'needle-scan',1,'test','seed','digest',0,'test','test');
+                 INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain','domain','domain',1,1,'normal'),
+                        ('evidence','evidence','domain','artifact','evidence',1,1,'normal');
+                 INSERT INTO domains(domain_id,object_id,name,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain',1,'normal');
+                 INSERT INTO evidence_meta(evidence_id,object_id,artifact_reference,artifact_digest,
+                     byte_length,media_type,retention_class,provider_egress_class,redaction_metadata,
+                     created_commit_seq,sensitivity_class)
+                 VALUES ('evidence','evidence','object','digest',1,'text/plain','canonical',
+                         'local_only',x'5b5d',1,'normal');",
+            )
+            .unwrap();
+            let insert = |id: &str, class: &str, kind: &str, payload: &str| {
+                tx.execute(
+                    "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,
+                         source_id,source_revision,created_commit_seq,sensitivity_class)
+                     VALUES (?1,'observation','domain',?2,?1,1,1,'normal')",
+                    params![id, class],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO observations(observation_id,object_id,evidence_id,
+                         observation_kind,observation_payload,observed_at,created_commit_seq,
+                         sensitivity_class)
+                     VALUES (?1,?1,'evidence',?2,?3,0,1,'normal')",
+                    params![id, kind, payload.as_bytes()],
+                )
+                .unwrap();
+            };
+            // A fixed handful of rows in the looked-up class, none holding the value.
+            for index in 0..8 {
+                insert(
+                    &format!("srcdesc:msg{index:06}:1"),
+                    "messages",
+                    "source_descriptor",
+                    "{}",
+                );
+            }
+            // Unrelated history that does hold the value's text.
+            let carrying = format!("{{\"detail\":\"{SESSION}\"}}");
+            for index in 0..unrelated {
+                insert(
+                    &format!("srcdesc:doc{index:06}:1"),
+                    "repository_documents",
+                    "source_descriptor",
+                    &carrying,
+                );
+                insert(
+                    &format!("other:{index:06}:1"),
+                    "messages",
+                    "other",
+                    &carrying,
+                );
+            }
+            let steps = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&steps);
+            tx.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+            let values = [SESSION];
+            let page = Narrowing::new(position, "session_id", &values)
+                .page(
+                    &tx,
+                    OccurrenceClass::Messages,
+                    1,
+                    None,
+                    NonZeroUsize::new(16).unwrap(),
+                )
+                .unwrap();
+            tx.progress_handler(0, None::<fn() -> bool>).unwrap();
+            assert!(page.rows.is_empty() && page.next.is_none());
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!("single-value page: unrelated={unrelated}, steps={steps}");
+            let baseline = *baseline.get_or_insert(steps);
+            assert!(
+                steps <= baseline * 2,
+                "page work grew from {baseline} to {steps} steps with unrelated history"
+            );
+        }
+    }
 }

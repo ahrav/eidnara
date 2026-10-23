@@ -662,6 +662,34 @@ so `metadata_headroom_bytes` reaching zero means new review work is refused
 until a new incarnation; it is a safety ceiling, not a measured service
 lifetime.
 
+The `context` component MAY also carry a sanitized `metrics.source_capture`
+object describing source capture (Section 7.9), the background publication of
+consented message text and tool results as Kernel source descriptors. The
+counters are process-local and start at zero when the daemon starts. The block
+is sanitized field by field: any object survives, a non-object drops the block
+whole, and every field is kept or dropped on its own. Every field is
+content-free: a count, a byte total, or milliseconds. No field carries unit
+text, an identity, a path, a digest, or a project.
+
+| field | type | rule |
+| --- | --- | --- |
+| `admitted` | unsigned integer | capture jobs that started |
+| `refused_queue_full`, `refused_resident_short`, `refused_window_too_large`, `refused_shutting_down` | unsigned integer | windows refused before or at handoff, by reason; `refused_resident_short` also counts jobs whose unit copies the capture budget refused |
+| `completed`, `discarded`, `session_invalidated`, `kernel_unavailable`, `deadline`, `kernel_error`, `worker_panicked` | unsigned integer | job ends by reason |
+| `adapter_refused` | unsigned integer | native records the adapters refused |
+| `units_published`, `units_replayed`, `units_memo_skipped`, `units_deferred`, `units_unit_too_large`, `units_identity_conflict`, `units_refused_terminal`, `units_refused_retryable`, `units_superseded` | unsigned integer | unit dispositions |
+| `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
+| `retained_bytes` | unsigned integer | bytes the capture budget holds now |
+| `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `documents_unchanged`, `documents_retired`, `documents_missing`, `documents_not_regular`, `documents_oversize`, `documents_not_utf8`, `documents_unreadable`, `documents_refused` | unsigned integer | configured repository documents a pass read for its prompt block, by outcome: unchanged against the live revision; retired after a verified removal; missing with no live revision; skipped as not a regular file, past a size cap, not UTF-8, or unreadable; and reads a refusal, a deadline, or a failed commit dropped |
+| `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
+| `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
+
+The same integer rules as `kernel` apply: every integer MUST be no greater
+than 2^53; a larger, negative, non-integer, or `null` value is dropped to
+absent, except `oldest_deferred_age_ms`, where `null` is a declared value;
+unknown fields are dropped; fields are additive.
+
 The `model_execution` component MAY also carry a sanitized
 `metrics.aws_credentials` object: the host's cached observation of the
 selected AWS credential source, read from a shared cell with no credential
@@ -920,12 +948,14 @@ contain zero facts. `memory.auto_capture` is user-only and defaults to true.
 It, `memory.enabled`, and `memory.auto_promote` must all
 permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
-it from the project tier before merging. It grants a different capture: the
-daemon retains the exact bytes of user message text, tool outputs, and tool
-errors as Kernel source descriptors. Source capture runs when
-`source_capture.enabled` and `memory.enabled` both permit it; a session marked
-`is_subagent` never captures. `memory.auto_capture` and `memory.auto_promote`
-gate only model-extracted facts from redacted text.
+it from the project tier before merging. It consents to a different capture:
+the daemon retaining the exact bytes of user and completed assistant message
+text, tool outputs, and tool errors as Kernel source descriptors, published by
+a background supervisor after the transform response settles and reported
+through `metrics.source_capture`. Source capture runs only when
+`source_capture.enabled` and `memory.enabled` both permit it, and a session
+marked `is_subagent` never captures. `memory.auto_capture` and
+`memory.auto_promote` gate only model-extracted facts from redacted text.
 Captured facts remain labeled model inference for explicit
 search, not human approval or automatic-context eligibility. Session deletion
 fences publication and removes queued sources; committed memories remain
@@ -1012,7 +1042,7 @@ Errors, each an application `Error` (Section 10.2) with a stable `code` and a hu
 
 | Code | Cause |
 | --- | --- |
-| `invalid_params` | `boundary` absent; an integer `boundary.sequence` outside the safe-integer range; a window whose first message is not `boundary.mid`; a declared segment whose end message is not `boundary.mid`; a declared segment newer than the rendered boundary; a repeated `mid` in the window; a `mid` over 128 bytes; a request identity string over 256 bytes; a blank prompt-surface tool description; a `pi` native row without a string `id` or an object `message`, whose `message.role` is outside Pi's `AgentMessage` role set (`user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `branchSummary`, `compactionSummary`), or whose `id` is outside its id space (a `custom`, `branchSummary`, or `compactionSummary` row must carry an id beginning `eidnara:`, and every other row must not); a `pi` or `opencode-aisdk` body whose `messages` holds any message, or a body of another profile carrying `native_messages`; a consumer treats each of these refusals as a declined pass |
+| `invalid_params` | `boundary` absent; an integer `boundary.sequence` outside the safe-integer range; a window whose first message is not `boundary.mid`; a declared segment whose end message is not `boundary.mid`; a declared segment newer than the rendered boundary; a repeated `mid` in the window; a `mid` over 128 bytes; a request identity string over 256 bytes; a blank prompt-surface tool description; a `pi` native row that is not an object with a non-empty string `id` and an object `message` whose `role` is a string, whose `message.role` is outside Pi's `AgentMessage` role set (`user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `branchSummary`, `compactionSummary`), or whose `id` is outside its id space (a `custom`, `branchSummary`, or `compactionSummary` row must carry an id beginning `eidnara:`, and every other row must not); a `pi` or `opencode-aisdk` body whose `messages` holds any message, or a body of another profile carrying `native_messages`; a consumer treats each of these refusals as a declined pass |
 | `bad_request` | a body that does not decode as a transform request, including a `boundary` that is neither `null` nor an object with a string `mid` and an integer `sequence` (a missing member, `5`, a `sequence` of `1.5` or `"2"`, or one outside the signed 64-bit range); an OpenCode message whose numeric creation time (`info.time.created`, `info.time_created`, or `info.timeCreated`) is not a signed 64-bit integer, answered with the message the same value in a CK message's `meta.created_at_ms` would draw |
 | `unknown_serializer_profile` | a missing or unknown profile |
 | `transform_base_revision_missing` | no `base_revision` |

@@ -141,8 +141,7 @@ impl PreparedArtifact {
 
         let (payload_redaction, bytes, inspected) = match std::str::from_utf8(&request.payload) {
             Ok(text) => {
-                let mut redaction = redact_payload(text, MAX_PAYLOAD_DETECTIONS)
-                    .map_err(|error| ArtifactError::new(scan_failure(error)))?;
+                let mut redaction = scan_payload(text).map_err(ArtifactError::new)?;
                 match fidelity {
                     PayloadFidelity::Redacting => {
                         // The redacted text becomes the stored bytes without a copy;
@@ -150,12 +149,10 @@ impl PreparedArtifact {
                         let bytes = std::mem::take(&mut redaction.text).into_bytes();
                         (redaction, bytes, true)
                     }
-                    PayloadFidelity::Exact if redaction.detections.is_empty() => {
+                    PayloadFidelity::Exact => {
+                        exact_verdict(&redaction).map_err(ArtifactError::new)?;
                         redaction.text = String::new();
                         (redaction, std::mem::take(&mut request.payload), true)
-                    }
-                    PayloadFidelity::Exact => {
-                        return Err(ArtifactError::new(ArtifactErrorKind::ExactBytesRewritten));
                     }
                 }
             }
@@ -241,6 +238,27 @@ fn scan_failure(error: RedactionError) -> ArtifactErrorKind {
         | RedactionErrorKind::UnknownRule
         | RedactionErrorKind::SecretDetected => ArtifactErrorKind::ScanIncomplete,
     }
+}
+
+fn scan_payload(text: &str) -> Result<RedactedField, ArtifactErrorKind> {
+    redact_payload(text, MAX_PAYLOAD_DETECTIONS).map_err(scan_failure)
+}
+
+fn exact_verdict(redaction: &RedactedField) -> Result<(), ArtifactErrorKind> {
+    if redaction.detections.is_empty() {
+        Ok(())
+    } else {
+        Err(ArtifactErrorKind::ExactBytesRewritten)
+    }
+}
+
+pub fn exact_text_refusal(text: &str) -> Option<ArtifactErrorKind> {
+    if text.len() > MAX_PAYLOAD_BYTES {
+        return Some(ArtifactErrorKind::PayloadTooLarge);
+    }
+    scan_payload(text)
+        .and_then(|redaction| exact_verdict(&redaction))
+        .err()
 }
 
 impl KernelStore {

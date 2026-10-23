@@ -2151,6 +2151,7 @@ mod tests {
             json!({ "id": "", "message": { "role": "user", "content": "x" } }),
             json!({ "id": "a", "message": "user" }),
             json!({ "id": "a", "message": { "content": "x" } }),
+            json!({ "id": "a", "message": { "role": 7, "content": "x" } }),
             json!({ "info": { "id": "a", "role": "user" }, "parts": [] }),
         ] {
             assert_eq!(

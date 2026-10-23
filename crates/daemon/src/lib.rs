@@ -2306,6 +2306,7 @@ struct BoundaryTokenCacheEntry {
     byte_size: usize,
     content_hash: [u8; 32],
     token_count: usize,
+    outcome: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2320,7 +2321,14 @@ struct BoundaryTokenCacheSnapshot {
 }
 
 impl BoundaryTokenCacheSnapshot {
-    fn token_count(&mut self, block_id: &str, bytes: &str, content_hash: &[u8; 32]) -> usize {
+    /// The result of `outcome` must remain valid while the block ID, byte length, and content hash match.
+    fn block_entry(
+        &mut self,
+        block_id: &str,
+        bytes: &str,
+        content_hash: &[u8; 32],
+        outcome: impl FnOnce() -> Option<Arc<str>>,
+    ) -> (usize, Option<Arc<str>>) {
         // Block IDs survive replay, and same-length content edits are valid for live-tail blocks.
         // Length alone cannot prove that a cached token count describes edited block bytes.
         // The projection computes and retains the digest on each block to avoid rehashing a valid token-cache payload.
@@ -2333,9 +2341,10 @@ impl BoundaryTokenCacheSnapshot {
             && entry.content_hash == *content_hash
         {
             self.hits = self.hits.saturating_add(1);
-            return entry.token_count;
+            return (entry.token_count, entry.outcome.clone());
         }
         let token_count = tokenizer::estimate_tokens(bytes);
+        let outcome = outcome();
         self.misses = self.misses.saturating_add(1);
         self.entry_updates.insert(
             block_id.to_string(),
@@ -2343,9 +2352,10 @@ impl BoundaryTokenCacheSnapshot {
                 byte_size: bytes.len(),
                 content_hash: *content_hash,
                 token_count,
+                outcome: outcome.clone(),
             },
         );
-        token_count
+        (token_count, outcome)
     }
 
     fn formatted_token_count(&mut self, bytes: &str) -> usize {
@@ -2420,7 +2430,12 @@ fn boundary_token_maps_retained_bytes<'a>(
 ) -> usize {
     let source_bytes = entries
         // Each estimate includes a conservative per-entry allowance for the HashMap bucket and owned key.
-        .map(|(block_id, _)| block_id.len() + std::mem::size_of::<BoundaryTokenCacheEntry>() + 64)
+        .map(|(block_id, entry)| {
+            block_id.len()
+                + std::mem::size_of::<BoundaryTokenCacheEntry>()
+                + entry.outcome.as_ref().map_or(0, |outcome| outcome.len())
+                + 64
+        })
         .sum::<usize>();
     source_bytes
         + formatted_token_count
@@ -13896,6 +13911,23 @@ pub mod kernel_route_fixtures {
         }
     }
 
+    /// Materializes the project scope of `project_root` and its route-owned domain inside `envelope`, as a kernel route's first commit for the project does. Returns the project digest and the scope id.
+    pub fn ensure_route_scope(
+        envelope: &mut Envelope<'_>,
+        project_root: &Path,
+    ) -> Result<(String, String), KernelError> {
+        let project = crate::kernel_routes::ProjectBinding::new(project_root);
+        let (mut ready, mut refused) = (false, None);
+        crate::kernel_routes::commit::ensure_scope(
+            envelope,
+            &project,
+            &mut ready,
+            &mut std::collections::HashSet::new(),
+            &mut refused,
+        )?;
+        Ok((project.digest().to_string(), project.scope_id()))
+    }
+
     /// A store-direct ingest of `payload` as evidence `evidence-{key}`,
     /// asserted at `sensitivity` and allowed to reach remote providers.
     pub fn ingest_request(
@@ -17992,21 +18024,30 @@ fn cached_boundary_messages<'a>(
                 .into_iter()
                 .flat_map(|range| projection.blocks[range.clone()].iter())
                 .filter(|block| block.mid == message.mid && !block.synthetic)
-                .map(|block| BoundaryBlock {
-                    id: std::borrow::Cow::Borrowed(&block.id),
-                    ordinal: block.ordinal,
-                    kind: sel_kind_for_flat(block),
-                    provider_executed: block.provider_executed,
-                    byte_size: block.bytes.len(),
-                    arc_id: block.arc_id.clone(),
-                    original_token_count: cache_snapshot.token_count(
+                .map(|block| {
+                    let (original_token_count, outcome) = cache_snapshot.block_entry(
                         &block.id,
                         &block.bytes,
                         &block.content_hash,
-                    ),
-                    original: Arc::clone(&block.bytes),
-                    rendered: None,
-                    ignored: false,
+                        || match block.wire.kind() {
+                            crate::wire::BlockKind::ToolResult { output, .. } => {
+                                Some(Arc::from(crate::tool_outcome::output_outcome(output)))
+                            }
+                            _ => None,
+                        },
+                    );
+                    BoundaryBlock {
+                        id: std::borrow::Cow::Borrowed(&block.id),
+                        ordinal: block.ordinal,
+                        kind: sel_kind_for_flat(block, outcome),
+                        provider_executed: block.provider_executed,
+                        byte_size: block.bytes.len(),
+                        arc_id: block.arc_id.clone(),
+                        original_token_count,
+                        original: Arc::clone(&block.bytes),
+                        rendered: None,
+                        ignored: false,
+                    }
                 })
                 .collect(),
         })
@@ -18022,7 +18063,7 @@ fn cached_boundary_messages<'a>(
     }
 }
 
-fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
+fn sel_kind_for_flat(block: &crate::wire::FlatBlock, outcome: Option<Arc<str>>) -> SelKind<'_> {
     match block.kind_tag.as_str() {
         "tool_call" => SelKind::ToolCall {
             name: block.name.clone().unwrap_or_default(),
@@ -18032,11 +18073,11 @@ fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
             }),
         },
         "tool_result" => SelKind::ToolResult {
-            tool_name: block.name.clone().unwrap_or_default(),
-            output: match block.wire.kind() {
-                crate::wire::BlockKind::ToolResult { output, .. } => Some(output),
-                _ => None,
+            tool_name: match block.wire.kind() {
+                crate::wire::BlockKind::ToolResult { tool_name, .. } => tool_name.clone(),
+                _ => String::new(),
             },
+            outcome,
         },
         "reasoning" => SelKind::Reasoning,
         "redacted_reasoning" => SelKind::RedactedReasoning,
@@ -18845,6 +18886,7 @@ mod tests {
                 byte_size: 1,
                 content_hash: [0u8; 32],
                 token_count: 1,
+                outcome: None,
             },
         );
         BoundaryTokenCacheSnapshot {
@@ -19514,14 +19556,16 @@ mod tests {
         let mut cold = cache.snapshot("ses-a");
         let cold_bytes = "aaaaaaaa";
         let cold_hash: [u8; 32] = Sha256::digest(cold_bytes.as_bytes()).into();
-        let cold_tokens = cold.token_count("m-1#0", cold_bytes, &cold_hash);
+        let cold_tokens = cold.block_entry("m-1#0", cold_bytes, &cold_hash, || None).0;
         assert_eq!((cold.hits, cold.misses), (0, 1));
         cache.replace("ses-a", cold);
 
         let mut edited = cache.snapshot("ses-a");
         let edited_bytes = "a b c d ";
         let edited_hash: [u8; 32] = Sha256::digest(edited_bytes.as_bytes()).into();
-        let edited_tokens = edited.token_count("m-1#0", edited_bytes, &edited_hash);
+        let edited_tokens = edited
+            .block_entry("m-1#0", edited_bytes, &edited_hash, || None)
+            .0;
         assert_ne!(
             cold_tokens, edited_tokens,
             "fixture must change token count"
@@ -19535,7 +19579,7 @@ mod tests {
         cache.replace("ses-a", edited);
 
         let mut warm = cache.snapshot("ses-a");
-        warm.token_count("m-1#0", edited_bytes, &edited_hash);
+        warm.block_entry("m-1#0", edited_bytes, &edited_hash, || None);
         assert_eq!((warm.hits, warm.misses), (1, 0));
         let one_session_bytes = warm.retained_bytes();
         let formatted = "[1] U:  a b c d";
@@ -19551,12 +19595,12 @@ mod tests {
         let mut first = bounded.snapshot("first");
         let first_bytes = "first";
         let first_hash: [u8; 32] = Sha256::digest(first_bytes.as_bytes()).into();
-        first.token_count("m-1#0", first_bytes, &first_hash);
+        first.block_entry("m-1#0", first_bytes, &first_hash, || None);
         bounded.replace("first", first);
         let mut second = bounded.snapshot("second");
         let second_bytes = "other";
         let second_hash: [u8; 32] = Sha256::digest(second_bytes.as_bytes()).into();
-        second.token_count("m-2#0", second_bytes, &second_hash);
+        second.block_entry("m-2#0", second_bytes, &second_hash, || None);
         bounded.replace("second", second);
         assert!(!bounded.sessions.contains_key("first"));
         assert!(bounded.sessions.contains_key("second"));
@@ -19635,7 +19679,15 @@ mod tests {
                             .map(|block| BoundaryBlock {
                                 id: block.id.clone().into(),
                                 ordinal: block.ordinal,
-                                kind: sel_kind_for_flat(block),
+                                kind: sel_kind_for_flat(
+                                    block,
+                                    match block.wire.kind() {
+                                        crate::wire::BlockKind::ToolResult { output, .. } => Some(
+                                            Arc::from(crate::tool_outcome::output_outcome(output)),
+                                        ),
+                                        _ => None,
+                                    },
+                                ),
                                 provider_executed: block.provider_executed,
                                 byte_size: block.bytes.len(),
                                 arc_id: block.arc_id.clone(),
@@ -19888,6 +19940,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_warm_boundary_pass_reuses_each_tool_results_outcome_digest() {
+        let tool_message = |mid: &str, ordinal: u64, blocks: Vec<BlockKind>| IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                if blocks
+                    .iter()
+                    .any(|block| matches!(block, BlockKind::ToolCall { .. }))
+                {
+                    "assistant"
+                } else {
+                    "tool"
+                },
+                blocks.into_iter().map(WireBlock::bare).collect(),
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let output = ToolOutput::bare(OutputKind::Json {
+            value: serde_json::json!({ "rows": vec!["row"; 2_000] }),
+        });
+        let messages = |extra: bool| {
+            let mut messages = vec![
+                wire_with_role("u1", 1, "user", "query it"),
+                tool_message(
+                    "a2",
+                    2,
+                    vec![BlockKind::ToolCall {
+                        id: "c1".to_owned(),
+                        name: "query".to_owned(),
+                        input: serde_json::json!({ "query": "rows" }),
+                        provider_executed: false,
+                    }],
+                ),
+                tool_message(
+                    "t3",
+                    3,
+                    vec![BlockKind::ToolResult {
+                        id: "c1".to_owned(),
+                        tool_name: "query".to_owned(),
+                        output: output.clone(),
+                        provider_executed: false,
+                    }],
+                ),
+            ];
+            if extra {
+                messages.push(wire_with_role("u4", 4, "user", "thanks"));
+            }
+            messages
+        };
+        let outcome = |messages: &[BoundaryMsg<'_>]| {
+            messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .find_map(|block| match &block.kind {
+                    SelKind::ToolResult { outcome, .. } => outcome.clone(),
+                    _ => None,
+                })
+                .expect("the tool result carries its outcome digest")
+        };
+        let cold_request = transform_request(messages(false), 1_000, 200_000);
+        let cold_projection = crate::wire::project_messages(&cold_request.messages).unwrap();
+        let warm_request = transform_request(messages(true), 1_000, 200_000);
+        let warm_projection = crate::wire::project_messages(&warm_request.messages).unwrap();
+        let token_cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
+        let cold = boundary_messages(&cold_request, &cold_projection, &token_cache);
+        let cold_outcome = outcome(&cold.messages);
+        let (status, text) = crate::tool_outcome::from_output(&output);
+        assert_eq!(
+            &*cold_outcome,
+            crate::tool_outcome::outcome_digest(status, &text)
+        );
+        token_cache
+            .lock()
+            .unwrap()
+            .replace(&cold_request.session_id, cold.token_cache_snapshot);
+        let warm = boundary_messages(&warm_request, &warm_projection, &token_cache);
+        assert_eq!(warm.tokenized_blocks, 1, "only the appended block is new");
+        assert!(
+            Arc::ptr_eq(&cold_outcome, &outcome(&warm.messages)),
+            "a warm pass serves the cached digest without reading the output"
+        );
     }
 
     #[test]

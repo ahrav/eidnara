@@ -153,8 +153,7 @@ mod reference {
         },
         ToolResult {
             tool_name: String,
-            /// Mirrors the production variant's output field; the reference reads only the name.
-            output: Option<()>,
+            outcome: Option<()>,
         },
         Reasoning,
         Text,
@@ -1703,7 +1702,7 @@ macro_rules! build_inputs {
                     },
                     KIND_TOOL_RESULT => K::ToolResult {
                         tool_name: TOOLS[usize::from(s.tool)].to_string(),
-                        output: None,
+                        outcome: None,
                     },
                     KIND_REASONING => K::Reasoning,
                     KIND_REDACTED_REASONING => K::RedactedReasoning,
@@ -2719,7 +2718,7 @@ fn every_production_variant_is_generated() {
         },
         SelKind::ToolResult {
             tool_name: "edit".to_string(),
-            output: None,
+            outcome: None,
         },
         SelKind::Reasoning,
         SelKind::RedactedReasoning,
