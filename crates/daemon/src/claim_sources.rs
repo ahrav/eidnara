@@ -24,7 +24,7 @@ use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::commit_stream::{CommitStreamBlocked, CommitWalk, drive_commit_pages, outcome_unknown};
 use crate::harness_sources::{
     CANONICAL_ROLE, KeyedWrite, PublishError, Representation, SourcePublisher, SourceUnit,
-    publish_batch,
+    publish_batch, retire_descriptors,
 };
 use crate::memory_render::is_positive_memory_category;
 
@@ -201,22 +201,6 @@ fn retirement_intent(retirement: &Retirement) -> CommitIntent {
         actor: CANONICAL_ROLE.to_owned(),
         cause: "claim descriptor retirement".to_owned(),
     }
-}
-
-/// Retires each of `ids` that names a live descriptor.
-fn retire_descriptors(
-    envelope: &mut kernel::Envelope<'_>,
-    ids: &[String],
-) -> Result<String, KernelError> {
-    for id in ids {
-        if envelope
-            .object_state(id)?
-            .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
-        {
-            envelope.retire_observation(id)?;
-        }
-    }
-    Ok(String::new())
 }
 
 /// Why an episode stopped short of its target. Nothing durable moved for the refused commit; the next episode starts from the same checkpoint.

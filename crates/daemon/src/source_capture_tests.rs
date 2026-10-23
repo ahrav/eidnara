@@ -1388,3 +1388,93 @@ async fn a_conflict_in_the_commit_leaves_the_sibling_pending() {
         "{published:?}"
     );
 }
+
+/// An assistant turn whose one `bash` call settled at `end` with `output`.
+fn opencode_rerun(end: u64, output: &str) -> Value {
+    json!({
+        "info": { "id": "msg_rerun", "sessionID": SESSION, "role": "assistant",
+                  "time": { "created": 1_700_000_000_000u64, "completed": end + 10 } },
+        "parts": [
+            { "type": "tool", "callID": "call_rerun", "tool": "bash",
+              "state": { "status": "completed", "output": output, "input": { "command": "cargo test" },
+                         "metadata": { "exit": 0, "truncated": false },
+                         "time": { "start": end - 5, "end": end } } },
+        ],
+    })
+}
+
+/// AC14 through the capture path (`replay_after_memo_loss`, `reversed_generation_delivery`): the OpenCode call re-runs in place with a new `state.time.end`. Generation 1 publishes; after a restart empties the memo, generation 2 retires it in its own commit; a window still showing generation 1 replays and retires nothing; an older generation that never published is superseded and terminal. The call keeps exactly one live generation throughout.
+#[tokio::test]
+async fn a_rerun_keeps_one_live_generation_across_a_restart() {
+    let (handler, _dir, _project) = capture_handler(capture_config(true), true).await;
+    let user = opencode_user("msg_u1", 1_700_000_000_000, "run the tests");
+    let live_generations = |store: &KernelStore| -> Vec<String> {
+        live(store, OccurrenceClass::RawToolSpans)
+            .iter()
+            .filter(|row| identity_of(row)[4] == ("tool_call_id", "call_rerun"))
+            .map(|row| identity_of(row)[5].1.to_owned())
+            .collect()
+    };
+    pass(
+        &handler,
+        transform_with(
+            &[
+                user.clone(),
+                opencode_rerun(1_700_000_001_000, "1 failed\n"),
+            ],
+            "base-1",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    let store = kernel_store(&handler);
+    assert_eq!(live_generations(&store), ["1700000001000"]);
+
+    handler.source_capture.forget_memo_for_test();
+    pass(
+        &handler,
+        transform_with(
+            &[user.clone(), opencode_rerun(1_700_000_002_000, "ok\n")],
+            "base-2",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(live_generations(&store), ["1700000002000"]);
+
+    handler.source_capture.forget_memo_for_test();
+    let tip = store.tip().unwrap();
+    pass(
+        &handler,
+        transform_with(
+            &[user, opencode_rerun(1_700_000_001_000, "1 failed\n")],
+            "base-3",
+        ),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(
+        store.tip().unwrap(),
+        tip,
+        "a redelivered generation commits nothing"
+    );
+    assert_eq!(live_generations(&store), ["1700000002000"]);
+
+    // A generation older than the live one that never published is superseded, retains nothing, and is not offered again.
+    let stale = [
+        opencode_user("msg_u1", 1_700_000_000_000, "run the tests"),
+        opencode_rerun(1_700_000_001_500, "flaky\n"),
+    ];
+    pass(&handler, transform_with(&stale, "base-4")).await;
+    settle(&handler).await;
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(report(&handler)["units_superseded"], 1);
+    pass(&handler, transform_with(&stale, "base-5")).await;
+    settle(&handler).await;
+    assert_eq!(
+        report(&handler)["units_superseded"],
+        1,
+        "a superseded unit is terminal"
+    );
+    assert_eq!(live_generations(&store), ["1700000002000"]);
+}

@@ -86,6 +86,7 @@ counts! {
     UnitsIdentityConflict => "units_identity_conflict",
     UnitsRefusedTerminal => "units_refused_terminal",
     UnitsRefusedRetryable => "units_refused_retryable",
+    UnitsSuperseded => "units_superseded",
     Active => "active",
     RetainedBytes => "retained_bytes",
     PublishMsLast => "publish_ms_last",
@@ -803,6 +804,7 @@ fn classify(disposition: UnitDisposition, observed_at: i64) -> (Count, Dispositi
             (Count::UnitsRefusedTerminal, Disposition::Terminal)
         }
         UnitDisposition::Refused(_) => (Count::UnitsRefusedRetryable, pending),
+        UnitDisposition::Superseded => (Count::UnitsSuperseded, Disposition::Terminal),
     }
 }
 

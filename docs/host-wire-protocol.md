@@ -677,10 +677,11 @@ text, an identity, a path, a digest, or a project.
 | `refused_queue_full`, `refused_resident_short`, `refused_window_too_large`, `refused_shutting_down` | unsigned integer | windows refused before or at handoff, by reason; `refused_resident_short` also counts jobs whose unit copies the capture budget refused |
 | `completed`, `discarded`, `session_invalidated`, `kernel_unavailable`, `deadline`, `kernel_error`, `worker_panicked` | unsigned integer | job ends by reason |
 | `adapter_refused` | unsigned integer | native records the adapters refused |
-| `units_published`, `units_replayed`, `units_memo_skipped`, `units_deferred`, `units_unit_too_large`, `units_identity_conflict`, `units_refused_terminal`, `units_refused_retryable` | unsigned integer | unit dispositions |
+| `units_published`, `units_replayed`, `units_memo_skipped`, `units_deferred`, `units_unit_too_large`, `units_identity_conflict`, `units_refused_terminal`, `units_refused_retryable`, `units_superseded` | unsigned integer | unit dispositions |
 | `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
 | `retained_bytes` | unsigned integer | bytes the capture budget holds now |
 | `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
