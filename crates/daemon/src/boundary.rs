@@ -1753,8 +1753,8 @@ enum ChunkMessagePart {
     },
 }
 
-/// The outcome half of each tool result's digest in `messages` ([`crate::tool_outcome::outcome_digest`]), by the arc its call opened. A result whose block carries no output has no entry, and its call renders as one without a result.
-fn tool_results(messages: &[&BoundaryMsg]) -> ToolResults {
+/// Each key identifies the arc opened by a tool call. The last output-bearing result for that arc supplies the call's output. A result whose block carries no output has no entry, and its call renders as one without a result.
+fn tool_results<'m>(messages: &[&'m BoundaryMsg<'_>]) -> ToolResults<'m> {
     let mut results = ToolResults::new();
     for block in messages.iter().flat_map(|message| &message.blocks) {
         if let (
@@ -1765,18 +1765,14 @@ fn tool_results(messages: &[&BoundaryMsg]) -> ToolResults {
             Some(arc_id),
         ) = (&block.kind, &block.arc_id)
         {
-            let (status, text) = crate::tool_outcome::from_output(output);
-            results.insert(
-                arc_id.clone(),
-                crate::tool_outcome::outcome_digest(status, None, &text),
-            );
+            results.insert(arc_id.as_str(), *output);
         }
     }
     results
 }
 
-/// Tool-result digest outcome halves by call arc.
-type ToolResults = std::collections::HashMap<String, String>;
+/// Tool-result outputs by call arc.
+type ToolResults<'m> = std::collections::HashMap<&'m str, &'m memory_store::ToolOutput>;
 
 fn chunk_message_part(message: &BoundaryMsg, results: &ToolResults) -> ChunkMessagePart {
     if message.role == Role::User && !has_meaningful_user_text(&message.blocks) {
@@ -1863,11 +1859,21 @@ fn tool_call_parts(
         let SelKind::ToolCall { name, input } = &block.kind else {
             continue;
         };
+        let output = block
+            .arc_id
+            .as_deref()
+            .and_then(|arc_id| results.get(arc_id));
+        if output.is_none() && !bare_calls {
+            continue;
+        }
         let summary = crate::history_summarizer_chunk::format_tool_summary(name, input);
-        match block.arc_id.as_ref().and_then(|arc_id| results.get(arc_id)) {
-            Some(outcome) => summaries.push((crate::tool_outcome::digest(&summary, outcome), true)),
-            None if bare_calls => summaries.push((summary, false)),
-            None => {}
+        match output {
+            Some(output) => {
+                let (status, text) = crate::tool_outcome::from_output(output);
+                let outcome = crate::tool_outcome::outcome_digest(status, None, &text);
+                summaries.push((crate::tool_outcome::digest(&summary, &outcome), true));
+            }
+            None => summaries.push((summary, false)),
         }
     }
     summaries

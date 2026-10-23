@@ -196,6 +196,10 @@ and `digest` render the rest:
   boundary with a `…` clip marker.
 - The whole digest is at most 1 KiB; a longer call summary is clipped the
   same way. Output bytes reach the summarizer only through the two excerpts.
+- Rendering reads the output from each end only as far as its excerpt line:
+  the text variants and content blocks are borrowed in place, so the cost of
+  a digest stays flat as the output grows. The boundary chunk renders a
+  digest only for a message its token scan formats.
 
 Both `TC:` sites render the digest through this one formatter and the one
 call-summary formatter. The chunk builder shows it for each result: under
