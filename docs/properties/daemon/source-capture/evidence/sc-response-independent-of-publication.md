@@ -22,7 +22,13 @@ then spawns `CaptureJob::run` on the tracked admission.
 work with `take_after_response`, awaits `settle_prepared`, and runs the work
 only when the settled outcome is `RequestOutcome::Response`. The comment
 there states that the response bytes are encoded and about to be handed to the
-wire writer.
+wire writer. For a transform response, `settle_direct_with` reserves the
+output with a boxed `DirectWrite` serializer
+(`output_from_direct_write`), so at that point the response is settled and
+its reservation is handed to the wire writer, and host-runtime serializes
+the bytes when it emits the frame; the capture job can start before that
+serialization. Publication still never delays the response, which is the
+record's claim.
 
 `crates/daemon/src/source_capture.rs` - `CaptureJob::run` moves `publish` to
 `spawn_blocking`; the Kernel open check (`kernel_store`), the budget

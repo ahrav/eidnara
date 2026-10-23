@@ -624,7 +624,7 @@ Kernel's re-probe commits nothing, and the prior live descriptor stays live.
 Check: `always` - a terminal memo entry with equal key and digest is never a
 publication candidate and never becomes `Pending`, and the tip is unchanged
 by any later attempt of that unit. Both must hold on every pass.
-Fault/timing angle: a memo loss (restart, any `session.delete` through
+Fault/timing angle: a memo loss (restart, a completed `session.delete` through
 `invalidate_sessions`, eviction past 4 MiB, poison). The next pass offers
 the unit again, the Kernel answers `Conflict` from its receipt before any
 commit, and the siblings in that batch wait one pass.
@@ -949,7 +949,7 @@ Existing check: `crates/daemon/src/source_capture_tests.rs::a_delete_before_the_
 Impact: a deleted session reappears as live evidence
 Open questions:
 - Post-delete passes for the same harness session (OQ4): resolved within scope in U8; a harness session that keeps running republishes on its next pass, stated in the route doc; the tombstone that would refuse later captures is the product owner's decision (needs human input)
-- The epoch is global: a delete drops every session's queued handoff and empties the memo; the next pass recaptures
+- The epoch is global: a delete whose memory-store step succeeded drops every session's queued handoff and empties the memo; the next pass recaptures
 
 ### sc-repodoc-one-live-revision-above-historical-head
 

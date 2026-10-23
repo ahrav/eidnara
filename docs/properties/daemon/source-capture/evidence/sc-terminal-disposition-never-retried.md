@@ -34,7 +34,8 @@ minted revision.
   `units_memo_skipped`. A terminal entry is never a candidate, so it is never
   overwritten with `Pending` while it lives.
 - The memo empties on restart, on `SourceCapture::invalidate_sessions` (every
-  `session.delete`), and on a poisoned lock, and evicts the oldest entries
+  `session.delete` whose memory-store delete succeeded), and on a poisoned
+  lock, and evicts the oldest entries
   past `MEMO_BUDGET_BYTES` (4 MiB).
 
 No code mints a revision from `observed_at` after a conflict.

@@ -12,8 +12,11 @@ and U8 (#1087) bound it to the delete and named this record.
 
 `crates/daemon/src/source_capture.rs`:
 
-- `SourceCapture::delete_epoch` (an `AtomicU64`) is documented as bumped
-  by every `session.delete` under the capture commit gate.
+- `SourceCapture::delete_epoch` (an `AtomicU64`) is bumped by every
+  `session.delete` whose memory-store delete succeeds, under the capture
+  commit gate; a delete that ends `kernel_unavailable`,
+  `source_retirement_failed`, or `store_write_failed` returns before the
+  bump.
 - `SourceCapture::epoch` is sampled into `Offer::epoch` when the pass
   builds its offer (`lib.rs`, `epoch: self.source_capture.epoch()`),
   before the response and the handoff.

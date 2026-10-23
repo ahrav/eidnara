@@ -2,13 +2,15 @@
 
 Source capture retains the exact bytes of what an agent saw in a transform
 window as Kernel source descriptors: user and assistant message text blocks,
-tool outputs, tool errors, and the configured repository documents the pass
-read for its prompt. Each capture is bound to the harness's native identity
+tool outputs, and tool errors, plus the raw bytes of the configured
+repository documents the pass read for its prompt (the prompt holds their
+canonical form). Each capture is bound to the harness's native identity
 and revision, carries a 30-day retention deadline when it holds message or
 tool text, and enters the Kernel as a candidate observation under the
 existing disclosure gates. The pass charges its window once the response is
-built, and the capture job starts only after the response bytes are encoded
-for the wire writer, so publication never delays them.
+built, and the capture job starts once the response is settled and its
+output reservation is handed to the wire writer, which serializes the
+bytes when it emits the frame, so publication never delays them.
 
 The daemon modules are `crates/daemon/src/source_capture.rs` (the
 supervisor, consent, handoff, job, memo, counters, document capture, and
@@ -60,8 +62,9 @@ Repository documents join the offer when the pass also has
    above 32 MiB is refused as `refused_window_too_large`; a budget that
    cannot cover it is refused as `refused_resident_short`.
 3. The offer rides the response as `AfterResponse` work. It runs once the
-   response bytes are encoded and the response is settled for the wire
-   writer; a response that never settles drops it unrun, releasing the
+   response is settled and its output reservation is handed to the wire
+   writer, which serializes a transform response when it emits the frame; a
+   response that never settles drops it unrun, releasing the
    charge.
 4. `CaptureHandoff::into_job` takes the store's single publication slot (a
    one-permit semaphore). A busy slot refuses the handoff as
@@ -171,8 +174,9 @@ bookkeeping (`MEMO_ENTRY_OVERHEAD_BYTES`); it evicts oldest first. An entry
 holds a digest, a disposition, and, for a pending unit, the time it first
 waited. It holds no window bytes. A memo hit with an equal digest
 suppresses the Kernel probe; a changed digest under the same key reaches
-the Kernel's conflict check. After a restart, a poisoned lock, or any
-`session.delete`, the memo is empty and the Kernel answers from its
+the Kernel's conflict check. After a restart, a poisoned lock, or a
+`session.delete` whose memory-store delete succeeded, the memo is empty and
+the Kernel answers from its
 receipts (`replayed: true`).
 
 The supervisor's retained memory is bounded by `RETAINED_BYTES_BOUND`,
@@ -378,10 +382,13 @@ commit gate:
    page's sorted object ids. A page that replays means the inventory listed
    already-retired rows and fails as `Conflict`. Retired rows stay readable
    as history.
-2. The memory store deletes the session's rows. `invalidate_sessions` then
+2. The memory store deletes the session's rows. Once that delete succeeds,
+   `invalidate_sessions`
    bumps the delete epoch and empties the memo, so every capture whose pass
    sampled the epoch before the delete, for any session, ends
-   `session_invalidated` when it reaches the gate.
+   `session_invalidated` when it reaches the gate. A delete that ends
+   `kernel_unavailable`, `source_retirement_failed`, or
+   `store_write_failed` leaves the epoch and the memo unchanged.
 
 A deployment without a Kernel skips step 1. Outcomes, each safe to retry:
 
@@ -427,7 +434,7 @@ observed unit uncaptured or unrecoverable:
 | Refuse-newest (C7) | A handoff that meets a busy slot, a short budget, an oversized window, or shutdown is refused and its window dropped. The next pass that carries the same records captures them; a window no later pass carries is lost. |
 | Unsettled response | A response that never reaches the wire writer drops its capture unrun. |
 | Deferred and retryable units | A unit past the batch bounds or refused retryably waits as pending for the next pass that carries it. A pass that no longer carries it leaves it uncaptured. |
-| Delete epoch | Any `session.delete` ends every earlier handoff as `session_invalidated`, including other sessions' handoffs; their next passes offer the windows again. |
+| Delete epoch | A `session.delete` that completes both steps ends every earlier handoff as `session_invalidated`, including other sessions' handoffs; their next passes offer the windows again. |
 | Documents | A read dropped by a refusal, a busy slot, or a deadline waits for the next pass that composes the prompt block. That pass reads afresh, so the lineage converges on the latest read and intermediate versions are absent. |
 | Terminal units | A unit over 64 KiB, an edit under an unchanged identity and revision, and a superseded tool generation are refused and retain nothing. |
 | Secret-bearing bytes | Ingest refuses the whole batch that admits the unit, and the job ends `kernel_error`. The admitted siblings in that batch publish nothing on any pass that admits the unit again. |
