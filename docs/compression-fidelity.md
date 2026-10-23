@@ -199,6 +199,11 @@ and `digest` render the rest:
   character boundary with a `…` clip marker.
 - The whole digest is at most 1 KiB; a longer call summary is clipped the
   same way. Output bytes reach the summarizer only through the two excerpts.
+  The excerpts travel in the summarizer request as the chunk's transcript
+  text does, to the owner's selected provider through the harness adapter
+  that already carried the full tool output; secret redaction applies where
+  the kernel writes durable text and where evaluator cassettes record a
+  frame.
 - The summarizer's system prompt documents these fields in its `TC:`
   notation, and a test pins them to the claim-value bound.
 
