@@ -681,6 +681,7 @@ text, an identity, a path, a digest, or a project.
 | `active`, `draining` | unsigned integer | jobs holding the publication slot, reported as `draining` once shutdown began |
 | `retained_bytes` | unsigned integer | bytes the capture budget holds now |
 | `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
+| `expiry_retired`, `expiry_retained` | unsigned integer | harness captures the Kernel's maintenance expiry retired outright, and captures whose descriptors it retired while a citation kept their evidence |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
