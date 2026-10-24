@@ -1,8 +1,16 @@
-import { describe, expect, it } from "bun:test";
-import { resolve } from "node:path";
+import { afterEach, describe, expect, it } from "bun:test";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { corpusDigest, corpusFiles, SOURCE_CORPUS_SHA256, verifyCorpusDigest } from "./corpus.ts";
 
-const { readFileSync } = process.getBuiltinModule("node:fs");
+const { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } =
+    process.getBuiltinModule("node:fs");
+
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+    for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 const RUST_OWNER = resolve(import.meta.dir, "../../../../crates/daemon/src/source_corpus.rs");
 
@@ -25,6 +33,14 @@ describe("source corpus digest", () => {
             return { path: file.path, bytes };
         });
         expect(() => verifyCorpusDigest(files)).toThrow(/source corpus digest/);
+    });
+
+    it("refuses a symlink under the corpus directory", () => {
+        const dir = mkdtempSync(join(tmpdir(), "eidnara-corpus-"));
+        temporaryRoots.push(dir);
+        writeFileSync(join(dir, "a.json"), "{}");
+        symlinkSync("a.json", join(dir, "b.json"));
+        expect(() => corpusFiles(dir)).toThrow(/symlink/);
     });
 
     it("sorts paths by bytes and normalizes CRLF to LF", () => {

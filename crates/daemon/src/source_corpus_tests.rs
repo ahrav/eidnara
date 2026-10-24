@@ -89,6 +89,15 @@ fn one_changed_byte_without_a_pin_move_fails_the_digest() {
 }
 
 #[test]
+fn a_symlink_under_the_corpus_directory_is_refused_by_the_walker() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.json"), b"{}").unwrap();
+    std::os::unix::fs::symlink("a.json", dir.path().join("b.json")).unwrap();
+    let error = corpus_files(dir.path()).unwrap_err();
+    assert!(error.to_string().contains("symlink"), "{error}");
+}
+
+#[test]
 fn the_digest_sorts_paths_by_bytes_and_normalizes_crlf() {
     let lf = vec![
         ("b".to_owned(), b"x\ny\n".to_vec()),
@@ -179,6 +188,14 @@ fn a_manifest_out_of_order_or_naming_an_unheld_condition_is_refused() {
     refused("beneath the symlink", &|v| {
         v["files"] =
             json!([{"path": "D", "symlink": "/tmp"}, {"path": "d/x", "size": 1, "utf8": true}]);
+    });
+    refused("case-folds to the same path", &|v| {
+        v["files"] =
+            json!([{"path": "D", "symlink": "/tmp"}, {"path": "d", "size": 1, "utf8": true}]);
+    });
+    refused("case-folds to the same path", &|v| {
+        v["documents"] = json!([{"path": "AGENTS.md", "text": "a"}]);
+        v["files"] = json!([{"path": "agents.MD", "size": 1, "utf8": true}]);
     });
     refused("recorded as non-UTF-8", &|v| {
         v["files"] = json!([{"path": "a", "size": 0, "utf8": false}]);

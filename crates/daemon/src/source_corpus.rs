@@ -45,7 +45,14 @@ pub(crate) fn corpus_files(dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>
         for entry in std::fs::read_dir(dir.join(&relative))? {
             let entry = entry?;
             let path = relative.join(entry.file_name());
-            if entry.file_type()?.is_dir() {
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(std::io::Error::other(format!(
+                    "{} is a symlink; corpus fixtures are regular files",
+                    path.display()
+                )));
+            }
+            if kind.is_dir() {
                 pending.push(path);
                 continue;
             }
@@ -273,6 +280,14 @@ impl Manifest {
             .iter()
             .copied()
             .chain(self.files.iter().map(FileEntry::path));
+        let mut folded: BTreeSet<String> = BTreeSet::new();
+        for path in all_paths.clone() {
+            if !folded.insert(path.to_ascii_lowercase()) {
+                return Err(format!(
+                    "{path:?} case-folds to the same path as another entry"
+                ));
+            }
+        }
         for path in all_paths {
             let mut ancestor = parent(path);
             while !ancestor.is_empty() {

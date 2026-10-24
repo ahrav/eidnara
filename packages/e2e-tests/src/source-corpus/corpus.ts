@@ -27,6 +27,9 @@ export function corpusFiles(dir: string = SOURCE_CORPUS_DIR): CorpusFile[] {
         const current = pending.pop() as string;
         for (const entry of readdirSync(current, { withFileTypes: true })) {
             const full = join(current, entry.name);
+            if (entry.isSymbolicLink()) {
+                throw new Error(`${full} is a symlink; corpus fixtures are regular files`);
+            }
             if (entry.isDirectory()) {
                 pending.push(full);
                 continue;
