@@ -6,8 +6,6 @@ const { readdirSync, readFileSync } = process.getBuiltinModule("node:fs");
 export const SOURCE_CORPUS_SHA256 =
     "7724a1dd6e2ba19b13f8a08c8d9c7f7170faef24ccaa84b34b13c986f01dea44";
 
-export const SOURCE_CORPUS_SCHEMA = "eidnara.source-corpus/v1";
-
 export const SOURCE_CORPUS_DIR = resolve(
     import.meta.dir,
     "../../../../crates/daemon/testdata/corpus",

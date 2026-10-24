@@ -53,17 +53,26 @@ export function forbiddenTypeScriptReaderLines(
 	path: string,
 	text: string,
 ): string[] {
-	const findings: string[] = [];
-	text.split("\n").forEach((line, index) => {
-		for (const match of withoutLineComment(line).matchAll(
-			TYPESCRIPT_SPECIFIER,
-		)) {
-			if (!allowedSpecifier(match[1]!)) {
-				findings.push(`${path}:${index + 1}: imports ${match[1]}`);
-			}
+	const findings = new Set<string>();
+	// The whole-text scan spans line breaks and keeps `import type`, which the transpiler
+	// erases; the transpiler's scan reads value imports the way the runtime resolves them.
+	for (const match of text.matchAll(TYPESCRIPT_SPECIFIER)) {
+		if (!allowedSpecifier(match[1] ?? "")) {
+			const line = text.slice(0, match.index).split("\n").length;
+			findings.add(`${path}:${line}: imports ${match[1]}`);
 		}
-	});
-	return findings;
+	}
+	const reported = new Set(
+		[...findings].map((finding) => finding.split(": imports ")[1]),
+	);
+	for (const { path: specifier } of new Bun.Transpiler({
+		loader: "ts",
+	}).scanImports(text)) {
+		if (!allowedSpecifier(specifier) && !reported.has(specifier)) {
+			findings.add(`${path}: imports ${specifier}`);
+		}
+	}
+	return [...findings];
 }
 
 /** An empty TypeScript reader set is a finding: a scan that matched no file proves nothing. */

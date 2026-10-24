@@ -257,11 +257,41 @@ impl Manifest {
                 ));
             }
         }
+        let links: BTreeSet<&str> = self
+            .files
+            .iter()
+            .filter_map(|file| match file {
+                FileEntry::Symlink(link) => Some(link.path.as_str()),
+                FileEntry::Regular(_) => None,
+            })
+            .collect();
+        let all_paths = documents
+            .iter()
+            .copied()
+            .chain(self.files.iter().map(FileEntry::path));
+        for path in all_paths {
+            let mut ancestor = parent(path);
+            while !ancestor.is_empty() {
+                if links.contains(ancestor) {
+                    return Err(format!("{path:?} lies beneath the symlink {ancestor:?}"));
+                }
+                ancestor = parent(ancestor);
+            }
+        }
         for file in &self.files {
             if documents.contains(file.path())
                 || INSTRUCTION_DOCUMENTS.contains(&basename(file.path()))
             {
                 return Err(format!("file {:?} is an instruction document", file.path()));
+            }
+            if let FileEntry::Regular(file) = file
+                && file.size == 0
+                && !file.utf8
+            {
+                return Err(format!(
+                    "empty file {:?} is recorded as non-UTF-8",
+                    file.path
+                ));
             }
         }
         for exclusion in &self.exclusions {
@@ -300,17 +330,17 @@ impl Manifest {
         };
         let agents: BTreeSet<&str> = named("AGENTS.md").collect();
         let claude: BTreeSet<&str> = named("CLAUDE.md").collect();
-        let mut directories = ["AGENTS.md", "CLAUDE.md", ".cursorrules"]
+        let directories: Vec<&str> = ["AGENTS.md", "CLAUDE.md", ".cursorrules"]
             .into_iter()
             .flat_map(named)
-            .peekable();
+            .collect();
         if named(".cursorrules").any(|dir| agents.contains(dir) && claude.contains(dir)) {
             Some(Instructions::Mixed)
         } else if agents.iter().any(|dir| dir.split('/').count() >= 2) {
             Some(Instructions::NestedDepth3)
-        } else if directories.peek().is_none() {
+        } else if directories.is_empty() {
             Some(Instructions::None)
-        } else if directories.all(str::is_empty) {
+        } else if directories.iter().all(|dir| dir.is_empty()) {
             Some(Instructions::RootOnly)
         } else {
             None
@@ -354,9 +384,13 @@ pub(crate) fn generated_bytes(size: u64, utf8: bool) -> Vec<u8> {
 /// Runs git with no system or global configuration and fixed identities and dates, so the same
 /// manifest yields the same commit oid on every host.
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir).env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        let absolute = std::env::split_paths(&path).filter(|entry| entry.is_absolute());
+        command.env("PATH", std::env::join_paths(absolute).unwrap_or_default());
+    }
+    let output = command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_AUTHOR_NAME", "corpus")
@@ -380,12 +414,15 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 pub(crate) fn materialize(manifest: &Manifest, worktree: bool) -> Result<Materialized, String> {
     let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let root = dir.path().join("checkout");
-    let write = |path: &str, bytes: &[u8]| -> Result<(), String> {
+    let target = |path: &str| -> Result<PathBuf, String> {
         let target = root.join(path);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(parent).map_err(|error| format!("{path}: {error}"))?;
         }
-        std::fs::write(&target, bytes).map_err(|error| format!("{path}: {error}"))
+        Ok(target)
+    };
+    let write = |path: &str, bytes: &[u8]| -> Result<(), String> {
+        std::fs::write(target(path)?, bytes).map_err(|error| format!("{path}: {error}"))
     };
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     for document in &manifest.documents {
@@ -395,11 +432,7 @@ pub(crate) fn materialize(manifest: &Manifest, worktree: bool) -> Result<Materia
         match file {
             FileEntry::Regular(file) => write(&file.path, &generated_bytes(file.size, file.utf8))?,
             FileEntry::Symlink(link) => {
-                let target = root.join(&link.path);
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-                }
-                std::os::unix::fs::symlink(&link.symlink, &target)
+                std::os::unix::fs::symlink(&link.symlink, target(&link.path)?)
                     .map_err(|error| format!("{}: {error}", link.path))?;
             }
         }
@@ -469,104 +502,77 @@ pub(crate) struct NonUnit {
     pub kind: String,
 }
 
-/// Why native content is not a unit. Closed: a reader meeting any other shape fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum NonUnitReason {
-    /// An OpenCode part whose kind is neither `text` nor `tool`.
-    NonTextPart,
-    /// An OpenCode text part marked `ignored`.
-    IgnoredText,
-    /// OpenCode assistant text of a message without `time.completed`.
-    UnsettledText,
-    /// An OpenCode tool part still `pending` or `running`, or interrupted in an incomplete turn.
-    UnsettledTool,
-    /// A Pi `toolResult` holding a non-text item: the whole record yields no unit.
-    NonTextItem,
-    /// A Pi user or assistant content item other than `text`.
-    SkippedItem,
-    /// A Pi entry whose `type` is not `message`.
-    NonMessageEntry,
+/// Declares a closed enum whose `ALL` lists every variant once and whose `name` is its snake-case
+/// label, both generated from one variant list.
+macro_rules! closed_names {
+    (
+        $(#[$meta:meta])*
+        enum $name:ident { $($(#[$doc:meta])* $variant:ident => $text:literal,)* }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub(crate) enum $name {
+            $($(#[$doc])* $variant,)*
+        }
+
+        impl $name {
+            pub(crate) const ALL: [Self; [$($text),*].len()] = [$(Self::$variant),*];
+
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text,)*
+                }
+            }
+        }
+    };
 }
 
-impl NonUnitReason {
-    pub(crate) const ALL: [Self; 7] = [
-        Self::NonTextPart,
-        Self::IgnoredText,
-        Self::UnsettledText,
-        Self::UnsettledTool,
-        Self::NonTextItem,
-        Self::SkippedItem,
-        Self::NonMessageEntry,
-    ];
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::NonTextPart => "non_text_part",
-            Self::IgnoredText => "ignored_text",
-            Self::UnsettledText => "unsettled_text",
-            Self::UnsettledTool => "unsettled_tool",
-            Self::NonTextItem => "non_text_item",
-            Self::SkippedItem => "skipped_item",
-            Self::NonMessageEntry => "non_message_entry",
-        }
+closed_names! {
+    /// Why native content is not a unit. Closed: a reader meeting any other shape fails.
+    enum NonUnitReason {
+        /// An OpenCode part whose kind is neither `text` nor `tool`.
+        NonTextPart => "non_text_part",
+        /// An OpenCode text part marked `ignored`.
+        IgnoredText => "ignored_text",
+        /// OpenCode assistant text of a message without `time.completed`.
+        UnsettledText => "unsettled_text",
+        /// An OpenCode tool part still `pending` or `running`, or interrupted in an incomplete turn.
+        UnsettledTool => "unsettled_tool",
+        /// A Pi `toolResult` holding a non-text item: the whole record yields no unit.
+        NonTextItem => "non_text_item",
+        /// A Pi user or assistant content item other than `text`.
+        SkippedItem => "skipped_item",
+        /// A Pi entry whose `type` is not `message`.
+        NonMessageEntry => "non_message_entry",
     }
 }
 
-/// The closed set of named conditions that account for an expected unit that did not publish.
-/// Reconciliation maps every missing unit to exactly one; any other outcome is unclassified loss.
-/// `docs/properties/daemon/interpretation-layer/` mirrors this list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum LossCondition {
-    /// The adapter refused the unit's whole native record (`adapter_refused`).
-    AdapterRefused,
-    /// The unit exceeds the per-unit byte cap (`units_unit_too_large`).
-    UnitTooLarge,
-    /// The unit was still deferred after the last replayed pass (`units_deferred`).
-    Deferred,
-    /// The Kernel refused the unit as secret-bearing (`units_refused_terminal`).
-    SecretBearing,
-    /// The Kernel refused the unit's artifact as re-admission blocked (`units_refused_terminal`).
-    ReAdmissionBlocked,
-    /// The unit was refused with a retryable cause on the last pass (`units_refused_retryable`).
-    RefusedRetryable,
-    /// The unit's identity held a different digest (`units_identity_conflict`).
-    IdentityConflict,
-    /// A later revision of the same identity replaced the unit (`units_superseded`).
-    Superseded,
-    /// The window was refused before any unit was read (`refused_*`).
-    WindowRefused,
-    /// The pass ended before publication (`kernel_error`, `deadline`, `kernel_unavailable`,
-    /// `worker_panicked`, `discarded`, `session_invalidated`).
-    PassFailed,
-}
-
-impl LossCondition {
-    pub(crate) const ALL: [Self; 10] = [
-        Self::AdapterRefused,
-        Self::UnitTooLarge,
-        Self::Deferred,
-        Self::SecretBearing,
-        Self::ReAdmissionBlocked,
-        Self::RefusedRetryable,
-        Self::IdentityConflict,
-        Self::Superseded,
-        Self::WindowRefused,
-        Self::PassFailed,
-    ];
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::AdapterRefused => "adapter_refused",
-            Self::UnitTooLarge => "unit_too_large",
-            Self::Deferred => "deferred",
-            Self::SecretBearing => "secret_bearing",
-            Self::ReAdmissionBlocked => "re_admission_blocked",
-            Self::RefusedRetryable => "refused_retryable",
-            Self::IdentityConflict => "identity_conflict",
-            Self::Superseded => "superseded",
-            Self::WindowRefused => "window_refused",
-            Self::PassFailed => "pass_failed",
-        }
+closed_names! {
+    /// The closed set of named conditions that account for an expected unit that did not publish.
+    /// Reconciliation maps every missing unit to exactly one; any other outcome is unclassified
+    /// loss. `docs/properties/daemon/interpretation-layer/` mirrors this list.
+    enum LossCondition {
+        /// The adapter refused the unit's whole native record (`adapter_refused`).
+        AdapterRefused => "adapter_refused",
+        /// The unit exceeds the per-unit byte cap (`units_unit_too_large`).
+        UnitTooLarge => "unit_too_large",
+        /// The unit was still deferred after the last replayed pass (`units_deferred`).
+        Deferred => "deferred",
+        /// The Kernel refused the unit as secret-bearing (`units_refused_terminal`).
+        SecretBearing => "secret_bearing",
+        /// The Kernel refused the unit's artifact as re-admission blocked (`units_refused_terminal`).
+        ReAdmissionBlocked => "re_admission_blocked",
+        /// The unit was refused with a retryable cause on the last pass (`units_refused_retryable`).
+        RefusedRetryable => "refused_retryable",
+        /// The unit's identity held a different digest (`units_identity_conflict`).
+        IdentityConflict => "identity_conflict",
+        /// A later revision of the same identity replaced the unit (`units_superseded`).
+        Superseded => "superseded",
+        /// The window was refused before any unit was read (`refused_*`).
+        WindowRefused => "window_refused",
+        /// The pass ended before publication (`kernel_error`, `deadline`, `kernel_unavailable`,
+        /// `worker_panicked`, `discarded`, `session_invalidated`).
+        PassFailed => "pass_failed",
     }
 }
 
@@ -587,110 +593,107 @@ fn string<'v>(value: &'v Value, key: &str, at: &str) -> Result<&'v str, String> 
 ///
 /// A line that is not JSON, or an entry missing a field Pi always writes, is a fixture defect.
 pub(crate) fn read_pi_session(jsonl: &str) -> Result<Vec<ExpectedRecord>, String> {
-    let mut records = Vec::new();
-    for (number, line) in jsonl.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let at = format!("line {}", number + 1);
-        let entry: Value = serde_json::from_str(line).map_err(|error| format!("{at}: {error}"))?;
-        let kind = string(&entry, "type", &at)?;
-        let id = string(&entry, "id", &at)?.to_owned();
-        if kind != "message" {
-            records.push(ExpectedRecord {
-                id,
-                role: None,
-                units: Vec::new(),
-                non_units: vec![NonUnit {
-                    index: None,
-                    reason: NonUnitReason::NonMessageEntry,
-                    kind: kind.to_owned(),
-                }],
-            });
-            continue;
-        }
-        let message = entry
-            .get("message")
-            .ok_or_else(|| format!("{at}: no `message`"))?;
-        let role = string(message, "role", &at)?.to_owned();
-        let mut record = ExpectedRecord {
-            id,
-            role: Some(role.clone()),
-            units: Vec::new(),
-            non_units: Vec::new(),
-        };
-        let items = match message.get("content") {
-            Some(Value::String(text)) if role != "toolResult" => {
-                record.units.push(ExpectedUnit {
-                    index: 0,
-                    byte_len: text.len(),
-                    tool: None,
-                });
-                records.push(record);
-                continue;
-            }
-            Some(Value::Array(items)) => items,
-            _ => return Err(format!("{at}: `message.content` has no supported shape")),
-        };
-        let item_kind =
-            |item: &Value| -> Result<String, String> { Ok(string(item, "type", &at)?.to_owned()) };
-        if role == "toolResult" {
-            if let Some(item) = items
-                .iter()
-                .find(|item| item.get("type").and_then(Value::as_str) != Some("text"))
-            {
-                record.non_units.push(NonUnit {
-                    index: None,
-                    reason: NonUnitReason::NonTextItem,
-                    kind: item_kind(item)?,
-                });
-                records.push(record);
-                continue;
-            }
-            let tool = ExpectedTool {
-                name: string(message, "toolName", &at)?.to_owned(),
-                call_id: string(message, "toolCallId", &at)?.to_owned(),
-                is_error: message
-                    .get("isError")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| format!("{at}: `isError` is not a boolean"))?,
-                exit: None,
-                truncated: message
-                    .pointer("/details/truncation/truncated")
-                    .and_then(Value::as_bool),
-            };
-            for (index, item) in items.iter().enumerate() {
-                record.units.push(ExpectedUnit {
-                    index,
-                    byte_len: string(item, "text", &at)?.len(),
-                    tool: Some(tool.clone()),
-                });
-            }
-        } else {
-            for (index, item) in items.iter().enumerate() {
-                let kind = item_kind(item)?;
-                if kind == "text" {
-                    record.units.push(ExpectedUnit {
-                        index,
-                        byte_len: string(item, "text", &at)?.len(),
-                        tool: None,
-                    });
-                } else {
-                    record.non_units.push(NonUnit {
-                        index: Some(index),
-                        reason: NonUnitReason::SkippedItem,
-                        kind,
-                    });
-                }
-            }
-        }
-        records.push(record);
-    }
-    Ok(records)
+    jsonl
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(number, line)| {
+            let at = format!("line {}", number + 1);
+            let entry: Value =
+                serde_json::from_str(line).map_err(|error| format!("{at}: {error}"))?;
+            pi_record(&entry, &at)
+        })
+        .collect()
 }
 
-/// Every string in `value` whose redaction verdict is wrong: a string is negative unless it is
-/// the `text` member of an object carrying `"canary": true`, which must be positive. `at` names
+fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
+    let kind = string(entry, "type", at)?;
+    let mut record = ExpectedRecord {
+        id: string(entry, "id", at)?.to_owned(),
+        role: None,
+        units: Vec::new(),
+        non_units: Vec::new(),
+    };
+    if kind != "message" {
+        record.non_units.push(NonUnit {
+            index: None,
+            reason: NonUnitReason::NonMessageEntry,
+            kind: kind.to_owned(),
+        });
+        return Ok(record);
+    }
+    let message = entry
+        .get("message")
+        .ok_or_else(|| format!("{at}: no `message`"))?;
+    let role = string(message, "role", at)?;
+    record.role = Some(role.to_owned());
+    let items = match message.get("content") {
+        Some(Value::String(text)) if role != "toolResult" => {
+            record.units.push(ExpectedUnit {
+                index: 0,
+                byte_len: text.len(),
+                tool: None,
+            });
+            return Ok(record);
+        }
+        Some(Value::Array(items)) => items,
+        _ => return Err(format!("{at}: `message.content` has no supported shape")),
+    };
+    fn item_kind<'v>(item: &'v Value, at: &str) -> Result<&'v str, String> {
+        string(item, "type", at)
+    }
+    if role != "toolResult" {
+        for (index, item) in items.iter().enumerate() {
+            match item_kind(item, at)? {
+                "text" => record.units.push(ExpectedUnit {
+                    index,
+                    byte_len: string(item, "text", at)?.len(),
+                    tool: None,
+                }),
+                kind => record.non_units.push(NonUnit {
+                    index: Some(index),
+                    reason: NonUnitReason::SkippedItem,
+                    kind: kind.to_owned(),
+                }),
+            }
+        }
+        return Ok(record);
+    }
+    if let Some(item) = items
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) != Some("text"))
+    {
+        record.non_units.push(NonUnit {
+            index: None,
+            reason: NonUnitReason::NonTextItem,
+            kind: item_kind(item, at)?.to_owned(),
+        });
+        return Ok(record);
+    }
+    let tool = ExpectedTool {
+        name: string(message, "toolName", at)?.to_owned(),
+        call_id: string(message, "toolCallId", at)?.to_owned(),
+        is_error: message
+            .get("isError")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{at}: `isError` is not a boolean"))?,
+        exit: None,
+        truncated: message
+            .pointer("/details/truncation/truncated")
+            .and_then(Value::as_bool),
+    };
+    for (index, item) in items.iter().enumerate() {
+        record.units.push(ExpectedUnit {
+            index,
+            byte_len: string(item, "text", at)?.len(),
+            tool: Some(tool.clone()),
+        });
+    }
+    Ok(record)
+}
+
+/// Every string or object key in `value` whose redaction verdict is wrong: each is negative
+/// unless it is the `text` member of an object carrying `"canary": true`, which must be positive. `at` names
 /// the fixture in each finding.
 pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     fn walk(
@@ -730,6 +733,9 @@ pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
                     let len = pointer.len();
                     pointer.push('/');
                     pointer.push_str(key);
+                    if context_core::redaction::detect_windowed_durable_text(key) != Ok(false) {
+                        out.push(format!("{at}{pointer}: key not negative"));
+                    }
                     walk(at, pointer, member, canary && key == "text", out);
                     pointer.truncate(len);
                 }

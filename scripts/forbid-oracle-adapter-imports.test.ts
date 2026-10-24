@@ -58,6 +58,20 @@ describe("forbiddenTypeScriptReaderLines", () => {
 	});
 });
 
+describe("forbiddenTypeScriptReaderLines across lines and strings", () => {
+	test("rejects an import split across lines or behind a URL literal", () => {
+		const text = [
+			'const u = "http://x"; await import("../adapter.ts");',
+			"const m = await import(",
+			'    "../rust-harness.ts");',
+		].join("\n");
+		expect(forbiddenTypeScriptReaderLines("r.ts", text)).toEqual([
+			"r.ts:1: imports ../adapter.ts",
+			"r.ts:2: imports ../rust-harness.ts",
+		]);
+	});
+});
+
 describe("forbiddenReaderSources", () => {
 	test("reports an empty scan as a finding", () => {
 		expect(forbiddenReaderSources({}, {})).toHaveLength(2);

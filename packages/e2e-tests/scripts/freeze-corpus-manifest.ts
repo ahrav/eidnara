@@ -38,7 +38,7 @@ function git(repo: string, args: string[]): Buffer {
 }
 
 function parseExclusion(spec: string): Exclusion {
-    const [, path, line, reason] = /^(.+):(\d+):(.+)$/.exec(spec) ?? [];
+    const [, path, line, reason] = /^(.+?):(\d+):(.+)$/.exec(spec) ?? [];
     if (path === undefined || reason === undefined) {
         throw new Error(`--exclude ${spec}: expected <path>:<line>:<reason>`);
     }
@@ -102,7 +102,9 @@ const exclusions = (values.exclude ?? []).map(parseExclusion);
 const documents: { path: string; text: string }[] = [];
 const files: ({ path: string; size: number; utf8: boolean } | { path: string; symlink: string })[] =
     [];
-const listing = git(repo, ["ls-tree", "-r", "-z", "--full-tree", commit]).toString("utf8");
+const listing = new TextDecoder("utf-8", { fatal: true }).decode(
+    git(repo, ["ls-tree", "-r", "-z", "--full-tree", commit]),
+);
 for (const record of listing.split("\0").filter((r) => r.length > 0)) {
     const tab = record.indexOf("\t");
     const [mode, type, oid] = record.slice(0, tab).split(" ");

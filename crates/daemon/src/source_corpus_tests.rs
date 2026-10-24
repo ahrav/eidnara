@@ -8,6 +8,9 @@ use super::source_corpus::{
     git, manifests, materialize, read_pi_session, redaction_violations, verify_corpus_digest,
 };
 
+/// The root commit materializing `repos/ripgrep.json` yields under the fixed git identity and dates.
+const RIPGREP_ROOT: &str = "40cf2c897a3cc5b4c2cd5e4c564b44bfb57447ae";
+
 const CANARY: &str = "sk-ant-api03-Zk9Qw2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0JgAbCdEfGh";
 
 const TYPESCRIPT_PEER: &str = concat!(
@@ -139,26 +142,73 @@ fn a_manifest_out_of_order_or_naming_an_unheld_condition_is_refused() {
         "files": [{"path": "a", "size": 1, "utf8": true}, {"path": "b", "symlink": "a"}],
     });
     assert!(Manifest::parse(base.to_string().as_bytes()).is_ok());
-    let refused = |edit: &dyn Fn(&mut Value)| {
+    let edited = |edit: &dyn Fn(&mut Value)| {
         let mut value = base.clone();
         edit(&mut value);
-        Manifest::parse(value.to_string().as_bytes()).unwrap_err()
+        Manifest::parse(value.to_string().as_bytes())
     };
-    refused(&|v| v["schema"] = json!("eidnara.source-corpus/v2"));
-    refused(&|v| {
+    let refused = |reason: &str, edit: &dyn Fn(&mut Value)| {
+        let error = edited(edit).unwrap_err();
+        assert!(error.contains(reason), "{error:?} names {reason:?}");
+    };
+    refused("schema", &|v| {
+        v["schema"] = json!("eidnara.source-corpus/v2")
+    });
+    refused("out of path-byte order", &|v| {
         v["files"] = json!([
             {"path": "b", "size": 1, "utf8": true},
             {"path": "a", "size": 1, "utf8": true},
         ]);
     });
-    refused(&|v| v["files"] = json!([{"path": "../a", "size": 1, "utf8": true}]));
-    refused(&|v| v["files"] = json!([{"path": "x/AGENTS.md", "size": 1, "utf8": true}]));
-    refused(&|v| v["instructions"] = json!("none"));
-    refused(&|v| v["documents"] = json!([{"path": "docs/AGENTS.md", "text": "a"}]));
-    refused(&|v| v["exclusions"] = json!([{"path": "AGENTS.md", "line": 1, "reason": "r"}]));
-    refused(&|v| v["upstream"]["commit"] = json!("ABC"));
-    refused(&|v| v["upstream"]["license"] = json!(""));
-    refused(&|v| v["extra"] = json!(1));
+    refused("not a normalized relative path", &|v| {
+        v["files"] = json!([{"path": "../a", "size": 1, "utf8": true}]);
+    });
+    refused("is an instruction document", &|v| {
+        v["files"] = json!([{"path": "x/AGENTS.md", "size": 1, "utf8": true}]);
+    });
+    refused("beneath the symlink", &|v| {
+        v["files"] =
+            json!([{"path": "d", "symlink": "/tmp"}, {"path": "d/x", "size": 1, "utf8": true}]);
+    });
+    refused("recorded as non-UTF-8", &|v| {
+        v["files"] = json!([{"path": "a", "size": 0, "utf8": false}]);
+    });
+    refused("manifest declares None", &|v| {
+        v["instructions"] = json!("none")
+    });
+    refused("documents hold None", &|v| {
+        v["documents"] = json!([{"path": "docs/AGENTS.md", "text": "a"}]);
+    });
+    refused("not a blank line", &|v| {
+        v["exclusions"] = json!([{"path": "AGENTS.md", "line": 1, "reason": "r"}]);
+    });
+    refused("full lowercase oid", &|v| {
+        v["upstream"]["commit"] = json!("ABC")
+    });
+    refused("no license", &|v| v["upstream"]["license"] = json!(""));
+    refused("unknown field", &|v| v["extra"] = json!(1));
+
+    let held = |documents: Value, instructions: &str| {
+        edited(&|v| {
+            v["documents"] = documents.clone();
+            v["instructions"] = json!(instructions);
+        })
+    };
+    let mixed = json!([
+        {"path": "a/.cursorrules", "text": "c"},
+        {"path": "a/AGENTS.md", "text": "a"},
+        {"path": "a/CLAUDE.md", "text": "b"},
+    ]);
+    assert!(held(mixed, "mixed").is_ok());
+    let deep = json!([{"path": "a/b/AGENTS.md", "text": "a"}]);
+    assert!(held(deep, "nested_depth_3").is_ok());
+    let shallow = json!([{"path": "a/AGENTS.md", "text": "a"}]);
+    assert!(held(shallow, "nested_depth_3").is_err());
+    let exclusion = edited(&|v| {
+        v["documents"] = json!([{"path": "AGENTS.md", "text": "a\n\nb"}]);
+        v["exclusions"] = json!([{"path": "AGENTS.md", "line": 2, "reason": "a fake key"}]);
+    });
+    assert!(exclusion.is_ok(), "{exclusion:?}");
 }
 
 #[test]
@@ -200,6 +250,7 @@ fn a_materialized_worktree_shares_its_checkout_root_commit() {
     assert_eq!(link, Path::new("pkg/brew"));
     let again = materialize(&manifest("ripgrep"), false).unwrap();
     assert_eq!(roots(&again.root), roots(&checkout.root));
+    assert_eq!(roots(&checkout.root).trim(), RIPGREP_ROOT);
 }
 
 #[test]
@@ -255,6 +306,17 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
         ),
         pi_entry("u2", json!({"role": "user", "content": "plain", "timestamp": 5})),
         json!({"type": "model_change", "id": "m", "parentId": "u2"}).to_string(),
+        pi_entry(
+            "t3",
+            json!({"role": "toolResult", "toolCallId": "c3", "toolName": "read", "isError": false,
+                "content": [image, {"type": "text", "text": "after"}], "timestamp": 6}),
+        ),
+        pi_entry(
+            "t4",
+            json!({"role": "toolResult", "toolCallId": "c4", "toolName": "read", "isError": false,
+                "content": [{"type": "text", "text": "ab"}, {"type": "text", "text": "cde"}],
+                "timestamp": 7}),
+        ),
     ]
     .join("\n");
     let records = read_pi_session(&session).unwrap();
@@ -310,21 +372,35 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
         }]
     );
     assert_eq!(records[5].units, [text(0, 5)]);
+    assert_eq!(records[7].non_units[0].reason, NonUnitReason::NonTextItem);
+    assert!(records[7].units.is_empty());
+    assert_eq!(
+        records[8]
+            .units
+            .iter()
+            .map(|u| (u.index, u.byte_len))
+            .collect::<Vec<_>>(),
+        [(0, 2), (1, 3)]
+    );
     assert_eq!(records[6].non_units[0].kind, "model_change");
     let expected: usize = records.iter().map(|r| r.units.len()).sum();
-    assert_eq!(expected, 4);
+    assert_eq!(expected, 6);
 }
 
 #[test]
 fn the_pi_reader_refuses_an_entry_missing_a_field_pi_always_writes() {
-    assert!(read_pi_session("{not json").is_err());
+    let refused = |jsonl: &str, reason: &str| {
+        let error = read_pi_session(jsonl).unwrap_err();
+        assert!(error.contains(reason), "{error:?} names {reason:?}");
+    };
+    refused("{not json", "line 1");
     let no_id = json!({"type": "message", "message": {"role": "user", "content": "x"}});
-    assert!(read_pi_session(&no_id.to_string()).is_err());
+    refused(&no_id.to_string(), "`id`");
     let no_error_flag = pi_entry(
         "t",
         json!({"role": "toolResult", "toolCallId": "c", "toolName": "read", "content": []}),
     );
-    assert!(read_pi_session(&no_error_flag).is_err());
+    refused(&no_error_flag, "`isError`");
 }
 
 #[test]
@@ -350,19 +426,28 @@ fn a_credential_shape_fails_the_redaction_scan_unless_its_unit_is_a_canary() {
     assert_eq!(redaction_violations("f", &negative_canary).len(), 1);
     let textless = json!({"units": [{"canary": true}]});
     assert_eq!(redaction_violations("f", &textless).len(), 1);
+    let key = json!({ CANARY: "value" });
+    assert_eq!(redaction_violations("f", &key).len(), 1);
 }
 
 #[test]
 fn the_loss_conditions_are_a_closed_set_of_distinct_names() {
-    let names: std::collections::BTreeSet<&str> =
-        LossCondition::ALL.iter().map(|c| c.name()).collect();
-    assert_eq!(names.len(), LossCondition::ALL.len());
-    assert!(
-        names
-            .iter()
-            .all(|name| name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+    let names: Vec<&str> = LossCondition::ALL.iter().map(|c| c.name()).collect();
+    assert_eq!(
+        names,
+        [
+            "adapter_refused",
+            "unit_too_large",
+            "deferred",
+            "secret_bearing",
+            "re_admission_blocked",
+            "refused_retryable",
+            "identity_conflict",
+            "superseded",
+            "window_refused",
+            "pass_failed",
+        ]
     );
-    assert!(names.contains("unit_too_large") && names.contains("deferred"));
 }
 
 #[test]

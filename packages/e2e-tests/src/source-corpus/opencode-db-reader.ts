@@ -101,9 +101,10 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
                 const status = text(state.status, `${at} status`);
                 const metadata =
                     state.metadata === undefined ? {} : object(state.metadata, `${at} metadata`);
-                if (status !== "completed" && status !== "error") {
-                    nonUnit("unsettled_tool");
-                } else if (metadata.interrupted === true && !settled) {
+                const unsettled =
+                    (status !== "completed" && status !== "error") ||
+                    (metadata.interrupted === true && !settled);
+                if (unsettled) {
                     nonUnit("unsettled_tool");
                 } else {
                     const isError = status === "error";
