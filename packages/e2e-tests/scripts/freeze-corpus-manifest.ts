@@ -114,7 +114,7 @@ for (const record of listing.split("\0").filter((r) => r.length > 0)) {
     }
     const bytes = git(repo, ["cat-file", "blob", oid]);
     if (mode === "120000") {
-        files.push({ path, symlink: bytes.toString("utf8") });
+        files.push({ path, symlink: new TextDecoder("utf-8", { fatal: true }).decode(bytes) });
     } else if (INSTRUCTION_DOCUMENTS.has(basename(path))) {
         if (!isUtf8(bytes)) throw new Error(`${path}: instruction document is not UTF-8`);
         documents.push({ path, text: blank(bytes.toString("utf8"), path, exclusions) });
