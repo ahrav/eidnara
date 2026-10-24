@@ -10417,10 +10417,11 @@ fn has_meaningful_content(block: &WireBlock) -> bool {
 fn is_reduce_block(block: &WireBlock) -> bool {
     matches!(
         block.kind(),
-        wire::BlockKind::ToolCall { name, .. } if name == "eidnara_reduce"
+        wire::BlockKind::ToolCall { name, .. } if name == crate::prompt_surface::EIDNARA_REDUCE_TOOL
     ) || matches!(
         block.kind(),
-        wire::BlockKind::ToolResult { tool_name, .. } if tool_name == "eidnara_reduce"
+        wire::BlockKind::ToolResult { tool_name, .. }
+            if tool_name == crate::prompt_surface::EIDNARA_REDUCE_TOOL
     )
 }
 
@@ -28474,122 +28475,6 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(serde_json::to_vec(&replay.messages).unwrap(), first_bytes);
-        assert!(core.frozen_units.iter().all(|unit| unit.kind == "drop"));
-    }
-
-    #[test]
-    fn duplicate_tool_full_drop_re_renders_byte_identically() {
-        let calls = vec![
-            WireBlock::bare(wire::BlockKind::ToolCall {
-                id: "duplicate-old".to_string(),
-                name: "mcp_read".to_string(),
-                input: json!({ "path": "src/lib.rs", "line": 7 }),
-                provider_executed: false,
-            }),
-            WireBlock::bare(wire::BlockKind::ToolCall {
-                id: "duplicate-new".to_string(),
-                name: "mcp_read".to_string(),
-                input: json!({ "line": 7, "path": "src/lib.rs" }),
-                provider_executed: false,
-            }),
-        ];
-        let request = cc_req(
-            "duplicate-tool-output-cache",
-            "cfg0",
-            vec![
-                IngressMessage {
-                    mid: "duplicate-owner".to_string(),
-                    ordinal: 1,
-                    ck: WireMessage::from_parts(
-                        "assistant",
-                        calls,
-                        None,
-                        wire::ProviderExtras::new(),
-                        wire::HarnessMeta {
-                            harness_id: Some("duplicate-owner".to_string()),
-                            ..Default::default()
-                        },
-                    ),
-                },
-                tool_result("duplicate-old-result", 2, "duplicate-old", "old output"),
-                tool_result("duplicate-new-result", 3, "duplicate-new", "new output"),
-            ],
-        );
-        let projection = project_messages(&request.messages).unwrap();
-        let live = projection.blocks.iter().collect::<Vec<_>>();
-        let items = tail_sel_items(&live, None, &HashMap::new());
-        let decisions = crate::selection::select_reductions(
-            &items,
-            &HashSet::new(),
-            &SelectionContext {
-                pass_class: PassClass::Execute,
-                current_total_input_tokens: 0.0,
-                ceiling_tokens: 0.0,
-                protected_cutoff_ordinal: 0,
-                last_execute_ordinal: 0,
-                scheduler_pressure_execute: false,
-                prior_input_sample: 0.0,
-                has_prior_drop: false,
-                agent_drop_ids: Vec::new(),
-                agent_drop_command_ids: HashMap::new(),
-                first_applied_agent_drop_ids: HashSet::new(),
-                pass_already_busting: false,
-                supersession_ride_available: true,
-                tag_window_protected_block_ids: HashSet::new(),
-                exempt_message_protected_block_ids: HashSet::new(),
-            },
-            &SelectionConfig::default(),
-        );
-        assert_eq!(
-            decisions
-                .iter()
-                .map(|decision| (decision.target_id.as_str(), decision.kind.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("duplicate-old-result#0", "drop"),
-                ("duplicate-owner#0", "drop"),
-            ],
-            "only the older same-owner duplicate freezes as a full drop: {decisions:?}"
-        );
-
-        let core = CoreState {
-            frozen_units: decisions
-                .iter()
-                .map(|decision| red_unit(&decision.target_id, &decision.kind, &decision.payload))
-                .collect(),
-            ..CoreState::empty()
-        };
-        let meta = ModuleMeta::default();
-        let first = build_output_with_tags(
-            &core,
-            &meta,
-            &projection,
-            &normalize_synthetic_todo_ingress(&request),
-            None,
-            false,
-            None,
-            &BTreeMap::new(),
-            0,
-            false,
-            true,
-        )
-        .unwrap();
-        let first_bytes = canonical_output(&first.messages);
-        let replay = build_output_with_tags(
-            &core,
-            &meta,
-            &projection,
-            &normalize_synthetic_todo_ingress(&request),
-            None,
-            false,
-            None,
-            &BTreeMap::new(),
-            0,
-            false,
-            true,
-        )
-        .unwrap();
-        assert_eq!(canonical_output(&replay.messages), first_bytes);
         assert!(core.frozen_units.iter().all(|unit| unit.kind == "drop"));
     }
 

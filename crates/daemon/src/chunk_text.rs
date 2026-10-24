@@ -120,18 +120,10 @@ pub fn format_block_line(
 /// Path-like keys have priority and are truncated to 60 Unicode scalar values.
 /// Symbol-like keys are returned without truncation. Non-objects return `None`.
 pub(crate) fn extract_key_arg(input: &Value) -> Option<String> {
-    let object = input.as_object()?;
-    for key in ["filePath", "path", "pattern", "query"] {
-        if let Some(value) = object.get(key).and_then(Value::as_str) {
-            return Some(truncate_arg(value));
-        }
+    match crate::tool_vocabulary::display_arg(input)? {
+        crate::tool_vocabulary::DisplayArg::PathLike(value) => Some(truncate_arg(value)),
+        crate::tool_vocabulary::DisplayArg::SymbolLike(value) => Some(value.to_string()),
     }
-    for key in ["symbol", "module", "action"] {
-        if let Some(value) = object.get(key).and_then(Value::as_str) {
-            return Some(value.to_string());
-        }
-    }
-    None
 }
 
 fn truncate_arg(value: &str) -> String {

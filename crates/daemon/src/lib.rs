@@ -42,6 +42,14 @@ pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
 mod ingress_scan;
 pub mod tool_outcome;
+pub(crate) mod tool_vocabulary;
+/// Re-exports the vocabulary queries for the selection differential reference.
+#[cfg(feature = "test-support")]
+pub mod tool_vocabulary_evaluation {
+    pub use crate::tool_vocabulary::{
+        Tier, ToolClass, classify, diff_keys, is_zero_value_note_call, normalize, path_arg, tier,
+    };
+}
 
 /// Re-exports the publication path's presented-line renderer and
 /// summarizer-output validator for scripted-summary tests.
@@ -11823,8 +11831,12 @@ impl HandlerCore {
         match name {
             "eidnara_memory" => self.handle_eidnara_memory_facade(channel, &request).await,
             "eidnara_search" => self.handle_eidnara_search_facade(channel, &request).await,
-            "eidnara_reduce" => self.handle_eidnara_reduce_facade(channel, &request).await,
-            "eidnara_note" => self.handle_eidnara_note_facade(channel, &request).await,
+            prompt_surface::EIDNARA_REDUCE_TOOL => {
+                self.handle_eidnara_reduce_facade(channel, &request).await
+            }
+            prompt_surface::EIDNARA_NOTE_TOOL => {
+                self.handle_eidnara_note_facade(channel, &request).await
+            }
             _ => unrecognized_request_error(&request),
         }
     }
@@ -12872,7 +12884,7 @@ impl HandlerCore {
             None
         };
         if is_mutation && command_id.is_none() {
-            self.log_missing_facade_command_id(session, "eidnara_note", action);
+            self.log_missing_facade_command_id(session, prompt_surface::EIDNARA_NOTE_TOOL, action);
         }
 
         match action {
@@ -12909,7 +12921,7 @@ impl HandlerCore {
                             project,
                             "notes",
                             session,
-                            "eidnara_note",
+                            prompt_surface::EIDNARA_NOTE_TOOL,
                             action,
                             command_id.as_deref(),
                             |tx| {
@@ -12957,7 +12969,7 @@ impl HandlerCore {
                             project,
                             "notes",
                             session,
-                            "eidnara_note",
+                            prompt_surface::EIDNARA_NOTE_TOOL,
                             action,
                             command_id.as_deref(),
                             |tx| {
@@ -13122,7 +13134,7 @@ impl HandlerCore {
                         project,
                         "notes",
                         session,
-                        "eidnara_note",
+                        prompt_surface::EIDNARA_NOTE_TOOL,
                         action,
                         command_id.as_deref(),
                         |tx| {
@@ -13168,7 +13180,7 @@ impl HandlerCore {
                         project,
                         "notes",
                         session,
-                        "eidnara_note",
+                        prompt_surface::EIDNARA_NOTE_TOOL,
                         action,
                         command_id.as_deref(),
                         |tx| {
@@ -17801,7 +17813,7 @@ fn refuse_conditioned_note_without_evaluator(
     if let Some(command_id) = command_id {
         match store.facade_mutation_ledger_response(
             identity_scope,
-            "eidnara_note",
+            prompt_surface::EIDNARA_NOTE_TOOL,
             action,
             command_id,
         ) {
@@ -18850,6 +18862,8 @@ mod tests {
     mod source_corpus_tests;
     #[path = "source_recovery_tests.rs"]
     mod source_recovery_tests;
+    #[path = "tool_vocabulary_tests.rs"]
+    mod tool_vocabulary_tests;
     #[path = "transform/window_admission.rs"]
     mod window_admission;
     #[path = "window_cap_tests.rs"]

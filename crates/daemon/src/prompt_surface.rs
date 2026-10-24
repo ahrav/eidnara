@@ -44,7 +44,7 @@ const GUIDANCE_LIGHT_PRIMARY: Option<&str> = Some(GUIDANCE_LIGHT_PRIMARY_TEXT);
 const GUIDANCE_LIGHT_NO_REDUCE: Option<&str> = Some(GUIDANCE_LIGHT_NO_REDUCE_TEXT);
 const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     (
-        "eidnara_reduce",
+        EIDNARA_REDUCE_TOOL,
         "Queue a tagged reduction request for asynchronous delivery.",
     ),
     (
@@ -56,20 +56,25 @@ const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
         "Before answering from memory, keyword-search saved memories, notes, and compacted summaries; this Claude Code leg is literal, not semantic.",
     ),
     (
-        "eidnara_note",
+        EIDNARA_NOTE_TOOL,
         "Save or inspect future session follow-ups; surface_condition is recorded but not evaluated on this Claude Code leg.",
     ),
 ]);
+
+/// Eidnara's reduce facade tool identifier, registered by Eidnara itself on every harness.
+pub(crate) const EIDNARA_REDUCE_TOOL: &str = "eidnara_reduce";
+/// Eidnara's note facade tool identifier, registered by Eidnara itself on every harness.
+pub(crate) const EIDNARA_NOTE_TOOL: &str = "eidnara_note";
 
 const EIDNARA_REDUCE_DESCRIPTION: &str =
     "Acknowledge a tagged reduction request for asynchronous delivery";
 
 /// Tool IDs whose descriptions may be selected or overridden.
 pub const PROMPT_SURFACE_TOOL_IDS: [&str; 4] = [
-    "eidnara_reduce",
+    EIDNARA_REDUCE_TOOL,
     "eidnara_memory",
     "eidnara_search",
-    "eidnara_note",
+    EIDNARA_NOTE_TOOL,
 ];
 
 /// Authored prompt and description set selected for a session.
@@ -261,9 +266,9 @@ pub fn module_tools(selection: &PromptSurfaceSelection) -> Vec<Tool> {
             schema: json!({ "type": "object" }),
         },
         Tool {
-            name: "eidnara_reduce".to_string(),
+            name: EIDNARA_REDUCE_TOOL.to_string(),
             description: Some(description(
-                "eidnara_reduce",
+                EIDNARA_REDUCE_TOOL,
                 EIDNARA_REDUCE_DESCRIPTION.to_string(),
             )),
             execution_mode: ExecutionMode::Pure,
@@ -290,8 +295,8 @@ pub fn module_tools(selection: &PromptSurfaceSelection) -> Vec<Tool> {
             schema: eidnara_search_schema(),
         },
         Tool {
-            name: "eidnara_note".to_string(),
-            description: Some(description("eidnara_note", eidnara_note_description())),
+            name: EIDNARA_NOTE_TOOL.to_string(),
+            description: Some(description(EIDNARA_NOTE_TOOL, eidnara_note_description())),
             execution_mode: ExecutionMode::Mutating,
             schema: eidnara_note_schema(),
         },

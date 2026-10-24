@@ -7,6 +7,7 @@
 #[cfg(test)]
 use crate::selection::SelMessageRole;
 use crate::selection::{SelItem, SelKind};
+use crate::tool_vocabulary::{NameRule, TODO_TOOL as TODO_TOOL_NAME, is_todo_tool};
 use memory_store::{
     BlockKind, FrozenSyntheticTodoPair, HarnessMeta, ModuleMeta, OutputKind, ProviderExtras,
     ToolOutput, WireBlock, WireMessage,
@@ -17,7 +18,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const SYNTHETIC_CALL_ID_PREFIX: &str = "synthetic_todo_";
-const TODO_TOOL_NAME: &str = "todowrite";
 const DEFAULT_PRIORITY: &str = "medium";
 const COMPLETED_STATUS: &str = "completed";
 const TERMINAL_STATUSES: &[&str] = &["completed", "cancelled"];
@@ -432,7 +432,7 @@ fn newest_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
         let SelKind::ToolCall { name, input } = &item.kind else {
             continue;
         };
-        if !name.eq_ignore_ascii_case(TODO_TOOL_NAME) {
+        if !is_todo_tool(name, NameRule::IgnoreAsciiCase) {
             continue;
         }
         let Some(state_json) = todo_state_from_input(input.as_ref()) else {

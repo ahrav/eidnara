@@ -15,7 +15,7 @@ mod reference {
     //! decisions → the slice-3 freeze/replay stays byte-identical.
     //!
     //! Faithful port of the OpenCode selectors: control-plane supersession, edit
-    //! supersession, duplicate-tool cleanup, emergency tiered drop, age-based two-pass,
+    //! supersession, emergency tiered drop, age-based two-pass,
     //! and eidnara_reduce agent-drop.
     //!
     //! Cache-critical invariants (enforced structurally here):
@@ -36,6 +36,7 @@ mod reference {
 
     use std::collections::{HashMap, HashSet};
 
+    use daemon::tool_vocabulary_evaluation::{self as vocabulary, Tier, ToolClass};
     pub use daemon::transform::ReductionDecision;
 
     fn utf16_len(text: &str) -> usize {
@@ -62,35 +63,6 @@ mod reference {
     const TODOWRITE_KEEP: usize = 1;
     /// Recent `eidnara_reduce` arcs retained as visible housekeeping exemplars.
     const EIDNARA_REDUCE_KEEP: usize = 3;
-    /// Zero-value meta tools whose every occurrence is droppable.
-    const ZERO_VALUE_META_TOOLS: &[&str] = &["bash_status", "bash_kill"];
-    /// `eidnara_note` actions that carry no lasting value (droppable when positively read).
-    const EIDNARA_NOTE_ZERO_VALUE_ACTIONS: &[&str] = &["read", "dismiss"];
-    /// Mirrors the duplicate-safe tool list in the TypeScript twin:
-    /// the TypeScript heuristic-cleanup hook this reference was ported from.
-    const DEDUP_SAFE_TOOLS: &[&str] = &[
-        "mcp_grep",
-        "mcp_read",
-        "mcp_glob",
-        "mcp_ast_grep_search",
-        "mcp_lsp_diagnostics",
-        "mcp_lsp_symbols",
-        "mcp_lsp_find_references",
-        "mcp_lsp_goto_definition",
-        "mcp_lsp_prepare_rename",
-    ];
-    /// Tools whose superseded older calls compress to an edit_marker.
-    const EDIT_TOOLS: &[&str] = &["edit", "write"];
-    /// filePath-like input keys, preserved verbatim in an edit_marker.
-    const FILE_PATH_KEYS: &[&str] = &["filePath", "file_path", "path"];
-    /// Diff-bearing input keys, clamped to a region hint in an edit_marker.
-    const DIFF_KEYS: &[&str] = &[
-        "oldString",
-        "newString",
-        "content",
-        "old_string",
-        "new_string",
-    ];
     /// Region-hint length: enough to identify the edited section, cheap to keep.
     const EDIT_REGION_HINT_LEN: usize = 40;
     /// The clamp sentinel appended to a region-hinted diff value.
@@ -106,10 +78,6 @@ mod reference {
     const EMERGENCY_REARM_MIN_TOKENS: f64 = 2000.0;
     /// Byte→token estimate for the emergency reclaim math (matches the TS nudge).
     const TOKENS_PER_BYTE: f64 = 0.25;
-    /// T1 (keep longest): navigation/structure the agent re-uses.
-    const T1_TOOLS: &[&str] = &["read", "todowrite", "task", "aft_outline", "aft_zoom"];
-    /// T2 (medium): edit-class continuation context.
-    const T2_TOOLS: &[&str] = &["edit", "write", "apply_patch", "grep", "glob", "aft_search"];
     /// Newest-window tool arcs keep a name-preserving call skeleton; older ones fully
     /// reduce the call block. The skeleton-vs-full choice is frozen at freeze time.
     pub(crate) const RECENT_TOOL_SKELETON_WINDOW: usize = 20;
@@ -262,12 +230,8 @@ mod reference {
         arc_id: String,
         /// Message that owns the ToolCall block; duplicate fingerprints are owner-qualified.
         owner_message_id: Option<String>,
+        /// The raw tool name of the first ToolCall block, else of the first result.
         name: String,
-        /// Original tool name, needed because the duplicate-safe set retains the `mcp_` prefix.
-        dedup_name: String,
-        /// Result position mirrors the order in which the TS tagger allocates tool tags.
-        dedup_result_ordinal: u64,
-        dedup_result_block_index: usize,
         /// The arc's age key = the ToolCall block's ordinal (or the min block ordinal).
         ordinal: u64,
         provider_executed: bool,
@@ -293,31 +257,6 @@ mod reference {
         }
     }
 
-    /// Normalize a tool name for matching (lowercase, strip an `mcp_` prefix) — mirrors
-    /// the TS `normalizeToolName`, defensive for MCP-surfaced names.
-    fn normalize_tool_name(name: &str) -> String {
-        let lower = name.to_lowercase();
-        lower
-            .strip_prefix("mcp_")
-            .map(str::to_string)
-            .unwrap_or(lower)
-    }
-
-    fn is_edit_tool(name: &str) -> bool {
-        EDIT_TOOLS.contains(&name)
-    }
-
-    /// Read a string field from a ToolCall input object by any of the given keys.
-    fn read_input_str(input: &serde_json::Value, keys: &[&str]) -> Option<String> {
-        let obj = input.as_object()?;
-        for key in keys {
-            if let Some(serde_json::Value::String(s)) = obj.get(*key) {
-                return Some(s.clone());
-            }
-        }
-        None
-    }
-
     /// Group the flat blocks into tool arcs (by `arc_id`), collecting the call/result
     /// bytes and adjacent reasoning. Non-tool, non-arc blocks are ignored here (they
     /// are not reduction targets for the tool selectors; eidnara_reduce targets ids directly).
@@ -333,9 +272,6 @@ mod reference {
                 arc_id: arc_id.clone(),
                 owner_message_id: None,
                 name: String::new(),
-                dedup_name: String::new(),
-                dedup_result_ordinal: 0,
-                dedup_result_block_index: 0,
                 ordinal: u64::MAX,
                 provider_executed: false,
                 input: serde_json::Value::Null,
@@ -360,8 +296,7 @@ mod reference {
             }
             match &item.kind {
                 SelKind::ToolCall { name, input } => {
-                    entry.name = normalize_tool_name(name);
-                    entry.dedup_name = name.clone();
+                    entry.name = name.clone();
                     if entry.call_inputs.is_empty() {
                         entry.input = input.clone();
                         entry.owner_message_id = item_message_id(item).map(str::to_owned);
@@ -372,19 +307,7 @@ mod reference {
                 }
                 SelKind::ToolResult { tool_name, .. } => {
                     if entry.name.is_empty() {
-                        entry.name = normalize_tool_name(tool_name);
-                        entry.dedup_name = tool_name.clone();
-                    }
-                    let block_index = item
-                        .id
-                        .rsplit_once('#')
-                        .and_then(|(_, index)| index.parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if (item.ordinal, block_index)
-                        > (entry.dedup_result_ordinal, entry.dedup_result_block_index)
-                    {
-                        entry.dedup_result_ordinal = item.ordinal;
-                        entry.dedup_result_block_index = block_index;
+                        entry.name = tool_name.clone();
                     }
                     entry.result_ids.push(item.id.clone());
                     entry.result_bytes += item.byte_size;
@@ -607,10 +530,7 @@ mod reference {
             None => return DROPPED_PLACEHOLDER.to_string(),
         };
         for (key, value) in obj.iter_mut() {
-            if FILE_PATH_KEYS.contains(&key.as_str()) {
-                continue;
-            }
-            if !DIFF_KEYS.contains(&key.as_str()) {
+            if !vocabulary::diff_keys().contains(&key.as_str()) {
                 continue;
             }
             if let serde_json::Value::String(s) = value {
@@ -664,7 +584,6 @@ mod reference {
         FullDrop,
         /// TS duplicate-tool cleanup always fully drops older calls. It bypasses the ordinary
         /// recency skeleton window, but still demotes for reasoning-adjacency safety.
-        DedupFullDrop,
         /// Edit-supersession: keep filePath + a region hint (regardless of window).
         EditMarker,
     }
@@ -729,9 +648,7 @@ mod reference {
             if !frozen.contains(call_id) {
                 let (kind, payload) = match shape {
                     ArcShape::Skeleton => (RedKind::Skeleton, skeleton_payload(input)),
-                    ArcShape::FullDrop | ArcShape::DedupFullDrop => {
-                        (RedKind::Drop, DROPPED_PLACEHOLDER.to_string())
-                    }
+                    ArcShape::FullDrop => (RedKind::Drop, DROPPED_PLACEHOLDER.to_string()),
                     ArcShape::EditMarker => (RedKind::EditMarker, edit_marker_payload(input)),
                 };
                 out.push(ReductionDecision {
@@ -763,7 +680,7 @@ mod reference {
         let mut newest_first: Vec<&ToolArc> = arcs
             .iter()
             .copied()
-            .filter(|arc| arc.name == "eidnara_reduce")
+            .filter(|arc| vocabulary::classify(&arc.name) == ToolClass::EidnaraReduce)
             .collect();
         newest_first.sort_by(|left, right| {
             right
@@ -798,10 +715,10 @@ mod reference {
         let mut seen_file: HashSet<String> = HashSet::new();
 
         for arc in newest_first {
-            let name = arc.name.as_str();
+            let class = vocabulary::classify(&arc.name);
             // Edit supersession first (1.2): older-per-file → edit_marker.
-            if is_edit_tool(name) {
-                if let Some(fp) = read_input_str(&arc.input, FILE_PATH_KEYS) {
+            if class == ToolClass::Edit {
+                if let Some(fp) = vocabulary::path_arg(&arc.input).map(str::to_owned) {
                     if seen_file.contains(&fp) {
                         intents
                             .entry(arc.arc_id.clone())
@@ -813,19 +730,15 @@ mod reference {
                 // no resolvable filePath → skip (fail-safe); still fall through to name rules
             }
             // Control-plane supersession (1.1).
-            let is_drop_target = if name == "todowrite" {
-                todowrite_seen += 1;
-                todowrite_seen > TODOWRITE_KEEP
-            } else if name == "eidnara_reduce" {
-                !protected_eidnara_reduce_arcs.contains(&arc.arc_id)
-            } else if ZERO_VALUE_META_TOOLS.contains(&name) {
-                true
-            } else if name == "eidnara_note" {
-                read_input_str(&arc.input, &["action"])
-                    .map(|a| EIDNARA_NOTE_ZERO_VALUE_ACTIONS.contains(&a.as_str()))
-                    .unwrap_or(false)
-            } else {
-                false
+            let is_drop_target = match class {
+                ToolClass::TodoWrite => {
+                    todowrite_seen += 1;
+                    todowrite_seen > TODOWRITE_KEEP
+                }
+                ToolClass::EidnaraReduce => !protected_eidnara_reduce_arcs.contains(&arc.arc_id),
+                ToolClass::ZeroValueMeta => true,
+                ToolClass::EidnaraNote => vocabulary::is_zero_value_note_call(&arc.input),
+                ToolClass::Edit | ToolClass::Tabled | ToolClass::Unknown => false,
             };
             if is_drop_target {
                 // A full drop supersedes an edit_marker for the same arc (drop wins).
@@ -833,58 +746,6 @@ mod reference {
             }
         }
         intents
-    }
-
-    /// Select older completed duplicate calls from safe tools. The owner is in both the lookup key
-    /// and the fingerprint, so identical calls from distinct assistant messages stay distinct.
-    /// Arguments use `serde_json` serialization; a serialization failure skips that candidate.
-    fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<String> {
-        // Including `owner_message_id` in `fingerprint` keeps identical calls from
-        // distinct assistant messages in separate buckets.
-        let mut groups: HashMap<String, Vec<&ToolArc>> = HashMap::new();
-        for arc in arcs {
-            if !DEDUP_SAFE_TOOLS.contains(&arc.dedup_name.as_str())
-                || arc.owner_message_id.is_none()
-                || arc.result_ids.is_empty()
-                || arc
-                    .call_inputs
-                    .iter()
-                    .any(|(id, _)| ctx.block_is_protected(id))
-                || arc.result_ids.iter().any(|id| ctx.block_is_protected(id))
-                || (ctx.protected_cutoff_ordinal > 0 && arc.ordinal > ctx.protected_cutoff_ordinal)
-            {
-                continue;
-            }
-            let Some(args) = serde_json::to_string(&arc.input).ok() else {
-                continue;
-            };
-            let owner_message_id = arc.owner_message_id.as_ref().expect("owner checked above");
-            let fingerprint = format!("{owner_message_id}:{}:{args}", arc.dedup_name);
-            groups.entry(fingerprint).or_default().push(*arc);
-        }
-        groups
-            .into_values()
-            .flat_map(|mut group| {
-                if group.len() <= 1 {
-                    return Vec::new();
-                }
-                group.sort_by(|left, right| {
-                    left.dedup_result_ordinal
-                        .cmp(&right.dedup_result_ordinal)
-                        .then_with(|| {
-                            left.dedup_result_block_index
-                                .cmp(&right.dedup_result_block_index)
-                        })
-                        .then_with(|| left.arc_id.cmp(&right.arc_id))
-                });
-                // Preserve the newest (highest tool-result position, then stable arc id).
-                group.pop();
-                group
-                    .into_iter()
-                    .map(|arc| arc.arc_id.clone())
-                    .collect::<Vec<_>>()
-            })
-            .collect()
     }
 
     fn two_pass_batch_can_apply(ctx: &SelectionContext) -> bool {
@@ -901,7 +762,7 @@ mod reference {
         let protected_eidnara_reduce_arcs = newest_eidnara_reduce_arc_ids(arcs);
         let newest_todowrite = arcs
             .iter()
-            .filter(|arc| arc.name == "todowrite")
+            .filter(|arc| vocabulary::classify(&arc.name) == ToolClass::TodoWrite)
             .max_by(|left, right| {
                 left.ordinal
                     .cmp(&right.ordinal)
@@ -967,13 +828,10 @@ mod reference {
     /// Tier of a tool for the emergency drop: T1 nav (keep longest), T2 edit·search, T3
     /// misc (drop first). Mirrors the TS `resolveToolTier`.
     fn resolve_tool_tier(name: &str) -> u8 {
-        let n = normalize_tool_name(name);
-        if T1_TOOLS.contains(&n.as_str()) {
-            1
-        } else if T2_TOOLS.contains(&n.as_str()) {
-            2
-        } else {
-            3
+        match vocabulary::tier(&vocabulary::normalize(name)) {
+            Tier::T1 => 1,
+            Tier::T2 => 2,
+            Tier::T3 => 3,
         }
     }
 
@@ -1183,21 +1041,12 @@ mod reference {
 
         // Per-arc reduction intents (arc_id → shape), assembled in TS precedence order.
         let mut arc_shapes: HashMap<String, ArcShape> = HashMap::new();
-        // Dedup precedes age selection, as in the TS heuristic pass. An older duplicate
-        // removed here must not also enter the two-pass age batch.
-        let dedup_arc_ids = select_tool_dedup(&active_arcs, ctx);
-        let arcs_after_dedup: Vec<&ToolArc> = active_arcs
-            .iter()
-            .copied()
-            .filter(|arc| !dedup_arc_ids.contains(&arc.arc_id))
-            .collect();
-        let two_pass_arc_ids = select_two_pass(&arcs_after_dedup, ctx);
+        let two_pass_arc_ids = select_two_pass(&active_arcs, ctx);
         let mut eligible_supersession_arc_ids = None;
 
         match ctx.pass_class {
             PassClass::EmergencyForce => {
-                // Compute emergency first to learn whether this pass has concrete reclaim work;
-                // dedup intent still enters before the age intent below.
+                // Compute emergency first to learn whether this pass has concrete reclaim work.
                 // Floor accounting and eviction candidates have different populations. Every
                 // unfrozen tagged-content class contributes to the fixed-floor derivation, including
                 // text, media, reasoning, and non-droppable tools; system-prefix and opaque metadata
@@ -1205,11 +1054,6 @@ mod reference {
                 let all_active_floor_tokens = active_floor_tokens(items, frozen_keys);
                 let emergency_arc_ids =
                     select_emergency(&active_arcs, ctx, all_active_floor_tokens);
-                if !emergency_arc_ids.is_empty() || !two_pass_arc_ids.is_empty() {
-                    for arc_id in &dedup_arc_ids {
-                        arc_shapes.insert(arc_id.clone(), ArcShape::DedupFullDrop);
-                    }
-                }
                 // The force-band edge admits a waiting age batch without changing emergency's
                 // own candidate accounting or tiered selection.
                 for arc_id in &two_pass_arc_ids {
@@ -1244,13 +1088,10 @@ mod reference {
                 }
             }
             PassClass::Execute => {
-                // Order = dedup (drop) → two-pass (drop) → control-plane (drop) → edit (edit_marker).
+                // Order = two-pass (drop) → control-plane (drop) → edit (edit_marker).
                 // drop wins: a later edit_marker never overrides an assigned drop. The transform maps
                 // ordinary scheduler Execute here only when classification identifies an independent
                 // bust opportunity; an active background history_summarizer defers ordinary executes first.
-                for arc_id in &dedup_arc_ids {
-                    arc_shapes.insert(arc_id.clone(), ArcShape::DedupFullDrop);
-                }
                 for arc_id in &two_pass_arc_ids {
                     arc_shapes
                         .entry(arc_id.clone())
@@ -1350,11 +1191,7 @@ mod reference {
                 {
                     ArcShape::Skeleton
                 }
-                ArcShape::DedupFullDrop if reasoning_adjacency_collapse_arcs.contains(arc_id) => {
-                    ArcShape::Skeleton
-                }
                 ArcShape::FullDrop => ArcShape::FullDrop,
-                ArcShape::DedupFullDrop => ArcShape::DedupFullDrop,
             };
             expand_arc(arc, resolved, frozen_keys, &mut out);
         }
@@ -1553,7 +1390,7 @@ fn item_spec() -> impl Strategy<Value = ItemSpec> {
         )
 }
 
-const TOOL_COUNT: u8 = 28;
+const TOOL_COUNT: u8 = 21;
 
 const TOOLS: [&str; TOOL_COUNT as usize] = [
     "mcp_read",
@@ -1580,16 +1417,7 @@ const TOOLS: [&str; TOOL_COUNT as usize] = [
     "apply_patch",
     "aft_search",
     "grep",
-    "mcp_glob",
-    "mcp_ast_grep_search",
-    "mcp_lsp_diagnostics",
-    "mcp_lsp_symbols",
-    "mcp_lsp_find_references",
-    "mcp_lsp_goto_definition",
-    "mcp_lsp_prepare_rename",
 ];
-
-const DEDUP_SAFE_TOOL_INDICES: [u8; 9] = [0, 1, 21, 22, 23, 24, 25, 26, 27];
 
 /// The rocket's UTF-16 surrogate pair crosses `EDIT_REGION_HINT_LEN`.
 const DIFF_ACROSS_HINT_BOUNDARY: &str = "012345678901234567890123456789012345678\u{1F680}tail";
@@ -2061,14 +1889,10 @@ fn emergency_ctx_bits() -> impl Strategy<Value = CtxBits> {
     )
 }
 
-fn dedup_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
-    (
-        2u8..6,
-        proptest::sample::select(&DEDUP_SAFE_TOOL_INDICES),
-        0u8..10,
-        any::<bool>(),
-    )
-        .prop_map(|(arc_count, tool, input, tag_protected)| {
+/// Several identical calls of one tool under one owner message, for every tool in [`TOOLS`].
+fn identical_call_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
+    (2u8..6, 0..TOOL_COUNT, 0u8..10, any::<bool>()).prop_map(
+        |(arc_count, tool, input, tag_protected)| {
             let mut specs = Vec::with_capacity(usize::from(arc_count) * 2);
             for arc in 0..arc_count {
                 let mut push = |kind: u8, byte_size: u16, tag_protected: bool| {
@@ -2093,7 +1917,8 @@ fn dedup_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
                 push(1, 400, false);
             }
             specs
-        })
+        },
+    )
 }
 
 fn eidnara_reduce_supersession_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
@@ -2235,7 +2060,7 @@ fn optimized_matches_frozen_reference_for_cross_owner_duplicates() {
 }
 
 #[test]
-fn optimized_matches_frozen_reference_for_tied_duplicate_ordinals() {
+fn optimized_matches_frozen_reference_for_tied_identical_calls() {
     let mut specs = Vec::with_capacity(6);
     for arc in 0..3 {
         for kind in [KIND_TOOL_CALL, KIND_TOOL_RESULT] {
@@ -2261,12 +2086,9 @@ fn optimized_matches_frozen_reference_for_tied_duplicate_ordinals() {
 
     let (optimized, expected, _, _) = outcome_pair!(specs, bits);
     assert_eq!(optimized, expected);
-    assert_eq!(optimized.0.len(), 4);
     assert!(
-        optimized
-            .0
-            .iter()
-            .all(|(id, _, _)| id != "m0#4" && id != "m0#5")
+        optimized.0.is_empty(),
+        "identical calls stay live: {optimized:?}"
     );
 }
 
@@ -2491,8 +2313,8 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(192))]
     #[test]
-    fn optimized_matches_frozen_reference_on_duplicate_calls(
-        specs in dedup_specs(),
+    fn optimized_matches_frozen_reference_on_identical_calls(
+        specs in identical_call_specs(),
         bits in ctx_bits(),
     ) {
         let (optimized, expected, specs, bits) = outcome_pair!(specs, bits);
@@ -2646,7 +2468,7 @@ fn generators_reach_every_decision_class() {
     for strategy in [
         proptest::collection::vec(item_spec(), 0..40).boxed(),
         arc_window_specs().boxed(),
-        dedup_specs().boxed(),
+        identical_call_specs().boxed(),
         payload_clamp_specs().boxed(),
         supersession_withheld_specs().boxed(),
     ] {

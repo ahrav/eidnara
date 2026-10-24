@@ -243,6 +243,25 @@ exposure model appends the same digests after the text of each record that
 carries text, so a span annotated on a tool block stays `absent` while the
 excerpts reach the producer.
 
+### Tool vocabulary
+
+A literal in the interpretation layer is contract when a harness with zero
+tools registered still emits it: message and part shapes, status fields,
+identity fields, and settled timestamps. It is vocabulary when its
+correctness depends on a tool author's choice: tool names, argument keys, and
+tool-authored metadata such as `state.metadata.exit`. Contract literals stay
+with the readers that parse them. Every vocabulary literal lives in
+`crates/daemon/src/tool_vocabulary.rs` behind typed queries (`classify`,
+`tier`, `path_arg`, `display_arg`, `diff_keys`, `exit_code`,
+`truncated_flag`), and that module is the one literal site:
+`scripts/forbid-tool-literals.sh` fails CI when a distinctive tool name or
+argument key appears elsewhere in daemon production source. A name no table
+describes classifies as `Unknown`. Selection never drops, deduplicates, or
+edit-marks an `Unknown` tool by a class decision, gives it the default tier,
+and shows its display argument from the generic key list, and the outcome
+record carries no exit code for it. Eidnara's own `eidnara_reduce` and
+`eidnara_note` identifiers are defined once in `prompt_surface.rs`.
+
 ### Fixture qualification
 
 The direct-host fixture example (`crates/daemon/examples/direct_host_fixture.rs`
