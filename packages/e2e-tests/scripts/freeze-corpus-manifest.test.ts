@@ -13,7 +13,12 @@ afterEach(() => {
 function run(cwd: string, cmd: string[], env: Record<string, string | undefined> = {}): string {
     const proc = Bun.spawnSync(cmd, {
         cwd,
-        env: { ...process.env, ...env },
+        env: {
+            ...Object.fromEntries(
+                Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+            ),
+            ...env,
+        },
         stdout: "pipe",
         stderr: "pipe",
     });

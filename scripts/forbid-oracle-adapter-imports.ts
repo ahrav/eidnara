@@ -26,7 +26,7 @@ const RUST_FORBIDDEN = new RegExp(
         String.raw`\b(?:opencode|pi)_units\w*`,
         String.raw`#\[path\b`,
         String.raw`\binclude(?:_str|_bytes)?!`,
-        String.raw`\bmod\s+\w+\s*;`,
+        String.raw`\bmod\s+(?:r#)?\w+\s*;`,
     ].join("|"),
 );
 
