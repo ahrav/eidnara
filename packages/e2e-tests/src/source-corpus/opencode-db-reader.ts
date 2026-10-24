@@ -41,11 +41,13 @@ export interface ExpectedRecord {
 
 type Json = Record<string, unknown>;
 
+function isObject(value: unknown): value is Json {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function object(value: unknown, at: string): Json {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        throw new Error(`${at}: not an object`);
-    }
-    return value as Json;
+    if (!isObject(value)) throw new Error(`${at}: not an object`);
+    return value;
 }
 
 function text(value: unknown, at: string): string {
@@ -103,8 +105,7 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
             } else if (kind === "tool") {
                 const state = object(part.state, `${at} state`);
                 const status = text(state.status, `${at} status`);
-                const metadata =
-                    state.metadata === undefined ? {} : object(state.metadata, `${at} metadata`);
+                const metadata = isObject(state.metadata) ? state.metadata : {};
                 const unsettled =
                     (status !== "completed" && status !== "error") ||
                     (metadata.interrupted === true && !settled);

@@ -143,6 +143,26 @@ describe("OpenCode db reader", () => {
         expect(() => readOpenCodeSession(db, SESSION)).toThrow(/output: not a string/);
     });
 
+    it("reads non-object tool metadata as unknown exit, truncation, and interruption", () => {
+        const db = store();
+        message(db, "msg_1", 1, { role: "assistant", time: { created: 1, completed: 2 } });
+        parts(db, "msg_1", [
+            {
+                ...settledTool("c1", "bash", {}),
+                state: { status: "completed", output: "ok", metadata: null },
+            },
+            {
+                ...settledTool("c2", "bash", {}),
+                state: { status: "completed", output: "ok", metadata: [1] },
+            },
+        ]);
+        const [assistant] = readOpenCodeSession(db, SESSION);
+        expect(assistant?.units.map((u) => [u.tool?.exit, u.tool?.truncated])).toEqual([
+            [null, null],
+            [null, null],
+        ]);
+    });
+
     it("indexes parts by (time_created, id), the order the harness presents them in", () => {
         const db = store();
         message(db, "msg_1", 1, { role: "user", time: { created: 1 } });
