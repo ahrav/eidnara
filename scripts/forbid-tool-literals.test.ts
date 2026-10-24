@@ -92,6 +92,8 @@ describe("forbid-tool-literals.sh", () => {
         write("crates/daemon/src/boundary_tests.rs", `const K: &str = ${FILE_PATH};\n`);
         write("crates/daemon/src/tests/fixture.rs", `const K: &str = ${FILE_PATH};\n`);
         write("crates/daemon/src/testdata/fixture.rs", `const K: &str = ${FILE_PATH};\n`);
+        write("crates/daemon/tests/selection.rs", `const K: &str = ${FILE_PATH};\n`);
+        write("crates/daemon/testdata/golden.json", `{${FILE_PATH}: "a.rs"}\n`);
         for (const { status } of both()) expect(status).toBe(0);
     });
 

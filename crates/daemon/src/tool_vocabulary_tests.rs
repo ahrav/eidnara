@@ -255,12 +255,12 @@ proptest! {
 
     #[test]
     fn tabled_names_classify_under_any_ascii_case_and_one_mcp_prefix(
-        index in 0usize..23,
+        tabled in proptest::sample::select(
+            TABLED_NAMES.iter().flat_map(|table| table.iter().copied()).collect::<Vec<&str>>(),
+        ),
         flips in proptest::collection::vec(any::<bool>(), 16),
         prefix in proptest::sample::select(vec!["", "mcp_", "MCP_", "Mcp_"]),
     ) {
-        let names: Vec<&str> = TABLED_NAMES.iter().flat_map(|table| table.iter().copied()).collect();
-        let tabled = names[index % names.len()];
         let cased: String = tabled
             .chars()
             .zip(flips.iter().cycle())
