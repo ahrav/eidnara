@@ -111,6 +111,28 @@ describe("forbid-tool-literals.sh", () => {
         }
     });
 
+    test("catches a literal after a test module that closes on its opening line", () => {
+        write(
+            "crates/daemon/src/boundary.rs",
+            `#[cfg(test)]\nmod tests {}\n\npub fn key() -> &'static str {\n    ${FILE_PATH}\n}\n`,
+        );
+        for (const { status, stderr } of both()) {
+            expect(status).toBe(1);
+            expect(stderr).toContain("crates/daemon/src/boundary.rs:5:");
+        }
+    });
+
+    // The added-line list for this file exceeds a pipe buffer, so a reader that exits at the
+    // first match can raise SIGPIPE in the producer while it writes the list.
+    test("catches a literal at the start of a large addition", () => {
+        const filler = Array.from({ length: 30_000 }, (_, i) => `fn f${i}() {}\n`).join("");
+        write("crates/daemon/src/boundary.rs", `const K: &str = ${FILE_PATH};\n${filler}`);
+        for (const { status, stderr } of both()) {
+            expect(status).toBe(1);
+            expect(stderr).toContain("crates/daemon/src/boundary.rs:1:");
+        }
+    });
+
     test("scans from the repository root when run from a subdirectory", () => {
         write("crates/daemon/src/boundary.rs", `const K: &str = ${FILE_PATH};\n`);
         git("add", "-A");

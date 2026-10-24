@@ -43,7 +43,7 @@ scan_file() {
   awk -v pattern="$PATTERN" '
     region { if ($0 ~ /^}/) region = 0; next }
     /^#\[/ { if ($0 ~ /^#\[cfg\(test\)\]/) pending = 1 }
-    /^(pub(\(crate\))? )?mod [A-Za-z0-9_]+ \{/ { if (pending) { region = 1; pending = 0; next } }
+    /^(pub(\(crate\))? )?mod [A-Za-z0-9_]+ \{/ { if (pending && $0 !~ /\}/) { region = 1; pending = 0; next } }
     !/^#\[/ { pending = 0 }
     $0 ~ pattern { print FNR "\t" $0 }
   ' "$1"
@@ -68,7 +68,7 @@ if [ "${1:-}" = "--staged" ]; then
     rm -f "$staged"
     while IFS=$'\t' read -r line text; do
       [ -n "$line" ] || continue
-      if printf '%s\n' "$added" | grep -qx "$line"; then
+      if grep -qxF -- "$line" <<< "$added"; then
         echo "$file:$line: $text" >&2
         found=1
       fi
