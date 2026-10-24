@@ -1,10 +1,12 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
-
 import { SOURCE_CORPUS_DIR } from "../source-corpus/corpus.ts";
+
+import { readOpenCodeSession } from "../source-corpus/opencode-db-reader.ts";
 import { readPiSession } from "../source-corpus/pi-jsonl-reader.ts";
 import { CANNOT_PRODUCE, openCodeWitnesses, piWitnesses, R1_CELLS } from "./census.ts";
-import { frozenPiJsonl, OPENCODE_CLOSURE, PI_CLOSURE } from "./freeze.ts";
+import { frozenPiJsonl, loadFrozenOpenCode, OPENCODE_CLOSURE, PI_CLOSURE } from "./freeze.ts";
 
 const { readFileSync } = process.getBuiltinModule("node:fs");
 
@@ -52,6 +54,19 @@ describe("frozen session census", () => {
             const piFirst = pi.find((witness) => witness.cell === cell);
             if (piFirst) expect(census).toContain(`\`${piFirst.at}\``);
         }
+    });
+
+    it("reads the totals the Rust SQL reader pins from the frozen OpenCode session", () => {
+        const db = new Database(":memory:");
+        const records = readOpenCodeSession(db, loadFrozenOpenCode(db, fixture(OPENCODE_CLOSURE)));
+        const units = records.flatMap((record) => record.units);
+        const nonUnits = records.flatMap((record) => record.nonUnits);
+        expect([records.length, units.length, units.filter((unit) => unit.tool).length]).toEqual([
+            42, 42, 13,
+        ]);
+        expect([nonUnits.length, nonUnits.filter((n) => n.kind === "file").length]).toEqual([
+            56, 1,
+        ]);
     });
 
     it("names each cannot-produce cell in the fixture README", () => {
