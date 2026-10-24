@@ -18844,6 +18844,10 @@ mod tests {
     mod request_budget_host_tests;
     #[path = "source_capture_tests.rs"]
     mod source_capture_tests;
+    #[path = "source_corpus.rs"]
+    mod source_corpus;
+    #[path = "source_corpus_tests.rs"]
+    mod source_corpus_tests;
     #[path = "source_recovery_tests.rs"]
     mod source_recovery_tests;
     #[path = "transform/window_admission.rs"]

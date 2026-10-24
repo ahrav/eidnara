@@ -591,6 +591,11 @@ jobs:
         # feature table.
         run: bun scripts/forbid-test-support-dependencies.ts
 
+      - name: Source-corpus oracle independence
+        run: |
+          bun test scripts/forbid-oracle-adapter-imports.test.ts
+          bun scripts/forbid-oracle-adapter-imports.ts
+
   lint:
     name: lint (1.98)
     runs-on: ubuntu-latest
