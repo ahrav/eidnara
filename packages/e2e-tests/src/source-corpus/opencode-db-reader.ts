@@ -71,9 +71,12 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
     const messages = db
         .prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id")
         .all(sessionId) as Array<{ id: string; data: string }>;
-    const parts = db.prepare("SELECT id, data FROM part WHERE message_id = ? ORDER BY id");
-    return messages.map((row) => {
+    const parts = db.prepare(
+        "SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created, id",
+    );
+    return messages.flatMap((row) => {
         const info = parse(row.data, `message ${row.id}`);
+        if (info.summary === true && info.finish === "stop") return [];
         const role = text(info.role, `message ${row.id} role`);
         const time = object(info.time, `message ${row.id} time`);
         const settled = time.completed !== undefined && time.completed !== null;
@@ -130,6 +133,6 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
                 nonUnit("non_text_part");
             }
         });
-        return { id: row.id, role, units, nonUnits };
+        return [{ id: row.id, role, units, nonUnits }];
     });
 }

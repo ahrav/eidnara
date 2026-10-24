@@ -19,10 +19,11 @@ A manifest records one upstream repository at a pinned commit:
 - `upstream`: repository URL, full commit oid, and license.
 - `layout`: one of `rust_workspace`, `typescript_monorepo`, `python_src`, `go_module`,
   `eidnara`, `non_git`.
-- `instructions`: the instruction-document condition the documents hold: `none`,
-  `root_only`, `nested_depth_3` (an `AGENTS.md` three or more path components deep), or
-  `mixed` (`CLAUDE.md` and `.cursorrules` beside an `AGENTS.md`). The Rust test refuses a
-  manifest whose documents hold a different condition.
+- `instructions`: the condition the `AGENTS.md`, `CLAUDE.md`, and `.cursorrules` documents hold:
+  `none`, `root_only`, `nested_depth_3` (an `AGENTS.md` three or more path components deep), or
+  `mixed` (`CLAUDE.md` and `.cursorrules` beside an `AGENTS.md`). `ARCHITECTURE.md` and
+  `STRUCTURE.md` are outside the condition. The Rust test refuses a manifest whose documents
+  hold a different condition.
 - `documents`: every `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `ARCHITECTURE.md`, and
   `STRUCTURE.md` in the tree, with its bytes verbatim.
 - `files`: every other tracked path with its byte size and whether its bytes are UTF-8,
@@ -104,7 +105,9 @@ The readers produce the expected-unit table: per native record, its units (text 
 settled tool result blocks, with tool name, call id, error flag, `metadata.exit`, and the
 harness `truncated` flag) and its classified non-units. The OpenCode reader
 (`packages/e2e-tests/src/source-corpus/opencode-db-reader.ts`) reads `message` and `part`
-rows of `opencode.db` by SQL; the Pi reader (`read_pi_session`) reads session JSONL entries.
+rows of `opencode.db` by SQL, orders parts by `(time_created, id)`, and leaves a completed
+compaction summary (`summary: true`, `finish: "stop"`) out of the table; the Pi reader
+(`read_pi_session`) reads session JSONL entries.
 `scripts/forbid-oracle-adapter-imports.ts` runs in CI and fails when a reader names the
 harness source adapters, the tool outcome module, or the shared identity and block types.
 

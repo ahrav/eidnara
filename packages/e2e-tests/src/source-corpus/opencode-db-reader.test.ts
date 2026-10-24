@@ -41,6 +41,17 @@ const settledTool = (call: string, tool: string, metadata: object) => ({
     state: { status: "completed", input: {}, output: `${tool} ok`, metadata, time: { end: 2 } },
 });
 
+function partAt(db: Database, messageId: string, id: string, at: number, item: object): void {
+    db.prepare("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
+        id,
+        messageId,
+        SESSION,
+        at,
+        at,
+        JSON.stringify(item),
+    );
+}
+
 /** AE1: 12 text parts, 7 settled tool parts, 1 pending tool part, and 1 image part. */
 function ae1Store(): Database {
     const db = store();
@@ -130,5 +141,39 @@ describe("OpenCode db reader", () => {
             { type: "tool", tool: "read", callID: "c", state: { status: "completed", output: 1 } },
         ]);
         expect(() => readOpenCodeSession(db, SESSION)).toThrow(/output: not a string/);
+    });
+
+    it("indexes parts by (time_created, id), the order the harness presents them in", () => {
+        const db = store();
+        message(db, "msg_1", 1, { role: "user", time: { created: 1 } });
+        partAt(db, "msg_1", "prt_z", 10, textPart("first"));
+        partAt(db, "msg_1", "prt_b", 20, textPart("second"));
+        partAt(db, "msg_1", "prt_a", 20, textPart("third"));
+        const [user] = readOpenCodeSession(db, SESSION);
+        expect(user?.units.map((u) => [u.index, u.partId, u.byteLen])).toEqual([
+            [0, "prt_z", 5],
+            [1, "prt_a", 5],
+            [2, "prt_b", 6],
+        ]);
+    });
+
+    it("leaves compaction summary messages out of the expected table", () => {
+        const db = store();
+        message(db, "msg_1", 1, { role: "user", time: { created: 1 } });
+        parts(db, "msg_1", [textPart("ask")]);
+        message(db, "msg_2", 2, {
+            role: "assistant",
+            summary: true,
+            finish: "stop",
+            time: { created: 2, completed: 3 },
+        });
+        parts(db, "msg_2", [textPart("compacted history")]);
+        message(db, "msg_3", 3, {
+            role: "assistant",
+            summary: true,
+            time: { created: 3 },
+        });
+        parts(db, "msg_3", [textPart("streaming summary")]);
+        expect(readOpenCodeSession(db, SESSION).map((r) => r.id)).toEqual(["msg_1", "msg_3"]);
     });
 });

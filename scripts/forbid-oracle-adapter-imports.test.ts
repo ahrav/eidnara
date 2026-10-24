@@ -49,6 +49,12 @@ describe("forbiddenRustReaderLines", () => {
         ];
         expect(forbiddenRustReaderLines("r.rs", seeded.join("\n"))).toHaveLength(seeded.length);
     });
+
+    test("rejects an external module declaration, which would move source outside the scan", () => {
+        const seeded = ["mod helper;", "pub mod helper;", "pub(crate) mod helper ;"];
+        expect(forbiddenRustReaderLines("r.rs", seeded.join("\n"))).toHaveLength(seeded.length);
+        expect(forbiddenRustReaderLines("r.rs", "mod inline {\n    fn f() {}\n}\n")).toEqual([]);
+    });
 });
 
 describe("forbiddenTypeScriptReaderLines", () => {

@@ -124,7 +124,7 @@ pub(crate) enum Layout {
 pub(crate) enum Instructions {
     /// No `AGENTS.md`, `CLAUDE.md`, or `.cursorrules` anywhere.
     None,
-    /// Instruction documents at the root only.
+    /// Every `AGENTS.md`, `CLAUDE.md`, and `.cursorrules` sits at the root.
     RootOnly,
     /// At least one `AGENTS.md` three or more path components deep.
     #[serde(rename = "nested_depth_3")]

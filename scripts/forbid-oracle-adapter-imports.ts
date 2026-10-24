@@ -13,7 +13,8 @@ export const TYPESCRIPT_READERS = "packages/e2e-tests/src/source-corpus/**/*.ts"
 /**
  * Rust paths and names the reader must not spell: any path into the daemon crate or a sibling
  * module, the adapter, outcome, and capture modules and their entry points, the shared identity
- * and block types, and the `#[path]` and `include!` forms that pull source from elsewhere.
+ * and block types, and the `#[path]`, `include!`, and `mod name;` forms that read source from
+ * another file.
  */
 const RUST_FORBIDDEN = new RegExp(
     [
@@ -25,6 +26,7 @@ const RUST_FORBIDDEN = new RegExp(
         String.raw`\b(?:opencode|pi)_units\w*`,
         String.raw`#\[path\b`,
         String.raw`\binclude(?:_str|_bytes)?!`,
+        String.raw`\bmod\s+\w+\s*;`,
     ].join("|"),
 );
 
