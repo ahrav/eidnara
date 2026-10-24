@@ -197,6 +197,12 @@ fn a_manifest_out_of_order_or_naming_an_unheld_condition_is_refused() {
         v["documents"] = json!([{"path": "AGENTS.md", "text": "a"}]);
         v["files"] = json!([{"path": "agents.MD", "size": 1, "utf8": true}]);
     });
+    refused("ASCII", &|v| {
+        v["files"] = json!([
+            {"path": "\u{c4}", "symlink": "/tmp"},
+            {"path": "\u{e4}/x", "size": 1, "utf8": true},
+        ]);
+    });
     refused("recorded as non-UTF-8", &|v| {
         v["files"] = json!([{"path": "a", "size": 0, "utf8": false}]);
     });

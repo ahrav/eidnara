@@ -215,6 +215,11 @@ fn check_relative(path: &str) -> Result<(), String> {
     {
         return Err(format!("{path:?} is not a normalized relative path"));
     }
+    // Case-insensitive and normalization-insensitive filesystems equate Unicode variants the
+    // ASCII fold in `validate` cannot see, so every path stays within ASCII.
+    if !path.is_ascii() {
+        return Err(format!("{path:?} is not an ASCII path"));
+    }
     Ok(())
 }
 

@@ -34,7 +34,8 @@ function git(repo: string, args: string[]): Buffer {
     const env = Object.fromEntries(
         Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
     );
-    const proc = Bun.spawnSync(["git", "-C", repo, ...args], {
+    // `--no-replace-objects` reads the pinned objects themselves, bypassing any `refs/replace`.
+    const proc = Bun.spawnSync(["git", "--no-replace-objects", "-C", repo, ...args], {
         env,
         stdout: "pipe",
         stderr: "pipe",

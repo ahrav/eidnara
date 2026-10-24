@@ -45,7 +45,9 @@ The materializer (`materialize` in `crates/daemon/src/source_corpus.rs`) writes 
 into a temporary directory, runs `git init` with the SHA-1 object format and one commit with
 fixed identities and dates, and optionally adds a worktree on its own branch, so both
 checkouts share one root commit. The validator refuses a path with a `.git` component in any
-ASCII case, since materializing it would write into the repository's administrative directory.
+ASCII case, since materializing it would write into the repository's administrative directory,
+and refuses non-ASCII paths and two paths that differ only in ASCII case, since a
+case-insensitive filesystem would resolve them to one entry.
 
 ## Harness closures
 
