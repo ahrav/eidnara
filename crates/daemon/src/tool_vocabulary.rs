@@ -83,7 +83,7 @@ pub(crate) fn normalize(name: &str) -> String {
     lower
 }
 
-/// The selection class of a tool, from its [`normalize`]d name.
+/// The selection class of a tool, from its name lowercased with one leading `mcp_` stripped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolClass {
     /// Older calls superseded by a newer call on the same path become edit markers.
@@ -132,7 +132,7 @@ pub enum Tier {
     T3,
 }
 
-/// The tier of `name` after [`normalize`].
+/// The tier of `name`, lowercased with one leading `mcp_` stripped.
 pub(crate) fn tier(name: &str) -> Tier {
     let name = normalize(name);
     if T1_TOOLS.contains(&name.as_str()) {
