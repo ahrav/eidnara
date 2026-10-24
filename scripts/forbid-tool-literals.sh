@@ -13,7 +13,7 @@
 # characters keep the pattern from matching its own spelling in this file.
 set -euo pipefail
 
-PATTERN='"(fil[e]Path|fil[e]_path|ol[d]String|ne[w]String|ol[d]_string|ne[w]_string|bas[h]_status|bas[h]_kill|tod[o]write|appl[y]_patch|af[t]_outline|af[t]_zoom|af[t]_search)([^A-Za-z0-9_]|$)|"mc[p]_'
+PATTERN='"(fil[e]Path|fil[e]_path|ol[d]String|ne[w]String|ol[d]_string|ne[w]_string|bas[h]_status|bas[h]_kill|tod[o]write|appl[y]_patch|af[t]_outline|af[t]_zoom|af[t]_search)([^A-Za-z0-9_]|$)|"m[c]p_'
 MODULE='crates/daemon/src/tool_vocabulary.rs'
 
 report_tool_failure() {
