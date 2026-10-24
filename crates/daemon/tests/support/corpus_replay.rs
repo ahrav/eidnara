@@ -24,7 +24,10 @@ use kernel::{
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::source_corpus::{ExpectedRecord, ExpectedUnit, LossCondition};
+use crate::source_corpus::{
+    ExpectedRecord, ExpectedUnit, LossCondition, frozen_pi_jsonl, load_frozen_opencode,
+    read_opencode_session, read_pi_session,
+};
 
 /// The project digest every replayed session is bound to.
 pub const PROJECT: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
@@ -164,6 +167,27 @@ pub fn pair(natives: Vec<Value>, expected: Vec<ExpectedRecord>) -> Vec<ReplayRec
         .collect()
 }
 
+/// A frozen OpenCode session: its id and its records paired with the SQL reader's expected table.
+pub fn opencode_records(fixture: &Value) -> (String, Vec<ReplayRecord>) {
+    let conn = rusqlite::Connection::open_in_memory().expect("sqlite opens");
+    let session = load_frozen_opencode(&conn, fixture).expect("fixture loads");
+    let expected = read_opencode_session(&conn, &session).expect("reader reads");
+    (session, pair(opencode_natives(fixture), expected))
+}
+
+/// A frozen Pi session: its id (the session header's) and its entries paired with the JSONL
+/// reader's expected table.
+pub fn pi_records(fixture: &Value) -> (String, Vec<ReplayRecord>) {
+    let jsonl = frozen_pi_jsonl(fixture).expect("fixture decodes");
+    let expected = read_pi_session(&jsonl).expect("reader reads");
+    let session = expected[0].id.clone();
+    let natives = jsonl
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("entry is JSON"))
+        .collect();
+    (session, pair(natives, expected))
+}
+
 /// The adapter a replay feeds each native record through; a test substitutes a mutated one.
 pub type Adapter<'a> =
     &'a dyn Fn(&SessionIdentity, &Value) -> Result<Vec<SourceUnit>, AdapterRefusal>;
@@ -178,7 +202,12 @@ pub fn harness_adapter(
     }
 }
 
-/// The reconciliation key of a unit: its class, its native record or call id, and its block.
+/// The reconciliation key both sides build: the unit's class, its native message or call id, and
+/// its block index.
+fn key(tool: bool, id: &str, block: &str) -> String {
+    format!("{}:{id}:{block}", if tool { "tool" } else { "text" })
+}
+
 fn unit_key(unit: &SourceUnit) -> String {
     let field = |name: &str| {
         unit.identity
@@ -187,17 +216,16 @@ fn unit_key(unit: &SourceUnit) -> String {
             .map_or("", |(_, value)| value.as_str())
     };
     match unit.class {
-        OccurrenceClass::RawToolSpans => {
-            format!("tool:{}:{}", field("tool_call_id"), field("block_index"))
-        }
-        _ => format!("text:{}:{}", field("message_id"), field("block_index")),
+        OccurrenceClass::RawToolSpans => key(true, field("tool_call_id"), field("block_index")),
+        _ => key(false, field("message_id"), field("block_index")),
     }
 }
 
 fn expected_key(record: &ExpectedRecord, unit: &ExpectedUnit) -> String {
+    let block = unit.block.to_string();
     match &unit.tool {
-        Some(tool) => format!("tool:{}:{}", tool.call_id, unit.block),
-        None => format!("text:{}:{}", record.id, unit.block),
+        Some(tool) => key(true, &tool.call_id, &block),
+        None => key(false, &record.id, &block),
     }
 }
 
@@ -212,6 +240,8 @@ pub enum Settled {
     Unnamed,
 }
 
+/// How a disposition settles its unit; `None` leaves it open for the next pass: a deferred unit,
+/// or a refusal unchanged input can outlive ([`PublishError::is_permanent`] is false).
 fn settled(disposition: &UnitDisposition) -> Option<Settled> {
     Some(match disposition {
         UnitDisposition::Published(published) => Settled::Admitted {
@@ -220,6 +250,7 @@ fn settled(disposition: &UnitDisposition) -> Option<Settled> {
         UnitDisposition::UnitTooLarge => Settled::Lost(LossCondition::UnitTooLarge),
         UnitDisposition::Deferred => return None,
         UnitDisposition::Superseded => Settled::Lost(LossCondition::Superseded),
+        UnitDisposition::Refused(error) if !error.is_permanent() => return None,
         UnitDisposition::Refused(error) => match error {
             PublishError::Artifact(
                 ArtifactErrorKind::ExactBytesRewritten
@@ -233,7 +264,6 @@ fn settled(disposition: &UnitDisposition) -> Option<Settled> {
             PublishError::IdentityReused | PublishError::Descriptor { .. } => {
                 Settled::Lost(LossCondition::IdentityConflict)
             }
-            error if !error.is_permanent() => Settled::Lost(LossCondition::RefusedRetryable),
             _ => Settled::Unnamed,
         },
     })
@@ -274,11 +304,12 @@ pub fn replay(
     adapter: Adapter<'_>,
     max_passes: usize,
 ) -> Replay {
-    let mut units: Vec<(SourceUnit, Option<Settled>)> = Vec::new();
+    // Each unit, its outcome once settled, and whether its last offer was refused.
+    let mut units: Vec<(SourceUnit, Option<Settled>, bool)> = Vec::new();
     let mut refused_records = BTreeSet::new();
     for record in records {
         match adapter(session, &record.native) {
-            Ok(produced) => units.extend(produced.into_iter().map(|unit| (unit, None))),
+            Ok(produced) => units.extend(produced.into_iter().map(|unit| (unit, None, false))),
             Err(_) => {
                 refused_records.insert(native_id(&record.native).to_owned());
             }
@@ -318,6 +349,7 @@ pub fn replay(
                         measure.admitted_bytes += units[index].0.text.len();
                     }
                     units[index].1 = outcome;
+                    units[index].2 = matches!(disposition, UnitDisposition::Refused(_));
                 }
             }
             Err(_) => {
@@ -331,11 +363,15 @@ pub fn replay(
     Replay {
         units: units
             .into_iter()
-            .map(|(unit, outcome)| ReplayedUnit {
+            .map(|(unit, outcome, refused)| ReplayedUnit {
                 key: unit_key(&unit),
                 revision: unit.revision.clone(),
                 bytes: unit.text.len(),
-                settled: outcome.unwrap_or(Settled::Lost(LossCondition::Deferred)),
+                settled: outcome.unwrap_or(Settled::Lost(if refused {
+                    LossCondition::RefusedRetryable
+                } else {
+                    LossCondition::Deferred
+                })),
             })
             .collect(),
         refused_records,
@@ -356,6 +392,8 @@ pub struct Reconciliation {
     pub phantom: Vec<String>,
     /// Expected units whose replayed revision differs from the one the harness wrote.
     pub revision_mismatch: Vec<String>,
+    /// Keys more than one expected unit, or more than one replayed unit, carries.
+    pub duplicate: Vec<String>,
 }
 
 impl Reconciliation {
@@ -365,19 +403,22 @@ impl Reconciliation {
 }
 
 pub fn reconcile(records: &[ReplayRecord], replay: &Replay) -> Reconciliation {
-    let by_key: BTreeMap<&str, &ReplayedUnit> = replay
-        .units
-        .iter()
-        .map(|unit| (unit.key.as_str(), unit))
-        .collect();
     let mut result = Reconciliation::default();
+    let mut by_key: BTreeMap<&str, &ReplayedUnit> = BTreeMap::new();
+    for unit in &replay.units {
+        if by_key.insert(unit.key.as_str(), unit).is_some() {
+            result.duplicate.push(format!("replayed {}", unit.key));
+        }
+    }
     let mut expected_keys = BTreeSet::new();
     for record in records {
         let expected = &record.expected;
         for unit in &expected.units {
             result.expected += 1;
             let key = expected_key(expected, unit);
-            expected_keys.insert(key.clone());
+            if !expected_keys.insert(key.clone()) {
+                result.duplicate.push(format!("expected {key}"));
+            }
             if replay.refused_records.contains(&expected.id) {
                 *result
                     .losses
