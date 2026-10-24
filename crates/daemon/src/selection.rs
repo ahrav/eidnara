@@ -187,8 +187,6 @@ pub struct SelectionConfig {
 /// arcs to reduce; the arc then expands to per-block decisions.
 struct ToolArc<'a> {
     arc_id: &'a str,
-    /// Message that owns the ToolCall block; duplicate fingerprints are owner-qualified.
-    owner_message_id: Option<&'a str>,
     /// The raw tool name of the arc's first ToolCall block, else of its first result.
     name: &'a str,
     /// The arc's age key = the ToolCall block's ordinal (or the min block ordinal).
@@ -214,9 +212,7 @@ impl<'a> ToolArc<'a> {
         self.call_bytes + self.result_bytes
     }
 
-    /// The first ToolCall block's input (`None` for result-only arcs). `group_arcs`
-    /// sets `owner_message_id` from that same first ToolCall block, so an arc with an
-    /// owner always has an input.
+    /// The first ToolCall block's input (`None` for result-only arcs).
     fn input(&self) -> Option<&'a serde_json::Value> {
         self.call_inputs.first().map(|&(_, input)| input)
     }
@@ -235,7 +231,6 @@ fn group_arcs<'a>(items: &'a [SelItem], frozen: &HashSet<String>) -> Vec<ToolArc
         };
         let entry = arcs.entry(arc_id).or_insert_with(|| ToolArc {
             arc_id,
-            owner_message_id: None,
             name: "",
             ordinal: u64::MAX,
             provider_executed: false,
@@ -261,9 +256,6 @@ fn group_arcs<'a>(items: &'a [SelItem], frozen: &HashSet<String>) -> Vec<ToolArc
         match &item.kind {
             SelKind::ToolCall { name, input } => {
                 entry.name = name.as_str();
-                if entry.call_inputs.is_empty() {
-                    entry.owner_message_id = item_message_id(item);
-                }
                 entry.call_inputs.push((item.id.as_str(), input.as_ref()));
                 entry.call_bytes += item.byte_size;
                 entry.provider_executed = item.provider_executed;
@@ -754,10 +746,8 @@ fn select_agent_drops(
     }
 }
 
-/// The tier of an arc's raw tool name. The lookup normalizes the already normalized selection
-/// name a second time, so `mcp_mcp_edit` resolves as `edit`.
 fn resolve_tool_tier(name: &str) -> u8 {
-    match tool_vocabulary::tier(&tool_vocabulary::normalize(name)) {
+    match tool_vocabulary::selection_tier(name) {
         Tier::T1 => 1,
         Tier::T2 => 2,
         Tier::T3 => 3,
@@ -2836,6 +2826,7 @@ mod tests {
 
     #[test]
     fn identical_calls_produce_no_dedup_decision_for_any_tool_name() {
+        let smart = SelectionConfig { smart_drops: true };
         for (name, args) in [
             ("read", serde_json::json!({"path": "src/lib.rs"})),
             ("mcp_read", serde_json::json!({"path": "src/lib.rs"})),
@@ -2852,9 +2843,25 @@ mod tests {
             ];
             let mut ctx = base_ctx(PassClass::Execute);
             ctx.supersession_ride_available = true;
-            let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+            let out = select_reductions(&items, &HashSet::new(), &ctx, &smart);
             assert!(out.is_empty(), "{name}: identical calls stay live: {out:?}");
         }
+        // Positive control: the same scenario under an edit tool reaches edit supersession.
+        let args = serde_json::json!({"filePath": "src/lib.rs", "oldString": "a"});
+        let items = vec![
+            tool_call_with_ids("owner#0", "owner#0", 1, "edit", args.clone(), 50),
+            tool_result_with_ids("older-result#0", "owner#0", 2, "edit", 300),
+            tool_call_with_ids("owner#1", "owner#1", 1, "edit", args, 50),
+            tool_result_with_ids("newer-result#0", "owner#1", 3, "edit", 300),
+        ];
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.supersession_ride_available = true;
+        let out = select_reductions(&items, &HashSet::new(), &ctx, &smart);
+        assert!(
+            out.iter()
+                .any(|d| d.target_id == "owner#0" && d.kind == "edit_marker"),
+            "the older edit becomes an edit marker: {out:?}"
+        );
     }
 
     #[test]

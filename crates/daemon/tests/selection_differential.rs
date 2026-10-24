@@ -228,8 +228,6 @@ mod reference {
     /// arcs to reduce; the arc then expands to per-block decisions.
     struct ToolArc {
         arc_id: String,
-        /// Message that owns the ToolCall block; duplicate fingerprints are owner-qualified.
-        owner_message_id: Option<String>,
         /// The raw tool name of the first ToolCall block, else of the first result.
         name: String,
         /// The arc's age key = the ToolCall block's ordinal (or the min block ordinal).
@@ -270,7 +268,6 @@ mod reference {
             };
             let entry = arcs.entry(arc_id.clone()).or_insert_with(|| ToolArc {
                 arc_id: arc_id.clone(),
-                owner_message_id: None,
                 name: String::new(),
                 ordinal: u64::MAX,
                 provider_executed: false,
@@ -299,7 +296,6 @@ mod reference {
                     entry.name = name.clone();
                     if entry.call_inputs.is_empty() {
                         entry.input = input.clone();
-                        entry.owner_message_id = item_message_id(item).map(str::to_owned);
                     }
                     entry.call_inputs.push((item.id.clone(), input.clone()));
                     entry.call_bytes += item.byte_size;
@@ -582,8 +578,6 @@ mod reference {
         Skeleton,
         /// Older than the window: fully drop the call block.
         FullDrop,
-        /// TS duplicate-tool cleanup always fully drops older calls. It bypasses the ordinary
-        /// recency skeleton window, but still demotes for reasoning-adjacency safety.
         /// Edit-supersession: keep filePath + a region hint (regardless of window).
         EditMarker,
     }
@@ -828,7 +822,7 @@ mod reference {
     /// Tier of a tool for the emergency drop: T1 nav (keep longest), T2 edit·search, T3
     /// misc (drop first). Mirrors the TS `resolveToolTier`.
     fn resolve_tool_tier(name: &str) -> u8 {
-        match vocabulary::tier(&vocabulary::normalize(name)) {
+        match vocabulary::selection_tier(name) {
             Tier::T1 => 1,
             Tier::T2 => 2,
             Tier::T3 => 3,
@@ -1390,7 +1384,7 @@ fn item_spec() -> impl Strategy<Value = ItemSpec> {
         )
 }
 
-const TOOL_COUNT: u8 = 21;
+const TOOL_COUNT: u8 = 22;
 
 const TOOLS: [&str; TOOL_COUNT as usize] = [
     "mcp_read",
@@ -1403,20 +1397,21 @@ const TOOLS: [&str; TOOL_COUNT as usize] = [
     "eidnara_note",
     "bash",
     "glob",
-    // `ZERO_VALUE_META_TOOLS` members.
+    // Zero-value meta tools.
     "bash_status",
     "bash_kill",
-    // Mixed-case tool names test `normalize_tool_name`.
+    // Mixed-case and doubly prefixed names exercise name normalization.
     "MCP_READ",
     "Edit",
     "TodoWrite",
-    // `T1_TOOLS` and `T2_TOOLS` members absent from the names above.
+    // Tier-table names absent from the names above.
     "task",
     "aft_outline",
     "aft_zoom",
     "apply_patch",
     "aft_search",
     "grep",
+    "mcp_mcp_edit",
 ];
 
 /// The rocket's UTF-16 surrogate pair crosses `EDIT_REGION_HINT_LEN`.
@@ -2027,69 +2022,6 @@ proptest! {
         let (optimized, expected, specs, bits) = outcome_pair!(specs, bits);
         prop_assert_eq!(optimized, expected, "diverged on {:?} {:?}", specs, bits);
     }
-}
-
-#[test]
-fn optimized_matches_frozen_reference_for_cross_owner_duplicates() {
-    let mut specs = Vec::with_capacity(4);
-    for msg in 0..2 {
-        for kind in [KIND_TOOL_CALL, KIND_TOOL_RESULT] {
-            specs.push(ItemSpec {
-                msg,
-                ordinal_slot: msg,
-                role: ROLE_ASSISTANT,
-                kind,
-                tool: 0,
-                input: 0,
-                provider_executed: false,
-                byte_size: 800,
-                token_count: None,
-                arc: Some(msg),
-                frozen: false,
-                agent_drop: false,
-                tag_protected: false,
-                exempt_protected: false,
-            });
-        }
-    }
-    let bits: CtxBits = (0, 0.0, 100_000.0, 0, 0, false, 0, false, false, true);
-
-    let (optimized, expected, _, _) = outcome_pair!(specs, bits);
-    assert_eq!(optimized, expected);
-    assert!(optimized.0.is_empty());
-}
-
-#[test]
-fn optimized_matches_frozen_reference_for_tied_identical_calls() {
-    let mut specs = Vec::with_capacity(6);
-    for arc in 0..3 {
-        for kind in [KIND_TOOL_CALL, KIND_TOOL_RESULT] {
-            specs.push(ItemSpec {
-                msg: 0,
-                ordinal_slot: 1,
-                role: ROLE_ASSISTANT,
-                kind,
-                tool: 0,
-                input: 0,
-                provider_executed: false,
-                byte_size: 800,
-                token_count: None,
-                arc: Some(arc),
-                frozen: false,
-                agent_drop: false,
-                tag_protected: false,
-                exempt_protected: false,
-            });
-        }
-    }
-    let bits: CtxBits = (0, 0.0, 100_000.0, 0, 0, false, 0, false, false, true);
-
-    let (optimized, expected, _, _) = outcome_pair!(specs, bits);
-    assert_eq!(optimized, expected);
-    assert!(
-        optimized.0.is_empty(),
-        "identical calls stay live: {optimized:?}"
-    );
 }
 
 #[test]

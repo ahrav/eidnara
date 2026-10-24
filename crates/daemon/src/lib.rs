@@ -47,7 +47,7 @@ pub(crate) mod tool_vocabulary;
 #[cfg(feature = "test-support")]
 pub mod tool_vocabulary_evaluation {
     pub use crate::tool_vocabulary::{
-        Tier, ToolClass, classify, diff_keys, is_zero_value_note_call, normalize, path_arg, tier,
+        Tier, ToolClass, classify, diff_keys, is_zero_value_note_call, path_arg, selection_tier,
     };
 }
 

@@ -21,6 +21,13 @@ report_tool_failure() {
   exit 2
 }
 
+# Every path below is relative to the repository root, whatever the caller's
+# working directory.
+status=0
+root=$(git rev-parse --show-toplevel) || status=$?
+[ "$status" -eq 0 ] || report_tool_failure "git rev-parse" "$status"
+cd "$root"
+
 # A `case` glob's `*` also matches `/`, so the last pattern covers every depth.
 scanned() {
   case "$1" in
@@ -49,10 +56,10 @@ if [ "${1:-}" = "--staged" ]; then
   found=0
   while IFS= read -r file; do
     if [ -z "$file" ] || ! scanned "$file"; then continue; fi
-    added=$(git diff --cached -U0 --no-color -- "$file" | awk '
+    # `>` marks added lines, so an added line that begins with `+` is still one.
+    added=$(git diff --cached -U0 --no-color --output-indicator-new='>' -- "$file" | awk '
       /^@@ / { match($0, /\+[0-9]+/); line = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
-      /^\+\+\+ / { next }
-      /^\+/ { print line; line++ }
+      /^>/ { print line; line++ }
     ') || report_tool_failure "awk" "$?"
     [ -n "$added" ] || continue
     staged=$(mktemp)
@@ -74,7 +81,6 @@ if [ "${1:-}" = "--staged" ]; then
   exit 0
 fi
 
-status=0
 files=$(git ls-files -- 'crates/daemon/src') || status=$?
 [ "$status" -eq 0 ] || report_tool_failure "git ls-files" "$status"
 found=0

@@ -3,8 +3,9 @@ use serde_json::{Value, json};
 
 use crate::harness_sources::Harness;
 use crate::tool_vocabulary::{
-    DisplayArg, NameRule, TABLED_NAMES, Tier, ToolClass, classify, diff_keys, display_arg,
-    exit_code, is_todo_tool, is_zero_value_note_call, path_arg, tier, truncated_flag,
+    DisplayArg, NOTE_ACTIONS, TABLED_NAMES, Tier, ToolClass, classify, diff_keys, display_arg,
+    exit_code, is_injected_todo_tool, is_zero_value_note_call, path_arg, selection_tier, tier,
+    truncated_flag,
 };
 
 const TRACE: &str = include_str!("../testdata/opencode-tool-outcome-trace.json");
@@ -45,16 +46,7 @@ fn each_consumer_keeps_its_name_rule() {
     for (name, class, expected_tier, todo_ignoring_case, exit) in table {
         assert_eq!(classify(name), class, "{name:?}");
         assert_eq!(tier(name), expected_tier, "{name:?}");
-        assert_eq!(
-            is_todo_tool(name, NameRule::IgnoreAsciiCase),
-            todo_ignoring_case,
-            "{name:?}"
-        );
-        assert_eq!(
-            is_todo_tool(name, NameRule::Normalized),
-            class == TodoWrite,
-            "{name:?}"
-        );
+        assert_eq!(is_injected_todo_tool(name), todo_ignoring_case, "{name:?}");
         let metadata = json!({"exit": 1});
         assert_eq!(
             exit_code(Harness::OpenCode, name, Some(&metadata)).is_some(),
@@ -63,6 +55,9 @@ fn each_consumer_keeps_its_name_rule() {
         );
         assert_eq!(exit_code(Harness::Pi, name, Some(&metadata)), None);
     }
+    assert_eq!(selection_tier("mcp_mcp_edit"), Tier::T2);
+    assert_eq!(selection_tier("MCP_READ"), Tier::T1);
+    assert_eq!(selection_tier("mcp_foo"), Tier::T3);
 }
 
 /// Wire extraction and edit supersession read one path key order. For paths, the summary
@@ -208,6 +203,7 @@ fn truncation_flags_are_read_from_each_harness_field() {
 
 #[test]
 fn zero_value_note_actions_are_read_and_dismiss() {
+    assert_eq!(NOTE_ACTIONS, ["read", "dismiss"]);
     assert!(is_zero_value_note_call(&json!({"action": "read"})));
     assert!(is_zero_value_note_call(&json!({"action": "dismiss"})));
     assert!(!is_zero_value_note_call(&json!({"action": "write"})));
@@ -225,7 +221,7 @@ fn every_tabled_name_reaches_a_non_unknown_answer() {
             "{name}"
         );
     }
-    assert!(is_todo_tool("todowrite", NameRule::Exact));
+    assert!(is_injected_todo_tool("TodoWrite"));
     assert_eq!(
         exit_code(Harness::OpenCode, "bash", Some(&json!({"exit": 3}))),
         Some(3)
@@ -258,8 +254,21 @@ proptest! {
     }
 
     #[test]
-    fn classify_ignores_ascii_case(name in "[A-Za-z_]{0,16}") {
-        prop_assert_eq!(classify(&name), classify(&name.to_ascii_uppercase()));
-        prop_assert_eq!(tier(&name), tier(&name.to_ascii_uppercase()));
+    fn tabled_names_classify_under_any_ascii_case_and_one_mcp_prefix(
+        index in 0usize..23,
+        flips in proptest::collection::vec(any::<bool>(), 16),
+        prefix in proptest::sample::select(vec!["", "mcp_", "MCP_", "Mcp_"]),
+    ) {
+        let names: Vec<&str> = TABLED_NAMES.iter().flat_map(|table| table.iter().copied()).collect();
+        let tabled = names[index % names.len()];
+        let cased: String = tabled
+            .chars()
+            .zip(flips.iter().cycle())
+            .map(|(c, &upper)| if upper { c.to_ascii_uppercase() } else { c })
+            .collect();
+        let name = format!("{prefix}{cased}");
+        prop_assert_eq!(classify(&name), classify(tabled));
+        prop_assert_eq!(tier(&name), tier(tabled));
+        prop_assert_ne!(classify(&name), ToolClass::Unknown);
     }
 }

@@ -9,15 +9,13 @@
 //!
 //! The tables are closed and compile-time. A name no table describes classifies as
 //! [`ToolClass::Unknown`], a legal value every caller handles: never dropped, deduplicated, or
-//! edit-marked by a class decision, default tier, display argument from the generic key list, and
-//! no exit code.
+//! edit-marked by a class decision, default tier (see [`selection_tier`] for doubly prefixed
+//! names), display argument from the generic key list, and no exit code.
 //!
-//! Each name query applies one [`NameRule`], preserved per caller: selection queries match the
+//! Each name query applies one fixed [`NameRule`], preserved per caller: selection queries match the
 //! [`normalize`]d name, the injection read-back matches the raw name ignoring ASCII case, and the
 //! outcome queries match the raw name exactly. Eidnara's own tool identifiers are defined once in
 //! [`crate::prompt_surface`] and referenced here, never redefined.
-
-use std::borrow::Cow;
 
 use serde_json::Value;
 
@@ -58,9 +56,7 @@ const MCP_PREFIX: &str = "mcp_";
 
 /// How a query compares a harness-supplied name with a tabled name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NameRule {
-    /// [`normalize`] the name, then compare exactly.
-    Normalized,
+enum NameRule {
     /// Compare the raw name ignoring ASCII case.
     IgnoreAsciiCase,
     /// Compare the raw name byte for byte.
@@ -70,17 +66,8 @@ pub(crate) enum NameRule {
 impl NameRule {
     fn matches(self, name: &str, tabled: &str) -> bool {
         match self {
-            Self::Normalized => normalize(name) == tabled,
             Self::IgnoreAsciiCase => name.eq_ignore_ascii_case(tabled),
             Self::Exact => name == tabled,
-        }
-    }
-
-    /// The name a table lookup under `Normalized` or `Exact` compares.
-    fn key(self, name: &str) -> Cow<'_, str> {
-        match self {
-            Self::Normalized => Cow::Owned(normalize(name)),
-            Self::IgnoreAsciiCase | Self::Exact => Cow::Borrowed(name),
         }
     }
 }
@@ -88,7 +75,7 @@ impl NameRule {
 /// Lowercases `name` and strips one leading `mcp_`, the shipped-default rule for MCP-surfaced
 /// names. A stripped MCP name equal to a tabled name (`mcp_edit` and `edit`) takes that name's
 /// class.
-pub fn normalize(name: &str) -> String {
+pub(crate) fn normalize(name: &str) -> String {
     let mut lower = name.to_lowercase();
     if lower.starts_with(MCP_PREFIX) {
         lower.drain(..MCP_PREFIX.len());
@@ -96,7 +83,7 @@ pub fn normalize(name: &str) -> String {
     lower
 }
 
-/// The selection class of a tool, from its [`NameRule::Normalized`] name.
+/// The selection class of a tool, from its [`normalize`]d name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolClass {
     /// Older calls superseded by a newer call on the same path become edit markers.
@@ -117,8 +104,8 @@ pub enum ToolClass {
 
 /// Total over every string.
 pub fn classify(name: &str) -> ToolClass {
-    let name = NameRule::Normalized.key(name);
-    let name = name.as_ref();
+    let name = normalize(name);
+    let name = name.as_str();
     if EDIT_TOOLS.contains(&name) {
         ToolClass::Edit
     } else if name == TODO_TOOL {
@@ -145,21 +132,29 @@ pub enum Tier {
     T3,
 }
 
-/// The tier of `name` under [`NameRule::Normalized`].
-pub fn tier(name: &str) -> Tier {
-    let name = NameRule::Normalized.key(name);
-    if T1_TOOLS.contains(&name.as_ref()) {
+/// The tier of `name` after [`normalize`].
+pub(crate) fn tier(name: &str) -> Tier {
+    let name = normalize(name);
+    if T1_TOOLS.contains(&name.as_str()) {
         Tier::T1
-    } else if T2_TOOLS.contains(&name.as_ref()) {
+    } else if T2_TOOLS.contains(&name.as_str()) {
         Tier::T2
     } else {
         Tier::T3
     }
 }
 
-/// Whether `name` is the to-do tool under `rule`.
-pub(crate) fn is_todo_tool(name: &str, rule: NameRule) -> bool {
-    rule.matches(name, TODO_TOOL)
+/// The tier selection assigns an arc's raw tool name. Selection normalizes the name once when it
+/// groups an arc and again in the tier lookup, so a name carrying two `mcp_` prefixes takes the
+/// tier of the name beneath them (`mcp_mcp_edit` is [`Tier::T2`]).
+pub fn selection_tier(name: &str) -> Tier {
+    tier(&normalize(name))
+}
+
+/// Whether the injection read-back treats `name` as the to-do tool ([`NameRule::IgnoreAsciiCase`]
+/// on the raw name).
+pub(crate) fn is_injected_todo_tool(name: &str) -> bool {
+    NameRule::IgnoreAsciiCase.matches(name, TODO_TOOL)
 }
 
 /// Whether an `eidnara_note` call's `action` is one whose call carries no value once read.
@@ -221,6 +216,9 @@ pub(crate) fn truncated_flag(harness: Harness, record: &Value) -> Option<bool> {
     };
     record.pointer(pointer).and_then(Value::as_bool)
 }
+
+#[cfg(test)]
+pub(crate) const NOTE_ACTIONS: &[&str] = ZERO_VALUE_NOTE_ACTIONS;
 
 #[cfg(test)]
 pub(crate) const TABLED_NAMES: &[&[&str]] = &[

@@ -259,7 +259,9 @@ argument key appears elsewhere in daemon production source. A name no table
 describes classifies as `Unknown`. Selection never drops, deduplicates, or
 edit-marks an `Unknown` tool by a class decision, gives it the default tier,
 and shows its display argument from the generic key list, and the outcome
-record carries no exit code for it. Eidnara's own `eidnara_reduce` and
+record carries no exit code for it. Selection's tier lookup normalizes a name
+twice, so a name carrying two `mcp_` prefixes takes the tier of the name
+beneath them. Eidnara's own `eidnara_reduce` and
 `eidnara_note` identifiers are defined once in `prompt_surface.rs`.
 
 ### Fixture qualification

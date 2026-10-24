@@ -6,9 +6,8 @@ import { dirname, join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "forbid-tool-literals.sh");
 
-// Built at runtime so the full-tree scan never matches this file's own text.
-const FILE_PATH = ['"file', 'Path"'].join("");
-const MCP_NAME = ['"mc', 'p_foo"'].join("");
+const FILE_PATH = '"filePath"';
+const MCP_NAME = '"mcp_foo"';
 
 let repo: string;
 
@@ -92,8 +91,7 @@ describe("forbid-tool-literals.sh", () => {
         write("crates/daemon/src/tool_vocabulary.rs", `const K: &str = ${FILE_PATH};\n`);
         write("crates/daemon/src/boundary_tests.rs", `const K: &str = ${FILE_PATH};\n`);
         write("crates/daemon/src/tests/fixture.rs", `const K: &str = ${FILE_PATH};\n`);
-        write("crates/daemon/tests/selection.rs", `const K: &str = ${FILE_PATH};\n`);
-        write("crates/daemon/testdata/golden.json", `{${FILE_PATH}: "a.rs"}\n`);
+        write("crates/daemon/src/testdata/fixture.rs", `const K: &str = ${FILE_PATH};\n`);
         for (const { status } of both()) expect(status).toBe(0);
     });
 
@@ -109,6 +107,27 @@ describe("forbid-tool-literals.sh", () => {
             expect(stderr).toContain("crates/daemon/src/boundary.rs:13:");
             expect(stderr).not.toContain("boundary.rs:7:");
         }
+    });
+
+    test("scans from the repository root when run from a subdirectory", () => {
+        write("crates/daemon/src/boundary.rs", `const K: &str = ${FILE_PATH};\n`);
+        git("add", "-A");
+        for (const args of [["--staged"], []]) {
+            const result = spawnSync("bash", [SCRIPT, ...args], {
+                cwd: join(repo, "crates"),
+                encoding: "utf8",
+            });
+            expect(result.status).toBe(1);
+            expect(result.stderr).toContain("crates/daemon/src/boundary.rs:1:");
+        }
+    });
+
+    test("counts an added line that begins with a plus sign", () => {
+        write("crates/daemon/src/boundary.rs", `fn a() {}\n++ 1;\nconst K: &str = ${FILE_PATH};\n`);
+        git("add", "-A");
+        const { status, stderr } = scan("--staged");
+        expect(status).toBe(1);
+        expect(stderr).toContain("crates/daemon/src/boundary.rs:3:");
     });
 
     test("reports a tool failure outside a git checkout", () => {
