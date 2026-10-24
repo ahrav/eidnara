@@ -74,7 +74,7 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
         .prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id")
         .all(sessionId) as Array<{ id: string; data: string }>;
     const parts = db.prepare(
-        "SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created, id",
+        "SELECT id, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created, id",
     );
     return messages.flatMap((row) => {
         const info = parse(row.data, `message ${row.id}`);
@@ -84,7 +84,7 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
         const settled = time.completed !== undefined && time.completed !== null;
         const units: ExpectedUnit[] = [];
         const nonUnits: NonUnit[] = [];
-        const partRows = parts.all(row.id) as Array<{ id: string; data: string }>;
+        const partRows = parts.all(sessionId, row.id) as Array<{ id: string; data: string }>;
         partRows.forEach((partRow, index) => {
             const at = `part ${partRow.id}`;
             const part = parse(partRow.data, at);
@@ -114,17 +114,19 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
                 } else {
                     const isError = status === "error";
                     const output = text(isError ? state.error : state.output, `${at} output`);
+                    const name = text(part.tool, `${at} tool`);
                     units.push({
                         index,
                         partId: partRow.id,
                         byteLen: utf8Length(output),
                         tool: {
-                            name: text(part.tool, `${at} tool`),
+                            name,
                             callId: text(part.callID, `${at} callID`),
                             isError,
-                            exit: Number.isInteger(metadata.exit)
-                                ? (metadata.exit as number)
-                                : null,
+                            exit:
+                                name === "bash" && Number.isInteger(metadata.exit)
+                                    ? (metadata.exit as number)
+                                    : null,
                             truncated:
                                 typeof metadata.truncated === "boolean" ? metadata.truncated : null,
                         },

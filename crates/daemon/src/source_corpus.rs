@@ -259,11 +259,13 @@ impl Manifest {
                 ));
             }
         }
-        let links: BTreeSet<&str> = self
+        // Case-insensitive filesystems resolve `d/x` through a symlink named `D`, so the
+        // ancestor check folds ASCII case the way the `.git` component check does.
+        let links: BTreeSet<String> = self
             .files
             .iter()
             .filter_map(|file| match file {
-                FileEntry::Symlink(link) => Some(link.path.as_str()),
+                FileEntry::Symlink(link) => Some(link.path.to_ascii_lowercase()),
                 FileEntry::Regular(_) => None,
             })
             .collect();
@@ -274,7 +276,7 @@ impl Manifest {
         for path in all_paths {
             let mut ancestor = parent(path);
             while !ancestor.is_empty() {
-                if links.contains(ancestor) {
+                if links.contains(&ancestor.to_ascii_lowercase()) {
                     return Err(format!("{path:?} lies beneath the symlink {ancestor:?}"));
                 }
                 ancestor = parent(ancestor);
@@ -439,6 +441,16 @@ pub(crate) fn materialize(manifest: &Manifest, worktree: bool) -> Result<Materia
                     .map_err(|error| format!("{}: {error}", link.path))?;
             }
         }
+    }
+    if manifest.layout == Layout::NonGit {
+        if worktree {
+            return Err("a non_git layout has no repository for a worktree".to_owned());
+        }
+        return Ok(Materialized {
+            _dir: dir,
+            root,
+            worktree: None,
+        });
     }
     // The explicit SHA-1 format makes the root commit oid independent of git's object-format default.
     git(&root, &["init", "-q", "-b", "main", "--object-format=sha1"])?;

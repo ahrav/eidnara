@@ -143,6 +143,32 @@ describe("OpenCode db reader", () => {
         expect(() => readOpenCodeSession(db, SESSION)).toThrow(/output: not a string/);
     });
 
+    it("reads exit only for bash, as the capture path does", () => {
+        const db = store();
+        message(db, "msg_1", 1, { role: "assistant", time: { created: 1, completed: 2 } });
+        parts(db, "msg_1", [
+            settledTool("c1", "read", { exit: 0 }),
+            settledTool("c2", "bash", { exit: 0 }),
+            settledTool("c3", "mcp_custom", { exit: 3 }),
+        ]);
+        const [assistant] = readOpenCodeSession(db, SESSION);
+        expect(assistant?.units.map((u) => u.tool?.exit)).toEqual([null, 0, null]);
+    });
+
+    it("reads only the requested session's part rows", () => {
+        const db = store();
+        message(db, "msg_1", 1, { role: "user", time: { created: 1 } });
+        parts(db, "msg_1", [textPart("mine")]);
+        db.prepare("INSERT INTO part VALUES (?, ?, ?, 0, 0, ?)").run(
+            "prt_stray",
+            "msg_1",
+            "ses_other",
+            JSON.stringify(textPart("stray")),
+        );
+        const [user] = readOpenCodeSession(db, SESSION);
+        expect(user?.units.map((u) => u.partId)).toEqual(["prt_msg_1_00"]);
+    });
+
     it("reads non-object tool metadata as unknown exit, truncation, and interruption", () => {
         const db = store();
         message(db, "msg_1", 1, { role: "assistant", time: { created: 1, completed: 2 } });

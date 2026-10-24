@@ -176,6 +176,10 @@ fn a_manifest_out_of_order_or_naming_an_unheld_condition_is_refused() {
         v["files"] =
             json!([{"path": "d", "symlink": "/tmp"}, {"path": "d/x", "size": 1, "utf8": true}]);
     });
+    refused("beneath the symlink", &|v| {
+        v["files"] =
+            json!([{"path": "D", "symlink": "/tmp"}, {"path": "d/x", "size": 1, "utf8": true}]);
+    });
     refused("recorded as non-UTF-8", &|v| {
         v["files"] = json!([{"path": "a", "size": 0, "utf8": false}]);
     });
@@ -242,6 +246,23 @@ fn materializing_eidnara_yields_its_eight_agents_documents_and_no_architecture_d
     assert_eq!(root_agents, manifest.documents[0].text);
     let tracked = git(&checkout.root, &["ls-files"]).unwrap();
     assert_eq!(tracked.lines().count(), paths.len());
+}
+
+#[test]
+fn a_non_git_layout_materializes_without_a_repository() {
+    let mut plain = manifest("ripgrep");
+    plain.layout = Layout::NonGit;
+    let checkout = materialize(&plain, false).unwrap();
+    assert!(!checkout.root.join(".git").exists());
+    assert_eq!(
+        tree(&checkout.root),
+        tree(&materialize(&manifest("ripgrep"), false).unwrap().root)
+    );
+    let error = match materialize(&plain, true) {
+        Ok(_) => panic!("a non_git layout accepted a worktree"),
+        Err(error) => error,
+    };
+    assert!(error.contains("non_git"), "{error:?}");
 }
 
 #[test]
