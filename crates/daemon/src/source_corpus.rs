@@ -513,6 +513,13 @@ pub(crate) struct ExpectedRecord {
 pub(crate) struct ExpectedUnit {
     /// Position of the part or content item within its record.
     pub index: usize,
+    /// The block index capture publishes the unit under: the part or item position for text, the
+    /// output block within a tool result.
+    pub block: usize,
+    /// The settled timestamp the harness wrote for the unit, as a decimal string: OpenCode
+    /// `time.completed` (else `time.created`) for text and `state.time.end` for a tool, Pi
+    /// `message.timestamp`; `None` when the record carries none.
+    pub revision: Option<String>,
     pub byte_len: usize,
     pub tool: Option<ExpectedTool>,
 }
@@ -666,6 +673,10 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
         .ok_or_else(|| format!("{at}: no `message`"))?;
     let role = string(message, "role", at)?;
     record.role = Some(role.to_owned());
+    let revision = message
+        .get("timestamp")
+        .and_then(Value::as_u64)
+        .map(|millis| millis.to_string());
     if !matches!(role, "user" | "assistant" | "toolResult") {
         record.non_units.push(NonUnit {
             index: None,
@@ -678,6 +689,8 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
         Some(Value::String(text)) if role != "toolResult" => {
             record.units.push(ExpectedUnit {
                 index: 0,
+                block: 0,
+                revision,
                 byte_len: text.len(),
                 tool: None,
             });
@@ -694,6 +707,8 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
             match item_kind(item, at)? {
                 "text" => record.units.push(ExpectedUnit {
                     index,
+                    block: index,
+                    revision: revision.clone(),
                     byte_len: string(item, "text", at)?.len(),
                     tool: None,
                 }),
@@ -732,11 +747,224 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     for (index, item) in items.iter().enumerate() {
         record.units.push(ExpectedUnit {
             index,
+            block: index,
+            revision: revision.clone(),
             byte_len: string(item, "text", at)?.len(),
             tool: Some(tool.clone()),
         });
     }
     Ok(record)
+}
+
+fn object<'v>(value: &'v Value, at: &str) -> Result<&'v serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{at}: not an object"))
+}
+
+fn millis(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_u64)
+        .map(|millis| millis.to_string())
+}
+
+/// The expected-unit table of one OpenCode session, read by SQL from the `message` and `part`
+/// tables of `conn`: messages in `(time_created, id)` order, each message's parts in
+/// `(time_created, id)` order. The classification is the TypeScript reader's
+/// (`packages/e2e-tests/src/source-corpus/opencode-db-reader.ts`): a completed compaction summary
+/// is left out, a part neither `text` nor `tool` is `non_text_part`, ignored text is
+/// `ignored_text`, assistant text of an unsettled message is `unsettled_text`, and a tool not yet
+/// settled, or interrupted in an unsettled message, is `unsettled_tool`.
+///
+/// # Errors
+///
+/// A SQL failure, a row whose `data` is not JSON, or a record missing a field OpenCode always
+/// writes.
+pub(crate) fn read_opencode_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<ExpectedRecord>, String> {
+    let sql = |error: rusqlite::Error| error.to_string();
+    let mut messages = conn
+        .prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")
+        .map_err(sql)?;
+    let mut parts = conn
+        .prepare(
+            "SELECT id, data FROM part WHERE session_id = ?1 AND message_id = ?2 \
+             ORDER BY time_created, id",
+        )
+        .map_err(sql)?;
+    let rows: Vec<(String, String)> = messages
+        .query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(sql)?
+        .collect::<Result<_, _>>()
+        .map_err(sql)?;
+    let mut records = Vec::new();
+    for (id, data) in rows {
+        let at = format!("message {id}");
+        let info: Value = serde_json::from_str(&data).map_err(|error| format!("{at}: {error}"))?;
+        if info.get("summary") == Some(&Value::Bool(true))
+            && info.get("finish").and_then(Value::as_str) == Some("stop")
+        {
+            continue;
+        }
+        let role = string(&info, "role", &at)?.to_owned();
+        let time = object(info.get("time").unwrap_or(&Value::Null), &at)?;
+        let completed = time.get("completed").filter(|value| !value.is_null());
+        let settled = completed.is_some();
+        let text_revision = millis(completed.or_else(|| time.get("created")));
+        let mut record = ExpectedRecord {
+            id: id.clone(),
+            role: Some(role.clone()),
+            units: Vec::new(),
+            non_units: Vec::new(),
+        };
+        let part_rows: Vec<(String, String)> = parts
+            .query_map([session_id, id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)?;
+        for (index, (part_id, data)) in part_rows.into_iter().enumerate() {
+            let at = format!("part {part_id}");
+            let part: Value =
+                serde_json::from_str(&data).map_err(|error| format!("{at}: {error}"))?;
+            let kind = string(&part, "type", &at)?.to_owned();
+            let mut non_unit = |reason| {
+                record.non_units.push(NonUnit {
+                    index: Some(index),
+                    reason,
+                    kind: kind.clone(),
+                });
+            };
+            match kind.as_str() {
+                "text" => {
+                    let body = string(&part, "text", &at)?;
+                    if part.get("ignored") == Some(&Value::Bool(true)) {
+                        non_unit(NonUnitReason::IgnoredText);
+                    } else if role == "assistant" && !settled {
+                        non_unit(NonUnitReason::UnsettledText);
+                    } else {
+                        record.units.push(ExpectedUnit {
+                            index,
+                            block: index,
+                            revision: text_revision.clone(),
+                            byte_len: body.len(),
+                            tool: None,
+                        });
+                    }
+                }
+                "tool" => {
+                    let state = part
+                        .get("state")
+                        .ok_or_else(|| format!("{at}: no `state`"))?;
+                    let status = string(state, "status", &at)?;
+                    let metadata = state.get("metadata").filter(|value| value.is_object());
+                    let interrupted = metadata
+                        .and_then(|metadata| metadata.get("interrupted"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    if !matches!(status, "completed" | "error") || (interrupted && !settled) {
+                        non_unit(NonUnitReason::UnsettledTool);
+                        continue;
+                    }
+                    let is_error = status == "error";
+                    let output = string(state, if is_error { "error" } else { "output" }, &at)?;
+                    let name = string(&part, "tool", &at)?.to_owned();
+                    let exit = metadata
+                        .and_then(|metadata| metadata.get("exit"))
+                        .and_then(Value::as_i64)
+                        .filter(|_| name == "bash");
+                    record.units.push(ExpectedUnit {
+                        index,
+                        block: 0,
+                        revision: millis(state.get("time").and_then(|time| time.get("end"))),
+                        byte_len: output.len(),
+                        tool: Some(ExpectedTool {
+                            call_id: string(&part, "callID", &at)?.to_owned(),
+                            name,
+                            is_error,
+                            exit,
+                            truncated: metadata
+                                .and_then(|metadata| metadata.get("truncated"))
+                                .and_then(Value::as_bool),
+                        }),
+                    });
+                }
+                _ => non_unit(NonUnitReason::NonTextPart),
+            }
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Loads a frozen OpenCode session fixture into `conn` as `message` and `part` rows, so
+/// [`read_opencode_session`] reads it as it reads a live store. Returns the session id.
+///
+/// # Errors
+///
+/// A fixture missing a field the freeze writes, or a SQL failure.
+pub(crate) fn load_frozen_opencode(
+    conn: &rusqlite::Connection,
+    fixture: &Value,
+) -> Result<String, String> {
+    let sql = |error: rusqlite::Error| error.to_string();
+    let session = string(fixture, "session_id", "fixture")?.to_owned();
+    conn.execute_batch(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, \
+           time_created INTEGER NOT NULL, data TEXT NOT NULL); \
+         CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, \
+           session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+    )
+    .map_err(sql)?;
+    let messages = fixture
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or("fixture: no `messages` array")?;
+    for message in messages {
+        let id = string(message, "id", "message")?;
+        let created = message.get("time_created").and_then(Value::as_i64);
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, session, created, message["data"].to_string()],
+        )
+        .map_err(sql)?;
+        for part in message["parts"]
+            .as_array()
+            .ok_or("message: no `parts` array")?
+        {
+            conn.execute(
+                "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    string(part, "id", "part")?,
+                    id,
+                    session,
+                    part.get("time_created").and_then(Value::as_i64),
+                    part["data"].to_string()
+                ],
+            )
+            .map_err(sql)?;
+        }
+    }
+    Ok(session)
+}
+
+/// The JSONL lines a frozen Pi session fixture decodes back to.
+///
+/// # Errors
+///
+/// A fixture without an `entries` array.
+pub(crate) fn frozen_pi_jsonl(fixture: &Value) -> Result<String, String> {
+    Ok(fixture
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or("fixture: no `entries` array")?
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// The unit content of a canary record: its `text`, or for an OpenCode tool part its
