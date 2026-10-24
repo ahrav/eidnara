@@ -197,12 +197,14 @@ fn parent(path: &str) -> &str {
 }
 
 fn check_relative(path: &str) -> Result<(), String> {
+    // A `.git` entry would write into the materialized repository's administrative directory,
+    // including its hooks; case-insensitive filesystems resolve `.GIT` to `.git`.
     if path.is_empty()
         || path.starts_with('/')
         || path.contains('\0')
-        || path
-            .split('/')
-            .any(|component| matches!(component, "" | "." | ".."))
+        || path.split('/').any(|component| {
+            matches!(component, "" | "." | "..") || component.eq_ignore_ascii_case(".git")
+        })
     {
         return Err(format!("{path:?} is not a normalized relative path"));
     }
@@ -393,6 +395,7 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let output = command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "corpus")
         .env("GIT_AUTHOR_EMAIL", "corpus@example.invalid")
         .env("GIT_AUTHOR_DATE", "@1700000000 +0000")
@@ -437,7 +440,8 @@ pub(crate) fn materialize(manifest: &Manifest, worktree: bool) -> Result<Materia
             }
         }
     }
-    git(&root, &["init", "-q", "-b", "main"])?;
+    // The explicit SHA-1 format makes the root commit oid independent of git's object-format default.
+    git(&root, &["init", "-q", "-b", "main", "--object-format=sha1"])?;
     // `-f` adds blobs the tree's own `.gitignore` would skip; upstream tracked them.
     git(&root, &["add", "-A", "-f"])?;
     git(
@@ -498,7 +502,7 @@ pub(crate) struct NonUnit {
     /// The part or item position; `None` when the reason covers the whole record.
     pub index: Option<usize>,
     pub reason: NonUnitReason,
-    /// The native kind: the part `type`, item `type`, or entry `type`.
+    /// The native kind: the part `type`, item `type`, entry `type`, or Pi message `role`.
     pub kind: String,
 }
 
@@ -544,6 +548,9 @@ closed_names! {
         SkippedItem => "skipped_item",
         /// A Pi entry whose `type` is not `message`.
         NonMessageEntry => "non_message_entry",
+        /// Pi capture reads `user`, `assistant`, and `toolResult` messages; every remaining role,
+        /// such as `bashExecution`, maps here.
+        UncapturedRole => "uncaptured_role",
     }
 }
 
@@ -627,6 +634,14 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
         .ok_or_else(|| format!("{at}: no `message`"))?;
     let role = string(message, "role", at)?;
     record.role = Some(role.to_owned());
+    if !matches!(role, "user" | "assistant" | "toolResult") {
+        record.non_units.push(NonUnit {
+            index: None,
+            reason: NonUnitReason::UncapturedRole,
+            kind: role.to_owned(),
+        });
+        return Ok(record);
+    }
     let items = match message.get("content") {
         Some(Value::String(text)) if role != "toolResult" => {
             record.units.push(ExpectedUnit {

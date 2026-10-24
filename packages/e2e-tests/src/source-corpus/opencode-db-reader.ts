@@ -7,7 +7,8 @@ export type NonUnitReason =
     | "unsettled_tool"
     | "non_text_item"
     | "skipped_item"
-    | "non_message_entry";
+    | "non_message_entry"
+    | "uncaptured_role";
 
 export interface ExpectedTool {
     readonly name: string;

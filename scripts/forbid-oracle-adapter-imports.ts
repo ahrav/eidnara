@@ -18,6 +18,9 @@ export const TYPESCRIPT_READERS = "packages/e2e-tests/src/source-corpus/**/*.ts"
 const RUST_FORBIDDEN = new RegExp(
     [
         String.raw`\b(?:crate|super|daemon)::`,
+        // Root aliases such as `crate as p` or `extern crate self as p` let `p::` reach the daemon crate.
+        String.raw`\b(?:crate|super|self)\s+as\b`,
+        String.raw`\bextern\s+crate\b`,
         String.raw`\b(?:harness_sources|tool_outcome|source_capture|SessionIdentity|ToolBlock|SourceUnit)\b`,
         String.raw`\b(?:opencode|pi)_units\w*`,
         String.raw`#\[path\b`,

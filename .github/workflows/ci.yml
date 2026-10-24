@@ -347,6 +347,9 @@ jobs:
         # `NOTICE`, and prose, following the schema-migration gate: the property
         # catalogs keep the deleted design as invalidated history, and the
         # tests that prove a retired name is refused spell it as a needle.
+        # Source-corpus repository manifests are exempt from this scan because
+        # they are test data that preserve an upstream tree's pathnames
+        # verbatim, including the property catalog's invalidated-history names.
         # Inline `#[cfg(test)]` modules are scanned, so they spell needles in
         # halves with `concat!`.
         # Identifier spellings (`_`, `-`, `.`, or nothing between the words)
@@ -375,7 +378,8 @@ jobs:
           PROSE+="|dua[l]${ws}lanes?${end}|mirro[r]${ws}rows?${end}"
           TOKENS="(^|[^0-9a-z])(${IDENT}|${PROSE})"
           paths=(':(exclude,glob)crates/*/tests/**' ':!docs/' ':!NOTICE'
-            ':!*.md' ':!*.test.ts' ':!*.test.tsx')
+            ':!*.md' ':!*.test.ts' ':!*.test.tsx'
+            ':(exclude,glob)crates/daemon/testdata/corpus/repos/*.json')
           status=0
           git grep -n -I -i -E -e "$TOKENS" -- "${paths[@]}" || status=$?
           if [ "$status" -eq 0 ]; then

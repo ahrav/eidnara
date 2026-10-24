@@ -39,6 +39,16 @@ describe("forbiddenRustReaderLines", () => {
             'r.rs:3: let u = "http://x"; use crate::a;',
         ]);
     });
+
+    test("rejects a rebound crate root before any aliased path can reach the daemon", () => {
+        const seeded = [
+            "use crate as product;",
+            "use crate::{self as product};",
+            "extern crate self as d;",
+            "extern crate daemon;",
+        ];
+        expect(forbiddenRustReaderLines("r.rs", seeded.join("\n"))).toHaveLength(seeded.length);
+    });
 });
 
 describe("forbiddenTypeScriptReaderLines", () => {

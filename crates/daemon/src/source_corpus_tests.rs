@@ -163,6 +163,12 @@ fn a_manifest_out_of_order_or_naming_an_unheld_condition_is_refused() {
     refused("not a normalized relative path", &|v| {
         v["files"] = json!([{"path": "../a", "size": 1, "utf8": true}]);
     });
+    refused("not a normalized relative path", &|v| {
+        v["files"] = json!([{"path": ".git/hooks/prepare-commit-msg", "symlink": "/bin/sh"}]);
+    });
+    refused("not a normalized relative path", &|v| {
+        v["files"] = json!([{"path": "a/.GIT/config", "size": 1, "utf8": true}]);
+    });
     refused("is an instruction document", &|v| {
         v["files"] = json!([{"path": "x/AGENTS.md", "size": 1, "utf8": true}]);
     });
@@ -251,6 +257,8 @@ fn a_materialized_worktree_shares_its_checkout_root_commit() {
     let again = materialize(&manifest("ripgrep"), false).unwrap();
     assert_eq!(roots(&again.root), roots(&checkout.root));
     assert_eq!(roots(&checkout.root).trim(), RIPGREP_ROOT);
+    let format = git(&checkout.root, &["rev-parse", "--show-object-format"]).unwrap();
+    assert_eq!(format.trim(), "sha1");
 }
 
 #[test]
@@ -385,6 +393,37 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
     assert_eq!(records[6].non_units[0].kind, "model_change");
     let expected: usize = records.iter().map(|r| r.units.len()).sum();
     assert_eq!(expected, 6);
+}
+
+#[test]
+fn the_pi_reader_classifies_a_bash_execution_message_whole_and_reads_its_siblings() {
+    let session = [
+        pi_entry("u1", json!({"role": "user", "content": "run it", "timestamp": 1})),
+        pi_entry(
+            "b1",
+            json!({"role": "bashExecution", "command": "git status", "output": "clean",
+                "exitCode": 0, "cancelled": false, "truncated": false, "timestamp": 2}),
+        ),
+        pi_entry(
+            "a1",
+            json!({"role": "assistant", "content": [{"type": "text", "text": "done"}], "timestamp": 3}),
+        ),
+    ]
+    .join("\n");
+    let records = read_pi_session(&session).unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].units.len(), 1);
+    assert_eq!(records[1].role.as_deref(), Some("bashExecution"));
+    assert!(records[1].units.is_empty());
+    assert_eq!(
+        records[1]
+            .non_units
+            .iter()
+            .map(|n| (n.index, n.reason.name(), n.kind.as_str()))
+            .collect::<Vec<_>>(),
+        [(None, "uncaptured_role", "bashExecution")]
+    );
+    assert_eq!(records[2].units.len(), 1);
 }
 
 #[test]

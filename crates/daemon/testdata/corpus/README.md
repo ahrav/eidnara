@@ -41,8 +41,10 @@ Exclusions: none. No instruction document in either manifest holds a string the
 redaction scan reports.
 
 The materializer (`materialize` in `crates/daemon/src/source_corpus.rs`) writes a manifest
-into a temporary directory, runs `git init` and one commit with fixed identities and dates,
-and optionally adds a worktree on its own branch, so both checkouts share one root commit.
+into a temporary directory, runs `git init` with the SHA-1 object format and one commit with
+fixed identities and dates, and optionally adds a worktree on its own branch, so both
+checkouts share one root commit. The validator refuses a path with a `.git` component in any
+ASCII case, since materializing it would write into the repository's administrative directory.
 
 ## Harness closures
 
@@ -108,7 +110,8 @@ harness source adapters, the tool outcome module, or the shared identity and blo
 
 Non-unit reasons: `non_text_part`, `ignored_text`, `unsettled_text`, `unsettled_tool`,
 `non_text_item` (a Pi `toolResult` holding a non-text item yields no unit for the whole
-record), `skipped_item`, `non_message_entry`.
+record), `skipped_item`, `non_message_entry`, `uncaptured_role` (a Pi message whose role is
+neither `user`, `assistant`, nor `toolResult`, such as `bashExecution`).
 
 Loss conditions, the closed set reconciliation maps every missing expected unit to:
 `adapter_refused`, `unit_too_large`, `deferred`, `secret_bearing`, `re_admission_blocked`,
