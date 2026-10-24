@@ -644,10 +644,7 @@ fn adjacent_tool_call_arc(
 }
 
 fn extract_file_path(input: &Value) -> Option<String> {
-    let obj = input.as_object()?;
-    ["filePath", "file_path", "path"]
-        .iter()
-        .find_map(|key| obj.get(*key).and_then(Value::as_str).map(str::to_string))
+    crate::tool_vocabulary::path_arg(input).map(str::to_string)
 }
 
 pub(crate) fn fingerprint_digest(content_hash: &[u8; 32]) -> String {

@@ -7,6 +7,7 @@
 #[cfg(test)]
 use crate::selection::SelMessageRole;
 use crate::selection::{SelItem, SelKind};
+use crate::tool_vocabulary::{TODO_TOOL, is_injected_todo_tool};
 use memory_store::{
     BlockKind, FrozenSyntheticTodoPair, HarnessMeta, ModuleMeta, OutputKind, ProviderExtras,
     ToolOutput, WireBlock, WireMessage,
@@ -17,7 +18,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const SYNTHETIC_CALL_ID_PREFIX: &str = "synthetic_todo_";
-const TODO_TOOL_NAME: &str = "todowrite";
 const DEFAULT_PRIORITY: &str = "medium";
 const COMPLETED_STATUS: &str = "completed";
 const TERMINAL_STATUSES: &[&str] = &["completed", "cancelled"];
@@ -155,7 +155,7 @@ pub fn build_synthetic_todo_pair(state_json: &str) -> Option<SyntheticTodo> {
         "assistant",
         vec![WireBlock::bare(BlockKind::ToolCall {
             id: call_id.clone(),
-            name: TODO_TOOL_NAME.to_string(),
+            name: TODO_TOOL.to_string(),
             input,
             provider_executed: false,
         })],
@@ -170,7 +170,7 @@ pub fn build_synthetic_todo_pair(state_json: &str) -> Option<SyntheticTodo> {
         "tool",
         vec![WireBlock::bare(BlockKind::ToolResult {
             id: call_id.clone(),
-            tool_name: TODO_TOOL_NAME.to_string(),
+            tool_name: TODO_TOOL.to_string(),
             output: ToolOutput::bare(OutputKind::Json {
                 value: result_value,
             }),
@@ -432,7 +432,7 @@ fn newest_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
         let SelKind::ToolCall { name, input } = &item.kind else {
             continue;
         };
-        if !name.eq_ignore_ascii_case(TODO_TOOL_NAME) {
+        if !is_injected_todo_tool(name) {
             continue;
         }
         let Some(state_json) = todo_state_from_input(input.as_ref()) else {
@@ -533,7 +533,7 @@ mod tests {
             ordinal,
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
-                name: TODO_TOOL_NAME.to_string(),
+                name: TODO_TOOL.to_string(),
                 input: std::borrow::Cow::Owned(serde_json::json!({ "todos": todos })),
             },
             provider_executed: false,
@@ -550,7 +550,7 @@ mod tests {
         assert_eq!(constants.terminal_statuses, TERMINAL_STATUSES);
         assert_eq!(constants.title_done_statuses, TITLE_DONE_STATUSES);
         assert_eq!(constants.default_priority, DEFAULT_PRIORITY);
-        assert_eq!(constants.tool_name, TODO_TOOL_NAME);
+        assert_eq!(constants.tool_name, TODO_TOOL);
         assert_eq!(constants.completed_status, COMPLETED_STATUS);
         assert_eq!(constants.synthetic_timestamp, SYNTHETIC_TIMESTAMP);
     }
@@ -1044,12 +1044,12 @@ mod tests {
         assert!(first.tool_msg.meta.synthetic);
         assert!(matches!(
             first.assistant_msg.content().first().map(|block| block.kind()),
-            Some(BlockKind::ToolCall { name, provider_executed: false, .. }) if name == TODO_TOOL_NAME
+            Some(BlockKind::ToolCall { name, provider_executed: false, .. }) if name == TODO_TOOL
         ));
         assert!(matches!(
             first.tool_msg.content().first().map(|block| block.kind()),
             Some(BlockKind::ToolResult { tool_name, output, provider_executed: false, .. })
-                if tool_name == TODO_TOOL_NAME && matches!(output.kind, OutputKind::Json { .. })
+                if tool_name == TODO_TOOL && matches!(output.kind, OutputKind::Json { .. })
         ));
     }
 

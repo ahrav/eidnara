@@ -299,6 +299,9 @@ jobs:
         # every tracked file.
         run: scripts/forbid-comment-markers.sh
 
+      - name: Tool literals
+        run: scripts/forbid-tool-literals.sh
+
       - name: Invented provenance
         # Review-staging, MemoryReviewer, harness-source publication,
         # source-capture, and repository-document read paths carry no caller

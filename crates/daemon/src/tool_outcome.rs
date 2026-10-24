@@ -8,6 +8,7 @@
 //!
 //! Pi (`toolResult` message): `status` follows `isError`, and `truncated` is the boolean `details.truncation.truncated` the bash tool reports. A Pi session entry carries status and truncation only, so a Pi record leaves `exit_code` and `exception_ref` unset.
 
+use crate::harness_sources::Harness;
 use kernel::{TOOL_OUTCOME_VERSION, ToolOutcome, ToolStatus};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -27,18 +28,13 @@ pub fn opencode(part: &Value, message_error: Option<&Value>, output: &str) -> Op
     };
     let metadata = state.get("metadata");
     let interrupted = opencode_interrupted(state);
-    let exit_code = (tool_name == "bash")
-        .then(|| metadata.and_then(|metadata| metadata.get("exit")))
-        .flatten()
-        .and_then(Value::as_i64);
+    let exit_code = crate::tool_vocabulary::exit_code(Harness::OpenCode, tool_name, metadata);
     Some(ToolOutcome {
         version: TOOL_OUTCOME_VERSION,
         status,
         tool_name: tool_name.to_owned(),
         byte_length: output.len() as u64,
-        truncated: metadata
-            .and_then(|metadata| metadata.get("truncated"))
-            .and_then(Value::as_bool),
+        truncated: crate::tool_vocabulary::truncated_flag(Harness::OpenCode, state),
         exit_code,
         exception_ref: interrupted
             .then_some(message_error)
@@ -72,11 +68,7 @@ pub fn pi(message: &Value, output: &str) -> Option<ToolOutcome> {
         status,
         tool_name: tool_name.to_owned(),
         byte_length: output.len() as u64,
-        truncated: message
-            .get("details")
-            .and_then(|details| details.get("truncation"))
-            .and_then(|truncation| truncation.get("truncated"))
-            .and_then(Value::as_bool),
+        truncated: crate::tool_vocabulary::truncated_flag(Harness::Pi, message),
         exit_code: None,
         exception_ref: None,
     })
