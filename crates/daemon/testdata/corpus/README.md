@@ -102,8 +102,8 @@ and rewrites both digest pins.
 ## Session fixtures
 
 A session fixture holds the harness's own records, decoded: an OpenCode fixture holds every
-`message` row of the session with its `part` rows in id order; a Pi fixture holds every JSONL
-entry in file order. The freeze replaces the scratch checkout path with `/corpus/ripgrep` and
+`message` row of the session with its `part` rows in `(time_created, id)` order, each part
+keeping its `time_created`; a Pi fixture holds every JSONL entry in file order. The freeze replaces the scratch checkout path with `/corpus/ripgrep` and
 other scratch paths with `/corpus/opencode` or `/corpus/pi`, renames OpenCode `ses_`, `msg_`,
 `prt_`, and `tool_` identifiers in sorted order (so part order is unchanged) and Pi entry ids in
 file order, and marks each canary unit with `"canary": true`. Field names, nesting, value

@@ -90,8 +90,8 @@ function stable(value: JsonValue): string {
 
 /**
  * The frozen form of one OpenCode session read from `opencode.db`: every `message` row with its
- * `part` rows in id order, `data` decoded, scratch paths and generated ids replaced, canaries
- * marked. The same store yields the same bytes.
+ * `part` rows in `(time_created, id)` order, `data` decoded, scratch paths and generated ids
+ * replaced, canaries marked. The same store yields the same bytes.
  */
 export function freezeOpenCode(
     db: Database,
