@@ -73,6 +73,14 @@ describe("forbiddenTypeScriptReaderLines", () => {
             "r.ts:6: imports ../rust-harness.ts",
         ]);
     });
+
+    test("rejects a sibling the `**/*.ts` scan would never open", () => {
+        const text = 'import { bridge } from "./bridge.js";\nimport { bare } from "./bare";\n';
+        expect(forbiddenTypeScriptReaderLines("r.ts", text)).toEqual([
+            "r.ts:1: imports ./bridge.js",
+            "r.ts:2: imports ./bare",
+        ]);
+    });
 });
 
 describe("forbiddenTypeScriptReaderLines across lines and strings", () => {

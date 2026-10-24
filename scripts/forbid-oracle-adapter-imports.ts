@@ -32,7 +32,7 @@ const RUST_FORBIDDEN = new RegExp(
 
 /** A TypeScript module specifier the reader may import: a runtime builtin or a sibling file. */
 function allowedSpecifier(specifier: string): boolean {
-    return /^(?:bun|node):/.test(specifier) || /^\.\/[^/]+$/.test(specifier);
+    return /^(?:bun|node):/.test(specifier) || /^\.\/[^/]+\.ts$/.test(specifier);
 }
 
 const TYPESCRIPT_SPECIFIER =

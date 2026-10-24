@@ -30,7 +30,15 @@ interface Exclusion {
 }
 
 function git(repo: string, args: string[]): Buffer {
-    const proc = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+    // An inherited `GIT_DIR` overrides `-C repo`; dropping the `GIT_` variables keeps Git on `repo`.
+    const env = Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+    );
+    const proc = Bun.spawnSync(["git", "-C", repo, ...args], {
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+    });
     if (proc.exitCode !== 0) {
         throw new Error(`git ${args.join(" ")} exited ${proc.exitCode}: ${proc.stderr}`);
     }
