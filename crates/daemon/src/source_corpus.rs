@@ -673,10 +673,7 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
         .ok_or_else(|| format!("{at}: no `message`"))?;
     let role = string(message, "role", at)?;
     record.role = Some(role.to_owned());
-    let revision = message
-        .get("timestamp")
-        .and_then(Value::as_u64)
-        .map(|millis| millis.to_string());
+    let revision = millis(message.get("timestamp"));
     if !matches!(role, "user" | "assistant" | "toolResult") {
         record.non_units.push(NonUnit {
             index: None,
@@ -928,7 +925,12 @@ pub(crate) fn load_frozen_opencode(
         let created = message.get("time_created").and_then(Value::as_i64);
         conn.execute(
             "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![id, session, created, message["data"].to_string()],
+            rusqlite::params![
+                id,
+                session,
+                created,
+                message.get("data").ok_or("message: no `data`")?.to_string()
+            ],
         )
         .map_err(sql)?;
         for part in message["parts"]
@@ -942,7 +944,7 @@ pub(crate) fn load_frozen_opencode(
                     id,
                     session,
                     part.get("time_created").and_then(Value::as_i64),
-                    part["data"].to_string()
+                    part.get("data").ok_or("part: no `data`")?.to_string()
                 ],
             )
             .map_err(sql)?;

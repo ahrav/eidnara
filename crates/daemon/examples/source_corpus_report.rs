@@ -5,8 +5,8 @@
 //! admitted bytes, and the R1 cell census.
 //!
 //! Every figure describes the frozen corpus population, computed exhaustively. The exit status is
-//! non-zero only when an expected unit is neither admitted nor lost under a named condition, or a
-//! replayed unit or revision disagrees with the expected table; every other figure only prints.
+//! non-zero only when `unclassified_loss` is: an expected unit neither admitted nor lost under a
+//! named condition. Every other figure only prints.
 //!
 //! Usage: `cargo run -p daemon --example source_corpus_report --features test-support -- [runs]`
 //! (`runs`, default 5, is how many independent replays time the publish batches).
@@ -30,12 +30,9 @@ use serde_json::Value;
 
 use corpus_replay::{
     PROJECT, PassMeasure, Reconciliation, ReplayRecord, ReplayStore, harness_adapter,
-    opencode_natives, pair, reconcile, replay,
+    opencode_records, pi_records, reconcile, replay,
 };
-use source_corpus::{
-    ExpectedUnit, LossCondition, corpus_dir, frozen_pi_jsonl, load_frozen_opencode,
-    read_opencode_session, read_pi_session,
-};
+use source_corpus::{ExpectedUnit, LossCondition, corpus_dir};
 
 /// Passes a replay runs at most; a pass offers every unit not yet settled.
 const PASSES: usize = 8;
@@ -55,24 +52,14 @@ fn fixture(path: &str) -> Value {
 
 fn sessions() -> Vec<Session> {
     let opencode = fixture("sessions/opencode-1.18.22/mix.json");
-    let conn = rusqlite::Connection::open_in_memory().expect("sqlite opens");
-    let id = load_frozen_opencode(&conn, &opencode).expect("fixture loads");
-    let expected = read_opencode_session(&conn, &id).expect("reader reads");
-    let opencode_records = pair(opencode_natives(&opencode), expected);
-
     let pi = fixture("sessions/pi-0.80.2/mix.json");
-    let jsonl = frozen_pi_jsonl(&pi).expect("fixture decodes");
-    let expected = read_pi_session(&jsonl).expect("reader reads");
-    let pi_id = expected[0].id.clone();
-    let natives = jsonl
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("entry is JSON"))
-        .collect();
+    let (opencode_id, opencode_records) = opencode_records(&opencode);
+    let (pi_id, pi_records) = pi_records(&pi);
     vec![
         Session {
             harness: Harness::OpenCode,
             closure: "OpenCode 1.18.22",
-            id,
+            id: opencode_id,
             records: opencode_records,
             fixture: opencode,
         },
@@ -80,7 +67,7 @@ fn sessions() -> Vec<Session> {
             harness: Harness::Pi,
             closure: "Pi 0.80.2",
             id: pi_id,
-            records: pair(natives, expected),
+            records: pi_records,
             fixture: pi,
         },
     ]
@@ -169,8 +156,8 @@ fn passes(out: &mut String, measures: &[PassMeasure]) {
     for (index, pass) in measures.iter().enumerate() {
         let _ = writeln!(
             out,
-            "    pass {}: offered {} units / {} bytes, admitted {} of {MAX_SOURCE_BATCH_UNITS} \
-             units and {} of {MAX_SOURCE_BATCH_BYTES} bytes",
+            "    pass {}: offered {} units / {} bytes; admitted {} units (bound \
+             {MAX_SOURCE_BATCH_UNITS}) and {} bytes (bound {MAX_SOURCE_BATCH_BYTES})",
             index + 1,
             pass.offered_units,
             pass.offered_bytes,
@@ -217,6 +204,21 @@ fn text_cells(text: &str, cells: &mut BTreeMap<&'static str, usize>) {
     }
 }
 
+/// The cells each closure cannot produce, as `packages/e2e-tests/src/corpus-sessions/census.ts`
+/// declares them; a zero count outside this list is a missing witness.
+fn cannot_produce(harness: Harness) -> &'static [&'static str] {
+    match harness {
+        Harness::OpenCode => &["Pi image item", "output over 64 KiB"],
+        Harness::Pi => &[
+            "glob",
+            "todowrite",
+            "MCP tool",
+            "subagent call",
+            "OpenCode non-text part",
+        ],
+    }
+}
+
 /// Witness counts per R1 cell, by the rules of `packages/e2e-tests/src/corpus-sessions/census.ts`.
 fn census(session: &Session) -> BTreeMap<&'static str, usize> {
     let mut cells = BTreeMap::new();
@@ -227,9 +229,9 @@ fn census(session: &Session) -> BTreeMap<&'static str, usize> {
             "edit" => "edit",
             "write" => "write",
             "grep" => "grep",
-            "glob" => "glob",
-            "todowrite" => "todowrite",
-            "task" => "subagent call",
+            "glob" if session.harness == Harness::OpenCode => "glob",
+            "todowrite" if session.harness == Harness::OpenCode => "todowrite",
+            "task" if session.harness == Harness::OpenCode => "subagent call",
             "corpus_probe" if session.harness == Harness::OpenCode => "MCP tool",
             _ => return None,
         })
@@ -304,129 +306,136 @@ fn host() -> String {
     format!("{name}; {cpu}; {cpus} CPUs")
 }
 
+/// Writes one session's section and returns its unclassified loss count.
+fn session_section(out: &mut String, session: &Session) -> usize {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = ReplayStore::open(dir.path());
+    let _ = writeln!(out, "## {}", session.closure);
+    let outcome = replay(
+        &store,
+        &identity(session),
+        &session.records,
+        &harness_adapter,
+        PASSES,
+    );
+    let all = reconcile(&session.records, &outcome);
+    let _ = writeln!(
+        out,
+        "- all units: expected {}, admitted {}, unclassified_loss {}; oracle disagreements: \
+         phantom {}, revision_mismatch {}, duplicate {}",
+        all.expected,
+        all.admitted,
+        all.unclassified.len(),
+        all.phantom.len(),
+        all.revision_mismatch.len(),
+        all.duplicate.len(),
+    );
+    for wanted in ["text", "tool"] {
+        let result = reconcile(&of_kind(&session.records, wanted), &outcome);
+        let _ = writeln!(out, "- content kind `{wanted}`:");
+        let _ = writeln!(
+            out,
+            "    completeness (published + replayed over expected): {} (replayed {})",
+            ratio(result.admitted, result.expected),
+            result.replayed,
+        );
+        losses(out, &result);
+    }
+    let units: Vec<&ExpectedUnit> = session
+        .records
+        .iter()
+        .flat_map(|record| &record.expected.units)
+        .collect();
+    let _ = writeln!(out, "- tool-result byte lengths (expected table):");
+    for (label, truncated) in [
+        ("truncated=true", Some(true)),
+        ("truncated=false", Some(false)),
+        ("truncated=unknown", None),
+    ] {
+        let values = units
+            .iter()
+            .filter(|unit| {
+                unit.tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.truncated == truncated)
+            })
+            .map(|unit| unit.byte_len)
+            .collect();
+        byte_lengths(out, label, values);
+    }
+    let over: Vec<&&ExpectedUnit> = units
+        .iter()
+        .filter(|unit| unit.byte_len > MAX_SOURCE_UNIT_BYTES)
+        .collect();
+    let total_bytes: usize = units.iter().map(|unit| unit.byte_len).sum();
+    let over_bytes: usize = over.iter().map(|unit| unit.byte_len).sum();
+    let _ = writeln!(
+        out,
+        "- above {MAX_SOURCE_UNIT_BYTES} bytes: units {}, bytes {}",
+        ratio(over.len(), units.len()),
+        ratio(over_bytes, total_bytes),
+    );
+    let _ = writeln!(
+        out,
+        "- offered and admitted per pass (bulk arrival: pass 1 offers the whole session):"
+    );
+    passes(out, &outcome.passes);
+    let _ = writeln!(out, "- census (witness units per R1 cell):");
+    let cells = census(session);
+    for cell in CELLS {
+        let count = cells.get(cell).copied().unwrap_or(0);
+        let shown = if cannot_produce(session.harness).contains(&cell) {
+            format!("{count} (the closure cannot produce this cell; see the corpus README)")
+        } else {
+            count.to_string()
+        };
+        let _ = writeln!(out, "    {cell}: {shown}");
+    }
+    let _ = writeln!(out);
+    all.unclassified.len()
+}
+
 fn main() -> ExitCode {
     let runs: usize = std::env::args()
         .nth(1)
         .map_or(5, |runs| runs.parse().expect("runs is a positive integer"));
+    assert!(runs > 0, "runs is a positive integer");
     let sessions = sessions();
     let mut out = String::new();
-    let mut unclassified = 0usize;
     let _ = writeln!(out, "# Source corpus measurement report\n");
     let _ = writeln!(
         out,
         "Estimand: every figure is a population fact about the frozen corpus \
          (crates/daemon/testdata/corpus/sessions), computed exhaustively; none estimates real \
-         sessions. No figure is compared to a threshold.\n"
+         sessions. No figure is compared to a threshold. The replay offers every record, the \
+         final assistant reply included, which live capture never offers; live reconciliation \
+         (the corpus README) counts one unit fewer per session.\n"
     );
     let _ = writeln!(
         out,
         "Replay: a pass offers every unit not yet settled to the screened publisher as one \
-         batch; passes run until a pass defers nothing, at most {PASSES}. Bounds: unit cap \
-         {MAX_SOURCE_UNIT_BYTES} bytes, batch {MAX_SOURCE_BATCH_UNITS} units and \
-         {MAX_SOURCE_BATCH_BYTES} bytes.\n"
+         batch, in a fresh kernel per session; passes run until a pass defers nothing, at most \
+         {PASSES}. Bounds: unit cap {MAX_SOURCE_UNIT_BYTES} bytes, batch \
+         {MAX_SOURCE_BATCH_UNITS} units and {MAX_SOURCE_BATCH_BYTES} bytes.\n"
     );
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = ReplayStore::open(dir.path());
-    for session in &sessions {
-        let _ = writeln!(out, "## {}", session.closure);
-        let outcome = replay(
-            &store,
-            &identity(session),
-            &session.records,
-            &harness_adapter,
-            PASSES,
-        );
-        let all = reconcile(&session.records, &outcome);
-        unclassified += all.unclassified.len() + all.phantom.len() + all.revision_mismatch.len();
-        let _ = writeln!(
-            out,
-            "- all units: expected {}, admitted {}, unclassified_loss {}, phantom {}, \
-             revision_mismatch {}",
-            all.expected,
-            all.admitted,
-            all.unclassified.len(),
-            all.phantom.len(),
-            all.revision_mismatch.len(),
-        );
-        for wanted in ["text", "tool"] {
-            let records = of_kind(&session.records, wanted);
-            let result = reconcile(&records, &outcome);
-            let _ = writeln!(out, "- content kind `{wanted}`:");
-            let _ = writeln!(
-                out,
-                "    completeness (published + replayed over expected): {} (replayed {})",
-                ratio(result.admitted, result.expected),
-                result.replayed,
-            );
-            losses(&mut out, &result);
-        }
-        let tool_units: Vec<&ExpectedUnit> = session
-            .records
-            .iter()
-            .flat_map(|record| &record.expected.units)
-            .filter(|unit| unit.tool.is_some())
-            .collect();
-        let _ = writeln!(out, "- tool-result byte lengths (expected table):");
-        for (label, truncated) in [
-            ("truncated=true", Some(true)),
-            ("truncated=false", Some(false)),
-            ("truncated=unknown", None),
-        ] {
-            let values = tool_units
-                .iter()
-                .filter(|unit| unit.tool.as_ref().and_then(|tool| tool.truncated) == truncated)
-                .map(|unit| unit.byte_len)
-                .collect();
-            byte_lengths(&mut out, label, values);
-        }
-        let all_units: Vec<&ExpectedUnit> = session
-            .records
-            .iter()
-            .flat_map(|record| &record.expected.units)
-            .collect();
-        let over: Vec<&&ExpectedUnit> = all_units
-            .iter()
-            .filter(|unit| unit.byte_len > MAX_SOURCE_UNIT_BYTES)
-            .collect();
-        let total_bytes: usize = all_units.iter().map(|unit| unit.byte_len).sum();
-        let over_bytes: usize = over.iter().map(|unit| unit.byte_len).sum();
-        let _ = writeln!(
-            out,
-            "- above {MAX_SOURCE_UNIT_BYTES} bytes: units {}, bytes {}",
-            ratio(over.len(), all_units.len()),
-            ratio(over_bytes, total_bytes),
-        );
-        let _ = writeln!(
-            out,
-            "- per pass (new units and bytes against the batch bounds):"
-        );
-        passes(&mut out, &outcome.passes);
-        let _ = writeln!(out, "- census (witness units per R1 cell):");
-        let cells = census(session);
-        for cell in CELLS {
-            let count = cells.get(cell).copied().unwrap_or(0);
-            let shown = if count == 0 {
-                "0 (harness cannot produce; see crates/daemon/testdata/corpus/README.md)".to_owned()
-            } else {
-                count.to_string()
-            };
-            let _ = writeln!(out, "    {cell}: {shown}");
-        }
-        let _ = writeln!(out);
-    }
+    let unclassified: usize = sessions
+        .iter()
+        .map(|session| session_section(&mut out, session))
+        .sum();
     let _ = writeln!(
         out,
-        "## Publish time against admitted bytes\n\nHost: {}. Runs: {runs}, each a fresh kernel. \
-         Pairs are (admitted bytes, elapsed ms) per batch, measured around the screened \
+        "## Publish time against admitted bytes\n\nHost: {}. Runs: {runs}, one after another \
+         in one process; each run replays every session into its own fresh kernel, OpenCode \
+         first. Pairs are (admitted bytes, elapsed ms) per batch, measured around the screened \
          publisher. The daemon's `publish_ms_last` and `publish_ms_max` gauges also span the \
          receipt preview wait, and no daemon counter records admitted bytes per batch; these \
          pairs are the replay harness's measurement.",
         host()
     );
     for run in 1..=runs {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let store = ReplayStore::open(dir.path());
         for session in &sessions {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let store = ReplayStore::open(dir.path());
             let outcome = replay(
                 &store,
                 &identity(session),
