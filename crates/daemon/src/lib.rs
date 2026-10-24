@@ -14134,6 +14134,17 @@ impl HandlerCore {
             .clone()
     }
 
+    /// The `source_capture` health metrics block as the next health report renders it, and
+    /// whether no capture job is running or queued.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub fn source_capture_report_for_test(&self) -> (serde_json::Value, bool) {
+        (
+            self.source_capture
+                .report(self.cancel.is_cancelled(), now_ms()),
+            self.source_capture.is_idle(),
+        )
+    }
+
     /// Whether a history_summarizer firing or reattach is live for any session:
     /// a driver that must reach quiescence between mutations waits on this.
     #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]

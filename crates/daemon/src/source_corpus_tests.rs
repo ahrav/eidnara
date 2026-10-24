@@ -20,7 +20,7 @@ const TYPESCRIPT_PEER: &str = concat!(
 
 const TYPESCRIPT_READER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../packages/e2e-tests/src/source-corpus/opencode-db-reader.ts"
+    "/../../packages/e2e-tests/src/source-corpus/expected.ts"
 );
 
 fn manifest(name: &str) -> Manifest {
@@ -503,8 +503,17 @@ fn a_credential_shape_fails_the_redaction_scan_unless_its_unit_is_a_canary() {
     assert_eq!(redaction_violations("f", &plain).len(), 1);
     let canary = json!({"units": [{"canary": true, "text": CANARY, "id": "u"}]});
     assert_eq!(redaction_violations("f", &canary), Vec::<String>::new());
-    let elsewhere = json!({"units": [{"canary": true, "text": CANARY, "note": CANARY}]});
-    assert_eq!(redaction_violations("f", &elsewhere).len(), 1);
+    let preview = json!({"units": [{"canary": true, "text": CANARY, "note": CANARY}]});
+    assert_eq!(redaction_violations("f", &preview), Vec::<String>::new());
+    let tool_part = json!({"parts": [{"canary": true, "type": "tool",
+        "state": {"output": CANARY, "metadata": {"output": CANARY}}}]});
+    assert_eq!(redaction_violations("f", &tool_part), Vec::<String>::new());
+    let beside = json!({"units": [{"canary": true, "text": CANARY}, {"text": CANARY}]});
+    assert_eq!(redaction_violations("f", &beside).len(), 1);
+    let other_secret = "sk-ant-api03-Qq1Ww2Ee3Rr4Tt5Yy6Uu7Ii8Oo9Pp0AaSsDdFfGg";
+    let inside = json!({"parts": [{"canary": true, "state": {"output": CANARY,
+        "input": {"command": other_secret}}}]});
+    assert_eq!(redaction_violations("f", &inside).len(), 1);
     let negative_canary = json!({"units": [{"canary": true, "text": "ordinary"}]});
     assert_eq!(redaction_violations("f", &negative_canary).len(), 1);
     let textless = json!({"units": [{"canary": true}]});
@@ -544,4 +553,37 @@ fn both_readers_name_the_same_closed_non_unit_reasons() {
     let typescript: Vec<&str> = union.split('"').skip(1).step_by(2).collect();
     let rust: Vec<&str> = NonUnitReason::ALL.iter().map(|r| r.name()).collect();
     assert_eq!(typescript, rust);
+}
+
+/// The frozen Pi session decoded back to its JSONL lines.
+fn frozen_pi_jsonl() -> String {
+    let path = corpus_dir().join("sessions/pi-0.80.2/mix.json");
+    let fixture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    fixture["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `packages/e2e-tests/src/corpus-sessions/census.test.ts` pins the same totals from the TypeScript reader.
+#[test]
+fn the_pi_reader_reads_the_frozen_pi_session() {
+    let records = read_pi_session(&frozen_pi_jsonl()).unwrap();
+    let units: Vec<&ExpectedUnit> = records.iter().flat_map(|r| &r.units).collect();
+    assert_eq!(records.len(), 57);
+    assert_eq!(units.len(), 39);
+    assert_eq!(units.iter().filter(|u| u.tool.is_some()).count(), 12);
+    let refused: Vec<&str> = records
+        .iter()
+        .filter(|r| {
+            r.non_units
+                .iter()
+                .any(|n| n.reason == NonUnitReason::NonTextItem)
+        })
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(refused, ["e0041"]);
 }

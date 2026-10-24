@@ -20,7 +20,7 @@ pub(crate) const SCHEMA: &str = "eidnara.source-corpus/v1";
 /// SHA-256 of the corpus fixture files in the canonical form [`corpus_digest`] computes.
 /// `packages/e2e-tests/src/source-corpus/corpus.ts` holds the same value.
 pub(crate) const CORPUS_SHA256: &str =
-    "7724a1dd6e2ba19b13f8a08c8d9c7f7170faef24ccaa84b34b13c986f01dea44";
+    "940e47f1a69126fee50848c75a0fdfd5b77328239c53c554f6991abd66b61be6";
 
 /// The corpus directory; its top-level `README.md` is documentation and stays outside the digest.
 pub(crate) fn corpus_dir() -> PathBuf {
@@ -739,51 +739,72 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     Ok(record)
 }
 
-/// Every string or object key in `value` whose redaction verdict is wrong: each is negative
-/// unless it is the `text` member of an object carrying `"canary": true`, which must be positive. `at` names
-/// the fixture in each finding.
+/// The unit content of a canary record: its `text`, or for an OpenCode tool part its
+/// `state.output` or `state.error`.
+fn canary_content(members: &serde_json::Map<String, Value>) -> Option<&str> {
+    let state = members.get("state");
+    [
+        members.get("text"),
+        state.and_then(|state| state.get("output")),
+        state.and_then(|state| state.get("error")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+}
+
+fn detects(text: &str) -> Result<bool, context_core::redaction::RedactionError> {
+    context_core::redaction::detect_windowed_durable_text(text)
+}
+
+/// Every string or object key in `value` whose redaction verdict is wrong. A string must be
+/// negative, except inside an object carrying `"canary": true`: there the unit content
+/// ([`canary_content`]) must be positive, and a string that contains that content or lies within
+/// it, such as a harness's preview copy of the same output, is exempt. `at` names the fixture in
+/// each finding.
 pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     fn walk(
         at: &str,
         pointer: &mut String,
         value: &Value,
-        canary_text: bool,
+        canary: Option<&str>,
         out: &mut Vec<String>,
     ) {
         match value {
             Value::String(text) => {
-                let verdict = context_core::redaction::detect_windowed_durable_text(text);
-                match (canary_text, verdict) {
-                    (false, Ok(false)) | (true, Ok(true)) => {}
-                    (false, verdict) => {
-                        out.push(format!("{at}{pointer}: not negative ({verdict:?})"))
-                    }
-                    (true, verdict) => {
-                        out.push(format!("{at}{pointer}: canary not positive ({verdict:?})"))
-                    }
+                let exempt = canary.is_some_and(|content| {
+                    content.contains(text.as_str()) || text.contains(content)
+                });
+                let verdict = detects(text);
+                if !exempt && verdict != Ok(false) {
+                    out.push(format!("{at}{pointer}: not negative ({verdict:?})"));
                 }
             }
             Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
                     let len = pointer.len();
                     pointer.push_str(&format!("/{index}"));
-                    walk(at, pointer, item, false, out);
+                    walk(at, pointer, item, canary, out);
                     pointer.truncate(len);
                 }
             }
             Value::Object(members) => {
-                let canary = members.get("canary") == Some(&Value::Bool(true));
-                if canary && !members.get("text").is_some_and(Value::is_string) {
-                    out.push(format!("{at}{pointer}: canary unit has no `text` string"));
+                let mut canary = canary;
+                if members.get("canary") == Some(&Value::Bool(true)) {
+                    match canary_content(members) {
+                        Some(content) if detects(content) == Ok(true) => canary = Some(content),
+                        Some(_) => out.push(format!("{at}{pointer}: canary not positive")),
+                        None => out.push(format!("{at}{pointer}: canary unit has no content")),
+                    }
                 }
                 for (key, member) in members {
                     let len = pointer.len();
                     pointer.push('/');
                     pointer.push_str(key);
-                    if context_core::redaction::detect_windowed_durable_text(key) != Ok(false) {
+                    if detects(key) != Ok(false) {
                         out.push(format!("{at}{pointer}: key not negative"));
                     }
-                    walk(at, pointer, member, canary && key == "text", out);
+                    walk(at, pointer, member, canary, out);
                     pointer.truncate(len);
                 }
             }
@@ -791,6 +812,6 @@ pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    walk(at, &mut String::new(), value, false, &mut out);
+    walk(at, &mut String::new(), value, None, &mut out);
     out
 }

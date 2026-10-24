@@ -10,6 +10,7 @@ reads it.
 | Path | Contents |
 | --- | --- |
 | `repos/<name>.json` | One repository manifest per upstream repository |
+| `sessions/<closure>/mix.json` | One frozen scripted session per harness closure |
 | `README.md` | This file; outside the digest |
 
 ## Repository manifests
@@ -54,8 +55,8 @@ case-insensitive filesystem would resolve them to one entry.
 | Fixture set | Harness closure |
 | --- | --- |
 | `repos/*.json` | none; manifests come from upstream git trees |
-| OpenCode sessions (U2) | OpenCode 1.18.22, the version CI installs |
-| Pi sessions (U2) | Pi 0.80.2 |
+| `sessions/opencode-1.18.22/` | OpenCode 1.18.22, the version CI installs |
+| `sessions/pi-0.80.2/` | Pi 0.80.2 (`@earendil-works/pi-coding-agent`) |
 | `../opencode-tool-outcome-trace.json` | OpenCode 1.19.0 trace shape, recorded beside the 1.18.22 shape |
 
 ## Regenerating
@@ -84,6 +85,85 @@ bun packages/e2e-tests/scripts/freeze-corpus-manifest.ts --repo /tmp/rg --commit
   --out crates/daemon/testdata/corpus/repos/ripgrep.json
 ```
 
+Session fixtures (each `--from` rerun over the same stores reproduces the bytes and the
+digest):
+
+```sh
+PATH=<dir holding opencode 1.18.22>:$PATH \
+  bun packages/e2e-tests/scripts/freeze-source-corpus.ts --run <store-dir>
+bun packages/e2e-tests/scripts/freeze-source-corpus.ts --from <store-dir>
+```
+
+`--run` drives the scripted mixes (`packages/e2e-tests/src/corpus-sessions/`) against the mock
+provider and the direct-host fixture over a materialized `repos/ripgrep.json` checkout, keeps
+each harness's own store (`opencode.db`, the Pi session JSONL) in `<store-dir>`, freezes it,
+and rewrites both digest pins.
+
+## Session fixtures
+
+A session fixture holds the harness's own records, decoded: an OpenCode fixture holds every
+`message` row of the session with its `part` rows in id order; a Pi fixture holds every JSONL
+entry in file order. The freeze replaces the scratch checkout path with `/corpus/ripgrep` and
+other scratch paths with `/corpus/opencode` or `/corpus/pi`, renames OpenCode `ses_`, `msg_`,
+`prt_`, and `tool_` identifiers in sorted order (so part order is unchanged) and Pi entry ids in
+file order, and marks each canary unit with `"canary": true`. Field names, nesting, value
+types, timestamps, and every other byte stay as the harness wrote them.
+
+The scripted mix runs one tool call per prompt, an aborted `bash` call, an OpenCode image
+attachment, and a closing turn, so every earlier message reaches a capture pass. The working
+files it reads (`canary.txt`, `data.json`, `notes.txt`, `pixel.png`, `ARCHITECTURE.md`) are
+written beside the materialized checkout and left uncommitted. The OpenCode mix registers a
+local stdio MCP server, `corpus`; the Pi mix registers the extension tool `corpus_probe`.
+
+Census of the R1 cells (witness record, or the reason the closure cannot produce the cell;
+`packages/e2e-tests/src/corpus-sessions/census.test.ts` checks every row):
+
+| Cell | OpenCode 1.18.22 | Pi 0.80.2 |
+| --- | --- | --- |
+| `read` | `msg_corpus0002` | `e0005` |
+| `bash` | `msg_corpus0005` | `e0009` |
+| `edit` | `msg_corpus0014` | `e0021` |
+| `write` | `msg_corpus0017` | `e0025` |
+| `grep` | `msg_corpus0020` | `e0029` |
+| `glob` | `msg_corpus0023` | Pi 0.80.2 has no glob tool; its `find` takes a glob pattern |
+| `todowrite` | `msg_corpus0026` | Pi 0.80.2 has no to-do tool |
+| MCP tool | `msg_corpus0032` (`corpus_probe`) | Pi 0.80.2 has no MCP client; the extension tool `corpus_probe` stands in |
+| subagent call | `msg_corpus0029` (`task`) | Pi 0.80.2 has no subagent tool |
+| aborted call | `msg_corpus0038` | `e0053` |
+| text | `msg_corpus0002` | `e0005` |
+| JSON text | `msg_corpus0008` | `e0013` |
+| Pi image item | a Pi content item; OpenCode carries images as file parts | `e0041` |
+| OpenCode non-text part | `msg_corpus0039` (`file`, `image/png`) | an OpenCode part kind |
+| output over 64 KiB | OpenCode 1.18.22 truncates every tool result before it reaches the session store | `e0045` (70,000 bytes) |
+| invalid UTF-8 | `msg_corpus0011` (U+FFFD) | `e0017` (U+FFFD) |
+| canary | `msg_corpus0005` | `e0009` |
+
+OQ9 observations:
+
+- OpenCode 1.18.22 publishes an MCP tool as `<server>_<tool>` (`corpus_probe` for server
+  `corpus`, tool `probe`). The vocabulary's leading-`mcp_` strip never applies to that shape,
+  so `corpus_probe` classifies as `Unknown`; a server whose tool is named `edit` or `write`
+  publishes `<server>_edit`, which stays `Unknown` and collides with no tabled name.
+- `AGENTS.md` at the pinned commits: `repos/ripgrep.json` holds none; `repos/eidnara.json`
+  holds eight.
+
+Invalid UTF-8 reaches both stores as U+FFFD: both harnesses decode tool output before storing
+it. An MCP result holding a lone UTF-16 surrogate reaches `opencode.db` as a `\ud800` JSON
+escape, and the transform pass whose window holds it ends in an error, so the scripted mix
+leaves that result out; the measurement follow-up owns the case.
+
+Reconciliation of the frozen run (live counters and descriptors, both scenarios in
+`packages/e2e-tests/tests/source-capture-*.test.ts`):
+
+| Harness | Expected units | Admitted | `unit_too_large` | `secret_bearing` | Unclassified |
+| --- | --- | --- | --- | --- | --- |
+| OpenCode 1.18.22 | 41 | 40 | 0 | 1 | 0 |
+| Pi 0.80.2 | 38 | 36 | 1 | 1 | 0 |
+
+Expected units exclude each session's final assistant reply, which no capture pass offers.
+The Pi image-bearing `toolResult` is `non_text_item` in the reader and `adapter_refused` in
+the counters.
+
 ## Digest
 
 The digest is SHA-256 over the concatenation, for each fixture file under this directory
@@ -96,8 +176,11 @@ it, and a fixture change fails both until both pins move in the same change.
 ## Redaction
 
 Every string in every fixture is redaction-negative under
-`context_core::redaction::detect_windowed_durable_text`, except the `text` of a unit record
-carrying `"canary": true`, which must be positive. Canary units use the fake credential
+`context_core::redaction::detect_windowed_durable_text`, except inside an object carrying
+`"canary": true`. That object's unit content (its `text`, or an OpenCode tool part's
+`state.output` or `state.error`) must be positive. A string inside the object that contains
+that content or lies within it, such as OpenCode's `state.metadata.output` preview of the same
+output, is exempt; every other string inside it must still be negative. Canary units use the fake credential
 shape of `packages/e2e-tests/tests/cassette-replay.test.ts`, so they keep exercising the
 Kernel's exact-text refusal.
 
@@ -108,8 +191,9 @@ settled tool result blocks, with tool name, call id, error flag, `metadata.exit`
 harness `truncated` flag) and its classified non-units. The OpenCode reader
 (`packages/e2e-tests/src/source-corpus/opencode-db-reader.ts`) reads `message` and `part`
 rows of `opencode.db` by SQL, orders parts by `(time_created, id)`, and leaves a completed
-compaction summary (`summary: true`, `finish: "stop"`) out of the table; the Pi reader
-(`read_pi_session`) reads session JSONL entries.
+compaction summary (`summary: true`, `finish: "stop"`) out of the table; the Pi readers
+(`read_pi_session` in Rust, `packages/e2e-tests/src/source-corpus/pi-jsonl-reader.ts` in
+TypeScript) read session JSONL entries.
 `scripts/forbid-oracle-adapter-imports.ts` runs in CI and fails when a reader names the
 harness source adapters, the tool outcome module, or the shared identity and block types.
 

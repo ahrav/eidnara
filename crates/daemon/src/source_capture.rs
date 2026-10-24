@@ -450,7 +450,7 @@ impl SourceCapture {
     }
 
     /// Whether no job holds the slot.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
     pub(crate) fn is_idle(&self) -> bool {
         self.slot.available_permits() == 1
     }

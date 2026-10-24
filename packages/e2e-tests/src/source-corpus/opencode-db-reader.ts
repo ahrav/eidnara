@@ -1,43 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export type NonUnitReason =
-    | "non_text_part"
-    | "ignored_text"
-    | "unsettled_text"
-    | "unsettled_tool"
-    | "non_text_item"
-    | "skipped_item"
-    | "non_message_entry"
-    | "uncaptured_role";
-
-export interface ExpectedTool {
-    readonly name: string;
-    readonly callId: string;
-    readonly isError: boolean;
-    readonly exit: number | null;
-    readonly truncated: boolean | null;
-}
-
-export interface ExpectedUnit {
-    readonly index: number;
-    readonly partId: string;
-    readonly byteLen: number;
-    readonly tool: ExpectedTool | null;
-}
-
-export interface NonUnit {
-    readonly index: number;
-    readonly partId: string;
-    readonly reason: NonUnitReason;
-    readonly kind: string;
-}
-
-export interface ExpectedRecord {
-    readonly id: string;
-    readonly role: string;
-    readonly units: readonly ExpectedUnit[];
-    readonly nonUnits: readonly NonUnit[];
-}
+import type { ExpectedRecord, ExpectedUnit, NonUnit, NonUnitReason } from "./expected.ts";
 
 type Json = Record<string, unknown>;
 
@@ -99,6 +62,7 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
                     units.push({
                         index,
                         partId: partRow.id,
+                        block: index,
                         byteLen: utf8Length(body),
                         tool: null,
                     });
@@ -118,6 +82,7 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
                     units.push({
                         index,
                         partId: partRow.id,
+                        block: 0,
                         byteLen: utf8Length(output),
                         tool: {
                             name,
