@@ -5,8 +5,10 @@
 use std::collections::HashSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use gix::bstr::ByteSlice;
+use gix::odb::store::init::Slots;
 use kernel::source_identity::OccurrenceClass;
 
 use crate::harness_sources::{Representation, SourceUnit};
@@ -132,22 +134,163 @@ pub(crate) fn isolated_options(max_object_bytes: NonZeroU64) -> gix::open::Optio
     )])
 }
 
-/// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
-///
-/// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
 pub(crate) fn open(
     path: &Path,
     max_object_bytes: NonZeroU64,
 ) -> Result<gix::Repository, GitRefusal> {
-    let mut repo = gix::open_opts(path, isolated_options(max_object_bytes)).map_err(|error| {
+    open_with_slots(path, max_object_bytes, Slots::default())
+}
+
+/// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
+///
+/// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
+pub(crate) fn open_with_slots(
+    path: &Path,
+    max_object_bytes: NonZeroU64,
+    slots: Slots,
+) -> Result<gix::Repository, GitRefusal> {
+    let options = isolated_options(max_object_bytes).object_store_slots(slots);
+    let mut repo = gix::open_opts(path, options).map_err(|error| {
         if declares_unsupported_object_format(&error) {
             GitRefusal::UnsupportedObjectFormat
         } else {
             GitRefusal::Open
         }
     })?;
+    // gix's default slot sizing resolves the alternates chain and lists every
+    // database's `pack` directory while the store opens (gix-odb
+    // `store_impls/dynamic/init.rs`). Pack-directory listing errors other than
+    // `NotFound` cause gix's default store opening to fail; this check applies
+    // the same refusals to a given slot count.
+    if matches!(slots, Slots::Given(_)) && !sizing_inputs_readable(repo.objects.store_ref().path())
+    {
+        return Err(GitRefusal::Open);
+    }
     repo.objects.ignore_replacements = true;
     Ok(repo)
+}
+
+fn sizing_inputs_readable(objects: &Path) -> bool {
+    let mut dirs = if matches!(
+        objects.join("info").join("alternates").try_exists(),
+        Ok(false)
+    ) {
+        Vec::new()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return false;
+        };
+        let Ok(alternates) = gix::odb::alternate::resolve(objects.to_owned(), &cwd) else {
+            return false;
+        };
+        alternates
+    };
+    dirs.insert(0, objects.to_owned());
+    dirs.iter().all(|dir| {
+        std::fs::read_dir(dir.join("pack")).map_or_else(
+            |error| error.kind() == std::io::ErrorKind::NotFound,
+            |_| true,
+        )
+    })
+}
+
+/// The lookup returns the kind of object `id` from `repo`'s own loose objects, then its pack files. `None` leaves the read to [`store_object_kind`], which also searches alternates and resolves delta bases across packs. Both reads look up `id` directly and decode only headers: the loose read inflates at most 64 bytes, and the pack read decodes entry headers and each delta's size prefix.
+///
+/// The pack read tries `hint`'s index first when it lies in this repository's `objects/pack`, then the other indices newest first, and stores the index that answers in `hint`.
+pub(crate) fn file_object_kind(
+    repo: &gix::Repository,
+    id: &gix::oid,
+    hint: &Mutex<Option<PathBuf>>,
+) -> Option<gix::object::Kind> {
+    let objects = repo.objects.store_ref().path();
+    let hash = repo.object_hash();
+    gix::odb::loose::Store::at(objects, hash)
+        .try_header(id)
+        .ok()
+        .flatten()
+        .map(|(_, kind)| kind)
+        .or_else(|| packed_kind(&objects.join("pack"), hash, id, hint))
+}
+
+fn packed_kind(
+    pack_dir: &Path,
+    hash: gix::hash::Kind,
+    id: &gix::oid,
+    hint: &Mutex<Option<PathBuf>>,
+) -> Option<gix::object::Kind> {
+    let hinted = hint
+        .lock()
+        .ok()
+        .and_then(|hint| hint.clone())
+        .filter(|path| path.parent() == Some(pack_dir));
+    if let Some(kind) = hinted
+        .as_deref()
+        .and_then(|path| index_kind(path, hash, id))
+    {
+        return Some(kind);
+    }
+    let mut indices: Vec<_> = std::fs::read_dir(pack_dir)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let is_index = entry.file_type().is_ok_and(|kind| kind.is_file())
+                && path.extension().is_some_and(|extension| extension == "idx");
+            if !is_index || hinted.as_ref() == Some(&path) {
+                return None;
+            }
+            Some((entry.metadata().ok()?.modified().ok()?, path))
+        })
+        .collect();
+    indices.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    let (path, kind) = indices
+        .into_iter()
+        .find_map(|(_, path)| index_kind(&path, hash, id).map(|kind| (path, kind)))?;
+    if let Ok(mut hint) = hint.lock() {
+        *hint = Some(path);
+    }
+    Some(kind)
+}
+
+fn index_kind(path: &Path, hash: gix::hash::Kind, id: &gix::oid) -> Option<gix::object::Kind> {
+    use gix::odb::pack;
+    let index = pack::index::File::at(path, hash).ok()?;
+    let position = index.lookup(id)?;
+    let data = pack::data::File::at(path.with_extension("pack"), hash).ok()?;
+    let entry_at = |position| data.entry(index.pack_offset_at_index(position)).ok();
+    let in_pack = |base: &gix::oid| {
+        let entry = entry_at(index.lookup(base)?)?;
+        Some(pack::data::decode::header::ResolvedBase::InPack(entry))
+    };
+    let header = data.decode_header(
+        entry_at(position)?,
+        &mut gix::zlib::Inflate::default(),
+        &in_pack,
+    );
+    header.ok().map(|header| header.kind)
+}
+
+/// The object store's lookup needed more pack index slots than [`open_with_slots`] received.
+pub(crate) struct SlotsExhausted;
+
+/// The kind of object `id` from `repo`'s object store. Store errors read as absent objects.
+pub(crate) fn store_object_kind(
+    repo: &gix::Repository,
+    id: &gix::oid,
+) -> Result<Option<gix::object::Kind>, SlotsExhausted> {
+    use gix::odb::store::{find::Error as Find, load_index::Error as LoadIndex};
+    match repo.try_find_header(id) {
+        Ok(header) => Ok(header.map(|header| header.kind())),
+        Err(error)
+            if matches!(
+                error.0.downcast_ref::<Find>(),
+                Some(Find::LoadIndex(LoadIndex::InsufficientSlots { .. }))
+            ) =>
+        {
+            Err(SlotsExhausted)
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 /// Whether the store refused an object because materializing it needs an allocation above its limit, anywhere in a delta chain.

@@ -16,7 +16,10 @@ parses the submission's output, then calls `observe_head` once
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:922`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
-(`crates/daemon/src/memory_capture/head.rs:10`). The store freezes a plan
+(`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:30`)
+resolves HEAD once; when its first store lookup exhausts the store's index
+slots, only the object lookup repeats, for the same id, in a store opened
+with the default slot sizing (`reopened_kind`, `:54`). The store freezes a plan
 once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:373`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
@@ -53,7 +56,11 @@ which both plans still hold the submit-time head; then the trigger dropped and
 a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
 (`crates/daemon/src/lib.rs:24619`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
-repository declaring SHA-256.
+repository declaring SHA-256. The head-observation tests freeze a HEAD
+commit stored whole, as an offset delta, and as an id delta in a pack
+(`crates/daemon/src/memory_capture/head.rs:445`), one stored as a delta
+whose base sits in another pack (`:462`), and one held only by an
+alternate behind more pack indices than the first slot count (`:552`).
 
 ## Investigation log
 

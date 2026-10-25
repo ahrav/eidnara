@@ -1,9 +1,14 @@
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use gix::odb::store::init::Slots;
 use serde::{Deserialize, Serialize};
 
+use crate::git_sources::{self, SlotsExhausted};
+
 const HEAD_OBJECT_BYTES: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
+const HEAD_INDEX_SLOTS: u16 = 128;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -12,31 +17,43 @@ pub(crate) enum FrozenHead {
     /// when detached or through its branch.
     Commit(String),
     /// `HeadUnavailable` indicates an unborn or unreadable HEAD, a HEAD naming
-    /// a non-commit object, an unsupported object format, or a root that
-    /// `git_sources::open` refuses.
+    /// a non-commit or absent object, an unsupported object format, or a
+    /// root that `git_sources::open_with_slots` refuses.
     #[default]
     HeadUnavailable,
 }
 
+/// The pack index that answered the last packed HEAD read; it orders the next
+/// pack search only.
+static LAST_HEAD_INDEX: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 pub(crate) fn observe_head(root: &Path) -> FrozenHead {
-    let Ok(repo) = crate::git_sources::open(root, HEAD_OBJECT_BYTES) else {
+    let slots = Slots::Given(HEAD_INDEX_SLOTS);
+    let Ok(repo) = git_sources::open_with_slots(root, HEAD_OBJECT_BYTES, slots) else {
         return FrozenHead::HeadUnavailable;
     };
-    if crate::git_sources::object_format(repo.object_hash()).is_err() {
+    let hash = repo.object_hash();
+    if git_sources::object_format(hash).is_err() {
         return FrozenHead::HeadUnavailable;
     }
     let Some(id) = repo.head().ok().and_then(|head| head.id()) else {
         return FrozenHead::HeadUnavailable;
     };
-    let is_commit = repo
-        .find_header(id)
-        .is_ok_and(|header| header.kind() == gix::object::Kind::Commit);
+    let kind = git_sources::file_object_kind(&repo, &id, &LAST_HEAD_INDEX).or_else(|| {
+        git_sources::store_object_kind(&repo, &id)
+            .unwrap_or_else(|SlotsExhausted| reopened_kind(root, &id))
+    });
     let hex = id.to_hex().to_string();
-    if is_commit && crate::git_sources::parse_oid(&hex, gix::hash::Kind::Sha1).is_some() {
+    if kind == Some(gix::object::Kind::Commit) && git_sources::parse_oid(&hex, hash).is_some() {
         FrozenHead::Commit(hex)
     } else {
         FrozenHead::HeadUnavailable
     }
+}
+
+fn reopened_kind(root: &Path, id: &gix::oid) -> Option<gix::object::Kind> {
+    let repo = git_sources::open(root, HEAD_OBJECT_BYTES).ok()?;
+    git_sources::store_object_kind(&repo, id).ok().flatten()
 }
 
 #[cfg(test)]
@@ -104,12 +121,194 @@ pub(crate) mod fixtures {
         )
         .unwrap();
     }
+
+    fn sha1(bytes: &[u8]) -> gix::ObjectId {
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(bytes);
+        hasher.try_finalize().unwrap()
+    }
+
+    fn zlib(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut deflate =
+            gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::DEFAULT);
+        deflate.write_all(bytes).unwrap();
+        deflate.flush().unwrap();
+        deflate.into_inner()
+    }
+
+    fn leb128(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// The delta encoding [`write_pack`] uses for its last object, with the
+    /// first object as the base.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Delta {
+        Offset,
+        Id,
+        /// The delta references the first object by id as an external base.
+        OutsideId,
+    }
+
+    fn first_written(delta: Option<Delta>) -> usize {
+        usize::from(matches!(delta, Some(Delta::OutsideId)))
+    }
+
+    pub(crate) type PackedObject = (gix::ObjectId, gix::object::Kind, Vec<u8>);
+
+    pub(crate) fn stored_object(root: &Path, oid: &str) -> PackedObject {
+        let repo = gix::open_opts(root, gix::open::Options::isolated()).unwrap();
+        let object = repo
+            .find_object(gix::ObjectId::from_hex(oid.as_bytes()).unwrap())
+            .unwrap();
+        (object.id, object.kind, object.data.clone())
+    }
+
+    /// Writes `objects` into one pack with a version 2 index and returns the
+    /// index path. With `delta`, the pack stores the last object as a delta
+    /// against the first.
+    pub(crate) fn write_pack(
+        root: &Path,
+        objects: &[PackedObject],
+        delta: Option<Delta>,
+    ) -> std::path::PathBuf {
+        use gix::odb::pack::data::entry::Header;
+        let written = &objects[first_written(delta)..];
+        let mut pack = b"PACK".to_vec();
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&(written.len() as u32).to_be_bytes());
+        let mut offsets = Vec::new();
+        for (position, (_, kind, data)) in written.iter().enumerate() {
+            let offset = pack.len();
+            offsets.push(offset);
+            let base = &objects[0];
+            let header = match delta.filter(|_| position + 1 == written.len() && objects.len() > 1)
+            {
+                None => None,
+                Some(Delta::Offset) => Some(Header::OfsDelta {
+                    base_distance: (offset - offsets[0]) as u64,
+                }),
+                Some(Delta::Id | Delta::OutsideId) => Some(Header::RefDelta { base_id: base.0 }),
+            };
+            let body = match header {
+                None => data.clone(),
+                Some(_) => {
+                    let mut instructions = Vec::new();
+                    leb128(&mut instructions, base.2.len() as u64);
+                    leb128(&mut instructions, data.len() as u64);
+                    for chunk in data.chunks(127) {
+                        instructions.push(chunk.len() as u8);
+                        instructions.extend_from_slice(chunk);
+                    }
+                    instructions
+                }
+            };
+            let header = header.unwrap_or(match kind {
+                gix::object::Kind::Commit => Header::Commit,
+                gix::object::Kind::Tree => Header::Tree,
+                gix::object::Kind::Blob => Header::Blob,
+                gix::object::Kind::Tag => Header::Tag,
+            });
+            header.write_to(body.len() as u64, &mut pack).unwrap();
+            pack.extend_from_slice(&zlib(&body));
+        }
+        offsets.push(pack.len());
+        let mut entries: Vec<(gix::ObjectId, u32, usize)> = written
+            .iter()
+            .enumerate()
+            .map(|(position, (id, _, _))| {
+                let bytes = &pack[offsets[position]..offsets[position + 1]];
+                (*id, gix::features::hash::crc32(bytes), offsets[position])
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.0);
+        let pack_checksum = sha1(&pack);
+        pack.extend_from_slice(pack_checksum.as_slice());
+        let mut idx = vec![0xff, b't', b'O', b'c'];
+        idx.extend_from_slice(&2u32.to_be_bytes());
+        for first in 0..=255u8 {
+            let count = entries
+                .iter()
+                .filter(|(id, _, _)| id.as_slice()[0] <= first)
+                .count() as u32;
+            idx.extend_from_slice(&count.to_be_bytes());
+        }
+        for (id, _, _) in &entries {
+            idx.extend_from_slice(id.as_slice());
+        }
+        for (_, crc, _) in &entries {
+            idx.extend_from_slice(&crc.to_be_bytes());
+        }
+        for (_, _, offset) in &entries {
+            idx.extend_from_slice(&(*offset as u32).to_be_bytes());
+        }
+        idx.extend_from_slice(pack_checksum.as_slice());
+        let idx_checksum = sha1(&idx);
+        idx.extend_from_slice(idx_checksum.as_slice());
+        let pack_dir = root.join(".git/objects/pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        let stem = pack_dir.join(format!("pack-{pack_checksum}"));
+        std::fs::write(stem.with_extension("pack"), &pack).unwrap();
+        std::fs::write(stem.with_extension("idx"), &idx).unwrap();
+        stem.with_extension("idx")
+    }
+
+    /// Packs the stored objects `oids` through [`write_pack`] and removes the
+    /// loose files of the objects it wrote.
+    pub(crate) fn pack_objects(
+        root: &Path,
+        oids: &[&str],
+        delta: Option<Delta>,
+    ) -> std::path::PathBuf {
+        let objects: Vec<PackedObject> = oids.iter().map(|oid| stored_object(root, oid)).collect();
+        let index = write_pack(root, &objects, delta);
+        for oid in &oids[first_written(delta)..] {
+            let loose = root.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+            match std::fs::remove_file(loose) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => panic!("{error}"),
+                _ => {}
+            }
+        }
+        index
+    }
+
+    /// Writes `count` packs that each hold one blob.
+    pub(crate) fn pack_blobs(root: &Path, count: u16) {
+        for index in 0..count {
+            let data = format!("blob {index}\n").into_bytes();
+            let id = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::object::Kind::Blob, &data)
+                .unwrap();
+            write_pack(root, &[(id, gix::object::Kind::Blob, data)], None);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{declare_sha256, detach, repository};
+    use super::fixtures::{
+        Delta, declare_sha256, detach, pack_blobs, pack_objects, repository, stored_object,
+        write_pack,
+    };
     use super::*;
+
+    fn open(root: &Path) -> gix::Repository {
+        git_sources::open(root, HEAD_OBJECT_BYTES).unwrap()
+    }
+
+    fn oid(hex: &str) -> gix::ObjectId {
+        gix::ObjectId::from_hex(hex.as_bytes()).unwrap()
+    }
+
+    const COMMIT: Option<gix::object::Kind> = Some(gix::object::Kind::Commit);
 
     fn head_id(root: &Path) -> String {
         gix::open_opts(root, gix::open::Options::isolated())
@@ -128,6 +327,12 @@ mod tests {
             FrozenHead::Commit(head_id(dir.path()))
         );
         assert_eq!(head_id(dir.path()), commits[2]);
+        std::fs::remove_dir(dir.path().join(".git/objects/pack")).unwrap();
+        let none = Mutex::new(None);
+        assert_eq!(
+            git_sources::file_object_kind(&open(dir.path()), &oid(&commits[2]), &none),
+            COMMIT
+        );
         detach(dir.path(), &commits[0]);
         assert_eq!(
             observe_head(dir.path()),
@@ -136,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn unborn_unsupported_non_commit_and_non_repository_roots_are_unavailable() {
+    fn unborn_unsupported_non_commit_absent_and_non_repository_roots_are_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let unborn = dir.path().join("unborn");
         std::fs::create_dir_all(&unborn).unwrap();
@@ -156,7 +361,43 @@ mod tests {
             .unwrap()
             .to_string();
         detach(&tree_head, &tree);
-        for root in [unborn, plain, sha256, tree_head, dir.path().join("missing")] {
+        let absent_head = dir.path().join("absent-head");
+        repository(&absent_head, 1);
+        detach(&absent_head, &"ab".repeat(20));
+        let cyclic = dir.path().join("cyclic-alternates");
+        repository(&cyclic, 1);
+        let objects = cyclic.join(".git/objects");
+        std::fs::write(
+            objects.join("info/alternates"),
+            format!("{}\n", objects.display()),
+        )
+        .unwrap();
+        let pack_file = dir.path().join("pack-file");
+        repository(&pack_file, 1);
+        let pack = pack_file.join(".git/objects/pack");
+        std::fs::remove_dir(&pack).unwrap();
+        std::fs::write(&pack, b"not a directory").unwrap();
+        let borrower = dir.path().join("alternate-pack-file");
+        repository(&borrower, 1);
+        std::fs::write(
+            borrower.join(".git/objects/info/alternates"),
+            format!("{}\n", pack_file.join(".git/objects").display()),
+        )
+        .unwrap();
+        for refused in [&cyclic, &pack_file, &borrower] {
+            assert!(git_sources::open(refused, HEAD_OBJECT_BYTES).is_err());
+        }
+        for root in [
+            unborn,
+            plain,
+            sha256,
+            tree_head,
+            absent_head,
+            cyclic,
+            pack_file,
+            borrower,
+            dir.path().join("missing"),
+        ] {
             assert_eq!(
                 observe_head(&root),
                 FrozenHead::HeadUnavailable,
@@ -198,6 +439,139 @@ mod tests {
             observe_head(dir.path()),
             FrozenHead::Commit(commits[0].clone())
         );
+    }
+
+    #[test]
+    fn a_packed_head_commit_freezes_whole_or_as_a_delta_from_the_pack_files() {
+        for delta in [None, Some(Delta::Offset), Some(Delta::Id)] {
+            let dir = tempfile::tempdir().unwrap();
+            let commits = repository(dir.path(), 2);
+            pack_blobs(dir.path(), 1);
+            pack_objects(dir.path(), &[&commits[0], &commits[1]], delta);
+            for commit in [&commits[1], &commits[0]] {
+                let none = Mutex::new(None);
+                let kind = git_sources::file_object_kind(&open(dir.path()), &oid(commit), &none);
+                assert_eq!(kind, COMMIT);
+                detach(dir.path(), commit);
+                assert_eq!(observe_head(dir.path()), FrozenHead::Commit(commit.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_delta_whose_base_is_in_another_pack_is_read_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 2);
+        pack_objects(dir.path(), &[&commits[0]], None);
+        pack_objects(
+            dir.path(),
+            &[&commits[0], &commits[1]],
+            Some(Delta::OutsideId),
+        );
+        let none = Mutex::new(None);
+        let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[1]), &none);
+        assert_eq!(kind, None);
+        assert_eq!(
+            observe_head(dir.path()),
+            FrozenHead::Commit(commits[1].clone())
+        );
+    }
+
+    /// Only the hint names the renamed index, because the directory scan reads
+    /// files ending in `.idx`; an answer from the renamed index shows the hint
+    /// was read.
+    #[test]
+    fn a_hinted_pack_index_is_read_before_the_directory_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 1);
+        let hinted = pack_objects(dir.path(), &[&commits[0]], None).with_extension("hint");
+        std::fs::rename(hinted.with_extension("idx"), &hinted).unwrap();
+        let hint = Mutex::new(Some(hinted.clone()));
+        let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[0]), &hint);
+        assert_eq!(kind, COMMIT);
+        assert_eq!(*hint.lock().unwrap(), Some(hinted));
+    }
+
+    #[test]
+    fn a_pack_index_of_another_repository_never_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let commits = repository(&first, 2);
+        let foreign = pack_objects(&first, &[&commits[1]], None);
+        let second = dir.path().join("second");
+        let own = repository(&second, 1);
+        pack_objects(&second, &[&own[0]], None);
+        let pack_dir = second.join(".git/objects/pack");
+        let linked = pack_dir.join("pack-linked.idx");
+        std::os::unix::fs::symlink(&foreign, &linked).unwrap();
+        std::os::unix::fs::symlink(
+            foreign.with_extension("pack"),
+            linked.with_extension("pack"),
+        )
+        .unwrap();
+        let hint = Mutex::new(Some(foreign));
+        let kind = git_sources::file_object_kind(&open(&second), &oid(&commits[1]), &hint);
+        assert_eq!(kind, None);
+        detach(&second, &commits[1]);
+        assert_eq!(observe_head(&second), FrozenHead::HeadUnavailable);
+    }
+
+    #[test]
+    fn the_newest_pack_index_answers_and_a_deleted_hint_falls_back_to_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 1);
+        let base = stored_object(dir.path(), &commits[0]);
+        let older = pack_objects(dir.path(), &[&commits[0]], None);
+        std::fs::File::options()
+            .write(true)
+            .open(&older)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+        let extra = b"extra\n".to_vec();
+        let extra_id =
+            gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::object::Kind::Blob, &extra)
+                .unwrap();
+        let newest = write_pack(
+            dir.path(),
+            &[base, (extra_id, gix::object::Kind::Blob, extra)],
+            None,
+        );
+        let hint = Mutex::new(None);
+        let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[0]), &hint);
+        assert_eq!(kind, COMMIT);
+        assert_eq!(*hint.lock().unwrap(), Some(newest.clone()));
+        std::fs::remove_file(&newest).unwrap();
+        std::fs::remove_file(newest.with_extension("pack")).unwrap();
+        let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[0]), &hint);
+        assert_eq!(kind, COMMIT);
+        assert_eq!(*hint.lock().unwrap(), Some(older));
+    }
+
+    #[test]
+    fn a_head_commit_in_an_alternate_freezes_when_the_store_holds_more_indices_than_its_first_slots()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let alternate = dir.path().join("alternate");
+        let commits = repository(&alternate, 1);
+        pack_objects(&alternate, &[&commits[0]], None);
+        let root = dir.path().join("root");
+        repository(&root, 0);
+        std::fs::write(
+            root.join(".git/objects/info/alternates"),
+            format!("{}\n", alternate.join(".git/objects").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".git/refs/heads/main"),
+            format!("{}\n", commits[0]),
+        )
+        .unwrap();
+        pack_blobs(&root, HEAD_INDEX_SLOTS);
+        let slots = Slots::Given(HEAD_INDEX_SLOTS);
+        let repo = git_sources::open_with_slots(&root, HEAD_OBJECT_BYTES, slots).unwrap();
+        assert!(git_sources::store_object_kind(&repo, &oid(&commits[0])).is_err());
+        assert_eq!(observe_head(&root), FrozenHead::Commit(commits[0].clone()));
     }
 
     #[test]
