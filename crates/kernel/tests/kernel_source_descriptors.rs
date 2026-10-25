@@ -2114,6 +2114,13 @@ fn repository_document_revisions_exceed_the_historical_head_including_retired_ro
         fixture.store.source_lineage_head(&lineage).unwrap(),
         Some(3)
     );
+    // Preconditions of `retired_lineage_republished`: the lineage holds no live row and its historical head is 3.
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    let mut coverage = eval_core::Coverage::default();
+    coverage.record("retired_lineage_republished").unwrap();
+    coverage
+        .complete("crates/kernel/tests/kernel_source_descriptors.rs::repository_document_revisions_exceed_the_historical_head_including_retired_rows")
+        .unwrap();
     let (fourth, _, _) = publish("doc-4", "4", Some(3), 3).unwrap();
     assert_eq!(
         fixture.store.source_lineage_head(&lineage).unwrap(),

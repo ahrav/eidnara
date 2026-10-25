@@ -751,3 +751,50 @@ fn the_marker_registry_is_unique_and_incomplete_until_every_marker_fires() {
     coverage.complete("").unwrap();
     assert_eq!(coverage.fired().len(), MARKERS.len());
 }
+
+/// Each source-capture witness names a test function that exists in its file and records the witness there, so renaming or deleting the test or its record fails here.
+#[test]
+fn source_capture_markers_each_name_a_test_that_records_them() {
+    const WITNESSES: [&str; 8] = [
+        "replay_after_memo_loss",
+        "reversed_generation_delivery",
+        "handoff_refused_slot_busy",
+        "tool_output_contains_sentinel",
+        "expired_capture_pinned_mid_sweep",
+        "retired_lineage_republished",
+        "pi_wire_row_without_type",
+        "expired_capture_cited_elsewhere",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in WITNESSES {
+        let marker = MARKERS
+            .iter()
+            .find(|marker| marker.name == name)
+            .unwrap_or_else(|| panic!("{name} is registered"));
+        let (file, path) = marker.test.split_once("::").unwrap();
+        let function = path.rsplit("::").next().unwrap();
+        let source = std::fs::read_to_string(root.join(file)).unwrap();
+        let body = function_body(&source, function)
+            .unwrap_or_else(|| panic!("{name}: {file} defines {function}"));
+        assert!(
+            body.contains(&format!("record(\"{name}\")")),
+            "{name}: {function} in {file} records it"
+        );
+    }
+}
+
+/// `function_body` relies on rustfmt placing the closing brace alone at the signature's indentation.
+fn function_body<'a>(source: &'a str, function: &str) -> Option<&'a str> {
+    let signature = source.find(&format!("fn {function}("))?;
+    let start = source[..signature].rfind('\n').map_or(0, |i| i + 1);
+    let indent: String = source[start..].chars().take_while(|c| *c == ' ').collect();
+    let closing = format!("\n{indent}}}");
+    let mut from = signature;
+    loop {
+        let end = from + source[from..].find(&closing)? + closing.len();
+        if source[end..].is_empty() || source[end..].starts_with('\n') {
+            return Some(&source[start..end]);
+        }
+        from = end;
+    }
+}

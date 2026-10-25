@@ -2,7 +2,7 @@
 //! contract: field order, check semantics, cited tests that exist and are not
 //! ignored, evidence files that exist, and an index that equals the record set.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const FIELDS: [&str; 12] = [
@@ -260,6 +260,75 @@ fn every_evaluator_record_is_method_ordered_and_cites_an_executed_check() {
         assert!(
             line.len() <= 100 || line.starts_with('|') || line.contains("](") || line.contains('`'),
             "catalog line over 100 columns without a link, code, or table: {line:?}"
+        );
+    }
+}
+
+/// Each invalidated source-capture record's `Status` names active successors
+/// that together support every requirement in its index row.
+#[test]
+fn source_capture_obligations_move_to_active_records() {
+    let part = workspace_root().join("docs/properties/daemon/source-capture");
+    let catalog = std::fs::read_to_string(part.join("catalog.md")).unwrap();
+    // Index columns: slug, part, unit, supports, type, reachability, status.
+    let index: BTreeMap<String, (BTreeSet<String>, String)> = catalog
+        .lines()
+        .filter(|line| line.starts_with("| [`"))
+        .map(|line| {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            let slug = cells[1]["[`".len()..].split('`').next().unwrap();
+            let supports = cells[4].split(", ").map(str::to_string).collect();
+            (slug.to_string(), (supports, cells[7].to_string()))
+        })
+        .collect();
+    let active = |slug: &str| {
+        index
+            .get(slug)
+            .is_some_and(|(_, status)| status == "active")
+    };
+
+    let invalidated: Vec<Record> = records(&catalog)
+        .into_iter()
+        .filter(|record| index[&record.slug].1 == "invalidated")
+        .collect();
+    assert!(!invalidated.is_empty());
+    for record in &invalidated {
+        let status = record
+            .lines
+            .iter()
+            .find(|line| line.starts_with("Status:"))
+            .unwrap();
+        let successors: Vec<&str> = status
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|token| active(token))
+            .collect();
+        for requirement in &index[&record.slug].0 {
+            assert!(
+                successors
+                    .iter()
+                    .any(|successor| index[*successor].0.contains(requirement)),
+                "{}: Status names no active record supporting {requirement}",
+                record.slug
+            );
+        }
+    }
+
+    let crosswalk = std::fs::read_to_string(part.join("spec-integration.md")).unwrap();
+    let rows: Vec<&str> = crosswalk
+        .lines()
+        .filter(|line| {
+            line.strip_prefix("| R")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .collect();
+    assert!(!rows.is_empty());
+    for row in rows {
+        let slug = row.split("[`").nth(1).unwrap().split('`').next().unwrap();
+        assert!(
+            active(slug),
+            "spec-integration row maps to {slug}, which is not active"
         );
     }
 }
