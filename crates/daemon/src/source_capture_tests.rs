@@ -2655,10 +2655,7 @@ async fn a_reclaiming_digest_stays_pending_and_publishes_after_reclamation() {
             retain_until: None,
             asserted_sensitivity: kernel::Sensitivity::Normal,
             provider_egress: kernel::ProviderEgress::RemoteAllowed,
-            provenance: Some(kernel::RepositoryProvenance {
-                repository_id: "repo".to_owned(),
-                revision: "abc123".to_owned(),
-            }),
+            provenance: None,
         })
         .unwrap()
         .digest;
