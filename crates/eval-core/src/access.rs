@@ -13,7 +13,9 @@ use crate::pairs::ArmKind;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriteKey {
+    /// The writing sample's task; own-task exclusion compares this field.
     pub task: String,
+    /// The writing sample's arm.
     pub arm: ArmKind,
 }
 
@@ -57,7 +59,9 @@ pub struct MemoryWrite {
 pub struct MemoryRead {
     /// The ledger sample whose history pool served the read.
     pub reader: String,
+    /// The pool that served the read; it equals the named write's pool.
     pub pool: String,
+    /// The write the pool served.
     pub write_id: String,
     /// The read's position in its pool, recorded for audit.
     pub sequence: u32,
@@ -70,8 +74,11 @@ pub struct MemoryRead {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessRecord {
+    /// Every write admitted into the run's pools.
     pub writes: Vec<MemoryWrite>,
+    /// Every read the run's pools served.
     pub reads: Vec<MemoryRead>,
+    /// The attested read count per ledger sample id.
     pub read_counts: BTreeMap<String, u32>,
 }
 
@@ -83,8 +90,8 @@ pub enum AccessError {
     Ledger(SampleError),
     /// The current run id is not a 64-character lowercase hex run id.
     MalformedRun { eval_run_id: String },
-    /// A `write_id` or `pool` on the write `write_id`, or on a read of it,
-    /// is empty or whitespace.
+    /// A blank `write_id` or `pool` on a write, or a blank `pool` on a read
+    /// of the write `write_id`; blank means empty or whitespace.
     Blank {
         write_id: String,
         field: &'static str,
