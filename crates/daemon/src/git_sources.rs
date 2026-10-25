@@ -115,7 +115,7 @@ pub(crate) fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRe
 }
 
 /// gix reports an `extensions.objectFormat` value this build does not read as a typed-string error on that key rather than a dedicated variant, so the refusal is recognized by the key it names.
-fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
+pub(crate) fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
     match error {
         gix::open::Error::Config(gix::config::Error::ConfigTypedString(error)) => {
             error.key == "extensions.objectFormat"

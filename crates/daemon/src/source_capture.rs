@@ -27,6 +27,9 @@ use crate::harness_sources::{
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 use crate::project_docs::DocumentRead;
+use crate::repository_identity::{
+    DerivationFailure, MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive,
+};
 
 /// The cooperative budget of one publication, from handoff acceptance.
 pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
@@ -231,6 +234,8 @@ pub(crate) struct SourceCapture {
     memo: Mutex<Memo>,
     /// The database incarnation and project of each capture scope a commit has ensured. The scope commit's receipt replays without rerunning the commit, so a recorded pair needs no second commit; a new database incarnation keys a new pair.
     ensured_scopes: Mutex<HashSet<String>>,
+    /// Each project's repository identity, fixed for the incarnation once a derivation settles it, so a repository that changes mid-incarnation moves its documents at the next restart rather than between passes.
+    repository_ids: Mutex<HashMap<String, RepositoryIdentity>>,
     /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
     delete_epoch: AtomicU64,
     counters: Counters,
@@ -239,6 +244,12 @@ pub(crate) struct SourceCapture {
     /// Runs inside the batch publication after the screening preview and before the commit, where a purge reaches the commit without the pre-screen seeing it.
     #[cfg(test)]
     pub(crate) between_screen_and_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Runs after a documents batch retires stale-identity rows and before it publishes, where a crash leaves the path with no live row.
+    #[cfg(test)]
+    pub(crate) between_document_retire_and_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Runs before a project's repository identity is derived, where a slow walk spends the job's budget.
+    #[cfg(test)]
+    pub(crate) before_repository_derivation: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// F23: when set, `session.delete` returns after the Kernel retirement commits and before the memory-store delete: an application-fault cut between the two commits.
     #[cfg(test)]
     pub(crate) stop_after_retirement: AtomicBool,
@@ -251,12 +262,17 @@ impl Default for SourceCapture {
             budget: ByteBudget::new(MAX_RETAINED_WINDOW_BYTES as u64),
             memo: Mutex::default(),
             ensured_scopes: Mutex::default(),
+            repository_ids: Mutex::default(),
             delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
             #[cfg(test)]
             before_publish: Mutex::new(None),
             #[cfg(test)]
             between_screen_and_commit: Mutex::new(None),
+            #[cfg(test)]
+            between_document_retire_and_publish: Mutex::new(None),
+            #[cfg(test)]
+            before_repository_derivation: Mutex::new(None),
             #[cfg(test)]
             stop_after_retirement: AtomicBool::new(false),
         }
@@ -465,6 +481,13 @@ impl SourceCapture {
     pub(crate) fn forget_memo_for_test(&self) {
         *self.memo() = Memo::default();
         self.ensured_scopes().clear();
+        self.repository_ids().clear();
+    }
+
+    fn repository_ids(&self) -> MutexGuard<'_, HashMap<String, RepositoryIdentity>> {
+        self.repository_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn refuse(&self, refusal: Count) {
@@ -791,13 +814,14 @@ impl CaptureJob {
             Some(&self.budget),
             || {
                 #[cfg(test)]
-                if let Some(hook) = self
+                let hook = self
                     .capture
                     .between_screen_and_commit
                     .lock()
                     .expect("capture hook mutex")
-                    .clone()
-                {
+                    .clone();
+                #[cfg(test)]
+                if let Some(hook) = hook {
                     hook();
                 }
             },
@@ -856,7 +880,8 @@ impl CaptureJob {
 
     /// Captures the configured documents the pass read when it composed its prompt block, in their own batch after the window's, under the commit gate, and returns how the batch ended.
     ///
-    /// - Identity: the project, the project standing in for its repository, and the path.
+    /// - Identity: the project, its repository identity ([`crate::repository_identity`]), and the path. A derivation the environment cuts short refuses every read as `documents_refused`, retires and publishes nothing, and memoizes nothing.
+    /// - A path whose read settles its current lineage (text to publish, unchanged text, or a verified missing file) first retires every live row this capture's domain owns for the path under another repository identity.
     /// - Text whose bytes equal the live revision's artifact is unchanged.
     /// - Other text publishes at the lineage's historical head plus one, which the descriptor commit checks as the expected head; a head that moved refuses as `documents_refused`.
     /// - `documents_refused` also counts every read the pass's capture drops before this batch handles it: a refused or dropped handoff, a job that ends before the batch, a deadline, a failed preview, or a failed retirement.
@@ -878,24 +903,78 @@ impl CaptureJob {
             self.capture.counters.add(Count::DocumentsRefused, count);
             return Count::Deadline;
         }
+        let identity = match self.repository_identity() {
+            Ok(identity) => identity,
+            Err(failure) => {
+                self.capture.counters.add(Count::DocumentsRefused, count);
+                log("documents refused", Count::DocumentsRefused, count);
+                return match failure {
+                    DerivationFailure::Budget => Count::Deadline,
+                    DerivationFailure::Unreadable => Count::Completed,
+                };
+            }
+        };
+        let project_id = self.session.project_id.as_str();
+        let repository_id = identity.value(project_id);
         // The live rows and the lineage heads are read under one reader wait cut to the job's deadline.
-        let steps = store.preview(self.preview_deadline(), |preview| {
-            documents
+        let planned = store.preview(self.preview_deadline(), |preview| {
+            let steps = documents
                 .into_iter()
-                .map(|(path, read)| self.plan_document(preview, path, read))
-                .collect::<Result<Vec<_>, _>>()
+                .map(|(path, read)| {
+                    Ok((
+                        path,
+                        self.plan_document(preview, repository_id, path, read)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, KernelError>>()?;
+            // A path whose read settles its current lineage moves off every other identity; a read that settles nothing keeps the row it has.
+            let settled: Vec<&str> = steps
+                .iter()
+                .filter(|(_, step)| {
+                    matches!(
+                        step,
+                        DocumentStep::Publish(_)
+                            | DocumentStep::Retire(_)
+                            | DocumentStep::Skip(
+                                Count::DocumentsUnchanged | Count::DocumentsMissing
+                            )
+                    )
+                })
+                .map(|(path, _)| *path)
+                .collect();
+            let stale = stale_documents(preview, project_id, repository_id, &settled)?;
+            Ok((stale, steps))
         });
-        let steps = match steps {
-            Ok((_, steps)) => steps,
+        let (stale, steps) = match planned {
+            Ok((_, planned)) => planned,
             Err(error) => {
                 self.capture.counters.add(Count::DocumentsRefused, count);
                 return kernel_end(error);
             }
         };
+        // Every stale row retires in its own commit before the current lineage publishes, so a crash between the two leaves the path with no live row rather than two.
+        for object_id in stale {
+            if let Err(error) = self.retire_document(store, &object_id) {
+                self.capture.counters.add(Count::DocumentsRefused, count);
+                return kernel_end(error);
+            }
+            self.capture.counters.add(Count::DocumentsRetired, 1);
+        }
+        #[cfg(test)]
+        let hook = self
+            .capture
+            .between_document_retire_and_publish
+            .lock()
+            .expect("capture hook mutex")
+            .clone();
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            hook();
+        }
         let mut units = Vec::new();
         // Reads settled so far; a failed retirement counts every other read as refused.
         let mut settled = 0;
-        for step in steps {
+        for (_, step) in steps {
             match step {
                 DocumentStep::Publish(unit) => units.push(unit),
                 DocumentStep::Retire(object_id) => {
@@ -941,10 +1020,35 @@ impl CaptureJob {
         }
     }
 
+    /// The project's repository identity, derived once per incarnation; an environmental failure memoizes nothing, so the next pass derives again.
+    fn repository_identity(&self) -> Result<RepositoryIdentity, DerivationFailure> {
+        let project_id = &self.session.project_id;
+        if let Some(identity) = self.capture.repository_ids().get(project_id) {
+            return Ok(identity.clone());
+        }
+        #[cfg(test)]
+        let hook = self
+            .capture
+            .before_repository_derivation
+            .lock()
+            .expect("capture hook mutex")
+            .clone();
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            hook();
+        }
+        let identity = derive(self.project.root(), &self.budget, MAX_ROOT_WALK_COMMITS)?;
+        self.capture
+            .repository_ids()
+            .insert(project_id.clone(), identity.clone());
+        Ok(identity)
+    }
+
     /// What capture does with one configured document, given its lineage's live revision.
     fn plan_document(
         &self,
         preview: &kernel::Preview<'_>,
+        repository_id: &str,
         path: &'static str,
         read: DocumentRead,
     ) -> Result<DocumentStep, KernelError> {
@@ -963,7 +1067,7 @@ impl CaptureJob {
         let project_id = self.session.project_id.as_str();
         let identity = vec![
             ("project_id", project_id.to_owned()),
-            ("repository_id", project_id.to_owned()),
+            ("repository_id", repository_id.to_owned()),
             ("relative_path", path.to_owned()),
         ];
         let lineage = document_lineage(&identity)?;
@@ -1307,6 +1411,48 @@ fn document_lineage(identity: &[(&'static str, String)]) -> Result<String, Kerne
     })
     .map(|encoded| encoded.lineage_id)
     .map_err(|_| KernelError::InvalidInput)
+}
+
+/// Live document rows one stale-identity page reads.
+const STALE_DOCUMENT_PAGE_ROWS: std::num::NonZeroUsize = std::num::NonZeroUsize::new(256).unwrap();
+
+/// The live capture-domain document rows of `project_id` at a path in `paths` whose `repository_id` differs from `repository_id`: lineages an earlier identity of the same checkout left live.
+fn stale_documents(
+    preview: &kernel::Envelope<'_>,
+    project_id: &str,
+    repository_id: &str,
+    paths: &[&str],
+) -> Result<Vec<String>, KernelError> {
+    let mut stale = Vec::new();
+    if paths.is_empty() {
+        return Ok(stale);
+    }
+    let mut after: Option<String> = None;
+    loop {
+        let page = preview.live_source_descriptors_with(
+            OccurrenceClass::RepositoryDocuments,
+            "project_id",
+            &[project_id],
+            after.as_deref(),
+            STALE_DOCUMENT_PAGE_ROWS,
+        )?;
+        stale.extend(
+            page.rows
+                .iter()
+                .filter(|row| {
+                    row.domain_id == CAPTURE_DOMAIN_ID
+                        && crate::git_reconcile::identity_field(row, "repository_id")
+                            != Some(repository_id)
+                        && crate::git_reconcile::identity_field(row, "relative_path")
+                            .is_some_and(|path| paths.contains(&path))
+                })
+                .map(|row| row.object_id.clone()),
+        );
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return Ok(stale),
+        }
+    }
 }
 
 fn kernel_end(error: KernelError) -> Count {

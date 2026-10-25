@@ -1,0 +1,109 @@
+//! The repository a project's captured documents belong to. Two checkouts of one repository bind
+//! two project digests, so the digest alone splits a document's lineage per checkout; the
+//! smallest root commit reachable from HEAD is shared by every checkout of the history and is the
+//! value the plugin's project-identity resolver renders (`git rev-list --max-parents=0 HEAD`,
+//! sorted first). A repository whose roots this walk cannot settle from its own state (no
+//! repository, unborn HEAD, a shallow history, an object format this build does not read, or a
+//! history past [`MAX_ROOT_WALK_COMMITS`]) takes the project digest, and the answer depends on that
+//! state alone, so it is stable across passes.
+
+use std::path::Path;
+
+use kernel::applicability::EvalBudget;
+
+/// The commits one derivation visits before the history counts as past the cap, the default
+/// #1105 OQ1 sets for the capture job budget.
+pub(crate) const MAX_ROOT_WALK_COMMITS: usize = 1 << 18;
+
+/// A derivation outcome fixed by the repository's state; capture memoizes it for the daemon
+/// incarnation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RepositoryIdentity {
+    /// `git:` and the lowercase hex id of the byte-order-smallest root commit reachable from HEAD.
+    Git(String),
+    /// The project digest stands in for the repository.
+    Fallback,
+}
+
+impl RepositoryIdentity {
+    /// The `repository_id` identity value under the project `project_id`.
+    pub(crate) fn value<'a>(&'a self, project_id: &'a str) -> &'a str {
+        match self {
+            Self::Git(value) => value,
+            Self::Fallback => project_id,
+        }
+    }
+}
+
+/// A derivation the environment cut short; the next pass derives again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DerivationFailure {
+    /// The repository or an object it names could not be read.
+    Unreadable,
+    /// The job's budget ended before the walk did.
+    Budget,
+}
+
+/// Derives the identity of the repository holding `root`, visiting at most `cap` commits within
+/// `budget`.
+///
+/// Discovery searches `root` and its parents, as the plugin's resolver does, and opens the
+/// repository without user, system, or installation configuration and with replacement refs
+/// ignored, so no configuration or `refs/replace` entry substitutes another root.
+pub(crate) fn derive(
+    root: &Path,
+    budget: &EvalBudget,
+    cap: usize,
+) -> Result<RepositoryIdentity, DerivationFailure> {
+    use gix::discover::upwards::Error as Upwards;
+    let options = gix::open::Options::isolated();
+    let trust = gix::sec::trust::Mapping {
+        full: options.clone(),
+        reduced: options,
+    };
+    let mut repo = match gix::ThreadSafeRepository::discover_opts(root, Default::default(), trust) {
+        Ok(repo) => repo.to_thread_local(),
+        Err(gix::discover::Error::Discover(
+            Upwards::NoGitRepository { .. }
+            | Upwards::NoGitRepositoryWithinCeiling { .. }
+            | Upwards::NoGitRepositoryWithinFs { .. },
+        )) => return Ok(RepositoryIdentity::Fallback),
+        Err(gix::discover::Error::Open(error))
+            if crate::git_sources::declares_unsupported_object_format(&error) =>
+        {
+            return Ok(RepositoryIdentity::Fallback);
+        }
+        Err(_) => return Err(DerivationFailure::Unreadable),
+    };
+    repo.objects.ignore_replacements = true;
+    if repo.is_shallow() {
+        return Ok(RepositoryIdentity::Fallback);
+    }
+    let head = repo.head().map_err(|_| DerivationFailure::Unreadable)?;
+    let Some(head) = head.id() else {
+        return Ok(RepositoryIdentity::Fallback);
+    };
+    let walk = repo
+        .rev_walk([head.detach()])
+        .all()
+        .map_err(|_| DerivationFailure::Unreadable)?;
+    let mut smallest: Option<String> = None;
+    for (visited, info) in walk.enumerate() {
+        if visited == cap {
+            return Ok(RepositoryIdentity::Fallback);
+        }
+        if budget.is_exhausted() {
+            return Err(DerivationFailure::Budget);
+        }
+        let info = info.map_err(|_| DerivationFailure::Unreadable)?;
+        if info.parent_ids.is_empty() {
+            let hex = info.id.to_hex().to_string();
+            if smallest.as_ref().is_none_or(|current| hex < *current) {
+                smallest = Some(hex);
+            }
+        }
+    }
+    smallest
+        .map(|hex| RepositoryIdentity::Git(format!("git:{hex}")))
+        .ok_or(DerivationFailure::Unreadable)
+}
